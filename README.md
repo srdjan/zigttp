@@ -438,7 +438,7 @@ provenance survives in the registry.
 
 Standalone analysis and compilation without starting a server.
 
-`zigts expert` calls the Anthropic API directly (`ANTHROPIC_API_KEY`). Its system prompt comes entirely from the binary: embedded persona text, embedded reference material, and compiler metadata rendered from in-process registries. Startup does not read `AGENTS.md`, `CLAUDE.md`, external skill files, or any other workspace prompt files.
+`zigts expert` calls the Anthropic API directly (`ANTHROPIC_API_KEY`). The persona, reference material, skill catalog, prompt templates, themes, and compiler metadata are all baked into the binary; there is no runtime plugin surface. The one external input that reaches the system prompt is `AGENTS.md` / `CLAUDE.md`, walked up from cwd to the enclosing `.git/` directory and appended as a labelled read-only project-context section with a 128 KiB cap. Disable with `--no-context-files`. Full pi architecture: [packages/pi/README.md](packages/pi/README.md).
 
 ```bash
 # Interactive REPL
@@ -449,15 +449,21 @@ zigts expert --session-id <id>           # named or resumed session
 zigts expert --fork <session-id>         # branch from an existing session
 zigts expert --yes                       # auto-approve all verified edits
 zigts expert --no-edit                   # auto-reject all verified edits
+zigts expert --no-context-files          # skip AGENTS.md / CLAUDE.md load
 zigts expert --tools minimal             # workspace-read-only tool preset
 zigts expert --tools full                # full compiler tool preset (default)
 
 # Non-interactive (one turn and exit)
 zigts expert --print "add a GET /health route"
 zigts expert --print "..." --mode json   # NDJSON event stream to stdout
+
+# Line-delimited JSON-RPC 2.0 over stdio (long-lived session)
+zigts expert --mode rpc
 ```
 
-In `--mode json`, each event is `{"v":1,"k":"<kind>","d":<payload>}`. Kinds: `user_text`, `model_text`, `tool_use`, `tool_result`, `proof_card`, `diagnostic_box`, `end`. Persisted `events.jsonl` lines use the same envelope for transcript events, but `end` is a live-stream-only sentinel emitted last on success. Errored runs may terminate without `end`, and session files do not persist it.
+In `--mode json`, each event is `{"v":1,"k":"<kind>","d":<payload>}`. Kinds: `user_text`, `model_text`, `tool_use`, `tool_result`, `proof_card`, `diagnostic_box`, `system_note`, `end`. Persisted `events.jsonl` lines use the same envelope for transcript events, but `end` is a live-stream-only sentinel emitted last on success. Errored runs may terminate without `end`, and session files do not persist it.
+
+In `--mode rpc`, each stdin line is a JSON-RPC 2.0 request; each stdout response line is a result or error keyed by `id`. Methods: `turn`, `compact`, `session.info`, `tools.list`, `tools.invoke`, `skills.list`, `templates.{list,expand}`, `model.{list,set}`, `shutdown`. During a `turn`, each new transcript entry emits as a notification with method `"event"` before the final result lands.
 
 The interactive REPL accepts slash commands alongside natural language:
 
@@ -474,11 +480,17 @@ The interactive REPL accepts slash commands alongside natural language:
 /templates                     list available prompt templates
 /template:<name> [args...]     expand a template and send it as a prompt
 /settings                      show compile-time defaults (model, token limits)
+/settings theme                list available TUI themes
+/settings theme <name>         switch the session's TUI theme
 /hotkeys                       list keyboard shortcuts
 /changelog                     recent expert subsystem additions
 ```
 
 After each model turn the REPL prints cumulative token use for the session: `[tokens: in=N cache_r=N cache_w=N out=N]`. The totals reset when you start a new session or reload with `/new` or `/resume`.
+
+The interactive surface runs as a bottom-anchored TUI: the status line (session, model, token totals) and input line stay pinned at the bottom while scrollback flows above. Redraws wrap in CSI `?2026h` / `?2026l` synchronized-output sequences so supporting terminals render each frame atomically. Two themes ship (`default`, `solarized-dark`); swap mid-session with `/settings theme <name>`.
+
+On resume, the session's `meta.json` carries the `policy_hash` it was created under. If the current binary's hash differs, the REPL prepends a `[policy drift]` system note to the transcript so the model knows prior rule citations may be stale against today's compiler.
 
 ```bash
 zigts check [handler.ts] [options]    # Verify handler, show proof card
