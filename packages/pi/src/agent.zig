@@ -649,14 +649,14 @@ test "StubClient ignores user_text and always returns the stub reply" {
 test "initAnthropic dupes api_key and system_prompt, deinit releases both" {
     var session = try AgentSession.initAnthropic(
         testing.allocator,
-        "sk-ant-test",
+        "test-fixture-key",
         "you are a zigts expert",
         "[{\"name\":\"zigts_expert_meta\",\"description\":\"d\",\"input_schema\":{}}]",
     );
     defer session.deinit(testing.allocator);
 
     try testing.expect(session.backend == .anthropic);
-    try testing.expectEqualStrings("sk-ant-test", session.backend.anthropic.config.api_key);
+    try testing.expectEqualStrings("test-fixture-key", session.backend.anthropic.config.api_key);
     try testing.expectEqualStrings("you are a zigts expert", session.backend.anthropic.config.system_prompt);
     try testing.expect(session.backend.anthropic.config.tools_json != null);
     try testing.expect(session.system_prompt_owned != null);
@@ -730,7 +730,7 @@ test "initFromEnvWithSessionConfig appends AGENTS and CLAUDE files as read-only 
     try std.Io.Threaded.chdir(tmp.abs_path);
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-    var api_override = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "sk-ant-test");
+    var api_override = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-fixture-key");
     defer api_override.restore(allocator);
 
     var session = try initFromEnvWithSessionConfig(allocator, null, .{ .no_session = true });
@@ -759,7 +759,7 @@ test "initFromEnvWithSessionConfig: no_context_files suppresses AGENTS and CLAUD
     try std.Io.Threaded.chdir(tmp.abs_path);
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-    var api_override = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "sk-ant-test");
+    var api_override = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-fixture-key");
     defer api_override.restore(allocator);
 
     var session = try initFromEnvWithSessionConfig(allocator, null, .{

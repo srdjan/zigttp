@@ -153,7 +153,7 @@ test "buildRequestBody: emits structured messages with model, system, user, no t
     defer arena.deinit();
 
     const body = try buildRequestBody(arena.allocator(), .{
-        .api_key = "sk-ant-test",
+        .api_key = "test-fixture-key",
         .system_prompt = "you are a zigts expert",
     }, &transcript, null);
 
@@ -193,7 +193,7 @@ test "buildRequestBody: includes tools_json verbatim when provided" {
 
 test "Client.asModelClient exposes the new request signature" {
     var client = Client.init(.{
-        .api_key = "sk-ant-test",
+        .api_key = "test-fixture-key",
         .system_prompt = "s",
     });
     const mc = client.asModelClient();
