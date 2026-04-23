@@ -38,6 +38,7 @@ pub fn resolveInsideWorkspace(
         try std.fs.path.resolve(allocator, &.{requested_path})
     else
         try std.fs.path.resolve(allocator, &.{ root, requested_path });
+    errdefer allocator.free(resolved);
 
     if (!isPathInsideRoot(root, resolved)) return error.PathOutsideWorkspace;
     return resolved;
@@ -124,4 +125,84 @@ pub fn commandOutcomeToToolResult(
         .ok = outcome.ok,
         .body = try buf.toOwnedSlice(allocator),
     };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "isPathInsideRoot: exact match is inside" {
+    try testing.expect(isPathInsideRoot("/a/b", "/a/b"));
+}
+
+test "isPathInsideRoot: strict child is inside" {
+    try testing.expect(isPathInsideRoot("/a/b", "/a/b/c"));
+    try testing.expect(isPathInsideRoot("/a/b", "/a/b/c/d.txt"));
+}
+
+test "isPathInsideRoot: prefix-only collision is rejected" {
+    // `/a/bar` must not be considered inside `/a/b`; startsWith alone
+    // would wrongly accept it. The separator check at root.len guards this.
+    try testing.expect(!isPathInsideRoot("/a/b", "/a/bar"));
+    try testing.expect(!isPathInsideRoot("/a/b", "/a/bc"));
+}
+
+test "isPathInsideRoot: unrelated path is outside" {
+    try testing.expect(!isPathInsideRoot("/a/b", "/c/d"));
+    try testing.expect(!isPathInsideRoot("/a/b", "/"));
+}
+
+test "resolveInsideWorkspace: plain relative path resolves inside" {
+    const allocator = testing.allocator;
+    const resolved = try resolveInsideWorkspace(allocator, "/tmp/ws", "handler.ts");
+    defer allocator.free(resolved);
+    try testing.expectEqualStrings("/tmp/ws/handler.ts", resolved);
+}
+
+test "resolveInsideWorkspace: rejects ../ escape" {
+    const allocator = testing.allocator;
+    try testing.expectError(
+        error.PathOutsideWorkspace,
+        resolveInsideWorkspace(allocator, "/tmp/ws", "../etc/passwd"),
+    );
+}
+
+test "resolveInsideWorkspace: rejects absolute path outside root" {
+    const allocator = testing.allocator;
+    try testing.expectError(
+        error.PathOutsideWorkspace,
+        resolveInsideWorkspace(allocator, "/tmp/ws", "/etc/passwd"),
+    );
+}
+
+test "resolveInsideWorkspace: accepts absolute path inside root" {
+    const allocator = testing.allocator;
+    const resolved = try resolveInsideWorkspace(allocator, "/tmp/ws", "/tmp/ws/deep/handler.ts");
+    defer allocator.free(resolved);
+    try testing.expectEqualStrings("/tmp/ws/deep/handler.ts", resolved);
+}
+
+test "resolveInsideWorkspace: collapses redundant path segments within root" {
+    const allocator = testing.allocator;
+    const resolved = try resolveInsideWorkspace(allocator, "/tmp/ws", "sub/../handler.ts");
+    defer allocator.free(resolved);
+    try testing.expectEqualStrings("/tmp/ws/handler.ts", resolved);
+}
+
+test "relativeToRoot: self is rendered as '.'" {
+    try testing.expectEqualStrings(".", relativeToRoot("/tmp/ws", "/tmp/ws"));
+}
+
+test "relativeToRoot: strips the root prefix and separator" {
+    try testing.expectEqualStrings("handler.ts", relativeToRoot("/tmp/ws", "/tmp/ws/handler.ts"));
+    try testing.expectEqualStrings("sub/handler.ts", relativeToRoot("/tmp/ws", "/tmp/ws/sub/handler.ts"));
+}
+
+test "workspaceRoot: returns a non-empty allocator-owned path" {
+    const allocator = testing.allocator;
+    const root = try workspaceRoot(allocator);
+    defer allocator.free(root);
+    try testing.expect(root.len > 0);
 }
