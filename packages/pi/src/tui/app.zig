@@ -203,18 +203,7 @@ fn parseKeyEvent(bytes: []const u8, start: usize) struct { KeyEvent, usize } {
             'D' => .{ .{ .kind = .left }, 3 },
             'H' => .{ .{ .kind = .home }, 3 },
             'F' => .{ .{ .kind = .end }, 3 },
-            '1', '7' => if (start + 3 < bytes.len and bytes[start + 3] == '~')
-                .{ .{ .kind = .home }, 4 }
-            else
-                .{ .{ .kind = .ignore }, 3 },
-            '4', '8' => if (start + 3 < bytes.len and bytes[start + 3] == '~')
-                .{ .{ .kind = .end }, 4 }
-            else
-                .{ .{ .kind = .ignore }, 3 },
-            '3' => if (start + 3 < bytes.len and bytes[start + 3] == '~')
-                .{ .{ .kind = .delete }, 4 }
-            else
-                .{ .{ .kind = .ignore }, 3 },
+            '1', '7', '4', '8', '3' => parseTildeTerminated(bytes, start, third),
             else => .{ .{ .kind = .ignore }, 3 },
         };
     }
@@ -229,6 +218,22 @@ fn parseKeyEvent(bytes: []const u8, start: usize) struct { KeyEvent, usize } {
     }
 
     return .{ .{ .kind = .ignore }, 1 };
+}
+
+/// Handles `ESC [ <code> ~` sequences (home/end/delete). When the
+/// trailing `~` is missing, returns `.ignore` for the three consumed
+/// bytes rather than over-advancing.
+fn parseTildeTerminated(bytes: []const u8, start: usize, code: u8) struct { KeyEvent, usize } {
+    if (start + 3 >= bytes.len or bytes[start + 3] != '~') {
+        return .{ .{ .kind = .ignore }, 3 };
+    }
+    const kind: line_editor.KeyKind = switch (code) {
+        '1', '7' => .home,
+        '4', '8' => .end,
+        '3' => .delete,
+        else => .ignore,
+    };
+    return .{ .{ .kind = kind }, 4 };
 }
 
 fn classifySingleByte(b: u8) KeyEvent {
