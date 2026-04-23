@@ -86,7 +86,7 @@ fn echoExecute(allocator: std.mem.Allocator, args: []const []const u8) anyerror!
         try aw.writer.writeAll(a);
     }
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
 }
 
 const echo_tool: ToolDef = .{
@@ -120,7 +120,7 @@ test "register + findByName + invoke round-trip" {
     var result = try reg.invoke(testing.allocator, "echo", &.{ "hello", "world" });
     defer result.deinit(testing.allocator);
     try testing.expect(result.ok);
-    try testing.expectEqualStrings("hello world", result.body);
+    try testing.expectEqualStrings("hello world", result.llm_text);
 }
 
 test "invokeJson decodes structured args before calling execute" {
@@ -132,7 +132,7 @@ test "invokeJson decodes structured args before calling execute" {
     var result = try reg.invokeJson(testing.allocator, "echo", "{\"parts\":[\"hello\",\"json\"]}");
     defer result.deinit(testing.allocator);
     try testing.expect(result.ok);
-    try testing.expectEqualStrings("hello json", result.body);
+    try testing.expectEqualStrings("hello json", result.llm_text);
 }
 
 test "duplicate registration fails" {

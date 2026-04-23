@@ -9,6 +9,7 @@ const zigts = @import("zigts");
 const rule_registry = zigts.rule_registry;
 const module_audit = @import("zigts_cli").module_audit;
 const registry_mod = @import("../registry/registry.zig");
+const ui_payload = @import("../ui_payload.zig");
 
 const name = "zigts_expert_verify_modules";
 
@@ -53,9 +54,12 @@ fn execute(
             try module_audit.writeJsonEnvelope(&aw.writer, &result, hash);
 
             buf = aw.toArrayList();
+            const llm_text = try buf.toOwnedSlice(allocator);
+            errdefer allocator.free(llm_text);
             return .{
                 .ok = !result.hasErrors(),
-                .body = try buf.toOwnedSlice(allocator),
+                .llm_text = llm_text,
+                .ui_payload = try buildDiagnosticsPayloadFromEnvelope(allocator, llm_text),
             };
         }
 
@@ -89,10 +93,72 @@ fn execute(
     try module_audit.writeJsonEnvelope(&aw.writer, &result, hash);
 
     buf = aw.toArrayList();
+    const llm_text = try buf.toOwnedSlice(allocator);
+    errdefer allocator.free(llm_text);
     return .{
         .ok = !result.hasErrors(),
-        .body = try buf.toOwnedSlice(allocator),
+        .llm_text = llm_text,
+        .ui_payload = try buildDiagnosticsPayloadFromEnvelope(allocator, llm_text),
     };
+}
+
+fn buildDiagnosticsPayloadFromEnvelope(
+    allocator: std.mem.Allocator,
+    llm_text: []const u8,
+) !ui_payload.UiPayload {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, llm_text, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidDiagnosticsEnvelope;
+    const obj = parsed.value.object;
+    const checked_files = obj.get("checked_files") orelse return error.InvalidDiagnosticsEnvelope;
+    const violations = obj.get("violations") orelse return error.InvalidDiagnosticsEnvelope;
+    if (checked_files != .array or violations != .array) return error.InvalidDiagnosticsEnvelope;
+
+    const items = try allocator.alloc(ui_payload.DiagnosticItem, violations.array.items.len);
+    errdefer allocator.free(items);
+    for (items) |*item| item.* = undefined;
+    var i: usize = 0;
+    errdefer {
+        while (i > 0) {
+            i -= 1;
+            items[i].deinit(allocator);
+        }
+        allocator.free(items);
+    }
+    while (i < violations.array.items.len) : (i += 1) {
+        const diag = violations.array.items[i];
+        if (diag != .object) return error.InvalidDiagnosticsEnvelope;
+        const diag_obj = diag.object;
+        items[i] = try ui_payload.DiagnosticItem.init(
+            allocator,
+            getString(diag_obj, "code") orelse return error.InvalidDiagnosticsEnvelope,
+            getString(diag_obj, "severity") orelse return error.InvalidDiagnosticsEnvelope,
+            getString(diag_obj, "file") orelse return error.InvalidDiagnosticsEnvelope,
+            @intCast(getInteger(diag_obj, "line") orelse return error.InvalidDiagnosticsEnvelope),
+            @intCast(getInteger(diag_obj, "column") orelse return error.InvalidDiagnosticsEnvelope),
+            getString(diag_obj, "message") orelse return error.InvalidDiagnosticsEnvelope,
+            null,
+        );
+    }
+
+    return .{ .diagnostics = .{
+        .summary = try std.fmt.allocPrint(
+            allocator,
+            "{d} checked file(s), {d} diagnostic(s)",
+            .{ checked_files.array.items.len, items.len },
+        ),
+        .items = items,
+    } };
+}
+
+fn getString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = obj.get(key) orelse return null;
+    return if (value == .string) value.string else null;
+}
+
+fn getInteger(obj: std.json.ObjectMap, key: []const u8) ?i64 {
+    const value = obj.get(key) orelse return null;
+    return if (value == .integer) value.integer else null;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +172,7 @@ test "missing args returns not-ok body" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "requires at least one path") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "requires at least one path") != null);
 }
 
 test "nonexistent module path produces a v1 envelope" {
@@ -115,7 +181,8 @@ test "nonexistent module path produces a v1 envelope" {
 
     // The audit reports "unknown virtual module file" or similar, but the
     // envelope shape must match regardless of the specific diagnostic.
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"policy_version\":\"2026.04.2\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"checked_files\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"violations\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"policy_version\":\"2026.04.2\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"checked_files\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"violations\":") != null);
+    try testing.expect(result.ui_payload != null);
 }

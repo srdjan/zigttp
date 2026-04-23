@@ -48,7 +48,7 @@ fn execute(
     try w.writeAll("]\n");
 
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
 }
 
 // ---------------------------------------------------------------------------
@@ -62,7 +62,7 @@ test "missing keyword returns not-ok body" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "requires a keyword") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "requires a keyword") != null);
 }
 
 test "search emits JSON array and finds at least one match for a common term" {
@@ -70,8 +70,8 @@ test "search emits JSON array and finds at least one match for a common term" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expectEqual(@as(u8, '['), result.body[0]);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"code\":") != null);
+    try testing.expectEqual(@as(u8, '['), result.llm_text[0]);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"code\":") != null);
 }
 
 test "search with no matches emits empty array" {
@@ -79,5 +79,5 @@ test "search with no matches emits empty array" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expectEqualStrings("[]\n", result.body);
+    try testing.expectEqualStrings("[]\n", result.llm_text);
 }

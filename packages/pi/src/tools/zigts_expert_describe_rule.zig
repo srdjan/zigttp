@@ -43,7 +43,7 @@ fn execute(
         try w.writeAll("]\n");
 
         buf = aw.toArrayList();
-        return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+        return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
     }
 
     const query = args[0];
@@ -52,14 +52,14 @@ fn execute(
         {
             try w.print("Unknown rule: {s}\n", .{query});
             buf = aw.toArrayList();
-            return .{ .ok = false, .body = try buf.toOwnedSlice(allocator) };
+            return .{ .ok = false, .llm_text = try buf.toOwnedSlice(allocator) };
         };
 
     try describe_rule.writeRuleJson(w, entry);
     try w.writeAll("\n");
 
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
 }
 
 // ---------------------------------------------------------------------------
@@ -73,10 +73,10 @@ test "list mode emits JSON array of rules" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(result.body.len > 2);
-    try testing.expectEqual(@as(u8, '['), result.body[0]);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"code\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"category\":") != null);
+    try testing.expect(result.llm_text.len > 2);
+    try testing.expectEqual(@as(u8, '['), result.llm_text[0]);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"code\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"category\":") != null);
 }
 
 test "lookup by code returns single rule object" {
@@ -84,8 +84,8 @@ test "lookup by code returns single rule object" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expectEqual(@as(u8, '{'), result.body[0]);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"code\":\"ZTS303\"") != null);
+    try testing.expectEqual(@as(u8, '{'), result.llm_text[0]);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"code\":\"ZTS303\"") != null);
 }
 
 test "unknown query returns not-ok body" {
@@ -93,5 +93,5 @@ test "unknown query returns not-ok body" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "Unknown rule") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "Unknown rule") != null);
 }

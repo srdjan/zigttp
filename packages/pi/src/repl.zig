@@ -48,7 +48,7 @@ pub const SubmitOutcome = union(enum) {
 
 /// Routes a single line through either the model (NL) or the dispatch
 /// table (slash/explicit/raw tool name). Returns a surface-agnostic
-/// outcome; the caller prints `rendered` / `tool_result.body` using its
+/// outcome; the caller prints `rendered` / `tool_result.llm_text` using its
 /// own writer conventions (bare stdout for REPL, CRLF-translated for TUI).
 pub fn processSubmit(
     allocator: std.mem.Allocator,
@@ -67,7 +67,7 @@ pub fn processSubmit(
             return .{ .rendered = rendered };
         }
         const msg = try std.fmt.allocPrint(allocator, "unknown skill: {s}\nAvailable: run /skills to list\n", .{skill_name});
-        return .{ .tool_result = .{ .ok = false, .body = msg } };
+        return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
     }
 
     if (std.mem.eql(u8, trimmed, "/model")) {
@@ -83,10 +83,10 @@ pub fn processSubmit(
         if (models_registry.findById(model_id)) |model| {
             session.setModel(model.id);
             const msg = try std.fmt.allocPrint(allocator, "Model switched to: {s}\n", .{model.display_name});
-            return .{ .tool_result = .{ .ok = true, .body = msg } };
+            return .{ .tool_result = .{ .ok = true, .llm_text = msg } };
         }
         const msg = try std.fmt.allocPrint(allocator, "Unknown model: {s}\n", .{model_id});
-        return .{ .tool_result = .{ .ok = false, .body = msg } };
+        return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
     }
 
     if (std.mem.startsWith(u8, trimmed, "/settings theme")) {
@@ -98,10 +98,10 @@ pub fn processSubmit(
         if (theme_mod.findByName(rest)) |t| {
             session.theme = t;
             const msg = try std.fmt.allocPrint(allocator, "Theme switched to: {s}\n", .{t.display_name});
-            return .{ .tool_result = .{ .ok = true, .body = msg } };
+            return .{ .tool_result = .{ .ok = true, .llm_text = msg } };
         }
         const msg = try std.fmt.allocPrint(allocator, "Unknown theme: {s}\nAvailable: run /settings theme to list\n", .{rest});
-        return .{ .tool_result = .{ .ok = false, .body = msg } };
+        return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
     }
 
     if (std.mem.startsWith(u8, trimmed, "/template:")) {
@@ -119,7 +119,7 @@ pub fn processSubmit(
             return .{ .rendered = rendered };
         }
         const msg = try std.fmt.allocPrint(allocator, "unknown template: {s}\nAvailable: run /templates to list\n", .{tmpl_name});
-        return .{ .tool_result = .{ .ok = false, .body = msg } };
+        return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
     }
 
     if (std.mem.eql(u8, trimmed, "/tree")) {
@@ -179,7 +179,7 @@ pub fn dispatchLine(
     }
 
     const msg = try std.fmt.allocPrint(allocator, "unknown tool or command: {s}\n", .{argv[0]});
-    return .{ .result = .{ .ok = false, .body = msg } };
+    return .{ .result = .{ .ok = false, .llm_text = msg } };
 }
 
 pub fn shouldDispatchTool(registry: *const Registry, line: []const u8) bool {
@@ -279,7 +279,7 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     try w.writeAll("Templates:     /templates  /template:<name> [args...]\n");
 
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return ToolResult.withPlainText(allocator, true, buf.items);
 }
 
 const request_mod = @import("providers/anthropic/request.zig");
@@ -297,7 +297,7 @@ fn renderModel(allocator: std.mem.Allocator, active: ?[]const u8) !ToolResult {
     }
     try w.writeAll("\nSwitch with: /model <model-id>\n");
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return ToolResult.withPlainText(allocator, true, buf.items);
 }
 
 fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
@@ -313,7 +313,8 @@ fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
             "Theme: run /settings theme to list or switch.\n",
         .{ request_mod.default_model, request_mod.default_max_tokens },
     );
-    return .{ .ok = true, .body = msg };
+    defer allocator.free(msg);
+    return ToolResult.withPlainText(allocator, true, msg);
 }
 
 fn renderStatus(allocator: std.mem.Allocator, session: *const agent.AgentSession) !ToolResult {
@@ -345,7 +346,8 @@ fn renderStatus(allocator: std.mem.Allocator, session: *const agent.AgentSession
             tok.output_tokens,
         },
     );
-    return .{ .ok = true, .body = msg };
+    defer allocator.free(msg);
+    return ToolResult.withPlainText(allocator, true, msg);
 }
 
 fn renderThemes(allocator: std.mem.Allocator, current: *const theme_mod.Theme) !ToolResult {
@@ -359,7 +361,7 @@ fn renderThemes(allocator: std.mem.Allocator, current: *const theme_mod.Theme) !
         try w.print("  {s} {s: <16}  {s}\n", .{ marker, t.name, t.display_name });
     }
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return ToolResult.withPlainText(allocator, true, buf.items);
 }
 
 fn renderHotkeys(allocator: std.mem.Allocator) !ToolResult {
@@ -374,7 +376,8 @@ fn renderHotkeys(allocator: std.mem.Allocator) !ToolResult {
             "  Delete         delete under cursor\n" ++
             "  Up/Down        history navigation\n",
     );
-    return .{ .ok = true, .body = msg };
+    defer allocator.free(msg);
+    return ToolResult.withPlainText(allocator, true, msg);
 }
 
 fn renderSkills(allocator: std.mem.Allocator) !ToolResult {
@@ -387,7 +390,7 @@ fn renderSkills(allocator: std.mem.Allocator) !ToolResult {
         try w.print("  {s: <20}  {s}\n", .{ skill.name, skill.description });
     }
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return ToolResult.withPlainText(allocator, true, buf.items);
 }
 
 fn renderTemplates(allocator: std.mem.Allocator) !ToolResult {
@@ -400,7 +403,7 @@ fn renderTemplates(allocator: std.mem.Allocator) !ToolResult {
         try w.print("  {s: <16}  {s}\n", .{ tmpl.name, tmpl.description });
     }
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return ToolResult.withPlainText(allocator, true, buf.items);
 }
 
 fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
@@ -415,24 +418,25 @@ fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
             "  Skills catalog (/skill:<name>)\n" ++
             "  Informational commands: /model, /status, /settings, /hotkeys, /changelog\n",
     );
-    return .{ .ok = true, .body = msg };
+    defer allocator.free(msg);
+    return ToolResult.withPlainText(allocator, true, msg);
 }
 
 fn renderTree(allocator: std.mem.Allocator, current_session_id: ?[]const u8) !ToolResult {
     const root = session_paths.sessionRoot(allocator) catch |err| {
         const msg = try std.fmt.allocPrint(allocator, "error reading session root: {s}\n", .{@errorName(err)});
-        return .{ .ok = false, .body = msg };
+        return .{ .ok = false, .llm_text = msg };
     };
     defer allocator.free(root);
 
     const hash = session_paths.cwdHashFull(allocator) catch |err| {
         const msg = try std.fmt.allocPrint(allocator, "error computing cwd hash: {s}\n", .{@errorName(err)});
-        return .{ .ok = false, .body = msg };
+        return .{ .ok = false, .llm_text = msg };
     };
 
     const entries = session_paths.listSessions(allocator, root, hash[0..]) catch |err| {
         const msg = try std.fmt.allocPrint(allocator, "error listing sessions: {s}\n", .{@errorName(err)});
-        return .{ .ok = false, .body = msg };
+        return .{ .ok = false, .llm_text = msg };
     };
     defer {
         for (entries) |*e| e.deinit(allocator);
@@ -440,7 +444,7 @@ fn renderTree(allocator: std.mem.Allocator, current_session_id: ?[]const u8) !To
     }
 
     if (entries.len == 0) {
-        return .{ .ok = true, .body = try allocator.dupe(u8, "No sessions found for this workspace.\n") };
+        return .{ .ok = true, .llm_text = try allocator.dupe(u8, "No sessions found for this workspace.\n") };
     }
 
     const nodes = try buildSessionTreeNodes(allocator, entries, current_session_id);
@@ -647,9 +651,9 @@ pub fn run(
             },
             .tool_result => |*result| {
                 defer result.deinit(allocator);
-                if (result.body.len > 0) {
-                    _ = std.c.write(std.c.STDOUT_FILENO, result.body.ptr, result.body.len);
-                    if (result.body[result.body.len - 1] != '\n') {
+                if (result.llm_text.len > 0) {
+                    _ = std.c.write(std.c.STDOUT_FILENO, result.llm_text.ptr, result.llm_text.len);
+                    if (result.llm_text[result.llm_text.len - 1] != '\n') {
                         _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
                     }
                 }
@@ -703,7 +707,7 @@ fn readLine(buf: []u8) !?[]const u8 {
 }
 
 fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
-    return loop.resolveApprovalFn(policy, approveEdit);
+    return loop.resolveApprovalFn(policy, loop.ApprovalFn.fromFn(approveEdit));
 }
 
 const testing = std.testing;
@@ -725,7 +729,7 @@ fn expectResult(outcome: *DispatchOutcome, allocator: std.mem.Allocator, needle:
         .result => |*r| {
             defer r.deinit(allocator);
             try testing.expectEqual(want_ok, r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.body, needle) != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, needle) != null);
         },
         else => return error.TestFailed,
     }
@@ -740,10 +744,10 @@ test "help renders local command guidance" {
         .result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.body, "/verify") != null);
-            try testing.expect(std.mem.indexOf(u8, r.body, "/status") != null);
-            try testing.expect(std.mem.indexOf(u8, r.body, commands.session_commands[0]) != null);
-            try testing.expect(std.mem.indexOf(u8, r.body, commands.session_commands[1]) != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "/verify") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "/status") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.session_commands[0]) != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.session_commands[1]) != null);
         },
         else => return error.TestFailed,
     }
@@ -783,15 +787,24 @@ test "shouldDispatchTool is false for plain natural language" {
 }
 
 test "selectApprovalFn: auto_approve resolves to loop.autoApprove" {
-    try testing.expect(selectApprovalFn(.auto_approve) == loop.autoApprove);
+    switch (selectApprovalFn(.auto_approve)) {
+        .bare => |func| try testing.expect(func == loop.autoApprove),
+        else => return error.TestFailed,
+    }
 }
 
 test "selectApprovalFn: auto_reject resolves to loop.autoReject" {
-    try testing.expect(selectApprovalFn(.auto_reject) == loop.autoReject);
+    switch (selectApprovalFn(.auto_reject)) {
+        .bare => |func| try testing.expect(func == loop.autoReject),
+        else => return error.TestFailed,
+    }
 }
 
 test "selectApprovalFn: ask resolves to the interactive approveEdit" {
-    try testing.expect(selectApprovalFn(.ask) == approveEdit);
+    switch (selectApprovalFn(.ask)) {
+        .bare => |func| try testing.expect(func == approveEdit),
+        else => return error.TestFailed,
+    }
 }
 
 test "processSubmit: /settings theme lists themes and marks the current one" {
@@ -805,10 +818,10 @@ test "processSubmit: /settings theme lists themes and marks the current one" {
         .tool_result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.body, "default") != null);
-            try testing.expect(std.mem.indexOf(u8, r.body, "solarized-dark") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "default") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "solarized-dark") != null);
             // The current theme gets a '*' marker.
-            try testing.expect(std.mem.indexOf(u8, r.body, "* default") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "* default") != null);
         },
         else => return error.TestFailed,
     }
@@ -827,7 +840,7 @@ test "processSubmit: /settings theme <name> swaps the session theme" {
         .tool_result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.body, "Solarized Dark") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "Solarized Dark") != null);
         },
         else => return error.TestFailed,
     }
@@ -845,7 +858,7 @@ test "processSubmit: /settings theme <unknown> returns an error result" {
         .tool_result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(!r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.body, "Unknown theme") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "Unknown theme") != null);
         },
         else => return error.TestFailed,
     }
@@ -864,9 +877,9 @@ test "processSubmit: /status reports provider auth and persistence state" {
         .tool_result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.body, "provider:      stub") != null);
-            try testing.expect(std.mem.indexOf(u8, r.body, "auth:          stub") != null);
-            try testing.expect(std.mem.indexOf(u8, r.body, "persistence:   disabled") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "provider:      stub") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "auth:          stub") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "persistence:   disabled") != null);
         },
         else => return error.TestFailed,
     }
@@ -1058,10 +1071,10 @@ test "renderStatus: stub session shows 'stub' provider + 'ephemeral' session" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "provider:      stub") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "auth:          stub") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "session:       ephemeral") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "persistence:   disabled") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "provider:      stub") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "auth:          stub") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "session:       ephemeral") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "persistence:   disabled") != null);
 }
 
 test "renderStatus: enumerates every token total" {
@@ -1077,8 +1090,8 @@ test "renderStatus: enumerates every token total" {
     var result = try renderStatus(testing.allocator, &session);
     defer result.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, result.body, "tokens.in:     11") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "tokens.out:    22") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "tokens.cache_r:33") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "tokens.cache_w:44") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.in:     11") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.out:    22") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.cache_r:33") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.cache_w:44") != null);
 }

@@ -11,6 +11,7 @@
 const std = @import("std");
 const edit_simulate = @import("zigts_cli").edit_simulate;
 const turn = @import("turn.zig");
+const ui_payload = @import("ui_payload.zig");
 
 /// Run edit-simulate against a proposed edit and produce an outcome the turn
 /// state machine can consume. The returned `body` is an allocator-owned slice
@@ -34,10 +35,104 @@ pub fn runVeto(
     try edit_simulate.writeResultJson(&aw.writer, &result);
 
     buf = aw.toArrayList();
+    const llm_text = try buf.toOwnedSlice(allocator);
+    errdefer allocator.free(llm_text);
+
+    var payload = if (result.new_count == 0)
+        try buildProofCardPayload(allocator, &result)
+    else
+        try buildDiagnosticsPayload(allocator, edit.file, &result);
+    errdefer payload.deinit(allocator);
+
     return .{
         .ok = result.new_count == 0,
-        .body = try buf.toOwnedSlice(allocator),
+        .llm_text = llm_text,
+        .ui_payload = payload,
     };
+}
+
+fn buildDiagnosticsPayload(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    result: *const edit_simulate.SimulateResult,
+) !ui_payload.UiPayload {
+    const items = try allocator.alloc(ui_payload.DiagnosticItem, result.violations.items.len);
+    errdefer allocator.free(items);
+    for (items) |*item| item.* = undefined;
+    var i: usize = 0;
+    errdefer {
+        while (i > 0) {
+            i -= 1;
+            items[i].deinit(allocator);
+        }
+        allocator.free(items);
+    }
+    while (i < result.violations.items.len) : (i += 1) {
+        const violation = result.violations.items[i];
+        items[i] = try ui_payload.DiagnosticItem.init(
+            allocator,
+            violation.code,
+            violation.severity,
+            path,
+            violation.line,
+            violation.column,
+            violation.message,
+            violation.introduced_by_patch,
+        );
+    }
+
+    return .{ .diagnostics = .{
+        .summary = try std.fmt.allocPrint(
+            allocator,
+            "{d} violation(s), {d} new, {d} preexisting",
+            .{ result.total, result.new_count, result.preexisting_count },
+        ),
+        .items = items,
+    } };
+}
+
+fn buildProofCardPayload(
+    allocator: std.mem.Allocator,
+    result: *const edit_simulate.SimulateResult,
+) !ui_payload.UiPayload {
+    var highlights_list: std.ArrayList([]u8) = .empty;
+    defer {
+        for (highlights_list.items) |highlight| allocator.free(highlight);
+        highlights_list.deinit(allocator);
+    }
+
+    if (result.properties) |properties| {
+        inline for ([_]struct {
+            label: []const u8,
+            value: bool,
+        }{
+            .{ .label = "retry_safe", .value = properties.retry_safe },
+            .{ .label = "idempotent", .value = properties.idempotent },
+            .{ .label = "deterministic", .value = properties.deterministic },
+            .{ .label = "read_only", .value = properties.read_only },
+            .{ .label = "state_isolated", .value = properties.state_isolated },
+            .{ .label = "injection_safe", .value = properties.injection_safe },
+            .{ .label = "fault_covered", .value = properties.fault_covered },
+        }) |entry| {
+            if (entry.value) try highlights_list.append(allocator, try allocator.dupe(u8, entry.label));
+        }
+    }
+
+    const highlights = try highlights_list.toOwnedSlice(allocator);
+    const summary = if (result.new_count == 0 and result.total == 0)
+        try allocator.dupe(u8, "No violations found.")
+    else
+        try allocator.dupe(u8, "No new violations introduced.");
+    return .{ .proof_card = .{
+        .title = try allocator.dupe(u8, "Compiler verification"),
+        .summary = summary,
+        .stats = .{
+            .total = result.total,
+            .new = result.new_count,
+            .preexisting = result.preexisting_count,
+        },
+        .highlights = highlights,
+    } };
 }
 
 // ---------------------------------------------------------------------------
@@ -55,8 +150,9 @@ test "clean handler passes the veto with an empty violations body" {
     defer outcome.deinit(testing.allocator);
 
     try testing.expect(outcome.ok);
-    try testing.expect(std.mem.indexOf(u8, outcome.body, "\"total\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, outcome.body, "\"new\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"new\":0") != null);
+    try testing.expect(outcome.ui_payload != null);
 }
 
 test "broken handler (var) fails the veto and body surfaces ZTS001" {
@@ -68,8 +164,9 @@ test "broken handler (var) fails the veto and body surfaces ZTS001" {
     defer outcome.deinit(testing.allocator);
 
     try testing.expect(!outcome.ok);
-    try testing.expect(std.mem.indexOf(u8, outcome.body, "\"ZTS001\"") != null);
-    try testing.expect(std.mem.indexOf(u8, outcome.body, "\"introduced_by_patch\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"ZTS001\"") != null);
+    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"introduced_by_patch\":true") != null);
+    try testing.expect(outcome.ui_payload != null);
 }
 
 test "pre-existing violation with matching before passes the veto" {
@@ -85,8 +182,8 @@ test "pre-existing violation with matching before passes the veto" {
     defer outcome.deinit(testing.allocator);
 
     try testing.expect(outcome.ok);
-    try testing.expect(std.mem.indexOf(u8, outcome.body, "\"introduced_by_patch\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, outcome.body, "\"new\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"introduced_by_patch\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"new\":0") != null);
 }
 
 test "runVeto output fits turn.TurnMachine edit_verified event path" {
@@ -106,7 +203,7 @@ test "runVeto output fits turn.TurnMachine edit_verified event path" {
     try testing.expectEqual(turn.TurnState.done, machine.state);
     switch (action) {
         .render => |msg| switch (msg) {
-            .proof_card => |body| try testing.expect(body.len > 0),
+            .proof_card => |body| try testing.expect(body.llm_text.len > 0),
             else => return error.TestFailed,
         },
         else => return error.TestFailed,

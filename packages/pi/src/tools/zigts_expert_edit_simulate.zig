@@ -71,7 +71,7 @@ fn execute(
     buf = aw.toArrayList();
     return .{
         .ok = result.new_count == 0,
-        .body = try buf.toOwnedSlice(allocator),
+        .llm_text = try buf.toOwnedSlice(allocator),
     };
 }
 
@@ -86,7 +86,7 @@ test "missing arg returns not-ok body" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "requires a JSON input") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "requires a JSON input") != null);
 }
 
 test "invalid JSON returns not-ok body" {
@@ -94,7 +94,7 @@ test "invalid JSON returns not-ok body" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "invalid JSON") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "invalid JSON") != null);
 }
 
 test "missing file field returns not-ok body" {
@@ -102,7 +102,7 @@ test "missing file field returns not-ok body" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "missing \"file\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "missing \"file\"") != null);
 }
 
 test "clean handler passes the veto" {
@@ -113,7 +113,7 @@ test "clean handler passes the veto" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"total\":0") != null);
 }
 
 test "broken handler (var) fails the veto with a new violation" {
@@ -124,8 +124,8 @@ test "broken handler (var) fails the veto with a new violation" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"ZTS001\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"introduced_by_patch\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ZTS001\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"introduced_by_patch\":true") != null);
 }
 
 test "pre-existing violation with matching before passes the veto" {
@@ -139,5 +139,5 @@ test "pre-existing violation with matching before passes the veto" {
     // (code + message) matches the baseline so introduced_by_patch == false
     // and new_count == 0 → the veto passes.
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"introduced_by_patch\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"introduced_by_patch\":false") != null);
 }

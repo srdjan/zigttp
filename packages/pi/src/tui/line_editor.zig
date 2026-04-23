@@ -15,6 +15,9 @@ pub const KeyKind = enum {
     home,
     end,
     enter,
+    tab,
+    shift_tab,
+    esc,
     ctrl_c,
     eof,
     ignore,
@@ -88,6 +91,7 @@ pub const LineEditor = struct {
             .up => try self.historyUp(allocator),
             .down => try self.historyDown(allocator),
             .enter => try self.submitCurrent(allocator),
+            .tab, .shift_tab, .esc => .none,
             .ctrl_c, .eof => .cancel,
             .ignore => .none,
         };

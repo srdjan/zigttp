@@ -325,7 +325,7 @@ fn expectOkContains(outcome: *repl.DispatchOutcome, allocator: std.mem.Allocator
         .result => |*r| {
             defer r.deinit(allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.body, needle) != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, needle) != null);
         },
         else => return error.TestFailed,
     }

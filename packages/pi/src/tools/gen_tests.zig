@@ -91,5 +91,5 @@ test "missing args returns not-ok" {
     var result = try execute(testing.allocator, &.{});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "requires handler_path") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "requires handler_path") != null);
 }

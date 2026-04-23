@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const turn = @import("turn.zig");
+const ui_payload = @import("ui_payload.zig");
 const box_widget = @import("tui/widgets/box.zig");
 
 /// Return an allocator-owned copy of `body`, capped at `max` bytes. When
@@ -65,13 +66,32 @@ pub const OwnedToolResult = struct {
     tool_use_id: []const u8,
     tool_name: []const u8,
     ok: bool,
-    body: []const u8,
+    llm_text: []const u8,
+    ui_payload: ?ui_payload.UiPayload = null,
 
     pub fn deinit(self: *OwnedToolResult, allocator: std.mem.Allocator) void {
         allocator.free(self.tool_use_id);
         allocator.free(self.tool_name);
-        allocator.free(self.body);
-        self.* = .{ .tool_use_id = &.{}, .tool_name = &.{}, .ok = false, .body = &.{} };
+        allocator.free(self.llm_text);
+        if (self.ui_payload) |*payload| payload.deinit(allocator);
+        self.* = .{
+            .tool_use_id = &.{},
+            .tool_name = &.{},
+            .ok = false,
+            .llm_text = &.{},
+            .ui_payload = null,
+        };
+    }
+};
+
+pub const OwnedDisplayMessage = struct {
+    llm_text: []const u8,
+    ui_payload: ?ui_payload.UiPayload = null,
+
+    pub fn deinit(self: *OwnedDisplayMessage, allocator: std.mem.Allocator) void {
+        allocator.free(self.llm_text);
+        if (self.ui_payload) |*payload| payload.deinit(allocator);
+        self.* = .{ .llm_text = &.{}, .ui_payload = null };
     }
 };
 
@@ -79,8 +99,8 @@ pub const OwnedEntry = union(enum) {
     user_text: []const u8,
     model_text: []const u8,
     assistant_tool_use: []OwnedToolCall,
-    proof_card: []const u8,
-    diagnostic_box: []const u8,
+    proof_card: OwnedDisplayMessage,
+    diagnostic_box: OwnedDisplayMessage,
     tool_result: OwnedToolResult,
     system_note: []const u8,
 
@@ -88,8 +108,8 @@ pub const OwnedEntry = union(enum) {
         switch (self.*) {
             .user_text => |body| allocator.free(body),
             .model_text => |body| allocator.free(body),
-            .proof_card => |body| allocator.free(body),
-            .diagnostic_box => |body| allocator.free(body),
+            .proof_card => |*message| message.deinit(allocator),
+            .diagnostic_box => |*message| message.deinit(allocator),
             .system_note => |body| allocator.free(body),
             .assistant_tool_use => |calls| {
                 for (calls) |*call| call.deinit(allocator);
@@ -133,8 +153,8 @@ fn ownMessage(allocator: std.mem.Allocator, message: turn.Message) !OwnedEntry {
     return switch (message) {
         .user_text => |body| .{ .user_text = try allocator.dupe(u8, body) },
         .model_text => |body| .{ .model_text = try allocator.dupe(u8, body) },
-        .proof_card => |body| .{ .proof_card = try allocator.dupe(u8, body) },
-        .diagnostic_box => |body| .{ .diagnostic_box = try allocator.dupe(u8, body) },
+        .proof_card => |body| .{ .proof_card = try ownDisplayMessage(allocator, body) },
+        .diagnostic_box => |body| .{ .diagnostic_box = try ownDisplayMessage(allocator, body) },
         .assistant_tool_use => |calls| blk: {
             const owned = try allocator.alloc(OwnedToolCall, calls.len);
             errdefer allocator.free(owned);
@@ -151,9 +171,26 @@ fn ownMessage(allocator: std.mem.Allocator, message: turn.Message) !OwnedEntry {
             .tool_use_id = try allocator.dupe(u8, result.tool_use_id),
             .tool_name = try allocator.dupe(u8, result.tool_name),
             .ok = result.ok,
-            .body = try allocator.dupe(u8, result.body),
+            .llm_text = try allocator.dupe(u8, result.llm_text),
+            .ui_payload = if (result.ui_payload) |payload|
+                try payload.clone(allocator)
+            else
+                null,
         } },
         .system_note => |body| .{ .system_note = try allocator.dupe(u8, body) },
+    };
+}
+
+fn ownDisplayMessage(
+    allocator: std.mem.Allocator,
+    message: turn.DisplayMessage,
+) !OwnedDisplayMessage {
+    return .{
+        .llm_text = try allocator.dupe(u8, message.llm_text),
+        .ui_payload = if (message.ui_payload) |payload|
+            try payload.clone(allocator)
+        else
+            null,
     };
 }
 
@@ -161,8 +198,8 @@ pub fn renderPlain(writer: anytype, entry: *const OwnedEntry) !void {
     switch (entry.*) {
         .user_text => |body| try writeTaggedLine(writer, "user", body),
         .model_text => |body| try writeTaggedLine(writer, "model", body),
-        .proof_card => |body| try writeTaggedLine(writer, "proof", body),
-        .diagnostic_box => |body| try writeTaggedLine(writer, "error", body),
+        .proof_card => |message| try writeTaggedLine(writer, "proof", message.llm_text),
+        .diagnostic_box => |message| try writeTaggedLine(writer, "error", message.llm_text),
         .system_note => |body| try writeTaggedLine(writer, "note", body),
         .assistant_tool_use => |calls| {
             try writer.writeAll("assistant: tool_use ");
@@ -176,8 +213,8 @@ pub fn renderPlain(writer: anytype, entry: *const OwnedEntry) !void {
             try writer.writeAll("tool ");
             try writer.writeAll(result.tool_name);
             try writer.writeAll(": ");
-            try writer.writeAll(result.body);
-            if (result.body.len == 0 or result.body[result.body.len - 1] != '\n') {
+            try writer.writeAll(result.llm_text);
+            if (result.llm_text.len == 0 or result.llm_text[result.llm_text.len - 1] != '\n') {
                 try writer.writeAll("\n");
             }
         },
@@ -201,15 +238,15 @@ fn renderAll(writer: anytype, transcript: *const Transcript) !void {
 
 pub fn renderRich(writer: anytype, entry: *const OwnedEntry) !void {
     switch (entry.*) {
-        .proof_card => |body| try box_widget.writeBox(
+        .proof_card => |message| try box_widget.writeBox(
             writer,
             .{ .title = "proof", .color = .green },
-            body,
+            message.llm_text,
         ),
-        .diagnostic_box => |body| try box_widget.writeBox(
+        .diagnostic_box => |message| try box_widget.writeBox(
             writer,
             .{ .title = "veto", .color = .red },
-            body,
+            message.llm_text,
         ),
         else => try renderPlain(writer, entry),
     }
@@ -271,7 +308,7 @@ test "assistant_tool_use and tool_result variants are preserved" {
         .tool_use_id = "toolu_1",
         .tool_name = "zigts_expert_meta",
         .ok = true,
-        .body = "{\"ok\":true}\n",
+        .llm_text = "{\"ok\":true}\n",
     } });
 
     switch (tr.at(0).*) {
@@ -304,10 +341,10 @@ test "every entry variant renders a stable plain-text label" {
         .tool_use_id = "toolu_1",
         .tool_name = "zigts_expert_meta",
         .ok = true,
-        .body = "{\"ok\":true}",
+        .llm_text = "{\"ok\":true}",
     } });
-    try tr.append(testing.allocator, .{ .proof_card = "contract ok" });
-    try tr.append(testing.allocator, .{ .diagnostic_box = "ZTS001 unsupported var" });
+    try tr.append(testing.allocator, .{ .proof_card = .{ .llm_text = "contract ok" } });
+    try tr.append(testing.allocator, .{ .diagnostic_box = .{ .llm_text = "ZTS001 unsupported var" } });
 
     const out = try renderToString(testing.allocator, &tr);
     defer testing.allocator.free(out);
@@ -371,7 +408,7 @@ test "veto -> turn -> transcript pipeline still lands a proof entry" {
     }
 
     switch (tr.at(0).*) {
-        .proof_card => |body| try testing.expect(std.mem.indexOf(u8, body, "\"total\":0") != null),
+        .proof_card => |message| try testing.expect(std.mem.indexOf(u8, message.llm_text, "\"total\":0") != null),
         else => return error.TestFailed,
     }
 }

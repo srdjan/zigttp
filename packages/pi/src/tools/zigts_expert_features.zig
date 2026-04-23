@@ -30,7 +30,7 @@ fn execute(
     try json_diagnostics.writeFeaturesJson(&aw.writer);
 
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
 }
 
 // ---------------------------------------------------------------------------
@@ -44,9 +44,9 @@ test "features emits JSON array with at least one allowed and one blocked entry"
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expectEqual(@as(u8, '['), result.body[0]);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"status\":\"allowed\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"status\":\"blocked\"") != null);
+    try testing.expectEqual(@as(u8, '['), result.llm_text[0]);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"status\":\"allowed\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"status\":\"blocked\"") != null);
 }
 
 test "features rejects unexpected arguments" {
@@ -54,5 +54,5 @@ test "features rejects unexpected arguments" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "takes no arguments") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "takes no arguments") != null);
 }

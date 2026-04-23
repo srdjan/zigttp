@@ -30,7 +30,7 @@ fn execute(
     try json_diagnostics.writeModulesJson(&aw.writer);
 
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
 }
 
 // ---------------------------------------------------------------------------
@@ -44,9 +44,9 @@ test "modules emits JSON array with at least the env module" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expectEqual(@as(u8, '['), result.body[0]);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"specifier\":\"zigttp:env\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"exports\":") != null);
+    try testing.expectEqual(@as(u8, '['), result.llm_text[0]);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"specifier\":\"zigttp:env\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"exports\":") != null);
 }
 
 test "modules rejects unexpected arguments" {
@@ -54,5 +54,5 @@ test "modules rejects unexpected arguments" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "takes no arguments") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "takes no arguments") != null);
 }
