@@ -132,7 +132,7 @@ pub fn commandOutcomeToToolResult(
         .ok = outcome.ok,
         .llm_text = llm_text,
         .ui_payload = .{ .command_outcome = .{
-            .title = try std.fmt.allocPrint(allocator, "{s}", .{argv[0]}),
+            .title = try allocator.dupe(u8, argv[0]),
             .exit_code = outcome.exit_code,
             .stdout = try allocator.dupe(u8, outcome.stdout),
             .stderr = try allocator.dupe(u8, outcome.stderr),
