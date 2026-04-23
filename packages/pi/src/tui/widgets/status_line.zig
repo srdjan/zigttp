@@ -43,14 +43,16 @@ pub fn render(
     try ansi.styled(writer, palette.status_value, state.auth);
 
     try ansi.styled(writer, palette.dim, middle_dot);
-    try ansi.styled(writer, palette.status_key, "tokens in:");
-    try ansi.styledFmt(writer, palette.status_value, "{d}", .{state.tokens.input_tokens});
-    try ansi.styled(writer, palette.status_key, " cache_r:");
-    try ansi.styledFmt(writer, palette.status_value, "{d}", .{state.tokens.cache_read_input_tokens});
-    try ansi.styled(writer, palette.status_key, " cache_w:");
-    try ansi.styledFmt(writer, palette.status_value, "{d}", .{state.tokens.cache_creation_input_tokens});
-    try ansi.styled(writer, palette.status_key, " out:");
-    try ansi.styledFmt(writer, palette.status_value, "{d}", .{state.tokens.output_tokens});
+    const token_fields = [_]struct { label: []const u8, value: u64 }{
+        .{ .label = "tokens in:", .value = state.tokens.input_tokens },
+        .{ .label = " cache_r:", .value = state.tokens.cache_read_input_tokens },
+        .{ .label = " cache_w:", .value = state.tokens.cache_creation_input_tokens },
+        .{ .label = " out:", .value = state.tokens.output_tokens },
+    };
+    for (token_fields) |f| {
+        try ansi.styled(writer, palette.status_key, f.label);
+        try ansi.styledFmt(writer, palette.status_value, "{d}", .{f.value});
+    }
 }
 
 /// Truncates a session id to a short display form. Session ids are 26-char
