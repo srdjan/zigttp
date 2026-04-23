@@ -175,88 +175,27 @@ fn dirHasGit(allocator: std.mem.Allocator, dir: []const u8) bool {
 
 const testing = std.testing;
 
-const TmpTree = struct {
-    root: []u8,
+const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 
-    fn init(allocator: std.mem.Allocator) !TmpTree {
-        var ts: std.posix.timespec = undefined;
-        _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
-        const counter = test_counter.fetchAdd(1, .seq_cst);
-        const name = try std.fmt.allocPrint(
-            allocator,
-            "zigttp-project-context-test-{d}-{d}-{d}",
-            .{ @as(u64, @intCast(ts.sec)), @as(u64, @intCast(ts.nsec)), counter },
-        );
-        defer allocator.free(name);
-
-        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
-        const io = io_backend.io();
-
-        var tmp_root = try std.Io.Dir.openDirAbsolute(io, "/tmp", .{});
-        defer tmp_root.close(io);
-        tmp_root.deleteTree(io, name) catch {};
-        try std.Io.Dir.createDirPath(tmp_root, io, name);
-
-        const root = try std.fs.path.resolve(allocator, &.{ "/tmp", name });
-        return .{ .root = root };
-    }
-
-    fn deinit(self: *TmpTree, allocator: std.mem.Allocator) void {
-        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
-        const io = io_backend.io();
-        var tmp_root = std.Io.Dir.openDirAbsolute(io, "/tmp", .{}) catch {
-            allocator.free(self.root);
-            return;
-        };
-        defer tmp_root.close(io);
-        const basename = std.fs.path.basename(self.root);
-        tmp_root.deleteTree(io, basename) catch {};
-        allocator.free(self.root);
-    }
-
-    fn mkdir(self: *const TmpTree, allocator: std.mem.Allocator, rel: []const u8) !void {
-        const abs_path = try std.fs.path.join(allocator, &.{ self.root, rel });
-        defer allocator.free(abs_path);
-        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
-        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), abs_path);
-    }
-
-    fn write(self: *const TmpTree, allocator: std.mem.Allocator, rel: []const u8, body: []const u8) !void {
-        const abs_path = try std.fs.path.join(allocator, &.{ self.root, rel });
-        defer allocator.free(abs_path);
-        if (std.fs.path.dirname(abs_path)) |parent| {
-            var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-            defer io_backend.deinit();
-            try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), parent);
-        }
-        try file_io.writeFile(allocator, abs_path, body);
-    }
-
-    fn absPath(self: *const TmpTree, allocator: std.mem.Allocator, rel: []const u8) ![]u8 {
-        return std.fs.path.join(allocator, &.{ self.root, rel });
-    }
-};
-
-var test_counter = std.atomic.Value(u64).init(0);
+fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
+    return IsolatedTmp.init(allocator, "project-context");
+}
 
 test "returns null when no context files exist" {
-    var tree = try TmpTree.init(testing.allocator);
-    defer tree.deinit(testing.allocator);
+    var tree = try initTmp(testing.allocator);
+    defer tree.cleanup(testing.allocator);
 
-    const result = try loadFromDir(testing.allocator, tree.root, .{});
+    const result = try loadFromDir(testing.allocator, tree.abs_path, .{});
     try testing.expect(result == null);
 }
 
 test "reads a single AGENTS.md at cwd" {
-    var tree = try TmpTree.init(testing.allocator);
-    defer tree.deinit(testing.allocator);
+    var tree = try initTmp(testing.allocator);
+    defer tree.cleanup(testing.allocator);
 
-    try tree.write(testing.allocator, "AGENTS.md", "project rule X\n");
+    try tree.writeFile(testing.allocator, "AGENTS.md", "project rule X\n");
 
-    const result = (try loadFromDir(testing.allocator, tree.root, .{})) orelse return error.TestExpected;
+    const result = (try loadFromDir(testing.allocator, tree.abs_path, .{})) orelse return error.TestExpected;
     defer testing.allocator.free(result);
 
     try testing.expect(std.mem.indexOf(u8, result, "AGENTS.md") != null);
@@ -264,13 +203,13 @@ test "reads a single AGENTS.md at cwd" {
 }
 
 test "reads both AGENTS.md and CLAUDE.md at the same level" {
-    var tree = try TmpTree.init(testing.allocator);
-    defer tree.deinit(testing.allocator);
+    var tree = try initTmp(testing.allocator);
+    defer tree.cleanup(testing.allocator);
 
-    try tree.write(testing.allocator, "AGENTS.md", "AAA\n");
-    try tree.write(testing.allocator, "CLAUDE.md", "BBB\n");
+    try tree.writeFile(testing.allocator, "AGENTS.md", "AAA\n");
+    try tree.writeFile(testing.allocator, "CLAUDE.md", "BBB\n");
 
-    const result = (try loadFromDir(testing.allocator, tree.root, .{})) orelse return error.TestExpected;
+    const result = (try loadFromDir(testing.allocator, tree.abs_path, .{})) orelse return error.TestExpected;
     defer testing.allocator.free(result);
 
     const a = std.mem.indexOf(u8, result, "AAA") orelse return error.TestExpected;
@@ -279,14 +218,14 @@ test "reads both AGENTS.md and CLAUDE.md at the same level" {
 }
 
 test "walks upward and emits outer-first" {
-    var tree = try TmpTree.init(testing.allocator);
-    defer tree.deinit(testing.allocator);
+    var tree = try initTmp(testing.allocator);
+    defer tree.cleanup(testing.allocator);
 
-    try tree.write(testing.allocator, "AGENTS.md", "ROOT\n");
+    try tree.writeFile(testing.allocator, "AGENTS.md", "ROOT\n");
     try tree.mkdir(testing.allocator, "sub");
-    try tree.write(testing.allocator, "sub/AGENTS.md", "SUB\n");
+    try tree.writeFile(testing.allocator, "sub/AGENTS.md", "SUB\n");
 
-    const sub_abs = try tree.absPath(testing.allocator, "sub");
+    const sub_abs = try tree.childPath(testing.allocator, "sub");
     defer testing.allocator.free(sub_abs);
 
     const result = (try loadFromDir(testing.allocator, sub_abs, .{ .stop_at_git_root = false })) orelse return error.TestExpected;
@@ -298,15 +237,15 @@ test "walks upward and emits outer-first" {
 }
 
 test "stops at .git directory inclusive" {
-    var tree = try TmpTree.init(testing.allocator);
-    defer tree.deinit(testing.allocator);
+    var tree = try initTmp(testing.allocator);
+    defer tree.cleanup(testing.allocator);
 
     // Tree: /tmp/<root>/.git/ (marker), /tmp/<root>/AGENTS.md, /tmp/<root>/inner/AGENTS.md
     try tree.mkdir(testing.allocator, ".git");
-    try tree.write(testing.allocator, "AGENTS.md", "REPO_ROOT\n");
-    try tree.write(testing.allocator, "inner/AGENTS.md", "INNER\n");
+    try tree.writeFile(testing.allocator, "AGENTS.md", "REPO_ROOT\n");
+    try tree.writeFile(testing.allocator, "inner/AGENTS.md", "INNER\n");
 
-    const inner_abs = try tree.absPath(testing.allocator, "inner");
+    const inner_abs = try tree.childPath(testing.allocator, "inner");
     defer testing.allocator.free(inner_abs);
 
     const result = (try loadFromDir(testing.allocator, inner_abs, .{})) orelse return error.TestExpected;
@@ -317,28 +256,28 @@ test "stops at .git directory inclusive" {
 }
 
 test "respects per-file cap by skipping oversized files" {
-    var tree = try TmpTree.init(testing.allocator);
-    defer tree.deinit(testing.allocator);
+    var tree = try initTmp(testing.allocator);
+    defer tree.cleanup(testing.allocator);
 
     var big: std.ArrayList(u8) = .empty;
     defer big.deinit(testing.allocator);
     try big.appendNTimes(testing.allocator, 'x', 1024);
-    try tree.write(testing.allocator, "AGENTS.md", big.items);
+    try tree.writeFile(testing.allocator, "AGENTS.md", big.items);
 
-    const result = try loadFromDir(testing.allocator, tree.root, .{ .per_file_cap = 512 });
+    const result = try loadFromDir(testing.allocator, tree.abs_path, .{ .per_file_cap = 512 });
     try testing.expect(result == null);
 }
 
 test "total cap surfaces as an error" {
-    var tree = try TmpTree.init(testing.allocator);
-    defer tree.deinit(testing.allocator);
+    var tree = try initTmp(testing.allocator);
+    defer tree.cleanup(testing.allocator);
 
     var big: std.ArrayList(u8) = .empty;
     defer big.deinit(testing.allocator);
     try big.appendNTimes(testing.allocator, 'y', 2048);
-    try tree.write(testing.allocator, "AGENTS.md", big.items);
+    try tree.writeFile(testing.allocator, "AGENTS.md", big.items);
 
-    const err = loadFromDir(testing.allocator, tree.root, .{
+    const err = loadFromDir(testing.allocator, tree.abs_path, .{
         .per_file_cap = 4096,
         .total_cap = 256,
     });

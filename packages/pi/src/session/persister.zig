@@ -112,57 +112,11 @@ pub fn appendEntry(
 const testing = std.testing;
 const zigts = @import("zigts");
 
-var isolated_tmp_counter = std.atomic.Value(u64).init(0);
+const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 
-const IsolatedTmp = struct {
-    abs_path: []u8,
-    name: []u8,
-
-    fn init(allocator: std.mem.Allocator) !IsolatedTmp {
-        var ts: std.posix.timespec = undefined;
-        _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
-        const counter = isolated_tmp_counter.fetchAdd(1, .seq_cst);
-        const name = try std.fmt.allocPrint(
-            allocator,
-            "zigttp-persister-test-{d}-{d}-{d}",
-            .{ @as(u64, @intCast(ts.sec)), @as(u64, @intCast(ts.nsec)), counter },
-        );
-        errdefer allocator.free(name);
-
-        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
-        const io = io_backend.io();
-
-        var tmp_root = try std.Io.Dir.openDirAbsolute(io, "/tmp", .{});
-        defer tmp_root.close(io);
-        tmp_root.deleteTree(io, name) catch {};
-        try std.Io.Dir.createDirPath(tmp_root, io, name);
-
-        const abs_path = try std.fs.path.resolve(allocator, &.{ "/tmp", name });
-        errdefer allocator.free(abs_path);
-
-        return .{ .abs_path = abs_path, .name = name };
-    }
-
-    fn cleanup(self: *IsolatedTmp, allocator: std.mem.Allocator) void {
-        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
-        const io = io_backend.io();
-        var tmp_root = std.Io.Dir.openDirAbsolute(io, "/tmp", .{}) catch {
-            allocator.free(self.abs_path);
-            allocator.free(self.name);
-            return;
-        };
-        defer tmp_root.close(io);
-        tmp_root.deleteTree(io, self.name) catch {};
-        allocator.free(self.abs_path);
-        allocator.free(self.name);
-    }
-
-    fn childPath(self: *const IsolatedTmp, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
-        return try std.fs.path.resolve(allocator, &.{ self.abs_path, name });
-    }
-};
+fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
+    return IsolatedTmp.init(allocator, "persister");
+}
 
 fn readWhole(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return try zigts.file_io.readFile(allocator, path, 1 * 1024 * 1024);
@@ -181,7 +135,7 @@ fn splitLines(allocator: std.mem.Allocator, raw: []const u8) !std.ArrayList([]co
 
 test "appendEntry persists a user_text entry" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
@@ -203,7 +157,7 @@ test "appendEntry persists a user_text entry" {
 
 test "appendEntry persists a model_text entry" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
@@ -225,7 +179,7 @@ test "appendEntry persists a model_text entry" {
 
 test "appendEntry on assistant_tool_use with 2 calls writes 2 distinct tool_use lines" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
@@ -263,7 +217,7 @@ test "appendEntry on assistant_tool_use with 2 calls writes 2 distinct tool_use 
 
 test "appendEntry on tool_result under cap writes body unchanged" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
@@ -290,7 +244,7 @@ test "appendEntry on tool_result under cap writes body unchanged" {
 
 test "appendEntry on tool_result over cap writes a truncated body with dropped byte count" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
@@ -334,7 +288,7 @@ test "appendEntry on tool_result over cap writes a truncated body with dropped b
 
 test "appendEntry with no_persist_tool_output skips tool_result entries" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
@@ -354,7 +308,7 @@ test "appendEntry with no_persist_tool_output skips tool_result entries" {
 
 test "appendEntry with no_persist_tool_output still persists user_text" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
@@ -376,7 +330,7 @@ test "appendEntry with no_persist_tool_output still persists user_text" {
 
 test "appendEntry on proof_card and diagnostic_box round-trip correctly" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
