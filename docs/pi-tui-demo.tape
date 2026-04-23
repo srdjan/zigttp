@@ -5,68 +5,67 @@
 
 Output docs/pi-tui-demo.gif
 
-# Terminal setup. 100x28 is wide enough to fit the status line without
-# wrapping on solarized-dark's longer color escapes.
+# Wide enough to keep the split feed/inspector layout visible.
 Set Shell "bash"
 Set FontSize 14
-Set Width 1100
-Set Height 620
+Set Width 1280
+Set Height 760
 Set Theme "Builtin Dark"
-Set TypingSpeed 60ms
+Set TypingSpeed 55ms
 Set PlaybackSpeed 1.0
 
-# The ephemeral --no-session flag keeps the demo reproducible: no
-# $HOME/.zigttp/sessions/ directories get created or touched.
-Type "zig-out/bin/zigts expert --no-session"
-Enter
-Sleep 900ms
-
-# Show /status: the new command that prints provider, auth, session,
-# and full token breakdown (in/cache_r/cache_w/out).
-Type "/status"
-Enter
-Sleep 1500ms
-
-# Show /skills: the five baked-in skill catalog entries.
-Type "/skills"
-Enter
-Sleep 1800ms
-
-# Switch themes mid-session. The status line colors change
-# immediately on the next redraw.
-Type "/settings theme solarized-dark"
+# Force the stub backend so the demo stays reproducible without network
+# access or local auth state.
+Type "env -u ANTHROPIC_API_KEY ./zig-out/bin/zigts expert --no-session"
 Enter
 Sleep 1200ms
 
-# Show that /settings theme (no arg) lists available themes and
-# marks the current one with '*'.
-Type "/settings theme"
+# Local informational commands land as feed items and open their full
+# content in the inspector.
+Type "/status"
 Enter
-Sleep 1500ms
+Sleep 1400ms
+Tab
+Sleep 450ms
 
-# A natural-language turn. The stub backend replies with the offline
-# message since no ANTHROPIC_API_KEY is set; the TUI shows the full
-# round-trip anyway: user text goes to scrollback, status line stays
-# anchored, model reply appears.
+Type "/model"
+Enter
+Sleep 1400ms
+Tab
+Sleep 450ms
+
+# Theme swap exercises a full redraw while staying in the split layout.
+Type "/settings theme solarized-dark"
+Enter
+Sleep 1400ms
+Tab
+Sleep 450ms
+
+# A natural-language turn adds transcript-backed feed rows.
 Type "add a GET /health route"
 Enter
 Sleep 1800ms
 
-# History recall: up-arrow brings back the previous command.
+# Move into the feed and walk older entries; the inspector follows the
+# selected row even before explicit focus changes.
+Tab
+Sleep 600ms
 Up
-Sleep 500ms
+Sleep 700ms
 Up
-Sleep 500ms
+Sleep 700ms
 
-# Cursor-left to show the mid-line editing is working.
-Left
-Left
-Left
-Sleep 400ms
-
-# Bail out of the recalled line and type something new.
-Ctrl+C
-Sleep 400ms
-Type "/quit"
+# Enter moves focus to the inspector; selection still tracks with Up/Down.
 Enter
 Sleep 500ms
+Down
+Sleep 700ms
+Down
+Sleep 700ms
+
+# Return to the composer and exit cleanly.
+Tab
+Sleep 500ms
+Type "/quit"
+Enter
+Sleep 700ms
