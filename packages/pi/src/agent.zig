@@ -32,6 +32,11 @@ const theme_mod = @import("tui/theme.zig");
 const Registry = registry_mod.Registry;
 const Transcript = transcript_mod.Transcript;
 
+pub const AuthKind = enum {
+    stub,
+    anthropic_api_key,
+};
+
 pub const SessionConfig = struct {
     no_session: bool = false,
     no_persist_tool_output: bool = false,
@@ -168,6 +173,27 @@ pub const AgentSession = struct {
         return switch (self.backend) {
             .stub => null,
             .anthropic => |c| c.config.model,
+        };
+    }
+
+    pub fn authKind(self: *const AgentSession) AuthKind {
+        return switch (self.backend) {
+            .stub => .stub,
+            .anthropic => .anthropic_api_key,
+        };
+    }
+
+    pub fn authLabel(self: *const AgentSession) []const u8 {
+        return switch (self.authKind()) {
+            .stub => "stub",
+            .anthropic_api_key => "api-key",
+        };
+    }
+
+    pub fn providerLabel(self: *const AgentSession) []const u8 {
+        return switch (self.backend) {
+            .stub => "stub",
+            .anthropic => "anthropic",
         };
     }
 

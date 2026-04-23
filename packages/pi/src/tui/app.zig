@@ -50,7 +50,7 @@ pub fn run(
     defer session.deinit(allocator);
 
     try writeBanner();
-    try redrawRetained(&session, editor.line());
+    try redrawRetained(&session, &editor);
 
     var input_buf: [256]u8 = undefined;
 
@@ -63,21 +63,13 @@ pub fn run(
 
         var i: usize = 0;
         while (i < n) {
-            const byte = input_buf[i];
-            if (byte == 0x1b) {
-                // Escape sequence: consume up to 2 more bytes (arrow / function
-                // keys are typically ESC [ X) and ignore.
-                i = @min(n, i + 3);
-                continue;
-            }
-
-            const event = classifyByte(byte);
-            i += 1;
+            const event, const consumed = parseKeyEvent(input_buf[0..n], i);
+            i += consumed;
 
             const action = try editor.handle(allocator, event);
             switch (action) {
                 .none => {},
-                .redraw => try redrawRetained(&session, editor.line()),
+                .redraw => try redrawRetained(&session, &editor),
                 .submit => {
                     const line_snapshot = editor.line();
 
@@ -89,8 +81,8 @@ pub fn run(
                         var msg_buf: [256]u8 = undefined;
                         const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\r\n", .{@errorName(err)}) catch "error\r\n";
                         try emitScrollback(&session, msg);
-                        editor.clear();
-                        try redrawRetained(&session, editor.line());
+                        editor.clear(allocator);
+                        try redrawRetained(&session, &editor);
                         continue;
                     };
 
@@ -119,8 +111,8 @@ pub fn run(
                         },
                     }
 
-                    editor.clear();
-                    try redrawRetained(&session, editor.line());
+                    editor.clear(allocator);
+                    try redrawRetained(&session, &editor);
                 },
                 .cancel => {
                     try emitScrollback(&session, "\r\n");
@@ -141,21 +133,23 @@ pub fn run(
 /// width + input length combination without truncation.
 var frame_buf: [8192]u8 = undefined;
 
-fn retainedState(session: *const agent.AgentSession, input: []const u8) retained.State {
+fn retainedState(session: *const agent.AgentSession, input: []const u8, cursor: usize) retained.State {
     return .{
         .status = .{
             .session_id = if (session.session_id) |s| s else null,
             .model = session.currentModel(),
+            .auth = session.authLabel(),
             .tokens = session.token_totals,
         },
         .input = input,
         .prompt_label = prompt_label,
+        .cursor = cursor,
     };
 }
 
-fn redrawRetained(session: *const agent.AgentSession, input: []const u8) !void {
+fn redrawRetained(session: *const agent.AgentSession, editor: *const LineEditor) !void {
     var fw = std.Io.Writer.fixed(&frame_buf);
-    try retained.redraw(&fw, session.theme, retainedState(session, input));
+    try retained.redraw(&fw, session.theme, retainedState(session, editor.line(), editor.cursor()));
     writeAll(fw.buffered());
 }
 
@@ -184,7 +178,7 @@ fn flushEraseRetained() !void {
 
 fn flushReanchor(session: *const agent.AgentSession) !void {
     var fw = std.Io.Writer.fixed(&frame_buf);
-    try retained.afterScrollback(&fw, session.theme, retainedState(session, ""));
+    try retained.afterScrollback(&fw, session.theme, retainedState(session, "", 0));
     writeAll(fw.buffered());
 }
 
@@ -193,7 +187,51 @@ fn writeBanner() !void {
     writeAll(banner);
 }
 
-fn classifyByte(b: u8) KeyEvent {
+fn parseKeyEvent(bytes: []const u8, start: usize) struct { KeyEvent, usize } {
+    const b = bytes[start];
+    if (b != 0x1b) return .{ classifySingleByte(b), 1 };
+    if (start + 1 >= bytes.len) return .{ .{ .kind = .ignore }, 1 };
+
+    const second = bytes[start + 1];
+    if (second == '[') {
+        if (start + 2 >= bytes.len) return .{ .{ .kind = .ignore }, 2 };
+        const third = bytes[start + 2];
+        return switch (third) {
+            'A' => .{ .{ .kind = .up }, 3 },
+            'B' => .{ .{ .kind = .down }, 3 },
+            'C' => .{ .{ .kind = .right }, 3 },
+            'D' => .{ .{ .kind = .left }, 3 },
+            'H' => .{ .{ .kind = .home }, 3 },
+            'F' => .{ .{ .kind = .end }, 3 },
+            '1', '7' => if (start + 3 < bytes.len and bytes[start + 3] == '~')
+                .{ .{ .kind = .home }, 4 }
+            else
+                .{ .{ .kind = .ignore }, 3 },
+            '4', '8' => if (start + 3 < bytes.len and bytes[start + 3] == '~')
+                .{ .{ .kind = .end }, 4 }
+            else
+                .{ .{ .kind = .ignore }, 3 },
+            '3' => if (start + 3 < bytes.len and bytes[start + 3] == '~')
+                .{ .{ .kind = .delete }, 4 }
+            else
+                .{ .{ .kind = .ignore }, 3 },
+            else => .{ .{ .kind = .ignore }, 3 },
+        };
+    }
+
+    if (second == 'O') {
+        if (start + 2 >= bytes.len) return .{ .{ .kind = .ignore }, 2 };
+        return switch (bytes[start + 2]) {
+            'H' => .{ .{ .kind = .home }, 3 },
+            'F' => .{ .{ .kind = .end }, 3 },
+            else => .{ .{ .kind = .ignore }, 3 },
+        };
+    }
+
+    return .{ .{ .kind = .ignore }, 1 };
+}
+
+fn classifySingleByte(b: u8) KeyEvent {
     return switch (b) {
         3 => .{ .kind = .ctrl_c },
         4 => .{ .kind = .eof },
@@ -265,37 +303,51 @@ fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
 }
 
 // ---------------------------------------------------------------------------
-// Tests (byte classification + rendering only; the event loop itself is
-// I/O-driven and exercised by integration runs).
+// Tests (key parsing + rendering only; the event loop itself is I/O-driven
+// and exercised by integration runs).
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
-test "classifyByte maps control bytes to the right kinds" {
-    try testing.expectEqual(line_editor.KeyKind.ctrl_c, classifyByte(3).kind);
-    try testing.expectEqual(line_editor.KeyKind.eof, classifyByte(4).kind);
-    try testing.expectEqual(line_editor.KeyKind.enter, classifyByte(13).kind);
-    try testing.expectEqual(line_editor.KeyKind.enter, classifyByte(10).kind);
-    try testing.expectEqual(line_editor.KeyKind.backspace, classifyByte(127).kind);
-    try testing.expectEqual(line_editor.KeyKind.backspace, classifyByte(8).kind);
+test "classifySingleByte maps control bytes to the right kinds" {
+    try testing.expectEqual(line_editor.KeyKind.ctrl_c, classifySingleByte(3).kind);
+    try testing.expectEqual(line_editor.KeyKind.eof, classifySingleByte(4).kind);
+    try testing.expectEqual(line_editor.KeyKind.enter, classifySingleByte(13).kind);
+    try testing.expectEqual(line_editor.KeyKind.enter, classifySingleByte(10).kind);
+    try testing.expectEqual(line_editor.KeyKind.backspace, classifySingleByte(127).kind);
+    try testing.expectEqual(line_editor.KeyKind.backspace, classifySingleByte(8).kind);
 }
 
-test "classifyByte: printable ASCII becomes char" {
-    const e = classifyByte('a');
+test "classifySingleByte: printable ASCII becomes char" {
+    const e = classifySingleByte('a');
     try testing.expectEqual(line_editor.KeyKind.char, e.kind);
     try testing.expectEqual(@as(u8, 'a'), e.byte);
 }
 
-test "classifyByte: high-bit bytes become char (UTF-8 passthrough)" {
-    const e = classifyByte(0xc3);
+test "classifySingleByte: high-bit bytes become char (UTF-8 passthrough)" {
+    const e = classifySingleByte(0xc3);
     try testing.expectEqual(line_editor.KeyKind.char, e.kind);
     try testing.expectEqual(@as(u8, 0xc3), e.byte);
 }
 
-test "classifyByte: low control bytes fall through to ignore" {
-    try testing.expectEqual(line_editor.KeyKind.ignore, classifyByte(0).kind);
-    try testing.expectEqual(line_editor.KeyKind.ignore, classifyByte(1).kind);
-    try testing.expectEqual(line_editor.KeyKind.ignore, classifyByte(31).kind);
+test "classifySingleByte: low control bytes fall through to ignore" {
+    try testing.expectEqual(line_editor.KeyKind.ignore, classifySingleByte(0).kind);
+    try testing.expectEqual(line_editor.KeyKind.ignore, classifySingleByte(1).kind);
+    try testing.expectEqual(line_editor.KeyKind.ignore, classifySingleByte(31).kind);
+}
+
+test "parseKeyEvent decodes arrow keys and delete" {
+    const up_event, const up_len = parseKeyEvent("\x1b[A", 0);
+    try testing.expectEqual(line_editor.KeyKind.up, up_event.kind);
+    try testing.expectEqual(@as(usize, 3), up_len);
+
+    const left_event, const left_len = parseKeyEvent("\x1b[D", 0);
+    try testing.expectEqual(line_editor.KeyKind.left, left_event.kind);
+    try testing.expectEqual(@as(usize, 3), left_len);
+
+    const delete_event, const delete_len = parseKeyEvent("\x1b[3~", 0);
+    try testing.expectEqual(line_editor.KeyKind.delete, delete_event.kind);
+    try testing.expectEqual(@as(usize, 4), delete_len);
 }
 
 fn captureBody(body: []const u8) ![]u8 {
@@ -446,9 +498,11 @@ test "retainedState: mirrors session fields" {
     var session = agent.AgentSession.initStub();
     defer session.deinit(testing.allocator);
 
-    const state = retainedState(&session, "typed");
+    const state = retainedState(&session, "typed", 2);
     try testing.expect(state.status.model == null);
+    try testing.expectEqualStrings("stub", state.status.auth);
     try testing.expectEqualStrings("typed", state.input);
     try testing.expectEqualStrings("expert> ", state.prompt_label);
     try testing.expect(state.status.session_id == null);
+    try testing.expectEqual(@as(usize, 2), state.cursor);
 }

@@ -93,10 +93,12 @@ pub const SessionEntry = struct {
     session_id: []const u8,
     dir_path: []const u8,
     created_at_unix_ms: i64,
+    parent_id: ?[]const u8,
 
     pub fn deinit(self: *SessionEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.session_id);
         allocator.free(self.dir_path);
+        if (self.parent_id) |parent_id| allocator.free(parent_id);
     }
 };
 
@@ -150,11 +152,17 @@ pub fn listSessions(
 
         const session_id = try allocator.dupe(u8, entry.name);
         errdefer allocator.free(session_id);
+        const parent_id = if (meta.parent_id) |parent|
+            try allocator.dupe(u8, parent)
+        else
+            null;
+        errdefer if (parent_id) |parent| allocator.free(parent);
 
         try list.append(allocator, .{
             .session_id = session_id,
             .dir_path = session_dir_path,
             .created_at_unix_ms = meta.created_at_unix_ms,
+            .parent_id = parent_id,
         });
     }
 
@@ -270,6 +278,7 @@ fn writeMetaAt(
     dir_path: []const u8,
     session_id: []const u8,
     created_at_unix_ms: i64,
+    parent_id: ?[]const u8,
 ) !void {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -282,6 +291,7 @@ fn writeMetaAt(
         .session_id = session_id,
         .workspace_realpath = "/workspace/test",
         .created_at_unix_ms = created_at_unix_ms,
+        .parent_id = parent_id,
     });
 }
 
@@ -325,9 +335,9 @@ test "listSessions returns three sessions sorted newest-first" {
     const dir_c = try std.fs.path.join(allocator, &.{ cwd_dir, "sess-c" });
     defer allocator.free(dir_c);
 
-    try writeMetaAt(allocator, dir_a, "sess-a", 100);
-    try writeMetaAt(allocator, dir_b, "sess-b", 300);
-    try writeMetaAt(allocator, dir_c, "sess-c", 200);
+    try writeMetaAt(allocator, dir_a, "sess-a", 100, null);
+    try writeMetaAt(allocator, dir_b, "sess-b", 300, "sess-a");
+    try writeMetaAt(allocator, dir_c, "sess-c", 200, null);
 
     const entries = try listSessions(allocator, tmp.abs_path, fake_hash);
     defer freeSessionList(allocator, entries);
@@ -339,6 +349,9 @@ test "listSessions returns three sessions sorted newest-first" {
     try testing.expectEqual(@as(i64, 300), entries[0].created_at_unix_ms);
     try testing.expectEqual(@as(i64, 200), entries[1].created_at_unix_ms);
     try testing.expectEqual(@as(i64, 100), entries[2].created_at_unix_ms);
+    try testing.expect(entries[0].parent_id != null);
+    try testing.expectEqualStrings("sess-a", entries[0].parent_id.?);
+    try testing.expect(entries[1].parent_id == null);
 }
 
 test "listSessions skips session dirs that have no meta.json" {
@@ -355,7 +368,7 @@ test "listSessions skips session dirs that have no meta.json" {
     const bare_dir = try std.fs.path.join(allocator, &.{ cwd_dir, "sess-bare" });
     defer allocator.free(bare_dir);
 
-    try writeMetaAt(allocator, good_dir, "sess-good", 500);
+    try writeMetaAt(allocator, good_dir, "sess-good", 500, null);
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();

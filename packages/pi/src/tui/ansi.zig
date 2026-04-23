@@ -15,6 +15,11 @@ pub fn eraseLineUp(w: *std.Io.Writer, rows: usize) !void {
     try w.print("\r\x1b[2K\x1b[{d}A\x1b[2K", .{rows});
 }
 
+pub fn cursorLeft(w: *std.Io.Writer, cols: usize) !void {
+    if (cols == 0) return;
+    try w.print("\x1b[{d}D", .{cols});
+}
+
 /// CSI ?2026h / ?2026l: synchronized-output begin/end. Terminals that
 /// support it buffer any redraws between the two codes into one atomic
 /// flush, eliminating tearing. Terminals that ignore the sequence still
@@ -145,3 +150,22 @@ test "eraseLineUp: clears current + N rows above" {
     try testing.expectEqualStrings("\r\x1b[2K\x1b[2A\x1b[2K", out);
 }
 
+test "cursorLeft: emits CSI D only when movement is non-zero" {
+    const out = try collect(struct {
+        fn call(w: *std.Io.Writer) !void {
+            try cursorLeft(w, 3);
+        }
+    }.call);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("\x1b[3D", out);
+}
+
+test "cursorLeft: zero columns is a no-op" {
+    const out = try collect(struct {
+        fn call(w: *std.Io.Writer) !void {
+            try cursorLeft(w, 0);
+        }
+    }.call);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("", out);
+}
