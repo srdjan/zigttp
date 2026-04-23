@@ -19,11 +19,14 @@ const registry_mod = @import("registry/registry.zig");
 const anthropic_client = @import("providers/anthropic/client.zig");
 const tools_schema = @import("providers/anthropic/tools_schema.zig");
 const expert_persona = @import("expert_persona.zig");
+const zigts_cli = @import("zigts_cli");
+const expert_meta = zigts_cli.expert_meta;
 const session_id_mod = @import("session/session_id.zig");
 const session_paths = @import("session/paths.zig");
 const session_events = @import("session/events.zig");
 const persister = @import("session/persister.zig");
 const reconstructor = @import("session/reconstructor.zig");
+const project_context = @import("context/project_context.zig");
 
 const Registry = registry_mod.Registry;
 const Transcript = transcript_mod.Transcript;
@@ -31,6 +34,10 @@ const Transcript = transcript_mod.Transcript;
 pub const SessionConfig = struct {
     no_session: bool = false,
     no_persist_tool_output: bool = false,
+    /// Skip AGENTS.md / CLAUDE.md project-context loading. Persona is
+    /// unchanged; only the appended read-only project-context section is
+    /// suppressed.
+    no_context_files: bool = false,
     /// Explicit session id. If both this and `resume_latest` are null/false,
     /// a fresh id is generated on init.
     session_id: ?[]const u8 = null,
@@ -188,9 +195,18 @@ pub fn initFromEnvWithSessionConfig(
     std.debug.assert(!(config.fork_session_id != null and config.resume_latest));
     std.debug.assert(!(config.fork_session_id != null and config.session_id != null));
 
+    // Load project context (AGENTS.md / CLAUDE.md) from cwd upward unless
+    // the caller disabled it. Best-effort: a load failure is logged as a
+    // silent skip so a broken file does not make the agent unusable.
+    const project_ctx: ?[]u8 = if (config.no_context_files)
+        null
+    else
+        project_context.loadFromCwd(allocator) catch null;
+    defer if (project_ctx) |p| allocator.free(p);
+
     var session = blk: {
         const api_key = envVar("ANTHROPIC_API_KEY") orelse break :blk AgentSession.initStub();
-        const system_prompt = try expert_persona.buildSystemPrompt(allocator);
+        const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
         defer allocator.free(system_prompt);
         const tools_json = if (registry) |reg|
             try buildToolsJson(allocator, reg)
@@ -239,12 +255,20 @@ pub fn initFromEnvWithSessionConfig(
     session.events_path = try std.fs.path.join(allocator, &.{ dir, "events.jsonl" });
     session.meta_path = try std.fs.path.join(allocator, &.{ dir, "meta.json" });
 
+    const current_hash_bytes = expert_meta.compute().policy_hash;
+    const current_hash = current_hash_bytes[0..];
+
     if (resumed) {
         var tr = try reconstructor.reconstructTranscript(allocator, session.events_path.?, null);
         session.transcript.deinit(allocator);
         session.transcript = tr;
         session.last_persisted_len = tr.len();
         session.replay_next_turn = true;
+
+        // Detect policy drift: if the resumed session's meta.json stamps a
+        // different hash than the current binary, prepend a system_note to
+        // the transcript so both the model and the user see the mismatch.
+        try injectDriftNote(allocator, &session, current_hash);
     } else if (config.fork_session_id) |fork_id| {
         const src_dir = try session_paths.sessionDir(allocator, fork_id);
         defer allocator.free(src_dir);
@@ -263,16 +287,70 @@ pub fn initFromEnvWithSessionConfig(
             .workspace_realpath = realpath,
             .created_at_unix_ms = nowUnixMs(),
             .parent_id = fork_id,
+            .policy_hash = current_hash,
         });
     } else {
         try session_events.writeMeta(allocator, session.meta_path.?, .{
             .session_id = sid,
             .workspace_realpath = realpath,
             .created_at_unix_ms = nowUnixMs(),
+            .policy_hash = current_hash,
         });
     }
 
     return session;
+}
+
+/// Compare the resumed session's stored policy_hash against the current
+/// binary's hash. On mismatch (or on a pre-Phase-2 session with no stamped
+/// hash), append a `system_note` to the transcript so the model is aware the
+/// reasoning in prior turns was produced under a different rule set.
+const POLICY_DRIFT_PREFIX = "[policy drift]";
+
+fn injectDriftNote(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    current_hash: []const u8,
+) !void {
+    const meta_path = session.meta_path orelse return;
+    // An unreadable meta.json is surfaced as a silent skip: the session can
+    // still run; the next successful write rebuilds the file.
+    var meta = session_events.readMeta(allocator, meta_path) catch return;
+    defer session_events.freeMeta(allocator, &meta);
+
+    // Pre-Phase-2 sessions (no saved hash) and matching hashes both skip the
+    // note; only the drift case appends + persists a system_note. All three
+    // cases fall through to a single forward-stamp at the bottom so the next
+    // resume has an accurate baseline.
+    if (meta.policy_hash) |saved| {
+        if (std.mem.eql(u8, saved, current_hash)) return;
+
+        const note = try std.fmt.allocPrint(
+            allocator,
+            "{s} Resumed session was created under policy_hash {s} but the current binary is {s}. Prior rule citations in this transcript may be stale against today's compiler policy.\n",
+            .{ POLICY_DRIFT_PREFIX, saved, current_hash },
+        );
+        errdefer allocator.free(note);
+        try session.transcript.entries.append(allocator, .{ .system_note = note });
+
+        if (session.events_path) |path| {
+            try persister.appendEntry(
+                allocator,
+                path,
+                &session.transcript.entries.items[session.transcript.entries.items.len - 1],
+                session.persist_opts,
+            );
+            session.last_persisted_len = session.transcript.len();
+        }
+    }
+
+    try session_events.writeMeta(allocator, meta_path, .{
+        .session_id = meta.session_id,
+        .workspace_realpath = meta.workspace_realpath,
+        .created_at_unix_ms = meta.created_at_unix_ms,
+        .parent_id = meta.parent_id,
+        .policy_hash = current_hash,
+    });
 }
 
 fn envVar(name_z: [:0]const u8) ?[]const u8 {
@@ -698,16 +776,13 @@ test "fork: ephemeral session returns error message" {
     try testing.expect(std.mem.indexOf(u8, msg, "ephemeral") != null);
 }
 
-test "initFromEnvWithSessionConfig ignores AGENTS and CLAUDE files when building the Anthropic prompt" {
+test "initFromEnvWithSessionConfig appends AGENTS and CLAUDE files as read-only project context" {
     const allocator = testing.allocator;
     var tmp = try IsolatedTmp.init(allocator);
     defer tmp.cleanup(allocator);
 
-    try writeTestFile(allocator, tmp.abs_path, "AGENTS.md", "IGNORE_AGENTS_MARKER");
-    try writeTestFile(allocator, tmp.abs_path, "CLAUDE.md", "IGNORE_CLAUDE_MARKER");
-
-    const expected = try expert_persona.buildSystemPrompt(allocator);
-    defer allocator.free(expected);
+    try writeTestFile(allocator, tmp.abs_path, "AGENTS.md", "AGENTS_MARKER_XYZ");
+    try writeTestFile(allocator, tmp.abs_path, "CLAUDE.md", "CLAUDE_MARKER_ABC");
 
     const saved_cwd = try cwdPathAlloc(allocator);
     defer allocator.free(saved_cwd);
@@ -722,8 +797,144 @@ test "initFromEnvWithSessionConfig ignores AGENTS and CLAUDE files when building
 
     try testing.expect(session.backend == .anthropic);
     const actual = session.system_prompt_owned orelse return error.TestUnexpectedResult;
-    try testing.expectEqualSlices(u8, expected, actual);
-    try testing.expect(std.mem.indexOf(u8, actual, "IGNORE_AGENTS_MARKER") == null);
-    try testing.expect(std.mem.indexOf(u8, actual, "IGNORE_CLAUDE_MARKER") == null);
+    try testing.expect(std.mem.indexOf(u8, actual, "AGENTS_MARKER_XYZ") != null);
+    try testing.expect(std.mem.indexOf(u8, actual, "CLAUDE_MARKER_ABC") != null);
+    try testing.expect(std.mem.indexOf(u8, actual, "PROJECT CONTEXT") != null);
+    // Persona identity still intact - project context never overrides it.
+    try testing.expect(std.mem.indexOf(u8, actual, "native zigts coding agent") != null);
+    try testing.expect(std.mem.indexOf(u8, actual, "END OF PERSONA") != null);
+}
+
+test "initFromEnvWithSessionConfig: no_context_files suppresses AGENTS and CLAUDE loading" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator);
+    defer tmp.cleanup(allocator);
+
+    try writeTestFile(allocator, tmp.abs_path, "AGENTS.md", "SHOULD_NOT_APPEAR_A");
+    try writeTestFile(allocator, tmp.abs_path, "CLAUDE.md", "SHOULD_NOT_APPEAR_B");
+
+    const saved_cwd = try cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var api_override = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "sk-ant-test");
+    defer api_override.restore(allocator);
+
+    var session = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_session = true,
+        .no_context_files = true,
+    });
+    defer session.deinit(allocator);
+
+    const actual = session.system_prompt_owned orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, actual, "SHOULD_NOT_APPEAR_A") == null);
+    try testing.expect(std.mem.indexOf(u8, actual, "SHOULD_NOT_APPEAR_B") == null);
     try testing.expect(std.mem.indexOf(u8, actual, "PROJECT CONTEXT") == null);
+}
+
+test "initFromEnvWithSessionConfig stamps current policy_hash into meta.json" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator);
+    defer tmp.cleanup(allocator);
+
+    const sessions_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "sessions" });
+    defer allocator.free(sessions_dir);
+    var env_override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", sessions_dir);
+    defer env_override.restore(allocator);
+
+    const ws_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "ws" });
+    defer allocator.free(ws_dir);
+    {
+        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+        defer io_backend.deinit();
+        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), ws_dir);
+    }
+
+    const saved_cwd = try cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(ws_dir);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var session = try initFromEnvWithSessionConfig(allocator, null, .{});
+    defer session.deinit(allocator);
+
+    const meta_path = session.meta_path orelse return error.TestUnexpectedResult;
+    var meta = try session_events.readMeta(allocator, meta_path);
+    defer session_events.freeMeta(allocator, &meta);
+
+    const saved = meta.policy_hash orelse return error.TestExpected;
+    const current = expert_meta.compute().policy_hash;
+    try testing.expectEqualStrings(current[0..], saved);
+}
+
+test "initFromEnvWithSessionConfig: resume with drifted hash injects a system_note" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator);
+    defer tmp.cleanup(allocator);
+
+    const sessions_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "sessions" });
+    defer allocator.free(sessions_dir);
+    var env_override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", sessions_dir);
+    defer env_override.restore(allocator);
+
+    const ws_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "ws" });
+    defer allocator.free(ws_dir);
+    {
+        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+        defer io_backend.deinit();
+        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), ws_dir);
+    }
+
+    const saved_cwd = try cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(ws_dir);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    // Build + run one stub turn so events.jsonl exists for reconstruction,
+    // then capture the meta path and tear down.
+    const captured_meta_path: []u8 = blk: {
+        var s = try initFromEnvWithSessionConfig(allocator, null, .{});
+        defer s.deinit(allocator);
+        var registry: Registry = .{};
+        defer registry.deinit(allocator);
+        const rendered = try runOneTurn(allocator, &s, &registry, "seed", null);
+        allocator.free(rendered);
+        break :blk try allocator.dupe(u8, s.meta_path orelse return error.TestUnexpectedResult);
+    };
+    defer allocator.free(captured_meta_path);
+
+    // Forge a drifted hash into the stored meta, then resume.
+    var original = try session_events.readMeta(allocator, captured_meta_path);
+    defer session_events.freeMeta(allocator, &original);
+    const drifted_hash = "b" ** 64;
+    try session_events.writeMeta(allocator, captured_meta_path, .{
+        .session_id = original.session_id,
+        .workspace_realpath = original.workspace_realpath,
+        .created_at_unix_ms = original.created_at_unix_ms,
+        .parent_id = original.parent_id,
+        .policy_hash = drifted_hash,
+    });
+
+    var resumed = try initFromEnvWithSessionConfig(allocator, null, .{ .resume_latest = true });
+    defer resumed.deinit(allocator);
+
+    var found_note = false;
+    for (resumed.transcript.entries.items) |*entry| {
+        switch (entry.*) {
+            .system_note => |body| {
+                if (std.mem.indexOf(u8, body, POLICY_DRIFT_PREFIX) != null) found_note = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(found_note);
+
+    // After drift handling, meta should carry the current hash so a second
+    // resume does not re-warn against the already-acknowledged drift.
+    var post = try session_events.readMeta(allocator, captured_meta_path);
+    defer session_events.freeMeta(allocator, &post);
+    const current = expert_meta.compute().policy_hash;
+    const stamped = post.policy_hash orelse return error.TestExpected;
+    try testing.expectEqualStrings(current[0..], stamped);
 }

@@ -385,6 +385,7 @@ pub fn baseSessionConfig(flags: ExpertFlags, overrides: agent.SessionConfig) age
     var cfg = overrides;
     cfg.no_session = flags.no_session;
     cfg.no_persist_tool_output = flags.no_persist_tool_output;
+    cfg.no_context_files = flags.no_context_files;
     return cfg;
 }
 
@@ -404,6 +405,7 @@ pub fn run(
     var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
         .no_session = flags.no_session,
         .no_persist_tool_output = flags.no_persist_tool_output,
+        .no_context_files = flags.no_context_files,
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
         .fork_session_id = flags.fork_session_id,

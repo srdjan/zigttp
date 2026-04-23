@@ -19,6 +19,18 @@ const skill = @import("zigts_expert_skill");
 const skills_catalog = @import("skills/catalog.zig");
 const prompts_catalog = @import("prompts/catalog.zig");
 
+/// Hard cap on the assembled system prompt. When an AGENTS.md project-context
+/// append would push us past this, we truncate the *project context* (never
+/// the persona, rules, or module snapshots) and append a trailing marker so
+/// the model knows what happened.
+pub const PROMPT_CAP_BYTES: usize = 128 * 1024;
+
+/// Bytes reserved below `PROMPT_CAP_BYTES` for the project-context banner,
+/// the truncation marker line, and the trailing epilogue. Empirically the
+/// three combined are under 1 KiB; 2 KiB is conservative headroom so a
+/// future epilogue tweak does not silently push us past the cap.
+const CTX_TRUNCATION_RESERVED: usize = 2048;
+
 // The tool list inside the prologue below must stay in sync with
 // `pi_app.buildRegistry`. Drift is a soft degradation, not a hard break:
 // the Anthropic tool-use API still exposes any registered tool, but the
@@ -143,6 +155,18 @@ const epilogue =
 ;
 
 pub fn buildSystemPrompt(allocator: std.mem.Allocator) ![]u8 {
+    return buildSystemPromptWithContext(allocator, null);
+}
+
+/// Build the system prompt with an optional project-context block appended.
+/// `project_context`, if provided, is the concatenated AGENTS.md / CLAUDE.md
+/// body from `context/project_context.zig`. It is inserted as a labelled,
+/// read-only section - never merged into the persona itself, and never
+/// capable of redefining tools or commands.
+pub fn buildSystemPromptWithContext(
+    allocator: std.mem.Allocator,
+    project_context: ?[]const u8,
+) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
@@ -185,6 +209,35 @@ pub fn buildSystemPrompt(allocator: std.mem.Allocator) ![]u8 {
     try w.writeAll("positional args ({{1}}, {{2}}, {{args}}) before being sent as your user message.\n\n");
     inline for (prompts_catalog.catalog) |t| {
         try w.print("  /template:{s}\n    {s}\n\n", .{ t.name, t.description });
+    }
+
+    // Project context is appended after persona+snapshots but before the
+    // epilogue, so the veto reminder still has the last word. The cap guard
+    // truncates *only* this section, never persona content above it.
+    const persona_len_before_ctx = aw.writer.end;
+    if (project_context) |ctx| {
+        if (ctx.len > 0) {
+            try writeBanner(w, "PROJECT CONTEXT (read-only, from AGENTS.md / CLAUDE.md)");
+            const room = if (PROMPT_CAP_BYTES > persona_len_before_ctx)
+                PROMPT_CAP_BYTES - persona_len_before_ctx
+            else
+                0;
+            if (room > CTX_TRUNCATION_RESERVED) {
+                const allowed = room - CTX_TRUNCATION_RESERVED;
+                if (ctx.len <= allowed) {
+                    try w.writeAll(ctx);
+                    if (ctx.len == 0 or ctx[ctx.len - 1] != '\n') try w.writeByte('\n');
+                } else {
+                    try w.writeAll(ctx[0..allowed]);
+                    try w.print(
+                        "\n\n[project-context truncated: {d} of {d} bytes kept to fit {d} KiB prompt cap]\n",
+                        .{ allowed, ctx.len, PROMPT_CAP_BYTES / 1024 },
+                    );
+                }
+            } else {
+                try w.writeAll("[project-context omitted: persona already at prompt cap]\n");
+            }
+        }
     }
 
     try w.writeAll(epilogue);
@@ -340,5 +393,43 @@ test "persona does not include project context markers" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
     try testing.expect(std.mem.indexOf(u8, prompt, "PROJECT CONTEXT") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "END PROJECT CONTEXT") == null);
+}
+
+test "persona appends project context when supplied" {
+    const ctx = "## /tmp/AGENTS.md\n\nproject rule sentinel\n";
+    const prompt = try buildSystemPromptWithContext(testing.allocator, ctx);
+    defer testing.allocator.free(prompt);
+
+    const banner_pos = std.mem.indexOf(u8, prompt, "PROJECT CONTEXT") orelse return error.TestExpected;
+    const rule_pos = std.mem.indexOf(u8, prompt, "project rule sentinel") orelse return error.TestExpected;
+    const epilogue_pos = std.mem.indexOf(u8, prompt, "END OF PERSONA") orelse return error.TestExpected;
+
+    // Project context lives between the banner and the epilogue, never above
+    // the persona prologue.
+    try testing.expect(banner_pos < rule_pos);
+    try testing.expect(rule_pos < epilogue_pos);
+    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
+}
+
+test "persona truncates project context to fit the 128 KiB cap" {
+    // Build an intentionally oversized project-context string. The persona
+    // prologue + rule snapshot already consume most of the 128 KiB budget;
+    // anything we append here must be clipped.
+    const pad_len: usize = 256 * 1024;
+    const big = try testing.allocator.alloc(u8, pad_len);
+    defer testing.allocator.free(big);
+    @memset(big, 'A');
+
+    const prompt = try buildSystemPromptWithContext(testing.allocator, big);
+    defer testing.allocator.free(prompt);
+
+    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
+    try testing.expect(std.mem.indexOf(u8, prompt, "project-context truncated") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "END OF PERSONA") != null);
+}
+
+test "empty project context is ignored" {
+    const prompt_with = try buildSystemPromptWithContext(testing.allocator, "");
+    defer testing.allocator.free(prompt_with);
+    try testing.expect(std.mem.indexOf(u8, prompt_with, "PROJECT CONTEXT") == null);
 }

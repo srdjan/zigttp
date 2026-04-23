@@ -47,4 +47,9 @@ comptime {
     _ = @import("session/reconstructor.zig");
     _ = @import("session/session_id.zig");
     _ = @import("session/replay_test.zig");
+    _ = @import("context/project_context.zig");
+    _ = @import("rpc_mode.zig");
+    _ = @import("frontmatter.zig");
+    _ = @import("skills/catalog.zig");
+    _ = @import("prompts/catalog.zig");
 }
