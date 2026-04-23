@@ -633,7 +633,7 @@ fn redraw(
     state.layout_mode = layout.mode;
     clampFeedViewport(state, visibleFeedRows(layout));
 
-    const inspector = try buildInspectorLines(allocator, state, session);
+    var inspector = try buildInspectorLines(allocator, state, session);
     defer inspector.deinit(allocator);
 
     var buf: std.ArrayList(u8) = .empty;

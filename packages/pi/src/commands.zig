@@ -74,7 +74,9 @@ fn parseZigBuild(argv: []const []const u8) ?LocalCommand {
 
 pub fn isQuit(name: []const u8) bool {
     return std.mem.eql(u8, name, "quit") or
+        std.mem.eql(u8, name, "/quit") or
         std.mem.eql(u8, name, "exit") or
+        std.mem.eql(u8, name, "/exit") or
         std.mem.eql(u8, name, ":q");
 }
 
@@ -162,7 +164,9 @@ test "lookup /rule forwards trailing args" {
 
 test "isQuit and isHelp recognize aliases" {
     try testing.expect(isQuit("quit"));
+    try testing.expect(isQuit("/quit"));
     try testing.expect(isQuit("exit"));
+    try testing.expect(isQuit("/exit"));
     try testing.expect(isQuit(":q"));
     try testing.expect(!isQuit("help"));
     try testing.expect(isHelp("help"));
