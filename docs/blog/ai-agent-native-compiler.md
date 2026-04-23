@@ -80,14 +80,15 @@ When you run `zig build -Dcontract`, the compiler extracts a machine-readable co
 
 ```json
 {
-  "imports": ["zigttp:auth", "zigttp:cache", "zigttp:validate"],
-  "env_vars": ["JWT_SECRET", "DATABASE_URL"],
-  "routes": ["GET /api/users/:id", "POST /api/users"],
-  "egress": ["api.stripe.com"],
+  "modules": ["zigttp:auth", "zigttp:cache", "zigttp:validate"],
+  "env": { "literal": ["JWT_SECRET", "DATABASE_URL"], "dynamic": false },
+  "routes": [{ "method": "GET", "path": "/api/users/:id" }],
+  "egress": { "hosts": ["api.stripe.com"], "dynamic": false },
   "properties": {
-    "state_isolation": true,
-    "all_results_checked": true,
-    "no_secret_leaks": true
+    "stateless": true,
+    "no_secret_leakage": true,
+    "no_credential_leakage": true,
+    "has_egress": true
   }
 }
 ```
@@ -106,13 +107,13 @@ to:
 generate code → compile → read proof failures → targeted fix → done
 ```
 
-The compiler tells the agent exactly what's wrong — not "test on line 47 failed" but "Result from jwtVerify on line 12 is used on line 18 without checking .ok" or "value derived from user_input reaches sqlExec on line 31 without passing through validateJson."
+The compiler tells the agent exactly what's wrong — not "test on line 47 failed" but `result.value accessed without checking result.ok first` with the fix printed inline: `if (result.ok) { ... result.value ... }`. Or a `secret-leakage` diagnostic pointing at the exact value labeled `secret` that reached a Response body. The diagnostics are not generic type errors; they reference the specific property the compiler was trying to prove and the specific value that violated it.
 
 ## Virtual Modules Are Agent Tool Declarations
 
 In standard serverless runtimes, accessing external resources means importing from npm, configuring clients, handling connection lifecycle, and hoping the AI agent generates the right incantation for each SDK.
 
-In zigtp, the only way to touch the outside world is through virtual modules:
+In zigttp, the only way to touch the outside world is through virtual modules:
 
 ```typescript
 import { cacheGet, cacheSet } from "zigttp:cache";
@@ -158,7 +159,7 @@ The future isn't AI agents writing TypeScript and hoping for the best. It's AI a
 generate → compile → prove → deploy
 ```
 
-No tests. No code review. No hope. Just proofs.
+The tests you used to write to catch unchecked errors, forgotten cases, leaked secrets, and mutated state — the compiler writes the proofs for you. You still write tests for *behavior*. You stop writing tests to *defend against the language*.
 
 ## Try It
 
@@ -166,6 +167,6 @@ No tests. No code review. No hope. Just proofs.
 zig build run -- examples/handler/handler.ts -p 3000
 ```
 
-The compiler is the guardrail. The proof is the test suite. The contract is the documentation.
+The compiler is the guardrail. The contract is the documentation. The proofs replace the tests you only wrote to appease the language.
 
 And for the AI agent writing your next handler — one obvious way to do everything is the only way that works.
