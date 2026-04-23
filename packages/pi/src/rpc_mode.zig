@@ -230,6 +230,50 @@ fn dispatchMethod(
 }
 
 // ---------------------------------------------------------------------------
+// Params validation helpers
+// ---------------------------------------------------------------------------
+
+/// Checks that `params` is present and is a JSON object. On failure emits
+/// the matching JSON-RPC error response and returns null; the caller just
+/// `orelse return`s.
+fn requireObjectParams(
+    allocator: std.mem.Allocator,
+    out: ?*std.Io.Writer,
+    params: ?std.json.Value,
+    id: std.json.Value,
+) !?std.json.ObjectMap {
+    const p = params orelse {
+        try emitError(allocator, out, id, INVALID_PARAMS, "missing params");
+        return null;
+    };
+    if (p != .object) {
+        try emitError(allocator, out, id, INVALID_PARAMS, "params must be an object");
+        return null;
+    }
+    return p.object;
+}
+
+/// Looks up `key` on `obj` and asserts it's a string. Emits `missing <key>`
+/// or `<key> must be a string` and returns null on failure.
+fn requireStringField(
+    allocator: std.mem.Allocator,
+    out: ?*std.Io.Writer,
+    obj: std.json.ObjectMap,
+    key: []const u8,
+    id: std.json.Value,
+) !?[]const u8 {
+    const val = obj.get(key) orelse {
+        try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "missing {s}", .{key});
+        return null;
+    };
+    if (val != .string) {
+        try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "{s} must be a string", .{key});
+        return null;
+    }
+    return val.string;
+}
+
+// ---------------------------------------------------------------------------
 // Method handlers
 // ---------------------------------------------------------------------------
 
@@ -296,24 +340,10 @@ fn handleModelSet(
     id: std.json.Value,
     out: ?*std.Io.Writer,
 ) !void {
-    const p = params orelse {
-        try emitError(allocator, out, id, INVALID_PARAMS, "missing params");
-        return;
-    };
-    if (p != .object) {
-        try emitError(allocator, out, id, INVALID_PARAMS, "params must be an object");
-        return;
-    }
-    const model_id_val = p.object.get("id") orelse {
-        try emitError(allocator, out, id, INVALID_PARAMS, "missing id");
-        return;
-    };
-    if (model_id_val != .string) {
-        try emitError(allocator, out, id, INVALID_PARAMS, "id must be a string");
-        return;
-    }
-    const model = models_registry.findById(model_id_val.string) orelse {
-        try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "unknown model: {s}", .{model_id_val.string});
+    const obj = (try requireObjectParams(allocator, out, params, id)) orelse return;
+    const model_id = (try requireStringField(allocator, out, obj, "id", id)) orelse return;
+    const model = models_registry.findById(model_id) orelse {
+        try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "unknown model: {s}", .{model_id});
         return;
     };
     session.setModel(model.id);
@@ -376,30 +406,16 @@ fn handleTemplatesExpand(
     id: std.json.Value,
     out: ?*std.Io.Writer,
 ) !void {
-    const p = params orelse {
-        try emitError(allocator, out, id, INVALID_PARAMS, "missing params");
-        return;
-    };
-    if (p != .object) {
-        try emitError(allocator, out, id, INVALID_PARAMS, "params must be an object");
-        return;
-    }
-    const name_val = p.object.get("name") orelse {
-        try emitError(allocator, out, id, INVALID_PARAMS, "missing name");
-        return;
-    };
-    if (name_val != .string) {
-        try emitError(allocator, out, id, INVALID_PARAMS, "name must be a string");
-        return;
-    }
-    const tmpl = prompts_catalog.findByName(name_val.string) orelse {
-        try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "unknown template: {s}", .{name_val.string});
+    const obj = (try requireObjectParams(allocator, out, params, id)) orelse return;
+    const tmpl_name = (try requireStringField(allocator, out, obj, "name", id)) orelse return;
+    const tmpl = prompts_catalog.findByName(tmpl_name) orelse {
+        try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "unknown template: {s}", .{tmpl_name});
         return;
     };
 
     var args: std.ArrayList([]const u8) = .empty;
     defer args.deinit(allocator);
-    if (p.object.get("args")) |args_val| {
+    if (obj.get("args")) |args_val| {
         if (args_val != .array) {
             try emitError(allocator, out, id, INVALID_PARAMS, "args must be an array of strings");
             return;
@@ -453,25 +469,11 @@ fn handleToolsInvoke(
     id: std.json.Value,
     out: ?*std.Io.Writer,
 ) !void {
-    const p = params orelse {
-        try emitError(allocator, out, id, INVALID_PARAMS, "missing params");
-        return;
-    };
-    if (p != .object) {
-        try emitError(allocator, out, id, INVALID_PARAMS, "params must be an object");
-        return;
-    }
-    const name_val = p.object.get("name") orelse {
-        try emitError(allocator, out, id, INVALID_PARAMS, "missing name");
-        return;
-    };
-    if (name_val != .string) {
-        try emitError(allocator, out, id, INVALID_PARAMS, "name must be a string");
-        return;
-    }
+    const obj = (try requireObjectParams(allocator, out, params, id)) orelse return;
+    const tool_name = (try requireStringField(allocator, out, obj, "name", id)) orelse return;
     // args_json is passed through to registry.invokeJson. Absent = {}.
     const args_json: []const u8 = blk: {
-        if (p.object.get("args_json")) |aj_val| {
+        if (obj.get("args_json")) |aj_val| {
             if (aj_val != .string) {
                 try emitError(allocator, out, id, INVALID_PARAMS, "args_json must be a string");
                 return;
@@ -484,9 +486,9 @@ fn handleToolsInvoke(
     const args_owned = try allocator.dupe(u8, args_json);
     defer allocator.free(args_owned);
 
-    var result = registry.invokeJson(allocator, name_val.string, args_owned) catch |err| switch (err) {
+    var result = registry.invokeJson(allocator, tool_name, args_owned) catch |err| switch (err) {
         registry_mod.RegistryError.ToolNotFound => {
-            try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "unknown tool: {s}", .{name_val.string});
+            try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "unknown tool: {s}", .{tool_name});
             return;
         },
         else => {
@@ -530,25 +532,11 @@ fn handleTurn(
     id: std.json.Value,
     out: ?*std.Io.Writer,
 ) !void {
-    const p = params orelse {
-        try emitError(allocator, out, id, INVALID_PARAMS, "missing params");
-        return;
-    };
-    if (p != .object) {
-        try emitError(allocator, out, id, INVALID_PARAMS, "params must be an object");
-        return;
-    }
-    const text_val = p.object.get("text") orelse {
-        try emitError(allocator, out, id, INVALID_PARAMS, "missing text");
-        return;
-    };
-    if (text_val != .string) {
-        try emitError(allocator, out, id, INVALID_PARAMS, "text must be a string");
-        return;
-    }
+    const obj = (try requireObjectParams(allocator, out, params, id)) orelse return;
+    const text = (try requireStringField(allocator, out, obj, "text", id)) orelse return;
 
     const start_len = session.transcript.len();
-    const rendered = agent.runOneTurn(allocator, session, registry, text_val.string, approval_fn) catch |err| {
+    const rendered = agent.runOneTurn(allocator, session, registry, text, approval_fn) catch |err| {
         try emitErrorFmt(allocator, out, id, INTERNAL_ERROR, "turn failed: {s}", .{@errorName(err)});
         return;
     };
