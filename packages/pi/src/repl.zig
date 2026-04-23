@@ -17,7 +17,7 @@ const theme_mod = @import("tui/theme.zig");
 
 pub const Registry = registry_mod.Registry;
 const ToolResult = registry_mod.ToolResult;
-const SessionTreeNode = registry_mod.helpers.SessionTreeNode;
+const SessionTreeNode = @import("registry/tool.zig").SessionTreeNode;
 const ExpertFlags = app.ExpertFlags;
 
 pub const DispatchOutcome = union(enum) {
