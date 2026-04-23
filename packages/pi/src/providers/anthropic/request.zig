@@ -254,3 +254,88 @@ test "writeRequestBody: extra retry prompt appends a final user text message" {
     const retry_blocks = msgs[1].object.get("content").?.array.items;
     try testing.expectEqualStrings("compiler veto failed", retry_blocks[0].object.get("text").?.string);
 }
+
+test "writeRequestBody: system block carries cache_control ephemeral marker" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "hi" });
+
+    const out = try serialize(testing.allocator, .{
+        .system_prompt = "persona bytes",
+        .transcript = &transcript,
+    });
+    defer testing.allocator.free(out);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+
+    const system = parsed.value.object.get("system").?.array.items;
+    try testing.expectEqual(@as(usize, 1), system.len);
+    const block = system[0].object;
+    try testing.expectEqualStrings("text", block.get("type").?.string);
+    try testing.expectEqualStrings("persona bytes", block.get("text").?.string);
+    const cache = block.get("cache_control").?.object;
+    try testing.expectEqualStrings("ephemeral", cache.get("type").?.string);
+}
+
+test "writeRequestBody: consecutive user messages group into one role block" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "first" });
+    try transcript.append(testing.allocator, .{ .user_text = "second" });
+
+    const out = try serialize(testing.allocator, .{
+        .system_prompt = "p",
+        .transcript = &transcript,
+    });
+    defer testing.allocator.free(out);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const msgs = parsed.value.object.get("messages").?.array.items;
+    try testing.expectEqual(@as(usize, 1), msgs.len);
+    try testing.expectEqualStrings("user", msgs[0].object.get("role").?.string);
+    const blocks = msgs[0].object.get("content").?.array.items;
+    try testing.expectEqual(@as(usize, 2), blocks.len);
+    try testing.expectEqualStrings("first", blocks[0].object.get("text").?.string);
+    try testing.expectEqualStrings("second", blocks[1].object.get("text").?.string);
+}
+
+test "writeRequestBody: model defaults and max_tokens appear on the root" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "hi" });
+
+    const out = try serialize(testing.allocator, .{
+        .system_prompt = "p",
+        .transcript = &transcript,
+    });
+    defer testing.allocator.free(out);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqualStrings(default_model, parsed.value.object.get("model").?.string);
+    try testing.expectEqual(@as(i64, default_max_tokens), parsed.value.object.get("max_tokens").?.integer);
+    try testing.expect(parsed.value.object.get("stream").?.bool);
+}
+
+test "writeRequestBody: tools_json is embedded verbatim when provided" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "hi" });
+
+    const tools_literal = "[{\"name\":\"demo\",\"description\":\"d\",\"input_schema\":{}}]";
+    const out = try serialize(testing.allocator, .{
+        .system_prompt = "p",
+        .transcript = &transcript,
+        .tools_json = tools_literal,
+    });
+    defer testing.allocator.free(out);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const tools = parsed.value.object.get("tools").?.array.items;
+    try testing.expectEqual(@as(usize, 1), tools.len);
+    try testing.expectEqualStrings("demo", tools[0].object.get("name").?.string);
+}

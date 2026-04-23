@@ -923,3 +923,110 @@ test "rpc: session.info reports stub session fields" {
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"transcript_len\":0") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"input\":0") != null);
 }
+
+test "rpc: turn missing params returns INVALID_PARAMS" {
+    const allocator = testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try driveWith(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"turn\"}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
+        &aw,
+    );
+
+    const out = aw.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"message\":\"missing params\"") != null);
+}
+
+test "rpc: turn missing text field returns INVALID_PARAMS" {
+    const allocator = testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try driveWith(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"turn\",\"params\":{}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
+        &aw,
+    );
+
+    const out = aw.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "missing text") != null);
+}
+
+test "rpc: turn with stub session emits event notifications and a final result" {
+    const allocator = testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try driveWith(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"turn\",\"params\":{\"text\":\"hello\"}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
+        &aw,
+    );
+
+    const out = aw.writer.buffered();
+    // user_text event notification for the prompt.
+    try testing.expect(std.mem.indexOf(u8, out, "\"method\":\"event\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"k\":\"user_text\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"k\":\"model_text\"") != null);
+    // Final result: two entries appended (user + stub reply).
+    try testing.expect(std.mem.indexOf(u8, out, "\"id\":1,\"result\":") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"appended\":2") != null);
+}
+
+test "rpc: tools.invoke missing name returns INVALID_PARAMS" {
+    const allocator = testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try driveWith(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
+        &aw,
+    );
+
+    const out = aw.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "missing name") != null);
+}
+
+test "rpc: tools.invoke with unknown tool name surfaces as INVALID_PARAMS" {
+    const allocator = testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try driveWith(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"no_such_tool\"}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
+        &aw,
+    );
+
+    const out = aw.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "unknown tool: no_such_tool") != null);
+}
+
+test "rpc: tools.invoke with known tool returns {ok, body}" {
+    const allocator = testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try driveWith(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"zigts_expert_meta\"}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
+        &aw,
+    );
+
+    const out = aw.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, out, "\"id\":1,\"result\":{\"ok\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "compiler_version") != null);
+}
