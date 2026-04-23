@@ -294,57 +294,11 @@ pub fn freeMeta(allocator: std.mem.Allocator, meta: *Meta) void {
 
 const testing = std.testing;
 
-var isolated_tmp_counter = std.atomic.Value(u64).init(0);
+const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 
-const IsolatedTmp = struct {
-    abs_path: []u8,
-    name: []u8,
-
-    fn init(allocator: std.mem.Allocator) !IsolatedTmp {
-        var ts: std.posix.timespec = undefined;
-        _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
-        const counter = isolated_tmp_counter.fetchAdd(1, .seq_cst);
-        const name = try std.fmt.allocPrint(
-            allocator,
-            "zigttp-events-test-{d}-{d}-{d}",
-            .{ @as(u64, @intCast(ts.sec)), @as(u64, @intCast(ts.nsec)), counter },
-        );
-        errdefer allocator.free(name);
-
-        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
-        const io = io_backend.io();
-
-        var tmp_root = try std.Io.Dir.openDirAbsolute(io, "/tmp", .{});
-        defer tmp_root.close(io);
-        tmp_root.deleteTree(io, name) catch {};
-        try std.Io.Dir.createDirPath(tmp_root, io, name);
-
-        const abs_path = try std.fs.path.resolve(allocator, &.{ "/tmp", name });
-        errdefer allocator.free(abs_path);
-
-        return .{ .abs_path = abs_path, .name = name };
-    }
-
-    fn cleanup(self: *IsolatedTmp, allocator: std.mem.Allocator) void {
-        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
-        const io = io_backend.io();
-        var tmp_root = std.Io.Dir.openDirAbsolute(io, "/tmp", .{}) catch {
-            allocator.free(self.abs_path);
-            allocator.free(self.name);
-            return;
-        };
-        defer tmp_root.close(io);
-        tmp_root.deleteTree(io, self.name) catch {};
-        allocator.free(self.abs_path);
-        allocator.free(self.name);
-    }
-
-    fn childPath(self: *const IsolatedTmp, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
-        return try std.fs.path.resolve(allocator, &.{ self.abs_path, name });
-    }
-};
+fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
+    return IsolatedTmp.init(allocator, "events");
+}
 
 fn readWhole(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return try zigts.file_io.readFile(allocator, path, 1 * 1024 * 1024);
@@ -352,7 +306,7 @@ fn readWhole(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 test "appendEvent round-trips a user_text event as NDJSON" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
@@ -377,7 +331,7 @@ test "appendEvent round-trips a user_text event as NDJSON" {
 
 test "appendEvent separates multiple records with \\n" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
@@ -408,7 +362,7 @@ test "appendEvent separates multiple records with \\n" {
 
 test "appendEvent serializes tool_use with nested id/name/args_json" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
@@ -437,7 +391,7 @@ test "appendEvent serializes tool_use with nested id/name/args_json" {
 
 test "appendEvent serializes tool_result with ok:bool payload" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "events.jsonl");
@@ -475,7 +429,7 @@ test "appendEvent serializes tool_result with ok:bool payload" {
 
 test "writeMeta + readMeta round-trip preserves all fields" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "meta.json");
@@ -499,7 +453,7 @@ test "writeMeta + readMeta round-trip preserves all fields" {
 
 test "writeMeta + readMeta round-trip preserves policy_hash" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "meta.json");
@@ -522,7 +476,7 @@ test "writeMeta + readMeta round-trip preserves policy_hash" {
 
 test "readMeta accepts legacy meta.json without policy_hash" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "meta.json");
@@ -545,7 +499,7 @@ test "readMeta accepts legacy meta.json without policy_hash" {
 
 test "readMeta rejects files whose schema_version exceeds the binary" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "meta.json");
@@ -567,7 +521,7 @@ test "readMeta rejects files whose schema_version exceeds the binary" {
 
 test "writeMeta always emits the binary's schema_version, ignoring stale input" {
     const allocator = testing.allocator;
-    var tmp = try IsolatedTmp.init(allocator);
+    var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
     const path = try tmp.childPath(allocator, "meta.json");
