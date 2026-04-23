@@ -152,6 +152,8 @@ notifications using the same `{v,k,d}` envelope as `events.jsonl`.
 
 ### Bottom-anchored retained TUI (`tui/`)
 
+![zigts expert TUI demo](../../docs/pi-tui-demo.gif)
+
 Status line (session id short, model, token totals) and input line stay
 anchored at the bottom of the terminal. Scrollback flows above them;
 the terminal's own buffer handles history. Redraws wrap in CSI
@@ -159,6 +161,9 @@ the terminal's own buffer handles history. Redraws wrap in CSI
 so supporting terminals render each update atomically without flicker.
 Themed via `/settings theme <name>`. Two palettes ship: `default` and
 `solarized-dark`.
+
+Regenerate the demo with `vhs docs/pi-tui-demo.tape` from the repo
+root after any TUI change.
 
 ### Backends
 
