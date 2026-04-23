@@ -236,7 +236,7 @@ fn renderAll(writer: anytype, transcript: *const Transcript) !void {
     }
 }
 
-pub fn renderRich(writer: anytype, entry: *const OwnedEntry) !void {
+fn renderRich(writer: anytype, entry: *const OwnedEntry) !void {
     switch (entry.*) {
         .proof_card => |message| try box_widget.writeBox(
             writer,
