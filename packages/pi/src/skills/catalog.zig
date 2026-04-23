@@ -1,7 +1,18 @@
-//! Baked-in skill catalog. Each Skill carries a name, a short description
-//! shown in help/meta output, and a body that is injected as a user-role
-//! message when the user invokes `/skill:<name>`. No external files are read;
-//! everything lives in this source file.
+//! Baked-in skill catalog. Each entry is a markdown file alongside this
+//! source at `packages/pi/src/skills/<name>.md` with YAML frontmatter
+//! carrying `name` and `description`. Files are embedded at compile time
+//! via `@embedFile` and frontmatter is parsed by the shared `frontmatter`
+//! module. Skills cannot be added, replaced, or silently altered at runtime:
+//! adding one requires dropping a new `.md` file, listing it in
+//! `embedded_sources` below, and rebuilding.
+//!
+//! The `.md` files live under `src/skills/` (not a sibling `skills/` dir)
+//! because `@embedFile` is restricted to the importing module's package
+//! tree. This keeps the files inside `pi_app` without extending the module
+//! system.
+
+const std = @import("std");
+const frontmatter = @import("../frontmatter.zig");
 
 pub const Skill = struct {
     name: []const u8,
@@ -9,87 +20,25 @@ pub const Skill = struct {
     body: []const u8,
 };
 
-pub const catalog = [_]Skill{
-    .{
-        .name = "handler-scaffold",
-        .description = "Scaffold a minimal zigts handler with typed request parsing and error handling.",
-        .body =
-        \\Create a minimal zigts handler following these conventions:
-        \\- Use typed destructuring for request params (query, body, path).
-        \\- All errors must be returned as structured JSON responses, never thrown.
-        \\- Import only the specific zigttp modules you need.
-        \\- Use `zigttp:decode` for request parsing and `zigttp:validate` for schema validation.
-        \\- Use `Response.json()` for all JSON responses, `Response.text()` for plain text.
-        \\- No classes, no async/await, no try/catch. Use `match` for error branching.
-        \\Start with the minimal passing scaffold and add complexity only as needed.
-        ,
-    },
-    .{
-        .name = "fix-violations",
-        .description = "Fix all compiler violations in the current file by iterating until clean.",
-        .body =
-        \\Work through every compiler violation in the current handler file systematically:
-        \\1. Run `/check` to get the full violation list.
-        \\2. Fix the highest-priority violations first (ZTS001-ZTS099 before ZTS100+).
-        \\3. After each edit, run `/verify <file>` to confirm the fix landed.
-        \\4. Continue until `/check` reports zero violations.
-        \\Do not introduce new violations while fixing existing ones. Use `--diff-only` mode.
-        ,
-    },
-    .{
-        .name = "route-table",
-        .description = "Add a `zigttp:router` route table to an existing handler.",
-        .body =
-        \\Add routing to the handler using `zigttp:router`:
-        \\```js
-        \\import { routerMatch } from "zigttp:router";
-        \\
-        \\const routes = {
-        \\  "GET /": handleIndex,
-        \\  "POST /items": handleCreate,
-        \\};
-        \\
-        \\function handler(req) {
-        \\  const match = routerMatch(routes, req);
-        \\  if (!match) return Response.json({ error: "not_found" }, { status: 404 });
-        \\  return match.handler(req, match.params);
-        \\}
-        \\```
-        \\Each route handler receives `(req, params)`. Path params use `:name` syntax.
-        ,
-    },
-    .{
-        .name = "auth-jwt",
-        .description = "Add JWT verification to a handler using zigttp:auth.",
-        .body =
-        \\Add JWT auth to the handler:
-        \\1. Import `parseBearer` and `jwtVerify` from `zigttp:auth`.
-        \\2. Extract the token: `const token = parseBearer(req.headers.get("authorization"))`.
-        \\3. Verify: `const claims = jwtVerify(token, env.JWT_SECRET)`.
-        \\4. Return 401 on verification failure: `if (!claims.ok) return Response.json({ error: "unauthorized" }, { status: 401 })`.
-        \\5. Use `claims.value.sub` (or other standard claims) in the handler body.
-        \\Add `JWT_SECRET` to the env contract. Never log or expose the raw token.
-        ,
-    },
-    .{
-        .name = "sql-query",
-        .description = "Add a typed SQL query pattern using zigttp:sql.",
-        .body =
-        \\Add a SQL query using `zigttp:sql`:
-        \\```js
-        \\import { sqlOne, sqlMany } from "zigttp:sql";
-        \\
-        \\// Single row (returns undefined if not found)
-        \\const user = sqlOne("SELECT id, name FROM users WHERE id = ?", [id]);
-        \\if (!user) return Response.json({ error: "not_found" }, { status: 404 });
-        \\
-        \\// Multiple rows
-        \\const items = sqlMany("SELECT * FROM items WHERE owner = ?", [userId]);
-        \\```
-        \\Always parameterize queries. Never interpolate user input into SQL strings.
-        \\Use `sql()` for writes (INSERT/UPDATE/DELETE) that don't return rows.
-        ,
-    },
+const embedded_sources = [_][]const u8{
+    @embedFile("handler-scaffold.md"),
+    @embedFile("fix-violations.md"),
+    @embedFile("route-table.md"),
+    @embedFile("auth-jwt.md"),
+    @embedFile("sql-query.md"),
+};
+
+pub const catalog: [embedded_sources.len]Skill = build: {
+    var out: [embedded_sources.len]Skill = undefined;
+    for (embedded_sources, 0..) |src, i| {
+        const doc = frontmatter.parseComptime(src);
+        out[i] = .{
+            .name = doc.require("name"),
+            .description = doc.require("description"),
+            .body = std.mem.trimEnd(u8, doc.body, " \t\r\n"),
+        };
+    }
+    break :build out;
 };
 
 pub fn findByName(name: []const u8) ?*const Skill {
@@ -99,4 +48,43 @@ pub fn findByName(name: []const u8) ?*const Skill {
     return null;
 }
 
-const std = @import("std");
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "catalog has exactly the expected entries, in order" {
+    const expected = [_][]const u8{
+        "handler-scaffold",
+        "fix-violations",
+        "route-table",
+        "auth-jwt",
+        "sql-query",
+    };
+    try testing.expectEqual(expected.len, catalog.len);
+    for (expected, 0..) |name, i| {
+        try testing.expectEqualStrings(name, catalog[i].name);
+    }
+}
+
+test "findByName returns a hit for every entry and null for unknowns" {
+    for (&catalog) |*skill| {
+        const found = findByName(skill.name) orelse return error.TestExpected;
+        try testing.expectEqualStrings(skill.name, found.name);
+    }
+    try testing.expect(findByName("does-not-exist") == null);
+}
+
+test "every skill body is non-empty and every description fits on one line" {
+    for (&catalog) |*skill| {
+        try testing.expect(skill.body.len > 0);
+        try testing.expect(std.mem.indexOfScalar(u8, skill.description, '\n') == null);
+    }
+}
+
+test "handler-scaffold body preserves the conventions list verbatim" {
+    const skill = findByName("handler-scaffold") orelse return error.TestExpected;
+    try testing.expect(std.mem.indexOf(u8, skill.body, "zigttp:decode") != null);
+    try testing.expect(std.mem.indexOf(u8, skill.body, "No classes, no async/await") != null);
+}

@@ -6,6 +6,7 @@ const repl = @import("repl.zig");
 const tui_app = @import("tui/app.zig");
 const loop = @import("loop.zig");
 const print_mode = @import("print_mode.zig");
+const rpc_mode = @import("rpc_mode.zig");
 
 const meta_tool = @import("tools/zigts_expert_meta.zig");
 const verify_paths_tool = @import("tools/zigts_expert_verify_paths.zig");
@@ -93,17 +94,22 @@ pub fn run(allocator: std.mem.Allocator) !void {
             std.process.exit(2);
         },
         error.MissingModeValue => {
-            const msg = "error: --mode requires a value (json)\n";
+            const msg = "error: --mode requires a value (json|rpc)\n";
             _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
             std.process.exit(2);
         },
         error.UnsupportedMode => {
-            const msg = "error: --mode only accepts 'json'\n";
+            const msg = "error: --mode only accepts 'json' or 'rpc'\n";
             _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
             std.process.exit(2);
         },
         error.JsonModeRequiresPrint => {
             const msg = "error: --mode json requires --print <prompt>\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.RpcModeConflictsWithPrint => {
+            const msg = "error: --mode rpc cannot be combined with --print\n";
             _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
             std.process.exit(2);
         },
@@ -135,6 +141,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
     };
     defer registry.deinit(allocator);
 
+    if (flags.rpc_mode) {
+        try rpc_mode.run(allocator, &registry, flags, flags.policy orelse .auto_reject);
+        return;
+    }
+
     if (flags.print != null) {
         try print_mode.run(allocator, &registry, flags, flags.policy orelse .auto_reject);
         return;
@@ -157,6 +168,18 @@ fn parseToolsPreset(val: []const u8) !ToolsPreset {
     return error.UnsupportedToolsPreset;
 }
 
+fn setMode(out: *ExpertFlags, val: []const u8) !void {
+    if (std.mem.eql(u8, val, "json")) {
+        out.json_mode = true;
+        return;
+    }
+    if (std.mem.eql(u8, val, "rpc")) {
+        out.rpc_mode = true;
+        return;
+    }
+    return error.UnsupportedMode;
+}
+
 /// Flags parsed from `zigts expert` argv. `policy == null` means the user
 /// did not pass `--yes` or `--no-edit`; callers pick an appropriate default
 /// (`.ask` for interactive, `.auto_reject` for `--print`).
@@ -164,11 +187,18 @@ pub const ExpertFlags = struct {
     policy: ?loop.ApprovalPolicy = null,
     no_session: bool = false,
     no_persist_tool_output: bool = false,
+    /// Skip the AGENTS.md / CLAUDE.md project-context walk. System prompt
+    /// still ships full persona + live snapshots; only the appended
+    /// project-context section is suppressed.
+    no_context_files: bool = false,
     session_id: ?[]const u8 = null,
     resume_latest: bool = false,
     fork_session_id: ?[]const u8 = null,
     print: ?[]const u8 = null,
     json_mode: bool = false,
+    /// Line-delimited JSON-RPC 2.0 over stdio. Long-lived session; mutually
+    /// exclusive with --print.
+    rpc_mode: bool = false,
     tools_preset: ToolsPreset = .full,
 };
 
@@ -187,6 +217,7 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
         if (std.mem.eql(u8, arg, "--no-edit")) saw_no_edit = true;
         if (std.mem.eql(u8, arg, "--no-session")) out.no_session = true;
         if (std.mem.eql(u8, arg, "--no-persist-tool-output")) out.no_persist_tool_output = true;
+        if (std.mem.eql(u8, arg, "--no-context-files")) out.no_context_files = true;
         if (std.mem.eql(u8, arg, "--resume") or std.mem.eql(u8, arg, "--continue")) out.resume_latest = true;
         if (std.mem.eql(u8, arg, "--fork")) {
             if (i + 1 >= argv.len) return error.MissingForkSessionId;
@@ -228,15 +259,11 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
         if (std.mem.eql(u8, arg, "--mode")) {
             if (i + 1 >= argv.len) return error.MissingModeValue;
             i += 1;
-            const val = argv[i];
-            if (!std.mem.eql(u8, val, "json")) return error.UnsupportedMode;
-            out.json_mode = true;
+            try setMode(&out, argv[i]);
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--mode=")) {
-            const val = arg["--mode=".len..];
-            if (!std.mem.eql(u8, val, "json")) return error.UnsupportedMode;
-            out.json_mode = true;
+            try setMode(&out, arg["--mode=".len..]);
         }
     }
     if (saw_yes and saw_no_edit) return error.MutuallyExclusiveApprovalFlags;
@@ -244,6 +271,7 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
     if (out.fork_session_id != null and out.resume_latest) return error.MutuallyExclusiveForkFlags;
     if (out.fork_session_id != null and out.session_id != null) return error.MutuallyExclusiveForkFlags;
     if (out.json_mode and out.print == null) return error.JsonModeRequiresPrint;
+    if (out.rpc_mode and out.print != null) return error.RpcModeConflictsWithPrint;
     if (saw_yes) {
         out.policy = .auto_approve;
     } else if (saw_no_edit) {
@@ -351,6 +379,43 @@ test "parseExpertFlags: --yes --no-session --no-persist-tool-output combine" {
 test "parseExpertFlags: --yes + --no-edit still errors regardless of session flags" {
     const argv = [_][]const u8{ "zigts", "expert", "--yes", "--no-session", "--no-edit" };
     try testing.expectError(error.MutuallyExclusiveApprovalFlags, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --no-context-files flips only that field" {
+    const argv = [_][]const u8{ "zigts", "expert", "--no-context-files" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(true, flags.no_context_files);
+    try testing.expectEqual(false, flags.no_session);
+    try testing.expectEqual(false, flags.no_persist_tool_output);
+}
+
+test "parseExpertFlags: --no-context-files defaults to false" {
+    const argv = [_][]const u8{ "zigts", "expert" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(false, flags.no_context_files);
+}
+
+test "parseExpertFlags: --mode rpc sets rpc_mode" {
+    const argv = [_][]const u8{ "zigts", "expert", "--mode", "rpc" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(true, flags.rpc_mode);
+    try testing.expectEqual(false, flags.json_mode);
+}
+
+test "parseExpertFlags: --mode=rpc inline form" {
+    const argv = [_][]const u8{ "zigts", "expert", "--mode=rpc" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(true, flags.rpc_mode);
+}
+
+test "parseExpertFlags: --mode rpc with --print errors" {
+    const argv = [_][]const u8{ "zigts", "expert", "--mode", "rpc", "--print", "hi" };
+    try testing.expectError(error.RpcModeConflictsWithPrint, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --mode bogus still rejected" {
+    const argv = [_][]const u8{ "zigts", "expert", "--mode", "xml" };
+    try testing.expectError(error.UnsupportedMode, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: unknown --frobnicate is ignored, defaults preserved" {

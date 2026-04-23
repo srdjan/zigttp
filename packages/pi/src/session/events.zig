@@ -64,6 +64,12 @@ pub const Meta = struct {
     workspace_realpath: []const u8,
     created_at_unix_ms: i64,
     parent_id: ?[]const u8 = null,
+    /// 64-char lowercase hex policy hash captured at session creation. Drives
+    /// the /resume drift warning: a hash mismatch on resume means the rule
+    /// registry changed between session init and the replay, and the old
+    /// transcript reasoning may be stale against today's compiler policy.
+    /// Optional so pre-Phase-2 `meta.json` files still parse.
+    policy_hash: ?[]const u8 = null,
 };
 
 // ===========================================================================
@@ -204,12 +210,21 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
     }
     errdefer if (parent_id) |p| allocator.free(p);
 
+    var policy_hash: ?[]u8 = null;
+    if (obj.get("policy_hash")) |ph_val| {
+        if (ph_val == .string) {
+            policy_hash = try allocator.dupe(u8, ph_val.string);
+        }
+    }
+    errdefer if (policy_hash) |p| allocator.free(p);
+
     return .{
         .schema_version = version,
         .session_id = session_id,
         .workspace_realpath = workspace_realpath,
         .created_at_unix_ms = created_val.integer,
         .parent_id = parent_id,
+        .policy_hash = policy_hash,
     };
 }
 
@@ -238,6 +253,10 @@ pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta
         try stream.objectField("parent_id");
         try stream.write(pid);
     }
+    if (meta.policy_hash) |ph| {
+        try stream.objectField("policy_hash");
+        try stream.write(ph);
+    }
     try stream.endObject();
     try aw.writer.writeByte('\n');
 
@@ -260,6 +279,7 @@ pub fn freeMeta(allocator: std.mem.Allocator, meta: *Meta) void {
     allocator.free(meta.session_id);
     allocator.free(meta.workspace_realpath);
     if (meta.parent_id) |p| allocator.free(p);
+    if (meta.policy_hash) |p| allocator.free(p);
     meta.* = .{
         .schema_version = schema_version,
         .session_id = &.{},
@@ -475,6 +495,52 @@ test "writeMeta + readMeta round-trip preserves all fields" {
     try testing.expectEqualStrings("sess_abc123", meta_out.session_id);
     try testing.expectEqualStrings("/Users/me/code/proj", meta_out.workspace_realpath);
     try testing.expectEqual(@as(i64, 1_730_000_000_000), meta_out.created_at_unix_ms);
+}
+
+test "writeMeta + readMeta round-trip preserves policy_hash" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "meta.json");
+    defer allocator.free(path);
+
+    const hash = "a" ** 64; // lowercase hex sentinel, 64 chars
+    try writeMeta(allocator, path, .{
+        .session_id = "sess_hash",
+        .workspace_realpath = "/w",
+        .created_at_unix_ms = 1,
+        .policy_hash = hash,
+    });
+
+    var meta_out = try readMeta(allocator, path);
+    defer freeMeta(allocator, &meta_out);
+
+    const got = meta_out.policy_hash orelse return error.TestExpected;
+    try testing.expectEqualStrings(hash, got);
+}
+
+test "readMeta accepts legacy meta.json without policy_hash" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "meta.json");
+    defer allocator.free(path);
+
+    const body =
+        \\{
+        \\  "schema_version": 1,
+        \\  "session_id": "legacy",
+        \\  "workspace_realpath": "/w",
+        \\  "created_at_unix_ms": 1
+        \\}
+    ;
+    try zigts.file_io.writeFile(allocator, path, body);
+
+    var meta_out = try readMeta(allocator, path);
+    defer freeMeta(allocator, &meta_out);
+    try testing.expect(meta_out.policy_hash == null);
 }
 
 test "readMeta rejects files whose schema_version exceeds the binary" {

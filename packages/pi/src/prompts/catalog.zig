@@ -1,9 +1,15 @@
-//! Baked-in prompt template catalog. Templates support simple positional
-//! argument substitution: {{1}}, {{2}}, ... are replaced with the nth argument,
-//! and {{args}} is replaced with all remaining arguments joined by spaces.
-//! No external files are read; content lives in this source file.
+//! Baked-in prompt template catalog. Each entry is a markdown file alongside
+//! this source at `packages/pi/src/prompts/<name>.md` with YAML frontmatter
+//! carrying `name` and `description`. The body supports simple positional
+//! argument substitution: {{1}}, {{2}}, ... are replaced with the nth arg,
+//! and {{args}} joins all remaining args with spaces.
+//!
+//! Files are embedded via `@embedFile` and parsed at comptime. The lockdown
+//! semantics match the skills catalog: no runtime file discovery, adding a
+//! template requires dropping a `.md` file, listing it below, and rebuilding.
 
 const std = @import("std");
+const frontmatter = @import("../frontmatter.zig");
 
 pub const Template = struct {
     name: []const u8,
@@ -11,37 +17,28 @@ pub const Template = struct {
     body: []const u8,
 };
 
-pub const catalog = [_]Template{
-    .{
-        .name = "explain",
-        .description = "Explain a concept or code element. Usage: /template:explain <topic>",
-        .body = "Explain {{args}} in the context of zigts/zigttp. Be concise and concrete. Include a minimal code example if relevant.",
-    },
-    .{
-        .name = "review",
-        .description = "Review a specific file for violations and quality. Usage: /template:review <file>",
-        .body = "Review the file {{1}} for correctness, compiler compliance, and code quality. List any ZTS violations, missing error handling, or style issues. Suggest concrete fixes for each.",
-    },
-    .{
-        .name = "add-route",
-        .description = "Add a new route to the handler. Usage: /template:add-route <METHOD> <path>",
-        .body = "Add a {{1}} {{2}} route to the current handler. Follow the existing patterns for request parsing and response formatting. Run /check after the edit to verify no violations were introduced.",
-    },
-    .{
-        .name = "add-env",
-        .description = "Add an env var to the contract and handler. Usage: /template:add-env <VAR_NAME>",
-        .body = "Add the environment variable {{1}} to the handler. Import it via `zigttp:env`, add it to the env contract section, and use it where needed. Run /check after the edit.",
-    },
-    .{
-        .name = "write-test",
-        .description = "Write a test case for a handler path. Usage: /template:write-test <description>",
-        .body = "Write a test case for: {{args}}. Use the JSONL test format with `request` and `expected` fields. Match the existing test file format in the workspace.",
-    },
-    .{
-        .name = "fix",
-        .description = "Fix a specific violation or error. Usage: /template:fix <error>",
-        .body = "Fix the following issue in the handler: {{args}}. Explain the root cause, show the corrected code, and verify with /check after applying the fix.",
-    },
+const embedded_sources = [_][]const u8{
+    @embedFile("explain.md"),
+    @embedFile("review.md"),
+    @embedFile("add-route.md"),
+    @embedFile("add-env.md"),
+    @embedFile("write-test.md"),
+    @embedFile("fix.md"),
+};
+
+pub const catalog: [embedded_sources.len]Template = build: {
+    var out: [embedded_sources.len]Template = undefined;
+    for (embedded_sources, 0..) |src, i| {
+        const doc = frontmatter.parseComptime(src);
+        // Template body loses trailing whitespace so the final prompt does
+        // not carry a dangling newline into the model request.
+        out[i] = .{
+            .name = doc.require("name"),
+            .description = doc.require("description"),
+            .body = std.mem.trimEnd(u8, doc.body, " \t\r\n"),
+        };
+    }
+    break :build out;
 };
 
 pub fn findByName(name: []const u8) ?*const Template {
@@ -52,6 +49,28 @@ pub fn findByName(name: []const u8) ?*const Template {
 }
 
 const testing = std.testing;
+
+test "catalog has exactly the expected entries, in order" {
+    const expected = [_][]const u8{
+        "explain",
+        "review",
+        "add-route",
+        "add-env",
+        "write-test",
+        "fix",
+    };
+    try testing.expectEqual(expected.len, catalog.len);
+    for (expected, 0..) |name, i| {
+        try testing.expectEqualStrings(name, catalog[i].name);
+    }
+}
+
+test "every template body mentions at least one placeholder" {
+    for (&catalog) |*t| {
+        const has_placeholder = std.mem.indexOf(u8, t.body, "{{") != null;
+        try testing.expect(has_placeholder);
+    }
+}
 
 test "expand: no placeholders returns body unchanged" {
     const result = try expand(testing.allocator, "hello world", &.{});

@@ -41,6 +41,7 @@ pub fn run(
     var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
         .no_session = flags.no_session,
         .no_persist_tool_output = flags.no_persist_tool_output,
+        .no_context_files = flags.no_context_files,
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
         .fork_session_id = flags.fork_session_id,
