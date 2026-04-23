@@ -89,3 +89,37 @@ fn execute(
     buf = aw.toArrayList();
     return .{ .ok = outcome.ok, .body = try buf.toOwnedSlice(allocator) };
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "workspace_list_files: malformed JSON args returns structured error" {
+    var result = try execute(testing.allocator, &.{"{not json"});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "invalid JSON input") != null);
+}
+
+test "workspace_list_files: non-string path returns structured error" {
+    var result = try execute(testing.allocator, &.{"{\"path\":123}"});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "path must be a string") != null);
+}
+
+test "workspace_list_files: limit must be a positive integer" {
+    var result = try execute(testing.allocator, &.{"{\"limit\":0}"});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "limit must be a positive integer") != null);
+}
+
+test "workspace_list_files: ../ escape is rejected by resolveInsideWorkspace" {
+    try testing.expectError(
+        error.PathOutsideWorkspace,
+        execute(testing.allocator, &.{"../../etc"}),
+    );
+}
