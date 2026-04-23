@@ -33,6 +33,8 @@ pub const State = struct {
     input: []const u8,
     /// Prompt label (with trailing separator/space, e.g. "expert> ").
     prompt_label: []const u8,
+    /// Cursor position inside `input` as a byte index.
+    cursor: usize,
 };
 
 /// Writer abstraction: production passes a small shim that forwards to
@@ -47,7 +49,7 @@ pub fn redraw(w: Writer, palette: *const theme_mod.Theme, state: State) !void {
     try ansi.eraseLineUp(w, 1);
     try status_line_widget.render(w, palette, state.status);
     try w.writeAll("\r\n");
-    try writeInputLine(w, palette, state.prompt_label, state.input);
+    try writeInputLine(w, palette, state.prompt_label, state.input, state.cursor);
     try w.writeAll(ansi.sync_end);
 }
 
@@ -70,10 +72,14 @@ fn writeInputLine(
     palette: *const theme_mod.Theme,
     prompt_label: []const u8,
     input: []const u8,
+    cursor: usize,
 ) !void {
     try w.writeAll(ansi.erase_line);
     try ansi.styled(w, palette.prompt_label, prompt_label);
     if (input.len > 0) try ansi.styled(w, palette.input_text, input);
+    const clamped = @min(cursor, input.len);
+    const trailing = input.len - clamped;
+    if (trailing > 0) try ansi.cursorLeft(w, trailing);
 }
 
 // ---------------------------------------------------------------------------
@@ -96,10 +102,12 @@ fn simpleState() State {
         .status = .{
             .session_id = "01HF2J5K6M",
             .model = "claude-opus-4-6",
+            .auth = "api-key",
             .tokens = .{ .input_tokens = 100, .output_tokens = 20 },
         },
         .input = "hello",
         .prompt_label = "expert> ",
+        .cursor = "hello".len,
     };
 }
 
@@ -131,9 +139,18 @@ test "redraw: input_text placed after the prompt label" {
 test "redraw: empty input still emits the prompt label" {
     var s = simpleState();
     s.input = "";
+    s.cursor = 0;
     const out = try capture(redraw, &theme_mod.default, s);
     defer testing.allocator.free(out);
     try testing.expect(std.mem.indexOf(u8, out, "expert> ") != null);
+}
+
+test "redraw: repositions the cursor when editing in the middle" {
+    var s = simpleState();
+    s.cursor = 2;
+    const out = try capture(redraw, &theme_mod.default, s);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[3D") != null);
 }
 
 test "beforeScrollback: erases region and is idempotent" {

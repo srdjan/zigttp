@@ -17,6 +17,7 @@ const theme_mod = @import("tui/theme.zig");
 
 pub const Registry = registry_mod.Registry;
 const ToolResult = registry_mod.ToolResult;
+const SessionTreeNode = registry_mod.helpers.SessionTreeNode;
 const ExpertFlags = app.ExpertFlags;
 
 pub const DispatchOutcome = union(enum) {
@@ -73,6 +74,10 @@ pub fn processSubmit(
         return .{ .tool_result = try renderModel(allocator, session.currentModel()) };
     }
 
+    if (std.mem.eql(u8, trimmed, "/status")) {
+        return .{ .tool_result = try renderStatus(allocator, session) };
+    }
+
     if (std.mem.startsWith(u8, trimmed, "/model ")) {
         const model_id = std.mem.trim(u8, trimmed["/model ".len..], " \t");
         if (models_registry.findById(model_id)) |model| {
@@ -117,6 +122,10 @@ pub fn processSubmit(
         return .{ .tool_result = .{ .ok = false, .body = msg } };
     }
 
+    if (std.mem.eql(u8, trimmed, "/tree")) {
+        return .{ .tool_result = try renderTree(allocator, if (session.session_id) |sid| sid else null) };
+    }
+
     if (!shouldDispatchTool(registry, trimmed)) {
         const rendered = try agent.runOneTurn(allocator, session, registry, trimmed, approval_fn);
         return .{ .rendered = rendered };
@@ -153,7 +162,7 @@ pub fn dispatchLine(
     if (commands.isSessionNew(argv[0])) return .session_new;
     if (commands.isCompact(argv[0])) return .session_compact;
     if (commands.isSessionFork(argv[0])) return .session_fork;
-    if (commands.isSessionTree(argv[0])) return .{ .result = try renderTree(allocator) };
+    if (commands.isSessionTree(argv[0])) return .{ .result = try renderTree(allocator, null) };
     if (commands.isSettings(argv[0])) return .{ .result = try renderSettings(allocator) };
     if (commands.isHotkeys(argv[0])) return .{ .result = try renderHotkeys(allocator) };
     if (commands.isChangelog(argv[0])) return .{ .result = try renderChangelog(allocator) };
@@ -264,7 +273,7 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
         try w.print("  {s: <36}  {s}\n", .{ entry.name, entry.description });
     }
     try w.writeAll("\nMeta commands: help (:h), quit (:q)\n");
-    try w.writeAll("Info commands: /model  /settings  /hotkeys  /changelog\n");
+    try w.writeAll("Info commands: /model  /status  /settings  /hotkeys  /changelog\n");
     try w.writeAll("Session:       /compact  /resume  /continue  /new  /fork  /tree\n");
     try w.writeAll("Skills:        /skills  /skill:<name>\n");
     try w.writeAll("Templates:     /templates  /template:<name> [args...]\n");
@@ -292,16 +301,48 @@ fn renderModel(allocator: std.mem.Allocator, active: ?[]const u8) !ToolResult {
 }
 
 fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
-    const msg = try std.fmt.allocPrint(allocator,
+    const msg = try std.fmt.allocPrint(
+        allocator,
         "Settings (compile-time defaults):\n" ++
-        "  model:           {s}\n" ++
-        "  max_tokens:      {d}\n" ++
-        "  max_attempts:    3\n" ++
-        "  roundtrips/turn: 8\n" ++
-        "  tool_calls/turn: 16\n" ++
-        "  batch_size:      8\n" ++
-        "Theme: run /settings theme to list or switch.\n",
+            "  model:           {s}\n" ++
+            "  max_tokens:      {d}\n" ++
+            "  max_attempts:    3\n" ++
+            "  roundtrips/turn: 8\n" ++
+            "  tool_calls/turn: 16\n" ++
+            "  batch_size:      8\n" ++
+            "Theme: run /settings theme to list or switch.\n",
         .{ request_mod.default_model, request_mod.default_max_tokens },
+    );
+    return .{ .ok = true, .body = msg };
+}
+
+fn renderStatus(allocator: std.mem.Allocator, session: *const agent.AgentSession) !ToolResult {
+    const session_id = if (session.session_id) |sid| sid else "ephemeral";
+    const model = session.currentModel() orelse "stub";
+    const tok = session.token_totals;
+    const msg = try std.fmt.allocPrint(
+        allocator,
+        "Expert status:\n" ++
+            "  provider:      {s}\n" ++
+            "  auth:          {s}\n" ++
+            "  model:         {s}\n" ++
+            "  session:       {s}\n" ++
+            "  persistence:   {s}\n" ++
+            "  tokens.in:     {d}\n" ++
+            "  tokens.cache_r:{d}\n" ++
+            "  tokens.cache_w:{d}\n" ++
+            "  tokens.out:    {d}\n",
+        .{
+            session.providerLabel(),
+            session.authLabel(),
+            model,
+            session_id,
+            if (session.session_dir != null) "enabled" else "disabled",
+            tok.input_tokens,
+            tok.cache_read_input_tokens,
+            tok.cache_creation_input_tokens,
+            tok.output_tokens,
+        },
     );
     return .{ .ok = true, .body = msg };
 }
@@ -321,12 +362,16 @@ fn renderThemes(allocator: std.mem.Allocator, current: *const theme_mod.Theme) !
 }
 
 fn renderHotkeys(allocator: std.mem.Allocator) !ToolResult {
-    const msg = try allocator.dupe(u8,
-        "Keyboard shortcuts (interactive REPL):\n" ++
-        "  Enter          submit current line\n" ++
-        "  Ctrl-C         interrupt / cancel\n" ++
-        "  Ctrl-D         quit (EOF)\n" ++
-        "  Up/Down        history navigation (TUI mode only)\n",
+    const msg = try allocator.dupe(
+        u8,
+        "Keyboard shortcuts (TUI mode):\n" ++
+            "  Enter          submit current line\n" ++
+            "  Ctrl-C         interrupt / cancel\n" ++
+            "  Ctrl-D         quit (EOF)\n" ++
+            "  Left/Right     move cursor\n" ++
+            "  Home/End       jump to start/end of line\n" ++
+            "  Delete         delete under cursor\n" ++
+            "  Up/Down        history navigation\n",
     );
     return .{ .ok = true, .body = msg };
 }
@@ -358,20 +403,21 @@ fn renderTemplates(allocator: std.mem.Allocator) !ToolResult {
 }
 
 fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
-    const msg = try allocator.dupe(u8,
+    const msg = try allocator.dupe(
+        u8,
         "zigts expert - changelog\n" ++
-        "  Full token accounting (input, cache_read, cache_write, output)\n" ++
-        "  Post-apply auto-verify (verify_paths + diff review after each edit)\n" ++
-        "  Session compaction (/compact)\n" ++
-        "  Session branching: /fork, /tree, --fork, --continue\n" ++
-        "  Session commands: /resume, /continue, /new, /compact, /fork, /tree\n" ++
-        "  Skills catalog (/skill:<name>)\n" ++
-        "  Informational commands: /model, /settings, /hotkeys, /changelog\n",
+            "  Full token accounting (input, cache_read, cache_write, output)\n" ++
+            "  Post-apply auto-verify (verify_paths + diff review after each edit)\n" ++
+            "  Session compaction (/compact)\n" ++
+            "  Session branching: /fork, /tree, --fork, --continue\n" ++
+            "  Session commands: /resume, /continue, /new, /compact, /fork, /tree\n" ++
+            "  Skills catalog (/skill:<name>)\n" ++
+            "  Informational commands: /model, /status, /settings, /hotkeys, /changelog\n",
     );
     return .{ .ok = true, .body = msg };
 }
 
-fn renderTree(allocator: std.mem.Allocator) !ToolResult {
+fn renderTree(allocator: std.mem.Allocator, current_session_id: ?[]const u8) !ToolResult {
     const root = session_paths.sessionRoot(allocator) catch |err| {
         const msg = try std.fmt.allocPrint(allocator, "error reading session root: {s}\n", .{@errorName(err)});
         return .{ .ok = false, .body = msg };
@@ -396,20 +442,136 @@ fn renderTree(allocator: std.mem.Allocator) !ToolResult {
         return .{ .ok = true, .body = try allocator.dupe(u8, "No sessions found for this workspace.\n") };
     }
 
+    const nodes = try buildSessionTreeNodes(allocator, entries, current_session_id);
+    defer freeSessionTreeNodes(allocator, nodes);
+
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     const w = &aw.writer;
-    try w.print("Sessions for this workspace ({d} total, newest first):\n", .{entries.len});
-    for (entries) |entry| {
-        const ms = entry.created_at_unix_ms;
-        const secs = @divTrunc(ms, 1000);
-        try w.print("  {s}  created={d}\n", .{ entry.session_id, secs });
-    }
+    try w.print("Sessions for this workspace ({d} total):\n", .{entries.len});
+    try writeSessionTree(w, nodes);
     try w.writeAll("\nUse /fork to branch the current session.\n");
     try w.writeAll("Use /resume or /continue to reload the newest session.\n");
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return try ToolResult.withSessionTree(allocator, true, buf.items, nodes);
+}
+
+fn buildSessionTreeNodes(
+    allocator: std.mem.Allocator,
+    entries: []const session_paths.SessionEntry,
+    current_session_id: ?[]const u8,
+) ![]SessionTreeNode {
+    var by_id: std.StringHashMapUnmanaged(usize) = .empty;
+    defer by_id.deinit(allocator);
+    try by_id.ensureUnusedCapacity(allocator, @intCast(entries.len));
+    for (entries, 0..) |entry, i| {
+        by_id.putAssumeCapacity(entry.session_id, i);
+    }
+
+    const child_lists = try allocator.alloc(std.ArrayListUnmanaged(usize), entries.len);
+    defer {
+        for (child_lists) |*children| children.deinit(allocator);
+        allocator.free(child_lists);
+    }
+    for (child_lists) |*children| children.* = .empty;
+
+    const orphan_roots = try allocator.alloc(bool, entries.len);
+    defer allocator.free(orphan_roots);
+    @memset(orphan_roots, false);
+
+    var roots: std.ArrayList(usize) = .empty;
+    defer roots.deinit(allocator);
+
+    for (entries, 0..) |entry, i| {
+        if (entry.parent_id) |parent_id| {
+            if (by_id.get(parent_id)) |parent_index| {
+                try child_lists[parent_index].append(allocator, i);
+            } else {
+                orphan_roots[i] = true;
+                try roots.append(allocator, i);
+            }
+        } else {
+            try roots.append(allocator, i);
+        }
+    }
+
+    var flat: std.ArrayList(SessionTreeNode) = .empty;
+    defer flat.deinit(allocator);
+
+    for (roots.items) |root_index| {
+        try appendSessionTreePreorder(
+            allocator,
+            &flat,
+            entries,
+            child_lists,
+            orphan_roots,
+            root_index,
+            0,
+            current_session_id,
+        );
+    }
+
+    return try flat.toOwnedSlice(allocator);
+}
+
+fn appendSessionTreePreorder(
+    allocator: std.mem.Allocator,
+    flat: *std.ArrayList(SessionTreeNode),
+    entries: []const session_paths.SessionEntry,
+    child_lists: []const std.ArrayListUnmanaged(usize),
+    orphan_roots: []const bool,
+    index: usize,
+    depth: usize,
+    current_session_id: ?[]const u8,
+) !void {
+    const entry = entries[index];
+    try flat.append(allocator, .{
+        .session_id = try allocator.dupe(u8, entry.session_id),
+        .parent_id = if (entry.parent_id) |parent_id|
+            try allocator.dupe(u8, parent_id)
+        else
+            null,
+        .created_at_unix_ms = entry.created_at_unix_ms,
+        .depth = depth,
+        .is_current = if (current_session_id) |sid| std.mem.eql(u8, sid, entry.session_id) else false,
+        .is_orphan_root = orphan_roots[index],
+    });
+
+    for (child_lists[index].items) |child_index| {
+        try appendSessionTreePreorder(
+            allocator,
+            flat,
+            entries,
+            child_lists,
+            orphan_roots,
+            child_index,
+            depth + 1,
+            current_session_id,
+        );
+    }
+}
+
+fn freeSessionTreeNodes(allocator: std.mem.Allocator, nodes: []SessionTreeNode) void {
+    for (nodes) |*node| node.deinit(allocator);
+    allocator.free(nodes);
+}
+
+fn writeSessionTree(writer: *std.Io.Writer, nodes: []const SessionTreeNode) !void {
+    for (nodes) |node| {
+        var depth: usize = 0;
+        while (depth < node.depth) : (depth += 1) {
+            try writer.writeAll("  ");
+        }
+        try writer.writeAll(if (node.is_current) "* " else "- ");
+        try writer.writeAll(node.session_id);
+        try writer.print("  created={d}", .{@divTrunc(node.created_at_unix_ms, 1000)});
+        if (node.is_orphan_root and node.parent_id != null) {
+            try writer.writeAll("  orphaned-from=");
+            try writer.writeAll(node.parent_id.?);
+        }
+        try writer.writeByte('\n');
+    }
 }
 
 pub fn baseSessionConfig(flags: ExpertFlags, overrides: agent.SessionConfig) agent.SessionConfig {
@@ -578,6 +740,7 @@ test "help renders local command guidance" {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
             try testing.expect(std.mem.indexOf(u8, r.body, "/verify") != null);
+            try testing.expect(std.mem.indexOf(u8, r.body, "/status") != null);
             try testing.expect(std.mem.indexOf(u8, r.body, commands.session_commands[0]) != null);
             try testing.expect(std.mem.indexOf(u8, r.body, commands.session_commands[1]) != null);
         },
@@ -687,4 +850,62 @@ test "processSubmit: /settings theme <unknown> returns an error result" {
     }
     // Theme should not have changed.
     try testing.expect(session.theme == &theme_mod.default);
+}
+
+test "processSubmit: /status reports provider auth and persistence state" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    var outcome = try processSubmit(testing.allocator, &session, &reg, "/status", null);
+    switch (outcome) {
+        .tool_result => |*r| {
+            defer r.deinit(testing.allocator);
+            try testing.expect(r.ok);
+            try testing.expect(std.mem.indexOf(u8, r.body, "provider:      stub") != null);
+            try testing.expect(std.mem.indexOf(u8, r.body, "auth:          stub") != null);
+            try testing.expect(std.mem.indexOf(u8, r.body, "persistence:   disabled") != null);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "renderTree builds nested payload nodes from parent ids" {
+    const allocator = testing.allocator;
+    var entries = [_]session_paths.SessionEntry{
+        .{
+            .session_id = try allocator.dupe(u8, "child"),
+            .dir_path = try allocator.dupe(u8, "/tmp/child"),
+            .created_at_unix_ms = 300,
+            .parent_id = try allocator.dupe(u8, "root"),
+        },
+        .{
+            .session_id = try allocator.dupe(u8, "root"),
+            .dir_path = try allocator.dupe(u8, "/tmp/root"),
+            .created_at_unix_ms = 200,
+            .parent_id = null,
+        },
+        .{
+            .session_id = try allocator.dupe(u8, "orphan"),
+            .dir_path = try allocator.dupe(u8, "/tmp/orphan"),
+            .created_at_unix_ms = 100,
+            .parent_id = try allocator.dupe(u8, "missing"),
+        },
+    };
+    defer {
+        for (&entries) |*entry| entry.deinit(allocator);
+    }
+
+    const nodes = try buildSessionTreeNodes(allocator, &entries, "child");
+    defer freeSessionTreeNodes(allocator, nodes);
+
+    try testing.expectEqual(@as(usize, 3), nodes.len);
+    try testing.expectEqualStrings("root", nodes[0].session_id);
+    try testing.expectEqual(@as(usize, 0), nodes[0].depth);
+    try testing.expectEqualStrings("child", nodes[1].session_id);
+    try testing.expectEqual(@as(usize, 1), nodes[1].depth);
+    try testing.expect(nodes[1].is_current);
+    try testing.expectEqualStrings("orphan", nodes[2].session_id);
+    try testing.expect(nodes[2].is_orphan_root);
 }

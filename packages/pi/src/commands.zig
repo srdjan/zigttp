@@ -100,6 +100,10 @@ pub fn isSettings(name: []const u8) bool {
     return std.mem.eql(u8, name, "/settings");
 }
 
+pub fn isStatus(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/status");
+}
+
 pub fn isHotkeys(name: []const u8) bool {
     return std.mem.eql(u8, name, "/hotkeys");
 }
@@ -187,8 +191,11 @@ test "isCompact isSessionFork isSessionTree recognize their slash commands" {
     try testing.expect(!isSessionTree("/fork"));
 }
 
-test "isSettings isHotkeys isChangelog recognize their slash commands" {
+test "isSettings isStatus isHotkeys isChangelog recognize their slash commands" {
     try testing.expect(isSettings("/settings"));
+    try testing.expect(!isSettings("/status"));
+    try testing.expect(isStatus("/status"));
+    try testing.expect(!isStatus("/settings"));
     try testing.expect(!isSettings("/hotkeys"));
     try testing.expect(isHotkeys("/hotkeys"));
     try testing.expect(!isHotkeys("/changelog"));

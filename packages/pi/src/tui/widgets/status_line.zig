@@ -19,6 +19,7 @@ const middle_dot = " \xc2\xb7 ";
 pub const State = struct {
     session_id: ?[]const u8,
     model: ?[]const u8,
+    auth: []const u8,
     tokens: turn.Usage,
 };
 
@@ -38,8 +39,16 @@ pub fn render(
     try ansi.styled(writer, palette.status_value, state.model orelse "stub");
 
     try ansi.styled(writer, palette.dim, middle_dot);
+    try ansi.styled(writer, palette.status_key, "auth ");
+    try ansi.styled(writer, palette.status_value, state.auth);
+
+    try ansi.styled(writer, palette.dim, middle_dot);
     try ansi.styled(writer, palette.status_key, "tokens in:");
     try ansi.styledFmt(writer, palette.status_value, "{d}", .{state.tokens.input_tokens});
+    try ansi.styled(writer, palette.status_key, " cache_r:");
+    try ansi.styledFmt(writer, palette.status_value, "{d}", .{state.tokens.cache_read_input_tokens});
+    try ansi.styled(writer, palette.status_key, " cache_w:");
+    try ansi.styledFmt(writer, palette.status_value, "{d}", .{state.tokens.cache_creation_input_tokens});
     try ansi.styled(writer, palette.status_key, " out:");
     try ansi.styledFmt(writer, palette.status_value, "{d}", .{state.tokens.output_tokens});
 }
@@ -72,6 +81,7 @@ test "render: shows session id, model, and token totals" {
     const state: State = .{
         .session_id = "01HF2J5K6M7N8P9Q0R1S2T3V4W",
         .model = "claude-opus-4-6",
+        .auth = "api-key",
         .tokens = .{ .input_tokens = 12345, .output_tokens = 678 },
     };
     const out = try captureRender(state);
@@ -81,10 +91,14 @@ test "render: shows session id, model, and token totals" {
     try testing.expect(std.mem.indexOf(u8, out, "01HF2J5K6M") != null);
     try testing.expect(std.mem.indexOf(u8, out, "model ") != null);
     try testing.expect(std.mem.indexOf(u8, out, "claude-opus-4-6") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "auth ") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "api-key") != null);
     // The number is wrapped in SGR so "in:" and "12345" are not adjacent
     // in the byte stream. Check both halves individually.
     try testing.expect(std.mem.indexOf(u8, out, "in:") != null);
     try testing.expect(std.mem.indexOf(u8, out, "12345") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "cache_r:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "cache_w:") != null);
     try testing.expect(std.mem.indexOf(u8, out, "out:") != null);
     try testing.expect(std.mem.indexOf(u8, out, "678") != null);
 }
@@ -93,6 +107,7 @@ test "render: null session id renders as 'ephemeral'" {
     const state: State = .{
         .session_id = null,
         .model = "claude-opus-4-6",
+        .auth = "api-key",
         .tokens = .{},
     };
     const out = try captureRender(state);
@@ -104,6 +119,7 @@ test "render: null model falls back to 'stub'" {
     const state: State = .{
         .session_id = "abcd",
         .model = null,
+        .auth = "stub",
         .tokens = .{},
     };
     const out = try captureRender(state);
@@ -115,6 +131,7 @@ test "render: every SGR segment is followed by a reset" {
     const state: State = .{
         .session_id = "sid",
         .model = "m",
+        .auth = "api-key",
         .tokens = .{ .input_tokens = 1, .output_tokens = 2 },
     };
     const out = try captureRender(state);
