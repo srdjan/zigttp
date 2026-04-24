@@ -340,6 +340,7 @@ Options:
   -e, --eval <CODE>     Inline JavaScript handler
   -m, --memory <SIZE>   JS runtime memory limit (default: 0 = no limit)
   -n, --pool <N>        Runtime pool size (default: auto)
+  -q, --quiet           Disable request logging
   --cors                Enable CORS headers
   --static <DIR>        Serve static files
   --outbound-http       Enable native outbound bridge (fetchSync/httpRequest)
@@ -351,9 +352,12 @@ Options:
   --force-swap          With --watch --prove: apply breaking changes anyway
   --trace <FILE>        Record handler I/O traces to JSONL file
   --replay <FILE>       Replay recorded traces and verify handler output
+  --test <FILE>         Run declarative handler tests from JSONL file
   --sqlite <FILE>       SQLite database path for zigttp:sql
   --durable <DIR>       Enable durable execution with write-ahead oplog
   --system <FILE>       System registry for zigttp:service
+  --security-log <FILE> Append security events (policy denies, panics) to FILE
+  --lifecycle <MODE>    Runtime lifecycle: ephemeral | bounded | reuse
   --no-env-check        Skip startup env var validation (development use)
 ```
 
@@ -498,12 +502,19 @@ zigts compile [--system path] <handler.ts> <out.zig>  # Compile to embedded byte
 zigts prove <old.json> <new.json>     # Compare contracts (exit 0=safe, 1=breaking)
 zigts mock <tests.jsonl> [--port N]   # Mock server from test cases
 zigts link <system.json>              # Cross-handler contract linking
+zigts rollout <old-system.json> <new-system.json>  # Plan safe multi-handler rollout
 zigts features [--json]               # List allowed/blocked language features
 zigts modules [--json]                # List virtual modules and exports
 zigts meta [--json]                   # Policy metadata (version, hash, rule count)
 zigts gen-tests [handler.ts] [-o output.jsonl]  # Generate tests from proven paths
-zigts verify-paths <f>... [--json]    # Full analysis on files
+zigts verify-paths <f>... [--json]    # Full analysis on files (includes flow-checker)
 zigts verify-modules --builtins --strict --json  # Governance audit
+zigts edit-simulate [handler.ts] [--before old.ts]  # Report violations an edit would introduce
+zigts describe-rule [name|code] [--json] [--hash]   # Inspect diagnostic rules
+zigts search <keyword> [--json]       # Find rules by keyword
+zigts review-patch <file> [--before <old>] [--diff-only]  # Surface only new violations
+zigts ledger export --session <id> --out <path>  # Export proof-carrying patches from an expert session
+zigts ledger replay --input <path> --onto <git-ref>  # Re-apply a ledger onto a base revision
 ```
 
 #### Structured JSON output
