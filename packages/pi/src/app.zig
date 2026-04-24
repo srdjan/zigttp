@@ -195,7 +195,11 @@ fn printAutoloopOutcome(
     try w.print("iterations: {d}\n", .{outcome.iterations});
     try w.writeAll("goals:\n");
     for (goals) |goal| {
-        const met = if (props) |p| session_state.propertyByName(p, goal) else false;
+        // .achieved means pi_goal_check reported ok for every requested goal
+        // on this handler, even when no patch was needed and the transcript
+        // holds no VerifiedPatch snapshot to derive properties from.
+        const met = outcome.verdict == .achieved or
+            (if (props) |p| session_state.propertyByName(p, goal) else false);
         try w.print("  {s} {s}\n", .{ if (met) "[x]" else "[ ]", goal });
     }
     if (outcome.final_patch_hash) |hash| {

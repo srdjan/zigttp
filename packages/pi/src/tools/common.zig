@@ -27,7 +27,21 @@ pub const CommandOutcome = struct {
 };
 
 pub fn workspaceRoot(allocator: std.mem.Allocator) ![]u8 {
-    return try std.fs.path.resolve(allocator, &.{"."});
+    // `std.fs.path.resolve(&.{"."})` in zig 0.16 returns "." verbatim rather
+    // than the absolute cwd, which breaks every isPathInsideRoot check that
+    // compares a workspace root against an absolute handler path. Resolve
+    // the real cwd explicitly; fall back to "." if the IO probe fails so
+    // test fixtures that never touch the filesystem still get a value.
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    // realPathFileAlloc returns a sentinel-terminated slice; dupe without the
+    // sentinel so callers can free with the same allocator they use for every
+    // other string in this module.
+    const cwd_z = std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io_backend.io(), ".", allocator) catch {
+        return try std.fs.path.resolve(allocator, &.{"."});
+    };
+    defer allocator.free(cwd_z);
+    return try allocator.dupe(u8, cwd_z);
 }
 
 /// Current unix time in milliseconds. `std.time.milliTimestamp` is unavailable
@@ -223,9 +237,10 @@ test "relativeToRoot: strips the root prefix and separator" {
     try testing.expectEqualStrings("sub/handler.ts", relativeToRoot("/tmp/ws", "/tmp/ws/sub/handler.ts"));
 }
 
-test "workspaceRoot: returns a non-empty allocator-owned path" {
+test "workspaceRoot: returns an absolute cwd path" {
     const allocator = testing.allocator;
     const root = try workspaceRoot(allocator);
     defer allocator.free(root);
     try testing.expect(root.len > 0);
+    try testing.expect(std.fs.path.isAbsolute(root));
 }

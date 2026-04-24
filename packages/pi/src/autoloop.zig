@@ -177,6 +177,12 @@ fn finalize(
 
 const GoalCheckResult = struct { ok: bool };
 
+// pi_goal_check and pi_repair_plan both set `ToolResult.ok` to reflect the
+// state of the thing they checked (goals met / no repair needed) rather than
+// "did the tool run". An unsatisfied goal returns ok=false with a populated
+// JSON body - that is exactly the signal the autoloop wants to drive its
+// next iteration against. Parse the body regardless; real invocation errors
+// surface through the Registry error set.
 fn invokePathGoalsTool(
     allocator: std.mem.Allocator,
     registry: *const registry_mod.Registry,
@@ -188,7 +194,6 @@ fn invokePathGoalsTool(
     defer allocator.free(args_json);
     var result = try registry.invokeJson(allocator, tool_name, args_json);
     defer result.deinit(allocator);
-    if (!result.ok) return error.ToolFailed;
     return allocator.dupe(u8, result.llm_text);
 }
 
