@@ -609,9 +609,7 @@ fn normalizeWorkspaceRoot(
         return std.fs.path.resolve(allocator, &.{workspace_root});
     }
 
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const cwd_real = std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io_backend.io(), ".", allocator) catch {
+    const cwd_real = tools_common.realCwd(allocator) catch {
         return std.fs.path.resolve(allocator, &.{workspace_root});
     };
     defer allocator.free(cwd_real);
