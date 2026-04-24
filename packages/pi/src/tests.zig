@@ -42,6 +42,7 @@ comptime {
     _ = @import("proof_enrichment.zig");
     _ = @import("witness_key.zig");
     _ = @import("session_state.zig");
+    _ = @import("autoloop.zig");
     _ = @import("agent.zig");
     _ = @import("providers/anthropic/events.zig");
     _ = @import("providers/anthropic/sse_parser.zig");
