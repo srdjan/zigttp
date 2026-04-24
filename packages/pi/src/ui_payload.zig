@@ -437,6 +437,11 @@ pub const VerifiedPatchPayload = struct {
     rule_citations: [][]u8,
     repair_plan_ids: [][]u8 = &.{},
     closed_witness_ids: [][]u8 = &.{},
+    patch_hash: ?[32]u8 = null,
+    parent_hash: ?[32]u8 = null,
+    goal_context: [][]u8 = &.{},
+    witnesses_defeated: [][]u8 = &.{},
+    witnesses_new: [][]u8 = &.{},
     post_apply_ok: bool,
     post_apply_summary: ?[]u8,
 
@@ -483,6 +488,12 @@ pub const VerifiedPatchPayload = struct {
         errdefer freeStringSlice(allocator, repair_plan_ids_copy);
         const closed_witness_ids_copy = try cloneStringSlice(allocator, self.closed_witness_ids);
         errdefer freeStringSlice(allocator, closed_witness_ids_copy);
+        const goal_context_copy = try cloneStringSlice(allocator, self.goal_context);
+        errdefer freeStringSlice(allocator, goal_context_copy);
+        const witnesses_defeated_copy = try cloneStringSlice(allocator, self.witnesses_defeated);
+        errdefer freeStringSlice(allocator, witnesses_defeated_copy);
+        const witnesses_new_copy = try cloneStringSlice(allocator, self.witnesses_new);
+        errdefer freeStringSlice(allocator, witnesses_new_copy);
         const post_apply_summary_copy: ?[]u8 = if (self.post_apply_summary) |s|
             try allocator.dupe(u8, s)
         else
@@ -505,6 +516,11 @@ pub const VerifiedPatchPayload = struct {
             .rule_citations = citations_copy,
             .repair_plan_ids = repair_plan_ids_copy,
             .closed_witness_ids = closed_witness_ids_copy,
+            .patch_hash = self.patch_hash,
+            .parent_hash = self.parent_hash,
+            .goal_context = goal_context_copy,
+            .witnesses_defeated = witnesses_defeated_copy,
+            .witnesses_new = witnesses_new_copy,
             .post_apply_ok = self.post_apply_ok,
             .post_apply_summary = post_apply_summary_copy,
         };
@@ -524,6 +540,9 @@ pub const VerifiedPatchPayload = struct {
         freeStringSlice(allocator, self.rule_citations);
         freeStringSlice(allocator, self.repair_plan_ids);
         freeStringSlice(allocator, self.closed_witness_ids);
+        freeStringSlice(allocator, self.goal_context);
+        freeStringSlice(allocator, self.witnesses_defeated);
+        freeStringSlice(allocator, self.witnesses_new);
         if (self.post_apply_summary) |s| allocator.free(s);
         self.* = .{
             .file = &.{},
@@ -542,6 +561,11 @@ pub const VerifiedPatchPayload = struct {
             .rule_citations = &.{},
             .repair_plan_ids = &.{},
             .closed_witness_ids = &.{},
+            .patch_hash = null,
+            .parent_hash = null,
+            .goal_context = &.{},
+            .witnesses_defeated = &.{},
+            .witnesses_new = &.{},
             .post_apply_ok = false,
             .post_apply_summary = null,
         };
@@ -934,6 +958,42 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
                 try json_writer.writeString(writer, closed_id);
             }
             try writer.writeByte(']');
+            if (patch.patch_hash) |hash| {
+                try writer.writeAll(",\"patch_hash\":\"");
+                const hex = std.fmt.bytesToHex(hash, .lower);
+                try writer.writeAll(&hex);
+                try writer.writeByte('"');
+            }
+            if (patch.parent_hash) |hash| {
+                try writer.writeAll(",\"parent_hash\":\"");
+                const hex = std.fmt.bytesToHex(hash, .lower);
+                try writer.writeAll(&hex);
+                try writer.writeByte('"');
+            }
+            if (patch.goal_context.len > 0) {
+                try writer.writeAll(",\"goal_context\":[");
+                for (patch.goal_context, 0..) |goal, i| {
+                    if (i > 0) try writer.writeByte(',');
+                    try json_writer.writeString(writer, goal);
+                }
+                try writer.writeByte(']');
+            }
+            if (patch.witnesses_defeated.len > 0) {
+                try writer.writeAll(",\"witnesses_defeated\":[");
+                for (patch.witnesses_defeated, 0..) |key, i| {
+                    if (i > 0) try writer.writeByte(',');
+                    try json_writer.writeString(writer, key);
+                }
+                try writer.writeByte(']');
+            }
+            if (patch.witnesses_new.len > 0) {
+                try writer.writeAll(",\"witnesses_new\":[");
+                for (patch.witnesses_new, 0..) |key, i| {
+                    if (i > 0) try writer.writeByte(',');
+                    try json_writer.writeString(writer, key);
+                }
+                try writer.writeByte(']');
+            }
             try writer.writeAll(",\"post_apply_ok\":");
             try writer.writeAll(if (patch.post_apply_ok) "true" else "false");
             if (patch.post_apply_summary) |s| {
@@ -1131,6 +1191,14 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         errdefer freeStringSlice(allocator, repair_plan_ids);
         const closed_witness_ids = try parseStringArrayField(allocator, obj.get("closed_witness_ids"));
         errdefer freeStringSlice(allocator, closed_witness_ids);
+        const goal_context = try parseStringArrayField(allocator, obj.get("goal_context"));
+        errdefer freeStringSlice(allocator, goal_context);
+        const witnesses_defeated = try parseStringArrayField(allocator, obj.get("witnesses_defeated"));
+        errdefer freeStringSlice(allocator, witnesses_defeated);
+        const witnesses_new = try parseStringArrayField(allocator, obj.get("witnesses_new"));
+        errdefer freeStringSlice(allocator, witnesses_new);
+        const patch_hash_opt = try parseHash32(obj.get("patch_hash"));
+        const parent_hash_opt = try parseHash32(obj.get("parent_hash"));
 
         const file_copy = try allocator.dupe(u8, file);
         errdefer allocator.free(file_copy);
@@ -1172,12 +1240,45 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             .rule_citations = rule_citations,
             .repair_plan_ids = repair_plan_ids,
             .closed_witness_ids = closed_witness_ids,
+            .patch_hash = patch_hash_opt,
+            .parent_hash = parent_hash_opt,
+            .goal_context = goal_context,
+            .witnesses_defeated = witnesses_defeated,
+            .witnesses_new = witnesses_new,
             .post_apply_ok = post_apply_ok,
             .post_apply_summary = post_apply_summary_copy,
         } };
     }
 
     return error.InvalidUiPayload;
+}
+
+fn parseHash32(value_opt: ?std.json.Value) !?[32]u8 {
+    const value = value_opt orelse return null;
+    return switch (value) {
+        .null => null,
+        .string => |s| blk: {
+            if (s.len != 64) return error.InvalidUiPayload;
+            var out: [32]u8 = undefined;
+            var i: usize = 0;
+            while (i < 32) : (i += 1) {
+                const hi = hexNibble(s[i * 2]) orelse return error.InvalidUiPayload;
+                const lo = hexNibble(s[i * 2 + 1]) orelse return error.InvalidUiPayload;
+                out[i] = (hi << 4) | lo;
+            }
+            break :blk out;
+        },
+        else => error.InvalidUiPayload,
+    };
+}
+
+fn hexNibble(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
 }
 
 fn writePropertiesSnapshot(writer: *std.Io.Writer, snapshot: ?PropertiesSnapshot) !void {
@@ -1648,6 +1749,32 @@ test "verified_patch payload round-trips with rich proof metadata" {
             .warnings = warnings,
         },
         .rule_citations = citations,
+        .patch_hash = blk: {
+            var bytes: [32]u8 = undefined;
+            for (&bytes, 0..) |*b, i| b.* = @intCast(i);
+            break :blk bytes;
+        },
+        .parent_hash = blk: {
+            var bytes: [32]u8 = undefined;
+            for (&bytes, 0..) |*b, i| b.* = @intCast(31 - i);
+            break :blk bytes;
+        },
+        .goal_context = blk: {
+            const goals = try testing.allocator.alloc([]u8, 2);
+            goals[0] = try testing.allocator.dupe(u8, "retry_safe");
+            goals[1] = try testing.allocator.dupe(u8, "no_secret_leakage");
+            break :blk goals;
+        },
+        .witnesses_defeated = blk: {
+            const keys = try testing.allocator.alloc([]u8, 1);
+            keys[0] = try testing.allocator.dupe(u8, "d" ** 64);
+            break :blk keys;
+        },
+        .witnesses_new = blk: {
+            const keys = try testing.allocator.alloc([]u8, 1);
+            keys[0] = try testing.allocator.dupe(u8, "e" ** 64);
+            break :blk keys;
+        },
         .post_apply_ok = true,
         .post_apply_summary = try testing.allocator.dupe(u8, "post-apply verification passed"),
     } };
@@ -1687,9 +1814,71 @@ test "verified_patch payload round-trips with rich proof metadata" {
             try testing.expect(patch.post_apply_ok);
             try testing.expect(patch.post_apply_summary != null);
             try testing.expectEqualStrings("post-apply verification passed", patch.post_apply_summary.?);
+            try testing.expect(patch.patch_hash != null);
+            try testing.expect(patch.parent_hash != null);
+            try testing.expectEqual(@as(u8, 0), patch.patch_hash.?[0]);
+            try testing.expectEqual(@as(u8, 31), patch.patch_hash.?[31]);
+            try testing.expectEqual(@as(u8, 31), patch.parent_hash.?[0]);
+            try testing.expectEqual(@as(u8, 0), patch.parent_hash.?[31]);
+            try testing.expectEqual(@as(usize, 2), patch.goal_context.len);
+            try testing.expectEqualStrings("retry_safe", patch.goal_context[0]);
+            try testing.expectEqualStrings("no_secret_leakage", patch.goal_context[1]);
+            try testing.expectEqual(@as(usize, 1), patch.witnesses_defeated.len);
+            try testing.expectEqualStrings("d" ** 64, patch.witnesses_defeated[0]);
+            try testing.expectEqual(@as(usize, 1), patch.witnesses_new.len);
+            try testing.expectEqualStrings("e" ** 64, patch.witnesses_new[0]);
         },
         else => return error.TestFailed,
     }
+}
+
+test "verified_patch chain metadata defaults when omitted from JSON" {
+    const json =
+        \\{
+        \\  "kind":"verified_patch",
+        \\  "file":"new.ts",
+        \\  "policy_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        \\  "stats":{"total":0,"new":0},
+        \\  "before":null,
+        \\  "after":"export default {}",
+        \\  "post_apply_ok":true
+        \\}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    var payload = try parse(testing.allocator, parsed.value);
+    defer payload.deinit(testing.allocator);
+
+    switch (payload) {
+        .verified_patch => |patch| {
+            try testing.expect(patch.patch_hash == null);
+            try testing.expect(patch.parent_hash == null);
+            try testing.expectEqual(@as(usize, 0), patch.goal_context.len);
+            try testing.expectEqual(@as(usize, 0), patch.witnesses_defeated.len);
+            try testing.expectEqual(@as(usize, 0), patch.witnesses_new.len);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "verified_patch parser rejects malformed patch_hash hex" {
+    const json =
+        \\{
+        \\  "kind":"verified_patch",
+        \\  "file":"new.ts",
+        \\  "policy_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        \\  "stats":{"total":0,"new":0},
+        \\  "before":null,
+        \\  "after":"export default {}",
+        \\  "post_apply_ok":true,
+        \\  "patch_hash":"not-a-hex-string"
+        \\}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    try testing.expectError(error.InvalidUiPayload, parse(testing.allocator, parsed.value));
 }
 
 test "verified_patch parser accepts legacy minimal schema" {

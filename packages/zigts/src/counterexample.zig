@@ -110,6 +110,14 @@ pub const CounterexampleWitness = struct {
     property: PropertyTag,
     origin: SourceSpan,
     sink: SourceSpan,
+    /// Stable AST node identifier for the origin endpoint, or null if the
+    /// producer has not yet wired node-level identity. Node IDs survive
+    /// line/column shifts caused by edits above the site, so witness
+    /// identity tracked by (property, origin_node_id, sink_node_id) does
+    /// not flip false-positive when a patch inserts unrelated lines above
+    /// the witnessing path.
+    origin_node_id: ?u32 = null,
+    sink_node_id: ?u32 = null,
     summary: []const u8,
     request: ConcreteRequest,
     io_stubs: []const IoStubEntry,
@@ -121,6 +129,47 @@ pub const CounterexampleWitness = struct {
         allocator.free(self.io_stubs);
         self.* = undefined;
     }
+
+    /// Write a stable structural key for this witness. Prefers AST node
+    /// IDs when present on either endpoint; falls back to line/column so
+    /// callers that have not yet adopted node-level tracking still get a
+    /// deterministic key. The output is a sha256 hex digest over the
+    /// chosen fields, which lets consumers compare witnesses with
+    /// constant-time byte equality.
+    pub fn stableKey(self: CounterexampleWitness, writer: anytype) !void {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(self.property.asString());
+        hasher.update("\x00");
+        if (self.origin_node_id) |id| {
+            hasher.update("n");
+            var buf: [4]u8 = undefined;
+            std.mem.writeInt(u32, &buf, id, .big);
+            hasher.update(&buf);
+        } else {
+            hasher.update("l");
+            var buf: [8]u8 = undefined;
+            std.mem.writeInt(u32, buf[0..4], self.origin.line, .big);
+            std.mem.writeInt(u32, buf[4..8], self.origin.column, .big);
+            hasher.update(&buf);
+        }
+        hasher.update("\x00");
+        if (self.sink_node_id) |id| {
+            hasher.update("n");
+            var buf: [4]u8 = undefined;
+            std.mem.writeInt(u32, &buf, id, .big);
+            hasher.update(&buf);
+        } else {
+            hasher.update("l");
+            var buf: [8]u8 = undefined;
+            std.mem.writeInt(u32, buf[0..4], self.sink.line, .big);
+            std.mem.writeInt(u32, buf[4..8], self.sink.column, .big);
+            hasher.update(&buf);
+        }
+        var digest: [32]u8 = undefined;
+        hasher.final(&digest);
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        try writer.writeAll(&hex);
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -131,6 +180,8 @@ pub const WitnessInput = struct {
     property: PropertyTag,
     origin: SourceSpan,
     sink: SourceSpan,
+    origin_node_id: ?u32 = null,
+    sink_node_id: ?u32 = null,
     summary: []const u8,
     constraints: []const WitnessConstraint,
     io_calls: []const TrackedIoCall,
@@ -158,6 +209,8 @@ pub fn solve(
         .property = input.property,
         .origin = input.origin,
         .sink = input.sink,
+        .origin_node_id = input.origin_node_id,
+        .sink_node_id = input.sink_node_id,
         .summary = input.summary,
         .request = request,
         .io_stubs = io_stubs,
@@ -313,15 +366,27 @@ fn stubValue(returns: mb.ReturnKind, truthy: bool) []const u8 {
 
 pub fn writeJsonl(writer: anytype, witness: CounterexampleWitness) !void {
     try writer.print(
-        "{{\"type\":\"witness\",\"property\":\"{s}\",\"origin\":{{\"line\":{d},\"column\":{d}}},\"sink\":{{\"line\":{d},\"column\":{d}}},\"summary\":",
+        "{{\"type\":\"witness\",\"property\":\"{s}\",\"origin\":{{\"line\":{d},\"column\":{d}",
         .{
             witness.property.asString(),
             witness.origin.line,
             witness.origin.column,
+        },
+    );
+    if (witness.origin_node_id) |id| {
+        try writer.print(",\"node_id\":{d}", .{id});
+    }
+    try writer.print(
+        "}},\"sink\":{{\"line\":{d},\"column\":{d}",
+        .{
             witness.sink.line,
             witness.sink.column,
         },
     );
+    if (witness.sink_node_id) |id| {
+        try writer.print(",\"node_id\":{d}", .{id});
+    }
+    try writer.writeAll("},\"summary\":");
     try json_utils.writeJsonString(writer, witness.summary);
     try writer.writeAll("}\n");
 
@@ -576,6 +641,155 @@ test "writeJsonl emits witness + request + io in trace-compatible order" {
         line_count += 1;
     };
     try std.testing.expectEqual(@as(usize, 3), line_count);
+}
+
+test "solve preserves origin_node_id and sink_node_id when supplied" {
+    const allocator = std.testing.allocator;
+    var witness = try solve(allocator, .{
+        .property = .no_secret_leakage,
+        .origin = .{ .line = 10, .column = 3 },
+        .sink = .{ .line = 22, .column = 7 },
+        .origin_node_id = 41,
+        .sink_node_id = 97,
+        .summary = "node-id carried",
+        .constraints = &.{},
+        .io_calls = &.{},
+    });
+    defer witness.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, 41), witness.origin_node_id);
+    try std.testing.expectEqual(@as(?u32, 97), witness.sink_node_id);
+}
+
+test "stableKey is stable across line shifts when node ids are present" {
+    const allocator = std.testing.allocator;
+
+    var a = try solve(allocator, .{
+        .property = .no_secret_leakage,
+        .origin = .{ .line = 5, .column = 3 },
+        .sink = .{ .line = 12, .column = 7 },
+        .origin_node_id = 41,
+        .sink_node_id = 97,
+        .summary = "before-insert",
+        .constraints = &.{},
+        .io_calls = &.{},
+    });
+    defer a.deinit(allocator);
+
+    var b = try solve(allocator, .{
+        .property = .no_secret_leakage,
+        .origin = .{ .line = 18, .column = 3 },
+        .sink = .{ .line = 25, .column = 7 },
+        .origin_node_id = 41,
+        .sink_node_id = 97,
+        .summary = "after-insert-above",
+        .constraints = &.{},
+        .io_calls = &.{},
+    });
+    defer b.deinit(allocator);
+
+    var buf_a: std.ArrayList(u8) = .empty;
+    defer buf_a.deinit(allocator);
+    var aw_a: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf_a);
+    try a.stableKey(&aw_a.writer);
+    buf_a = aw_a.toArrayList();
+
+    var buf_b: std.ArrayList(u8) = .empty;
+    defer buf_b.deinit(allocator);
+    var aw_b: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf_b);
+    try b.stableKey(&aw_b.writer);
+    buf_b = aw_b.toArrayList();
+
+    try std.testing.expectEqualStrings(buf_a.items, buf_b.items);
+    try std.testing.expectEqual(@as(usize, 64), buf_a.items.len);
+}
+
+test "stableKey differs when node ids differ" {
+    const allocator = std.testing.allocator;
+
+    var a = try solve(allocator, .{
+        .property = .no_secret_leakage,
+        .origin = .{ .line = 5, .column = 3 },
+        .sink = .{ .line = 12, .column = 7 },
+        .origin_node_id = 41,
+        .sink_node_id = 97,
+        .summary = "a",
+        .constraints = &.{},
+        .io_calls = &.{},
+    });
+    defer a.deinit(allocator);
+
+    var b = try solve(allocator, .{
+        .property = .no_secret_leakage,
+        .origin = .{ .line = 5, .column = 3 },
+        .sink = .{ .line = 12, .column = 7 },
+        .origin_node_id = 42,
+        .sink_node_id = 97,
+        .summary = "b",
+        .constraints = &.{},
+        .io_calls = &.{},
+    });
+    defer b.deinit(allocator);
+
+    var buf_a: std.ArrayList(u8) = .empty;
+    defer buf_a.deinit(allocator);
+    var aw_a: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf_a);
+    try a.stableKey(&aw_a.writer);
+    buf_a = aw_a.toArrayList();
+
+    var buf_b: std.ArrayList(u8) = .empty;
+    defer buf_b.deinit(allocator);
+    var aw_b: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf_b);
+    try b.stableKey(&aw_b.writer);
+    buf_b = aw_b.toArrayList();
+
+    try std.testing.expect(!std.mem.eql(u8, buf_a.items, buf_b.items));
+}
+
+test "stableKey falls back to line/column when node ids are absent" {
+    const allocator = std.testing.allocator;
+
+    var w = try solve(allocator, .{
+        .property = .injection_safe,
+        .origin = .{ .line = 7, .column = 2 },
+        .sink = .{ .line = 9, .column = 4 },
+        .summary = "fallback",
+        .constraints = &.{},
+        .io_calls = &.{},
+    });
+    defer w.deinit(allocator);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try w.stableKey(&aw.writer);
+    buf = aw.toArrayList();
+
+    try std.testing.expectEqual(@as(usize, 64), buf.items.len);
+}
+
+test "writeJsonl emits node_id fields when present" {
+    const allocator = std.testing.allocator;
+    var witness = try solve(allocator, .{
+        .property = .no_secret_leakage,
+        .origin = .{ .line = 3, .column = 9 },
+        .sink = .{ .line = 5, .column = 12 },
+        .origin_node_id = 11,
+        .sink_node_id = 22,
+        .summary = "with-node-ids",
+        .constraints = &.{},
+        .io_calls = &.{},
+    });
+    defer witness.deinit(allocator);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try writeJsonl(&aw.writer, witness);
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"node_id\":11") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"node_id\":22") != null);
 }
 
 test "writeJsonl escapes control characters and quotes in summary" {

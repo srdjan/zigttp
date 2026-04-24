@@ -56,6 +56,15 @@ pub const BuildVerifiedPatchOptions = struct {
     post_apply_summary: ?[]const u8 = null,
     transcript: ?*const transcript_mod.Transcript = null,
     repair_plan_ids: []const []const u8 = &.{},
+    /// If null, buildVerifiedPatchPayload computes a patch_hash from
+    /// sha256(normalized_before ++ "\x00" ++ unified_diff). Callers that
+    /// already know the hash (the autoloop orchestrator caches it across
+    /// turns) can supply it directly to avoid a redundant hash pass.
+    patch_hash: ?[32]u8 = null,
+    parent_hash: ?[32]u8 = null,
+    goal_context: []const []const u8 = &.{},
+    witnesses_defeated: []const []const u8 = &.{},
+    witnesses_new: []const []const u8 = &.{},
 };
 
 pub fn buildVerifiedPatchPayload(
@@ -90,6 +99,14 @@ pub fn buildVerifiedPatchPayload(
     errdefer if (post_apply_summary_copy) |summary| allocator.free(summary);
     const repair_plan_ids_copy = try cloneStringSlice(allocator, options.repair_plan_ids);
     errdefer freeStringSlice(allocator, repair_plan_ids_copy);
+    const goal_context_copy = try cloneStringSlice(allocator, options.goal_context);
+    errdefer freeStringSlice(allocator, goal_context_copy);
+    const witnesses_defeated_copy = try cloneStringSlice(allocator, options.witnesses_defeated);
+    errdefer freeStringSlice(allocator, witnesses_defeated_copy);
+    const witnesses_new_copy = try cloneStringSlice(allocator, options.witnesses_new);
+    errdefer freeStringSlice(allocator, witnesses_new_copy);
+
+    const patch_hash_value: [32]u8 = options.patch_hash orelse computePatchHash(options.before, analysis.unified_diff);
 
     const payload = ui_payload.VerifiedPatchPayload{
         .file = file_copy,
@@ -107,6 +124,11 @@ pub fn buildVerifiedPatchPayload(
         .system = analysis.system,
         .rule_citations = analysis.rule_citations,
         .repair_plan_ids = repair_plan_ids_copy,
+        .patch_hash = patch_hash_value,
+        .parent_hash = options.parent_hash,
+        .goal_context = goal_context_copy,
+        .witnesses_defeated = witnesses_defeated_copy,
+        .witnesses_new = witnesses_new_copy,
         .post_apply_ok = options.post_apply_ok,
         .post_apply_summary = post_apply_summary_copy,
     };
@@ -117,6 +139,23 @@ pub fn buildVerifiedPatchPayload(
     analysis.system = null;
     analysis.rule_citations = &.{};
     return payload;
+}
+
+/// Compute a deterministic content hash for chaining VerifiedPatch events.
+///
+/// The hash keys the "before" source (empty for root patches on new files)
+/// together with the unified diff. Using the diff rather than the "after"
+/// source means a cosmetic formatter pass that rewrites the whole file but
+/// produces an empty diff yields the same hash as its parent - chain
+/// continuity is preserved across reformatting.
+pub fn computePatchHash(before: ?[]const u8, unified_diff: []const u8) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    if (before) |bytes| hasher.update(bytes);
+    hasher.update("\x00");
+    hasher.update(unified_diff);
+    var out: [32]u8 = undefined;
+    hasher.final(&out);
+    return out;
 }
 
 fn cloneStringSlice(allocator: std.mem.Allocator, items: []const []const u8) ![][]u8 {
