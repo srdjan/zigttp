@@ -37,6 +37,7 @@ fn runExpertCommand(argv: []const []const u8, allocator: std.mem.Allocator) !voi
                 if (i + 1 < argv.len) i += 1;
                 continue;
             }
+            if (isExpertValueTakingFlagEq(arg)) continue;
             std.debug.print("zigts expert does not accept flag '{s}'. See `zigts expert --help`.\n", .{arg});
             std.process.exit(1);
         }
@@ -59,6 +60,18 @@ fn isExpertBareFlag(arg: []const u8) bool {
 fn isExpertValueTakingFlag(arg: []const u8) bool {
     for (pi_app.value_taking_flags) |name| {
         if (std.mem.eql(u8, arg, name)) return true;
+    }
+    return false;
+}
+
+fn isExpertValueTakingFlagEq(arg: []const u8) bool {
+    for (pi_app.value_taking_flags) |name| {
+        if (arg.len > name.len and
+            std.mem.startsWith(u8, arg, name) and
+            arg[name.len] == '=')
+        {
+            return true;
+        }
     }
     return false;
 }
