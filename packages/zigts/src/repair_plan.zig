@@ -113,12 +113,19 @@ pub fn fromFlowDiagnostic(
             .kind = .redact_sensitive_sink,
             .target = target,
             .behavioral_change = true,
-            .summary = "Stop the labelled value from reaching the sink on this witnessed path.",
+            .summary = "Return before the witnessed sink so the labelled value is unreachable on this path.",
+            // v1 apply only supports line insertions, so we close the sink
+            // path with an early return rather than mutating the sink
+            // argument. The property (no secret reaches the response) is
+            // achieved; the handler's behaviour on the witnessed request
+            // changes to a 500. Callers that want the original response
+            // shape back should follow up with a semantic repair once
+            // replace_sink_expression is apply-supported.
             .edit_intent = .{
-                .kind = .replace_sink_expression,
+                .kind = .insert_guard_before_line,
                 .line = target.line,
                 .column = target.column,
-                .template = "Replace the sink argument with a non-secret value, or return before this sink on the witnessed path.",
+                .template = "return Response.json({ error: \"redacted to preserve no_secret_leakage\" }, { status: 500 });",
             },
         },
         .injection_safe => .{
@@ -161,5 +168,7 @@ test "flow diagnostics map to property repair plans" {
     };
     const plan = fromFlowDiagnostic(diag, .no_secret_leakage, .{ .line = 7, .column = 17 }) orelse return error.MissingPlan;
     try std.testing.expectEqual(RepairKind.redact_sensitive_sink, plan.kind);
+    try std.testing.expectEqual(EditIntentKind.insert_guard_before_line, plan.edit_intent.kind);
+    try std.testing.expect(std.mem.indexOf(u8, plan.edit_intent.template, "return Response") != null);
     try std.testing.expect(plan.closesProperty(.no_secret_leakage));
 }

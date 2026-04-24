@@ -96,7 +96,7 @@ pub fn drive(
             return finalize(allocator, transcript, options, .stalled, iter);
         }
 
-        const applied_this_iter = try applyPlans(
+        const apply_outcome = try applyPlans(
             allocator,
             registry,
             transcript,
@@ -104,9 +104,13 @@ pub fn drive(
             plans.items,
         );
 
+        if (apply_outcome.regression) {
+            return finalize(allocator, transcript, options, .regression_blocked, iter + 1);
+        }
+
         const current_met = countMetGoals(transcript, options.file, options.goals);
-        if (current_met <= last_goals_met_count and applied_this_iter > 0) {
-            patches_without_progress += applied_this_iter;
+        if (current_met <= last_goals_met_count and apply_outcome.applied > 0) {
+            patches_without_progress += apply_outcome.applied;
             if (patches_without_progress >= options.budget.max_patches_without_progress) {
                 return finalize(allocator, transcript, options, .stalled, iter + 1);
             }
@@ -357,13 +361,18 @@ fn buildApplyArgsJson(
     return buf.toOwnedSlice(allocator);
 }
 
+const ApplyOutcome = struct {
+    applied: u32,
+    regression: bool = false,
+};
+
 fn applyPlans(
     allocator: std.mem.Allocator,
     registry: *const registry_mod.Registry,
     transcript: *transcript_mod.Transcript,
     options: DriveOptions,
     plans: []const RepairPlan,
-) !u32 {
+) !ApplyOutcome {
     var applied: u32 = 0;
     for (plans) |plan| {
         var candidate = invokeApply(allocator, registry, options.file, plan.raw_json) catch |err| switch (err) {
@@ -404,10 +413,16 @@ fn applyPlans(
         });
         errdefer payload.deinit(allocator);
 
+        const regressed = detectRegression(payload);
+
         const summary = try std.fmt.allocPrint(
             allocator,
-            "autoloop verified: {s} (plan {s})",
-            .{ options.file, plan.id },
+            "autoloop {s}: {s} (plan {s})",
+            .{
+                if (regressed) "reverted" else "verified",
+                options.file,
+                plan.id,
+            },
         );
         errdefer allocator.free(summary);
 
@@ -424,9 +439,52 @@ fn applyPlans(
             } });
         }
 
+        if (regressed) {
+            // Roll the file back. The verified_patch entry stays in the
+            // transcript as an audit record of the attempt; the autoloop
+            // signals regression_blocked up to drive() so the session
+            // stops rather than keep trying past a property demotion.
+            zigts.file_io.writeFile(allocator, absolute, before) catch {
+                return error.FileWriteFailed;
+            };
+            if (options.events_path) |path| {
+                const note = try std.fmt.allocPrint(
+                    allocator,
+                    "autoloop: plan {s} demoted a property; reverted {s} to the pre-patch snapshot.",
+                    .{ plan.id, options.file },
+                );
+                defer allocator.free(note);
+                try session_events.appendEvent(allocator, path, .{ .system_note = note });
+            }
+            return .{ .applied = applied, .regression = true };
+        }
+
         applied += 1;
     }
-    return applied;
+    return .{ .applied = applied };
+}
+
+/// A patch regresses if any bool property that was true in `before` is false
+/// in `after`. Witness-delta regression (a patch that closes one witness but
+/// introduces a different one) would also count, but witnesses_new is not
+/// populated from the autoloop yet - that lives with the goal-check diff
+/// step that D2 deferred.
+fn detectRegression(payload: ui_payload.VerifiedPatchPayload) bool {
+    const after = payload.after_properties orelse return false;
+    const Visitor = struct {
+        found: bool = false,
+        pub fn visit(self: *@This(), change: ui_payload.PropertiesSnapshot.Change) !void {
+            if (change.kind == .demoted) self.found = true;
+        }
+    };
+    var visitor: Visitor = .{};
+    ui_payload.PropertiesSnapshot.forEachChange(
+        payload.before_properties,
+        after,
+        *Visitor,
+        &visitor,
+    ) catch return false;
+    return visitor.found;
 }
 
 // ---------------------------------------------------------------------------
@@ -599,6 +657,102 @@ test "drive returns .exhausted_iters when budget runs out" {
 
     try testing.expectEqual(AutoloopVerdict.exhausted_iters, outcome.verdict);
     try testing.expectEqual(@as(u32, 3), outcome.iterations);
+}
+
+test "detectRegression is true when any bool property demotes" {
+    const before: ui_payload.PropertiesSnapshot = .{
+        .pure = true, .read_only = true, .stateless = true, .retry_safe = true,
+        .deterministic = true, .has_egress = false, .no_secret_leakage = true,
+        .no_credential_leakage = true, .input_validated = true, .pii_contained = true,
+        .idempotent = true, .max_io_depth = 0, .injection_safe = true,
+        .state_isolated = true, .fault_covered = true, .result_safe = true,
+        .optional_safe = true,
+    };
+    var after = before;
+    after.pure = false;
+    const payload: ui_payload.VerifiedPatchPayload = .{
+        .file = @constCast(""),
+        .policy_hash = @constCast(""),
+        .applied_at_unix_ms = 0,
+        .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
+        .before = null,
+        .after = @constCast(""),
+        .unified_diff = @constCast(""),
+        .hunks = &.{},
+        .violations = &.{},
+        .before_properties = before,
+        .after_properties = after,
+        .prove = null,
+        .system = null,
+        .rule_citations = &.{},
+        .post_apply_ok = true,
+        .post_apply_summary = null,
+    };
+    try testing.expect(detectRegression(payload));
+}
+
+test "detectRegression is false when only promotions occur" {
+    var before: ui_payload.PropertiesSnapshot = .{
+        .pure = false, .read_only = false, .stateless = false, .retry_safe = false,
+        .deterministic = false, .has_egress = false, .no_secret_leakage = false,
+        .no_credential_leakage = false, .input_validated = false, .pii_contained = false,
+        .idempotent = false, .max_io_depth = null, .injection_safe = false,
+        .state_isolated = false, .fault_covered = false, .result_safe = false,
+        .optional_safe = false,
+    };
+    var after = before;
+    after.retry_safe = true;
+    after.no_secret_leakage = true;
+    const payload: ui_payload.VerifiedPatchPayload = .{
+        .file = @constCast(""),
+        .policy_hash = @constCast(""),
+        .applied_at_unix_ms = 0,
+        .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
+        .before = null,
+        .after = @constCast(""),
+        .unified_diff = @constCast(""),
+        .hunks = &.{},
+        .violations = &.{},
+        .before_properties = before,
+        .after_properties = after,
+        .prove = null,
+        .system = null,
+        .rule_citations = &.{},
+        .post_apply_ok = true,
+        .post_apply_summary = null,
+    };
+    _ = &before;
+    try testing.expect(!detectRegression(payload));
+}
+
+test "detectRegression is false when before_properties is absent" {
+    const after: ui_payload.PropertiesSnapshot = .{
+        .pure = false, .read_only = false, .stateless = false, .retry_safe = false,
+        .deterministic = false, .has_egress = false, .no_secret_leakage = false,
+        .no_credential_leakage = false, .input_validated = false, .pii_contained = false,
+        .idempotent = false, .max_io_depth = null, .injection_safe = false,
+        .state_isolated = false, .fault_covered = false, .result_safe = false,
+        .optional_safe = false,
+    };
+    const payload: ui_payload.VerifiedPatchPayload = .{
+        .file = @constCast(""),
+        .policy_hash = @constCast(""),
+        .applied_at_unix_ms = 0,
+        .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
+        .before = null,
+        .after = @constCast(""),
+        .unified_diff = @constCast(""),
+        .hunks = &.{},
+        .violations = &.{},
+        .before_properties = null,
+        .after_properties = after,
+        .prove = null,
+        .system = null,
+        .rule_citations = &.{},
+        .post_apply_ok = true,
+        .post_apply_summary = null,
+    };
+    try testing.expect(!detectRegression(payload));
 }
 
 test "parseRepairPlans handles missing plans field as empty list" {
