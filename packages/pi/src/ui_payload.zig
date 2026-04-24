@@ -970,30 +970,9 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
                 try writer.writeAll(&hex);
                 try writer.writeByte('"');
             }
-            if (patch.goal_context.len > 0) {
-                try writer.writeAll(",\"goal_context\":[");
-                for (patch.goal_context, 0..) |goal, i| {
-                    if (i > 0) try writer.writeByte(',');
-                    try json_writer.writeString(writer, goal);
-                }
-                try writer.writeByte(']');
-            }
-            if (patch.witnesses_defeated.len > 0) {
-                try writer.writeAll(",\"witnesses_defeated\":[");
-                for (patch.witnesses_defeated, 0..) |key, i| {
-                    if (i > 0) try writer.writeByte(',');
-                    try json_writer.writeString(writer, key);
-                }
-                try writer.writeByte(']');
-            }
-            if (patch.witnesses_new.len > 0) {
-                try writer.writeAll(",\"witnesses_new\":[");
-                for (patch.witnesses_new, 0..) |key, i| {
-                    if (i > 0) try writer.writeByte(',');
-                    try json_writer.writeString(writer, key);
-                }
-                try writer.writeByte(']');
-            }
+            try writeOptionalStringArray(writer, "goal_context", patch.goal_context);
+            try writeOptionalStringArray(writer, "witnesses_defeated", patch.witnesses_defeated);
+            try writeOptionalStringArray(writer, "witnesses_new", patch.witnesses_new);
             try writer.writeAll(",\"post_apply_ok\":");
             try writer.writeAll(if (patch.post_apply_ok) "true" else "false");
             if (patch.post_apply_summary) |s| {
@@ -1279,6 +1258,22 @@ fn hexNibble(c: u8) ?u8 {
         'A'...'F' => c - 'A' + 10,
         else => null,
     };
+}
+
+fn writeOptionalStringArray(
+    writer: *std.Io.Writer,
+    field_name: []const u8,
+    items: []const []u8,
+) !void {
+    if (items.len == 0) return;
+    try writer.writeAll(",\"");
+    try writer.writeAll(field_name);
+    try writer.writeAll("\":[");
+    for (items, 0..) |item, i| {
+        if (i > 0) try writer.writeByte(',');
+        try json_writer.writeString(writer, item);
+    }
+    try writer.writeByte(']');
 }
 
 fn writePropertiesSnapshot(writer: *std.Io.Writer, snapshot: ?PropertiesSnapshot) !void {
