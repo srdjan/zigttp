@@ -8,6 +8,7 @@ const loop = @import("loop.zig");
 const print_mode = @import("print_mode.zig");
 const rpc_mode = @import("rpc_mode.zig");
 const ledger = @import("ledger.zig");
+const autoloop = @import("autoloop.zig");
 
 const meta_tool = @import("tools/zigts_expert_meta.zig");
 const verify_paths_tool = @import("tools/zigts_expert_verify_paths.zig");
@@ -73,7 +74,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
 
 /// Long flags whose next token is a value. `zigts_main.zig` consults this
 /// list so it can skip the value while scanning for stray positional args.
-pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode", "--tools", "--fork" };
+pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode", "--tools", "--fork", "--goal", "--max-iters", "--handler" };
 
 var captured_argv: ?[]const []const u8 = null;
 
@@ -144,6 +145,36 @@ pub fn run(allocator: std.mem.Allocator) !void {
             _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
             std.process.exit(2);
         },
+        error.MissingGoalValue => {
+            const msg = "error: --goal requires a comma-separated list of property tags\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.MissingMaxItersValue => {
+            const msg = "error: --max-iters requires a positive integer\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.InvalidMaxIters => {
+            const msg = "error: --max-iters must be a positive integer\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.MissingHandlerValue => {
+            const msg = "error: --handler requires a path value\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.GoalRequiresHandler => {
+            const msg = "error: --goal requires --handler <path>\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.GoalConflictsWithPrintOrRpc => {
+            const msg = "error: --goal cannot be combined with --print or --mode rpc\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
     };
 
     var registry = switch (flags.tools_preset) {
@@ -151,6 +182,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
         .minimal => try buildMinimalRegistry(allocator),
     };
     defer registry.deinit(allocator);
+
+    if (flags.goals != null) {
+        try runAutoloop(allocator, &registry, flags);
+        return;
+    }
 
     if (flags.rpc_mode) {
         try rpc_mode.run(allocator, &registry, flags, flags.policy orelse .auto_reject);
@@ -175,12 +211,115 @@ pub fn runLedgerCommand(allocator: std.mem.Allocator, argv: []const []const u8) 
     try ledger.runWithArgs(allocator, argv);
 }
 
+fn runAutoloop(
+    allocator: std.mem.Allocator,
+    registry: *const Registry,
+    flags: ExpertFlags,
+) !void {
+    const goals_csv = flags.goals orelse return;
+    const handler = flags.handler orelse return;
+
+    const goals = try splitCsv(allocator, goals_csv);
+    defer {
+        for (goals) |g| allocator.free(g);
+        allocator.free(goals);
+    }
+    if (goals.len == 0) {
+        const msg = "error: --goal list is empty\n";
+        _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+        std.process.exit(2);
+    }
+
+    const tools_common = @import("tools/common.zig");
+    const workspace_root = try tools_common.workspaceRoot(allocator);
+    defer allocator.free(workspace_root);
+
+    var transcript: @import("transcript.zig").Transcript = .{};
+    defer transcript.deinit(allocator);
+
+    var budget: autoloop.Budget = .{};
+    if (flags.max_iters) |n| budget.max_iterations = n;
+
+    const goal_slices = try allocator.alloc([]const u8, goals.len);
+    defer allocator.free(goal_slices);
+    for (goals, 0..) |g, i| goal_slices[i] = g;
+
+    const outcome = autoloop.drive(allocator, registry, &transcript, .{
+        .workspace_root = workspace_root,
+        .file = handler,
+        .goals = goal_slices,
+        .budget = budget,
+    }) catch |err| {
+        var stderr: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&stderr, "autoloop error: {s}\n", .{@errorName(err)}) catch "autoloop error\n";
+        _ = std.c.write(std.c.STDERR_FILENO, line.ptr, line.len);
+        std.process.exit(1);
+    };
+
+    try printAutoloopOutcome(allocator, outcome, &transcript, handler, goal_slices);
+    if (outcome.verdict != .achieved) std.process.exit(1);
+}
+
+fn printAutoloopOutcome(
+    allocator: std.mem.Allocator,
+    outcome: autoloop.Outcome,
+    transcript: *const @import("transcript.zig").Transcript,
+    file: []const u8,
+    goals: []const []const u8,
+) !void {
+    const session_state = @import("session_state.zig");
+    const props = session_state.currentProperties(transcript, file);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+
+    try w.print("autoloop verdict: {s}\n", .{@tagName(outcome.verdict)});
+    try w.print("iterations: {d}\n", .{outcome.iterations});
+    try w.writeAll("goals:\n");
+    for (goals) |goal| {
+        const met = if (props) |p| session_state.propertyByName(p, goal) else false;
+        try w.print("  {s} {s}\n", .{ if (met) "[x]" else "[ ]", goal });
+    }
+    if (outcome.final_patch_hash) |hash| {
+        const hex = std.fmt.bytesToHex(hash, .lower);
+        try w.writeAll("final_patch_hash: ");
+        try w.writeAll(&hex);
+        try w.writeByte('\n');
+    }
+
+    buf = aw.toArrayList();
+    _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+}
+
+fn splitCsv(allocator: std.mem.Allocator, csv: []const u8) ![][]u8 {
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (out.items) |s| allocator.free(s);
+        out.deinit(allocator);
+    }
+    var it = std.mem.splitScalar(u8, csv, ',');
+    while (it.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " \t");
+        if (trimmed.len == 0) continue;
+        try out.append(allocator, try allocator.dupe(u8, trimmed));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 pub const ToolsPreset = enum { full, minimal };
 
 fn parseToolsPreset(val: []const u8) !ToolsPreset {
     if (std.mem.eql(u8, val, "minimal")) return .minimal;
     if (std.mem.eql(u8, val, "full")) return .full;
     return error.UnsupportedToolsPreset;
+}
+
+fn parseMaxIters(val: []const u8) !u32 {
+    const n = std.fmt.parseInt(u32, val, 10) catch return error.InvalidMaxIters;
+    if (n == 0) return error.InvalidMaxIters;
+    return n;
 }
 
 fn setMode(out: *ExpertFlags, val: []const u8) !void {
@@ -215,6 +354,16 @@ pub const ExpertFlags = struct {
     /// exclusive with --print.
     rpc_mode: bool = false,
     tools_preset: ToolsPreset = .full,
+    /// Comma-separated property tags to drive convergence against. When
+    /// non-null, `zigts expert` short-circuits the conversational run and
+    /// invokes the autoloop orchestrator end-to-end.
+    goals: ?[]const u8 = null,
+    /// Iteration budget for the autoloop. When null, the orchestrator's
+    /// default (8) applies.
+    max_iters: ?u32 = null,
+    /// Handler path the autoloop operates on. Required whenever `goals` is
+    /// set; ignored otherwise.
+    handler: ?[]const u8 = null,
 };
 
 /// Scan argv for the expert launch flags. Unknown `--*` tokens are ignored so
@@ -280,6 +429,33 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
         if (std.mem.startsWith(u8, arg, "--mode=")) {
             try setMode(&out, arg["--mode=".len..]);
         }
+        if (std.mem.eql(u8, arg, "--goal")) {
+            if (i + 1 >= argv.len) return error.MissingGoalValue;
+            i += 1;
+            out.goals = argv[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--goal=")) {
+            out.goals = arg["--goal=".len..];
+        }
+        if (std.mem.eql(u8, arg, "--max-iters")) {
+            if (i + 1 >= argv.len) return error.MissingMaxItersValue;
+            i += 1;
+            out.max_iters = try parseMaxIters(argv[i]);
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--max-iters=")) {
+            out.max_iters = try parseMaxIters(arg["--max-iters=".len..]);
+        }
+        if (std.mem.eql(u8, arg, "--handler")) {
+            if (i + 1 >= argv.len) return error.MissingHandlerValue;
+            i += 1;
+            out.handler = argv[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--handler=")) {
+            out.handler = arg["--handler=".len..];
+        }
     }
     if (saw_yes and saw_no_edit) return error.MutuallyExclusiveApprovalFlags;
     if (out.resume_latest and out.session_id != null) return error.MutuallyExclusiveResumeFlags;
@@ -287,6 +463,8 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
     if (out.fork_session_id != null and out.session_id != null) return error.MutuallyExclusiveForkFlags;
     if (out.json_mode and out.print == null) return error.JsonModeRequiresPrint;
     if (out.rpc_mode and out.print != null) return error.RpcModeConflictsWithPrint;
+    if (out.goals != null and out.handler == null) return error.GoalRequiresHandler;
+    if (out.goals != null and (out.print != null or out.rpc_mode)) return error.GoalConflictsWithPrintOrRpc;
     if (saw_yes) {
         out.policy = .auto_approve;
     } else if (saw_no_edit) {
@@ -606,4 +784,62 @@ test "buildRegistry + dispatchLine end-to-end against every tool" {
 
     var search_outcome = try repl.dispatchLine(testing.allocator, &reg, "zigts_expert_search result");
     try expectOkContains(&search_outcome, testing.allocator, "\"code\":");
+}
+
+
+test "parseExpertFlags: --goal sets goals csv" {
+    const argv = [_][]const u8{ "zigts", "expert", "--handler", "handler.ts", "--goal", "retry_safe,pure" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqualStrings("retry_safe,pure", flags.goals.?);
+    try testing.expectEqualStrings("handler.ts", flags.handler.?);
+}
+
+test "parseExpertFlags: --goal= and --handler= attached forms" {
+    const argv = [_][]const u8{ "zigts", "expert", "--handler=h.ts", "--goal=retry_safe" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqualStrings("retry_safe", flags.goals.?);
+    try testing.expectEqualStrings("h.ts", flags.handler.?);
+}
+
+test "parseExpertFlags: --max-iters parses a positive integer" {
+    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "x", "--max-iters", "12" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(@as(u32, 12), flags.max_iters.?);
+}
+
+test "parseExpertFlags: --max-iters rejects zero" {
+    const argv = [_][]const u8{ "zigts", "expert", "--max-iters", "0" };
+    try testing.expectError(error.InvalidMaxIters, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --max-iters rejects non-numeric" {
+    const argv = [_][]const u8{ "zigts", "expert", "--max-iters", "abc" };
+    try testing.expectError(error.InvalidMaxIters, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --goal without --handler is rejected" {
+    const argv = [_][]const u8{ "zigts", "expert", "--goal", "retry_safe" };
+    try testing.expectError(error.GoalRequiresHandler, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --goal conflicts with --print" {
+    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "x", "--print", "hi" };
+    try testing.expectError(error.GoalConflictsWithPrintOrRpc, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --goal conflicts with --mode rpc" {
+    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "x", "--mode", "rpc" };
+    try testing.expectError(error.GoalConflictsWithPrintOrRpc, parseExpertFlags(argv[0..]));
+}
+
+test "splitCsv trims whitespace and drops empty entries" {
+    const parts = try splitCsv(testing.allocator, " a , b,, c ");
+    defer {
+        for (parts) |p| testing.allocator.free(p);
+        testing.allocator.free(parts);
+    }
+    try testing.expectEqual(@as(usize, 3), parts.len);
+    try testing.expectEqualStrings("a", parts[0]);
+    try testing.expectEqualStrings("b", parts[1]);
+    try testing.expectEqualStrings("c", parts[2]);
 }
