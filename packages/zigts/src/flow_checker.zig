@@ -61,19 +61,23 @@ pub const DiagnosticKind = enum {
     unvalidated_input_in_egress, // {user_input} without {validated} in fetchSync
 };
 
+/// Snapshot of the branch constraints and module calls observed on the
+/// path that witnessed a flow sink. Present on diagnostics whose kind
+/// maps to a `counterexample.PropertyTag`; the solver turns it into an
+/// executable request + stub sequence. Owned by the FlowChecker
+/// allocator; freed in `FlowChecker.deinit`.
+pub const Witness = struct {
+    path_constraints: []const counterexample.WitnessConstraint,
+    io_calls: []const counterexample.TrackedIoCall,
+};
+
 pub const Diagnostic = struct {
     severity: Severity,
     kind: DiagnosticKind,
     node: NodeIndex,
     message: []const u8,
     help: ?[]const u8,
-    /// Branch constraints accumulated on the path that witnessed this sink,
-    /// in source order. Owned by the FlowChecker allocator; freed in deinit.
-    /// The counterexample solver turns these into a concrete Request.
-    path_constraints: []const counterexample.WitnessConstraint = &.{},
-    /// Virtual-module calls visited on the witness path, in execution order.
-    /// Owned by the FlowChecker allocator; freed in deinit.
-    io_calls: []const counterexample.TrackedIoCall = &.{},
+    witness: ?Witness = null,
 };
 
 /// Map a diagnostic kind to the property tag it witnesses. `null` when the
@@ -263,8 +267,10 @@ pub const FlowChecker = struct {
 
     pub fn deinit(self: *FlowChecker) void {
         for (self.diagnostics.items) |d| {
-            if (d.path_constraints.len > 0) self.allocator.free(d.path_constraints);
-            if (d.io_calls.len > 0) self.allocator.free(d.io_calls);
+            if (d.witness) |w| {
+                if (w.path_constraints.len > 0) self.allocator.free(w.path_constraints);
+                if (w.io_calls.len > 0) self.allocator.free(w.io_calls);
+            }
         }
         self.diagnostics.deinit(self.allocator);
         self.binding_labels.deinit(self.allocator);
@@ -1108,25 +1114,27 @@ pub const FlowChecker = struct {
         // carry a witness snapshot. Skipping the dupe for everything else
         // avoids allocator churn when the handler raises many non-witness
         // diagnostics (unused-variable warnings, XSS warnings, etc.).
-        if (propertyTagForKind(diag.kind) != null) {
-            if (self.working_constraints.items.len > 0) {
-                const dup = self.allocator.dupe(
-                    counterexample.WitnessConstraint,
-                    self.working_constraints.items,
-                ) catch &[_]counterexample.WitnessConstraint{};
-                owned.path_constraints = dup;
-            }
-            if (self.working_io_calls.items.len > 0) {
-                const dup = self.allocator.dupe(
-                    counterexample.TrackedIoCall,
-                    self.working_io_calls.items,
-                ) catch &[_]counterexample.TrackedIoCall{};
-                owned.io_calls = dup;
-            }
+        if (propertyTagForKind(diag.kind) != null and
+            (self.working_constraints.items.len > 0 or self.working_io_calls.items.len > 0))
+        {
+            const constraints = self.allocator.dupe(
+                counterexample.WitnessConstraint,
+                self.working_constraints.items,
+            ) catch &[_]counterexample.WitnessConstraint{};
+            const io_calls = self.allocator.dupe(
+                counterexample.TrackedIoCall,
+                self.working_io_calls.items,
+            ) catch &[_]counterexample.TrackedIoCall{};
+            owned.witness = .{
+                .path_constraints = constraints,
+                .io_calls = io_calls,
+            };
         }
         self.diagnostics.append(self.allocator, owned) catch {
-            if (owned.path_constraints.len > 0) self.allocator.free(owned.path_constraints);
-            if (owned.io_calls.len > 0) self.allocator.free(owned.io_calls);
+            if (owned.witness) |w| {
+                if (w.path_constraints.len > 0) self.allocator.free(w.path_constraints);
+                if (w.io_calls.len > 0) self.allocator.free(w.io_calls);
+            }
         };
     }
 
@@ -1249,11 +1257,12 @@ test "FlowChecker captures witness constraints on secret-in-response" {
             counterexample.PropertyTag.no_secret_leakage,
             propertyTagForKind(d.kind).?,
         );
-        try std.testing.expectEqual(@as(usize, 1), d.path_constraints.len);
-        try std.testing.expect(d.path_constraints[0] == .stub_truthy);
-        try std.testing.expectEqualStrings("env", d.path_constraints[0].stub_truthy.func);
-        try std.testing.expect(d.io_calls.len >= 1);
-        try std.testing.expectEqualStrings("env", d.io_calls[0].func);
+        const w = d.witness orelse return error.MissingWitness;
+        try std.testing.expectEqual(@as(usize, 1), w.path_constraints.len);
+        try std.testing.expect(w.path_constraints[0] == .stub_truthy);
+        try std.testing.expectEqualStrings("env", w.path_constraints[0].stub_truthy.func);
+        try std.testing.expect(w.io_calls.len >= 1);
+        try std.testing.expectEqualStrings("env", w.io_calls[0].func);
     }
     try std.testing.expect(found);
 }
@@ -1298,7 +1307,8 @@ test "FlowChecker does not leak sibling-branch I/O calls into the witness" {
     for (checker.getDiagnostics()) |d| {
         if (d.kind != .secret_in_response) continue;
         found = true;
-        for (d.io_calls) |call| {
+        const w = d.witness orelse return error.MissingWitness;
+        for (w.io_calls) |call| {
             // `cacheGet` is only called on the sibling branch that returns
             // without leaking. It must not appear in this witness.
             try std.testing.expect(!std.mem.eql(u8, call.func, "cacheGet"));
@@ -1344,9 +1354,10 @@ test "FlowChecker captures stub_truthy on if-else with negated condition" {
     for (checker.getDiagnostics()) |d| {
         if (d.kind != .secret_in_response) continue;
         found = true;
-        try std.testing.expectEqual(@as(usize, 1), d.path_constraints.len);
-        try std.testing.expect(d.path_constraints[0] == .stub_truthy);
-        try std.testing.expectEqualStrings("env", d.path_constraints[0].stub_truthy.func);
+        const w = d.witness orelse return error.MissingWitness;
+        try std.testing.expectEqual(@as(usize, 1), w.path_constraints.len);
+        try std.testing.expect(w.path_constraints[0] == .stub_truthy);
+        try std.testing.expectEqualStrings("env", w.path_constraints[0].stub_truthy.func);
     }
     try std.testing.expect(found);
 }

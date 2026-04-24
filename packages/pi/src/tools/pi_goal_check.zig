@@ -223,13 +223,20 @@ fn execute(
             .column = loc.column,
         };
 
+        // Diagnostics with no witness still count as a goal violation, but
+        // the solver receives empty slices and produces the default witness.
+        const constraints: []const counterexample.WitnessConstraint =
+            if (diag.witness) |wit| wit.path_constraints else &.{};
+        const io_calls: []const counterexample.TrackedIoCall =
+            if (diag.witness) |wit| wit.io_calls else &.{};
+
         var witness = counterexample.solve(allocator, .{
             .property = tag,
             .origin = span,
             .sink = span,
             .summary = diag.message,
-            .constraints = diag.path_constraints,
-            .io_calls = diag.io_calls,
+            .constraints = constraints,
+            .io_calls = io_calls,
         }) catch continue;
         defer witness.deinit(allocator);
 
