@@ -92,12 +92,20 @@ goals:
 final_patch_hash: f70c608c...
 ```
 
-`stalled` is the honest verdict here: `pi_apply_repair_plan` v1 only
-supports deterministic line insertions (`insert_guard_before_line`,
-`add_trailing_return`). Secret redaction is a mutation rather than an
-insertion, so the autoloop reaches its patches-without-progress ceiling
-and exits. When `redact_sensitive_sink` lands as an insertion-friendly
-intent, the same handler will converge to `achieved`.
+`stalled` is the honest verdict here. The handler produces two
+compile-time diagnostics on the same line (`unchecked_optional_use` for
+the `env(...)` result, `secret_in_response` for the flow into the body).
+`pi_repair_plan` emits a plan for each; `pi_apply_repair_plan` applies
+them in order, and the first apply shifts the line numbers so the
+second plan targets the wrong line. That's the v1 ordering limitation.
+`redact_sensitive_sink` now emits an `insert_guard_before_line` edit
+intent - the apply tool accepts it - but the demo still stalls on the
+two-diagnostics-one-line pattern until repair-plan ordering learns to
+cope with line-number shifts or to batch cooperative plans.
+
+On a handler where only the flow diagnostic fires (for example, one
+where the optional is narrowed explicitly before the sink), the same
+redact intent drives the verdict to `achieved`.
 
 The run mutates the handler file. Reset it before another attempt:
 
@@ -115,12 +123,21 @@ git checkout -- examples/autoloop/handler.ts
 
 ## What it does not do yet
 
-- No block-and-revert on property regression. A patch that closes one
-  witness while regressing a different property still lands; the
-  `patches_without_progress` counter catches pathological loops but
-  cannot roll back.
 - No session persistence of the autoloop run. `--no-session` is
   implicit; the TUI ledger view (coming) will be the durable surface.
 - The orchestrator drives one plan per turn to stay compatible with the
   `apply_edit must be the only tool call` invariant elsewhere in the
   loop. Batching is possible but would change the veto ordering.
+- Multiple diagnostics on the same line cause ordering problems:
+  applying the first plan shifts line numbers and invalidates the
+  second plan's target. Addressed when repair-plan ordering learns
+  line-delta tracking, or when plans emit byte offsets instead of
+  line/column targets.
+
+## Regression guard
+
+A patch that flips any previously-green boolean property to false is
+rolled back. The orchestrator writes the pre-patch snapshot back to
+disk, keeps the `verified_patch` event in the transcript as an audit
+record of the attempt, appends a `system_note` explaining the revert,
+and exits with verdict `regression_blocked` on the next finalize.
