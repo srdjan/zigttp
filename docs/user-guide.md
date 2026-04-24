@@ -165,6 +165,13 @@ OPTIONS:
   --no-env-check        Skip startup env var validation from contract
                         Useful during development when env vars aren't set
 
+  --security-log <FILE> Append security events (policy denies, panics) to FILE
+                        One JSON object per line
+
+  --lifecycle <MODE>    Runtime pooling policy for self-contained binaries
+                        Values: ephemeral, bounded, reuse
+                        Overrides the contract-derived default
+
   --cors                Enable CORS headers on all responses
 
   --static <DIR>        Serve static files from directory
