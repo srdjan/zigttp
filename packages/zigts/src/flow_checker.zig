@@ -441,18 +441,32 @@ pub const FlowChecker = struct {
         const func = self.ir_view.getFunction(handler_func) orelse return;
         if (func.params_count == 0) return;
 
-        // First parameter is the request object
+        // First parameter is the request object. The parser wraps every
+        // function parameter in a `.pattern_element`, even for the simple
+        // `function handler(req)` case; drill through to the binding.
         const param_idx = self.ir_view.getListIndex(func.params_start, 0);
-        const param_tag = self.ir_view.getTag(param_idx) orelse return;
+        const binding = self.paramBinding(param_idx) orelse return;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        self.req_binding_key = key;
+        // Request parameter carries user_input label
+        self.binding_labels.put(self.allocator, key, .{ .user_input = true }) catch {};
+    }
 
-        if (param_tag == .identifier) {
-            const binding = self.ir_view.getBinding(param_idx) orelse return;
-            const key = packBindingKey(binding.scope_id, binding.slot);
-            self.req_binding_key = key;
-            // Request parameter carries user_input label
-            self.binding_labels.put(self.allocator, key, .{ .user_input = true }) catch {};
+    /// Unwrap a function parameter node to its binding slot. Handles both
+    /// the bare `.identifier` shape and the `.pattern_element` wrapper
+    /// the parser emits for every parameter. Destructuring patterns
+    /// (object_pattern / array_pattern) return null; those don't carry a
+    /// single binding slot and callers treat the request as unnamed.
+    fn paramBinding(self: *const FlowChecker, param_idx: NodeIndex) ?ir.BindingRef {
+        const tag = self.ir_view.getTag(param_idx) orelse return null;
+        if (tag == .identifier) {
+            return self.ir_view.getBinding(param_idx);
         }
-        // Pattern destructuring of request: labels propagate through walkStmt
+        if (tag == .pattern_element) {
+            const pe = self.ir_view.getPatternElem(param_idx) orelse return null;
+            return pe.binding;
+        }
+        return null;
     }
 
     fn walkStmt(self: *FlowChecker, node: NodeIndex) void {
@@ -479,15 +493,15 @@ pub const FlowChecker = struct {
                 // drive the handler down the path that actually witnesses
                 // the sink.
                 const saved_io = self.working_io_calls.items.len;
-                const then_pushed = self.pushConditionConstraint(if_s.condition, false);
+                const then_pushed = self.pushConditionConstraints(if_s.condition, false);
                 self.walkStmt(if_s.then_branch);
-                if (then_pushed) self.popConstraint();
+                self.popConstraints(then_pushed);
                 self.working_io_calls.shrinkRetainingCapacity(saved_io);
 
                 if (if_s.else_branch != null_node) {
-                    const else_pushed = self.pushConditionConstraint(if_s.condition, true);
+                    const else_pushed = self.pushConditionConstraints(if_s.condition, true);
                     self.walkStmt(if_s.else_branch);
-                    if (else_pushed) self.popConstraint();
+                    self.popConstraints(else_pushed);
                     self.working_io_calls.shrinkRetainingCapacity(saved_io);
                 }
             },
@@ -1138,18 +1152,37 @@ pub const FlowChecker = struct {
         };
     }
 
-    /// Push a constraint for `cond` (or its negation) onto the working stack.
-    /// Returns true iff a constraint was pushed, so the caller knows whether
-    /// to pop after walking the branch body.
-    fn pushConditionConstraint(self: *FlowChecker, cond: NodeIndex, want_negation: bool) bool {
-        const raw = self.extractCondConstraint(cond) orelse return false;
-        const final = if (want_negation) counterexample.negate(raw) orelse return false else raw;
-        self.working_constraints.append(self.allocator, final) catch return false;
-        return true;
+    /// Push zero or more constraints derived from `cond` onto the working
+    /// stack. AND chains contribute one constraint per clause; every other
+    /// shape contributes at most one. Returns the number pushed so the
+    /// caller can pop exactly that many when the branch body is done.
+    ///
+    /// Under `want_negation` (the else-branch path), we distribute negation
+    /// into each AND clause the same way path_generator does. That is
+    /// unsound symbolically - `!(a && b)` is `!a || !b`, not `!a && !b` -
+    /// but witness synthesis only needs ONE concrete request that reaches
+    /// the sink; over-constraining at worst adds irrelevant stubs that the
+    /// runtime replay accepts.
+    fn pushConditionConstraints(self: *FlowChecker, cond: NodeIndex, want_negation: bool) usize {
+        const tag = self.ir_view.getTag(cond) orelse return 0;
+        if (tag == .binary_op) {
+            const bin = self.ir_view.getBinary(cond) orelse return 0;
+            if (bin.op == .and_op) {
+                const left = self.pushConditionConstraints(bin.left, want_negation);
+                const right = self.pushConditionConstraints(bin.right, want_negation);
+                return left + right;
+            }
+        }
+
+        const raw = self.extractCondConstraint(cond) orelse return 0;
+        const final = if (want_negation) counterexample.negate(raw) orelse return 0 else raw;
+        self.working_constraints.append(self.allocator, final) catch return 0;
+        return 1;
     }
 
-    fn popConstraint(self: *FlowChecker) void {
-        _ = self.working_constraints.pop();
+    fn popConstraints(self: *FlowChecker, count: usize) void {
+        var remaining = count;
+        while (remaining > 0) : (remaining -= 1) _ = self.working_constraints.pop();
     }
 
     /// Record a virtual-module call on the current path, if `vd.init` is a
@@ -1173,11 +1206,16 @@ pub const FlowChecker = struct {
         self.binding_origin.put(self.allocator, key, binding.slot) catch {};
     }
 
-    /// Extract a WitnessConstraint from a condition node. Covers the
-    /// patterns flow_checker needs to synthesise request shapes for the
-    /// supported properties:
-    ///   if (x)     where x was initialised from a module call
-    ///   if (!x)    same, negated
+    /// Extract a WitnessConstraint from a condition node. Covers:
+    ///   if (x)                    - identifier bound to a module call
+    ///   if (!x)                   - negated truthiness
+    ///   if (req.method === "X")   - literal method comparison
+    ///   if ("X" === req.method)   - same, flipped
+    ///   if (req.method !== "X")   - negated method comparison (drops the
+    ///                               constraint, since the MVP solver has
+    ///                               no alphabet to pick a different value)
+    ///   if (result.ok)            - Result-returning module call
+    /// AND chains are handled one level up in `pushConditionConstraints`.
     fn extractCondConstraint(self: *FlowChecker, cond: NodeIndex) ?counterexample.WitnessConstraint {
         const tag = self.ir_view.getTag(cond) orelse return null;
         switch (tag) {
@@ -1198,8 +1236,68 @@ pub const FlowChecker = struct {
                 const inner = self.extractCondConstraint(unary.operand) orelse return null;
                 return counterexample.negate(inner);
             },
+            .binary_op => {
+                const bin = self.ir_view.getBinary(cond) orelse return null;
+                if (bin.op != .strict_eq and bin.op != .strict_neq) return null;
+
+                const raw = self.extractLiteralReqComparison(bin.left, bin.right) orelse
+                    self.extractLiteralReqComparison(bin.right, bin.left) orelse
+                    return null;
+                return if (bin.op == .strict_eq) raw else counterexample.negate(raw);
+            },
+            .member_access => {
+                return self.extractResultOkConstraint(cond);
+            },
             else => return null,
         }
+    }
+
+    /// Recognise `req.method === "POST"` / `req.url === "/path"` shapes
+    /// (either direction). Handles only direct property access on the
+    /// request binding; `const method = req.method` indirection would
+    /// need a second binding_origin track and is a follow-up.
+    fn extractLiteralReqComparison(
+        self: *FlowChecker,
+        prop_node: NodeIndex,
+        lit_node: NodeIndex,
+    ) ?counterexample.WitnessConstraint {
+        const lit_tag = self.ir_view.getTag(lit_node) orelse return null;
+        if (lit_tag != .lit_string) return null;
+        const str_idx = self.ir_view.getStringIdx(lit_node) orelse return null;
+        const value = self.ir_view.getString(str_idx) orelse return null;
+
+        if (self.isReqProperty(prop_node, "method")) {
+            return .{ .req_method = value };
+        }
+        if (self.isReqProperty(prop_node, "url") or self.isReqProperty(prop_node, "path")) {
+            return .{ .req_url = value };
+        }
+        return null;
+    }
+
+    /// Recognise `result.ok` where `result` is an identifier bound to a
+    /// Result-returning module call (validateJson, jwtVerify, etc.).
+    fn extractResultOkConstraint(
+        self: *FlowChecker,
+        member_node: NodeIndex,
+    ) ?counterexample.WitnessConstraint {
+        const member = self.ir_view.getMember(member_node) orelse return null;
+        const prop_name = self.resolveAtomName(member.property) orelse return null;
+        if (!std.mem.eql(u8, prop_name, "ok")) return null;
+
+        const obj_tag = self.ir_view.getTag(member.object) orelse return null;
+        if (obj_tag != .identifier) return null;
+        const binding = self.ir_view.getBinding(member.object) orelse return null;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const origin_slot = self.binding_origin.get(key) orelse return null;
+        const meta = self.module_fn_meta.get(origin_slot) orelse return null;
+        if (meta.returns != .result) return null;
+
+        return .{ .result_ok = .{
+            .module = meta.module,
+            .func = meta.func,
+            .returns = meta.returns,
+        } };
     }
 
     fn resolveAtomName(self: *const FlowChecker, atom_idx: u16) ?[]const u8 {
@@ -1358,6 +1456,155 @@ test "FlowChecker captures stub_truthy on if-else with negated condition" {
         try std.testing.expectEqual(@as(usize, 1), w.path_constraints.len);
         try std.testing.expect(w.path_constraints[0] == .stub_truthy);
         try std.testing.expectEqualStrings("env", w.path_constraints[0].stub_truthy.func);
+    }
+    try std.testing.expect(found);
+}
+
+test "FlowChecker captures req_method constraint from literal comparison" {
+    // `if (req.method === "POST") { leak }` - the witness request must be
+    // POST, not the default GET, so the handler reaches the sink.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  if (req.method === "POST") {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind != .secret_in_response) continue;
+        found = true;
+        const w = d.witness orelse return error.MissingWitness;
+        try std.testing.expectEqual(@as(usize, 1), w.path_constraints.len);
+        try std.testing.expect(w.path_constraints[0] == .req_method);
+        try std.testing.expectEqualStrings("POST", w.path_constraints[0].req_method);
+    }
+    try std.testing.expect(found);
+}
+
+test "FlowChecker captures AND chain as multiple constraints" {
+    // `if (req.method === "POST" && secret) { leak }` produces TWO
+    // constraints: the method literal and the env truthiness. The solver
+    // turns this into a POST request whose env stub returns truthy.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  if (req.method === "POST" && secret) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind != .secret_in_response) continue;
+        found = true;
+        const w = d.witness orelse return error.MissingWitness;
+        try std.testing.expectEqual(@as(usize, 2), w.path_constraints.len);
+
+        var saw_method = false;
+        var saw_truthy = false;
+        for (w.path_constraints) |c| {
+            switch (c) {
+                .req_method => |m| {
+                    try std.testing.expectEqualStrings("POST", m);
+                    saw_method = true;
+                },
+                .stub_truthy => |info| {
+                    try std.testing.expectEqualStrings("env", info.func);
+                    saw_truthy = true;
+                },
+                else => return error.UnexpectedConstraintKind,
+            }
+        }
+        try std.testing.expect(saw_method and saw_truthy);
+    }
+    try std.testing.expect(found);
+}
+
+test "FlowChecker captures result_ok constraint on validated path" {
+    // `if (r.ok) { leak(env()) }` - the witness must make validateJson
+    // return an ok Result so the sink is reachable.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\import { validateJson } from "zigttp:validate";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  const r = validateJson(0, "{}");
+        \\  if (r.ok) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind != .secret_in_response) continue;
+        found = true;
+        const w = d.witness orelse return error.MissingWitness;
+        var saw_result_ok = false;
+        for (w.path_constraints) |c| {
+            if (c == .result_ok) {
+                try std.testing.expectEqualStrings("validateJson", c.result_ok.func);
+                saw_result_ok = true;
+            }
+        }
+        try std.testing.expect(saw_result_ok);
     }
     try std.testing.expect(found);
 }
