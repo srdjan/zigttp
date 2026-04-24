@@ -253,6 +253,37 @@ pub const PropertiesSnapshot = struct {
     fault_covered: bool,
     result_safe: bool,
     optional_safe: bool,
+
+    pub const ChangeKind = enum { promoted, demoted };
+
+    pub const Change = struct {
+        name: []const u8,
+        kind: ChangeKind,
+    };
+
+    /// Walk the boolean fields of `after` against `before` and invoke `visitor`
+    /// once per field whose value flipped. Missing `before` means no baseline;
+    /// every after-field is treated as unchanged. Kept as an inline visitor so
+    /// the compile-time field walk inlines at each call site and the caller
+    /// decides how to render or collect the changes.
+    pub inline fn forEachChange(
+        before_opt: ?PropertiesSnapshot,
+        after: PropertiesSnapshot,
+        comptime Visitor: type,
+        visitor: Visitor,
+    ) !void {
+        const before = before_opt orelse return;
+        inline for (@typeInfo(PropertiesSnapshot).@"struct".fields) |field| {
+            if (field.type != bool) continue;
+            const after_val = @field(after, field.name);
+            const before_val = @field(before, field.name);
+            if (after_val and !before_val) {
+                try visitor.visit(.{ .name = field.name, .kind = .promoted });
+            } else if (!after_val and before_val) {
+                try visitor.visit(.{ .name = field.name, .kind = .demoted });
+            }
+        }
+    }
 };
 
 pub const ViolationDeltaItem = struct {

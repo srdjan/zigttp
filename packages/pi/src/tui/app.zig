@@ -1621,9 +1621,9 @@ fn writeProofDeltaCard(
     }
 }
 
-/// Compare two PropertiesSnapshots and emit SGR-coloured badges: green `+name`
-/// for promotions (false -> true), red `-name` for demotions. Unchanged fields
-/// are suppressed so the eye lands on what this patch actually did.
+/// Emit SGR-coloured property-change badges: green `+name` for promotions
+/// (false -> true), red `-name` for demotions. Unchanged fields are
+/// suppressed so the eye lands on what this patch actually did.
 fn writePropertyDelta(
     w: *std.Io.Writer,
     before_opt: ?ui_payload_mod.PropertiesSnapshot,
@@ -1634,34 +1634,32 @@ fn writePropertyDelta(
         return;
     };
 
-    var promoted: u32 = 0;
-    var demoted: u32 = 0;
-    const before = before_opt;
+    const Visitor = struct {
+        w: *std.Io.Writer,
+        wrote: bool = false,
 
-    try w.writeAll("  ");
-    inline for (@typeInfo(ui_payload_mod.PropertiesSnapshot).@"struct".fields) |field| {
-        if (field.type == bool) {
-            const after_val = @field(after, field.name);
-            const before_val = if (before) |b| @field(b, field.name) else after_val;
-            if (after_val and !before_val) {
-                if (promoted > 0 or demoted > 0) try w.writeAll("  ");
-                try ansi.sgr(w, "32");
-                try w.print("+{s}", .{field.name});
-                try w.writeAll(ansi.reset);
-                promoted += 1;
-            } else if (!after_val and before_val) {
-                if (promoted > 0 or demoted > 0) try w.writeAll("  ");
-                try ansi.sgr(w, "31");
-                try w.print("-{s}", .{field.name});
-                try w.writeAll(ansi.reset);
-                demoted += 1;
+        pub fn visit(self: *@This(), change: ui_payload_mod.PropertiesSnapshot.Change) !void {
+            // Leading "  " for the first badge acts as the indent; subsequent
+            // "  " acts as the separator. Both look the same on the wire.
+            try self.w.writeAll("  ");
+            switch (change.kind) {
+                .promoted => try ansi.sgr(self.w, "32"),
+                .demoted => try ansi.sgr(self.w, "31"),
             }
+            const prefix: u8 = switch (change.kind) {
+                .promoted => '+',
+                .demoted => '-',
+            };
+            try self.w.print("{c}{s}", .{ prefix, change.name });
+            try self.w.writeAll(ansi.reset);
+            self.wrote = true;
         }
-    }
+    };
 
-    if (promoted == 0 and demoted == 0) {
-        try w.writeAll("(no property changes)");
-    }
+    var visitor: Visitor = .{ .w = w };
+    try ui_payload_mod.PropertiesSnapshot.forEachChange(before_opt, after, *Visitor, &visitor);
+
+    if (!visitor.wrote) try w.writeAll("  (no property changes)");
     try w.writeByte('\n');
 }
 

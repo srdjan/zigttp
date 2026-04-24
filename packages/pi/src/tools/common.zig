@@ -26,22 +26,22 @@ pub const CommandOutcome = struct {
     }
 };
 
-pub fn workspaceRoot(allocator: std.mem.Allocator) ![]u8 {
-    // `std.fs.path.resolve(&.{"."})` in zig 0.16 returns "." verbatim rather
-    // than the absolute cwd, which breaks every isPathInsideRoot check that
-    // compares a workspace root against an absolute handler path. Resolve
-    // the real cwd explicitly; fall back to "." if the IO probe fails so
-    // test fixtures that never touch the filesystem still get a value.
+/// Return the current working directory as an absolute path.
+///
+/// `std.fs.path.resolve(&.{"."})` in zig 0.16 does not expand "." against
+/// the real cwd, so we reach through `realPathFileAlloc`. The sentinel is
+/// stripped so callers free with the same allocator they use for every
+/// other string they own.
+pub fn realCwd(allocator: std.mem.Allocator) ![]u8 {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
-    // realPathFileAlloc returns a sentinel-terminated slice; dupe without the
-    // sentinel so callers can free with the same allocator they use for every
-    // other string in this module.
-    const cwd_z = std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io_backend.io(), ".", allocator) catch {
-        return try std.fs.path.resolve(allocator, &.{"."});
-    };
+    const cwd_z = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io_backend.io(), ".", allocator);
     defer allocator.free(cwd_z);
     return try allocator.dupe(u8, cwd_z);
+}
+
+pub fn workspaceRoot(allocator: std.mem.Allocator) ![]u8 {
+    return realCwd(allocator) catch try std.fs.path.resolve(allocator, &.{"."});
 }
 
 /// Current unix time in milliseconds. `std.time.milliTimestamp` is unavailable
