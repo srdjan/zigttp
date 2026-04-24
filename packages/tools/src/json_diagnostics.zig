@@ -188,10 +188,15 @@ pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
     };
 }
 
-pub fn fromBoolDiagnostic(diag: bool_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
+fn fromCheckerDiagnostic(
+    comptime codeFn: anytype,
+    diag: anytype,
+    ir_view: IrView,
+    file: []const u8,
+) ?JsonDiagnostic {
     const loc = ir_view.getLoc(diag.node) orelse return null;
     return .{
-        .code = boolCheckerCode(diag.kind),
+        .code = codeFn(diag.kind),
         .severity = diag.severity.label(),
         .message = diag.message,
         .file = file,
@@ -199,45 +204,22 @@ pub fn fromBoolDiagnostic(diag: bool_checker.Diagnostic, ir_view: IrView, file: 
         .column = loc.column,
         .suggestion = diag.help,
     };
+}
+
+pub fn fromBoolDiagnostic(diag: bool_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
+    return fromCheckerDiagnostic(boolCheckerCode, diag, ir_view, file);
 }
 
 pub fn fromTypeDiagnostic(diag: type_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    const loc = ir_view.getLoc(diag.node) orelse return null;
-    return .{
-        .code = typeCheckerCode(diag.kind),
-        .severity = diag.severity.label(),
-        .message = diag.message,
-        .file = file,
-        .line = loc.line,
-        .column = loc.column,
-        .suggestion = diag.help,
-    };
+    return fromCheckerDiagnostic(typeCheckerCode, diag, ir_view, file);
 }
 
 pub fn fromVerifierDiagnostic(diag: handler_verifier.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    const loc = ir_view.getLoc(diag.node) orelse return null;
-    return .{
-        .code = verifierCode(diag.kind),
-        .severity = diag.severity.label(),
-        .message = diag.message,
-        .file = file,
-        .line = loc.line,
-        .column = loc.column,
-        .suggestion = diag.help,
-    };
+    return fromCheckerDiagnostic(verifierCode, diag, ir_view, file);
 }
 
 pub fn fromFlowDiagnostic(diag: flow_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    const loc = ir_view.getLoc(diag.node) orelse return null;
-    return .{
-        .code = flowCheckerCode(diag.kind),
-        .severity = diag.severity.label(),
-        .message = diag.message,
-        .file = file,
-        .line = loc.line,
-        .column = loc.column,
-        .suggestion = diag.help,
-    };
+    return fromCheckerDiagnostic(flowCheckerCode, diag, ir_view, file);
 }
 
 // -------------------------------------------------------------------------
