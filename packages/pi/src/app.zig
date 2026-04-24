@@ -27,6 +27,7 @@ const zigts_check_tool = @import("tools/zigts_check.zig");
 const zig_build_step_tool = @import("tools/zig_build_step.zig");
 const zig_test_step_tool = @import("tools/zig_test_step.zig");
 const gen_tests_tool = @import("tools/gen_tests.zig");
+const pi_goal_check_tool = @import("tools/pi_goal_check.zig");
 
 const Registry = registry_mod.Registry;
 
@@ -61,6 +62,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, zig_build_step_tool.tool);
     try reg.register(allocator, zig_test_step_tool.tool);
     try reg.register(allocator, gen_tests_tool.tool);
+    try reg.register(allocator, pi_goal_check_tool.tool);
 
     return reg;
 }
