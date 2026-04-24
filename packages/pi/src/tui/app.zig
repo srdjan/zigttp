@@ -47,6 +47,7 @@ pub const FeedItemKind = enum {
     tool_result,
     proof_card,
     diagnostic_box,
+    verified_patch,
     system_note,
     local_result,
 };
@@ -922,6 +923,10 @@ fn buildFeedLine(
                     w.writeAll("diag: ") catch {};
                     w.writeAll(summaryText(message.llm_text, message.ui_payload)) catch {};
                 },
+                .verified_patch => |message| {
+                    w.writeAll("patch: ") catch {};
+                    w.writeAll(summaryText(message.llm_text, message.ui_payload)) catch {};
+                },
                 .system_note => |body| {
                     w.writeAll("note: ") catch {};
                     w.writeAll(firstLine(body)) catch {};
@@ -1020,6 +1025,10 @@ fn writeTranscriptInspector(w: *std.Io.Writer, entry: *const transcript_mod.Owne
             try w.writeAll("diagnostics\n\n");
             try writePayloadOrText(w, message.llm_text, message.ui_payload);
         },
+        .verified_patch => |message| {
+            try w.writeAll("verified patch\n\n");
+            try writePayloadOrText(w, message.llm_text, message.ui_payload);
+        },
     }
 }
 
@@ -1043,6 +1052,7 @@ fn writePayloadOrText(
             .proof_card => |proof| try writeProofCardPayload(w, proof),
             .command_outcome => |outcome| try writeCommandOutcomePayload(w, outcome),
             .session_tree => |tree| try writeSessionTreePayload(w, tree),
+            .verified_patch => |patch| try writeVerifiedPatchPayload(w, patch),
         }
         return;
     }
@@ -1085,6 +1095,34 @@ fn writeProofCardPayload(
         try w.writeAll("\nhighlights:\n");
         for (payload.highlights) |highlight| {
             try w.print("- {s}\n", .{highlight});
+        }
+    }
+}
+
+fn writeVerifiedPatchPayload(
+    w: *std.Io.Writer,
+    payload: ui_payload_mod.VerifiedPatchPayload,
+) !void {
+    try w.print("file: {s}\npolicy_hash: {s}\nstats: total={d} new={d}", .{
+        payload.file,
+        payload.policy_hash,
+        payload.stats.total,
+        payload.stats.new,
+    });
+    if (payload.stats.preexisting) |count| {
+        try w.print(" preexisting={d}", .{count});
+    }
+    try w.print("\npost_apply_ok: {s}\n", .{if (payload.post_apply_ok) "true" else "false"});
+    if (payload.post_apply_summary) |note| {
+        try w.print("post_apply: {s}\n", .{note});
+    }
+    if (payload.after_properties) |p| {
+        try w.writeAll("\nproperties:\n");
+        inline for (@typeInfo(ui_payload_mod.PropertiesSnapshot).@"struct".fields) |field| {
+            try w.print("- {s}: {s}\n", .{
+                field.name,
+                if (@field(p, field.name)) "true" else "false",
+            });
         }
     }
 }
@@ -1299,6 +1337,7 @@ fn kindForTranscriptEntry(entry: *const transcript_mod.OwnedEntry) FeedItemKind 
         .tool_result => .tool_result,
         .proof_card => .proof_card,
         .diagnostic_box => .diagnostic_box,
+        .verified_patch => .verified_patch,
         .system_note => .system_note,
     };
 }
@@ -1309,6 +1348,7 @@ fn summaryText(llm_text: []const u8, payload: ?UiPayload) []const u8 {
             .diagnostics => |diag| return firstLine(diag.summary),
             .proof_card => |proof| return if (proof.summary.len > 0) firstLine(proof.summary) else firstLine(proof.title),
             .command_outcome => |outcome| return if (outcome.title.len > 0) firstLine(outcome.title) else firstLine(outcome.command),
+            .verified_patch => |patch| return firstLine(patch.file),
             .plain_text => |text| return firstLine(text),
             .session_tree => {},
         }

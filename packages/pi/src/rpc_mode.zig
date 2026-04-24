@@ -679,6 +679,10 @@ fn emitEntryNotification(
             .llm_text = b.llm_text,
             .ui_payload = b.ui_payload,
         } },
+        .verified_patch => |b| .{ .verified_patch = .{
+            .llm_text = b.llm_text,
+            .ui_payload = b.ui_payload,
+        } },
         .system_note => |b| .{ .system_note = b },
         .tool_result => |tr| .{ .tool_result = .{
             .tool_use_id = tr.tool_use_id,

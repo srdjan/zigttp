@@ -9,17 +9,58 @@
 //! in docs/zigts-expert-contract.md.
 
 const std = @import("std");
+const zigts = @import("zigts");
 const edit_simulate = @import("zigts_cli").edit_simulate;
 const turn = @import("turn.zig");
 const ui_payload = @import("ui_payload.zig");
 
-/// Run edit-simulate against a proposed edit and produce an outcome the turn
-/// state machine can consume. The returned `body` is an allocator-owned slice
-/// (v1 edit-simulate JSON envelope) that the caller must free.
+/// Structured veto summary extracted from `edit_simulate.simulate`.
+///
+/// The `outcome` is the turn-machine-facing payload (ok bit, llm_text for the
+/// provider, optional UiPayload for rendering). The `report` carries the
+/// compiler-proof-flavored fields that a `verified_patch` event needs: the
+/// `policy_hash` in force at apply time, the violation counts keyed by the
+/// edit-simulate delta heuristic, and the post-edit `HandlerProperties` when
+/// analysis reached the contract phase.
+///
+/// Both halves share the same allocator; deinit frees them together.
+pub const VetoReport = struct {
+    policy_hash: []u8,
+    total: u32,
+    new: u32,
+    preexisting: u32,
+    after_properties: ?ui_payload.PropertiesSnapshot,
+
+    pub fn deinit(self: *VetoReport, allocator: std.mem.Allocator) void {
+        allocator.free(self.policy_hash);
+        self.* = .{
+            .policy_hash = &.{},
+            .total = 0,
+            .new = 0,
+            .preexisting = 0,
+            .after_properties = null,
+        };
+    }
+};
+
+pub const VetoResult = struct {
+    outcome: turn.EditOutcome,
+    report: VetoReport,
+
+    pub fn deinit(self: *VetoResult, allocator: std.mem.Allocator) void {
+        self.outcome.deinit(allocator);
+        self.report.deinit(allocator);
+    }
+};
+
+/// Run edit-simulate against a proposed edit and produce an outcome plus a
+/// structured report. The outcome's `llm_text` is an allocator-owned slice
+/// carrying the v1 edit-simulate JSON envelope. The report owns a copy of the
+/// policy hash string. Call `VetoResult.deinit` to free both.
 pub fn runVeto(
     allocator: std.mem.Allocator,
     edit: turn.Edit,
-) !turn.EditOutcome {
+) !VetoResult {
     const input: edit_simulate.EditSimulateInput = .{
         .file = edit.file,
         .content = edit.content,
@@ -44,10 +85,37 @@ pub fn runVeto(
         try buildDiagnosticsPayload(allocator, edit.file, &result);
     errdefer payload.deinit(allocator);
 
+    const hash_bytes = zigts.rule_registry.policyHash();
+    const hash_copy = try allocator.dupe(u8, &hash_bytes);
+    errdefer allocator.free(hash_copy);
+
+    const snapshot: ?ui_payload.PropertiesSnapshot = if (result.properties) |p|
+        .{
+            .pure = p.pure,
+            .read_only = p.read_only,
+            .deterministic = p.deterministic,
+            .retry_safe = p.retry_safe,
+            .idempotent = p.idempotent,
+            .state_isolated = p.state_isolated,
+            .injection_safe = p.injection_safe,
+            .fault_covered = p.fault_covered,
+        }
+    else
+        null;
+
     return .{
-        .ok = result.new_count == 0,
-        .llm_text = llm_text,
-        .ui_payload = payload,
+        .outcome = .{
+            .ok = result.new_count == 0,
+            .llm_text = llm_text,
+            .ui_payload = payload,
+        },
+        .report = .{
+            .policy_hash = hash_copy,
+            .total = result.total,
+            .new = result.new_count,
+            .preexisting = result.preexisting_count,
+            .after_properties = snapshot,
+        },
     };
 }
 
@@ -142,64 +210,62 @@ fn buildProofCardPayload(
 const testing = std.testing;
 
 test "clean handler passes the veto with an empty violations body" {
-    var outcome = try runVeto(testing.allocator, .{
+    var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
         .content = "function handler(req: Request): Response { return Response.json({ok: true}); }",
         .before = null,
     });
-    defer outcome.deinit(testing.allocator);
+    defer result.deinit(testing.allocator);
 
-    try testing.expect(outcome.ok);
-    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"total\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"new\":0") != null);
-    try testing.expect(outcome.ui_payload != null);
+    try testing.expect(result.outcome.ok);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "\"total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "\"new\":0") != null);
+    try testing.expect(result.outcome.ui_payload != null);
+    try testing.expectEqual(@as(usize, 64), result.report.policy_hash.len);
+    try testing.expectEqual(@as(u32, 0), result.report.total);
+    try testing.expectEqual(@as(u32, 0), result.report.new);
 }
 
 test "broken handler (var) fails the veto and body surfaces ZTS001" {
-    var outcome = try runVeto(testing.allocator, .{
+    var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
         .content = "function handler(req: Request): Response { var x = 1; return Response.json({x}); }",
         .before = null,
     });
-    defer outcome.deinit(testing.allocator);
+    defer result.deinit(testing.allocator);
 
-    try testing.expect(!outcome.ok);
-    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"ZTS001\"") != null);
-    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"introduced_by_patch\":true") != null);
-    try testing.expect(outcome.ui_payload != null);
+    try testing.expect(!result.outcome.ok);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "\"ZTS001\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "\"introduced_by_patch\":true") != null);
+    try testing.expect(result.outcome.ui_payload != null);
+    try testing.expect(result.report.new >= 1);
 }
 
 test "pre-existing violation with matching before passes the veto" {
-    // The edit adds a field to the response but leaves the `var x = 1` alone.
-    // With `before` supplied, edit_simulate's violation-key heuristic matches
-    // the var on both sides and marks it preexisting - new_count drops to 0
-    // and the veto passes even though the body still contains the ZTS001.
-    var outcome = try runVeto(testing.allocator, .{
+    var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
         .content = "function handler(req: Request): Response { var x = 1; return Response.json({x, y: 2}); }",
         .before = "function handler(req: Request): Response { var x = 1; return Response.json({x}); }",
     });
-    defer outcome.deinit(testing.allocator);
+    defer result.deinit(testing.allocator);
 
-    try testing.expect(outcome.ok);
-    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"introduced_by_patch\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, outcome.llm_text, "\"new\":0") != null);
+    try testing.expect(result.outcome.ok);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "\"introduced_by_patch\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "\"new\":0") != null);
+    try testing.expectEqual(@as(u32, 0), result.report.new);
+    try testing.expect(result.report.preexisting >= 1);
 }
 
 test "runVeto output fits turn.TurnMachine edit_verified event path" {
-    var outcome = try runVeto(testing.allocator, .{
+    var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
         .content = "function handler(req: Request): Response { return Response.json({ok: true}); }",
         .before = null,
     });
-    defer outcome.deinit(testing.allocator);
+    defer result.deinit(testing.allocator);
 
-    // The state machine's verifying_edit state consumes exactly this shape
-    // on the edit_verified event. Prove the wiring: machine enters
-    // verifying_edit, then transitions to done with render(proof_card) when
-    // fed the veto's outcome.
     var machine: turn.TurnMachine = .{ .state = .verifying_edit };
-    const action = machine.transition(.{ .edit_verified = outcome });
+    const action = machine.transition(.{ .edit_verified = result.outcome });
     try testing.expectEqual(turn.TurnState.done, machine.state);
     switch (action) {
         .render => |msg| switch (msg) {

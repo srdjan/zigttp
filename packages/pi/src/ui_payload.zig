@@ -174,6 +174,72 @@ pub const CommandOutcomePayload = struct {
     }
 };
 
+pub const PropertiesSnapshot = struct {
+    pure: bool,
+    read_only: bool,
+    deterministic: bool,
+    retry_safe: bool,
+    idempotent: bool,
+    state_isolated: bool,
+    injection_safe: bool,
+    fault_covered: bool,
+};
+
+pub const VerifiedPatchPayload = struct {
+    file: []u8,
+    policy_hash: []u8,
+    stats: ProofStats,
+    before: ?[]u8,
+    after: []u8,
+    after_properties: ?PropertiesSnapshot,
+    post_apply_ok: bool,
+    post_apply_summary: ?[]u8,
+
+    pub fn clone(self: VerifiedPatchPayload, allocator: std.mem.Allocator) !VerifiedPatchPayload {
+        const file_copy = try allocator.dupe(u8, self.file);
+        errdefer allocator.free(file_copy);
+        const policy_copy = try allocator.dupe(u8, self.policy_hash);
+        errdefer allocator.free(policy_copy);
+        const before_copy: ?[]u8 = if (self.before) |b| try allocator.dupe(u8, b) else null;
+        errdefer if (before_copy) |b| allocator.free(b);
+        const after_copy = try allocator.dupe(u8, self.after);
+        errdefer allocator.free(after_copy);
+        const post_apply_summary_copy: ?[]u8 = if (self.post_apply_summary) |s|
+            try allocator.dupe(u8, s)
+        else
+            null;
+        errdefer if (post_apply_summary_copy) |s| allocator.free(s);
+        return .{
+            .file = file_copy,
+            .policy_hash = policy_copy,
+            .stats = self.stats,
+            .before = before_copy,
+            .after = after_copy,
+            .after_properties = self.after_properties,
+            .post_apply_ok = self.post_apply_ok,
+            .post_apply_summary = post_apply_summary_copy,
+        };
+    }
+
+    pub fn deinit(self: *VerifiedPatchPayload, allocator: std.mem.Allocator) void {
+        allocator.free(self.file);
+        allocator.free(self.policy_hash);
+        if (self.before) |b| allocator.free(b);
+        allocator.free(self.after);
+        if (self.post_apply_summary) |s| allocator.free(s);
+        self.* = .{
+            .file = &.{},
+            .policy_hash = &.{},
+            .stats = .{ .total = 0, .new = 0, .preexisting = null },
+            .before = null,
+            .after = &.{},
+            .after_properties = null,
+            .post_apply_ok = false,
+            .post_apply_summary = null,
+        };
+    }
+};
+
 pub const SessionTreeNode = struct {
     session_id: []u8,
     parent_id: ?[]u8,
@@ -243,6 +309,7 @@ pub const UiPayload = union(enum) {
     diagnostics: DiagnosticsPayload,
     proof_card: ProofCardPayload,
     command_outcome: CommandOutcomePayload,
+    verified_patch: VerifiedPatchPayload,
     plain_text: []u8,
 
     pub fn clone(self: UiPayload, allocator: std.mem.Allocator) !UiPayload {
@@ -251,6 +318,7 @@ pub const UiPayload = union(enum) {
             .diagnostics => |payload| .{ .diagnostics = try payload.clone(allocator) },
             .proof_card => |payload| .{ .proof_card = try payload.clone(allocator) },
             .command_outcome => |payload| .{ .command_outcome = try payload.clone(allocator) },
+            .verified_patch => |payload| .{ .verified_patch = try payload.clone(allocator) },
             .plain_text => |text| .{ .plain_text = try allocator.dupe(u8, text) },
         };
     }
@@ -261,6 +329,7 @@ pub const UiPayload = union(enum) {
             .diagnostics => |*payload| payload.deinit(allocator),
             .proof_card => |*payload| payload.deinit(allocator),
             .command_outcome => |*payload| payload.deinit(allocator),
+            .verified_patch => |*payload| payload.deinit(allocator),
             .plain_text => |text| allocator.free(text),
         }
         self.* = .{ .plain_text = &.{} };
@@ -361,6 +430,48 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
             try json_writer.writeString(writer, command.stderr);
             try writer.writeAll(",\"command\":");
             try json_writer.writeString(writer, command.command);
+        },
+        .verified_patch => |patch| {
+            try writer.writeAll("\"kind\":\"verified_patch\",\"file\":");
+            try json_writer.writeString(writer, patch.file);
+            try writer.writeAll(",\"policy_hash\":");
+            try json_writer.writeString(writer, patch.policy_hash);
+            try writer.writeAll(",\"stats\":{\"total\":");
+            try writer.print("{d}", .{patch.stats.total});
+            try writer.writeAll(",\"new\":");
+            try writer.print("{d}", .{patch.stats.new});
+            if (patch.stats.preexisting) |preexisting| {
+                try writer.writeAll(",\"preexisting\":");
+                try writer.print("{d}", .{preexisting});
+            }
+            try writer.writeAll("},\"before\":");
+            if (patch.before) |b| {
+                try json_writer.writeString(writer, b);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"after\":");
+            try json_writer.writeString(writer, patch.after);
+            try writer.writeAll(",\"after_properties\":");
+            if (patch.after_properties) |p| {
+                try writer.writeByte('{');
+                inline for (@typeInfo(PropertiesSnapshot).@"struct".fields, 0..) |field, i| {
+                    if (i > 0) try writer.writeByte(',');
+                    try writer.writeByte('"');
+                    try writer.writeAll(field.name);
+                    try writer.writeAll("\":");
+                    try writer.writeAll(if (@field(p, field.name)) "true" else "false");
+                }
+                try writer.writeByte('}');
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"post_apply_ok\":");
+            try writer.writeAll(if (patch.post_apply_ok) "true" else "false");
+            if (patch.post_apply_summary) |s| {
+                try writer.writeAll(",\"post_apply_summary\":");
+                try json_writer.writeString(writer, s);
+            }
         },
     }
     try writer.writeByte('}');
@@ -500,6 +611,61 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             .command = try allocator.dupe(u8, command),
         } };
     }
+    if (std.mem.eql(u8, kind_val.string, "verified_patch")) {
+        const file = getString(obj, "file") orelse return error.InvalidUiPayload;
+        const policy_hash = getString(obj, "policy_hash") orelse return error.InvalidUiPayload;
+        const stats_val = obj.get("stats") orelse return error.InvalidUiPayload;
+        if (stats_val != .object) return error.InvalidUiPayload;
+        const stats_obj = stats_val.object;
+        const after = getString(obj, "after") orelse return error.InvalidUiPayload;
+        const before_opt = try getOptionalString(obj, "before");
+        const post_apply_ok = getBool(obj, "post_apply_ok") orelse return error.InvalidUiPayload;
+
+        const props_val = obj.get("after_properties") orelse return error.InvalidUiPayload;
+        const properties: ?PropertiesSnapshot = switch (props_val) {
+            .null => null,
+            .object => |po| blk: {
+                var snapshot: PropertiesSnapshot = undefined;
+                inline for (@typeInfo(PropertiesSnapshot).@"struct".fields) |field| {
+                    @field(snapshot, field.name) = getBool(po, field.name) orelse return error.InvalidUiPayload;
+                }
+                break :blk snapshot;
+            },
+            else => return error.InvalidUiPayload,
+        };
+
+        const file_copy = try allocator.dupe(u8, file);
+        errdefer allocator.free(file_copy);
+        const policy_copy = try allocator.dupe(u8, policy_hash);
+        errdefer allocator.free(policy_copy);
+        const before_copy: ?[]u8 = if (before_opt) |b| try allocator.dupe(u8, b) else null;
+        errdefer if (before_copy) |b| allocator.free(b);
+        const after_copy = try allocator.dupe(u8, after);
+        errdefer allocator.free(after_copy);
+        const post_apply_summary_copy: ?[]u8 = blk: {
+            const s = try getOptionalString(obj, "post_apply_summary");
+            break :blk if (s) |text| try allocator.dupe(u8, text) else null;
+        };
+        errdefer if (post_apply_summary_copy) |s| allocator.free(s);
+
+        return .{ .verified_patch = .{
+            .file = file_copy,
+            .policy_hash = policy_copy,
+            .stats = .{
+                .total = @intCast(getUnsigned(stats_obj, "total") orelse return error.InvalidUiPayload),
+                .new = @intCast(getUnsigned(stats_obj, "new") orelse return error.InvalidUiPayload),
+                .preexisting = if (getUnsigned(stats_obj, "preexisting")) |preexisting|
+                    @intCast(preexisting)
+                else
+                    null,
+            },
+            .before = before_copy,
+            .after = after_copy,
+            .after_properties = properties,
+            .post_apply_ok = post_apply_ok,
+            .post_apply_summary = post_apply_summary_copy,
+        } };
+    }
 
     return error.InvalidUiPayload;
 }
@@ -636,6 +802,81 @@ test "command outcome payload round-trips" {
             try testing.expectEqualStrings("zig test", command.title);
             try testing.expectEqual(@as(?u8, 0), command.exit_code);
             try testing.expectEqualStrings("zig build test-zigts", command.command);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "verified_patch payload round-trips with properties and optional before" {
+    var payload: UiPayload = .{ .verified_patch = .{
+        .file = try testing.allocator.dupe(u8, "handler.ts"),
+        .policy_hash = try testing.allocator.dupe(u8, "a" ** 64),
+        .stats = .{ .total = 1, .new = 0, .preexisting = 1 },
+        .before = try testing.allocator.dupe(u8, "old content"),
+        .after = try testing.allocator.dupe(u8, "new content"),
+        .after_properties = .{
+            .pure = true,
+            .read_only = false,
+            .deterministic = true,
+            .retry_safe = true,
+            .idempotent = true,
+            .state_isolated = true,
+            .injection_safe = true,
+            .fault_covered = false,
+        },
+        .post_apply_ok = true,
+        .post_apply_summary = null,
+    } };
+    defer payload.deinit(testing.allocator);
+
+    var roundtripped = try roundTrip(testing.allocator, payload);
+    defer roundtripped.deinit(testing.allocator);
+
+    switch (roundtripped) {
+        .verified_patch => |patch| {
+            try testing.expectEqualStrings("handler.ts", patch.file);
+            try testing.expectEqualStrings("a" ** 64, patch.policy_hash);
+            try testing.expectEqual(@as(u32, 1), patch.stats.total);
+            try testing.expectEqual(@as(u32, 0), patch.stats.new);
+            try testing.expect(patch.before != null);
+            try testing.expectEqualStrings("old content", patch.before.?);
+            try testing.expectEqualStrings("new content", patch.after);
+            try testing.expect(patch.after_properties != null);
+            try testing.expect(patch.after_properties.?.pure);
+            try testing.expect(!patch.after_properties.?.read_only);
+            try testing.expect(patch.after_properties.?.retry_safe);
+            try testing.expect(!patch.after_properties.?.fault_covered);
+            try testing.expect(patch.post_apply_ok);
+            try testing.expect(patch.post_apply_summary == null);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "verified_patch payload round-trips with null before and post-apply note" {
+    var payload: UiPayload = .{ .verified_patch = .{
+        .file = try testing.allocator.dupe(u8, "new.ts"),
+        .policy_hash = try testing.allocator.dupe(u8, "b" ** 64),
+        .stats = .{ .total = 0, .new = 0, .preexisting = null },
+        .before = null,
+        .after = try testing.allocator.dupe(u8, "export default {}"),
+        .after_properties = null,
+        .post_apply_ok = false,
+        .post_apply_summary = try testing.allocator.dupe(u8, "verify_paths regressed"),
+    } };
+    defer payload.deinit(testing.allocator);
+
+    var roundtripped = try roundTrip(testing.allocator, payload);
+    defer roundtripped.deinit(testing.allocator);
+
+    switch (roundtripped) {
+        .verified_patch => |patch| {
+            try testing.expectEqualStrings("new.ts", patch.file);
+            try testing.expect(patch.before == null);
+            try testing.expect(patch.after_properties == null);
+            try testing.expect(!patch.post_apply_ok);
+            try testing.expect(patch.post_apply_summary != null);
+            try testing.expectEqualStrings("verify_paths regressed", patch.post_apply_summary.?);
         },
         else => return error.TestFailed,
     }

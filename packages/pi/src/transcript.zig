@@ -101,6 +101,7 @@ pub const OwnedEntry = union(enum) {
     assistant_tool_use: []OwnedToolCall,
     proof_card: OwnedDisplayMessage,
     diagnostic_box: OwnedDisplayMessage,
+    verified_patch: OwnedDisplayMessage,
     tool_result: OwnedToolResult,
     system_note: []const u8,
 
@@ -110,6 +111,7 @@ pub const OwnedEntry = union(enum) {
             .model_text => |body| allocator.free(body),
             .proof_card => |*message| message.deinit(allocator),
             .diagnostic_box => |*message| message.deinit(allocator),
+            .verified_patch => |*message| message.deinit(allocator),
             .system_note => |body| allocator.free(body),
             .assistant_tool_use => |calls| {
                 for (calls) |*call| call.deinit(allocator);
@@ -200,6 +202,7 @@ pub fn renderPlain(writer: anytype, entry: *const OwnedEntry) !void {
         .model_text => |body| try writeTaggedLine(writer, "model", body),
         .proof_card => |message| try writeTaggedLine(writer, "proof", message.llm_text),
         .diagnostic_box => |message| try writeTaggedLine(writer, "error", message.llm_text),
+        .verified_patch => |message| try writeTaggedLine(writer, "patch", message.llm_text),
         .system_note => |body| try writeTaggedLine(writer, "note", body),
         .assistant_tool_use => |calls| {
             try writer.writeAll("assistant: tool_use ");
@@ -246,6 +249,11 @@ fn renderRich(writer: anytype, entry: *const OwnedEntry) !void {
         .diagnostic_box => |message| try box_widget.writeBox(
             writer,
             .{ .title = "veto", .color = .red },
+            message.llm_text,
+        ),
+        .verified_patch => |message| try box_widget.writeBox(
+            writer,
+            .{ .title = "patch", .color = .green },
             message.llm_text,
         ),
         else => try renderPlain(writer, entry),
@@ -389,15 +397,15 @@ test "capToolResultBody truncates with a byte-count suffix when over the cap" {
 }
 
 test "veto -> turn -> transcript pipeline still lands a proof entry" {
-    var outcome = try veto.runVeto(testing.allocator, .{
+    var result = try veto.runVeto(testing.allocator, .{
         .file = "handler.ts",
         .content = "function handler(req: Request): Response { return Response.json({ok: true}); }",
         .before = null,
     });
-    defer outcome.deinit(testing.allocator);
+    defer result.deinit(testing.allocator);
 
     var machine: turn.TurnMachine = .{ .state = .verifying_edit };
-    const action = machine.transition(.{ .edit_verified = outcome });
+    const action = machine.transition(.{ .edit_verified = result.outcome });
 
     var tr: Transcript = .{};
     defer tr.deinit(testing.allocator);

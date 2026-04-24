@@ -151,6 +151,10 @@ fn emitEntry(allocator: std.mem.Allocator, out: ?*std.Io.Writer, entry: *const t
             .llm_text = body.llm_text,
             .ui_payload = body.ui_payload,
         } }),
+        .verified_patch => |body| try emitRecord(allocator, out, .{ .verified_patch = .{
+            .llm_text = body.llm_text,
+            .ui_payload = body.ui_payload,
+        } }),
         .assistant_tool_use => |calls| {
             for (calls) |call| {
                 try emitRecord(allocator, out, .{ .tool_use = .{
