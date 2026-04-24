@@ -325,3 +325,118 @@ fn printReplayDiffs(results: []const ReplayResult, summary: ReplaySummary) void 
 }
 
 const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+const counterexample = zq.counterexample;
+
+test "witness round-trip: solved witness replays into an executable leak" {
+    // Proof the counterexample wire format is executable end-to-end.
+    // We synthesise a witness for the secret-leak pattern, serialise it
+    // through counterexample.writeJsonl, parse it back with the trace
+    // parser, and replay it against the handler under the runtime's
+    // standard replay stubs. The response body MUST contain the sentinel
+    // secret string that the solver places in the env stub - that is the
+    // witness actually driving the handler into the leaking branch.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const handler_code =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  if (secret) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    // 1. Synthesise a witness with the constraint + io-call shape that
+    // flow_checker would attach to a secret_in_response diagnostic.
+    const constraints = [_]counterexample.WitnessConstraint{
+        .{ .stub_truthy = .{
+            .module = "env",
+            .func = "env",
+            .returns = .optional_string,
+        } },
+    };
+    const io_calls = [_]counterexample.TrackedIoCall{
+        .{ .module = "env", .func = "env", .returns = .optional_string },
+    };
+    var witness = try counterexample.solve(allocator, .{
+        .property = .no_secret_leakage,
+        .origin = .{ .line = 3, .column = 18 },
+        .sink = .{ .line = 5, .column = 12 },
+        .summary = "SECRET_KEY flows into Response body",
+        .constraints = &constraints,
+        .io_calls = &io_calls,
+    });
+    defer witness.deinit(allocator);
+
+    // 2. Serialise as JSONL exactly as agents would emit it.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try counterexample.writeJsonl(&aw.writer, witness);
+    buf = aw.toArrayList();
+
+    // 3. Parse the JSONL. The trace parser silently drops the `witness`
+    // header line (unknown type), consuming only the request + io lines.
+    const groups = try zq.trace.parseTraceFile(allocator, buf.items);
+    defer {
+        for (groups) |g| allocator.free(g.io_calls);
+        allocator.free(groups);
+    }
+    try std.testing.expectEqual(@as(usize, 1), groups.len);
+    const group = groups[0];
+    try std.testing.expectEqualStrings("GET", group.request.method);
+    try std.testing.expectEqual(@as(usize, 1), group.io_calls.len);
+    try std.testing.expectEqualStrings("env", group.io_calls[0].func);
+
+    // 4. Create a runtime in replay mode so the virtual-module calls get
+    // redirected to the replay stubs that consume ReplayState.
+    const rt = try Runtime.init(allocator, .{ .replay_file_path = "witness-roundtrip-test" });
+    defer rt.deinit();
+
+    var replay_state = zq.trace.ReplayState{
+        .io_calls = group.io_calls,
+        .cursor = 0,
+        .divergences = 0,
+    };
+    rt.ctx.setModuleState(
+        zq.trace.REPLAY_STATE_SLOT,
+        @ptrCast(&replay_state),
+        &zq.trace.ReplayState.deinitOpaque,
+    );
+    defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
+
+    // 5. Load handler and execute the request built from the witness.
+    try rt.loadCode(handler_code, "<witness-roundtrip>");
+
+    var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    try parseHeadersFromJson(allocator, group.request.headers_json, &headers);
+
+    const request = HttpRequestView{
+        .method = group.request.method,
+        .url = group.request.url,
+        .headers = headers,
+        .body = group.request.body,
+    };
+
+    var response = try rt.executeHandler(request);
+    defer response.deinit();
+
+    // 6. The handler took the leaking branch. The response body carries
+    // the sentinel that counterexample.stubValue plants for optional_string
+    // returns: "secret-sentinel". No divergences on the stub consumption.
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expect(
+        std.mem.indexOf(u8, response.body, "secret-sentinel") != null,
+    );
+    try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
+}

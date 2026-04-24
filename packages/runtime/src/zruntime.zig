@@ -6078,6 +6078,7 @@ fn seedIncompleteDurableRandomStep(
 // test_runner, and durable_recovery) needs an explicit hook here.
 test {
     _ = @import("handler_loader.zig");
+    _ = @import("replay_runner.zig");
     _ = @import("websocket_codec.zig");
     _ = @import("websocket_pool.zig");
     _ = @import("ws_gateway.zig");
