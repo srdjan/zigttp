@@ -30,6 +30,15 @@ pub fn workspaceRoot(allocator: std.mem.Allocator) ![]u8 {
     return try std.fs.path.resolve(allocator, &.{"."});
 }
 
+/// Current unix time in milliseconds. `std.time.milliTimestamp` is unavailable
+/// in the zig 0.16 dev builds this project targets, so both the turn loop and
+/// the autoloop reach through `std.c.clock_gettime` here.
+pub fn nowUnixMs() i64 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
 pub fn resolveInsideWorkspace(
     allocator: std.mem.Allocator,
     root: []const u8,
