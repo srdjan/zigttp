@@ -1258,6 +1258,99 @@ test "FlowChecker captures witness constraints on secret-in-response" {
     try std.testing.expect(found);
 }
 
+test "FlowChecker does not leak sibling-branch I/O calls into the witness" {
+    // If a module call happens inside the branch that does NOT reach the
+    // sink, the fall-through sink's witness must not include it - otherwise
+    // the synthesised stub sequence would drive the handler down the wrong
+    // path. Regression test for the shrinkRetainingCapacity fix around
+    // `.if_stmt` in walkStmt.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\import { cacheGet } from "zigttp:cache";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  if (!secret) {
+        \\    const cached = cacheGet("sibling");
+        \\    return Response.json({ ok: cached });
+        \\  }
+        \\  return Response.json({ leaked: secret });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind != .secret_in_response) continue;
+        found = true;
+        for (d.io_calls) |call| {
+            // `cacheGet` is only called on the sibling branch that returns
+            // without leaking. It must not appear in this witness.
+            try std.testing.expect(!std.mem.eql(u8, call.func, "cacheGet"));
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "FlowChecker captures stub_truthy on if-else with negated condition" {
+    // `if (!secret) { ok } else { leak }` - the else branch's effective
+    // constraint is the double-negation of !secret, i.e. secret truthy.
+    // Exercises the `.unary_op` arm of `extractCondConstraint`.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  if (!secret) {
+        \\    return Response.json({ ok: true });
+        \\  } else {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind != .secret_in_response) continue;
+        found = true;
+        try std.testing.expectEqual(@as(usize, 1), d.path_constraints.len);
+        try std.testing.expect(d.path_constraints[0] == .stub_truthy);
+        try std.testing.expectEqualStrings("env", d.path_constraints[0].stub_truthy.func);
+    }
+    try std.testing.expect(found);
+}
+
 test "LabelSet operations in flow context" {
     // Verify secret + credential merge
     const secret = LabelSet{ .secret = true };
