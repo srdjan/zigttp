@@ -21,6 +21,7 @@ const context = @import("context.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const mb = @import("module_binding.zig");
 const bool_checker_mod = @import("bool_checker.zig");
+const counterexample = @import("counterexample.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -66,7 +67,32 @@ pub const Diagnostic = struct {
     node: NodeIndex,
     message: []const u8,
     help: ?[]const u8,
+    /// Branch constraints accumulated on the path that witnessed this sink,
+    /// in source order. Owned by the FlowChecker allocator; freed in deinit.
+    /// The counterexample solver turns these into a concrete Request.
+    path_constraints: []const counterexample.WitnessConstraint = &.{},
+    /// Virtual-module calls visited on the witness path, in execution order.
+    /// Owned by the FlowChecker allocator; freed in deinit.
+    io_calls: []const counterexample.TrackedIoCall = &.{},
 };
+
+/// Map a diagnostic kind to the property tag it witnesses. `null` when the
+/// diagnostic does not correspond to a currently modelled property (the
+/// counterexample surface is a subset of flow diagnostics by design).
+pub fn propertyTagForKind(kind: DiagnosticKind) ?counterexample.PropertyTag {
+    return switch (kind) {
+        .secret_in_response,
+        .secret_in_log,
+        .secret_in_egress_url,
+        .secret_in_egress_body,
+        => .no_secret_leakage,
+        .credential_in_response,
+        .credential_in_log,
+        .credential_in_egress_url,
+        => .no_credential_leakage,
+        .unvalidated_input_in_egress => .injection_safe,
+    };
+}
 
 /// Proven data flow properties for a handler.
 pub const FlowProperties = struct {
@@ -181,6 +207,14 @@ pub const FlowChecker = struct {
     binding_labels: std.AutoHashMapUnmanaged(u32, LabelSet),
     /// Virtual module import tracking: local slot -> FunctionBinding return_labels.
     module_fn_labels: std.AutoHashMapUnmanaged(u16, LabelSet),
+    /// Virtual module function metadata (module name, function name, return kind),
+    /// keyed by the same slot as `module_fn_labels`. Populated by `scanImports`
+    /// and consumed by the counterexample-witness capture pipeline.
+    module_fn_meta: std.AutoHashMapUnmanaged(u16, counterexample.StubInfo),
+    /// Per-binding origin: packed(scope_id, slot) -> slot of the module function
+    /// whose call initialised this binding. Lets the constraint extractor emit
+    /// `stub_truthy` on `if (binding)` patterns.
+    binding_origin: std.AutoHashMapUnmanaged(u32, u16),
     /// Result binding tracking: packed(scope_id, slot) -> return_labels from the producing call.
     /// When accessing .value on these bindings, the return_labels are merged in.
     result_binding_labels: std.AutoHashMapUnmanaged(u32, LabelSet),
@@ -188,6 +222,12 @@ pub const FlowChecker = struct {
     req_binding_key: ?u32,
     /// Slot of the `env` function import (for smart label refinement).
     env_fn_slot: ?u16,
+    /// Constraint stack maintained as `walkStmt` descends into conditional
+    /// branches. Snapshotted onto every diagnostic at emission time.
+    working_constraints: std.ArrayListUnmanaged(counterexample.WitnessConstraint),
+    /// Ordered list of virtual-module calls observed by the current walk.
+    /// Snapshotted alongside `working_constraints` on diagnostics.
+    working_io_calls: std.ArrayListUnmanaged(counterexample.TrackedIoCall),
 
     /// External label overrides: property name -> LabelSet (additive, merged via OR).
     /// Both qualified ("User.email") and short ("email") forms are registered.
@@ -207,9 +247,13 @@ pub const FlowChecker = struct {
             .diagnostics = .empty,
             .binding_labels = .empty,
             .module_fn_labels = .empty,
+            .module_fn_meta = .empty,
+            .binding_origin = .empty,
             .result_binding_labels = .empty,
             .req_binding_key = null,
             .env_fn_slot = null,
+            .working_constraints = .empty,
+            .working_io_calls = .empty,
             .external_labels = .empty,
             .external_reasons = .empty,
             .allocated_messages = .empty,
@@ -218,9 +262,17 @@ pub const FlowChecker = struct {
     }
 
     pub fn deinit(self: *FlowChecker) void {
+        for (self.diagnostics.items) |d| {
+            if (d.path_constraints.len > 0) self.allocator.free(d.path_constraints);
+            if (d.io_calls.len > 0) self.allocator.free(d.io_calls);
+        }
         self.diagnostics.deinit(self.allocator);
         self.binding_labels.deinit(self.allocator);
         self.module_fn_labels.deinit(self.allocator);
+        self.module_fn_meta.deinit(self.allocator);
+        self.binding_origin.deinit(self.allocator);
+        self.working_constraints.deinit(self.allocator);
+        self.working_io_calls.deinit(self.allocator);
         self.result_binding_labels.deinit(self.allocator);
 
         // Free dynamically formatted diagnostic messages
@@ -362,6 +414,15 @@ pub const FlowChecker = struct {
                             entry.func.return_labels,
                         ) catch {};
                     }
+                    self.module_fn_meta.put(
+                        self.allocator,
+                        spec.local_binding.slot,
+                        .{
+                            .module = entry.binding.name,
+                            .func = entry.func.name,
+                            .returns = entry.func.returns,
+                        },
+                    ) catch {};
                     if (std.mem.eql(u8, imported_name, "env")) {
                         self.env_fn_slot = spec.local_binding.slot;
                     }
@@ -403,9 +464,25 @@ pub const FlowChecker = struct {
 
             .if_stmt => {
                 const if_s = self.ir_view.getIfStmt(node) orelse return;
+
+                // Both `working_constraints` and `working_io_calls` are
+                // path-scoped: entering a branch extends them, leaving
+                // restores them. Without the io_calls restore, calls made
+                // in a sibling branch would appear in the witness for this
+                // one, so the synthesised stub sequence would no longer
+                // drive the handler down the path that actually witnesses
+                // the sink.
+                const saved_io = self.working_io_calls.items.len;
+                const then_pushed = self.pushConditionConstraint(if_s.condition, false);
                 self.walkStmt(if_s.then_branch);
+                if (then_pushed) self.popConstraint();
+                self.working_io_calls.shrinkRetainingCapacity(saved_io);
+
                 if (if_s.else_branch != null_node) {
+                    const else_pushed = self.pushConditionConstraint(if_s.condition, true);
                     self.walkStmt(if_s.else_branch);
+                    if (else_pushed) self.popConstraint();
+                    self.working_io_calls.shrinkRetainingCapacity(saved_io);
                 }
             },
 
@@ -417,6 +494,7 @@ pub const FlowChecker = struct {
                         const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
                         self.binding_labels.put(self.allocator, key, labels) catch {};
                     }
+                    self.trackModuleCallInit(vd);
                     // Track result bindings from validation calls for .value label narrowing
                     self.trackResultBinding(vd);
                 }
@@ -1025,7 +1103,95 @@ pub const FlowChecker = struct {
     }
 
     fn addDiagnostic(self: *FlowChecker, diag: Diagnostic) void {
-        self.diagnostics.append(self.allocator, diag) catch {};
+        var owned = diag;
+        // Only diagnostics the counterexample surface can actually consume
+        // carry a witness snapshot. Skipping the dupe for everything else
+        // avoids allocator churn when the handler raises many non-witness
+        // diagnostics (unused-variable warnings, XSS warnings, etc.).
+        if (propertyTagForKind(diag.kind) != null) {
+            if (self.working_constraints.items.len > 0) {
+                const dup = self.allocator.dupe(
+                    counterexample.WitnessConstraint,
+                    self.working_constraints.items,
+                ) catch &[_]counterexample.WitnessConstraint{};
+                owned.path_constraints = dup;
+            }
+            if (self.working_io_calls.items.len > 0) {
+                const dup = self.allocator.dupe(
+                    counterexample.TrackedIoCall,
+                    self.working_io_calls.items,
+                ) catch &[_]counterexample.TrackedIoCall{};
+                owned.io_calls = dup;
+            }
+        }
+        self.diagnostics.append(self.allocator, owned) catch {
+            if (owned.path_constraints.len > 0) self.allocator.free(owned.path_constraints);
+            if (owned.io_calls.len > 0) self.allocator.free(owned.io_calls);
+        };
+    }
+
+    /// Push a constraint for `cond` (or its negation) onto the working stack.
+    /// Returns true iff a constraint was pushed, so the caller knows whether
+    /// to pop after walking the branch body.
+    fn pushConditionConstraint(self: *FlowChecker, cond: NodeIndex, want_negation: bool) bool {
+        const raw = self.extractCondConstraint(cond) orelse return false;
+        const final = if (want_negation) counterexample.negate(raw) orelse return false else raw;
+        self.working_constraints.append(self.allocator, final) catch return false;
+        return true;
+    }
+
+    fn popConstraint(self: *FlowChecker) void {
+        _ = self.working_constraints.pop();
+    }
+
+    /// Record a virtual-module call on the current path, if `vd.init` is a
+    /// direct call to an imported module function. Also remembers the
+    /// originating module-function slot on the declared binding so that
+    /// later `if (x)` patterns can emit stub_truthy.
+    fn trackModuleCallInit(self: *FlowChecker, vd: Node.VarDecl) void {
+        const init_tag = self.ir_view.getTag(vd.init) orelse return;
+        if (init_tag != .call) return;
+        const call = self.ir_view.getCall(vd.init) orelse return;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return;
+        if (callee_tag != .identifier) return;
+        const binding = self.ir_view.getBinding(call.callee) orelse return;
+        const meta = self.module_fn_meta.get(binding.slot) orelse return;
+        self.working_io_calls.append(self.allocator, .{
+            .module = meta.module,
+            .func = meta.func,
+            .returns = meta.returns,
+        }) catch {};
+        const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
+        self.binding_origin.put(self.allocator, key, binding.slot) catch {};
+    }
+
+    /// Extract a WitnessConstraint from a condition node. Covers the
+    /// patterns flow_checker needs to synthesise request shapes for the
+    /// supported properties:
+    ///   if (x)     where x was initialised from a module call
+    ///   if (!x)    same, negated
+    fn extractCondConstraint(self: *FlowChecker, cond: NodeIndex) ?counterexample.WitnessConstraint {
+        const tag = self.ir_view.getTag(cond) orelse return null;
+        switch (tag) {
+            .identifier => {
+                const binding = self.ir_view.getBinding(cond) orelse return null;
+                const key = packBindingKey(binding.scope_id, binding.slot);
+                const origin_slot = self.binding_origin.get(key) orelse return null;
+                const meta = self.module_fn_meta.get(origin_slot) orelse return null;
+                return .{ .stub_truthy = .{
+                    .module = meta.module,
+                    .func = meta.func,
+                    .returns = meta.returns,
+                } };
+            },
+            .unary_op => {
+                const unary = self.ir_view.getUnary(cond) orelse return null;
+                if (unary.op != .not) return null;
+                const inner = self.extractCondConstraint(unary.operand) orelse return null;
+                return counterexample.negate(inner);
+            },
+            else => return null,
+        }
     }
 
     fn resolveAtomName(self: *const FlowChecker, atom_idx: u16) ?[]const u8 {
@@ -1043,6 +1209,54 @@ pub const FlowChecker = struct {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "FlowChecker captures witness constraints on secret-in-response" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  if (secret) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    // Expect exactly one secret-in-response diagnostic, carrying a
+    // stub_truthy constraint on the env call and a tracked env I/O call.
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind != .secret_in_response) continue;
+        found = true;
+        try std.testing.expectEqual(
+            counterexample.PropertyTag.no_secret_leakage,
+            propertyTagForKind(d.kind).?,
+        );
+        try std.testing.expectEqual(@as(usize, 1), d.path_constraints.len);
+        try std.testing.expect(d.path_constraints[0] == .stub_truthy);
+        try std.testing.expectEqualStrings("env", d.path_constraints[0].stub_truthy.func);
+        try std.testing.expect(d.io_calls.len >= 1);
+        try std.testing.expectEqualStrings("env", d.io_calls[0].func);
+    }
+    try std.testing.expect(found);
+}
 
 test "LabelSet operations in flow context" {
     // Verify secret + credential merge
@@ -1138,9 +1352,13 @@ test "setExternalLabels registers short form from qualified name" {
         .diagnostics = .empty,
         .binding_labels = .empty,
         .module_fn_labels = .empty,
+        .module_fn_meta = .empty,
+        .binding_origin = .empty,
         .result_binding_labels = .empty,
         .req_binding_key = null,
         .env_fn_slot = null,
+        .working_constraints = .empty,
+        .working_io_calls = .empty,
         .external_labels = .empty,
         .external_reasons = .empty,
         .allocated_messages = .empty,

@@ -81,6 +81,11 @@ const prologue =
     \\                                idempotent, injection_safe,
     \\                                state_isolated, fault_covered,
     \\                                result_safe
+    \\  pi_goal_check               - check a handler against property goals
+    \\                                and surface *executable counterexample
+    \\                                witnesses* (a concrete Request + virtual
+    \\                                module stub sequence) for every goal
+    \\                                that is violated
     \\  zig_build_step              - run `zig build <step>`
     \\  zig_test_step               - run `zig build test...`
     \\
@@ -127,6 +132,25 @@ const prologue =
     \\Never reach for JavaScript idioms that are compile errors in zigts:
     \\try/catch, classes, var, null, ==/!=, ++/--. Use Result types, plain
     \\objects, let/const, undefined, ===/!==, and explicit increments.
+    \\
+    \\Goal-seeking synthesis with counterexamples:
+    \\When the user states a property goal ("make this endpoint injection
+    \\safe", "prove no secrets leak here", "remove credential leakage"),
+    \\drive the edit with pi_goal_check in a loop:
+    \\  1. Call pi_goal_check with the target file and goal list.
+    \\  2. If "ok":true, the goals are already discharged; stop.
+    \\  3. Otherwise each "witnesses" entry is a concrete (Request,
+    \\     io_stubs) tuple that executes the violating path. Read the
+    \\     summary and the sink line.
+    \\  4. Edit the handler so the violating path disappears: either the
+    \\     sink no longer receives the labelled value, or the branch that
+    \\     carries it is closed earlier. Do not mute the rule or rename
+    \\     the env var - the witness is an executable proof, so the fix
+    \\     must close the concrete path.
+    \\  5. Re-run pi_goal_check. Repeat until "ok":true.
+    \\Every iteration is captured as a proof-carrying patch in the session
+    \\ledger, so the final artifact carries a record of which goals were
+    \\closed and which witnesses they closed.
     \\
     \\What follows is:
     \\  1. The zigts-expert skill document - your identity.
