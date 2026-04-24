@@ -64,6 +64,8 @@ const prologue =
     \\  zigts_expert_verify_paths   - full analysis on one or more files
     \\  zigts_expert_edit_simulate  - dry-run a proposed edit
     \\  zigts_expert_review_patch   - diff-aware violation review
+    \\  zigts_expert_prove_patch    - classify a before/after contract pair
+    \\  zigts_expert_system_proof   - run cross-handler system linking proof
     \\  zigts_expert_verify_modules - audit a virtual module file
     \\  workspace_list_files        - list workspace files
     \\  workspace_read_file         - read a file or line range
@@ -73,9 +75,12 @@ const prologue =
     \\                                the test suite in sync with the proof
     \\  zigts_check                 - run `zigts check --json`; on success
     \\                                returns on-disk proof.properties for
-    \\                                retry_safe, idempotent, injection_safe,
-    \\                                deterministic, read_only,
-    \\                                state_isolated, fault_covered
+    \\                                behavioral and data-flow guarantees
+    \\                                such as pure, read_only, stateless,
+    \\                                retry_safe, deterministic,
+    \\                                idempotent, injection_safe,
+    \\                                state_isolated, fault_covered,
+    \\                                result_safe
     \\  zig_build_step              - run `zig build <step>`
     \\  zig_test_step               - run `zig build test...`
     \\
@@ -86,6 +91,8 @@ const prologue =
     \\  Error code explanation (ZTSxxx)        -> zigts_expert_describe_rule
     \\  Rule search by keyword                 -> zigts_expert_search
     \\  Violation baseline before editing      -> zigts_expert_verify_paths
+    \\  Contract-pair compatibility proof      -> zigts_expert_prove_patch
+    \\  Cross-handler system proof             -> zigts_expert_system_proof
     \\  Virtual module implementation audit    -> zigts_expert_verify_modules
     \\  List files in workspace                -> workspace_list_files
     \\  Read a source file                     -> workspace_read_file
@@ -105,15 +112,10 @@ const prologue =
     \\Behavioral contract awareness:
     \\Every successful edit produces a proof_card that includes a
     \\"properties" object alongside the violations summary. These are
-    \\compiler-proven behavioral guarantees:
-    \\  pure            - no virtual module calls at all
-    \\  read_only       - no state mutations (cache writes, SQL writes, etc.)
-    \\  deterministic   - no Date.now() or Math.random(); same input -> same output
-    \\  retry_safe      - safe for at-least-once delivery (Lambda retry)
-    \\  idempotent      - deterministic AND retry_safe; duplicate calls are safe
-    \\  state_isolated  - no cross-request module-scope mutations
-    \\  injection_safe  - all user_input validated before sensitive sinks
-    \\  fault_covered   - every failable I/O call has an explicit failure path
+    \\compiler-proven behavioral and data-flow guarantees, including pure,
+    \\read_only, stateless, deterministic, retry_safe, idempotent,
+    \\injection_safe, state_isolated, fault_covered, result_safe, secret /
+    \\credential leakage containment, input validation, and max I/O depth.
     \\
     \\Use `zigts_check` when the user's goal involves a behavioral property
     \\(e.g. "make this safe to cache", "ensure this is idempotent", "prove
@@ -387,6 +389,14 @@ test "persona includes tool dispatch guidance" {
     try testing.expect(std.mem.indexOf(u8, prompt, "Tool dispatch") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "pre-existing violation") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "training data lags") != null);
+}
+
+test "persona lists explicit contract and system proof tools" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zigts_expert_prove_patch") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zigts_expert_system_proof") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Contract-pair compatibility proof") != null);
 }
 
 test "persona does not include project context markers" {

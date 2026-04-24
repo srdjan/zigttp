@@ -7,15 +7,10 @@ const veto = @import("veto.zig");
 const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
 const ui_payload_mod = @import("ui_payload.zig");
+const proof_enrichment = @import("proof_enrichment.zig");
 const zigts = @import("zigts");
 const file_io = zigts.file_io;
 const apply_edit = @import("providers/anthropic/apply_edit.zig");
-
-/// Each verified_patch carries both the before and the after bytes, so the
-/// cap applies per-side: 2 * 64 KiB = 128 KiB worst case, keeping a single
-/// patch record within the same 256 KiB envelope the tool_result persister
-/// already enforces via `AppendOptions.max_body`.
-const verified_patch_content_cap: usize = 64 * 1024;
 
 const PostApplyReport = struct {
     ok: bool,
@@ -203,6 +198,7 @@ pub fn runTurnWith(
                     try appendVerifiedPatchEntry(
                         allocator,
                         transcript,
+                        options.workspace_root,
                         prepared,
                         veto_result.report,
                         post_apply,
@@ -411,61 +407,57 @@ fn postApplyCheck(
 fn appendVerifiedPatchEntry(
     allocator: std.mem.Allocator,
     transcript: *transcript_mod.Transcript,
+    workspace_root: []const u8,
     prepared: PreparedEdit,
     report: veto.VetoReport,
     post_apply: PostApplyReport,
 ) !void {
+    const workspace_root_abs = try std.fs.path.resolve(allocator, &.{workspace_root});
+    defer allocator.free(workspace_root_abs);
+
+    const payload: ui_payload_mod.UiPayload = .{ .verified_patch = try proof_enrichment.buildVerifiedPatchPayload(
+        allocator,
+        .{
+            .workspace_root = workspace_root_abs,
+            .file = prepared.edit.file,
+            .before = prepared.edit.before,
+            .after = prepared.edit.content,
+            .policy_hash = report.policy_hash,
+            .applied_at_unix_ms = nowUnixMs(),
+            .post_apply_ok = post_apply.ok,
+            .post_apply_summary = post_apply.summary,
+            .transcript = transcript,
+        },
+    ) };
+    errdefer {
+        var owned = payload;
+        owned.deinit(allocator);
+    }
+
+    const patch = payload.verified_patch;
     const summary_line = try std.fmt.allocPrint(
         allocator,
-        "verified: {s} ({d} total, {d} new, {d} preexisting)",
-        .{ prepared.edit.file, report.total, report.new, report.preexisting },
+        "verified: {s} ({s}, {d} total, {d} new, {d} preexisting)",
+        .{
+            patch.file,
+            if (patch.prove) |prove| prove.classification else "unclassified",
+            patch.stats.total,
+            patch.stats.new,
+            patch.stats.preexisting orelse 0,
+        },
     );
     errdefer allocator.free(summary_line);
-
-    const file_copy = try allocator.dupe(u8, prepared.edit.file);
-    errdefer allocator.free(file_copy);
-
-    const policy_copy = try allocator.dupe(u8, report.policy_hash);
-    errdefer allocator.free(policy_copy);
-
-    const after_capped = try transcript_mod.capToolResultBody(
-        allocator,
-        prepared.edit.content,
-        verified_patch_content_cap,
-    );
-    errdefer allocator.free(after_capped);
-
-    const before_capped: ?[]u8 = if (prepared.edit.before) |b|
-        try transcript_mod.capToolResultBody(allocator, b, verified_patch_content_cap)
-    else
-        null;
-    errdefer if (before_capped) |b| allocator.free(b);
-
-    const post_apply_summary_copy: ?[]u8 = if (post_apply.summary) |s|
-        try allocator.dupe(u8, s)
-    else
-        null;
-    errdefer if (post_apply_summary_copy) |s| allocator.free(s);
-
-    const payload: ui_payload_mod.UiPayload = .{ .verified_patch = .{
-        .file = file_copy,
-        .policy_hash = policy_copy,
-        .stats = .{
-            .total = report.total,
-            .new = report.new,
-            .preexisting = report.preexisting,
-        },
-        .before = before_capped,
-        .after = after_capped,
-        .after_properties = report.after_properties,
-        .post_apply_ok = post_apply.ok,
-        .post_apply_summary = post_apply_summary_copy,
-    } };
 
     try transcript.entries.append(allocator, .{ .verified_patch = .{
         .llm_text = summary_line,
         .ui_payload = payload,
     } });
+}
+
+fn nowUnixMs() i64 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
 fn isPathInsideRoot(root: []const u8, candidate: []const u8) bool {

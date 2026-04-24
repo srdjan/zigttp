@@ -174,6 +174,7 @@ pub fn build(b: *std.Build) void {
     pi_tests.root_module.addImport("zigts", zigts_host_mod);
     pi_tests.root_module.addImport("zigts_cli", pi_zigts_cli_host_mod);
     pi_tests.root_module.addImport("zigts_expert_skill", pi_zigts_expert_skill_host_mod);
+    pi_tests.root_module.addImport("project_config", project_config_mod);
     const run_pi_tests = b.addRunArtifact(pi_tests);
     const expert_app_test_step = b.step("test-expert-app", "Run zigts expert in-process app tests");
     expert_app_test_step.dependOn(&run_pi_tests.step);

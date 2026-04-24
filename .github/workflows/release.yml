@@ -11,6 +11,8 @@ permissions:
 env:
   ZIG_VERSION: '0.16.0-dev.3073+28ae5d415'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PROOF_LEDGER_PATH: ${{ vars.PROOF_LEDGER_PATH || '' }}
+  PROOF_LEDGER_ONTO: ${{ vars.PROOF_LEDGER_ONTO || 'HEAD' }}
 
 jobs:
   test:
@@ -30,6 +32,12 @@ jobs:
 
       - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast
+
+      - name: Replay proof ledger
+        if: ${{ vars.PROOF_LEDGER_PATH != '' }}
+        run: |
+          test -f "$PROOF_LEDGER_PATH"
+          ./zig-out/bin/zigts ledger replay --input "$PROOF_LEDGER_PATH" --onto "$PROOF_LEDGER_ONTO"
 
       - name: Run example handler tests
         run: bash scripts/test-examples.sh

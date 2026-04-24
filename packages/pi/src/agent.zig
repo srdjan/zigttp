@@ -12,6 +12,7 @@
 //! history on every submission.
 
 const std = @import("std");
+const zigts = @import("zigts");
 const loop = @import("loop.zig");
 const turn = @import("turn.zig");
 const transcript_mod = @import("transcript.zig");
@@ -783,6 +784,8 @@ test "initFromEnvWithSessionConfig stamps current policy_hash into meta.json" {
     defer allocator.free(sessions_dir);
     var env_override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", sessions_dir);
     defer env_override.restore(allocator);
+    var api_override = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+    defer api_override.restore(allocator);
 
     const ws_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "ws" });
     defer allocator.free(ws_dir);
@@ -832,15 +835,13 @@ test "initFromEnvWithSessionConfig: resume with drifted hash injects a system_no
     try std.Io.Threaded.chdir(ws_dir);
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-    // Build + run one stub turn so events.jsonl exists for reconstruction,
-    // then capture the meta path and tear down.
+    // Create a session so meta.json exists, then materialize an empty
+    // events.jsonl for reconstruction without depending on a live model
+    // backend during this test.
     const captured_meta_path: []u8 = blk: {
         var s = try initFromEnvWithSessionConfig(allocator, null, .{});
         defer s.deinit(allocator);
-        var registry: Registry = .{};
-        defer registry.deinit(allocator);
-        const rendered = try runOneTurn(allocator, &s, &registry, "seed", null);
-        allocator.free(rendered);
+        try zigts.file_io.writeFile(allocator, s.events_path orelse return error.TestUnexpectedResult, "");
         break :blk try allocator.dupe(u8, s.meta_path orelse return error.TestUnexpectedResult);
     };
     defer allocator.free(captured_meta_path);

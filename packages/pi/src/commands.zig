@@ -85,6 +85,8 @@ pub fn isHelp(name: []const u8) bool {
 }
 
 pub const session_commands = [_][]const u8{ "/resume", "/continue", "/new", "/compact", "/fork", "/tree" };
+pub const view_commands = [_][]const u8{ "/ledger", "/chat" };
+pub const ledger_commands = [_][]const u8{"/ledger export <path>"};
 
 pub fn isSessionResume(name: []const u8) bool {
     return std.mem.eql(u8, name, "/resume") or std.mem.eql(u8, name, "/continue");
@@ -116,6 +118,14 @@ pub fn isSessionFork(name: []const u8) bool {
 
 pub fn isSessionTree(name: []const u8) bool {
     return std.mem.eql(u8, name, "/tree");
+}
+
+pub fn isViewLedger(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/ledger");
+}
+
+pub fn isViewChat(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/chat");
 }
 
 const testing = std.testing;
@@ -198,4 +208,11 @@ test "isSettings isHotkeys isChangelog recognize their slash commands" {
     try testing.expect(!isHotkeys("/changelog"));
     try testing.expect(isChangelog("/changelog"));
     try testing.expect(!isChangelog("/settings"));
+}
+
+test "isViewLedger and isViewChat recognize view commands" {
+    try testing.expect(isViewLedger("/ledger"));
+    try testing.expect(!isViewLedger("/chat"));
+    try testing.expect(isViewChat("/chat"));
+    try testing.expect(!isViewChat("/ledger"));
 }

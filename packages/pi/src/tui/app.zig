@@ -35,6 +35,11 @@ pub const FocusMode = enum {
     inspector,
 };
 
+pub const ViewMode = enum {
+    ledger,
+    chat,
+};
+
 const LayoutMode = enum {
     split,
     stacked,
@@ -60,6 +65,15 @@ const FeedSource = union(enum) {
 pub const FeedItem = struct {
     source: FeedSource,
     kind: FeedItemKind,
+};
+
+const LedgerTab = enum {
+    diff,
+    properties,
+    violations,
+    prove,
+    system,
+    citations,
 };
 
 pub const ComposerState = struct {
@@ -136,10 +150,16 @@ const LocalResult = struct {
 
 pub const AppState = struct {
     feed_items: std.ArrayListUnmanaged(FeedItem) = .empty,
+    ledger_items: std.ArrayListUnmanaged(usize) = .empty,
     local_results: std.ArrayListUnmanaged(LocalResult) = .empty,
     selected_feed_index: usize = 0,
+    selected_ledger_index: usize = 0,
     feed_scroll: usize = 0,
+    ledger_scroll: usize = 0,
     focus_mode: FocusMode = .composer,
+    view_mode: ViewMode = .ledger,
+    ledger_tab: LedgerTab = .diff,
+    diff_expanded: bool = false,
     composer: ComposerState = .{},
     inspector: InspectorState = .{},
     modal: ModalState = null,
@@ -148,6 +168,7 @@ pub const AppState = struct {
 
     pub fn deinit(self: *AppState, allocator: std.mem.Allocator) void {
         self.feed_items.deinit(allocator);
+        self.ledger_items.deinit(allocator);
         self.clearLocalResults(allocator);
     }
 
@@ -174,15 +195,21 @@ pub const AppState = struct {
 
         const follow_tail = self.shouldFollowTail();
         while (self.observed_transcript_len < session.transcript.len()) : (self.observed_transcript_len += 1) {
+            const entry = session.transcript.at(self.observed_transcript_len);
             try self.feed_items.append(allocator, .{
                 .source = .{ .transcript = self.observed_transcript_len },
-                .kind = kindForTranscriptEntry(session.transcript.at(self.observed_transcript_len)),
+                .kind = kindForTranscriptEntry(entry),
             });
+            switch (entry.*) {
+                .verified_patch => try self.ledger_items.append(allocator, self.observed_transcript_len),
+                else => {},
+            }
         }
         if (follow_tail and self.feed_items.items.len > 0) {
             self.selected_feed_index = self.feed_items.items.len - 1;
         }
         self.clampSelection();
+        self.clampLedgerSelection();
     }
 
     pub fn resetToTranscript(
@@ -203,22 +230,35 @@ pub const AppState = struct {
         self.feed_items.clearRetainingCapacity();
         self.observed_transcript_len = 0;
         self.feed_scroll = 0;
+        self.ledger_scroll = 0;
         self.inspector.scroll_offset = 0;
         self.selected_feed_index = 0;
+        self.selected_ledger_index = 0;
+        self.diff_expanded = false;
+        self.ledger_items.clearRetainingCapacity();
         self.composer = .{
             .line = editor.line(),
             .cursor = editor.cursor(),
         };
         while (self.observed_transcript_len < session.transcript.len()) : (self.observed_transcript_len += 1) {
+            const entry = session.transcript.at(self.observed_transcript_len);
             try self.feed_items.append(allocator, .{
                 .source = .{ .transcript = self.observed_transcript_len },
-                .kind = kindForTranscriptEntry(session.transcript.at(self.observed_transcript_len)),
+                .kind = kindForTranscriptEntry(entry),
             });
+            switch (entry.*) {
+                .verified_patch => try self.ledger_items.append(allocator, self.observed_transcript_len),
+                else => {},
+            }
         }
         if (self.feed_items.items.len > 0) {
             self.selected_feed_index = self.feed_items.items.len - 1;
         }
+        if (self.ledger_items.items.len > 0) {
+            self.selected_ledger_index = self.ledger_items.items.len - 1;
+        }
         self.clampSelection();
+        self.clampLedgerSelection();
     }
 
     pub fn appendLocalToolResult(
@@ -272,6 +312,22 @@ pub const AppState = struct {
     fn selectedFeedItem(self: *const AppState) ?FeedItem {
         if (self.feed_items.items.len == 0) return null;
         return self.feed_items.items[self.selected_feed_index];
+    }
+
+    fn selectedLedgerIndex(self: *const AppState) ?usize {
+        if (self.ledger_items.items.len == 0) return null;
+        return self.ledger_items.items[self.selected_ledger_index];
+    }
+
+    fn clampLedgerSelection(self: *AppState) void {
+        if (self.ledger_items.items.len == 0) {
+            self.selected_ledger_index = 0;
+            self.ledger_scroll = 0;
+            return;
+        }
+        if (self.selected_ledger_index >= self.ledger_items.items.len) {
+            self.selected_ledger_index = self.ledger_items.items.len - 1;
+        }
     }
 };
 
@@ -453,11 +509,21 @@ fn handleComposerEvent(
 fn handlePaneEvent(state: *AppState, event: KeyEvent) ?bool {
     switch (event.kind) {
         .tab => {
-            state.focus_mode = nextFocus(state.focus_mode);
+            if (state.view_mode == .ledger) {
+                state.ledger_tab = nextLedgerTab(state.ledger_tab);
+                state.focus_mode = .inspector;
+            } else {
+                state.focus_mode = nextFocus(state.focus_mode);
+            }
             return false;
         },
         .shift_tab => {
-            state.focus_mode = prevFocus(state.focus_mode);
+            if (state.view_mode == .ledger) {
+                state.ledger_tab = prevLedgerTab(state.ledger_tab);
+                state.focus_mode = .inspector;
+            } else {
+                state.focus_mode = prevFocus(state.focus_mode);
+            }
             return false;
         },
         .esc => {
@@ -465,16 +531,39 @@ fn handlePaneEvent(state: *AppState, event: KeyEvent) ?bool {
             return false;
         },
         .up => {
-            moveSelectionUp(state);
+            if (state.view_mode == .ledger) {
+                moveLedgerSelectionUp(state);
+            } else {
+                moveSelectionUp(state);
+            }
             return false;
         },
         .down => {
-            moveSelectionDown(state);
+            if (state.view_mode == .ledger) {
+                moveLedgerSelectionDown(state);
+            } else {
+                moveSelectionDown(state);
+            }
             return false;
         },
         .enter => {
-            if (state.focus_mode == .feed) state.focus_mode = .inspector;
+            if (state.view_mode == .ledger and state.ledger_tab == .diff) {
+                state.diff_expanded = !state.diff_expanded;
+            } else if (state.focus_mode == .feed) {
+                state.focus_mode = .inspector;
+            }
             return false;
+        },
+        .char => switch (event.byte) {
+            'c', 'C' => {
+                state.view_mode = .chat;
+                return false;
+            },
+            'l', 'L' => {
+                state.view_mode = .ledger;
+                return false;
+            },
+            else => return null,
         },
         .ctrl_c, .eof => return true,
         else => return null,
@@ -552,6 +641,16 @@ fn handleSubmit(
             const msg = try agent.fork(runtime.allocator, runtime.session);
             defer runtime.allocator.free(msg);
             try runtime.state.appendLocalText(runtime.allocator, "/fork", true, msg);
+            return false;
+        },
+        .view_ledger => {
+            runtime.state.view_mode = .ledger;
+            runtime.state.focus_mode = .inspector;
+            return false;
+        },
+        .view_chat => {
+            runtime.state.view_mode = .chat;
+            runtime.state.focus_mode = .inspector;
             return false;
         },
     }
@@ -632,7 +731,10 @@ fn redraw(
     const size = terminalSize();
     const layout = computeLayout(size);
     state.layout_mode = layout.mode;
-    clampFeedViewport(state, visibleFeedRows(layout));
+    switch (state.view_mode) {
+        .chat => clampFeedViewport(state, visiblePrimaryRows(layout)),
+        .ledger => clampLedgerViewport(state, visiblePrimaryRows(layout)),
+    }
 
     var inspector = try buildInspectorLines(allocator, state, session);
     defer inspector.deinit(allocator);
@@ -683,7 +785,7 @@ fn renderStatusRow(
     var line_buf: [1024]u8 = undefined;
     const line = std.fmt.bufPrint(
         &line_buf,
-        "session {s} | provider {s}/{s} | model {s} | in {d} out {d} | cache {d}/{d} | focus {s}",
+        "session {s} | provider {s}/{s} | model {s} | in {d} out {d} | cache {d}/{d} | view {s} | focus {s}",
         .{
             session_id,
             descriptor.provider_label,
@@ -693,6 +795,7 @@ fn renderStatusRow(
             tok.output_tokens,
             tok.cache_read_input_tokens,
             tok.cache_creation_input_tokens,
+            viewLabel(state.view_mode),
             focusLabel(state.focus_mode),
         },
     ) catch "status";
@@ -708,9 +811,9 @@ fn renderSplitBody(
 ) !void {
     var row: usize = 0;
     while (row < layout.body_height) : (row += 1) {
-        try writeFeedRow(w, state, session, row, layout.feed_width, visibleFeedRows(layout));
+        try writePrimaryRow(w, state, session, row, layout.feed_width, visiblePrimaryRows(layout));
         try w.writeAll(" | ");
-        try writeInspectorRow(w, row, inspector_lines, layout.inspector_width, state.focus_mode == .inspector);
+        try writeInspectorRow(w, state, row, inspector_lines, layout.inspector_width, state.focus_mode == .inspector);
         if (row + 1 < layout.body_height) try writeCrlf(w);
     }
     try writeCrlf(w);
@@ -725,12 +828,12 @@ fn renderStackedBody(
 ) !void {
     var row: usize = 0;
     while (row < layout.feed_height) : (row += 1) {
-        try writeFeedRow(w, state, session, row, layout.feed_width, visibleFeedRows(layout));
+        try writePrimaryRow(w, state, session, row, layout.feed_width, visiblePrimaryRows(layout));
         try writeCrlf(w);
     }
     row = 0;
     while (row < layout.inspector_height) : (row += 1) {
-        try writeInspectorRow(w, row, inspector_lines, layout.inspector_width, state.focus_mode == .inspector);
+        try writeInspectorRow(w, state, row, inspector_lines, layout.inspector_width, state.focus_mode == .inspector);
         if (row + 1 < layout.inspector_height) try writeCrlf(w);
     }
     try writeCrlf(w);
@@ -764,10 +867,16 @@ fn renderComposer(
     }
     try writeCrlf(w);
 
-    const hints = switch (state.focus_mode) {
-        .composer => "Enter submits. Up/Down keep line history. Left/Right edit within the composer.",
-        .feed => "Up/Down move the feed selection. Enter opens the inspector. Esc returns to the composer.",
-        .inspector => "Up/Down still move the feed selection. Esc returns to the composer.",
+    const hints = switch (state.view_mode) {
+        .chat => switch (state.focus_mode) {
+            .composer => "Enter submits. Up/Down keep line history. Left/Right edit within the composer. /ledger switches views.",
+            .feed => "Up/Down move the transcript selection. Enter opens the inspector. Esc returns to the composer. l opens the ledger.",
+            .inspector => "Up/Down still move the transcript selection. Esc returns to the composer. l opens the ledger.",
+        },
+        .ledger => switch (state.focus_mode) {
+            .composer => "Enter submits. /chat switches back to transcript view.",
+            .feed, .inspector => "Up/Down move the patch rail. Tab cycles detail tabs. Enter toggles diff expansion. c opens chat.",
+        },
     };
     try writeFitted(w, hints, width);
 }
@@ -808,6 +917,20 @@ fn writeModalLine(
     try ansi.sgr(w, "1");
     try writeFitted(w, text, width);
     try w.writeAll(ansi.reset);
+}
+
+fn writePrimaryRow(
+    w: *std.Io.Writer,
+    state: *const AppState,
+    session: *const agent.AgentSession,
+    row: usize,
+    width: usize,
+    visible_items: usize,
+) !void {
+    switch (state.view_mode) {
+        .chat => try writeFeedRow(w, state, session, row, width, visible_items),
+        .ledger => try writeLedgerRow(w, state, session, row, width, visible_items),
+    }
 }
 
 fn writeFeedRow(
@@ -851,8 +974,83 @@ fn writeFeedRow(
     }
 }
 
+fn writeLedgerRow(
+    w: *std.Io.Writer,
+    state: *const AppState,
+    session: *const agent.AgentSession,
+    row: usize,
+    width: usize,
+    visible_items: usize,
+) !void {
+    if (row == 0) {
+        var header_buf: [256]u8 = undefined;
+        const header = std.fmt.bufPrint(
+            &header_buf,
+            "ledger {s} | patches {d} | selected {d}/{d}",
+            .{
+                if (state.focus_mode != .composer) "*" else "",
+                state.ledger_items.items.len,
+                if (state.ledger_items.items.len == 0) 0 else state.selected_ledger_index + 1,
+                state.ledger_items.items.len,
+            },
+        ) catch "ledger";
+        try writeFitted(w, header, width);
+        return;
+    }
+
+    const item_index = state.ledger_scroll + (row - 1);
+    if (item_index >= state.ledger_items.items.len or visible_items == 0) {
+        try writeFitted(w, "", width);
+        return;
+    }
+
+    var line_buf: [1024]u8 = undefined;
+    const line = buildLedgerLine(&line_buf, state, session, item_index);
+    if (item_index == state.selected_ledger_index) {
+        try ansi.sgr(w, "7");
+        try writeFitted(w, line, width);
+        try w.writeAll(ansi.reset);
+    } else {
+        try writeFitted(w, line, width);
+    }
+}
+
+fn buildLedgerLine(
+    out: *[1024]u8,
+    state: *const AppState,
+    session: *const agent.AgentSession,
+    ledger_index: usize,
+) []const u8 {
+    var fw = std.Io.Writer.fixed(out);
+    const w = &fw;
+    const transcript_index = state.ledger_items.items[ledger_index];
+    const entry = session.transcript.at(transcript_index);
+    switch (entry.*) {
+        .verified_patch => |message| {
+            if (message.ui_payload) |payload| switch (payload) {
+                .verified_patch => |patch| {
+                    w.print("{s} | {s} | new {d}", .{
+                        patch.file,
+                        if (patch.prove) |prove| prove.classification else "unclassified",
+                        patch.stats.new,
+                    }) catch {};
+                    if (!patch.post_apply_ok) {
+                        w.writeAll(" | post-apply warn") catch {};
+                    }
+                },
+                else => w.writeAll(firstLine(message.llm_text)) catch {},
+            } else {
+                w.writeAll(firstLine(message.llm_text)) catch {};
+            }
+        },
+        else => w.writeAll("(not a patch)") catch {},
+    }
+    return fw.buffered();
+}
+
 fn writeInspectorRow(
     w: *std.Io.Writer,
+    state: *const AppState,
     row: usize,
     inspector_lines: []const []const u8,
     width: usize,
@@ -862,8 +1060,14 @@ fn writeInspectorRow(
         var header_buf: [256]u8 = undefined;
         const header = std.fmt.bufPrint(
             &header_buf,
-            "inspector {s}",
-            .{if (focused) "*" else ""},
+            "{s} {s}",
+            .{
+                switch (state.view_mode) {
+                    .chat => "inspector",
+                    .ledger => ledgerTabLabel(state.ledger_tab),
+                },
+                if (focused) "*" else "",
+            },
         ) catch "inspector";
         try writeFitted(w, header, width);
         return;
@@ -976,6 +1180,10 @@ fn buildInspectorText(
     state: *const AppState,
     session: *const agent.AgentSession,
 ) ![]u8 {
+    if (state.view_mode == .ledger) {
+        return buildLedgerText(allocator, state, session);
+    }
+
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
@@ -993,6 +1201,39 @@ fn buildInspectorText(
         }
     } else {
         try w.writeAll("No feed items yet.\n\nType a request or run /status, /model, or /tree.");
+    }
+
+    buf = aw.toArrayList();
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn buildLedgerText(
+    allocator: std.mem.Allocator,
+    state: *const AppState,
+    session: *const agent.AgentSession,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+
+    const transcript_index = state.selectedLedgerIndex() orelse {
+        try w.writeAll("No verified patches yet.\n\nApproved edits will populate this rail.\nRun /chat to inspect the live transcript.");
+        buf = aw.toArrayList();
+        return try buf.toOwnedSlice(allocator);
+    };
+
+    const entry = session.transcript.at(transcript_index);
+    switch (entry.*) {
+        .verified_patch => |message| {
+            if (message.ui_payload) |payload| switch (payload) {
+                .verified_patch => |patch| try writeLedgerPatchPanel(w, patch, state.ledger_tab, state.diff_expanded),
+                else => try writeTextBlock(w, message.llm_text),
+            } else {
+                try writeTextBlock(w, message.llm_text);
+            }
+        },
+        else => try w.writeAll("Selected ledger entry is unavailable."),
     }
 
     buf = aw.toArrayList();
@@ -1119,12 +1360,180 @@ fn writeVerifiedPatchPayload(
     if (payload.after_properties) |p| {
         try w.writeAll("\nproperties:\n");
         inline for (@typeInfo(ui_payload_mod.PropertiesSnapshot).@"struct".fields) |field| {
-            try w.print("- {s}: {s}\n", .{
-                field.name,
-                if (@field(p, field.name)) "true" else "false",
-            });
+            switch (@typeInfo(field.type)) {
+                .bool => try w.print("- {s}: {s}\n", .{
+                    field.name,
+                    if (@field(p, field.name)) "true" else "false",
+                }),
+                .optional => {
+                    if (@field(p, field.name)) |number| {
+                        try w.print("- {s}: {d}\n", .{ field.name, number });
+                    } else {
+                        try w.print("- {s}: null\n", .{field.name});
+                    }
+                },
+                else => @compileError("unsupported PropertiesSnapshot field type"),
+            }
         }
     }
+}
+
+fn writeLedgerPatchPanel(
+    w: *std.Io.Writer,
+    payload: ui_payload_mod.VerifiedPatchPayload,
+    tab: LedgerTab,
+    diff_expanded: bool,
+) !void {
+    try w.print(
+        "file: {s}\napplied_at_unix_ms: {d}\npolicy_hash: {s}\nstats: total={d} new={d} preexisting={d}\npost_apply_ok: {s}\n",
+        .{
+            payload.file,
+            payload.applied_at_unix_ms,
+            payload.policy_hash,
+            payload.stats.total,
+            payload.stats.new,
+            payload.stats.preexisting orelse 0,
+            if (payload.post_apply_ok) "true" else "false",
+        },
+    );
+    if (payload.post_apply_summary) |summary| {
+        try w.print("post_apply_summary: {s}\n", .{summary});
+    }
+    try w.writeAll("\n");
+
+    switch (tab) {
+        .diff => {
+            try w.writeAll("Diff\n\n");
+            if (payload.hunks.len == 0) {
+                try w.writeAll("No content delta recorded.");
+                return;
+            }
+            if (diff_expanded) {
+                try writeTextBlock(w, payload.unified_diff);
+            } else {
+                for (payload.hunks, 0..) |hunk, i| {
+                    try w.print(
+                        "{d}. @@ -{d},{d} +{d},{d} @@\n",
+                        .{ i + 1, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count },
+                    );
+                }
+                try w.writeAll("\nPress Enter to expand the full diff.");
+            }
+        },
+        .properties => {
+            try w.writeAll("Properties\n\nbefore:\n");
+            try writePropertiesSnapshot(w, payload.before_properties);
+            try w.writeAll("\nafter:\n");
+            try writePropertiesSnapshot(w, payload.after_properties);
+        },
+        .violations => {
+            try w.writeAll("Violations\n\n");
+            if (payload.violations.len == 0) {
+                try w.writeAll("No violations recorded.");
+                return;
+            }
+            for (payload.violations, 0..) |violation, i| {
+                try w.print(
+                    "{d}. {s} {s} line={d} col={d} introduced={s}\n   {s}\n   key={s}\n\n",
+                    .{
+                        i + 1,
+                        violation.severity,
+                        violation.code,
+                        violation.line,
+                        violation.column,
+                        if (violation.introduced_by_patch) "true" else "false",
+                        violation.message,
+                        violation.stable_key,
+                    },
+                );
+            }
+        },
+        .prove => {
+            try w.writeAll("Prove\n\n");
+            if (payload.prove) |prove| {
+                try w.print(
+                    "classification: {s}\nproof_level: {s}\nrecommendation: {s}\n",
+                    .{ prove.classification, prove.proof_level, prove.recommendation },
+                );
+                if (prove.counterexample) |counterexample| {
+                    try w.print("counterexample: {s}\n", .{counterexample});
+                }
+                if (prove.laws_used.len > 0) {
+                    try w.writeAll("laws_used:\n");
+                    for (prove.laws_used) |law| try w.print("- {s}\n", .{law});
+                }
+            } else {
+                try w.writeAll("No contract-pair proof was available for this patch.");
+            }
+        },
+        .system => {
+            try w.writeAll("System\n\n");
+            if (payload.system) |system| {
+                try w.print(
+                    "system_path: {s}\nproof_level: {s}\nall_links_resolved: {s}\nall_responses_covered: {s}\npayload_compatible: {s}\ninjection_safe: {s}\nno_secret_leakage: {s}\nno_credential_leakage: {s}\nretry_safe: {s}\nfault_covered: {s}\nstate_isolated: {s}\ndynamic_links: {d}\n",
+                    .{
+                        system.system_path,
+                        system.proof_level,
+                        if (system.all_links_resolved) "true" else "false",
+                        if (system.all_responses_covered) "true" else "false",
+                        if (system.payload_compatible) "true" else "false",
+                        if (system.injection_safe) "true" else "false",
+                        if (system.no_secret_leakage) "true" else "false",
+                        if (system.no_credential_leakage) "true" else "false",
+                        if (system.retry_safe) "true" else "false",
+                        if (system.fault_covered) "true" else "false",
+                        if (system.state_isolated) "true" else "false",
+                        system.dynamic_links,
+                    },
+                );
+                if (system.max_system_io_depth) |depth| {
+                    try w.print("max_system_io_depth: {d}\n", .{depth});
+                }
+                if (system.warnings.len > 0) {
+                    try w.writeAll("warnings:\n");
+                    for (system.warnings) |warning| try w.print("- {s}\n", .{warning});
+                }
+            } else {
+                try w.writeAll("No system proof was available for this patch.");
+            }
+        },
+        .citations => {
+            try w.writeAll("Citations\n\n");
+            if (payload.rule_citations.len == 0) {
+                try w.writeAll("No cited rule codes were captured for this turn.");
+                return;
+            }
+            for (payload.rule_citations) |citation| {
+                try w.print("- {s}\n", .{citation});
+            }
+        },
+    }
+}
+
+fn writePropertiesSnapshot(
+    w: *std.Io.Writer,
+    snapshot: ?ui_payload_mod.PropertiesSnapshot,
+) !void {
+    if (snapshot) |value| {
+        inline for (@typeInfo(ui_payload_mod.PropertiesSnapshot).@"struct".fields) |field| {
+            switch (@typeInfo(field.type)) {
+                .bool => try w.print("- {s}: {s}\n", .{
+                    field.name,
+                    if (@field(value, field.name)) "true" else "false",
+                }),
+                .optional => {
+                    if (@field(value, field.name)) |number| {
+                        try w.print("- {s}: {d}\n", .{ field.name, number });
+                    } else {
+                        try w.print("- {s}: null\n", .{field.name});
+                    }
+                },
+                else => @compileError("unsupported PropertiesSnapshot field type"),
+            }
+        }
+        return;
+    }
+    try w.writeAll("(none)\n");
 }
 
 fn writeCommandOutcomePayload(
@@ -1250,7 +1659,7 @@ fn computeLayout(size: TerminalSize) Layout {
     };
 }
 
-fn visibleFeedRows(layout: Layout) usize {
+fn visiblePrimaryRows(layout: Layout) usize {
     return switch (layout.mode) {
         .split => layout.body_height -| 1,
         .stacked => layout.feed_height -| 1,
@@ -1270,6 +1679,21 @@ fn clampFeedViewport(state: *AppState, visible_rows: usize) void {
     }
     const max_scroll = state.feed_items.items.len -| visible_rows;
     if (state.feed_scroll > max_scroll) state.feed_scroll = max_scroll;
+}
+
+fn clampLedgerViewport(state: *AppState, visible_rows: usize) void {
+    state.clampLedgerSelection();
+    if (state.ledger_items.items.len == 0 or visible_rows == 0) {
+        state.ledger_scroll = 0;
+        return;
+    }
+    if (state.selected_ledger_index < state.ledger_scroll) {
+        state.ledger_scroll = state.selected_ledger_index;
+    } else if (state.selected_ledger_index >= state.ledger_scroll + visible_rows) {
+        state.ledger_scroll = state.selected_ledger_index + 1 - visible_rows;
+    }
+    const max_scroll = state.ledger_items.items.len -| visible_rows;
+    if (state.ledger_scroll > max_scroll) state.ledger_scroll = max_scroll;
 }
 
 fn composerCursorPosition(layout: Layout, width: usize, composer: ComposerState) struct { usize, usize } {
@@ -1317,6 +1741,28 @@ fn prevFocus(current: FocusMode) FocusMode {
     };
 }
 
+fn nextLedgerTab(current: LedgerTab) LedgerTab {
+    return switch (current) {
+        .diff => .properties,
+        .properties => .violations,
+        .violations => .prove,
+        .prove => .system,
+        .system => .citations,
+        .citations => .diff,
+    };
+}
+
+fn prevLedgerTab(current: LedgerTab) LedgerTab {
+    return switch (current) {
+        .diff => .citations,
+        .properties => .diff,
+        .violations => .properties,
+        .prove => .violations,
+        .system => .prove,
+        .citations => .system,
+    };
+}
+
 fn moveSelectionUp(state: *AppState) void {
     if (state.feed_items.items.len == 0 or state.selected_feed_index == 0) return;
     state.selected_feed_index -= 1;
@@ -1327,6 +1773,20 @@ fn moveSelectionDown(state: *AppState) void {
     if (state.feed_items.items.len == 0 or state.selected_feed_index + 1 >= state.feed_items.items.len) return;
     state.selected_feed_index += 1;
     state.inspector.scroll_offset = 0;
+}
+
+fn moveLedgerSelectionUp(state: *AppState) void {
+    if (state.ledger_items.items.len == 0 or state.selected_ledger_index == 0) return;
+    state.selected_ledger_index -= 1;
+    state.inspector.scroll_offset = 0;
+    state.diff_expanded = false;
+}
+
+fn moveLedgerSelectionDown(state: *AppState) void {
+    if (state.ledger_items.items.len == 0 or state.selected_ledger_index + 1 >= state.ledger_items.items.len) return;
+    state.selected_ledger_index += 1;
+    state.inspector.scroll_offset = 0;
+    state.diff_expanded = false;
 }
 
 fn kindForTranscriptEntry(entry: *const transcript_mod.OwnedEntry) FeedItemKind {
@@ -1367,6 +1827,24 @@ fn focusLabel(focus: FocusMode) []const u8 {
         .composer => "composer",
         .feed => "feed",
         .inspector => "inspector",
+    };
+}
+
+fn viewLabel(view: ViewMode) []const u8 {
+    return switch (view) {
+        .ledger => "ledger",
+        .chat => "chat",
+    };
+}
+
+fn ledgerTabLabel(tab: LedgerTab) []const u8 {
+    return switch (tab) {
+        .diff => "detail Diff",
+        .properties => "detail Properties",
+        .violations => "detail Violations",
+        .prove => "detail Prove",
+        .system => "detail System",
+        .citations => "detail Citations",
     };
 }
 
@@ -1466,6 +1944,114 @@ fn writeAll(bytes: []const u8) void {
 
 const testing = std.testing;
 
+fn appendTestVerifiedPatch(
+    allocator: std.mem.Allocator,
+    session: *agent.AgentSession,
+) !void {
+    const hunks = try allocator.alloc(ui_payload_mod.DiffHunk, 1);
+    hunks[0] = .{ .old_start = 1, .old_count = 1, .new_start = 1, .new_count = 1 };
+
+    const violations = try allocator.alloc(ui_payload_mod.ViolationDeltaItem, 1);
+    violations[0] = try ui_payload_mod.ViolationDeltaItem.init(
+        allocator,
+        "stable-1",
+        "ZTS204",
+        "error",
+        "serviceCall target must be validated",
+        3,
+        9,
+        true,
+    );
+
+    const laws_used = try allocator.alloc([]u8, 1);
+    laws_used[0] = try allocator.dupe(u8, "subtyping");
+
+    const warnings = try allocator.alloc([]u8, 1);
+    warnings[0] = try allocator.dupe(u8, "dynamic edge retained");
+
+    const citations = try allocator.alloc([]u8, 1);
+    citations[0] = try allocator.dupe(u8, "ZTS204");
+
+    try session.transcript.entries.append(allocator, .{ .verified_patch = .{
+        .llm_text = try allocator.dupe(u8, "verified: handler.ts (additive, total=1 new=0)"),
+        .ui_payload = .{ .verified_patch = .{
+            .file = try allocator.dupe(u8, "handler.ts"),
+            .policy_hash = try allocator.dupe(u8, "a" ** 64),
+            .applied_at_unix_ms = 42,
+            .stats = .{ .total = 1, .new = 0, .preexisting = 1 },
+            .before = try allocator.dupe(u8, "function handler(req: Request): Response { return Response.json({ ok: true }); }"),
+            .after = try allocator.dupe(u8, "function handler(req: Request): Response { return Response.json({ ok: true, region: \"iad\" }); }"),
+            .unified_diff = try allocator.dupe(u8, "@@ -1,1 +1,1 @@\n-function handler(req: Request): Response { return Response.json({ ok: true }); }\n+function handler(req: Request): Response { return Response.json({ ok: true, region: \"iad\" }); }\n"),
+            .hunks = hunks,
+            .violations = violations,
+            .before_properties = .{
+                .pure = true,
+                .read_only = true,
+                .stateless = true,
+                .retry_safe = true,
+                .deterministic = true,
+                .has_egress = false,
+                .no_secret_leakage = true,
+                .no_credential_leakage = true,
+                .input_validated = true,
+                .pii_contained = true,
+                .idempotent = true,
+                .max_io_depth = 0,
+                .injection_safe = true,
+                .state_isolated = true,
+                .fault_covered = true,
+                .result_safe = true,
+                .optional_safe = true,
+            },
+            .after_properties = .{
+                .pure = false,
+                .read_only = true,
+                .stateless = true,
+                .retry_safe = true,
+                .deterministic = true,
+                .has_egress = false,
+                .no_secret_leakage = true,
+                .no_credential_leakage = true,
+                .input_validated = true,
+                .pii_contained = true,
+                .idempotent = true,
+                .max_io_depth = 1,
+                .injection_safe = true,
+                .state_isolated = true,
+                .fault_covered = true,
+                .result_safe = true,
+                .optional_safe = true,
+            },
+            .prove = .{
+                .classification = try allocator.dupe(u8, "additive"),
+                .proof_level = try allocator.dupe(u8, "complete"),
+                .recommendation = try allocator.dupe(u8, "safe to accept"),
+                .counterexample = try allocator.dupe(u8, "none"),
+                .laws_used = laws_used,
+            },
+            .system = .{
+                .system_path = try allocator.dupe(u8, "system.json"),
+                .proof_level = try allocator.dupe(u8, "partial"),
+                .all_links_resolved = true,
+                .all_responses_covered = true,
+                .payload_compatible = true,
+                .injection_safe = true,
+                .no_secret_leakage = true,
+                .no_credential_leakage = true,
+                .retry_safe = true,
+                .fault_covered = true,
+                .state_isolated = true,
+                .max_system_io_depth = 2,
+                .dynamic_links = 1,
+                .warnings = warnings,
+            },
+            .rule_citations = citations,
+            .post_apply_ok = true,
+            .post_apply_summary = try allocator.dupe(u8, "post-apply verification succeeded"),
+        } },
+    } });
+}
+
 test "classifySingleByte maps control bytes plus tab" {
     try testing.expectEqual(KeyKind.ctrl_c, classifySingleByte(3).kind);
     try testing.expectEqual(KeyKind.eof, classifySingleByte(4).kind);
@@ -1531,6 +2117,7 @@ test "feed selection drives inspector content" {
 
     var state: AppState = .{};
     defer state.deinit(testing.allocator);
+    state.view_mode = .chat;
     try state.sync(testing.allocator, &session, &editor);
     state.selected_feed_index = 1;
 
@@ -1539,6 +2126,92 @@ test "feed selection drives inspector content" {
 
     try testing.expect(std.mem.indexOf(u8, text, "all checks passed") != null);
     try testing.expect(std.mem.indexOf(u8, text, "total=4") != null);
+}
+
+test "ledger view shows empty state when no verified patches exist" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+
+    const text = try buildInspectorText(testing.allocator, &state, &session);
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "No verified patches yet.") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Run /chat") != null);
+}
+
+test "ledger view renders verified patch tabs" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+
+    try testing.expectEqual(@as(usize, 1), state.ledger_items.items.len);
+
+    const diff_text = try buildInspectorText(testing.allocator, &state, &session);
+    defer testing.allocator.free(diff_text);
+    try testing.expect(std.mem.indexOf(u8, diff_text, "Diff") != null);
+    try testing.expect(std.mem.indexOf(u8, diff_text, "@@ -1,1 +1,1 @@") != null);
+
+    state.ledger_tab = .prove;
+    const prove_text = try buildInspectorText(testing.allocator, &state, &session);
+    defer testing.allocator.free(prove_text);
+    try testing.expect(std.mem.indexOf(u8, prove_text, "classification: additive") != null);
+    try testing.expect(std.mem.indexOf(u8, prove_text, "laws_used:") != null);
+
+    state.ledger_tab = .system;
+    const system_text = try buildInspectorText(testing.allocator, &state, &session);
+    defer testing.allocator.free(system_text);
+    try testing.expect(std.mem.indexOf(u8, system_text, "system_path: system.json") != null);
+    try testing.expect(std.mem.indexOf(u8, system_text, "dynamic_links: 1") != null);
+
+    state.ledger_tab = .citations;
+    const citations_text = try buildInspectorText(testing.allocator, &state, &session);
+    defer testing.allocator.free(citations_text);
+    try testing.expect(std.mem.indexOf(u8, citations_text, "ZTS204") != null);
+}
+
+test "ledger pane hotkeys switch tabs and views" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+
+    try testing.expectEqual(LedgerTab.diff, state.ledger_tab);
+    try testing.expectEqual(ViewMode.ledger, state.view_mode);
+
+    _ = handlePaneEvent(&state, .{ .kind = .tab });
+    try testing.expectEqual(LedgerTab.properties, state.ledger_tab);
+    try testing.expectEqual(FocusMode.inspector, state.focus_mode);
+
+    _ = handlePaneEvent(&state, .{ .kind = .shift_tab });
+    try testing.expectEqual(LedgerTab.diff, state.ledger_tab);
+
+    _ = handlePaneEvent(&state, .{ .kind = .enter });
+    try testing.expect(state.diff_expanded);
+
+    _ = handlePaneEvent(&state, .{ .kind = .char, .byte = 'c' });
+    try testing.expectEqual(ViewMode.chat, state.view_mode);
+
+    _ = handlePaneEvent(&state, .{ .kind = .char, .byte = 'l' });
+    try testing.expectEqual(ViewMode.ledger, state.view_mode);
 }
 
 test "approval modal accepts and rejects with keyboard actions" {

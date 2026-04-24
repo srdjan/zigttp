@@ -13,6 +13,7 @@ const zigts = @import("zigts");
 const edit_simulate = @import("zigts_cli").edit_simulate;
 const turn = @import("turn.zig");
 const ui_payload = @import("ui_payload.zig");
+const proof_enrichment = @import("proof_enrichment.zig");
 
 /// Structured veto summary extracted from `edit_simulate.simulate`.
 ///
@@ -90,16 +91,7 @@ pub fn runVeto(
     errdefer allocator.free(hash_copy);
 
     const snapshot: ?ui_payload.PropertiesSnapshot = if (result.properties) |p|
-        .{
-            .pure = p.pure,
-            .read_only = p.read_only,
-            .deterministic = p.deterministic,
-            .retry_safe = p.retry_safe,
-            .idempotent = p.idempotent,
-            .state_isolated = p.state_isolated,
-            .injection_safe = p.injection_safe,
-            .fault_covered = p.fault_covered,
-        }
+        proof_enrichment.propertiesSnapshot(p)
     else
         null;
 

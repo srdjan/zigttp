@@ -7,6 +7,7 @@ const tui_app = @import("tui/app.zig");
 const loop = @import("loop.zig");
 const print_mode = @import("print_mode.zig");
 const rpc_mode = @import("rpc_mode.zig");
+const ledger = @import("ledger.zig");
 
 const meta_tool = @import("tools/zigts_expert_meta.zig");
 const verify_paths_tool = @import("tools/zigts_expert_verify_paths.zig");
@@ -14,6 +15,8 @@ const describe_rule_tool = @import("tools/zigts_expert_describe_rule.zig");
 const search_tool = @import("tools/zigts_expert_search.zig");
 const edit_simulate_tool = @import("tools/zigts_expert_edit_simulate.zig");
 const review_patch_tool = @import("tools/zigts_expert_review_patch.zig");
+const prove_patch_tool = @import("tools/zigts_expert_prove_patch.zig");
+const system_proof_tool = @import("tools/zigts_expert_system_proof.zig");
 const features_tool = @import("tools/zigts_expert_features.zig");
 const modules_tool = @import("tools/zigts_expert_modules.zig");
 const verify_modules_tool = @import("tools/zigts_expert_verify_modules.zig");
@@ -46,6 +49,8 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, search_tool.tool);
     try reg.register(allocator, edit_simulate_tool.tool);
     try reg.register(allocator, review_patch_tool.tool);
+    try reg.register(allocator, prove_patch_tool.tool);
+    try reg.register(allocator, system_proof_tool.tool);
     try reg.register(allocator, features_tool.tool);
     try reg.register(allocator, modules_tool.tool);
     try reg.register(allocator, verify_modules_tool.tool);
@@ -158,6 +163,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
     } else {
         try repl.run(allocator, &registry, flags, interactive_policy);
     }
+}
+
+pub fn runLedgerCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    try ledger.runWithArgs(allocator, argv);
 }
 
 pub const ToolsPreset = enum { full, minimal };

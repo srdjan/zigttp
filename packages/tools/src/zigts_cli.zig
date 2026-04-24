@@ -11,6 +11,7 @@ pub const describe_rule = @import("describe_rule.zig");
 pub const edit_simulate = @import("edit_simulate.zig");
 pub const module_audit = @import("module_audit.zig");
 pub const json_diagnostics = @import("json_diagnostics.zig");
+pub const system_analysis = @import("system_analysis.zig");
 const json_diag = precompile.json_diag;
 const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
@@ -349,6 +350,8 @@ fn printHelp() void {
         \\  zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
         \\  zigts gen-tests [handler.ts] [-o output.jsonl]
         \\  zigts expert                          (interactive coding agent)
+        \\  zigts ledger export --session <id> --out <path>
+        \\  zigts ledger replay --input <path> --onto <git-ref>
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

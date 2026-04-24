@@ -10,11 +10,13 @@ pub const tool: registry_mod.ToolDef = .{
     .description =
     \\Run `zigts check --json` for a handler path. On success the output
     \\includes a "proof.properties" object with compiler-proven behavioral
-    \\flags: retry_safe, idempotent, injection_safe, deterministic,
-    \\read_only, state_isolated, fault_covered. Use this to inspect the
-    \\current on-disk proof state of a file before editing. `apply_edit`
-    \\drafts are validated before they are written to disk, so use the
-    \\compiler veto proof_card to validate post-edit properties instead.
+    \\and data-flow properties such as pure, read_only, stateless,
+    \\retry_safe, deterministic, idempotent, injection_safe,
+    \\state_isolated, fault_covered, result_safe, and related leakage /
+    \\validation flags. Use this to inspect the current on-disk proof state
+    \\of a file before editing. `apply_edit` drafts are validated before
+    \\they are written to disk, so use the compiler veto proof_card to
+    \\validate post-edit properties instead.
     ,
     .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
     .decode_json = decodeJson,
@@ -49,7 +51,8 @@ fn execute(
 const testing = std.testing;
 
 test "tool description matches the current zigts check properties contract" {
-    try testing.expect(std.mem.indexOf(u8, tool.description, "pure") == null);
+    try testing.expect(std.mem.indexOf(u8, tool.description, "pure") != null);
+    try testing.expect(std.mem.indexOf(u8, tool.description, "result_safe") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "current on-disk proof state") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "proof_card") != null);
 }
