@@ -144,3 +144,41 @@ test "writeJsonEnvelope on a non-existent path emits a ZTS000 envelope" {
     try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS000\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "/tmp/zigts-verify-paths-core-not-real.ts") != null);
 }
+
+test "writeJsonEnvelope surfaces ZTS400 for a flow violation" {
+    // The agent-facing `verify-paths` surface must include flow_checker
+    // diagnostics, not only the bool/type/verifier cascade. Before flow
+    // diagnostics were wired into json_diagnostics, this same handler
+    // would produce `"ok":true,"violations":[]`.
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const fixture =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  if (secret) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    try tmp_dir.dir.writeFile(.{ .sub_path = "leak.ts", .data = fixture });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs_path = try tmp_dir.dir.realpath("leak.ts", &path_buf);
+    const paths = [_][]const u8{abs_path};
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const outcome = try writeJsonEnvelope(allocator, &aw.writer, &paths);
+    buf = aw.toArrayList();
+    const s = buf.items;
+
+    try std.testing.expect(!outcome.ok);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS400\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "secret data flows into response body") != null);
+}
