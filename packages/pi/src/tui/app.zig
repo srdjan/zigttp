@@ -68,6 +68,10 @@ pub const FeedItem = struct {
 };
 
 const LedgerTab = enum {
+    /// Proof-first summary: property delta, violations before/after, witness
+    /// status, chain metadata. The default tab - callers trust the badges
+    /// and expand the diff only when a change needs line-level inspection.
+    delta,
     diff,
     properties,
     violations,
@@ -158,7 +162,7 @@ pub const AppState = struct {
     ledger_scroll: usize = 0,
     focus_mode: FocusMode = .composer,
     view_mode: ViewMode = .ledger,
-    ledger_tab: LedgerTab = .diff,
+    ledger_tab: LedgerTab = .delta,
     diff_expanded: bool = false,
     composer: ComposerState = .{},
     inspector: InspectorState = .{},
@@ -547,7 +551,9 @@ fn handlePaneEvent(state: *AppState, event: KeyEvent) ?bool {
             return false;
         },
         .enter => {
-            if (state.view_mode == .ledger and state.ledger_tab == .diff) {
+            if (state.view_mode == .ledger and
+                (state.ledger_tab == .diff or state.ledger_tab == .delta))
+            {
                 state.diff_expanded = !state.diff_expanded;
             } else if (state.focus_mode == .feed) {
                 state.focus_mode = .inspector;
@@ -1419,12 +1425,23 @@ fn writeLedgerPatchPanel(
             if (payload.post_apply_ok) "true" else "false",
         },
     );
+    if (payload.patch_hash) |hash| {
+        try w.writeAll("patch_hash: ");
+        try writeShortHash(w, hash);
+        try w.writeByte('\n');
+    }
+    if (payload.parent_hash) |hash| {
+        try w.writeAll("parent_hash: ");
+        try writeShortHash(w, hash);
+        try w.writeByte('\n');
+    }
     if (payload.post_apply_summary) |summary| {
         try w.print("post_apply_summary: {s}\n", .{summary});
     }
     try w.writeAll("\n");
 
     switch (tab) {
+        .delta => try writeProofDeltaCard(w, payload, diff_expanded),
         .diff => {
             try w.writeAll("Diff\n\n");
             if (payload.hunks.len == 0) {
@@ -1531,6 +1548,126 @@ fn writeLedgerPatchPanel(
             }
         },
     }
+}
+
+/// Proof-first summary renderer. Property delta badges, violations before -> after,
+/// witness lifecycle counts, chain metadata, collapsed diff pointer. The badges are
+/// the review primitive here: trust the delta, press `d` (or Tab + Enter on .diff)
+/// only when a change needs line-level inspection.
+fn writeProofDeltaCard(
+    w: *std.Io.Writer,
+    payload: ui_payload_mod.VerifiedPatchPayload,
+    diff_expanded: bool,
+) !void {
+    try w.writeAll("Proof Delta\n\n");
+
+    if (payload.patch_hash) |hash| {
+        try w.writeAll("patch  ");
+        try writeShortHash(w, hash);
+        if (payload.parent_hash) |parent| {
+            try w.writeAll("  <- ");
+            try writeShortHash(w, parent);
+        }
+        try w.writeByte('\n');
+    }
+
+    if (payload.goal_context.len > 0) {
+        try w.writeAll("goals  ");
+        for (payload.goal_context, 0..) |goal, i| {
+            if (i > 0) try w.writeAll(", ");
+            try w.writeAll(goal);
+        }
+        try w.writeByte('\n');
+    }
+
+    try w.writeByte('\n');
+    try w.writeAll("properties\n");
+    try writePropertyDelta(w, payload.before_properties, payload.after_properties);
+
+    try w.writeByte('\n');
+    try w.print("violations  {d} total", .{payload.stats.total});
+    if (payload.stats.preexisting) |pre| {
+        try w.print("  ({d} new, {d} preexisting)", .{ payload.stats.new, pre });
+    } else {
+        try w.print("  ({d} new)", .{payload.stats.new});
+    }
+    try w.writeByte('\n');
+
+    try w.print("witnesses   {d} defeated", .{payload.witnesses_defeated.len});
+    if (payload.witnesses_new.len > 0) {
+        try w.print(", ", .{});
+        try ansi.sgr(w, "31");
+        try w.print("{d} new", .{payload.witnesses_new.len});
+        try w.writeAll(ansi.reset);
+    }
+    try w.writeByte('\n');
+
+    if (payload.post_apply_summary) |summary| {
+        try w.writeByte('\n');
+        try w.print("note  {s}\n", .{summary});
+    }
+
+    try w.writeByte('\n');
+    if (payload.hunks.len == 0) {
+        try w.writeAll("diff  (no content delta)\n");
+    } else if (diff_expanded) {
+        try w.writeAll("diff\n");
+        try writeTextBlock(w, payload.unified_diff);
+    } else {
+        try w.print("diff  {d} hunk{s} (Enter to expand)\n", .{
+            payload.hunks.len,
+            if (payload.hunks.len == 1) "" else "s",
+        });
+    }
+}
+
+/// Compare two PropertiesSnapshots and emit SGR-coloured badges: green `+name`
+/// for promotions (false -> true), red `-name` for demotions. Unchanged fields
+/// are suppressed so the eye lands on what this patch actually did.
+fn writePropertyDelta(
+    w: *std.Io.Writer,
+    before_opt: ?ui_payload_mod.PropertiesSnapshot,
+    after_opt: ?ui_payload_mod.PropertiesSnapshot,
+) !void {
+    const after = after_opt orelse {
+        try w.writeAll("  (not computed)\n");
+        return;
+    };
+
+    var promoted: u32 = 0;
+    var demoted: u32 = 0;
+    const before = before_opt;
+
+    try w.writeAll("  ");
+    inline for (@typeInfo(ui_payload_mod.PropertiesSnapshot).@"struct".fields) |field| {
+        if (field.type == bool) {
+            const after_val = @field(after, field.name);
+            const before_val = if (before) |b| @field(b, field.name) else after_val;
+            if (after_val and !before_val) {
+                if (promoted > 0 or demoted > 0) try w.writeAll("  ");
+                try ansi.sgr(w, "32");
+                try w.print("+{s}", .{field.name});
+                try w.writeAll(ansi.reset);
+                promoted += 1;
+            } else if (!after_val and before_val) {
+                if (promoted > 0 or demoted > 0) try w.writeAll("  ");
+                try ansi.sgr(w, "31");
+                try w.print("-{s}", .{field.name});
+                try w.writeAll(ansi.reset);
+                demoted += 1;
+            }
+        }
+    }
+
+    if (promoted == 0 and demoted == 0) {
+        try w.writeAll("(no property changes)");
+    }
+    try w.writeByte('\n');
+}
+
+fn writeShortHash(w: *std.Io.Writer, hash: [32]u8) !void {
+    const hex = std.fmt.bytesToHex(hash, .lower);
+    try w.writeAll(hex[0..12]);
 }
 
 fn writePropertiesSnapshot(
@@ -1766,18 +1903,20 @@ fn prevFocus(current: FocusMode) FocusMode {
 
 fn nextLedgerTab(current: LedgerTab) LedgerTab {
     return switch (current) {
+        .delta => .diff,
         .diff => .properties,
         .properties => .violations,
         .violations => .prove,
         .prove => .system,
         .system => .citations,
-        .citations => .diff,
+        .citations => .delta,
     };
 }
 
 fn prevLedgerTab(current: LedgerTab) LedgerTab {
     return switch (current) {
-        .diff => .citations,
+        .delta => .citations,
+        .diff => .delta,
         .properties => .diff,
         .violations => .properties,
         .prove => .violations,
@@ -1863,6 +2002,7 @@ fn viewLabel(view: ViewMode) []const u8 {
 
 fn ledgerTabLabel(tab: LedgerTab) []const u8 {
     return switch (tab) {
+        .delta => "proof delta",
         .diff => "detail Diff",
         .properties => "detail Properties",
         .violations => "detail Violations",
@@ -2183,6 +2323,7 @@ test "ledger view renders verified patch tabs" {
 
     try testing.expectEqual(@as(usize, 1), state.ledger_items.items.len);
 
+    state.ledger_tab = .diff;
     const diff_text = try buildInspectorText(testing.allocator, &state, &session);
     defer testing.allocator.free(diff_text);
     try testing.expect(std.mem.indexOf(u8, diff_text, "Diff") != null);
@@ -2206,6 +2347,34 @@ test "ledger view renders verified patch tabs" {
     try testing.expect(std.mem.indexOf(u8, citations_text, "ZTS204") != null);
 }
 
+test "ledger proof-delta tab is the default and renders promoted/demoted badges" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+
+    try testing.expectEqual(LedgerTab.delta, state.ledger_tab);
+
+    const text = try buildInspectorText(testing.allocator, &state, &session);
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "Proof Delta") != null);
+    // Fixture demotes `pure` (true -> false) and max_io_depth is optional so it
+    // doesn't surface; no bool field is promoted in the fixture. Expect the
+    // demotion badge to render.
+    try testing.expect(std.mem.indexOf(u8, text, "-pure") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "violations") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "witnesses") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "diff") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Enter to expand") != null);
+}
+
 test "ledger pane hotkeys switch tabs and views" {
     var session = agent.AgentSession.initStub();
     defer session.deinit(testing.allocator);
@@ -2218,15 +2387,15 @@ test "ledger pane hotkeys switch tabs and views" {
     defer state.deinit(testing.allocator);
     try state.sync(testing.allocator, &session, &editor);
 
-    try testing.expectEqual(LedgerTab.diff, state.ledger_tab);
+    try testing.expectEqual(LedgerTab.delta, state.ledger_tab);
     try testing.expectEqual(ViewMode.ledger, state.view_mode);
 
     _ = handlePaneEvent(&state, .{ .kind = .tab });
-    try testing.expectEqual(LedgerTab.properties, state.ledger_tab);
+    try testing.expectEqual(LedgerTab.diff, state.ledger_tab);
     try testing.expectEqual(FocusMode.inspector, state.focus_mode);
 
     _ = handlePaneEvent(&state, .{ .kind = .shift_tab });
-    try testing.expectEqual(LedgerTab.diff, state.ledger_tab);
+    try testing.expectEqual(LedgerTab.delta, state.ledger_tab);
 
     _ = handlePaneEvent(&state, .{ .kind = .enter });
     try testing.expect(state.diff_expanded);
