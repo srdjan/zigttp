@@ -10,6 +10,7 @@ const agent = @import("agent.zig");
 const commands = @import("commands.zig");
 const loop = @import("loop.zig");
 const app = @import("app.zig");
+const ledger = @import("ledger.zig");
 const skills_catalog = @import("skills/catalog.zig");
 const prompts_catalog = @import("prompts/catalog.zig");
 const models_registry = @import("providers/models.zig");
@@ -28,6 +29,8 @@ pub const DispatchOutcome = union(enum) {
     session_new,
     session_compact,
     session_fork,
+    view_ledger,
+    view_chat,
 };
 
 /// Surface-agnostic result of processing one submitted line. Both the
@@ -44,6 +47,8 @@ pub const SubmitOutcome = union(enum) {
     session_new,
     session_compact,
     session_fork,
+    view_ledger,
+    view_chat,
 };
 
 /// Routes a single line through either the model (NL) or the dispatch
@@ -126,6 +131,27 @@ pub fn processSubmit(
         return .{ .tool_result = try renderTree(allocator, if (session.session_id) |sid| sid else null) };
     }
 
+    if (commands.isViewLedger(trimmed)) {
+        return .view_ledger;
+    }
+
+    if (commands.isViewChat(trimmed)) {
+        return .view_chat;
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "/ledger export ")) {
+        const out_path = std.mem.trim(u8, trimmed["/ledger export ".len..], " \t");
+        if (out_path.len == 0) {
+            return .{ .tool_result = .{ .ok = false, .llm_text = try allocator.dupe(u8, "usage: /ledger export <path>\n") } };
+        }
+        const sid = session.session_id orelse {
+            return .{ .tool_result = .{ .ok = false, .llm_text = try allocator.dupe(u8, "ledger export requires a persisted session\n") } };
+        };
+        try ledger.exportSessionLedger(allocator, sid, out_path);
+        const msg = try std.fmt.allocPrint(allocator, "ledger exported to {s}\n", .{out_path});
+        return .{ .tool_result = .{ .ok = true, .llm_text = msg } };
+    }
+
     if (!shouldDispatchTool(registry, trimmed)) {
         const rendered = try agent.runOneTurn(allocator, session, registry, trimmed, approval_fn);
         return .{ .rendered = rendered };
@@ -140,6 +166,8 @@ pub fn processSubmit(
         .session_new => .session_new,
         .session_compact => .session_compact,
         .session_fork => .session_fork,
+        .view_ledger => .view_ledger,
+        .view_chat => .view_chat,
     };
 }
 
@@ -163,6 +191,8 @@ pub fn dispatchLine(
     if (commands.isCompact(argv[0])) return .session_compact;
     if (commands.isSessionFork(argv[0])) return .session_fork;
     if (commands.isSessionTree(argv[0])) return .{ .result = try renderTree(allocator, null) };
+    if (commands.isViewLedger(argv[0])) return .view_ledger;
+    if (commands.isViewChat(argv[0])) return .view_chat;
     if (commands.isSettings(argv[0])) return .{ .result = try renderSettings(allocator) };
     if (commands.isHotkeys(argv[0])) return .{ .result = try renderHotkeys(allocator) };
     if (commands.isChangelog(argv[0])) return .{ .result = try renderChangelog(allocator) };
@@ -248,6 +278,12 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     for (commands.session_commands) |slash| {
         try w.print("  {s}\n", .{slash});
     }
+    for (commands.view_commands) |slash| {
+        try w.print("  {s}\n", .{slash});
+    }
+    for (commands.ledger_commands) |slash| {
+        try w.print("  {s}\n", .{slash});
+    }
     try w.writeAll("  zigts");
     for (commands.command_table) |row| {
         if (row.explicit) |name| {
@@ -275,6 +311,7 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     try w.writeAll("\nMeta commands: help (:h), quit (:q)\n");
     try w.writeAll("Info commands: /model  /status  /settings  /hotkeys  /changelog\n");
     try w.writeAll("Session:       /compact  /resume  /continue  /new  /fork  /tree\n");
+    try w.writeAll("Views:         /ledger  /chat  /ledger export <path>\n");
     try w.writeAll("Skills:        /skills  /skill:<name>\n");
     try w.writeAll("Templates:     /templates  /template:<name> [args...]\n");
 
@@ -374,7 +411,9 @@ fn renderHotkeys(allocator: std.mem.Allocator) !ToolResult {
             "  Left/Right     move cursor\n" ++
             "  Home/End       jump to start/end of line\n" ++
             "  Delete         delete under cursor\n" ++
-            "  Up/Down        history navigation\n",
+            "  Up/Down        history navigation or move the ledger rail\n" ++
+            "  Tab/Shift-Tab  cycle panes in chat or ledger detail tabs\n" ++
+            "  c / l          switch between chat and ledger views\n",
     );
     defer allocator.free(msg);
     return ToolResult.withPlainText(allocator, true, msg);
@@ -415,6 +454,7 @@ fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
             "  Session compaction (/compact)\n" ++
             "  Session branching: /fork, /tree, --fork, --continue\n" ++
             "  Session commands: /resume, /continue, /new, /compact, /fork, /tree\n" ++
+            "  Proof ledger mode: /ledger, /chat, /ledger export, zigts ledger replay/export\n" ++
             "  Skills catalog (/skill:<name>)\n" ++
             "  Informational commands: /model, /status, /settings, /hotkeys, /changelog\n",
     );
@@ -670,6 +710,14 @@ pub fn run(
                 defer allocator.free(msg);
                 _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
             },
+            .view_ledger => {
+                const msg = "ledger view is available in the full-screen TUI\n";
+                _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
+            },
+            .view_chat => {
+                const msg = "chat view is the default in the line-buffered REPL\n";
+                _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
+            },
         }
     }
 }
@@ -748,7 +796,26 @@ test "help renders local command guidance" {
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "/status") != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.session_commands[0]) != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.session_commands[1]) != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.view_commands[0]) != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.ledger_commands[0]) != null);
         },
+        else => return error.TestFailed,
+    }
+}
+
+test "slash view commands route locally" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+
+    const ledger_outcome = try dispatchLine(testing.allocator, &reg, "/ledger");
+    switch (ledger_outcome) {
+        .view_ledger => {},
+        else => return error.TestFailed,
+    }
+
+    const chat_outcome = try dispatchLine(testing.allocator, &reg, "/chat");
+    switch (chat_outcome) {
+        .view_chat => {},
         else => return error.TestFailed,
     }
 }
@@ -880,6 +947,42 @@ test "processSubmit: /status reports provider auth and persistence state" {
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "provider:      stub") != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "auth:          stub") != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "persistence:   disabled") != null);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "processSubmit: /ledger and /chat switch views" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    const ledger_outcome = try processSubmit(testing.allocator, &session, &reg, "/ledger", null);
+    switch (ledger_outcome) {
+        .view_ledger => {},
+        else => return error.TestFailed,
+    }
+
+    const chat_outcome = try processSubmit(testing.allocator, &session, &reg, "/chat", null);
+    switch (chat_outcome) {
+        .view_chat => {},
+        else => return error.TestFailed,
+    }
+}
+
+test "processSubmit: /ledger export requires a persisted session" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    var outcome = try processSubmit(testing.allocator, &session, &reg, "/ledger export /tmp/proof.ndjson", null);
+    switch (outcome) {
+        .tool_result => |*r| {
+            defer r.deinit(testing.allocator);
+            try testing.expect(!r.ok);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "persisted session") != null);
         },
         else => return error.TestFailed,
     }

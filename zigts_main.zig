@@ -15,6 +15,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try runExpertCommand(user_args[1..], allocator);
         return;
     }
+    if (user_args.len > 0 and std.mem.eql(u8, user_args[0], "ledger")) {
+        try pi_app.runLedgerCommand(allocator, user_args[1..]);
+        return;
+    }
 
     try zigts_cli.run(allocator, user_args);
 }
@@ -84,6 +88,8 @@ fn printExpertHelp() void {
         \\  zigts meta
         \\  zigts verify-paths <file>...
         \\  zigts verify-modules --builtins --strict --json
+        \\  zigts ledger export --session <id> --out <path>
+        \\  zigts ledger replay --input <path> --onto <git-ref>
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

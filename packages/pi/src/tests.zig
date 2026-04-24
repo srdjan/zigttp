@@ -9,6 +9,8 @@ comptime {
     _ = @import("tools/zigts_expert_search.zig");
     _ = @import("tools/zigts_expert_edit_simulate.zig");
     _ = @import("tools/zigts_expert_review_patch.zig");
+    _ = @import("tools/zigts_expert_prove_patch.zig");
+    _ = @import("tools/zigts_expert_system_proof.zig");
     _ = @import("tools/zigts_expert_features.zig");
     _ = @import("tools/zigts_expert_modules.zig");
     _ = @import("tools/zigts_expert_verify_modules.zig");
@@ -33,6 +35,7 @@ comptime {
     _ = @import("transcript.zig");
     _ = @import("expert_persona.zig");
     _ = @import("loop.zig");
+    _ = @import("proof_enrichment.zig");
     _ = @import("agent.zig");
     _ = @import("providers/anthropic/events.zig");
     _ = @import("providers/anthropic/sse_parser.zig");

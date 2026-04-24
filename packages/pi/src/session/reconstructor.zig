@@ -353,19 +353,40 @@ test "reconstructTranscript round-trips a verified_patch event with ui_payload" 
     var patch: ui_payload.UiPayload = .{ .verified_patch = .{
         .file = try allocator.dupe(u8, "handler.ts"),
         .policy_hash = try allocator.dupe(u8, "b" ** 64),
+        .applied_at_unix_ms = 42,
         .stats = .{ .total = 2, .new = 1, .preexisting = 1 },
         .before = try allocator.dupe(u8, "old"),
         .after = try allocator.dupe(u8, "new"),
+        .unified_diff = try allocator.dupe(u8, "@@ -1,1 +1,1 @@\n-old\n+new\n"),
+        .hunks = blk: {
+            const hunks = try allocator.alloc(ui_payload.DiffHunk, 1);
+            hunks[0] = .{ .old_start = 1, .old_count = 1, .new_start = 1, .new_count = 1 };
+            break :blk hunks;
+        },
+        .violations = try allocator.alloc(ui_payload.ViolationDeltaItem, 0),
+        .before_properties = null,
         .after_properties = .{
             .pure = false,
             .read_only = false,
-            .deterministic = true,
+            .stateless = false,
             .retry_safe = true,
+            .deterministic = true,
+            .has_egress = false,
+            .no_secret_leakage = true,
+            .no_credential_leakage = true,
+            .input_validated = true,
+            .pii_contained = true,
             .idempotent = false,
+            .max_io_depth = null,
             .state_isolated = true,
             .injection_safe = true,
             .fault_covered = false,
+            .result_safe = false,
+            .optional_safe = false,
         },
+        .prove = null,
+        .system = null,
+        .rule_citations = try allocator.alloc([]u8, 0),
         .post_apply_ok = true,
         .post_apply_summary = null,
     } };

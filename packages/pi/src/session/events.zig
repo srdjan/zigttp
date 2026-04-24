@@ -335,10 +335,18 @@ test "appendEvent serializes verified_patch with ui_payload" {
     var patch: ui_payload.UiPayload = .{ .verified_patch = .{
         .file = try allocator.dupe(u8, "handler.ts"),
         .policy_hash = try allocator.dupe(u8, "a" ** 64),
+        .applied_at_unix_ms = 42,
         .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
         .before = null,
         .after = try allocator.dupe(u8, "export default {}"),
+        .unified_diff = try allocator.alloc(u8, 0),
+        .hunks = try allocator.alloc(ui_payload.DiffHunk, 0),
+        .violations = try allocator.alloc(ui_payload.ViolationDeltaItem, 0),
+        .before_properties = null,
         .after_properties = null,
+        .prove = null,
+        .system = null,
+        .rule_citations = try allocator.alloc([]u8, 0),
         .post_apply_ok = true,
         .post_apply_summary = null,
     } };
