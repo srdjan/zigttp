@@ -154,9 +154,6 @@ fn execute(
         }
     }
 
-    // Strip TypeScript annotations before parsing. The low-level JsParser
-    // is the same one precompile.zig drives, and it sidesteps the 4-arg
-    // compat shim that the top-level `zigts.Parser` alias still exposes.
     var strip_result = zigts.strip(allocator, source, .{
         .comptime_env = .{},
     }) catch |e| {

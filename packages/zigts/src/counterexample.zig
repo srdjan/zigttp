@@ -27,15 +27,9 @@ const std = @import("std");
 const mb = @import("module_binding.zig");
 const json_utils = @import("json_utils.zig");
 
-// ---------------------------------------------------------------------------
-// Constraint kinds understood by the solver.
-//
-// Kept structurally identical to `path_generator.Constraint` so that wiring
-// flow_checker + path_generator into the solver later is a memcpy, not a
-// translation. We intentionally do not import path_generator here: this file
-// must stay consumable by flow_checker (which has its own constraint
-// provenance) without pulling in the full IR walker.
-// ---------------------------------------------------------------------------
+// TODO: these types shadow `path_generator.Constraint` / `StubInfo` exactly;
+// a future extraction into a shared `witness_types.zig` lets both files
+// depend on the same definition without either pulling in the other.
 
 pub const StubInfo = struct {
     module: []const u8,
