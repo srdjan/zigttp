@@ -83,7 +83,7 @@ fn writeMessagesArray(
             },
             .tool_result => |result| try appendBlock(allocator, &groups, .user, .{ .tool_result = result }),
             .system_note => |body| try appendBlock(allocator, &groups, .user, .{ .text = body }),
-            .proof_card, .diagnostic_box => {},
+            .proof_card, .diagnostic_box, .verified_patch => {},
         }
     }
 

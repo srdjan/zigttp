@@ -18,6 +18,7 @@ const EventKind = enum {
     tool_result,
     proof_card,
     diagnostic_box,
+    verified_patch,
     system_note,
 };
 
@@ -47,6 +48,7 @@ pub const EventRecord = union(EventKind) {
     tool_result: ToolResult,
     proof_card: DisplayMessage,
     diagnostic_box: DisplayMessage,
+    verified_patch: DisplayMessage,
     system_note: []const u8,
 };
 
@@ -103,6 +105,7 @@ fn kindTag(record: EventRecord) []const u8 {
         .tool_result => "tool_result",
         .proof_card => "proof_card",
         .diagnostic_box => "diagnostic_box",
+        .verified_patch => "verified_patch",
         .system_note => "system_note",
     };
 }
@@ -140,6 +143,7 @@ fn writePayload(writer: *std.Io.Writer, record: EventRecord) !void {
         },
         .proof_card => |message| try writeDisplayPayload(writer, message),
         .diagnostic_box => |message| try writeDisplayPayload(writer, message),
+        .verified_patch => |message| try writeDisplayPayload(writer, message),
     }
 }
 
@@ -318,6 +322,39 @@ test "appendEvent serializes tool_result with llm_text body alias and ui_payload
     try testing.expect(std.mem.indexOf(u8, raw, "\"llm_text\":\"{\\\"ok\\\":false}\"") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"body\":\"{\\\"ok\\\":false}\"") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"ui_payload\":{\"kind\":\"plain_text\"") != null);
+}
+
+test "appendEvent serializes verified_patch with ui_payload" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    var patch: ui_payload.UiPayload = .{ .verified_patch = .{
+        .file = try allocator.dupe(u8, "handler.ts"),
+        .policy_hash = try allocator.dupe(u8, "a" ** 64),
+        .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
+        .before = null,
+        .after = try allocator.dupe(u8, "export default {}"),
+        .after_properties = null,
+        .post_apply_ok = true,
+        .post_apply_summary = null,
+    } };
+    defer patch.deinit(allocator);
+
+    try appendEvent(allocator, path, .{ .verified_patch = .{
+        .llm_text = "verified: handler.ts",
+        .ui_payload = patch,
+    } });
+
+    const raw = try readWhole(allocator, path);
+    defer allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"verified_patch\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"ui_payload\":{\"kind\":\"verified_patch\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"policy_hash\":\"aaaaa") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"post_apply_ok\":true") != null);
 }
 
 test "appendEvent serializes proof_card as a display object" {

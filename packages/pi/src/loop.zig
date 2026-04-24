@@ -6,9 +6,21 @@ const turn = @import("turn.zig");
 const veto = @import("veto.zig");
 const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
+const ui_payload_mod = @import("ui_payload.zig");
 const zigts = @import("zigts");
 const file_io = zigts.file_io;
 const apply_edit = @import("providers/anthropic/apply_edit.zig");
+
+/// Each verified_patch carries both the before and the after bytes, so the
+/// cap applies per-side: 2 * 64 KiB = 128 KiB worst case, keeping a single
+/// patch record within the same 256 KiB envelope the tool_result persister
+/// already enforces via `AppendOptions.max_body`.
+const verified_patch_content_cap: usize = 64 * 1024;
+
+const PostApplyReport = struct {
+    ok: bool,
+    summary: ?[]u8 = null,
+};
 
 pub const ModelCallResult = struct {
     reply: turn.AssistantReply,
@@ -167,12 +179,12 @@ pub fn runTurnWith(
             },
             .run_veto => |edit| {
                 const prepared = try prepareEdit(ta, options.workspace_root, edit);
-                const outcome = try veto.runVeto(ta, .{
+                const veto_result = try veto.runVeto(ta, .{
                     .file = prepared.edit.file,
                     .content = prepared.edit.content,
                     .before = prepared.edit.before,
                 });
-                if (outcome.ok and !options.replay_mode) {
+                if (veto_result.outcome.ok and !options.replay_mode) {
                     if (options.approval_fn) |approve| {
                         if (!try approve.call(prepared.edit.file)) {
                             try transcript.append(allocator, .{ .tool_result = .{
@@ -186,9 +198,17 @@ pub fn runTurnWith(
                         }
                     }
                     try applyPreparedEdit(ta, prepared);
-                    try postApplyCheck(allocator, ta, registry, transcript, prepared);
+                    const post_apply = try postApplyCheck(allocator, ta, registry, transcript, prepared);
+                    defer if (post_apply.summary) |s| allocator.free(s);
+                    try appendVerifiedPatchEntry(
+                        allocator,
+                        transcript,
+                        prepared,
+                        veto_result.report,
+                        post_apply,
+                    );
                 }
-                next_event = .{ .edit_verified = outcome };
+                next_event = .{ .edit_verified = veto_result.outcome };
             },
             .invoke_tool_batch => |calls| {
                 try transcript.append(allocator, .{ .assistant_tool_use = calls });
@@ -324,14 +344,17 @@ fn postApplyCheck(
     registry: *const registry_mod.Registry,
     transcript: *transcript_mod.Transcript,
     prepared: PreparedEdit,
-) !void {
+) !PostApplyReport {
+    var report: PostApplyReport = .{ .ok = true, .summary = null };
+    errdefer if (report.summary) |s| allocator.free(s);
+
     if (registry.findByName("zigts_expert_verify_paths") != null) {
         const args_json = try std.fmt.allocPrint(
             arena,
             "{{\"paths\":[\"{s}\"]}}",
             .{prepared.edit.file},
         );
-        var vr = registry.invokeJson(arena, "zigts_expert_verify_paths", args_json) catch return;
+        var vr = registry.invokeJson(arena, "zigts_expert_verify_paths", args_json) catch return report;
         defer vr.deinit(arena);
         if (!vr.ok) {
             const note = try std.fmt.allocPrint(
@@ -339,6 +362,7 @@ fn postApplyCheck(
                 "post-apply regression: verify_paths found violations\n{s}",
                 .{vr.llm_text},
             );
+            defer allocator.free(note);
             try transcript.append(allocator, .{ .diagnostic_box = .{
                 .llm_text = note,
                 .ui_payload = if (vr.ui_payload) |payload|
@@ -346,6 +370,10 @@ fn postApplyCheck(
                 else
                     null,
             } });
+            report.ok = false;
+            if (report.summary == null) {
+                report.summary = try allocator.dupe(u8, "verify_paths regressed");
+            }
         }
     }
 
@@ -355,7 +383,7 @@ fn postApplyCheck(
             "{{\"file\":\"{s}\",\"diff_only\":true}}",
             .{prepared.edit.file},
         );
-        var rr = registry.invokeJson(arena, "zigts_expert_review_patch", args_json) catch return;
+        var rr = registry.invokeJson(arena, "zigts_expert_review_patch", args_json) catch return report;
         defer rr.deinit(arena);
         if (!rr.ok) {
             const note = try std.fmt.allocPrint(
@@ -363,6 +391,7 @@ fn postApplyCheck(
                 "post-apply diff review: new violations found\n{s}",
                 .{rr.llm_text},
             );
+            defer allocator.free(note);
             try transcript.append(allocator, .{ .diagnostic_box = .{
                 .llm_text = note,
                 .ui_payload = if (rr.ui_payload) |payload|
@@ -370,8 +399,73 @@ fn postApplyCheck(
                 else
                     null,
             } });
+            report.ok = false;
+            if (report.summary) |s| allocator.free(s);
+            report.summary = try allocator.dupe(u8, "review_patch flagged new violations");
         }
     }
+
+    return report;
+}
+
+fn appendVerifiedPatchEntry(
+    allocator: std.mem.Allocator,
+    transcript: *transcript_mod.Transcript,
+    prepared: PreparedEdit,
+    report: veto.VetoReport,
+    post_apply: PostApplyReport,
+) !void {
+    const summary_line = try std.fmt.allocPrint(
+        allocator,
+        "verified: {s} ({d} total, {d} new, {d} preexisting)",
+        .{ prepared.edit.file, report.total, report.new, report.preexisting },
+    );
+    errdefer allocator.free(summary_line);
+
+    const file_copy = try allocator.dupe(u8, prepared.edit.file);
+    errdefer allocator.free(file_copy);
+
+    const policy_copy = try allocator.dupe(u8, report.policy_hash);
+    errdefer allocator.free(policy_copy);
+
+    const after_capped = try transcript_mod.capToolResultBody(
+        allocator,
+        prepared.edit.content,
+        verified_patch_content_cap,
+    );
+    errdefer allocator.free(after_capped);
+
+    const before_capped: ?[]u8 = if (prepared.edit.before) |b|
+        try transcript_mod.capToolResultBody(allocator, b, verified_patch_content_cap)
+    else
+        null;
+    errdefer if (before_capped) |b| allocator.free(b);
+
+    const post_apply_summary_copy: ?[]u8 = if (post_apply.summary) |s|
+        try allocator.dupe(u8, s)
+    else
+        null;
+    errdefer if (post_apply_summary_copy) |s| allocator.free(s);
+
+    const payload: ui_payload_mod.UiPayload = .{ .verified_patch = .{
+        .file = file_copy,
+        .policy_hash = policy_copy,
+        .stats = .{
+            .total = report.total,
+            .new = report.new,
+            .preexisting = report.preexisting,
+        },
+        .before = before_capped,
+        .after = after_capped,
+        .after_properties = report.after_properties,
+        .post_apply_ok = post_apply.ok,
+        .post_apply_summary = post_apply_summary_copy,
+    } };
+
+    try transcript.entries.append(allocator, .{ .verified_patch = .{
+        .llm_text = summary_line,
+        .ui_payload = payload,
+    } });
 }
 
 fn isPathInsideRoot(root: []const u8, candidate: []const u8) bool {
@@ -809,4 +903,94 @@ test "replay_mode off preserves existing write behavior" {
     const written = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
     defer testing.allocator.free(written);
     try testing.expectEqualStrings(clean_handler, written);
+}
+
+test "verified edit path appends a verified_patch entry before the proof card" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+
+    var canned: CannedClient = .{ .reply = .{
+        .response = .{ .edit = .{
+            .file = "handler.ts",
+            .content = clean_handler,
+            .before = null,
+        } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const result = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "write the handler",
+        .{ .workspace_root = workspace_root },
+    );
+    try testing.expectEqual(turn.TurnState.done, result.final_state);
+
+    // proof_card remains the final entry so the turn state machine contract is
+    // unchanged; verified_patch is the entry immediately before it.
+    switch (tr.at(tr.len() - 1).*) {
+        .proof_card => {},
+        else => return error.TestFailed,
+    }
+    try testing.expect(tr.len() >= 2);
+    switch (tr.at(tr.len() - 2).*) {
+        .verified_patch => |message| {
+            try testing.expect(message.ui_payload != null);
+            switch (message.ui_payload.?) {
+                .verified_patch => |payload| {
+                    try testing.expectEqualStrings("handler.ts", payload.file);
+                    try testing.expectEqual(@as(usize, 64), payload.policy_hash.len);
+                    try testing.expect(payload.before == null);
+                    try testing.expectEqualStrings(clean_handler, payload.after);
+                    try testing.expect(payload.post_apply_ok);
+                    try testing.expect(payload.post_apply_summary == null);
+                    try testing.expectEqual(@as(u32, 0), payload.stats.new);
+                },
+                else => return error.TestFailed,
+            }
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "failed veto does not append a verified_patch entry" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+
+    var canned: CannedClient = .{ .reply = .{
+        .response = .{ .edit = .{
+            .file = "handler.ts",
+            .content = bad_handler,
+            .before = null,
+        } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    _ = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "add a bad handler",
+        .{ .workspace_root = workspace_root, .max_attempts = 1 },
+    );
+
+    for (tr.entries.items) |*entry| {
+        switch (entry.*) {
+            .verified_patch => return error.TestFailed,
+            else => {},
+        }
+    }
 }

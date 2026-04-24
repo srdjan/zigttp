@@ -99,6 +99,8 @@ fn appendFromLine(
         try appendDisplayMessage(allocator, tr, payload, .proof_card);
     } else if (std.mem.eql(u8, kind, "diagnostic_box")) {
         try appendDisplayMessage(allocator, tr, payload, .diagnostic_box);
+    } else if (std.mem.eql(u8, kind, "verified_patch")) {
+        try appendDisplayMessage(allocator, tr, payload, .verified_patch);
     } else if (std.mem.eql(u8, kind, "tool_use")) {
         try appendToolUse(allocator, tr, payload);
     } else if (std.mem.eql(u8, kind, "tool_result")) {
@@ -130,7 +132,7 @@ fn appendText(
     try tr.entries.append(allocator, entry);
 }
 
-const DisplayKind = enum { proof_card, diagnostic_box };
+const DisplayKind = enum { proof_card, diagnostic_box, verified_patch };
 
 fn appendDisplayMessage(
     allocator: std.mem.Allocator,
@@ -151,6 +153,7 @@ fn appendDisplayMessage(
     try tr.entries.append(allocator, switch (kind) {
         .proof_card => .{ .proof_card = message },
         .diagnostic_box => .{ .diagnostic_box = message },
+        .verified_patch => .{ .verified_patch = message },
     });
 }
 
@@ -335,6 +338,68 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
     }
     switch (tr.at(4).*) {
         .proof_card => |body| try testing.expectEqualStrings("contract ok", body.llm_text),
+        else => return error.TestFailed,
+    }
+}
+
+test "reconstructTranscript round-trips a verified_patch event with ui_payload" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    var patch: ui_payload.UiPayload = .{ .verified_patch = .{
+        .file = try allocator.dupe(u8, "handler.ts"),
+        .policy_hash = try allocator.dupe(u8, "b" ** 64),
+        .stats = .{ .total = 2, .new = 1, .preexisting = 1 },
+        .before = try allocator.dupe(u8, "old"),
+        .after = try allocator.dupe(u8, "new"),
+        .after_properties = .{
+            .pure = false,
+            .read_only = false,
+            .deterministic = true,
+            .retry_safe = true,
+            .idempotent = false,
+            .state_isolated = true,
+            .injection_safe = true,
+            .fault_covered = false,
+        },
+        .post_apply_ok = true,
+        .post_apply_summary = null,
+    } };
+    defer patch.deinit(allocator);
+
+    try events.appendEvent(allocator, path, .{ .verified_patch = .{
+        .llm_text = "verified: handler.ts",
+        .ui_payload = patch,
+    } });
+
+    var tr = try reconstructTranscript(allocator, path, null);
+    defer tr.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), tr.len());
+    switch (tr.at(0).*) {
+        .verified_patch => |message| {
+            try testing.expectEqualStrings("verified: handler.ts", message.llm_text);
+            try testing.expect(message.ui_payload != null);
+            switch (message.ui_payload.?) {
+                .verified_patch => |vp| {
+                    try testing.expectEqualStrings("handler.ts", vp.file);
+                    try testing.expectEqualStrings("b" ** 64, vp.policy_hash);
+                    try testing.expectEqual(@as(u32, 2), vp.stats.total);
+                    try testing.expect(vp.before != null);
+                    try testing.expectEqualStrings("old", vp.before.?);
+                    try testing.expectEqualStrings("new", vp.after);
+                    try testing.expect(vp.after_properties != null);
+                    try testing.expect(vp.after_properties.?.retry_safe);
+                    try testing.expect(!vp.after_properties.?.pure);
+                    try testing.expect(vp.post_apply_ok);
+                },
+                else => return error.TestFailed,
+            }
+        },
         else => return error.TestFailed,
     }
 }
