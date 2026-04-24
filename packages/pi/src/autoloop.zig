@@ -28,6 +28,8 @@ const proof_enrichment = @import("proof_enrichment.zig");
 const session_state = @import("session_state.zig");
 const session_events = @import("session/events.zig");
 const persister = @import("session/persister.zig");
+const tools_common = @import("tools/common.zig");
+const json_writer = @import("providers/anthropic/json_writer.zig");
 
 pub const AutoloopVerdict = session_events.AutoloopVerdict;
 
@@ -69,26 +71,23 @@ pub fn drive(
     transcript: *transcript_mod.Transcript,
     options: DriveOptions,
 ) !Outcome {
-    const start_ms = nowUnixMs();
+    const start_ms = tools_common.nowUnixMs();
     var iter: u32 = 0;
     var patches_without_progress: u32 = 0;
     var last_goals_met_count: u32 = countMetGoals(transcript, options.file, options.goals);
 
     while (iter < options.budget.max_iterations) : (iter += 1) {
-        if (nowUnixMs() - start_ms > options.budget.max_wall_time_ms) {
+        if (tools_common.nowUnixMs() - start_ms > options.budget.max_wall_time_ms) {
             return finalize(allocator, transcript, options, .exhausted_time, iter);
         }
 
-        const check = try invokeGoalCheck(allocator, registry, options.file, options.goals);
+        const check = try invokePathGoalsTool(allocator, registry, "pi_goal_check", options.file, options.goals);
         defer allocator.free(check);
-        const check_parsed = try parseGoalCheck(allocator, check);
-        defer check_parsed.deinit(allocator);
-
-        if (check_parsed.ok) {
+        if ((try parseGoalCheck(allocator, check)).ok) {
             return finalize(allocator, transcript, options, .achieved, iter);
         }
 
-        const plans_json = try invokeRepairPlan(allocator, registry, options.file, options.goals);
+        const plans_json = try invokePathGoalsTool(allocator, registry, "pi_repair_plan", options.file, options.goals);
         defer allocator.free(plans_json);
         var plans = try parseRepairPlans(allocator, plans_json);
         defer plans.deinit(allocator);
@@ -176,38 +175,18 @@ fn finalize(
     };
 }
 
-const GoalCheckResult = struct {
-    ok: bool,
+const GoalCheckResult = struct { ok: bool };
 
-    pub fn deinit(self: GoalCheckResult, allocator: std.mem.Allocator) void {
-        _ = self;
-        _ = allocator;
-    }
-};
-
-fn invokeGoalCheck(
+fn invokePathGoalsTool(
     allocator: std.mem.Allocator,
     registry: *const registry_mod.Registry,
+    tool_name: []const u8,
     file: []const u8,
     goals: []const []const u8,
 ) ![]u8 {
     const args_json = try buildPathGoalsJson(allocator, file, goals);
     defer allocator.free(args_json);
-    var result = try registry.invokeJson(allocator, "pi_goal_check", args_json);
-    defer result.deinit(allocator);
-    if (!result.ok) return error.ToolFailed;
-    return allocator.dupe(u8, result.llm_text);
-}
-
-fn invokeRepairPlan(
-    allocator: std.mem.Allocator,
-    registry: *const registry_mod.Registry,
-    file: []const u8,
-    goals: []const []const u8,
-) ![]u8 {
-    const args_json = try buildPathGoalsJson(allocator, file, goals);
-    defer allocator.free(args_json);
-    var result = try registry.invokeJson(allocator, "pi_repair_plan", args_json);
+    var result = try registry.invokeJson(allocator, tool_name, args_json);
     defer result.deinit(allocator);
     if (!result.ok) return error.ToolFailed;
     return allocator.dupe(u8, result.llm_text);
@@ -224,11 +203,11 @@ fn buildPathGoalsJson(
     const w = &aw.writer;
 
     try w.writeAll("{\"path\":");
-    try writeJsonString(w, file);
+    try json_writer.writeString(w, file);
     try w.writeAll(",\"goals\":[");
     for (goals, 0..) |goal, i| {
         if (i > 0) try w.writeByte(',');
-        try writeJsonString(w, goal);
+        try json_writer.writeString(w, goal);
     }
     try w.writeAll("]}");
 
@@ -364,7 +343,7 @@ fn buildApplyArgsJson(
     const w = &aw.writer;
 
     try w.writeAll("{\"path\":");
-    try writeJsonString(w, file);
+    try json_writer.writeString(w, file);
     try w.writeAll(",\"plan\":");
     try w.writeAll(plan_raw_json);
     try w.writeByte('}');
@@ -390,7 +369,7 @@ fn applyPlans(
 
         if (!candidate.ok) continue;
 
-        const absolute = try resolveAbsolute(allocator, options.workspace_root, options.file);
+        const absolute = try tools_common.resolveInsideWorkspace(allocator, options.workspace_root, options.file);
         defer allocator.free(absolute);
 
         const before = zigts.file_io.readFile(allocator, absolute, 16 * 1024 * 1024) catch |err| switch (err) {
@@ -412,7 +391,7 @@ fn applyPlans(
             .before = before,
             .after = candidate.proposed_content,
             .policy_hash = options.policy_hash,
-            .applied_at_unix_ms = nowUnixMs(),
+            .applied_at_unix_ms = tools_common.nowUnixMs(),
             .post_apply_ok = true,
             .repair_plan_ids = &plan_ids,
             .parent_hash = parent_hash,
@@ -443,35 +422,6 @@ fn applyPlans(
         applied += 1;
     }
     return applied;
-}
-
-fn resolveAbsolute(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    file: []const u8,
-) ![]u8 {
-    if (std.fs.path.isAbsolute(file)) return allocator.dupe(u8, file);
-    return std.fs.path.resolve(allocator, &.{ workspace_root, file });
-}
-
-fn nowUnixMs() i64 {
-    var ts: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
-    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
-}
-
-fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0...8, 11, 12, 14...31 => try w.print("\\u{x:0>4}", .{c}),
-        else => try w.writeByte(c),
-    };
-    try w.writeByte('"');
 }
 
 // ---------------------------------------------------------------------------

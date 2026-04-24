@@ -9,6 +9,9 @@ const print_mode = @import("print_mode.zig");
 const rpc_mode = @import("rpc_mode.zig");
 const ledger = @import("ledger.zig");
 const autoloop = @import("autoloop.zig");
+const transcript_mod = @import("transcript.zig");
+const session_state = @import("session_state.zig");
+const tools_common = @import("tools/common.zig");
 
 const meta_tool = @import("tools/zigts_expert_meta.zig");
 const verify_paths_tool = @import("tools/zigts_expert_verify_paths.zig");
@@ -84,98 +87,7 @@ pub fn setInvocationArgv(argv: []const []const u8) void {
 
 pub fn run(allocator: std.mem.Allocator) !void {
     const argv = captured_argv orelse &[_][]const u8{};
-    const flags = parseExpertFlags(argv) catch |err| switch (err) {
-        error.MutuallyExclusiveApprovalFlags => {
-            const msg = "error: --yes and --no-edit are mutually exclusive\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.MissingSessionId => {
-            const msg = "error: --session-id requires a value\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.MutuallyExclusiveResumeFlags => {
-            const msg = "error: --resume and --session-id are mutually exclusive\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.MissingPrintPrompt => {
-            const msg = "error: --print requires a value\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.MissingModeValue => {
-            const msg = "error: --mode requires a value (json|rpc)\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.UnsupportedMode => {
-            const msg = "error: --mode only accepts 'json' or 'rpc'\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.JsonModeRequiresPrint => {
-            const msg = "error: --mode json requires --print <prompt>\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.RpcModeConflictsWithPrint => {
-            const msg = "error: --mode rpc cannot be combined with --print\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.MissingToolsPreset => {
-            const msg = "error: --tools requires a value (full, minimal)\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.UnsupportedToolsPreset => {
-            const msg = "error: --tools only accepts 'full' or 'minimal'\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.MissingForkSessionId => {
-            const msg = "error: --fork requires a session id value\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.MutuallyExclusiveForkFlags => {
-            const msg = "error: --fork is mutually exclusive with --resume, --continue, and --session-id\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.MissingGoalValue => {
-            const msg = "error: --goal requires a comma-separated list of property tags\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.MissingMaxItersValue => {
-            const msg = "error: --max-iters requires a positive integer\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.InvalidMaxIters => {
-            const msg = "error: --max-iters must be a positive integer\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.MissingHandlerValue => {
-            const msg = "error: --handler requires a path value\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.GoalRequiresHandler => {
-            const msg = "error: --goal requires --handler <path>\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-        error.GoalConflictsWithPrintOrRpc => {
-            const msg = "error: --goal cannot be combined with --print or --mode rpc\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            std.process.exit(2);
-        },
-    };
+    const flags = parseExpertFlags(argv) catch |err| exitWithMessage(flagErrorMessage(err), 2);
 
     var registry = switch (flags.tools_preset) {
         .full => try buildRegistry(allocator),
@@ -224,17 +136,23 @@ fn runAutoloop(
         for (goals) |g| allocator.free(g);
         allocator.free(goals);
     }
-    if (goals.len == 0) {
-        const msg = "error: --goal list is empty\n";
-        _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-        std.process.exit(2);
+    if (goals.len == 0) exitWithMessage("error: --goal list is empty\n", 2);
+    for (goals) |goal| {
+        if (!session_state.isKnownProperty(goal)) {
+            var stderr: [256]u8 = undefined;
+            const line = std.fmt.bufPrint(
+                &stderr,
+                "error: unknown property '{s}' in --goal; try one of: retry_safe, pure, no_secret_leakage, no_credential_leakage, input_validated, pii_contained, injection_safe, idempotent, state_isolated, fault_covered, result_safe, optional_safe, deterministic, stateless, read_only, has_egress\n",
+                .{goal},
+            ) catch "error: unknown property in --goal\n";
+            exitWithMessage(line, 2);
+        }
     }
 
-    const tools_common = @import("tools/common.zig");
     const workspace_root = try tools_common.workspaceRoot(allocator);
     defer allocator.free(workspace_root);
 
-    var transcript: @import("transcript.zig").Transcript = .{};
+    var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(allocator);
 
     var budget: autoloop.Budget = .{};
@@ -252,8 +170,7 @@ fn runAutoloop(
     }) catch |err| {
         var stderr: [256]u8 = undefined;
         const line = std.fmt.bufPrint(&stderr, "autoloop error: {s}\n", .{@errorName(err)}) catch "autoloop error\n";
-        _ = std.c.write(std.c.STDERR_FILENO, line.ptr, line.len);
-        std.process.exit(1);
+        exitWithMessage(line, 1);
     };
 
     try printAutoloopOutcome(allocator, outcome, &transcript, handler, goal_slices);
@@ -263,11 +180,10 @@ fn runAutoloop(
 fn printAutoloopOutcome(
     allocator: std.mem.Allocator,
     outcome: autoloop.Outcome,
-    transcript: *const @import("transcript.zig").Transcript,
+    transcript: *const transcript_mod.Transcript,
     file: []const u8,
     goals: []const []const u8,
 ) !void {
-    const session_state = @import("session_state.zig");
     const props = session_state.currentProperties(transcript, file);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -314,6 +230,35 @@ fn parseToolsPreset(val: []const u8) !ToolsPreset {
     if (std.mem.eql(u8, val, "minimal")) return .minimal;
     if (std.mem.eql(u8, val, "full")) return .full;
     return error.UnsupportedToolsPreset;
+}
+
+fn exitWithMessage(msg: []const u8, code: u8) noreturn {
+    _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+    std.process.exit(code);
+}
+
+fn flagErrorMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.MutuallyExclusiveApprovalFlags => "error: --yes and --no-edit are mutually exclusive\n",
+        error.MissingSessionId => "error: --session-id requires a value\n",
+        error.MutuallyExclusiveResumeFlags => "error: --resume and --session-id are mutually exclusive\n",
+        error.MissingPrintPrompt => "error: --print requires a value\n",
+        error.MissingModeValue => "error: --mode requires a value (json|rpc)\n",
+        error.UnsupportedMode => "error: --mode only accepts 'json' or 'rpc'\n",
+        error.JsonModeRequiresPrint => "error: --mode json requires --print <prompt>\n",
+        error.RpcModeConflictsWithPrint => "error: --mode rpc cannot be combined with --print\n",
+        error.MissingToolsPreset => "error: --tools requires a value (full, minimal)\n",
+        error.UnsupportedToolsPreset => "error: --tools only accepts 'full' or 'minimal'\n",
+        error.MissingForkSessionId => "error: --fork requires a session id value\n",
+        error.MutuallyExclusiveForkFlags => "error: --fork is mutually exclusive with --resume, --continue, and --session-id\n",
+        error.MissingGoalValue => "error: --goal requires a comma-separated list of property tags\n",
+        error.MissingMaxItersValue => "error: --max-iters requires a positive integer\n",
+        error.InvalidMaxIters => "error: --max-iters must be a positive integer\n",
+        error.MissingHandlerValue => "error: --handler requires a path value\n",
+        error.GoalRequiresHandler => "error: --goal requires --handler <path>\n",
+        error.GoalConflictsWithPrintOrRpc => "error: --goal cannot be combined with --print or --mode rpc\n",
+        else => "error: unexpected flag parse failure\n",
+    };
 }
 
 fn parseMaxIters(val: []const u8) !u32 {

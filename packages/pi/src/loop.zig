@@ -11,6 +11,7 @@ const proof_enrichment = @import("proof_enrichment.zig");
 const zigts = @import("zigts");
 const file_io = zigts.file_io;
 const apply_edit = @import("providers/anthropic/apply_edit.zig");
+const tools_common = @import("tools/common.zig");
 
 const PostApplyReport = struct {
     ok: bool,
@@ -441,7 +442,7 @@ fn appendVerifiedPatchEntry(
             .before = prepared.edit.before,
             .after = prepared.edit.content,
             .policy_hash = report.policy_hash,
-            .applied_at_unix_ms = nowUnixMs(),
+            .applied_at_unix_ms = tools_common.nowUnixMs(),
             .post_apply_ok = post_apply.ok,
             .post_apply_summary = post_apply.summary,
             .transcript = transcript,
@@ -518,12 +519,6 @@ fn repairLinksFromCandidate(
         },
         else => null,
     };
-}
-
-fn nowUnixMs() i64 {
-    var ts: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
-    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
 fn isPathInsideRoot(root: []const u8, candidate: []const u8) bool {
