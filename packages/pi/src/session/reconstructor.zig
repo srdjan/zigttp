@@ -107,6 +107,9 @@ fn appendFromLine(
         try appendToolResult(allocator, tr, payload);
     } else if (std.mem.eql(u8, kind, "system_note")) {
         try appendText(allocator, tr, payload, .system_note);
+    } else if (std.mem.eql(u8, kind, "autoloop_outcome")) {
+        // Session-level summary; not rebuilt into the transcript.
+        return;
     } else {
         return error.CorruptEventsLog;
     }

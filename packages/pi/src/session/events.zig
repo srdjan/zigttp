@@ -20,6 +20,28 @@ const EventKind = enum {
     diagnostic_box,
     verified_patch,
     system_note,
+    autoloop_outcome,
+};
+
+pub const AutoloopVerdict = enum {
+    achieved,
+    exhausted_iters,
+    exhausted_time,
+    stalled,
+    regression_blocked,
+    tool_failed,
+
+    pub fn asString(self: AutoloopVerdict) []const u8 {
+        return @tagName(self);
+    }
+};
+
+pub const AutoloopOutcome = struct {
+    verdict: AutoloopVerdict,
+    final_patch_hash: ?[32]u8 = null,
+    goals_met: []const []const u8 = &.{},
+    goals_unmet: []const []const u8 = &.{},
+    iterations: u32 = 0,
 };
 
 pub const ToolUse = struct {
@@ -50,6 +72,7 @@ pub const EventRecord = union(EventKind) {
     diagnostic_box: DisplayMessage,
     verified_patch: DisplayMessage,
     system_note: []const u8,
+    autoloop_outcome: AutoloopOutcome,
 };
 
 pub const Meta = struct {
@@ -107,6 +130,7 @@ fn kindTag(record: EventRecord) []const u8 {
         .diagnostic_box => "diagnostic_box",
         .verified_patch => "verified_patch",
         .system_note => "system_note",
+        .autoloop_outcome => "autoloop_outcome",
     };
 }
 
@@ -144,7 +168,37 @@ fn writePayload(writer: *std.Io.Writer, record: EventRecord) !void {
         .proof_card => |message| try writeDisplayPayload(writer, message),
         .diagnostic_box => |message| try writeDisplayPayload(writer, message),
         .verified_patch => |message| try writeDisplayPayload(writer, message),
+        .autoloop_outcome => |outcome| try writeAutoloopOutcomePayload(writer, outcome),
     }
+}
+
+fn writeAutoloopOutcomePayload(
+    writer: *std.Io.Writer,
+    outcome: AutoloopOutcome,
+) !void {
+    try writer.writeByte('{');
+    try writer.writeAll("\"verdict\":");
+    try json_writer.writeString(writer, outcome.verdict.asString());
+    try writer.writeAll(",\"iterations\":");
+    try writer.print("{d}", .{outcome.iterations});
+    try writer.writeAll(",\"goals_met\":[");
+    for (outcome.goals_met, 0..) |goal, i| {
+        if (i > 0) try writer.writeByte(',');
+        try json_writer.writeString(writer, goal);
+    }
+    try writer.writeAll("],\"goals_unmet\":[");
+    for (outcome.goals_unmet, 0..) |goal, i| {
+        if (i > 0) try writer.writeByte(',');
+        try json_writer.writeString(writer, goal);
+    }
+    try writer.writeByte(']');
+    if (outcome.final_patch_hash) |hash| {
+        try writer.writeAll(",\"final_patch_hash\":\"");
+        const hex = std.fmt.bytesToHex(hash, .lower);
+        try writer.writeAll(&hex);
+        try writer.writeByte('"');
+    }
+    try writer.writeByte('}');
 }
 
 fn writeDisplayPayload(
@@ -408,6 +462,56 @@ test "writeMeta/readMeta round-trip current schema" {
     try testing.expectEqualStrings("/tmp/ws", meta.workspace_realpath);
     try testing.expectEqual(@as(i64, 123), meta.created_at_unix_ms);
     try testing.expectEqualStrings("parent", meta.parent_id.?);
+}
+
+test "appendEvent serializes autoloop_outcome with goals and final hash" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    var hash: [32]u8 = undefined;
+    for (&hash, 0..) |*b, i| b.* = @intCast(i);
+
+    try appendEvent(allocator, path, .{ .autoloop_outcome = .{
+        .verdict = .achieved,
+        .final_patch_hash = hash,
+        .goals_met = &.{ "retry_safe", "pure" },
+        .goals_unmet = &.{},
+        .iterations = 3,
+    } });
+
+    const raw = try readWhole(allocator, path);
+    defer allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"autoloop_outcome\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"verdict\":\"achieved\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"iterations\":3") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"retry_safe\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"goals_unmet\":[]") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"final_patch_hash\":\"000102") != null);
+}
+
+test "appendEvent omits final_patch_hash when null" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    try appendEvent(allocator, path, .{ .autoloop_outcome = .{
+        .verdict = .exhausted_iters,
+        .goals_met = &.{},
+        .goals_unmet = &.{"retry_safe"},
+        .iterations = 8,
+    } });
+
+    const raw = try readWhole(allocator, path);
+    defer allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"verdict\":\"exhausted_iters\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "final_patch_hash") == null);
 }
 
 test "readMeta accepts older schema versions" {
