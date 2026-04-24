@@ -55,6 +55,7 @@ pub const BuildVerifiedPatchOptions = struct {
     post_apply_ok: bool,
     post_apply_summary: ?[]const u8 = null,
     transcript: ?*const transcript_mod.Transcript = null,
+    repair_plan_ids: []const []const u8 = &.{},
 };
 
 pub fn buildVerifiedPatchPayload(
@@ -87,6 +88,8 @@ pub fn buildVerifiedPatchPayload(
     else
         null;
     errdefer if (post_apply_summary_copy) |summary| allocator.free(summary);
+    const repair_plan_ids_copy = try cloneStringSlice(allocator, options.repair_plan_ids);
+    errdefer freeStringSlice(allocator, repair_plan_ids_copy);
 
     const payload = ui_payload.VerifiedPatchPayload{
         .file = file_copy,
@@ -103,6 +106,7 @@ pub fn buildVerifiedPatchPayload(
         .prove = analysis.prove,
         .system = analysis.system,
         .rule_citations = analysis.rule_citations,
+        .repair_plan_ids = repair_plan_ids_copy,
         .post_apply_ok = options.post_apply_ok,
         .post_apply_summary = post_apply_summary_copy,
     };
@@ -113,6 +117,28 @@ pub fn buildVerifiedPatchPayload(
     analysis.system = null;
     analysis.rule_citations = &.{};
     return payload;
+}
+
+fn cloneStringSlice(allocator: std.mem.Allocator, items: []const []const u8) ![][]u8 {
+    if (items.len == 0) return &.{};
+    const copy = try allocator.alloc([]u8, items.len);
+    errdefer allocator.free(copy);
+    var i: usize = 0;
+    errdefer {
+        while (i > 0) {
+            i -= 1;
+            allocator.free(copy[i]);
+        }
+    }
+    while (i < items.len) : (i += 1) {
+        copy[i] = try allocator.dupe(u8, items[i]);
+    }
+    return copy;
+}
+
+fn freeStringSlice(allocator: std.mem.Allocator, items: []const []u8) void {
+    for (items) |item| allocator.free(item);
+    allocator.free(items);
 }
 
 pub fn analyzePatch(

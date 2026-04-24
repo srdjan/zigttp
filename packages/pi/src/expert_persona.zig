@@ -89,6 +89,9 @@ const prologue =
     \\  pi_repair_plan              - turn verifier/property failures into
     \\                                typed compiler repair intents; apply one
     \\                                plan, then re-run the veto/goal check
+    \\  pi_apply_repair_plan        - dry-run one repair intent into proposed
+    \\                                source and compiler-verify it before
+    \\                                drafting the edit
     \\  zig_build_step              - run `zig build <step>`
     \\  zig_test_step               - run `zig build test...`
     \\
@@ -102,6 +105,7 @@ const prologue =
     \\  Contract-pair compatibility proof      -> zigts_expert_prove_patch
     \\  Cross-handler system proof             -> zigts_expert_system_proof
     \\  Proof-guided repair plan               -> pi_repair_plan
+    \\  Compiler-authored repair dry-run       -> pi_apply_repair_plan
     \\  Virtual module implementation audit    -> zigts_expert_verify_modules
     \\  List files in workspace                -> workspace_list_files
     \\  Read a source file                     -> workspace_read_file
@@ -144,8 +148,11 @@ const prologue =
     \\  1. Call pi_repair_plan with the target file and goal list.
     \\  2. If "ok":true, the goals are already discharged; stop.
     \\  3. Otherwise each "plans" entry is a compiler-authored edit intent
-    \\     tied to diagnostics or witnesses. Apply the smallest applicable
-    \\     plan; do not invent a broader refactor.
+    \\     tied to diagnostics or witnesses. Pass the smallest applicable
+    \\     plan to pi_apply_repair_plan first; if it returns a verified
+    \\     proposed_content, draft that exact edit. If it returns an
+    \\     unsupported reason, fall back to manual editing without broadening
+    \\     the change.
     \\  4. Each "witnesses" entry is a concrete (Request,
     \\     io_stubs) tuple that executes the violating path. Read the
     \\     summary and the sink line.

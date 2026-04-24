@@ -1292,6 +1292,7 @@ fn writePayloadOrText(
             .diagnostics => |diag| try writeDiagnosticsPayload(w, diag),
             .proof_card => |proof| try writeProofCardPayload(w, proof),
             .command_outcome => |outcome| try writeCommandOutcomePayload(w, outcome),
+            .repair_candidate => |candidate| try writeRepairCandidatePayload(w, candidate),
             .session_tree => |tree| try writeSessionTreePayload(w, tree),
             .verified_patch => |patch| try writeVerifiedPatchPayload(w, patch),
         }
@@ -1338,6 +1339,28 @@ fn writeProofCardPayload(
             try w.print("- {s}\n", .{highlight});
         }
     }
+}
+
+fn writeRepairCandidatePayload(
+    w: *std.Io.Writer,
+    payload: ui_payload_mod.RepairCandidatePayload,
+) !void {
+    try w.print(
+        "path: {s}\nplan_id: {s}\nintent: {s}\nverification_ok: {s}\nstats: total={d} new={d}",
+        .{
+            payload.path,
+            payload.plan_id,
+            payload.intent_kind,
+            if (payload.verification_ok) "true" else "false",
+            payload.stats.total,
+            payload.stats.new,
+        },
+    );
+    if (payload.stats.preexisting) |count| {
+        try w.print(" preexisting={d}", .{count});
+    }
+    try w.print("\nsummary: {s}\n\nproposed_content:\n", .{payload.verification_summary});
+    try writeTextBlock(w, payload.proposed_content);
 }
 
 fn writeVerifiedPatchPayload(
@@ -1808,6 +1831,7 @@ fn summaryText(llm_text: []const u8, payload: ?UiPayload) []const u8 {
             .diagnostics => |diag| return firstLine(diag.summary),
             .proof_card => |proof| return if (proof.summary.len > 0) firstLine(proof.summary) else firstLine(proof.title),
             .command_outcome => |outcome| return if (outcome.title.len > 0) firstLine(outcome.title) else firstLine(outcome.command),
+            .repair_candidate => |candidate| return firstLine(candidate.plan_id),
             .verified_patch => |patch| return firstLine(patch.file),
             .plain_text => |text| return firstLine(text),
             .session_tree => {},
