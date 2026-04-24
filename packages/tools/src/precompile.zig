@@ -273,6 +273,7 @@ fn buildContractForServiceContext(
         sql_schema_path,
         null,
         null,
+        null,
     );
 }
 
@@ -1397,21 +1398,20 @@ pub fn runCheckOnlyFromSource(
         }
     }
 
-    // Stage 7.5: Data flow provenance
-    //
-    // Run standalone so its diagnostics feed `json_diagnostics` alongside
-    // the other checkers. `buildContractWithPolicy` runs FlowChecker again
-    // to inject properties into the contract, but that path populates a
-    // different structure (PropertyViolation) and does not surface in
-    // `zigts verify-paths --json`. This stage closes the agent-facing gap.
+    // Stage 7.5: data flow provenance. Runs once here and stays alive for
+    // stage 8 so buildContractWithPolicy can reuse its diagnostics and
+    // properties instead of walking the IR a second time. Also feeds
+    // `json_diagnostics` so `zigts verify-paths --json` surfaces flow
+    // violations alongside the other checkers.
+    var flow_checker_opt: ?zigts.FlowChecker = null;
+    defer if (flow_checker_opt) |*fc| fc.deinit();
     {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         if (zigts.handler_verifier.findHandlerFunction(ir_view, root)) |hf| {
-            var flow = zigts.FlowChecker.init(allocator, ir_view, &atoms);
-            defer flow.deinit();
-
-            result.flow_errors = @intCast(flow.check(hf) catch 0);
-            const flow_diags = flow.getDiagnostics();
+            flow_checker_opt = zigts.FlowChecker.init(allocator, ir_view, &atoms);
+            const fc = &flow_checker_opt.?;
+            result.flow_errors = @intCast(try fc.check(hf));
+            const flow_diags = fc.getDiagnostics();
             result.flow_warnings = @intCast(flow_diags.len -| result.flow_errors);
 
             if (json_mode) {
@@ -1420,18 +1420,15 @@ pub fn runCheckOnlyFromSource(
                         result.json_diagnostics.append(allocator, jd) catch {};
                     }
                 }
-            } else if (flow_diags.len > 0) {
-                var buf: std.ArrayList(u8) = .empty;
-                defer buf.deinit(allocator);
-                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-                flow.formatDiagnostics(source_to_parse, &aw.writer) catch {};
-                buf = aw.toArrayList();
-                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
             }
+            // Non-JSON stderr output is emitted by buildContractWithPolicy
+            // from the same FlowChecker instance; avoid printing twice.
         }
     }
 
-    // Stage 8: Contract + flow analysis
+    // Stage 8: Contract. Pass the precomputed FlowChecker through so its
+    // flow block reuses the already-populated state instead of rerunning.
+    const flow_in = if (flow_checker_opt) |*fc| fc else null;
     result.contract = try buildContractWithPolicy(
         allocator,
         &js_parser,
@@ -1445,6 +1442,7 @@ pub fn runCheckOnlyFromSource(
         sql_schema_path,
         null,
         stc_ptr,
+        flow_in,
     );
 
     if (result.contract) |*c| {
@@ -2493,6 +2491,7 @@ pub fn compileHandler(
                     sql_schema_path,
                     null,
                     stc_ptr,
+                    null,
                 )
             else
                 null;
@@ -2541,6 +2540,7 @@ pub fn compileHandler(
             sql_schema_path,
             &all_violations,
             stc_ptr,
+            null,
         );
 
         // Inject verification-derived properties (Checks 2, 6, 7)
@@ -3006,6 +3006,11 @@ fn buildContractWithPolicy(
     sql_schema_path: ?[]const u8,
     violations_out: ?*std.ArrayList(zigts.property_diagnostics.PropertyViolation),
     service_type_context: ?*const ServiceTypeContext,
+    /// When non-null, the flow analysis has already been run and its
+    /// diagnostics/properties should be reused. The internal flow stage
+    /// then skips the IR walk but still performs contract property
+    /// injection and stderr output.
+    precomputed_flow: ?*const zigts.FlowChecker,
 ) !HandlerContract {
     var contract = try buildContract(
         allocator,
@@ -3024,36 +3029,41 @@ fn buildContractWithPolicy(
         return error.ScopeDurableUnsupported;
     }
 
-    // Run data flow provenance analysis
+    // Data flow provenance analysis. Reuses a precomputed FlowChecker if
+    // the caller ran it upstream (runCheckOnlyFromSource does), otherwise
+    // runs the walk here.
     {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = findHandlerFunction(ir_view, root);
         if (handler_fn) |hf| {
-            var flow = zigts.FlowChecker.init(allocator, ir_view, atoms);
-            defer flow.deinit();
+            var owned_flow: ?zigts.FlowChecker = null;
+            defer if (owned_flow) |*fc| fc.deinit();
 
-            const flow_errors = try flow.check(hf);
+            const flow_errors: u32 = if (precomputed_flow) |_| 0 else blk: {
+                owned_flow = zigts.FlowChecker.init(allocator, ir_view, atoms);
+                break :blk try owned_flow.?.check(hf);
+            };
+
+            const flow: *const zigts.FlowChecker = precomputed_flow orelse &owned_flow.?;
             const flow_diags = flow.getDiagnostics();
+            const fresh = precomputed_flow == null;
 
-            if (flow_diags.len > 0) {
-                if (!builtin.is_test) {
-                    std.debug.print("\n", .{});
-                    var flow_output: std.ArrayList(u8) = .empty;
-                    defer flow_output.deinit(allocator);
-                    var flow_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &flow_output);
-                    flow.formatDiagnostics("", &flow_aw.writer) catch {};
-                    flow_output = flow_aw.toArrayList();
-                    if (flow_output.items.len > 0) {
-                        std.debug.print("{s}", .{flow_output.items});
-                    }
-                    std.debug.print("{d} flow error(s), {d} warning(s)\n", .{
-                        flow_errors,
-                        flow_diags.len - flow_errors,
-                    });
+            if (fresh and flow_diags.len > 0 and !builtin.is_test) {
+                std.debug.print("\n", .{});
+                var flow_output: std.ArrayList(u8) = .empty;
+                defer flow_output.deinit(allocator);
+                var flow_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &flow_output);
+                flow.formatDiagnostics("", &flow_aw.writer) catch {};
+                flow_output = flow_aw.toArrayList();
+                if (flow_output.items.len > 0) {
+                    std.debug.print("{s}", .{flow_output.items});
                 }
+                std.debug.print("{d} flow error(s), {d} warning(s)\n", .{
+                    flow_errors,
+                    flow_diags.len - flow_errors,
+                });
             }
 
-            // Inject flow properties into contract
             const flow_props = flow.getProperties();
             if (contract.properties) |*props| {
                 props.no_secret_leakage = flow_props.no_secret_leakage;
@@ -3063,13 +3073,11 @@ fn buildContractWithPolicy(
                 props.injection_safe = flow_props.injection_safe;
             }
 
-            // Collect flow violations while flow is still alive (strings are duped).
             if (violations_out) |vout| {
-                const ir_view_flow = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-                zigts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view_flow);
+                zigts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view);
             }
 
-            if (!builtin.is_test and flow_errors == 0) {
+            if (fresh and !builtin.is_test and flow_errors == 0) {
                 std.debug.print("Flow analysis passed\n", .{});
             }
         }
@@ -4152,6 +4160,7 @@ fn buildTestContractForSource(
         null,
         null,
         sql_schema_path,
+        null,
         null,
         null,
     );

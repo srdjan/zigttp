@@ -1206,16 +1206,9 @@ pub const FlowChecker = struct {
         self.binding_origin.put(self.allocator, key, binding.slot) catch {};
     }
 
-    /// Extract a WitnessConstraint from a condition node. Covers:
-    ///   if (x)                    - identifier bound to a module call
-    ///   if (!x)                   - negated truthiness
-    ///   if (req.method === "X")   - literal method comparison
-    ///   if ("X" === req.method)   - same, flipped
-    ///   if (req.method !== "X")   - negated method comparison (drops the
-    ///                               constraint, since the MVP solver has
-    ///                               no alphabet to pick a different value)
-    ///   if (result.ok)            - Result-returning module call
-    /// AND chains are handled one level up in `pushConditionConstraints`.
+    /// Extract a single WitnessConstraint from a condition node. AND
+    /// chains are handled one level up in `pushConditionConstraints`;
+    /// supported single-node shapes are documented by the switch arms.
     fn extractCondConstraint(self: *FlowChecker, cond: NodeIndex) ?counterexample.WitnessConstraint {
         const tag = self.ir_view.getTag(cond) orelse return null;
         switch (tag) {
