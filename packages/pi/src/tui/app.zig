@@ -12,6 +12,7 @@ const loop = @import("../loop.zig");
 const app = @import("../app.zig");
 const transcript_mod = @import("../transcript.zig");
 const ui_payload_mod = @import("../ui_payload.zig");
+const session_events = @import("../session/events.zig");
 const registry_tool = @import("../registry/tool.zig");
 
 const LineEditor = line_editor.LineEditor;
@@ -456,9 +457,14 @@ pub fn run(
                     if (try handleComposerEvent(&runtime, registry, flags, approval_fn, event)) return;
                 },
                 .feed, .inspector => {
-                    if (handlePaneEvent(&state, event)) |should_quit| {
-                        if (should_quit) return;
-                        try runtime.redrawFrame();
+                    switch (handlePaneEvent(&state, &session, event)) {
+                        .no_op => {},
+                        .redraw => try runtime.redrawFrame(),
+                        .quit => return,
+                        .approve => {
+                            try approveSelectedPatch(&runtime);
+                            try runtime.redrawFrame();
+                        },
                     }
                 },
             }
@@ -510,7 +516,23 @@ fn handleComposerEvent(
     }
 }
 
-fn handlePaneEvent(state: *AppState, event: KeyEvent) ?bool {
+pub const PaneOutcome = enum {
+    /// Event was not recognised by this pane; caller should not redraw.
+    no_op,
+    /// Event consumed; caller redraws.
+    redraw,
+    /// User asked to quit.
+    quit,
+    /// User pressed `A` on a selected ledger patch whose witness state is
+    /// clean. Caller resolves by emitting an approval system_note.
+    approve,
+};
+
+fn handlePaneEvent(
+    state: *AppState,
+    session: *const agent.AgentSession,
+    event: KeyEvent,
+) PaneOutcome {
     switch (event.kind) {
         .tab => {
             if (state.view_mode == .ledger) {
@@ -519,7 +541,7 @@ fn handlePaneEvent(state: *AppState, event: KeyEvent) ?bool {
             } else {
                 state.focus_mode = nextFocus(state.focus_mode);
             }
-            return false;
+            return .redraw;
         },
         .shift_tab => {
             if (state.view_mode == .ledger) {
@@ -528,11 +550,11 @@ fn handlePaneEvent(state: *AppState, event: KeyEvent) ?bool {
             } else {
                 state.focus_mode = prevFocus(state.focus_mode);
             }
-            return false;
+            return .redraw;
         },
         .esc => {
             state.focus_mode = .composer;
-            return false;
+            return .redraw;
         },
         .up => {
             if (state.view_mode == .ledger) {
@@ -540,7 +562,7 @@ fn handlePaneEvent(state: *AppState, event: KeyEvent) ?bool {
             } else {
                 moveSelectionUp(state);
             }
-            return false;
+            return .redraw;
         },
         .down => {
             if (state.view_mode == .ledger) {
@@ -548,7 +570,7 @@ fn handlePaneEvent(state: *AppState, event: KeyEvent) ?bool {
             } else {
                 moveSelectionDown(state);
             }
-            return false;
+            return .redraw;
         },
         .enter => {
             if (state.view_mode == .ledger and
@@ -558,21 +580,80 @@ fn handlePaneEvent(state: *AppState, event: KeyEvent) ?bool {
             } else if (state.focus_mode == .feed) {
                 state.focus_mode = .inspector;
             }
-            return false;
+            return .redraw;
         },
         .char => switch (event.byte) {
             'c', 'C' => {
                 state.view_mode = .chat;
-                return false;
+                return .redraw;
             },
             'l', 'L' => {
                 state.view_mode = .ledger;
-                return false;
+                return .redraw;
             },
-            else => return null,
+            'A' => {
+                if (state.view_mode == .ledger and approvalGateClear(state, session)) {
+                    return .approve;
+                }
+                return .redraw;
+            },
+            else => return .no_op,
         },
-        .ctrl_c, .eof => return true,
-        else => return null,
+        .ctrl_c, .eof => return .quit,
+        else => return .no_op,
+    }
+}
+
+/// Approval is only offered on a selected patch with no new witnesses and
+/// a successful post-apply check. The gate is the load-bearing UX claim of
+/// the Proof Delta Card: a single keystroke is safe only because witness
+/// state is clean.
+fn approveSelectedPatch(runtime: *TuiRuntime) !void {
+    const allocator = runtime.allocator;
+    const transcript_index = runtime.state.selectedLedgerIndex() orelse return;
+    const entry = runtime.session.transcript.at(transcript_index);
+    const patch = switch (entry.*) {
+        .verified_patch => |message| blk: {
+            const payload = message.ui_payload orelse return;
+            break :blk switch (payload) {
+                .verified_patch => |p| p,
+                else => return,
+            };
+        },
+        else => return,
+    };
+
+    const note = if (patch.patch_hash) |hash| blk: {
+        const hex = std.fmt.bytesToHex(hash, .lower);
+        break :blk try std.fmt.allocPrint(
+            allocator,
+            "approved {s} for {s}",
+            .{ hex[0..12], patch.file },
+        );
+    } else try std.fmt.allocPrint(allocator, "approved {s}", .{patch.file});
+    errdefer allocator.free(note);
+
+    try runtime.session.transcript.entries.append(allocator, .{ .system_note = note });
+
+    if (runtime.session.events_path) |path| {
+        try session_events.appendEvent(allocator, path, .{ .system_note = note });
+    }
+}
+
+fn approvalGateClear(state: *const AppState, session: *const agent.AgentSession) bool {
+    const transcript_index = state.selectedLedgerIndex() orelse return false;
+    const entry = session.transcript.at(transcript_index);
+    switch (entry.*) {
+        .verified_patch => |message| {
+            const payload = message.ui_payload orelse return false;
+            switch (payload) {
+                .verified_patch => |patch| {
+                    return patch.post_apply_ok and patch.witnesses_new.len == 0;
+                },
+                else => return false,
+            }
+        },
+        else => return false,
     }
 }
 
@@ -881,7 +962,7 @@ fn renderComposer(
         },
         .ledger => switch (state.focus_mode) {
             .composer => "Enter submits. /chat switches back to transcript view.",
-            .feed, .inspector => "Up/Down move the patch rail. Tab cycles detail tabs. Enter toggles diff expansion. c opens chat.",
+            .feed, .inspector => "Up/Down move the patch rail. Tab cycles detail tabs. Enter toggles diff expansion. A approves when witness state is clean. c opens chat.",
         },
     };
     try writeFitted(w, hints, width);
@@ -2248,6 +2329,8 @@ test "layout stacks inspector on narrow terminals" {
 }
 
 test "Tab and Esc move focus through panes" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
     var state: AppState = .{};
     defer state.deinit(testing.allocator);
 
@@ -2256,7 +2339,7 @@ test "Tab and Esc move focus through panes" {
     try testing.expectEqual(FocusMode.feed, state.focus_mode);
     state.focus_mode = nextFocus(state.focus_mode);
     try testing.expectEqual(FocusMode.inspector, state.focus_mode);
-    _ = handlePaneEvent(&state, .{ .kind = .esc });
+    _ = handlePaneEvent(&state, &session, .{ .kind = .esc });
     try testing.expectEqual(FocusMode.composer, state.focus_mode);
 }
 
@@ -2388,21 +2471,69 @@ test "ledger pane hotkeys switch tabs and views" {
     try testing.expectEqual(LedgerTab.delta, state.ledger_tab);
     try testing.expectEqual(ViewMode.ledger, state.view_mode);
 
-    _ = handlePaneEvent(&state, .{ .kind = .tab });
+    _ = handlePaneEvent(&state, &session, .{ .kind = .tab });
     try testing.expectEqual(LedgerTab.diff, state.ledger_tab);
     try testing.expectEqual(FocusMode.inspector, state.focus_mode);
 
-    _ = handlePaneEvent(&state, .{ .kind = .shift_tab });
+    _ = handlePaneEvent(&state, &session, .{ .kind = .shift_tab });
     try testing.expectEqual(LedgerTab.delta, state.ledger_tab);
 
-    _ = handlePaneEvent(&state, .{ .kind = .enter });
+    _ = handlePaneEvent(&state, &session, .{ .kind = .enter });
     try testing.expect(state.diff_expanded);
 
-    _ = handlePaneEvent(&state, .{ .kind = .char, .byte = 'c' });
+    _ = handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'c' });
     try testing.expectEqual(ViewMode.chat, state.view_mode);
 
-    _ = handlePaneEvent(&state, .{ .kind = .char, .byte = 'l' });
+    _ = handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'l' });
     try testing.expectEqual(ViewMode.ledger, state.view_mode);
+}
+
+test "uppercase A on a clean ledger patch returns .approve" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+
+    const outcome = handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'A' });
+    try testing.expectEqual(PaneOutcome.approve, outcome);
+}
+
+test "uppercase A in chat view does not trigger approval" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.view_mode = .chat;
+
+    const outcome = handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'A' });
+    try testing.expectEqual(PaneOutcome.redraw, outcome);
+}
+
+test "uppercase A with no selected patch does not trigger approval" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+
+    const outcome = handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'A' });
+    try testing.expectEqual(PaneOutcome.redraw, outcome);
 }
 
 test "approval modal accepts and rejects with keyboard actions" {
