@@ -40,6 +40,7 @@ comptime {
     _ = @import("expert_persona.zig");
     _ = @import("loop.zig");
     _ = @import("proof_enrichment.zig");
+    _ = @import("witness_key.zig");
     _ = @import("agent.zig");
     _ = @import("providers/anthropic/events.zig");
     _ = @import("providers/anthropic/sse_parser.zig");
