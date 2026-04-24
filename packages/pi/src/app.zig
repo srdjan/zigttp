@@ -28,6 +28,7 @@ const zig_build_step_tool = @import("tools/zig_build_step.zig");
 const zig_test_step_tool = @import("tools/zig_test_step.zig");
 const gen_tests_tool = @import("tools/gen_tests.zig");
 const pi_goal_check_tool = @import("tools/pi_goal_check.zig");
+const pi_repair_plan_tool = @import("tools/pi_repair_plan.zig");
 
 const Registry = registry_mod.Registry;
 
@@ -63,6 +64,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, zig_test_step_tool.tool);
     try reg.register(allocator, gen_tests_tool.tool);
     try reg.register(allocator, pi_goal_check_tool.tool);
+    try reg.register(allocator, pi_repair_plan_tool.tool);
 
     return reg;
 }
@@ -310,6 +312,8 @@ test "buildRegistry registers every first-party compiler primitive" {
         "zigts_expert_search",
         "zigts_expert_edit_simulate",
         "zigts_expert_review_patch",
+        "zigts_expert_prove_patch",
+        "zigts_expert_system_proof",
         "zigts_expert_features",
         "zigts_expert_modules",
         "zigts_expert_verify_modules",
@@ -320,6 +324,8 @@ test "buildRegistry registers every first-party compiler primitive" {
         "zig_build_step",
         "zig_test_step",
         "workspace_gen_tests",
+        "pi_goal_check",
+        "pi_repair_plan",
     };
 
     for (expected_names) |expected| {

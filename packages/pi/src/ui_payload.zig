@@ -374,6 +374,8 @@ pub const VerifiedPatchPayload = struct {
     prove: ?ProveSummary,
     system: ?SystemProofSummary,
     rule_citations: [][]u8,
+    repair_plan_ids: [][]u8 = &.{},
+    closed_witness_ids: [][]u8 = &.{},
     post_apply_ok: bool,
     post_apply_summary: ?[]u8,
 
@@ -416,6 +418,10 @@ pub const VerifiedPatchPayload = struct {
         errdefer if (system_copy) |*summary| summary.deinit(allocator);
         const citations_copy = try cloneStringSlice(allocator, self.rule_citations);
         errdefer freeStringSlice(allocator, citations_copy);
+        const repair_plan_ids_copy = try cloneStringSlice(allocator, self.repair_plan_ids);
+        errdefer freeStringSlice(allocator, repair_plan_ids_copy);
+        const closed_witness_ids_copy = try cloneStringSlice(allocator, self.closed_witness_ids);
+        errdefer freeStringSlice(allocator, closed_witness_ids_copy);
         const post_apply_summary_copy: ?[]u8 = if (self.post_apply_summary) |s|
             try allocator.dupe(u8, s)
         else
@@ -436,6 +442,8 @@ pub const VerifiedPatchPayload = struct {
             .prove = prove_copy,
             .system = system_copy,
             .rule_citations = citations_copy,
+            .repair_plan_ids = repair_plan_ids_copy,
+            .closed_witness_ids = closed_witness_ids_copy,
             .post_apply_ok = self.post_apply_ok,
             .post_apply_summary = post_apply_summary_copy,
         };
@@ -453,6 +461,8 @@ pub const VerifiedPatchPayload = struct {
         if (self.prove) |*summary| summary.deinit(allocator);
         if (self.system) |*summary| summary.deinit(allocator);
         freeStringSlice(allocator, self.rule_citations);
+        freeStringSlice(allocator, self.repair_plan_ids);
+        freeStringSlice(allocator, self.closed_witness_ids);
         if (self.post_apply_summary) |s| allocator.free(s);
         self.* = .{
             .file = &.{},
@@ -469,6 +479,8 @@ pub const VerifiedPatchPayload = struct {
             .prove = null,
             .system = null,
             .rule_citations = &.{},
+            .repair_plan_ids = &.{},
+            .closed_witness_ids = &.{},
             .post_apply_ok = false,
             .post_apply_summary = null,
         };
@@ -823,6 +835,18 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
                 try json_writer.writeString(writer, citation);
             }
             try writer.writeByte(']');
+            try writer.writeAll(",\"repair_plan_ids\":[");
+            for (patch.repair_plan_ids, 0..) |repair_id, i| {
+                if (i > 0) try writer.writeByte(',');
+                try json_writer.writeString(writer, repair_id);
+            }
+            try writer.writeByte(']');
+            try writer.writeAll(",\"closed_witness_ids\":[");
+            for (patch.closed_witness_ids, 0..) |closed_id, i| {
+                if (i > 0) try writer.writeByte(',');
+                try json_writer.writeString(writer, closed_id);
+            }
+            try writer.writeByte(']');
             try writer.writeAll(",\"post_apply_ok\":");
             try writer.writeAll(if (patch.post_apply_ok) "true" else "false");
             if (patch.post_apply_summary) |s| {
@@ -994,6 +1018,10 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         errdefer if (system) |*summary| summary.deinit(allocator);
         const rule_citations = try parseStringArrayField(allocator, obj.get("rule_citations"));
         errdefer freeStringSlice(allocator, rule_citations);
+        const repair_plan_ids = try parseStringArrayField(allocator, obj.get("repair_plan_ids"));
+        errdefer freeStringSlice(allocator, repair_plan_ids);
+        const closed_witness_ids = try parseStringArrayField(allocator, obj.get("closed_witness_ids"));
+        errdefer freeStringSlice(allocator, closed_witness_ids);
 
         const file_copy = try allocator.dupe(u8, file);
         errdefer allocator.free(file_copy);
@@ -1033,6 +1061,8 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             .prove = prove,
             .system = system,
             .rule_citations = rule_citations,
+            .repair_plan_ids = repair_plan_ids,
+            .closed_witness_ids = closed_witness_ids,
             .post_apply_ok = post_apply_ok,
             .post_apply_summary = post_apply_summary_copy,
         } };
