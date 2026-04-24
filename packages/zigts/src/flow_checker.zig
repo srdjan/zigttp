@@ -215,10 +215,10 @@ pub const FlowChecker = struct {
     /// keyed by the same slot as `module_fn_labels`. Populated by `scanImports`
     /// and consumed by the counterexample-witness capture pipeline.
     module_fn_meta: std.AutoHashMapUnmanaged(u16, counterexample.StubInfo),
-    /// Per-binding origin: packed(scope_id, slot) -> slot of the module function
-    /// whose call initialised this binding. Lets the constraint extractor emit
-    /// `stub_truthy` on `if (binding)` patterns.
-    binding_origin: std.AutoHashMapUnmanaged(u32, u16),
+    /// Per-binding origin: packed(scope_id, slot) -> metadata for the module
+    /// call that initialised this binding. Lets the constraint extractor emit
+    /// per-call stub constraints on `if (binding)` patterns.
+    binding_origin: std.AutoHashMapUnmanaged(u32, counterexample.StubInfo),
     /// Result binding tracking: packed(scope_id, slot) -> return_labels from the producing call.
     /// When accessing .value on these bindings, the return_labels are merged in.
     result_binding_labels: std.AutoHashMapUnmanaged(u32, LabelSet),
@@ -958,7 +958,7 @@ pub const FlowChecker = struct {
 
     fn isSensitiveEnvName(name: []const u8) bool {
         const patterns = [_][]const u8{
-            "SECRET", "PASSWORD", "PASSWD", "KEY", "TOKEN",
+            "SECRET",  "PASSWORD",   "PASSWD", "KEY", "TOKEN",
             "PRIVATE", "CREDENTIAL", "AUTH",
         };
         for (patterns) |pattern| {
@@ -1157,17 +1157,22 @@ pub const FlowChecker = struct {
     /// shape contributes at most one. Returns the number pushed so the
     /// caller can pop exactly that many when the branch body is done.
     ///
-    /// Under `want_negation` (the else-branch path), we distribute negation
-    /// into each AND clause the same way path_generator does. That is
-    /// unsound symbolically - `!(a && b)` is `!a || !b`, not `!a && !b` -
-    /// but witness synthesis only needs ONE concrete request that reaches
-    /// the sink; over-constraining at worst adds irrelevant stubs that the
-    /// runtime replay accepts.
+    /// Under `want_negation` (the else-branch path), an AND chain contributes
+    /// one negated clause. `!(a && b)` is `!a || !b`; emitting every negated
+    /// clause would force `!a && !b`, which can make a witness skip the value
+    /// it is supposed to leak.
     fn pushConditionConstraints(self: *FlowChecker, cond: NodeIndex, want_negation: bool) usize {
         const tag = self.ir_view.getTag(cond) orelse return 0;
         if (tag == .binary_op) {
             const bin = self.ir_view.getBinary(cond) orelse return 0;
             if (bin.op == .and_op) {
+                if (want_negation) {
+                    const final = self.findNegatedAndConstraint(cond, true) orelse
+                        self.findNegatedAndConstraint(cond, false) orelse
+                        return 0;
+                    self.working_constraints.append(self.allocator, final) catch return 0;
+                    return 1;
+                }
                 const left = self.pushConditionConstraints(bin.left, want_negation);
                 const right = self.pushConditionConstraints(bin.right, want_negation);
                 return left + right;
@@ -1197,13 +1202,43 @@ pub const FlowChecker = struct {
         if (callee_tag != .identifier) return;
         const binding = self.ir_view.getBinding(call.callee) orelse return;
         const meta = self.module_fn_meta.get(binding.slot) orelse return;
+        const call_index = self.working_io_calls.items.len;
         self.working_io_calls.append(self.allocator, .{
             .module = meta.module,
             .func = meta.func,
             .returns = meta.returns,
-        }) catch {};
+        }) catch return;
+        var call_meta = meta;
+        call_meta.call_index = @intCast(call_index);
         const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
-        self.binding_origin.put(self.allocator, key, binding.slot) catch {};
+        self.binding_origin.put(self.allocator, key, call_meta) catch {};
+    }
+
+    fn findNegatedAndConstraint(
+        self: *FlowChecker,
+        cond: NodeIndex,
+        prefer_request: bool,
+    ) ?counterexample.WitnessConstraint {
+        const tag = self.ir_view.getTag(cond) orelse return null;
+        if (tag == .binary_op) {
+            const bin = self.ir_view.getBinary(cond) orelse return null;
+            if (bin.op == .and_op) {
+                return self.findNegatedAndConstraint(bin.left, prefer_request) orelse
+                    self.findNegatedAndConstraint(bin.right, prefer_request);
+            }
+        }
+
+        const raw = self.extractCondConstraint(cond) orelse return null;
+        const negated = counterexample.negate(raw) orelse return null;
+        if (prefer_request and !isRequestConstraint(negated)) return null;
+        return negated;
+    }
+
+    fn isRequestConstraint(c: counterexample.WitnessConstraint) bool {
+        return switch (c) {
+            .req_method, .req_method_not, .req_url, .req_url_not => true,
+            else => false,
+        };
     }
 
     /// Extract a single WitnessConstraint from a condition node. AND
@@ -1215,12 +1250,12 @@ pub const FlowChecker = struct {
             .identifier => {
                 const binding = self.ir_view.getBinding(cond) orelse return null;
                 const key = packBindingKey(binding.scope_id, binding.slot);
-                const origin_slot = self.binding_origin.get(key) orelse return null;
-                const meta = self.module_fn_meta.get(origin_slot) orelse return null;
+                const meta = self.binding_origin.get(key) orelse return null;
                 return .{ .stub_truthy = .{
                     .module = meta.module,
                     .func = meta.func,
                     .returns = meta.returns,
+                    .call_index = meta.call_index,
                 } };
             },
             .unary_op => {
@@ -1282,14 +1317,14 @@ pub const FlowChecker = struct {
         if (obj_tag != .identifier) return null;
         const binding = self.ir_view.getBinding(member.object) orelse return null;
         const key = packBindingKey(binding.scope_id, binding.slot);
-        const origin_slot = self.binding_origin.get(key) orelse return null;
-        const meta = self.module_fn_meta.get(origin_slot) orelse return null;
+        const meta = self.binding_origin.get(key) orelse return null;
         if (meta.returns != .result) return null;
 
         return .{ .result_ok = .{
             .module = meta.module,
             .func = meta.func,
             .returns = meta.returns,
+            .call_index = meta.call_index,
         } };
     }
 
@@ -1549,6 +1584,135 @@ test "FlowChecker captures AND chain as multiple constraints" {
             }
         }
         try std.testing.expect(saw_method and saw_truthy);
+    }
+    try std.testing.expect(found);
+}
+
+test "FlowChecker captures one concrete negated request constraint for else AND path" {
+    // `!(req.method === "GET" && secret)` should use one concrete false
+    // clause. Pick a non-GET method and leave the env call on its default
+    // truthy stub so replay still leaks the sentinel secret.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  if (req.method === "GET" && secret) {
+        \\    return Response.json({ ok: true });
+        \\  } else {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind != .secret_in_response) continue;
+        found = true;
+        const w = d.witness orelse return error.MissingWitness;
+        try std.testing.expectEqual(@as(usize, 1), w.path_constraints.len);
+        try std.testing.expect(w.path_constraints[0] == .req_method_not);
+        try std.testing.expectEqualStrings("GET", w.path_constraints[0].req_method_not);
+
+        var witness = try counterexample.solve(allocator, .{
+            .property = .no_secret_leakage,
+            .origin = .{ .line = 1, .column = 1 },
+            .sink = .{ .line = 1, .column = 1 },
+            .summary = "t",
+            .constraints = w.path_constraints,
+            .io_calls = w.io_calls,
+        });
+        defer witness.deinit(allocator);
+
+        try std.testing.expectEqualStrings("POST", witness.request.method);
+        try std.testing.expectEqual(@as(usize, 1), witness.io_stubs.len);
+        try std.testing.expectEqualStrings("\"secret-sentinel\"", witness.io_stubs[0].result_json);
+    }
+    try std.testing.expect(found);
+}
+
+test "FlowChecker keeps repeated module call constraints tied to call index" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const a = env("SECRET_A");
+        \\  const b = env("SECRET_B");
+        \\  if (a) {
+        \\    if (!b) {
+        \\      return Response.json({ leaked: a });
+        \\    }
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind != .secret_in_response) continue;
+        found = true;
+        const w = d.witness orelse return error.MissingWitness;
+        try std.testing.expectEqual(@as(usize, 2), w.io_calls.len);
+
+        var saw_a_truthy = false;
+        var saw_b_falsy = false;
+        for (w.path_constraints) |c| {
+            switch (c) {
+                .stub_truthy => |info| {
+                    try std.testing.expectEqual(@as(?u32, 0), info.call_index);
+                    saw_a_truthy = true;
+                },
+                .stub_falsy => |info| {
+                    try std.testing.expectEqual(@as(?u32, 1), info.call_index);
+                    saw_b_falsy = true;
+                },
+                else => return error.UnexpectedConstraintKind,
+            }
+        }
+        try std.testing.expect(saw_a_truthy and saw_b_falsy);
+
+        var witness = try counterexample.solve(allocator, .{
+            .property = .no_secret_leakage,
+            .origin = .{ .line = 1, .column = 1 },
+            .sink = .{ .line = 1, .column = 1 },
+            .summary = "t",
+            .constraints = w.path_constraints,
+            .io_calls = w.io_calls,
+        });
+        defer witness.deinit(allocator);
+
+        try std.testing.expectEqualStrings("\"secret-sentinel\"", witness.io_stubs[0].result_json);
+        try std.testing.expectEqualStrings("null", witness.io_stubs[1].result_json);
     }
     try std.testing.expect(found);
 }

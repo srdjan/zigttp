@@ -27,33 +27,36 @@ const std = @import("std");
 const mb = @import("module_binding.zig");
 const json_utils = @import("json_utils.zig");
 
-// TODO: these types shadow `path_generator.Constraint` / `StubInfo` exactly;
-// a future extraction into a shared `witness_types.zig` lets both files
-// depend on the same definition without either pulling in the other.
+// TODO: these types intentionally stay close to `path_generator.Constraint`
+// / `StubInfo`; a future extraction into a shared `witness_types.zig` lets
+// both files depend on the same definition without either pulling in the other.
 
 pub const StubInfo = struct {
     module: []const u8,
     func: []const u8,
     returns: mb.ReturnKind,
+    call_index: ?u32 = null,
 };
 
 pub const WitnessConstraint = union(enum) {
     req_method: []const u8,
+    req_method_not: []const u8,
     req_url: []const u8,
+    req_url_not: []const u8,
     stub_truthy: StubInfo,
     stub_falsy: StubInfo,
     result_ok: StubInfo,
     result_not_ok: StubInfo,
 };
 
-/// Invert a witness constraint's truthiness. `req_method` / `req_url` have
-/// no meaningful negation under the MVP solver (negating a method equality
-/// would require picking a *different* method, which the solver cannot do
-/// without an alphabet), so they produce null and the caller drops the
-/// constraint rather than emitting a wrong witness.
+/// Invert a witness constraint's truthiness. Request method/url negation is
+/// represented explicitly so the solver can pick one concrete different value.
 pub fn negate(c: WitnessConstraint) ?WitnessConstraint {
     return switch (c) {
-        .req_method, .req_url => null,
+        .req_method => |value| .{ .req_method_not = value },
+        .req_method_not => |value| .{ .req_method = value },
+        .req_url => |value| .{ .req_url_not = value },
+        .req_url_not => |value| .{ .req_url = value },
         .stub_truthy => |info| .{ .stub_falsy = info },
         .stub_falsy => |info| .{ .stub_truthy = info },
         .result_ok => |info| .{ .result_not_ok = info },
@@ -169,7 +172,9 @@ fn solveRequest(constraints: []const WitnessConstraint) ConcreteRequest {
     for (constraints) |c| {
         switch (c) {
             .req_method => |m| method = m,
+            .req_method_not => |m| method = alternateMethod(m),
             .req_url => |u| url = u,
+            .req_url_not => |u| url = alternateUrl(u),
             .stub_truthy => |info| {
                 // The parseBearer import is the canonical signal that the
                 // handler expects an Authorization header. Any witness that
@@ -194,33 +199,42 @@ fn solveStubs(
     constraints: []const WitnessConstraint,
     io_calls: []const TrackedIoCall,
 ) error{OutOfMemory}![]const IoStubEntry {
-    // Per-function overrides derived from truthiness / result constraints.
-    // Last constraint wins if the same function appears twice on the path;
-    // that matches path_generator's last-write-wins behaviour for
-    // stub_overrides.
-    var overrides: std.StringHashMapUnmanaged([]const u8) = .empty;
-    defer overrides.deinit(allocator);
+    var call_overrides: std.AutoHashMapUnmanaged(u32, []const u8) = .empty;
+    defer call_overrides.deinit(allocator);
+
+    // Legacy fallback for hand-authored tests or callers that have not yet
+    // attached call indexes to stub constraints.
+    var func_overrides: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer func_overrides.deinit(allocator);
 
     for (constraints) |c| {
         switch (c) {
-            .stub_truthy => |info| try overrides.put(
+            .stub_truthy => |info| try putStubOverride(
                 allocator,
-                info.func,
+                &call_overrides,
+                &func_overrides,
+                info,
                 stubValue(info.returns, true),
             ),
-            .stub_falsy => |info| try overrides.put(
+            .stub_falsy => |info| try putStubOverride(
                 allocator,
-                info.func,
+                &call_overrides,
+                &func_overrides,
+                info,
                 stubValue(info.returns, false),
             ),
-            .result_ok => |info| try overrides.put(
+            .result_ok => |info| try putStubOverride(
                 allocator,
-                info.func,
+                &call_overrides,
+                &func_overrides,
+                info,
                 "{\"ok\":true,\"value\":{}}",
             ),
-            .result_not_ok => |info| try overrides.put(
+            .result_not_ok => |info| try putStubOverride(
                 allocator,
-                info.func,
+                &call_overrides,
+                &func_overrides,
+                info,
                 "{\"ok\":false,\"error\":\"counterexample\"}",
             ),
             else => {},
@@ -229,7 +243,9 @@ fn solveStubs(
 
     const stubs = try allocator.alloc(IoStubEntry, io_calls.len);
     for (io_calls, 0..) |call, i| {
-        const result_json = overrides.get(call.func) orelse stubValue(call.returns, true);
+        const result_json = call_overrides.get(@intCast(i)) orelse
+            func_overrides.get(call.func) orelse
+            stubValue(call.returns, true);
         stubs[i] = .{
             .seq = @intCast(i),
             .module = call.module,
@@ -238,6 +254,30 @@ fn solveStubs(
         };
     }
     return stubs;
+}
+
+fn putStubOverride(
+    allocator: std.mem.Allocator,
+    call_overrides: *std.AutoHashMapUnmanaged(u32, []const u8),
+    func_overrides: *std.StringHashMapUnmanaged([]const u8),
+    info: StubInfo,
+    result_json: []const u8,
+) error{OutOfMemory}!void {
+    if (info.call_index) |idx| {
+        try call_overrides.put(allocator, idx, result_json);
+    } else {
+        try func_overrides.put(allocator, info.func, result_json);
+    }
+}
+
+fn alternateMethod(method: []const u8) []const u8 {
+    if (std.mem.eql(u8, method, "GET")) return "POST";
+    return "GET";
+}
+
+fn alternateUrl(url: []const u8) []const u8 {
+    if (std.mem.eql(u8, url, "/")) return "/__zigttp_counterexample__";
+    return "/";
 }
 
 fn stubValue(returns: mb.ReturnKind, truthy: bool) []const u8 {
@@ -350,6 +390,26 @@ test "solve picks literals from req_method and req_url constraints" {
     try std.testing.expectEqualStrings("/api/secret", witness.request.url);
 }
 
+test "solve picks concrete alternatives for negated request constraints" {
+    const allocator = std.testing.allocator;
+    const constraints = [_]WitnessConstraint{
+        .{ .req_method_not = "GET" },
+        .{ .req_url_not = "/" },
+    };
+    var witness = try solve(allocator, .{
+        .property = .no_secret_leakage,
+        .origin = .{ .line = 1, .column = 1 },
+        .sink = .{ .line = 1, .column = 1 },
+        .summary = "t",
+        .constraints = &constraints,
+        .io_calls = &.{},
+    });
+    defer witness.deinit(allocator);
+
+    try std.testing.expectEqualStrings("POST", witness.request.method);
+    try std.testing.expectEqualStrings("/__zigttp_counterexample__", witness.request.url);
+}
+
 test "solve emits auth header when parseBearer is constrained truthy" {
     const allocator = std.testing.allocator;
     const constraints = [_]WitnessConstraint{
@@ -443,6 +503,31 @@ test "solve preserves io_calls ordering and sequence numbers" {
     try std.testing.expectEqualStrings("env", witness.io_stubs[0].func);
     try std.testing.expectEqualStrings("sha256", witness.io_stubs[1].func);
     try std.testing.expectEqualStrings("cacheGet", witness.io_stubs[2].func);
+}
+
+test "solve applies stub overrides to the constrained call occurrence" {
+    const allocator = std.testing.allocator;
+    const constraints = [_]WitnessConstraint{
+        .{ .stub_truthy = .{ .module = "env", .func = "env", .returns = .optional_string, .call_index = 0 } },
+        .{ .stub_falsy = .{ .module = "env", .func = "env", .returns = .optional_string, .call_index = 1 } },
+    };
+    const io_calls = [_]TrackedIoCall{
+        .{ .module = "env", .func = "env", .returns = .optional_string },
+        .{ .module = "env", .func = "env", .returns = .optional_string },
+    };
+    var witness = try solve(allocator, .{
+        .property = .no_secret_leakage,
+        .origin = .{ .line = 1, .column = 1 },
+        .sink = .{ .line = 1, .column = 1 },
+        .summary = "t",
+        .constraints = &constraints,
+        .io_calls = &io_calls,
+    });
+    defer witness.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), witness.io_stubs.len);
+    try std.testing.expectEqualStrings("\"secret-sentinel\"", witness.io_stubs[0].result_json);
+    try std.testing.expectEqualStrings("null", witness.io_stubs[1].result_json);
 }
 
 test "writeJsonl emits witness + request + io in trace-compatible order" {
