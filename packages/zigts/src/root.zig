@@ -55,6 +55,7 @@ pub const bool_checker = @import("bool_checker.zig");
 pub const flow_checker = @import("flow_checker.zig");
 pub const path_generator = @import("path_generator.zig");
 pub const counterexample = @import("counterexample.zig");
+pub const repair_plan = @import("repair_plan.zig");
 pub const json_utils = @import("json_utils.zig");
 pub const behavior_canonical = @import("behavior_canonical.zig");
 pub const fault_coverage = @import("fault_coverage.zig");
