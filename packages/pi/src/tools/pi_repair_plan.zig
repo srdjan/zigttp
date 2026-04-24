@@ -201,10 +201,11 @@ fn execute(
         const loc = ir_view.getLoc(diag.node) orelse continue;
         diag_index += 1;
         const plan = repair_plan.fromVerifierDiagnostic(diag, .{ .line = loc.line, .column = loc.column }) orelse continue;
+        const subject_name = repairSubjectName(ir_view, &atoms, diag);
         plan_index += 1;
         if (!first_plan) try w.writeByte(',');
         first_plan = false;
-        try writePlan(w, allocator, plan_index, plan, "diag", diag_index);
+        try writePlan(w, allocator, plan_index, plan, "diag", diag_index, subject_name);
     }
 
     witness_index = 0;
@@ -217,7 +218,7 @@ fn execute(
         plan_index += 1;
         if (!first_plan) try w.writeByte(',');
         first_plan = false;
-        try writePlan(w, allocator, plan_index, plan, "wit", witness_index);
+        try writePlan(w, allocator, plan_index, plan, "wit", witness_index, null);
     }
     try w.writeAll("]}\n");
 
@@ -302,11 +303,14 @@ fn writePlan(
     plan: repair_plan.Plan,
     closes_prefix: []const u8,
     closes_index: usize,
+    subject_name: ?[]const u8,
 ) !void {
     const id = try std.fmt.allocPrint(allocator, "rp_{d:0>3}", .{index});
     defer allocator.free(id);
     const closes = try std.fmt.allocPrint(allocator, "{s}_{d:0>3}", .{ closes_prefix, closes_index });
     defer allocator.free(closes);
+    const template = try concreteTemplate(allocator, plan, subject_name);
+    defer allocator.free(template);
 
     try writer.writeAll("{\"id\":");
     try json_utils.writeJsonString(writer, id);
@@ -327,10 +331,76 @@ fn writePlan(
     try writer.writeAll(",\"column\":");
     try writer.print("{d}", .{plan.edit_intent.column});
     try writer.writeAll(",\"template\":");
-    try json_utils.writeJsonString(writer, plan.edit_intent.template);
+    try json_utils.writeJsonString(writer, template);
+    if (subject_name) |name_text| {
+        try writer.writeAll(",\"bindings\":{\"subject\":");
+        try json_utils.writeJsonString(writer, name_text);
+        try writer.writeByte('}');
+    }
     try writer.writeAll("},\"closes\":[");
     try json_utils.writeJsonString(writer, closes);
     try writer.writeAll("]}");
+}
+
+fn concreteTemplate(
+    allocator: std.mem.Allocator,
+    plan: repair_plan.Plan,
+    subject_name: ?[]const u8,
+) ![]u8 {
+    return switch (plan.kind) {
+        .check_result_before_value => {
+            const name_text = subject_name orelse "result";
+            return std.fmt.allocPrint(
+                allocator,
+                "if (!{s}.ok) return Response.json({{ error: {s}.error }}, {{ status: 400 }});",
+                .{ name_text, name_text },
+            );
+        },
+        .narrow_optional_before_use => {
+            const name_text = subject_name orelse "value";
+            return std.fmt.allocPrint(
+                allocator,
+                "if ({s} === undefined) return Response.json({{ error: \"missing value\" }}, {{ status: 400 }});",
+                .{name_text},
+            );
+        },
+        else => allocator.dupe(u8, plan.edit_intent.template),
+    };
+}
+
+fn repairSubjectName(
+    ir_view: ir.IrView,
+    atoms: *zigts.context.AtomTable,
+    diag: handler_verifier.Diagnostic,
+) ?[]const u8 {
+    return switch (diag.kind) {
+        .unchecked_result_value, .unchecked_optional_access => memberObjectName(ir_view, atoms, diag.node),
+        .unchecked_optional_use => identifierName(ir_view, atoms, diag.node),
+        else => null,
+    };
+}
+
+fn memberObjectName(
+    ir_view: ir.IrView,
+    atoms: *zigts.context.AtomTable,
+    node: zigts.parser.NodeIndex,
+) ?[]const u8 {
+    const tag = ir_view.getTag(node) orelse return null;
+    if (tag == .identifier) return identifierName(ir_view, atoms, node);
+    if (tag != .member_access and tag != .optional_chain) return null;
+    const member = ir_view.getMember(node) orelse return null;
+    return identifierName(ir_view, atoms, member.object);
+}
+
+fn identifierName(
+    ir_view: ir.IrView,
+    atoms: *zigts.context.AtomTable,
+    node: zigts.parser.NodeIndex,
+) ?[]const u8 {
+    const tag = ir_view.getTag(node) orelse return null;
+    if (tag != .identifier) return null;
+    const binding = ir_view.getBinding(node) orelse return null;
+    return atoms.getName(@enumFromInt(binding.slot));
 }
 
 fn hasRequestedFlowDiagnostics(
@@ -372,4 +442,21 @@ test "decodeJson accepts path and goals" {
 test "tool description names repair plan authority boundary" {
     try testing.expect(std.mem.indexOf(u8, tool.description, "does not edit files") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "unchecked Result.value") != null);
+}
+
+test "concreteTemplate uses extracted subject names" {
+    const plan = repair_plan.fromVerifierDiagnostic(
+        .{
+            .severity = .err,
+            .kind = .unchecked_result_value,
+            .node = 0,
+            .message = "result.value accessed without checking result.ok first",
+            .help = null,
+        },
+        .{ .line = 8, .column = 12 },
+    ) orelse return error.MissingPlan;
+    const template = try concreteTemplate(testing.allocator, plan, "authResult");
+    defer testing.allocator.free(template);
+    try testing.expect(std.mem.indexOf(u8, template, "authResult.ok") != null);
+    try testing.expect(std.mem.indexOf(u8, template, "authResult.error") != null);
 }
