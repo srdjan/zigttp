@@ -13,6 +13,7 @@ const parser = zigts.parser;
 const bool_checker = zigts.bool_checker;
 const type_checker = zigts.type_checker;
 const handler_verifier = zigts.handler_verifier;
+const flow_checker = zigts.flow_checker;
 const handler_contract = zigts.handler_contract;
 const writeJsonString = handler_contract.writeJsonString;
 
@@ -130,6 +131,20 @@ fn verifierCode(kind: handler_verifier.DiagnosticKind) []const u8 {
     };
 }
 
+/// FlowChecker error codes: ZTS4xx
+fn flowCheckerCode(kind: flow_checker.DiagnosticKind) []const u8 {
+    return switch (kind) {
+        .secret_in_response => "ZTS400",
+        .credential_in_response => "ZTS401",
+        .secret_in_log => "ZTS402",
+        .credential_in_log => "ZTS403",
+        .secret_in_egress_url => "ZTS404",
+        .credential_in_egress_url => "ZTS405",
+        .secret_in_egress_body => "ZTS406",
+        .unvalidated_input_in_egress => "ZTS407",
+    };
+}
+
 // -------------------------------------------------------------------------
 // Conversion helpers
 // -------------------------------------------------------------------------
@@ -203,6 +218,19 @@ pub fn fromVerifierDiagnostic(diag: handler_verifier.Diagnostic, ir_view: IrView
     const loc = ir_view.getLoc(diag.node) orelse return null;
     return .{
         .code = verifierCode(diag.kind),
+        .severity = diag.severity.label(),
+        .message = diag.message,
+        .file = file,
+        .line = loc.line,
+        .column = loc.column,
+        .suggestion = diag.help,
+    };
+}
+
+pub fn fromFlowDiagnostic(diag: flow_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
+    const loc = ir_view.getLoc(diag.node) orelse return null;
+    return .{
+        .code = flowCheckerCode(diag.kind),
         .severity = diag.severity.label(),
         .message = diag.message,
         .file = file,

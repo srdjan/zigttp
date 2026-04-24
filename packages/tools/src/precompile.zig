@@ -1092,6 +1092,8 @@ pub const CheckResult = struct {
     verify_ran: bool = false,
     verify_errors: u32 = 0,
     verify_warnings: u32 = 0,
+    flow_errors: u32 = 0,
+    flow_warnings: u32 = 0,
     exhaustive_returns: bool = false,
     results_safe: bool = false,
     optionals_safe: bool = false,
@@ -1108,11 +1110,11 @@ pub const CheckResult = struct {
     json_diagnostics: std.ArrayList(json_diag.JsonDiagnostic) = .empty,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
-        return self.parse_errors + self.bool_errors + self.type_errors + self.verify_errors;
+        return self.parse_errors + self.bool_errors + self.type_errors + self.verify_errors + self.flow_errors;
     }
 
     pub fn totalWarnings(self: *const CheckResult) u32 {
-        return self.bool_warnings + self.verify_warnings;
+        return self.bool_warnings + self.verify_warnings + self.flow_warnings;
     }
 
     pub fn deinit(self: *CheckResult, allocator: std.mem.Allocator) void {
@@ -1391,6 +1393,40 @@ pub fn runCheckOnlyFromSource(
                         break;
                     }
                 }
+            }
+        }
+    }
+
+    // Stage 7.5: Data flow provenance
+    //
+    // Run standalone so its diagnostics feed `json_diagnostics` alongside
+    // the other checkers. `buildContractWithPolicy` runs FlowChecker again
+    // to inject properties into the contract, but that path populates a
+    // different structure (PropertyViolation) and does not surface in
+    // `zigts verify-paths --json`. This stage closes the agent-facing gap.
+    {
+        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        if (zigts.handler_verifier.findHandlerFunction(ir_view, root)) |hf| {
+            var flow = zigts.FlowChecker.init(allocator, ir_view, &atoms);
+            defer flow.deinit();
+
+            result.flow_errors = @intCast(flow.check(hf) catch 0);
+            const flow_diags = flow.getDiagnostics();
+            result.flow_warnings = @intCast(flow_diags.len -| result.flow_errors);
+
+            if (json_mode) {
+                for (flow_diags) |diag| {
+                    if (json_diag.fromFlowDiagnostic(diag, ir_view, handler_path)) |jd| {
+                        result.json_diagnostics.append(allocator, jd) catch {};
+                    }
+                }
+            } else if (flow_diags.len > 0) {
+                var buf: std.ArrayList(u8) = .empty;
+                defer buf.deinit(allocator);
+                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+                flow.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+                buf = aw.toArrayList();
+                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
             }
         }
     }
