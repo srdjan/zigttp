@@ -24,6 +24,7 @@ comptime {
     _ = @import("tools/gen_tests.zig");
     _ = @import("tools/pi_goal_check.zig");
     _ = @import("tools/pi_repair_plan.zig");
+    _ = @import("tools/pi_apply_repair_plan.zig");
     _ = @import("repl.zig");
     _ = @import("commands.zig");
     _ = @import("tui/term.zig");

@@ -174,6 +174,67 @@ pub const CommandOutcomePayload = struct {
     }
 };
 
+pub const RepairCandidatePayload = struct {
+    path: []u8,
+    plan_id: []u8,
+    intent_kind: []u8,
+    proposed_content: []u8,
+    verification_ok: bool,
+    verification_summary: []u8,
+    stats: ProofStats,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        plan_id: []const u8,
+        intent_kind: []const u8,
+        proposed_content: []const u8,
+        verification_ok: bool,
+        verification_summary: []const u8,
+        stats: ProofStats,
+    ) !RepairCandidatePayload {
+        return .{
+            .path = try allocator.dupe(u8, path),
+            .plan_id = try allocator.dupe(u8, plan_id),
+            .intent_kind = try allocator.dupe(u8, intent_kind),
+            .proposed_content = try allocator.dupe(u8, proposed_content),
+            .verification_ok = verification_ok,
+            .verification_summary = try allocator.dupe(u8, verification_summary),
+            .stats = stats,
+        };
+    }
+
+    pub fn clone(self: RepairCandidatePayload, allocator: std.mem.Allocator) !RepairCandidatePayload {
+        return init(
+            allocator,
+            self.path,
+            self.plan_id,
+            self.intent_kind,
+            self.proposed_content,
+            self.verification_ok,
+            self.verification_summary,
+            self.stats,
+        );
+    }
+
+    pub fn deinit(self: *RepairCandidatePayload, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.plan_id);
+        allocator.free(self.intent_kind);
+        allocator.free(self.proposed_content);
+        allocator.free(self.verification_summary);
+        self.* = .{
+            .path = &.{},
+            .plan_id = &.{},
+            .intent_kind = &.{},
+            .proposed_content = &.{},
+            .verification_ok = false,
+            .verification_summary = &.{},
+            .stats = .{ .total = 0, .new = 0, .preexisting = null },
+        };
+    }
+};
+
 pub const PropertiesSnapshot = struct {
     pure: bool,
     read_only: bool,
@@ -578,6 +639,7 @@ pub const UiPayload = union(enum) {
     diagnostics: DiagnosticsPayload,
     proof_card: ProofCardPayload,
     command_outcome: CommandOutcomePayload,
+    repair_candidate: RepairCandidatePayload,
     verified_patch: VerifiedPatchPayload,
     plain_text: []u8,
 
@@ -587,6 +649,7 @@ pub const UiPayload = union(enum) {
             .diagnostics => |payload| .{ .diagnostics = try payload.clone(allocator) },
             .proof_card => |payload| .{ .proof_card = try payload.clone(allocator) },
             .command_outcome => |payload| .{ .command_outcome = try payload.clone(allocator) },
+            .repair_candidate => |payload| .{ .repair_candidate = try payload.clone(allocator) },
             .verified_patch => |payload| .{ .verified_patch = try payload.clone(allocator) },
             .plain_text => |text| .{ .plain_text = try allocator.dupe(u8, text) },
         };
@@ -598,6 +661,7 @@ pub const UiPayload = union(enum) {
             .diagnostics => |*payload| payload.deinit(allocator),
             .proof_card => |*payload| payload.deinit(allocator),
             .command_outcome => |*payload| payload.deinit(allocator),
+            .repair_candidate => |*payload| payload.deinit(allocator),
             .verified_patch => |*payload| payload.deinit(allocator),
             .plain_text => |text| allocator.free(text),
         }
@@ -699,6 +763,29 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
             try json_writer.writeString(writer, command.stderr);
             try writer.writeAll(",\"command\":");
             try json_writer.writeString(writer, command.command);
+        },
+        .repair_candidate => |candidate| {
+            try writer.writeAll("\"kind\":\"repair_candidate\",\"path\":");
+            try json_writer.writeString(writer, candidate.path);
+            try writer.writeAll(",\"plan_id\":");
+            try json_writer.writeString(writer, candidate.plan_id);
+            try writer.writeAll(",\"intent_kind\":");
+            try json_writer.writeString(writer, candidate.intent_kind);
+            try writer.writeAll(",\"proposed_content\":");
+            try json_writer.writeString(writer, candidate.proposed_content);
+            try writer.writeAll(",\"verification_ok\":");
+            try writer.writeAll(if (candidate.verification_ok) "true" else "false");
+            try writer.writeAll(",\"verification_summary\":");
+            try json_writer.writeString(writer, candidate.verification_summary);
+            try writer.writeAll(",\"stats\":{\"total\":");
+            try writer.print("{d}", .{candidate.stats.total});
+            try writer.writeAll(",\"new\":");
+            try writer.print("{d}", .{candidate.stats.new});
+            if (candidate.stats.preexisting) |preexisting| {
+                try writer.writeAll(",\"preexisting\":");
+                try writer.print("{d}", .{preexisting});
+            }
+            try writer.writeByte('}');
         },
         .verified_patch => |patch| {
             try writer.writeAll("\"kind\":\"verified_patch\",\"file\":");
@@ -991,6 +1078,28 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             .stderr = try allocator.dupe(u8, stderr),
             .command = try allocator.dupe(u8, command),
         } };
+    }
+    if (std.mem.eql(u8, kind_val.string, "repair_candidate")) {
+        const stats_val = obj.get("stats") orelse return error.InvalidUiPayload;
+        if (stats_val != .object) return error.InvalidUiPayload;
+        const stats_obj = stats_val.object;
+        return .{ .repair_candidate = try RepairCandidatePayload.init(
+            allocator,
+            getString(obj, "path") orelse return error.InvalidUiPayload,
+            getString(obj, "plan_id") orelse return error.InvalidUiPayload,
+            getString(obj, "intent_kind") orelse return error.InvalidUiPayload,
+            getString(obj, "proposed_content") orelse return error.InvalidUiPayload,
+            getBool(obj, "verification_ok") orelse return error.InvalidUiPayload,
+            getString(obj, "verification_summary") orelse return error.InvalidUiPayload,
+            .{
+                .total = @intCast(getUnsigned(stats_obj, "total") orelse return error.InvalidUiPayload),
+                .new = @intCast(getUnsigned(stats_obj, "new") orelse return error.InvalidUiPayload),
+                .preexisting = if (getUnsigned(stats_obj, "preexisting")) |preexisting|
+                    @intCast(preexisting)
+                else
+                    null,
+            },
+        ) };
     }
     if (std.mem.eql(u8, kind_val.string, "verified_patch")) {
         const file = getString(obj, "file") orelse return error.InvalidUiPayload;
@@ -1405,6 +1514,35 @@ test "command outcome payload round-trips" {
             try testing.expectEqualStrings("zig test", command.title);
             try testing.expectEqual(@as(?u8, 0), command.exit_code);
             try testing.expectEqualStrings("zig build test-zigts", command.command);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "repair candidate payload round-trips" {
+    var payload: UiPayload = .{ .repair_candidate = try RepairCandidatePayload.init(
+        testing.allocator,
+        "handler.ts",
+        "rp_001",
+        "insert_guard_before_line",
+        "function handler(req: Request): Response { return Response.json({ ok: true }); }",
+        true,
+        "0 total, 0 new, 0 preexisting",
+        .{ .total = 0, .new = 0, .preexisting = 0 },
+    ) };
+    defer payload.deinit(testing.allocator);
+
+    var roundtripped = try roundTrip(testing.allocator, payload);
+    defer roundtripped.deinit(testing.allocator);
+
+    switch (roundtripped) {
+        .repair_candidate => |candidate| {
+            try testing.expectEqualStrings("handler.ts", candidate.path);
+            try testing.expectEqualStrings("rp_001", candidate.plan_id);
+            try testing.expectEqualStrings("insert_guard_before_line", candidate.intent_kind);
+            try testing.expect(candidate.verification_ok);
+            try testing.expectEqual(@as(u32, 0), candidate.stats.new);
+            try testing.expect(std.mem.indexOf(u8, candidate.proposed_content, "Response.json") != null);
         },
         else => return error.TestFailed,
     }

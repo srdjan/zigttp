@@ -17,6 +17,16 @@ const PostApplyReport = struct {
     summary: ?[]u8 = null,
 };
 
+const RepairLinks = struct {
+    repair_plan_ids: [][]u8 = &.{},
+
+    fn deinit(self: *RepairLinks, allocator: std.mem.Allocator) void {
+        for (self.repair_plan_ids) |item| allocator.free(item);
+        allocator.free(self.repair_plan_ids);
+        self.* = .{};
+    }
+};
+
 pub const ModelCallResult = struct {
     reply: turn.AssistantReply,
     usage: turn.Usage = .{},
@@ -414,6 +424,14 @@ fn appendVerifiedPatchEntry(
 ) !void {
     const workspace_root_abs = try std.fs.path.resolve(allocator, &.{workspace_root});
     defer allocator.free(workspace_root_abs);
+    var repair_links = try collectRecentRepairLinks(
+        allocator,
+        transcript,
+        workspace_root_abs,
+        prepared.edit.file,
+        prepared.edit.content,
+    );
+    defer repair_links.deinit(allocator);
 
     const payload: ui_payload_mod.UiPayload = .{ .verified_patch = try proof_enrichment.buildVerifiedPatchPayload(
         allocator,
@@ -427,6 +445,7 @@ fn appendVerifiedPatchEntry(
             .post_apply_ok = post_apply.ok,
             .post_apply_summary = post_apply.summary,
             .transcript = transcript,
+            .repair_plan_ids = repair_links.repair_plan_ids,
         },
     ) };
     errdefer {
@@ -452,6 +471,53 @@ fn appendVerifiedPatchEntry(
         .llm_text = summary_line,
         .ui_payload = payload,
     } });
+}
+
+fn collectRecentRepairLinks(
+    allocator: std.mem.Allocator,
+    transcript: *const transcript_mod.Transcript,
+    workspace_root_abs: []const u8,
+    file: []const u8,
+    content: []const u8,
+) !RepairLinks {
+    const file_abs = try std.fs.path.resolve(allocator, &.{ workspace_root_abs, file });
+    defer allocator.free(file_abs);
+    var i = transcript.len();
+    while (i > 0) {
+        i -= 1;
+        switch (transcript.at(i).*) {
+            .tool_result => |result| {
+                if (std.mem.eql(u8, result.tool_name, "pi_apply_repair_plan")) {
+                    if (try repairLinksFromCandidate(allocator, result.ui_payload, workspace_root_abs, file_abs, content)) |links| return links;
+                }
+            },
+            else => {},
+        }
+    }
+    return .{};
+}
+
+fn repairLinksFromCandidate(
+    allocator: std.mem.Allocator,
+    payload: ?ui_payload_mod.UiPayload,
+    workspace_root_abs: []const u8,
+    file_abs: []const u8,
+    content: []const u8,
+) !?RepairLinks {
+    const value = payload orelse return null;
+    return switch (value) {
+        .repair_candidate => |candidate| blk: {
+            const candidate_abs = try std.fs.path.resolve(allocator, &.{ workspace_root_abs, candidate.path });
+            defer allocator.free(candidate_abs);
+            if (!std.mem.eql(u8, candidate_abs, file_abs)) break :blk null;
+            if (!std.mem.eql(u8, candidate.proposed_content, content)) break :blk null;
+            const repair_plan_ids = try allocator.alloc([]u8, 1);
+            errdefer allocator.free(repair_plan_ids);
+            repair_plan_ids[0] = try allocator.dupe(u8, candidate.plan_id);
+            break :blk .{ .repair_plan_ids = repair_plan_ids };
+        },
+        else => null,
+    };
 }
 
 fn nowUnixMs() i64 {
@@ -947,6 +1013,117 @@ test "verified edit path appends a verified_patch entry before the proof card" {
                 },
                 else => return error.TestFailed,
             }
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "verified patch does not infer links from broad repair plan result" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+
+    var canned: CannedClient = .{ .reply = .{
+        .response = .{ .edit = .{
+            .file = "handler.ts",
+            .content = clean_handler,
+            .before = null,
+        } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const calls = [_]turn.ToolCall{
+        .{ .id = "toolu_repair", .name = "pi_repair_plan", .args_json = "{\"path\":\"handler.ts\"}" },
+    };
+    try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
+    try tr.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = "toolu_repair",
+        .tool_name = "pi_repair_plan",
+        .ok = false,
+        .llm_text =
+        \\{"ok":false,"plans":[{"id":"rp_001","closes":["wit_001"]},{"id":"rp_002","closes":["wit_002"]}]}
+        ,
+        .ui_payload = null,
+    } });
+
+    _ = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "write the handler",
+        .{ .workspace_root = workspace_root },
+    );
+
+    switch (tr.at(tr.len() - 2).*) {
+        .verified_patch => |message| switch (message.ui_payload.?) {
+            .verified_patch => |payload| {
+                try testing.expectEqual(@as(usize, 0), payload.repair_plan_ids.len);
+                try testing.expectEqual(@as(usize, 0), payload.closed_witness_ids.len);
+            },
+            else => return error.TestFailed,
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "verified patch records matching repair candidate plan link" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+
+    var canned: CannedClient = .{ .reply = .{
+        .response = .{ .edit = .{
+            .file = "handler.ts",
+            .content = clean_handler,
+            .before = null,
+        } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    var candidate_payload: ui_payload_mod.UiPayload = .{ .repair_candidate = try ui_payload_mod.RepairCandidatePayload.init(
+        testing.allocator,
+        "handler.ts",
+        "rp_candidate",
+        "insert_guard_before_line",
+        clean_handler,
+        true,
+        "0 total, 0 new, 0 preexisting",
+        .{ .total = 0, .new = 0, .preexisting = 0 },
+    ) };
+    defer candidate_payload.deinit(testing.allocator);
+    try tr.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = "toolu_apply_repair",
+        .tool_name = "pi_apply_repair_plan",
+        .ok = true,
+        .llm_text = "{\"ok\":true,\"applied\":false}",
+        .ui_payload = candidate_payload,
+    } });
+
+    _ = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "write the candidate",
+        .{ .workspace_root = workspace_root },
+    );
+
+    switch (tr.at(tr.len() - 2).*) {
+        .verified_patch => |message| switch (message.ui_payload.?) {
+            .verified_patch => |payload| {
+                try testing.expectEqual(@as(usize, 1), payload.repair_plan_ids.len);
+                try testing.expectEqualStrings("rp_candidate", payload.repair_plan_ids[0]);
+            },
+            else => return error.TestFailed,
         },
         else => return error.TestFailed,
     }
