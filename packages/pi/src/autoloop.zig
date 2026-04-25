@@ -50,6 +50,12 @@ pub const DriveOptions = struct {
     budget: Budget = .{},
     events_path: ?[]const u8 = null,
     policy_hash: []const u8 = "",
+    /// Optional stable witness key. When set, the autoloop terminates
+    /// `.achieved` as soon as no witness with this key remains, even
+    /// if other witnesses for the same property tag are still live.
+    /// Lets the witness pane drive convergence on one specific
+    /// counterexample instead of the whole property class.
+    focus_witness_key: ?[]const u8 = null,
 };
 
 pub const Outcome = struct {
@@ -86,7 +92,7 @@ pub fn drive(
         defer allocator.free(check);
         const check_result = try parseGoalCheckResult(allocator, check);
         defer ui_payload.freeWitnessBodySlice(allocator, check_result.witnesses);
-        if (check_result.ok) {
+        if (focusedAchieved(check_result, options.focus_witness_key)) {
             return finalize(allocator, transcript, options, .achieved, iter);
         }
 
@@ -125,6 +131,18 @@ pub fn drive(
     }
 
     return finalize(allocator, transcript, options, .exhausted_iters, iter);
+}
+
+/// Convergence predicate. Without a focus key the unfiltered
+/// `pi_goal_check` verdict wins; with one, drive declares achieved iff
+/// the focused witness has been defeated, regardless of unrelated
+/// witnesses still live for the same property tag.
+fn focusedAchieved(result: GoalCheckResult, focus_key: ?[]const u8) bool {
+    const key = focus_key orelse return result.ok;
+    for (result.witnesses) |w| {
+        if (std.mem.eql(u8, w.key, key)) return false;
+    }
+    return true;
 }
 
 fn countMetGoals(
@@ -1235,4 +1253,59 @@ test "diffWitnessKeys returns empty slice when a is empty" {
     const diff = try diffWitnessKeys(allocator, a, b);
     defer allocator.free(diff);
     try testing.expectEqual(@as(usize, 0), diff.len);
+}
+
+test "focusedAchieved without focus key defers to result.ok" {
+    const result_ok: GoalCheckResult = .{ .ok = true, .witnesses = &.{} };
+    const result_unmet: GoalCheckResult = .{ .ok = false, .witnesses = &.{} };
+    try testing.expect(focusedAchieved(result_ok, null));
+    try testing.expect(!focusedAchieved(result_unmet, null));
+}
+
+test "focusedAchieved returns true when focused witness is gone, even if others remain" {
+    const others = [_]ui_payload.WitnessBody{
+        .{
+            .key = @constCast("cc" ** 32),
+            .property = @constCast("no_secret_leakage"),
+            .summary = @constCast(""),
+            .origin_line = 1, .origin_column = 1, .sink_line = 1, .sink_column = 1,
+            .request_method = @constCast("GET"),
+            .request_url = @constCast("/"),
+            .request_has_auth = false,
+            .request_body = null,
+            .io_stubs = &.{},
+        },
+    };
+    const result: GoalCheckResult = .{ .ok = false, .witnesses = @constCast(&others) };
+    try testing.expect(focusedAchieved(result, "aa" ** 32));
+}
+
+test "focusedAchieved returns false when focused witness is still live" {
+    const live = [_]ui_payload.WitnessBody{
+        .{
+            .key = @constCast("aa" ** 32),
+            .property = @constCast("no_secret_leakage"),
+            .summary = @constCast(""),
+            .origin_line = 1, .origin_column = 1, .sink_line = 1, .sink_column = 1,
+            .request_method = @constCast("GET"),
+            .request_url = @constCast("/"),
+            .request_has_auth = false,
+            .request_body = null,
+            .io_stubs = &.{},
+        },
+        .{
+            .key = @constCast("bb" ** 32),
+            .property = @constCast("injection_safe"),
+            .summary = @constCast(""),
+            .origin_line = 1, .origin_column = 1, .sink_line = 1, .sink_column = 1,
+            .request_method = @constCast("POST"),
+            .request_url = @constCast("/"),
+            .request_has_auth = false,
+            .request_body = null,
+            .io_stubs = &.{},
+        },
+    };
+    const result: GoalCheckResult = .{ .ok = false, .witnesses = @constCast(&live) };
+    try testing.expect(!focusedAchieved(result, "aa" ** 32));
+    try testing.expect(!focusedAchieved(result, "bb" ** 32));
 }

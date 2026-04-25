@@ -3,6 +3,7 @@
 //! so the TUI can surface them without changing replay semantics.
 
 const std = @import("std");
+const zigts = @import("zigts");
 const term = @import("term.zig");
 const ansi = @import("ansi.zig");
 const line_editor = @import("line_editor.zig");
@@ -54,6 +55,11 @@ const StatusNotice = union(enum) {
     /// flight. The slice is the property name and is owned by the comptime
     /// PropertiesSnapshot field set, so no allocation is required.
     goal_driving: []const u8,
+    /// `g` was just pressed on a witness in the witnesses tab; the
+    /// autoloop is converging on that specific counterexample. Both
+    /// fields borrow from `pending_witness_focus` and the comptime
+    /// property table, so the variant itself owns nothing.
+    witness_driving: WitnessDriving,
     /// The autoloop returned. Carries the verdict so the user can see
     /// whether the chip went green or which budget tripped.
     goal_completed: GoalCompleted,
@@ -72,12 +78,25 @@ const StatusNotice = union(enum) {
     /// missing, parse error, tool unwired). The error name surfaces in
     /// the status row.
     replay_error: []const u8,
+    /// `m` minted the selected witness as a regression test case.
+    /// `short_key` borrows from the witness body in the transcript.
+    /// The full path lands as a system_note for durability; this
+    /// notice just acknowledges the action in the status row.
+    mint_done: []const u8,
+    /// `m` was pressed but minting could not proceed: missing verdict,
+    /// witness selection out of range, or filesystem failure.
+    mint_error: []const u8,
 };
 
 const ReplayDone = struct {
     reproduced: bool,
     /// First 12 hex chars of the witness key. Borrowed from the witness
     /// body; the verdict record itself owns the full key.
+    short_key: []const u8,
+};
+
+const WitnessDriving = struct {
+    property: []const u8,
     short_key: []const u8,
 };
 
@@ -111,6 +130,21 @@ const FeedSource = union(enum) {
 pub const FeedItem = struct {
     source: FeedSource,
     kind: FeedItemKind,
+};
+
+/// Pending dispatch carrier for `g` pressed on a witness. Owns its key
+/// copy so the keystroke handler does not have to keep the source
+/// witness body alive while the autoloop runs.
+pub const PendingWitnessFocus = struct {
+    key: []u8,
+    /// Property tag (e.g. `no_secret_leakage`). Borrowed from the
+    /// `boolPropertyNameAt` table; free `key` only.
+    property: []const u8,
+
+    pub fn deinit(self: *PendingWitnessFocus, allocator: std.mem.Allocator) void {
+        allocator.free(self.key);
+        self.* = .{ .key = &.{}, .property = &.{} };
+    }
 };
 
 /// Owned record of a witness replay verdict held in AppState. Pairs the
@@ -254,18 +288,31 @@ pub const AppState = struct {
     /// changes, or when the user explicitly clears it. The TUI renders
     /// it inline below the selected witness in the witnesses tab.
     witness_verdict: ?WitnessVerdictRecord = null,
+    /// Pending witness-scoped goal drive: stable key copy stashed by the
+    /// `g` keystroke handler in the witnesses tab, consumed by
+    /// `driveSelectedGoal` and freed there. Non-null only between the
+    /// keystroke and the autoloop dispatch (a few milliseconds at most).
+    pending_witness_focus: ?PendingWitnessFocus = null,
 
     pub fn deinit(self: *AppState, allocator: std.mem.Allocator) void {
         self.feed_items.deinit(allocator);
         self.ledger_items.deinit(allocator);
         self.clearLocalResults(allocator);
         self.clearWitnessVerdict(allocator);
+        self.clearPendingWitnessFocus(allocator);
     }
 
     pub fn clearWitnessVerdict(self: *AppState, allocator: std.mem.Allocator) void {
         if (self.witness_verdict) |*record| {
             record.deinit(allocator);
             self.witness_verdict = null;
+        }
+    }
+
+    pub fn clearPendingWitnessFocus(self: *AppState, allocator: std.mem.Allocator) void {
+        if (self.pending_witness_focus) |*focus| {
+            focus.deinit(allocator);
+            self.pending_witness_focus = null;
         }
     }
 
@@ -590,6 +637,10 @@ pub fn run(
                             try replaySelectedWitness(&runtime);
                             try runtime.redrawFrame();
                         },
+                        .mint_witness => {
+                            try mintSelectedWitness(&runtime);
+                            try runtime.redrawFrame();
+                        },
                     }
                 },
             }
@@ -662,6 +713,12 @@ pub const PaneOutcome = enum {
     /// against the patch's handler file and storing the verdict in
     /// `state.witness_verdict` for the next redraw.
     replay_witness,
+    /// User pressed `m` on a selected witness with a recent verdict.
+    /// The caller serialises the witness as a JSONL test case
+    /// (request + io stubs + an `expect` clause derived from the
+    /// verdict's actual status) and appends it to the handler's
+    /// regression-tests file.
+    mint_witness,
 };
 
 fn handlePaneEvent(
@@ -769,8 +826,12 @@ fn handlePaneEvent(
                 return .redraw;
             },
             'g', 'G' => {
-                if (state.view_mode != .ledger or state.ledger_tab != .properties) return .no_op;
+                if (state.view_mode != .ledger) return .no_op;
                 if (state.autoloop_in_flight) return .no_op;
+                if (state.ledger_tab == .witnesses) {
+                    return dispatchWitnessGoal(allocator, state, session);
+                }
+                if (state.ledger_tab != .properties) return .no_op;
                 const name = property_goals.boolPropertyNameAt(state.selected_property_index) orelse {
                     state.status_notice = .invalid_property;
                     return .redraw;
@@ -813,6 +874,19 @@ fn handlePaneEvent(
                 }
                 state.clearWitnessVerdict(allocator);
                 return .replay_witness;
+            },
+            'm', 'M' => {
+                if (state.view_mode != .ledger or state.ledger_tab != .witnesses) return .no_op;
+                if (state.witness_verdict == null) {
+                    state.status_notice = .{ .mint_error = "no recent verdict; press r first" };
+                    return .redraw;
+                }
+                const total = witnessCountForSelectedPatch(state, session);
+                if (total == 0 or state.selected_witness_index >= total) {
+                    state.status_notice = .{ .mint_error = "no witness selected" };
+                    return .redraw;
+                }
+                return .mint_witness;
             },
             'A' => {
                 if (state.view_mode == .ledger and approvalGateClear(state, session)) {
@@ -918,7 +992,7 @@ fn replaySelectedWitness(runtime: *TuiRuntime) !void {
     };
     state.status_notice = .{ .replay_done = .{
         .reproduced = reproduced,
-        .short_key = state.witness_verdict.?.key[0..@min(12, state.witness_verdict.?.key.len)],
+        .short_key = shortKey(state.witness_verdict.?.key),
     } };
 }
 
@@ -933,19 +1007,210 @@ fn selectedWitness(
     return null;
 }
 
+/// Append the selected witness to the handler's regression tests file
+/// as a JSONL test case. The current `state.witness_verdict` becomes the
+/// `expect` clause - the test asserts the post-fix response shape, so a
+/// future regression that re-introduces the leak fails the test.
+///
+/// File layout: `<handler-dir>/witness-regressions.jsonl`. Append-only;
+/// duplicates from repeated minting are tolerated because the test
+/// runner runs each case independently and the JSONL parser is
+/// per-line.
+fn mintSelectedWitness(runtime: *TuiRuntime) !void {
+    const allocator = runtime.allocator;
+    const state = runtime.state;
+
+    const ledger_idx = state.selectedLedgerIndex() orelse {
+        state.status_notice = .{ .mint_error = "no patch selected" };
+        return;
+    };
+    const patch = session_state.patchPayload(runtime.session.transcript.at(ledger_idx)) orelse {
+        state.status_notice = .{ .mint_error = "selected entry is not a patch" };
+        return;
+    };
+    const witness = selectedWitness(patch, state.selected_witness_index) orelse {
+        state.status_notice = .{ .mint_error = "witness selection out of range" };
+        return;
+    };
+    const verdict_record = state.witness_verdict orelse {
+        state.status_notice = .{ .mint_error = "no recent verdict; press r first" };
+        return;
+    };
+    if (!std.mem.eql(u8, verdict_record.key, witness.key)) {
+        state.status_notice = .{ .mint_error = "verdict does not match selected witness" };
+        return;
+    }
+    if (!verdict_record.verdict.ran) {
+        state.status_notice = .{ .mint_error = "verdict errored; replay before minting" };
+        return;
+    }
+
+    const workspace_root = tools_common.workspaceRoot(allocator) catch {
+        state.status_notice = .{ .mint_error = "workspace root unresolved" };
+        return;
+    };
+    defer allocator.free(workspace_root);
+    const handler_path = tools_common.resolveInsideWorkspace(allocator, workspace_root, patch.file) catch {
+        state.status_notice = .{ .mint_error = "handler path not in workspace" };
+        return;
+    };
+    defer allocator.free(handler_path);
+
+    const tests_path = mintTestsPathFor(allocator, handler_path) catch {
+        state.status_notice = .{ .mint_error = "tests path build failed" };
+        return;
+    };
+    defer allocator.free(tests_path);
+
+    appendWitnessRegression(
+        allocator,
+        tests_path,
+        witness,
+        verdict_record.verdict.actual_status,
+    ) catch |err| {
+        state.status_notice = .{ .mint_error = @errorName(err) };
+        return;
+    };
+
+    const short = shortKey(witness.key);
+    const note = try std.fmt.allocPrint(
+        allocator,
+        "minted regression test: {s} -> {s} (status {d})",
+        .{ short, tests_path, verdict_record.verdict.actual_status },
+    );
+    var note_owned_by_transcript = false;
+    errdefer if (!note_owned_by_transcript) allocator.free(note);
+
+    try runtime.session.transcript.entries.append(allocator, .{ .system_note = note });
+    note_owned_by_transcript = true;
+
+    if (runtime.session.events_path) |path| {
+        try session_events.appendEvent(allocator, path, .{ .system_note = note });
+    }
+
+    state.status_notice = .{ .mint_done = short };
+}
+
+/// Build the per-handler regression tests path. Sits next to the
+/// handler so `zig build -Dhandler=... -Dtest-file=...` lines up
+/// without extra plumbing. `handler_path` arrives from
+/// `tools_common.resolveInsideWorkspace` and is always an absolute path
+/// inside the workspace root, so `dirname` cannot be null at this
+/// callsite; the error path treats a null dirname as a bug rather than
+/// a recoverable condition.
+fn mintTestsPathFor(allocator: std.mem.Allocator, handler_path: []const u8) ![]u8 {
+    const dir = std.fs.path.dirname(handler_path) orelse return error.HandlerPathHasNoDirectory;
+    return std.fs.path.join(allocator, &.{ dir, "witness-regressions.jsonl" });
+}
+
+fn appendWitnessRegression(
+    allocator: std.mem.Allocator,
+    tests_path: []const u8,
+    witness: ui_payload_mod.WitnessBody,
+    expect_status: u16,
+) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+
+    try w.writeAll("{\"type\":\"test\",\"name\":\"witness-");
+    try w.writeAll(shortKey(witness.key));
+    try w.writeAll("-");
+    try w.writeAll(witness.property);
+    try w.writeAll("\"}\n");
+    try witness_replay.writeWitnessJsonl(w, witness);
+    try w.print("{{\"type\":\"expect\",\"status\":{d}}}\n", .{expect_status});
+
+    buf = aw.toArrayList();
+
+    // Read existing content (if any), concatenate, write back.
+    // The runtime's writeFile overwrites; there is no append helper,
+    // and the regression file is small enough that read+write is fine.
+    const existing = zigts.file_io.readFile(allocator, tests_path, 16 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => try allocator.alloc(u8, 0),
+        else => return err,
+    };
+    defer allocator.free(existing);
+
+    var combined: std.ArrayList(u8) = .empty;
+    defer combined.deinit(allocator);
+    try combined.appendSlice(allocator, existing);
+    if (existing.len > 0 and existing[existing.len - 1] != '\n') {
+        try combined.append(allocator, '\n');
+    }
+    try combined.appendSlice(allocator, buf.items);
+
+    try zigts.file_io.writeFile(allocator, tests_path, combined.items);
+}
+
+/// Validate the selected witness, stash a focus key in AppState, and
+/// hand off via `.drive_goal`. The autoloop dispatcher
+/// (`driveSelectedGoal`) reads `pending_witness_focus` to decide
+/// whether the run targets a property chip or a specific witness.
+/// Returns `.redraw` with a status notice on any failure (no patch
+/// selected, witness out of range, property not goal-driveable).
+fn dispatchWitnessGoal(
+    allocator: std.mem.Allocator,
+    state: *AppState,
+    session: *const agent.AgentSession,
+) PaneOutcome {
+    const ledger_idx = state.selectedLedgerIndex() orelse {
+        state.status_notice = .invalid_property;
+        return .redraw;
+    };
+    const patch = session_state.patchPayload(session.transcript.at(ledger_idx)) orelse {
+        state.status_notice = .invalid_property;
+        return .redraw;
+    };
+    const witness = selectedWitness(patch, state.selected_witness_index) orelse {
+        state.status_notice = .invalid_property;
+        return .redraw;
+    };
+    const property_tag = property_goals.parseDriveableGoal(witness.property) orelse {
+        state.status_notice = .structural_property;
+        return .redraw;
+    };
+    const property_name = property_tag.asString();
+
+    const key_copy = allocator.dupe(u8, witness.key) catch {
+        state.status_notice = .invalid_property;
+        return .redraw;
+    };
+    state.clearPendingWitnessFocus(allocator);
+    state.pending_witness_focus = .{ .key = key_copy, .property = property_name };
+    state.autoloop_in_flight = true;
+    state.status_notice = .{ .witness_driving = .{
+        .property = property_name,
+        .short_key = shortKey(key_copy),
+    } };
+    return .drive_goal;
+}
+
 /// Run the property-goal autoloop against the live session transcript for
-/// the chip the user pressed `g` on. The chip's file is the file of the
-/// currently-selected ledger patch; the chip's name is the property at the
-/// rail's cursor. handlePaneEvent has already validated both ends and
-/// flipped `autoloop_in_flight` true; this helper owns the dispatch and
-/// the post-run status update, and always clears `autoloop_in_flight` so a
+/// the chip or witness the user pressed `g` on. The dispatcher reads
+/// `pending_witness_focus` to choose between two anchors:
+///
+///   * Witness-focused: the loop converges on a single counterexample
+///     by stable key, regardless of unrelated witnesses still live for
+///     the same property tag.
+///   * Chip-focused (default): the loop converges on the entire
+///     property class for the chip the user selected on the properties
+///     tab.
+///
+/// In both cases the file is the currently-selected ledger patch's
+/// file; `handlePaneEvent` has already validated the anchor and flipped
+/// `autoloop_in_flight` true, so this helper owns the dispatch and the
+/// post-run status update, and always clears `autoloop_in_flight` so a
 /// failure can never wedge the rail.
 ///
 /// Sync-blocking by design at step 1: the UI freezes for the run. Step 3
 /// moves `autoloop.drive` to a worker thread and replaces the freeze with
 /// a self-pipe wakeup. The status notice is the same in either world.
 fn driveSelectedGoal(runtime: *TuiRuntime, registry: *const Registry) !void {
+    const allocator = runtime.allocator;
     defer runtime.state.autoloop_in_flight = false;
+    defer runtime.state.clearPendingWitnessFocus(allocator);
 
     const idx = runtime.state.selectedLedgerIndex() orelse {
         runtime.state.status_notice = .invalid_property;
@@ -955,16 +1220,23 @@ fn driveSelectedGoal(runtime: *TuiRuntime, registry: *const Registry) !void {
         runtime.state.status_notice = .invalid_property;
         return;
     };
-    const name = property_goals.boolPropertyNameAt(runtime.state.selected_property_index) orelse {
-        runtime.state.status_notice = .invalid_property;
-        return;
-    };
-    if (!property_goals.isGoalDriveable(name)) {
-        runtime.state.status_notice = .invalid_property;
-        return;
-    }
 
-    const allocator = runtime.allocator;
+    const name: []const u8 = if (runtime.state.pending_witness_focus) |focus|
+        focus.property
+    else blk: {
+        const chip_name = property_goals.boolPropertyNameAt(runtime.state.selected_property_index) orelse {
+            runtime.state.status_notice = .invalid_property;
+            return;
+        };
+        if (!property_goals.isGoalDriveable(chip_name)) {
+            runtime.state.status_notice = .invalid_property;
+            return;
+        }
+        break :blk chip_name;
+    };
+
+    const focus_key: ?[]const u8 = if (runtime.state.pending_witness_focus) |f| f.key else null;
+
     const workspace_root = tools_common.workspaceRoot(allocator) catch {
         runtime.state.status_notice = .{ .goal_dispatch_error = name };
         return;
@@ -977,6 +1249,7 @@ fn driveSelectedGoal(runtime: *TuiRuntime, registry: *const Registry) !void {
         .file = patch.file,
         .goals = &goals,
         .events_path = runtime.session.events_path,
+        .focus_witness_key = focus_key,
     }) catch {
         runtime.state.status_notice = .{ .goal_dispatch_error = name };
         return;
@@ -1230,6 +1503,11 @@ fn statusNoticeText(notice: StatusNotice, buf: *[256]u8) []const u8 {
             "driving goal {s}... (autoloop in flight)",
             .{name},
         ) catch "driving goal",
+        .witness_driving => |d| std.fmt.bufPrint(
+            buf,
+            "driving witness {s} on {s}... (autoloop in flight)",
+            .{ d.short_key, d.property },
+        ) catch "driving witness",
         .goal_completed => |c| std.fmt.bufPrint(
             buf,
             "autoloop {s} on goal {s}",
@@ -1251,6 +1529,16 @@ fn statusNoticeText(notice: StatusNotice, buf: *[256]u8) []const u8 {
             "replay error: {s}",
             .{text},
         ) catch "replay error",
+        .mint_done => |key| std.fmt.bufPrint(
+            buf,
+            "minted regression test for {s}",
+            .{key},
+        ) catch "minted regression test",
+        .mint_error => |text| std.fmt.bufPrint(
+            buf,
+            "mint error: {s}",
+            .{text},
+        ) catch "mint error",
     };
 }
 
@@ -2746,6 +3034,7 @@ fn writeAll(bytes: []const u8) void {
 }
 
 const testing = std.testing;
+const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 
 fn appendTestVerifiedPatch(
     allocator: std.mem.Allocator,
@@ -3245,6 +3534,163 @@ test "ledger tab cycler reaches witnesses after citations and wraps to delta" {
     try testing.expectEqual(LedgerTab.witnesses, nextLedgerTab(.citations));
     try testing.expectEqual(LedgerTab.delta, nextLedgerTab(.witnesses));
     try testing.expectEqual(LedgerTab.witnesses, prevLedgerTab(.delta));
+}
+
+test "g on a witness with goal-driveable property stashes a focus and dispatches drive_goal" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+    try injectTestWitnesses(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.ledger_tab = .witnesses;
+    state.selected_witness_index = 0; // defeated witness: no_secret_leakage
+
+    const outcome = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'g' });
+    try testing.expectEqual(PaneOutcome.drive_goal, outcome);
+    try testing.expect(state.autoloop_in_flight);
+    try testing.expect(state.pending_witness_focus != null);
+    try testing.expectEqualStrings("a" ** 64, state.pending_witness_focus.?.key);
+    try testing.expectEqualStrings("no_secret_leakage", state.pending_witness_focus.?.property);
+    switch (state.status_notice) {
+        .witness_driving => |d| {
+            try testing.expectEqualStrings("no_secret_leakage", d.property);
+            try testing.expectEqualStrings("a" ** 12, d.short_key);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "m without a recent verdict surfaces an error and does not dispatch" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+    try injectTestWitnesses(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.ledger_tab = .witnesses;
+    state.selected_witness_index = 0;
+
+    const outcome = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'm' });
+    try testing.expectEqual(PaneOutcome.redraw, outcome);
+    switch (state.status_notice) {
+        .mint_error => |text| try testing.expect(std.mem.indexOf(u8, text, "press r first") != null),
+        else => return error.TestFailed,
+    }
+}
+
+test "m with a matching verdict returns mint_witness" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+    try injectTestWitnesses(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.ledger_tab = .witnesses;
+    state.selected_witness_index = 0;
+
+    // Plant a verdict whose key matches the first defeated witness.
+    const key_copy = try testing.allocator.dupe(u8, "a" ** 64);
+    state.witness_verdict = .{
+        .key = key_copy,
+        .verdict = .{
+            .ran = true,
+            .actual_status = 401,
+            .actual_body = try testing.allocator.dupe(u8, "Unauthorized"),
+            .error_text = null,
+        },
+        .reproduced = false,
+    };
+
+    const outcome = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'm' });
+    try testing.expectEqual(PaneOutcome.mint_witness, outcome);
+}
+
+test "appendWitnessRegression writes a parseable test block" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "witness-mint");
+    defer tmp.cleanup(allocator);
+    const tests_path = try tmp.childPath(allocator, "witness-regressions.jsonl");
+    defer allocator.free(tests_path);
+
+    const stubs = [_]ui_payload_mod.WitnessStub{
+        .{
+            .seq = 0,
+            .module = @constCast("env"),
+            .func = @constCast("env"),
+            .result_json = @constCast("\"sentinel\""),
+        },
+    };
+    const body = ui_payload_mod.WitnessBody{
+        .key = @constCast("d" ** 64),
+        .property = @constCast("no_secret_leakage"),
+        .summary = @constCast(""),
+        .origin_line = 5,
+        .origin_column = 9,
+        .sink_line = 7,
+        .sink_column = 12,
+        .request_method = @constCast("GET"),
+        .request_url = @constCast("/"),
+        .request_has_auth = false,
+        .request_body = null,
+        .io_stubs = @constCast(&stubs),
+    };
+
+    try appendWitnessRegression(allocator, tests_path, body, 401);
+    const written = try zigts.file_io.readFile(allocator, tests_path, 1024 * 1024);
+    defer allocator.free(written);
+
+    try testing.expect(std.mem.indexOf(u8, written, "\"type\":\"test\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "witness-dddddddddddd-no_secret_leakage") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"type\":\"request\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"method\":\"GET\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"type\":\"io\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"fn\":\"env\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"type\":\"expect\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"status\":401") != null);
+
+    // Append a second mint to the same file - both cases must coexist.
+    try appendWitnessRegression(allocator, tests_path, body, 200);
+    const both = try zigts.file_io.readFile(allocator, tests_path, 1024 * 1024);
+    defer allocator.free(both);
+    try testing.expect(std.mem.indexOf(u8, both, "\"status\":401") != null);
+    try testing.expect(std.mem.indexOf(u8, both, "\"status\":200") != null);
+}
+
+test "g on a witness while the autoloop is in flight is dropped" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+    try injectTestWitnesses(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.ledger_tab = .witnesses;
+    state.selected_witness_index = 0;
+    state.autoloop_in_flight = true;
+
+    const outcome = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'g' });
+    try testing.expectEqual(PaneOutcome.no_op, outcome);
+    try testing.expect(state.pending_witness_focus == null);
 }
 
 /// Replace the latest verified_patch entry's witness arrays with concrete
