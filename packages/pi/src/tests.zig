@@ -41,6 +41,7 @@ comptime {
     _ = @import("loop.zig");
     _ = @import("proof_enrichment.zig");
     _ = @import("witness_key.zig");
+    _ = @import("property_goals.zig");
     _ = @import("session_state.zig");
     _ = @import("autoloop.zig");
     _ = @import("agent.zig");
