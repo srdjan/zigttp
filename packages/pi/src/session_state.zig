@@ -18,28 +18,33 @@ const std = @import("std");
 const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
 
-/// Unwrap a transcript entry as a VerifiedPatchPayload for the requested
-/// file, or null if it is not a verified_patch entry, has no payload,
-/// carries a non-verified_patch payload, or is for a different file. The
-/// shared predicate behind every "find the latest patch for file" lookup
-/// in this module and in tui/app.zig.
-pub fn patchPayloadIfMatching(
+/// Unwrap a transcript entry as a VerifiedPatchPayload, or null if it is
+/// not a verified_patch entry, has no payload, or carries a non-
+/// verified_patch payload. The shared predicate behind every "extract the
+/// patch from this entry" lookup in this module and in tui/app.zig.
+pub fn patchPayload(
     entry: *const transcript_mod.OwnedEntry,
-    file: []const u8,
 ) ?ui_payload.VerifiedPatchPayload {
     switch (entry.*) {
         .verified_patch => |message| {
             const payload = message.ui_payload orelse return null;
             switch (payload) {
-                .verified_patch => |patch| {
-                    if (!std.mem.eql(u8, patch.file, file)) return null;
-                    return patch;
-                },
+                .verified_patch => |patch| return patch,
                 else => return null,
             }
         },
         else => return null,
     }
+}
+
+/// Same as `patchPayload` but also requires the patch to be for `file`.
+pub fn patchPayloadIfMatching(
+    entry: *const transcript_mod.OwnedEntry,
+    file: []const u8,
+) ?ui_payload.VerifiedPatchPayload {
+    const patch = patchPayload(entry) orelse return null;
+    if (!std.mem.eql(u8, patch.file, file)) return null;
+    return patch;
 }
 
 /// Return the `after_properties` of the most recent verified_patch entry
