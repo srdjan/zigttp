@@ -2,7 +2,10 @@
 
 ## Status
 
-Phase 0 deliverable for the peer-package move (`docs/virtual-modules-peer-package.md`). Written 2026-04-19.
+Historical phase-0 deliverable for the peer-package move
+(`docs/design/virtual-modules-peer-package.md`). Written 2026-04-19. Use
+`packages/zigts/src/builtin_modules.zig` and `packages/modules/module-specs/`
+for current module inventory.
 
 ## Source inventory
 

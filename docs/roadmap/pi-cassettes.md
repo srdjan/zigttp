@@ -1,7 +1,7 @@
 # pi OpenAI provider cassettes
 
 Spec for the recorded-replay harness that unblocks
-[Phase 8](../packages/pi/README.md#deferred) of the pi port: a second
+[Phase 8](../../packages/pi/README.md#deferred) of the pi port: a second
 model provider, recorded once against the real API and replayed
 deterministically in CI so the test suite never burns tokens.
 
@@ -192,8 +192,8 @@ backends.
 
 ## See also
 
-- [../packages/pi/README.md](../packages/pi/README.md) - pi architecture
+- [../packages/pi/README.md](../../packages/pi/README.md) - pi architecture
   reference; the Backends section describes the `loop.ModelClient`
   vtable this work plugs into.
-- [./architecture.md](./architecture.md) - how `pi_app` fits alongside
+- [../internals/architecture.md](../internals/architecture.md) - how `pi_app` fits alongside
   the other binaries in the workspace.

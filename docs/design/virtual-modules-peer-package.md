@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposal. Not implemented. Written 2026-04-19.
+Historical proposal. The peer package now exists under `packages/modules/`;
+use this file for design context, not current source paths. Written
+2026-04-19.
 
 ## Goal
 
@@ -75,7 +77,7 @@ Each phase lands as its own commit on a green build.
 
 ### Phase 0: Inventory and SDK shape
 
-Deliverable: `docs/virtual-modules-sdk-api.md` — a table of every type the modules need, categorized as:
+Deliverable: `docs/design/virtual-modules-sdk-api.md` - a table of every type the modules need, categorized as:
 
 - **SDK owns outright** (moves from zigts into SDK): `JSValue` (already there), `ModuleBinding`, `FunctionBinding`, `Slot`, option/result helpers, effect/severity enums.
 - **SDK exposes as opaque handle + v-table**: `Context` (ops: `allocator`, `createString`, `createObject`, `getModuleState`, `setModuleState`, `throwError`, `callFunction`), `Object` (ops: `get`, `set`, `defineProperty`), `String` (ops: `bytes`, `len`).
@@ -156,7 +158,7 @@ For each module:
 - Update `packages/tools/src/module_audit.zig` path constants and test fixtures (the audit enforces paths under `packages/zigts/src/modules/`; change to `packages/modules/src/`).
 - Update `scripts/check-capability-helpers.sh`: `git ls-files 'packages/zigts/src/modules/*.zig'` → `git ls-files 'packages/modules/src/**/*.zig'`.
 - Update the root `README.md` architecture paragraph: virtual modules are their own package.
-- Update `docs/architecture.md` if it references the old modules path.
+- Update `docs/internals/architecture.md` if it references the old modules path.
 - `docs/virtual-modules/*` needs no changes (docs live by content, not code path).
 
 ## Risks and mitigations

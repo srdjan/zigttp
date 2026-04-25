@@ -3,7 +3,7 @@
 This document describes the architecture of zigttp, a serverless JavaScript runtime powered by the zigts JavaScript engine.
 
 For the strategic direction beyond the current implementation, see
-[Frontier](frontier.md).
+[Frontier](../roadmap/frontier.md).
 
 ## Design Philosophy
 
@@ -402,7 +402,7 @@ When no explicit `--policy` file is provided, the precompiler auto-derives a `Ru
 
 Each virtual module declares a `pub const binding: ModuleBinding` struct - the single source of truth for all compile-time consumers. The `FunctionBinding` struct captures effect class, return kind (for verification/type checking), param types, traceability, and declarative contract extraction rules. `ModuleBinding` also carries `required_capabilities`, which records the runtime capabilities consumed by the module's Zig implementation for governance and auditability. These declarations are distinct from handler-facing `effect` metadata and do not feed into `RuntimePolicy`. The `packages/zigts/src/builtin_modules.zig` registry lists all bindings and runs comptime validation (unique specifiers, unique function names, state lifecycle consistency, duplicate capability declarations).
 
-For the planned redesign of third-party virtual modules, see [Extension Model](extension-model.md).
+For the planned redesign of third-party virtual modules, see [Extension Model](../design/extension-model.md).
 
 Consumers that previously maintained separate hardcoded tables now read from the registry:
 - **Type checker** (`packages/zigts/src/types.zig`): maps `ReturnKind` to `TypeIndex` via `mapReturnKind()`
@@ -474,7 +474,7 @@ Without `--prove`, `--watch` recompiles and swaps without contract diffing. Comp
 
 ### Guard Composition
 
-The parser recognizes `guard()` calls within pipe operator chains and desugars the entire chain into a single flat arrow function at compile time. `guard(g1) |> guard(g2) |> handler |> guard(post)` becomes sequential if-checks: pre-guards receive `req` and short-circuit on non-undefined return, the main handler runs if all pre-guards pass, and post-guards receive the response and can replace it. Zero runtime overhead - pure compile-time macro. Implementation: `packages/zigts/src/parser/parse.zig` (pipe chain collection), `packages/zigts/src/modules/compose.zig` (guard marker).
+The parser recognizes `guard()` calls within pipe operator chains and desugars the entire chain into a single flat arrow function at compile time. `guard(g1) |> guard(g2) |> handler |> guard(post)` becomes sequential if-checks: pre-guards receive `req` and short-circuit on non-undefined return, the main handler runs if all pre-guards pass, and post-guards receive the response and can replace it. Zero runtime overhead - pure compile-time macro. Implementation: `packages/zigts/src/parser/parse.zig` (pipe chain collection), `packages/modules/src/workflow/compose.zig` (guard marker).
 
 ### Native Deploy
 

@@ -6,7 +6,7 @@ Read this end-to-end before adding a new virtual module.
 
 ## The capability enum
 
-`ModuleCapability` is declared in [`packages/zigts/src/module_binding.zig`](../packages/zigts/src/module_binding.zig) (around line 501). Ten variants exist today:
+`ModuleCapability` is declared in [`packages/zigts/src/module_binding.zig`](../../packages/zigts/src/module_binding.zig) (around line 501). Ten variants exist today:
 
 | Capability | Gates |
 |---|---|
@@ -35,7 +35,7 @@ Every module declares a `ModuleBinding` with three relevant fields:
 
 Two cooperating helpers in `module_binding.zig` turn the declaration into an enforcement contract:
 
-1. **`wrapNativeFnWithCapabilities(user_fn, specifier, required_capabilities)`** is a comptime wrapper that the resolver ([`packages/zigts/src/modules/resolver.zig:164`](../packages/zigts/src/modules/resolver.zig)) applies automatically to every exported function of a module whose `required_capabilities` list is non-empty. The wrapper pushes an `ActiveModuleContext` onto a thread-local slot before calling the user function and pops it on exit. Modules with an empty capability list skip the wrapper entirely at compile time, so there is zero runtime overhead for capability-free modules (`zigttp:text`, `zigttp:compose`, etc.).
+1. **`wrapNativeFnWithCapabilities(user_fn, specifier, required_capabilities)`** is a comptime wrapper that the resolver ([`packages/zigts/src/modules/internal/resolver.zig`](../../packages/zigts/src/modules/internal/resolver.zig)) applies automatically to every exported function of a module whose `required_capabilities` list is non-empty. The wrapper pushes an `ActiveModuleContext` onto a thread-local slot before calling the user function and pops it on exit. Modules with an empty capability list skip the wrapper entirely at compile time, so there is zero runtime overhead for capability-free modules (`zigttp:text`, `zigttp:compose`, etc.).
 
 2. **`requireCapability(handle, capability)`** is the call-site check. Inside a module implementation, any operation that touches the guarded resource calls `requireCapability(handle, .clock)` (or the read-only sibling `hasCapability`). The check inspects the thread-local `active_module_context` and returns `error.MissingModuleCapability` if the capability is not present. Because the wrapper is applied by the resolver, an implementation that calls a guarded helper without the declaration in its binding will panic in the build-time `test-capability-audit` pass before reaching runtime.
 
@@ -86,7 +86,7 @@ The absence of a capability does not make these modules "trusted": they still go
 
 ## The build-time audit
 
-`zig build test-capability-audit` grep-walks `packages/zigts/src/modules/` looking for direct references to sensitive operations (clock reads, RNG, crypto primitives, filesystem, stderr, sqlite handles) that bypass the checked helpers. A hit fails the build with the offending file and line. The audit is the broad helper-bypass tripwire - it watches every module implementation, including internal helpers.
+`zig build test-capability-audit` grep-walks `packages/modules/src/` and `packages/zigts/src/modules/` looking for direct references to sensitive operations (clock reads, RNG, crypto primitives, filesystem, stderr, sqlite handles) that bypass the checked helpers. A hit fails the build with the offending file and line. The audit is the broad helper-bypass tripwire - it watches every module implementation, including internal helpers.
 
 `zig build test-module-governance` is the public built-in governance gate. It runs `zigts verify-modules --builtins --strict --json` against the authoritative built-in set from `packages/zigts/src/builtin_modules.zig` and fails on:
 
@@ -121,8 +121,7 @@ If the module needs a capability not yet in the enum, you are extending the gove
 
 ## Cross references
 
-- [`packages/zigts/src/module_binding.zig`](../packages/zigts/src/module_binding.zig) - enum, wrappers, thread-local context, `requireCapability`.
-- [`packages/zigts/src/modules/resolver.zig`](../packages/zigts/src/modules/resolver.zig) - where `wrapNativeFnWithCapabilities` is applied per exported function.
-- [`SECURITY.md`](../SECURITY.md) - reporting and scope.
-- [`docs/threat-model.md`](threat-model.md) - threat model for the rule review system (complementary to this doc's module boundary story).
-- [`docs/verification.md`](verification.md) - the handler-level verification pass that lives alongside capability enforcement.
+- [`packages/zigts/src/module_binding.zig`](../../packages/zigts/src/module_binding.zig) - enum, wrappers, thread-local context, `requireCapability`.
+- [`packages/zigts/src/modules/internal/resolver.zig`](../../packages/zigts/src/modules/internal/resolver.zig) - where `wrapNativeFnWithCapabilities` is applied per exported function.
+- [`SECURITY.md`](../../SECURITY.md) - reporting and scope.
+- [`docs/verification.md`](../verification.md) - the handler-level verification pass that lives alongside capability enforcement.

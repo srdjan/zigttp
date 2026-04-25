@@ -1,5 +1,8 @@
 # The zigttp Book
 
+Legacy narrative guide. Prefer [../README.md](../README.md) for the maintained
+documentation index and the focused public guides for current API details.
+
 A guide to the serverless JavaScript runtime that proves your code correct before it ever runs.
 
 ---

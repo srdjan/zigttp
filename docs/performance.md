@@ -185,7 +185,7 @@ The precompile pipeline also supports:
 
 ### Concurrent I/O
 
-**Structured concurrency** (`packages/zigts/src/modules/io.zig`, `packages/runtime/src/zruntime.zig`):
+**Structured concurrency** (`packages/zigts/src/modules/workflow/io.zig`, `packages/runtime/src/zruntime.zig`):
 `parallel()` and `race()` overlap outbound HTTP without async/await overhead.
 The three-phase model (collect descriptors, dispatch to OS threads, join results)
 avoids event loop machinery entirely.
