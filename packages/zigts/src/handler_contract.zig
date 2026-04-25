@@ -798,6 +798,11 @@ pub const HandlerContract = struct {
     /// Populated in `build()`; verified at runtime against the registry the
     /// running binary was linked with.
     policy_hash: [32]u8 = [_]u8{0} ** 32,
+    /// SHA-256 of the embedded Wasm policy artifact (Phase 2). All-zeros
+    /// means no Wasm policy is present; the runtime falls back to the
+    /// in-process LocalPolicyChecker. Non-zero values are verified at startup
+    /// against the artifact on disk before the WasmPool is populated.
+    wasm_policy_hash: [32]u8 = [_]u8{0} ** 32,
 
     pub const FunctionEntry = struct {
         module: []const u8, // owned
@@ -4923,6 +4928,11 @@ fn parseSandbox(parser: *JsonParser, contract: *HandlerContract) !void {
             if (hex.len == 64) {
                 _ = std.fmt.hexToBytes(&contract.policy_hash, hex) catch return error.InvalidJson;
             }
+        } else if (std.mem.eql(u8, key, "wasmPolicyHash")) {
+            const hex = parser.readString() orelse return error.InvalidJson;
+            if (hex.len == 64) {
+                _ = std.fmt.hexToBytes(&contract.wasm_policy_hash, hex) catch return error.InvalidJson;
+            }
         } else if (std.mem.eql(u8, key, "artifactSha256")) {
             const hex = parser.readString() orelse return error.InvalidJson;
             if (hex.len == 64) {
@@ -5290,6 +5300,9 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll(",\n");
     try writer.writeAll("    \"policyHash\": ");
     try json_utils.writeJsonHex(writer, contract.policy_hash);
+    try writer.writeAll(",\n");
+    try writer.writeAll("    \"wasmPolicyHash\": ");
+    try json_utils.writeJsonHex(writer, contract.wasm_policy_hash);
     try writer.writeAll(",\n");
     try writer.writeAll("    \"artifactSha256\": ");
     try json_utils.writeJsonHex(writer, contract.artifact_sha256);

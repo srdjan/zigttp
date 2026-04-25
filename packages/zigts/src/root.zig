@@ -79,6 +79,7 @@ pub const ws_consistency = @import("ws_consistency.zig");
 pub const module_binding = @import("module_binding.zig");
 pub const builtin_modules = @import("builtin_modules.zig");
 pub const security_events = @import("security_events.zig");
+pub const wasm = @import("wasm/root.zig");
 pub const sqlite = @import("sqlite.zig");
 pub const sql_analysis = @import("sql_analysis.zig");
 pub const modules = @import("modules/root.zig");
