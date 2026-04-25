@@ -33,7 +33,6 @@ comptime {
     _ = @import("tui/widgets/box.zig");
     _ = @import("tui/ansi.zig");
     _ = @import("tui/theme.zig");
-    _ = @import("tui/widgets/status_line.zig");
     _ = @import("turn.zig");
     _ = @import("veto.zig");
     _ = @import("transcript.zig");
