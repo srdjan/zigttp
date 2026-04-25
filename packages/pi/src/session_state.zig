@@ -127,17 +127,6 @@ pub fn propertyByName(props: ui_payload.PropertiesSnapshot, name: []const u8) bo
     return false;
 }
 
-/// True when `name` matches a boolean field on PropertiesSnapshot. Used at
-/// CLI parse time to fail fast on typos rather than let the autoloop spin
-/// until budget exhaustion chasing a property that does not exist.
-pub fn isKnownProperty(name: []const u8) bool {
-    inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".fields) |field| {
-        if (field.type != bool) continue;
-        if (std.mem.eql(u8, field.name, name)) return true;
-    }
-    return false;
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -322,12 +311,3 @@ test "goalsMet is false when no patch exists for the file" {
     try testing.expect(!goalsMet(&tr, "handler.ts", &goals));
 }
 
-test "isKnownProperty accepts every PropertiesSnapshot bool field" {
-    try testing.expect(isKnownProperty("retry_safe"));
-    try testing.expect(isKnownProperty("pure"));
-    try testing.expect(isKnownProperty("no_secret_leakage"));
-    try testing.expect(isKnownProperty("injection_safe"));
-    try testing.expect(!isKnownProperty("max_io_depth"));
-    try testing.expect(!isKnownProperty("retry_saf"));
-    try testing.expect(!isKnownProperty(""));
-}
