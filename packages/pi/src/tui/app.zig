@@ -15,6 +15,7 @@ const autoloop = @import("../autoloop.zig");
 const transcript_mod = @import("../transcript.zig");
 const ui_payload_mod = @import("../ui_payload.zig");
 const witness_replay = @import("../witness_replay.zig");
+const theme_mod = @import("theme.zig");
 const session_events = @import("../session/events.zig");
 const session_state = @import("../session_state.zig");
 const property_goals = @import("../property_goals.zig");
@@ -1440,11 +1441,11 @@ fn redraw(
     try writeCrlf(w);
 
     switch (layout.mode) {
-        .split => try renderSplitBody(w, state, session, layout, inspector.lines),
-        .stacked => try renderStackedBody(w, state, session, layout, inspector.lines),
+        .split => try renderSplitBody(w, state, session, layout, inspector.lines, session.theme),
+        .stacked => try renderStackedBody(w, state, session, layout, inspector.lines, session.theme),
     }
 
-    try renderComposer(w, session, state, size.width);
+    try renderComposer(w, session, state, size.width, session.theme);
 
     if (state.modal) |modal| {
         try renderModalOverlay(w, size, modal);
@@ -1465,32 +1466,65 @@ fn renderStatusRow(
     state: *const AppState,
     width: usize,
 ) !void {
+    const theme = session.theme;
     const descriptor = session.backendDescriptor();
     const model = session.currentModel() orelse "stub";
     const session_id = session.session_id orelse "ephemeral";
     const tok = session.token_totals;
 
+    const sep = " \xc2\xb7 "; // U+00B7 middle dot
+
+    var fields_buf: [1536]u8 = undefined;
+    var fw = std.Io.Writer.fixed(&fields_buf);
+    try ansi.styled(&fw, theme.status_key, "sess ");
+    try ansi.styled(&fw, theme.status_value, session_id[0..@min(10, session_id.len)]);
+    try ansi.styled(&fw, theme.dim, sep);
+    try ansi.styled(&fw, theme.status_key, "provider ");
+    try ansi.styled(&fw, theme.status_value, descriptor.provider_label);
+    fw.writeByte('/') catch {};
+    try ansi.styled(&fw, theme.status_value, descriptor.auth_label);
+    try ansi.styled(&fw, theme.dim, sep);
+    try ansi.styled(&fw, theme.status_key, "model ");
+    try ansi.styled(&fw, theme.status_value, model);
+    try ansi.styled(&fw, theme.dim, sep);
+    try ansi.styled(&fw, theme.status_key, "in ");
+    fw.print("{d}", .{tok.input_tokens}) catch {};
+    try ansi.styled(&fw, theme.status_key, " out ");
+    fw.print("{d}", .{tok.output_tokens}) catch {};
+    try ansi.styled(&fw, theme.dim, sep);
+    try ansi.styled(&fw, theme.status_key, "cache ");
+    fw.print("{d}/{d}", .{ tok.cache_read_input_tokens, tok.cache_creation_input_tokens }) catch {};
+    try ansi.styled(&fw, theme.dim, sep);
+    try ansi.styled(&fw, theme.status_key, "view ");
+    try ansi.styled(&fw, theme.status_value, viewLabel(state.view_mode));
+    try ansi.styled(&fw, theme.dim, sep);
+    try ansi.styled(&fw, theme.status_key, "focus ");
+    try ansi.styled(&fw, theme.status_value, focusLabel(state.focus_mode));
+
     var notice_buf: [256]u8 = undefined;
     const notice = statusNoticeText(state.status_notice, &notice_buf);
-    const base_args = .{
-        session_id,
-        descriptor.provider_label,
-        descriptor.auth_label,
-        model,
-        tok.input_tokens,
-        tok.output_tokens,
-        tok.cache_read_input_tokens,
-        tok.cache_creation_input_tokens,
-        viewLabel(state.view_mode),
-        focusLabel(state.focus_mode),
+    if (notice.len > 0) {
+        try ansi.styled(&fw, theme.dim, sep);
+        const notice_sgr = statusNoticeSgr(state.status_notice, theme);
+        try ansi.styled(&fw, notice_sgr, notice);
+    }
+    const buf = fw.buffered();
+    const visible = visibleCellEstimate(buf);
+    try w.writeAll(buf);
+    if (width > visible) try writeSpaces(w, width - visible);
+}
+
+fn statusNoticeSgr(notice: StatusNotice, theme: *const theme_mod.Theme) []const u8 {
+    return switch (notice) {
+        .none => "",
+        .structural_property, .invalid_property => theme.severity_warn,
+        .goal_driving, .witness_driving => theme.verdict_pending,
+        .goal_completed => theme.severity_info,
+        .goal_dispatch_error, .replay_error, .mint_error => theme.severity_error,
+        .replay_unavailable => theme.severity_warn,
+        .replay_done => |d| if (d.reproduced) theme.verdict_pass else theme.verdict_fixed,
+        .mint_done => theme.severity_info,
     };
-    const base_fmt = "session {s} | provider {s}/{s} | model {s} | in {d} out {d} | cache {d}/{d} | view {s} | focus {s}";
-    var line_buf: [1536]u8 = undefined;
-    const line = if (notice.len == 0)
-        std.fmt.bufPrint(&line_buf, base_fmt, base_args) catch "status"
-    else
-        std.fmt.bufPrint(&line_buf, base_fmt ++ " | {s}", base_args ++ .{notice}) catch "status";
-    try writeFitted(w, line, width);
 }
 
 fn statusNoticeText(notice: StatusNotice, buf: *[256]u8) []const u8 {
@@ -1548,12 +1582,15 @@ fn renderSplitBody(
     session: *const agent.AgentSession,
     layout: Layout,
     inspector_lines: []const []const u8,
+    theme: *const theme_mod.Theme,
 ) !void {
     var row: usize = 0;
     while (row < layout.body_height) : (row += 1) {
-        try writePrimaryRow(w, state, session, row, layout.feed_width, visiblePrimaryRows(layout));
-        try w.writeAll(" | ");
-        try writeInspectorRow(w, state, row, inspector_lines, layout.inspector_width, state.focus_mode == .inspector);
+        try writePrimaryRow(w, state, session, row, layout.feed_width, visiblePrimaryRows(layout), theme);
+        // Coloured vertical rule between feed and inspector. Themed to the
+        // idle border colour - the panes themselves carry the focus accent.
+        try ansi.styled(w, theme.pane_border_idle, " \xe2\x94\x82 ");
+        try writeInspectorRow(w, state, row, inspector_lines, layout.inspector_width, state.focus_mode == .inspector, theme);
         if (row + 1 < layout.body_height) try writeCrlf(w);
     }
     try writeCrlf(w);
@@ -1565,15 +1602,16 @@ fn renderStackedBody(
     session: *const agent.AgentSession,
     layout: Layout,
     inspector_lines: []const []const u8,
+    theme: *const theme_mod.Theme,
 ) !void {
     var row: usize = 0;
     while (row < layout.feed_height) : (row += 1) {
-        try writePrimaryRow(w, state, session, row, layout.feed_width, visiblePrimaryRows(layout));
+        try writePrimaryRow(w, state, session, row, layout.feed_width, visiblePrimaryRows(layout), theme);
         try writeCrlf(w);
     }
     row = 0;
     while (row < layout.inspector_height) : (row += 1) {
-        try writeInspectorRow(w, state, row, inspector_lines, layout.inspector_width, state.focus_mode == .inspector);
+        try writeInspectorRow(w, state, row, inspector_lines, layout.inspector_width, state.focus_mode == .inspector, theme);
         if (row + 1 < layout.inspector_height) try writeCrlf(w);
     }
     try writeCrlf(w);
@@ -1584,24 +1622,19 @@ fn renderComposer(
     session: *const agent.AgentSession,
     state: *const AppState,
     width: usize,
+    theme: *const theme_mod.Theme,
 ) !void {
     _ = session;
-    var header_buf: [256]u8 = undefined;
-    const header = std.fmt.bufPrint(
-        &header_buf,
-        "composer {s} | Tab next pane | Shift-Tab previous | Esc composer",
-        .{if (state.focus_mode == .composer) "*" else ""},
-    ) catch "composer";
-    try writeFitted(w, header, width);
+    try writePaneHeader(w, "composer", 0, 0, "", state.focus_mode == .composer, width, theme);
     try writeCrlf(w);
 
     const available = width -| prompt_label.len;
     const composer_view = visibleComposer(state.composer.line, state.composer.cursor, available);
 
     if (width <= prompt_label.len) {
-        try writeFitted(w, prompt_label, width);
+        try ansi.styled(w, theme.prompt_label, prompt_label[0..width]);
     } else {
-        try w.writeAll(prompt_label);
+        try ansi.styled(w, theme.prompt_label, prompt_label);
         try w.writeAll(composer_view.visible);
         try writeSpaces(w, available - composer_view.visible.len);
     }
@@ -1618,7 +1651,9 @@ fn renderComposer(
             .feed, .inspector => "Up/Down move the patch rail. Tab cycles detail tabs. Left/Right select property chips. g drives the selected goal green. A approves when witness state is clean. c opens chat.",
         },
     };
+    try ansi.sgr(w, theme.dim);
     try writeFitted(w, hints, width);
+    try w.writeAll(ansi.reset);
 }
 
 fn renderModalOverlay(w: *std.Io.Writer, size: TerminalSize, approval: ApprovalModal) !void {
@@ -1666,10 +1701,11 @@ fn writePrimaryRow(
     row: usize,
     width: usize,
     visible_items: usize,
+    theme: *const theme_mod.Theme,
 ) !void {
     switch (state.view_mode) {
-        .chat => try writeFeedRow(w, state, session, row, width, visible_items),
-        .ledger => try writeLedgerRow(w, state, session, row, width, visible_items),
+        .chat => try writeFeedRow(w, state, session, row, width, visible_items, theme),
+        .ledger => try writeLedgerRow(w, state, session, row, width, visible_items, theme),
     }
 }
 
@@ -1680,20 +1716,19 @@ fn writeFeedRow(
     row: usize,
     width: usize,
     visible_items: usize,
+    theme: *const theme_mod.Theme,
 ) !void {
     if (row == 0) {
-        var header_buf: [256]u8 = undefined;
-        const header = std.fmt.bufPrint(
-            &header_buf,
-            "feed {s} | items {d} | selected {d}/{d}",
-            .{
-                if (state.focus_mode == .feed) "*" else "",
-                state.feed_items.items.len,
-                if (state.feed_items.items.len == 0) 0 else state.selected_feed_index + 1,
-                state.feed_items.items.len,
-            },
-        ) catch "feed";
-        try writeFitted(w, header, width);
+        try writePaneHeader(
+            w,
+            "feed",
+            state.feed_items.items.len,
+            if (state.feed_items.items.len == 0) 0 else state.selected_feed_index + 1,
+            "items",
+            state.focus_mode == .feed,
+            width,
+            theme,
+        );
         return;
     }
 
@@ -1706,7 +1741,7 @@ fn writeFeedRow(
     var line_buf: [1024]u8 = undefined;
     const line = buildFeedLine(&line_buf, state.feed_items.items[item_index], state, session);
     if (item_index == state.selected_feed_index) {
-        try ansi.sgr(w, "7");
+        try ansi.sgr(w, theme.selection_bg);
         try writeFitted(w, line, width);
         try w.writeAll(ansi.reset);
     } else {
@@ -1721,20 +1756,19 @@ fn writeLedgerRow(
     row: usize,
     width: usize,
     visible_items: usize,
+    theme: *const theme_mod.Theme,
 ) !void {
     if (row == 0) {
-        var header_buf: [256]u8 = undefined;
-        const header = std.fmt.bufPrint(
-            &header_buf,
-            "ledger {s} | patches {d} | selected {d}/{d}",
-            .{
-                if (state.focus_mode != .composer) "*" else "",
-                state.ledger_items.items.len,
-                if (state.ledger_items.items.len == 0) 0 else state.selected_ledger_index + 1,
-                state.ledger_items.items.len,
-            },
-        ) catch "ledger";
-        try writeFitted(w, header, width);
+        try writePaneHeader(
+            w,
+            "ledger",
+            state.ledger_items.items.len,
+            if (state.ledger_items.items.len == 0) 0 else state.selected_ledger_index + 1,
+            "patches",
+            state.focus_mode != .composer,
+            width,
+            theme,
+        );
         return;
     }
 
@@ -1747,12 +1781,94 @@ fn writeLedgerRow(
     var line_buf: [1024]u8 = undefined;
     const line = buildLedgerLine(&line_buf, state, session, item_index);
     if (item_index == state.selected_ledger_index) {
-        try ansi.sgr(w, "7");
+        try ansi.sgr(w, theme.selection_bg);
         try writeFitted(w, line, width);
         try w.writeAll(ansi.reset);
     } else {
         try writeFitted(w, line, width);
     }
+}
+
+/// Render a pane header row: a coloured marker, the pane name, and a
+/// `count/total` summary. Active panes get the accent_primary marker;
+/// idle panes get pane_border_idle. Width is honoured via writeFitted.
+fn writePaneHeader(
+    w: *std.Io.Writer,
+    name: []const u8,
+    total: usize,
+    selected_one_based: usize,
+    noun: []const u8,
+    focused: bool,
+    width: usize,
+    theme: *const theme_mod.Theme,
+) !void {
+    var header_buf: [256]u8 = undefined;
+    var fw = std.Io.Writer.fixed(&header_buf);
+    if (focused) {
+        try ansi.sgr(&fw, theme.accent_primary);
+        fw.writeAll("\xe2\x96\x8c ") catch {}; // U+258C left half block
+        fw.writeAll(name) catch {};
+        fw.writeAll(ansi.reset) catch {};
+    } else {
+        try ansi.sgr(&fw, theme.pane_border_idle);
+        fw.writeAll("  ") catch {};
+        fw.writeAll(name) catch {};
+        fw.writeAll(ansi.reset) catch {};
+    }
+    if (noun.len > 0) {
+        fw.writeAll(" ") catch {};
+        try ansi.sgr(&fw, theme.dim);
+        fw.print("{d} {s}, viewing {d}/{d}", .{ total, noun, selected_one_based, total }) catch {};
+        fw.writeAll(ansi.reset) catch {};
+    }
+    const header = fw.buffered();
+
+    // writeFitted truncates by visible width but does not understand SGR
+    // bytes; we emit the SGR directly and pass an estimate of the visible
+    // length to writeFitted via a guard. For simplicity at this width, just
+    // write it raw and pad with spaces to fill to `width`.
+    try w.writeAll(header);
+    // Pad with spaces. Estimate visible cells: rough approximation at
+    // count of bytes after stripping SGR; for the demo terminal width this
+    // is fine.
+    const visible_estimate = visibleCellEstimate(header);
+    if (width > visible_estimate) {
+        try writeSpaces(w, width - visible_estimate);
+    }
+}
+
+fn visibleCellEstimate(text: []const u8) usize {
+    var i: usize = 0;
+    var visible: usize = 0;
+    while (i < text.len) {
+        if (text[i] == 0x1b) {
+            // Skip the SGR escape: ESC [ ... m
+            i += 1;
+            if (i < text.len and text[i] == '[') i += 1;
+            while (i < text.len and text[i] != 'm') i += 1;
+            if (i < text.len) i += 1;
+            continue;
+        }
+        // Treat each UTF-8 sequence as a single cell. A leading byte is
+        // detected by the high bits.
+        if ((text[i] & 0x80) == 0) {
+            visible += 1;
+            i += 1;
+        } else if ((text[i] & 0xe0) == 0xc0) {
+            visible += 1;
+            i += 2;
+        } else if ((text[i] & 0xf0) == 0xe0) {
+            visible += 1;
+            i += 3;
+        } else if ((text[i] & 0xf8) == 0xf0) {
+            visible += 1;
+            i += 4;
+        } else {
+            visible += 1;
+            i += 1;
+        }
+    }
+    return visible;
 }
 
 fn buildLedgerLine(
@@ -1795,21 +1911,17 @@ fn writeInspectorRow(
     inspector_lines: []const []const u8,
     width: usize,
     focused: bool,
+    theme: *const theme_mod.Theme,
 ) !void {
     if (row == 0) {
-        var header_buf: [256]u8 = undefined;
-        const header = std.fmt.bufPrint(
-            &header_buf,
-            "{s} {s}",
-            .{
-                switch (state.view_mode) {
-                    .chat => "inspector",
-                    .ledger => ledgerTabLabel(state.ledger_tab),
-                },
-                if (focused) "*" else "",
-            },
-        ) catch "inspector";
-        try writeFitted(w, header, width);
+        // Inspector pane header: just the pane name + focus marker. The
+        // active tab is shown via the in-pane tab bar emitted by
+        // writeLedgerPatchPanel.
+        const name: []const u8 = switch (state.view_mode) {
+            .chat => "inspector",
+            .ledger => "inspector",
+        };
+        try writePaneHeader(w, name, 0, 0, "", focused, width, theme);
         return;
     }
 
@@ -1977,6 +2089,7 @@ fn buildLedgerText(
                         .selected_index = state.selected_witness_index,
                         .verdict = state.witness_verdict,
                     },
+                    session.theme,
                 ),
                 else => try writeTextBlock(w, message.llm_text),
             } else {
@@ -2158,7 +2271,9 @@ fn writeLedgerPatchPanel(
     diff_expanded: bool,
     selected_property_index: usize,
     witness_view: WitnessView,
+    theme: *const theme_mod.Theme,
 ) !void {
+    try writeTabBar(w, tab, theme);
     try w.print(
         "file: {s}\napplied_at_unix_ms: {d}\npolicy_hash: {s}\nstats: total={d} new={d} preexisting={d}\npost_apply_ok: {s}\n",
         .{
@@ -2187,7 +2302,7 @@ fn writeLedgerPatchPanel(
     try w.writeAll("\n");
 
     switch (tab) {
-        .delta => try writeProofDeltaCard(w, payload, diff_expanded),
+        .delta => try writeProofDeltaCard(w, payload, diff_expanded, theme),
         .diff => {
             try w.writeAll("Diff\n\n");
             if (payload.hunks.len == 0) {
@@ -2208,9 +2323,9 @@ fn writeLedgerPatchPanel(
         },
         .properties => {
             try w.writeAll("Properties\n\nbefore:\n");
-            try writePropertiesSnapshot(w, payload.before_properties, null);
+            try writePropertiesSnapshot(w, payload.before_properties, null, theme);
             try w.writeAll("\nafter:\n");
-            try writePropertiesSnapshot(w, payload.after_properties, selected_property_index);
+            try writePropertiesSnapshot(w, payload.after_properties, selected_property_index, theme);
         },
         .violations => {
             try w.writeAll("Violations\n\n");
@@ -2293,7 +2408,7 @@ fn writeLedgerPatchPanel(
                 try w.print("- {s}\n", .{citation});
             }
         },
-        .witnesses => try writeWitnessesTab(w, payload, witness_view),
+        .witnesses => try writeWitnessesTab(w, payload, witness_view, theme),
     }
 }
 
@@ -2313,9 +2428,11 @@ fn writeWitnessesTab(
     w: *std.Io.Writer,
     payload: ui_payload_mod.VerifiedPatchPayload,
     view: WitnessView,
+    theme: *const theme_mod.Theme,
 ) !void {
-    try w.writeAll("Witnesses (r=replay selected, up/down=select)\n\n");
-    try writeWitnessSection(w, "defeated by this patch", payload.witnesses_defeated, 0, view);
+    try ansi.styled(w, theme.accent_muted, "Witnesses ");
+    try ansi.styled(w, theme.dim, "(r replay  m mint  up/down select)\n\n");
+    try writeWitnessSection(w, "defeated by this patch", payload.witnesses_defeated, 0, view, theme, .promoted);
     try w.writeByte('\n');
     try writeWitnessSection(
         w,
@@ -2323,8 +2440,12 @@ fn writeWitnessesTab(
         payload.witnesses_new,
         payload.witnesses_defeated.len,
         view,
+        theme,
+        if (payload.witnesses_new.len > 0) .demoted else .neutral,
     );
 }
+
+const SectionMood = enum { promoted, demoted, neutral };
 
 fn writeWitnessSection(
     w: *std.Io.Writer,
@@ -2332,16 +2453,26 @@ fn writeWitnessSection(
     bodies: []const ui_payload_mod.WitnessBody,
     flat_offset: usize,
     view: WitnessView,
+    theme: *const theme_mod.Theme,
+    mood: SectionMood,
 ) !void {
-    try w.print("{s} ({d})\n", .{ title, bodies.len });
+    const header_sgr = switch (mood) {
+        .promoted => theme.delta_promoted,
+        .demoted => theme.delta_demoted,
+        .neutral => theme.dim,
+    };
+    try ansi.sgr(w, header_sgr);
+    try w.print("{s} ({d})", .{ title, bodies.len });
+    try w.writeAll(ansi.reset);
+    try w.writeByte('\n');
     if (bodies.len == 0) {
-        try w.writeAll("  (none)\n");
+        try ansi.styled(w, theme.dim, "  (none)\n");
         return;
     }
     for (bodies, 0..) |body, i| {
         const selected = (flat_offset + i) == view.selected_index;
-        try writeWitnessBody(w, i + 1, body, selected);
-        if (selected) try writeVerdictInline(w, view.verdict, body);
+        try writeWitnessBody(w, i + 1, body, selected, theme);
+        if (selected) try writeVerdictInline(w, view.verdict, body, theme);
     }
 }
 
@@ -2350,30 +2481,49 @@ fn writeWitnessBody(
     index: usize,
     body: ui_payload_mod.WitnessBody,
     selected: bool,
+    theme: *const theme_mod.Theme,
 ) !void {
-    const marker: u8 = if (selected) '>' else ' ';
-    try w.print("  {c} {d}. [{s}]\n", .{ marker, index, body.property });
-    try w.print("     {s} {s}", .{ body.request_method, body.request_url });
-    if (body.request_has_auth) try w.writeAll("  (auth)");
+    if (selected) {
+        try ansi.sgr(w, theme.accent_primary);
+        try w.print("  > {d}. [{s}]", .{ index, body.property });
+        try w.writeAll(ansi.reset);
+    } else {
+        try w.print("    {d}. ", .{index});
+        try ansi.styled(w, theme.chip_idle, body.property);
+    }
+    try w.writeByte('\n');
+    try w.writeAll("     ");
+    try ansi.styled(w, theme.accent_muted, body.request_method);
+    try w.print(" {s}", .{body.request_url});
+    if (body.request_has_auth) {
+        try w.writeAll("  ");
+        try ansi.styled(w, theme.severity_warn, "(auth)");
+    }
     if (body.request_body) |b| try w.print("  body={s}", .{firstLine(b)});
     try w.writeByte('\n');
+    try ansi.sgr(w, theme.dim);
     try w.print(
         "     origin {d}:{d} -> sink {d}:{d}\n",
         .{ body.origin_line, body.origin_column, body.sink_line, body.sink_column },
     );
+    try w.writeAll(ansi.reset);
     if (body.summary.len > 0) {
         try w.print("     summary: {s}\n", .{body.summary});
     }
-    try w.print("     key: {s}\n", .{shortKey(body.key)});
+    try w.writeAll("     key: ");
+    try ansi.styled(w, theme.digest, shortKey(body.key));
+    try w.writeByte('\n');
     if (body.io_stubs.len == 0) {
-        try w.writeAll("     io_stubs: (none)\n");
+        try ansi.styled(w, theme.dim, "     io_stubs: (none)\n");
     } else {
         try w.writeAll("     io_stubs:\n");
         for (body.io_stubs) |stub| {
             try w.print(
-                "       {d}. {s}.{s}() -> {s}\n",
-                .{ stub.seq, stub.module, stub.func, stub.result_json },
+                "       {d}. {s}.{s}() -> ",
+                .{ stub.seq, stub.module, stub.func },
             );
+            try ansi.styled(w, theme.severity_info, stub.result_json);
+            try w.writeByte('\n');
         }
     }
     try w.writeByte('\n');
@@ -2383,26 +2533,35 @@ fn writeVerdictInline(
     w: *std.Io.Writer,
     verdict_opt: ?WitnessVerdictRecord,
     body: ui_payload_mod.WitnessBody,
+    theme: *const theme_mod.Theme,
 ) !void {
     const record = verdict_opt orelse return;
     if (!std.mem.eql(u8, record.key, body.key)) return;
 
     try w.writeAll("     replay: ");
     if (!record.verdict.ran) {
+        try ansi.sgr(w, theme.verdict_error);
         try w.writeAll("ERROR");
+        try w.writeAll(ansi.reset);
         if (record.verdict.error_text) |t| try w.print(" ({s})", .{t});
         try w.writeByte('\n');
         return;
     }
     if (record.reproduced) {
+        try ansi.sgr(w, theme.verdict_pass);
         try w.writeAll("PASS - violation reproduced");
+        try w.writeAll(ansi.reset);
     } else {
+        try ansi.sgr(w, theme.verdict_fixed);
         try w.writeAll("FIXED - violation no longer reproduces");
+        try w.writeAll(ansi.reset);
     }
     try w.print(" (status {d})\n", .{record.verdict.actual_status});
     if (record.verdict.actual_body.len > 0) {
         try w.writeAll("     actual: ");
+        try ansi.sgr(w, theme.severity_info);
         try writeBodyExcerpt(w, record.verdict.actual_body, 160);
+        try w.writeAll(ansi.reset);
         try w.writeByte('\n');
     }
 }
@@ -2436,34 +2595,38 @@ fn writeProofDeltaCard(
     w: *std.Io.Writer,
     payload: ui_payload_mod.VerifiedPatchPayload,
     diff_expanded: bool,
+    theme: *const theme_mod.Theme,
 ) !void {
-    try w.writeAll("Proof Delta\n\n");
+    try ansi.styled(w, theme.accent_primary, "Proof Delta\n\n");
 
     if (payload.patch_hash) |hash| {
-        try w.writeAll("patch  ");
+        try ansi.styled(w, theme.dim, "patch  ");
+        try ansi.sgr(w, theme.digest);
         try writeShortHash(w, hash);
         if (payload.parent_hash) |parent| {
             try w.writeAll("  <- ");
             try writeShortHash(w, parent);
         }
+        try w.writeAll(ansi.reset);
         try w.writeByte('\n');
     }
 
     if (payload.goal_context.len > 0) {
-        try w.writeAll("goals  ");
+        try ansi.styled(w, theme.dim, "goals  ");
         for (payload.goal_context, 0..) |goal, i| {
             if (i > 0) try w.writeAll(", ");
-            try w.writeAll(goal);
+            try ansi.styled(w, theme.accent_muted, goal);
         }
         try w.writeByte('\n');
     }
 
     try w.writeByte('\n');
-    try w.writeAll("properties\n");
-    try writePropertyDelta(w, payload.before_properties, payload.after_properties);
+    try ansi.styled(w, theme.dim, "properties\n");
+    try writePropertyDelta(w, payload.before_properties, payload.after_properties, theme);
 
     try w.writeByte('\n');
-    try w.print("violations  {d} total", .{payload.stats.total});
+    try ansi.styled(w, theme.dim, "violations  ");
+    try w.print("{d} total", .{payload.stats.total});
     if (payload.stats.preexisting) |pre| {
         try w.print("  ({d} new, {d} preexisting)", .{ payload.stats.new, pre });
     } else {
@@ -2471,10 +2634,13 @@ fn writeProofDeltaCard(
     }
     try w.writeByte('\n');
 
-    try w.print("witnesses   {d} defeated", .{payload.witnesses_defeated.len});
+    try ansi.styled(w, theme.dim, "witnesses   ");
+    try ansi.sgr(w, theme.delta_promoted);
+    try w.print("{d} defeated", .{payload.witnesses_defeated.len});
+    try w.writeAll(ansi.reset);
     if (payload.witnesses_new.len > 0) {
-        try w.print(", ", .{});
-        try ansi.sgr(w, "31");
+        try w.writeAll(", ");
+        try ansi.sgr(w, theme.delta_demoted);
         try w.print("{d} new", .{payload.witnesses_new.len});
         try w.writeAll(ansi.reset);
     }
@@ -2482,48 +2648,54 @@ fn writeProofDeltaCard(
 
     if (payload.post_apply_summary) |summary| {
         try w.writeByte('\n');
-        try w.print("note  {s}\n", .{summary});
+        try ansi.styled(w, theme.dim, "note  ");
+        try w.print("{s}\n", .{summary});
     }
 
     try w.writeByte('\n');
     if (payload.hunks.len == 0) {
-        try w.writeAll("diff  (no content delta)\n");
+        try ansi.styled(w, theme.dim, "diff  (no content delta)\n");
     } else if (diff_expanded) {
-        try w.writeAll("diff\n");
+        try ansi.styled(w, theme.dim, "diff\n");
         try writeTextBlock(w, payload.unified_diff);
     } else {
-        try w.print("diff  {d} hunk{s} (Enter to expand)\n", .{
+        try ansi.styled(w, theme.dim, "diff  ");
+        try w.print("{d} hunk{s}", .{
             payload.hunks.len,
             if (payload.hunks.len == 1) "" else "s",
         });
+        try ansi.styled(w, theme.dim, " (Enter to expand)\n");
     }
 }
 
-/// Emit SGR-coloured property-change badges: green `+name` for promotions
-/// (false -> true), red `-name` for demotions. Unchanged fields are
-/// suppressed so the eye lands on what this patch actually did.
+/// Emit theme-coloured property-change badges: green `+name` for
+/// promotions (false -> true), red `-name` for demotions. Unchanged
+/// fields are suppressed so the eye lands on what this patch actually did.
 fn writePropertyDelta(
     w: *std.Io.Writer,
     before_opt: ?ui_payload_mod.PropertiesSnapshot,
     after_opt: ?ui_payload_mod.PropertiesSnapshot,
+    theme: *const theme_mod.Theme,
 ) !void {
     const after = after_opt orelse {
-        try w.writeAll("  (not computed)\n");
+        try ansi.styled(w, theme.dim, "  (not computed)\n");
         return;
     };
 
     const Visitor = struct {
         w: *std.Io.Writer,
+        theme: *const theme_mod.Theme,
         wrote: bool = false,
 
         pub fn visit(self: *@This(), change: ui_payload_mod.PropertiesSnapshot.Change) !void {
             // Leading "  " for the first badge acts as the indent; subsequent
             // "  " acts as the separator. Both look the same on the wire.
             try self.w.writeAll("  ");
-            switch (change.kind) {
-                .promoted => try ansi.sgr(self.w, "32"),
-                .demoted => try ansi.sgr(self.w, "31"),
-            }
+            const sgr_param = switch (change.kind) {
+                .promoted => self.theme.delta_promoted,
+                .demoted => self.theme.delta_demoted,
+            };
+            try ansi.sgr(self.w, sgr_param);
             const prefix: u8 = switch (change.kind) {
                 .promoted => '+',
                 .demoted => '-',
@@ -2534,10 +2706,10 @@ fn writePropertyDelta(
         }
     };
 
-    var visitor: Visitor = .{ .w = w };
+    var visitor: Visitor = .{ .w = w, .theme = theme };
     try ui_payload_mod.PropertiesSnapshot.forEachChange(before_opt, after, *Visitor, &visitor);
 
-    if (!visitor.wrote) try w.writeAll("  (no property changes)");
+    if (!visitor.wrote) try ansi.styled(w, theme.dim, "  (no property changes)");
     try w.writeByte('\n');
 }
 
@@ -2550,9 +2722,10 @@ fn writePropertiesSnapshot(
     w: *std.Io.Writer,
     snapshot: ?ui_payload_mod.PropertiesSnapshot,
     cursor: ?usize,
+    theme: *const theme_mod.Theme,
 ) !void {
     const value = snapshot orelse {
-        try w.writeAll("(none)\n");
+        try ansi.styled(w, theme.dim, "(none)\n");
         return;
     };
 
@@ -2560,29 +2733,59 @@ fn writePropertiesSnapshot(
     inline for (@typeInfo(ui_payload_mod.PropertiesSnapshot).@"struct".fields) |field| {
         switch (@typeInfo(field.type)) {
             .bool => {
-                const truthy = if (@field(value, field.name)) "true" else "false";
+                const is_true = @field(value, field.name);
+                const truthy = if (is_true) "true" else "false";
+                const value_sgr = if (is_true) theme.delta_promoted else theme.delta_demoted;
                 if (cursor) |selected_index| {
-                    const marker: u8 = if (bool_index == selected_index) '>' else ' ';
+                    const selected = bool_index == selected_index;
                     const lane = property_goals.classify(field.name).label();
-                    try w.print("{c} [{s}] {s} ({s})\n", .{ marker, truthy, field.name, lane });
+                    if (selected) {
+                        try ansi.styled(w, theme.accent_primary, "> ");
+                    } else {
+                        try w.writeAll("  ");
+                    }
+                    try w.writeAll("[");
+                    try ansi.styled(w, value_sgr, truthy);
+                    try w.writeAll("] ");
+                    if (selected) {
+                        try ansi.styled(w, theme.chip_focus, field.name);
+                    } else {
+                        try ansi.styled(w, theme.chip_idle, field.name);
+                    }
+                    try w.writeAll(" ");
+                    try ansi.sgr(w, theme.dim);
+                    try w.print("({s})", .{lane});
+                    try w.writeAll(ansi.reset);
+                    try w.writeByte('\n');
                 } else {
-                    try w.print("- {s}: {s}\n", .{ field.name, truthy });
+                    try ansi.styled(w, theme.dim, "- ");
+                    try ansi.styled(w, theme.chip_idle, field.name);
+                    try ansi.styled(w, theme.dim, ": ");
+                    try ansi.styled(w, value_sgr, truthy);
+                    try w.writeByte('\n');
                 }
                 bool_index += 1;
             },
             .optional => {
                 if (cursor == null) {
+                    try ansi.styled(w, theme.dim, "- ");
+                    try ansi.styled(w, theme.chip_idle, field.name);
+                    try ansi.styled(w, theme.dim, ": ");
                     if (@field(value, field.name)) |number| {
-                        try w.print("- {s}: {d}\n", .{ field.name, number });
+                        try w.print("{d}\n", .{number});
                     } else {
-                        try w.print("- {s}: null\n", .{field.name});
+                        try ansi.styled(w, theme.dim, "null\n");
                     }
                 } else if (comptime std.mem.eql(u8, field.name, "max_io_depth")) {
+                    try w.writeAll("  ");
+                    try ansi.styled(w, theme.chip_idle, field.name);
+                    try ansi.styled(w, theme.dim, ": ");
                     if (@field(value, field.name)) |number| {
-                        try w.print("  {s}: {d} (metric)\n", .{ field.name, number });
+                        try w.print("{d} ", .{number});
                     } else {
-                        try w.print("  {s}: null (metric)\n", .{field.name});
+                        try ansi.styled(w, theme.dim, "null ");
                     }
+                    try ansi.styled(w, theme.dim, "(metric)\n");
                 }
             },
             else => @compileError("unsupported PropertiesSnapshot field type"),
@@ -2937,6 +3140,79 @@ fn ledgerTabLabel(tab: LedgerTab) []const u8 {
         .citations => "detail Citations",
         .witnesses => "detail Witnesses",
     };
+}
+
+/// Short labels for the inspector tab bar. Kept distinct from
+/// `ledgerTabLabel` (which carries the longer "detail X" form for the
+/// status row) so the bar fits a narrow inspector.
+fn ledgerTabShortLabel(tab: LedgerTab) []const u8 {
+    return switch (tab) {
+        .delta => "Delta",
+        .diff => "Diff",
+        .properties => "Properties",
+        .violations => "Violations",
+        .prove => "Prove",
+        .system => "System",
+        .citations => "Citations",
+        .witnesses => "Witnesses",
+    };
+}
+
+/// Render a single horizontal tab bar at the top of the inspector
+/// pane. The active tab is bold + accent-coloured with a heavy underline
+/// drawn directly beneath it; idle tabs are dim. The bar always shows
+/// every tab in order so the user can see where they are in the cycle.
+fn writeTabBar(w: *std.Io.Writer, current: LedgerTab, theme: *const theme_mod.Theme) !void {
+    const tabs = [_]LedgerTab{ .delta, .diff, .properties, .violations, .prove, .system, .citations, .witnesses };
+    var underline_buf: [256]u8 = undefined;
+    var underline_len: usize = 0;
+    for (tabs, 0..) |t, idx| {
+        if (idx > 0) {
+            try ansi.styled(w, theme.dim, "  ");
+            if (underline_len + 2 <= underline_buf.len) {
+                @memset(underline_buf[underline_len .. underline_len + 2], ' ');
+                underline_len += 2;
+            }
+        }
+        const label = ledgerTabShortLabel(t);
+        if (t == current) {
+            try ansi.styled(w, theme.tab_active, label);
+            if (underline_len + label.len <= underline_buf.len) {
+                // Underline with U+2501 "heavy horizontal" - one byte for ASCII
+                // would underflow, but the rule line is rendered separately so
+                // we just track the byte count of the label here for spacing.
+                const fill: usize = if (label.len > underline_buf.len - underline_len)
+                    underline_buf.len - underline_len
+                else
+                    label.len;
+                @memset(underline_buf[underline_len .. underline_len + fill], 'X');
+                underline_len += fill;
+            }
+        } else {
+            try ansi.styled(w, theme.tab_idle, label);
+            if (underline_len + label.len <= underline_buf.len) {
+                @memset(underline_buf[underline_len .. underline_len + label.len], ' ');
+                underline_len += label.len;
+            }
+        }
+    }
+    try w.writeByte('\n');
+
+    // Underline rule beneath the active tab. We walk the same labels and
+    // emit a `━` (U+2501, 3 bytes UTF-8) under each char of the active
+    // label, spaces under the rest. The buffer above tracks `X` for active
+    // chars and ` ` for idle, which we now translate to wire bytes.
+    try ansi.sgr(w, theme.tab_underline);
+    var i: usize = 0;
+    while (i < underline_len) : (i += 1) {
+        if (underline_buf[i] == 'X') {
+            try w.writeAll("\xe2\x94\x80"); // U+2500 light horizontal
+        } else {
+            try w.writeByte(' ');
+        }
+    }
+    try w.writeAll(ansi.reset);
+    try w.writeByte('\n');
 }
 
 fn parseKeyEvent(bytes: []const u8, start: usize) struct { KeyEvent, usize } {
@@ -3322,9 +3598,17 @@ test "ledger properties tab marks goal-driveable and structural properties" {
     const text = try buildInspectorText(testing.allocator, &state, &session);
     defer testing.allocator.free(text);
 
-    try testing.expect(std.mem.indexOf(u8, text, "> [false] pure (struct)") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "[true] no_secret_leakage (goal)") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "max_io_depth: 1 (metric)") != null);
+    // The chip rendering interleaves SGR escapes between the marker, the
+    // value, and the property name, so we check each visible piece
+    // individually rather than for a contiguous substring.
+    try testing.expect(std.mem.indexOf(u8, text, "false") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "pure") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "(struct)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "true") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "no_secret_leakage") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "(goal)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "max_io_depth") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "(metric)") != null);
 }
 
 test "ledger properties tab left and right move the property cursor" {
@@ -3496,17 +3780,25 @@ test "ledger witnesses tab renders defeated and new counterexample bodies" {
     const text = try buildInspectorText(testing.allocator, &state, &session);
     defer testing.allocator.free(text);
 
+    // The witness pane is now themed: SGR escapes interleave between the
+    // request method and url, between section headers and counts, and
+    // between key prefixes and digests. Assert each visible token rather
+    // than contiguous substrings.
     try testing.expect(std.mem.indexOf(u8, text, "Witnesses") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "defeated by this patch (1)") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "[no_secret_leakage]") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "GET /") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "defeated by this patch") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "(1)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "no_secret_leakage") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "GET") != null);
     try testing.expect(std.mem.indexOf(u8, text, "origin 5:9 -> sink 7:12") != null);
     try testing.expect(std.mem.indexOf(u8, text, "summary: DB_KEY in response") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "key: aaaaaaaaaaaa") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "env.env() -> \"sentinel\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "introduced by this patch (1)") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "[injection_safe]") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "POST /api/items  (auth)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "aaaaaaaaaaaa") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "env.env()") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"sentinel\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "introduced by this patch") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "injection_safe") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "POST") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "/api/items") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "(auth)") != null);
 }
 
 test "lowercase w jumps to the witnesses tab and focuses the inspector" {
