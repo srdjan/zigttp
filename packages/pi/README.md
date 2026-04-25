@@ -164,8 +164,24 @@ selection, tab accents, proof badges, witness verdicts, and modal
 chrome. Swap palettes with `/settings theme <name>`; two palettes ship:
 `default` and `solarized-dark`.
 
-Regenerate the demo with `vhs docs/pi-tui-demo.tape` from the repo
-root after any TUI change.
+The ledger inspector has eight tabs: Delta, Diff, Properties,
+Violations, Prove, System, Citations, Witnesses. Tab and Shift-Tab
+cycle. The Witnesses tab carries the full counterexample body for
+every witness the patch defeated or introduced; press `w` to jump to
+it directly. Witness keystrokes:
+
+- `r` replays the selected witness against the post-patch handler and
+  renders the verdict inline (`PASS`, `FIXED`, `ERROR`).
+- `g` runs the autoloop scoped to that witness's stable key, ending
+  the moment the focused witness is gone.
+- `m` mints the witness as a regression test in
+  `<handler-dir>/witness-regressions.jsonl`.
+
+Regenerate the demos with `vhs docs/pi-tui-demo.tape` and
+`vhs docs/witness-theater-demo.tape` from the repo root after any TUI
+change. The witness theater demo also requires
+`./scripts/witness-theater-demo-prep.sh` to stage the autoloop
+session.
 
 ### Backends
 
