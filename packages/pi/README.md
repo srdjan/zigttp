@@ -159,8 +159,10 @@ anchored at the bottom of the terminal. Scrollback flows above them;
 the terminal's own buffer handles history. Redraws wrap in CSI
 `?2026h` / `?2026l` synchronized output
 so supporting terminals render each update atomically without flicker.
-Themed via `/settings theme <name>`. Two palettes ship: `default` and
-`solarized-dark`.
+The full-screen surface uses themed Workbench-style pane headers, row
+selection, tab accents, proof badges, witness verdicts, and modal
+chrome. Swap palettes with `/settings theme <name>`; two palettes ship:
+`default` and `solarized-dark`.
 
 Regenerate the demo with `vhs docs/pi-tui-demo.tape` from the repo
 root after any TUI change.

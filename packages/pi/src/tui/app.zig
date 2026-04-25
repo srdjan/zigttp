@@ -16,6 +16,7 @@ const transcript_mod = @import("../transcript.zig");
 const ui_payload_mod = @import("../ui_payload.zig");
 const witness_replay = @import("../witness_replay.zig");
 const theme_mod = @import("theme.zig");
+const box_chars = @import("widgets/box.zig");
 const session_events = @import("../session/events.zig");
 const session_state = @import("../session_state.zig");
 const property_goals = @import("../property_goals.zig");
@@ -1448,7 +1449,7 @@ fn redraw(
     try renderComposer(w, session, state, size.width, session.theme);
 
     if (state.modal) |modal| {
-        try renderModalOverlay(w, size, modal);
+        try renderModalOverlay(w, size, modal, session.theme);
     } else if (state.focus_mode == .composer) {
         const row, const col = composerCursorPosition(layout, size.width, state.composer);
         try moveCursor(w, row, col);
@@ -1656,29 +1657,49 @@ fn renderComposer(
     try w.writeAll(ansi.reset);
 }
 
-fn renderModalOverlay(w: *std.Io.Writer, size: TerminalSize, approval: ApprovalModal) !void {
+/// Width budget for inner modal text. Each row carries 2 cells of left
+/// chrome (vertical bar + space) and 2 cells of right chrome (space +
+/// vertical bar), so the writeable text area is `width - 4`.
+const modal_chrome_cells: usize = 4;
+
+const ModalEdge = enum { top, bottom };
+
+fn renderModalOverlay(
+    w: *std.Io.Writer,
+    size: TerminalSize,
+    approval: ApprovalModal,
+    theme: *const theme_mod.Theme,
+) !void {
     const width = @min(size.width -| 4, @as(usize, 64));
     const left_col = if (size.width > width) (size.width - width) / 2 + 1 else 1;
     const top_row = if (size.height > 7) (size.height - 5) / 2 + 1 else 1;
 
-    var title_buf: [256]u8 = undefined;
+    // 1024 bytes covers any realistic workspace path. Truncation falls
+    // back to a generic title rather than a half-rendered path.
+    var title_buf: [1024]u8 = undefined;
     const title = std.fmt.bufPrint(&title_buf, "Apply verified edit to {s}?", .{approval.file}) catch "Apply verified edit?";
 
-    const reject_style = if (approval.choice == .reject) "7" else "";
-    const approve_style = if (approval.choice == .approve) "7" else "";
+    // Idle button colours are intentionally asymmetric: `reject` reads as
+    // dim chrome (a "do nothing" affordance), `approve` reads as a
+    // promoted-property green even when not selected (the action the
+    // user came here to take).
+    const reject_style = if (approval.choice == .reject) theme.selection_bg else theme.dim;
+    const approve_style = if (approval.choice == .approve) theme.selection_bg else theme.delta_promoted;
 
-    try writeModalLine(w, top_row, left_col, width, "+--------------------------------------------------------------+");
-    try writeModalLine(w, top_row + 1, left_col, width, "| approval required                                            |");
-    try writeModalLine(w, top_row + 2, left_col, width, title);
+    try writeModalBorder(w, top_row, left_col, width, .top, theme);
+    try writeModalLine(w, top_row + 1, left_col, width, "approval required", theme, theme.accent_primary);
+    try writeModalLine(w, top_row + 2, left_col, width, title, theme, theme.accent_primary);
     try moveCursor(w, top_row + 3, left_col);
-    try writeFitted(w, "| ", 2);
+    try ansi.styled(w, theme.pane_border_active, box_chars.vertical ++ " ");
     try ansi.styled(w, reject_style, " reject ");
     try w.writeAll("   ");
     try ansi.styled(w, approve_style, " approve ");
-    const used = 2 + @as(usize, 8) + 3 + @as(usize, 9);
+    const used = modal_chrome_cells + @as(usize, 8) + 3 + @as(usize, 9);
     try writeSpaces(w, width -| used);
+    try ansi.styled(w, theme.pane_border_active, " " ++ box_chars.vertical);
     try writeCrlf(w);
-    try writeModalLine(w, top_row + 4, left_col, width, "y/n or Enter. Tab switches choice. Esc rejects.");
+    try writeModalLine(w, top_row + 4, left_col, width, "y/n or Enter. Tab switches choice. Esc rejects.", theme, theme.dim);
+    try writeModalBorder(w, top_row + 5, left_col, width, .bottom, theme);
 }
 
 fn writeModalLine(
@@ -1687,11 +1708,42 @@ fn writeModalLine(
     col: usize,
     width: usize,
     text: []const u8,
+    theme: *const theme_mod.Theme,
+    text_sgr: []const u8,
 ) !void {
     try moveCursor(w, row, col);
-    try ansi.sgr(w, "1");
-    try writeFitted(w, text, width);
+    try ansi.styled(w, theme.pane_border_active, box_chars.vertical ++ " ");
+    try ansi.sgr(w, text_sgr);
+    try writeFitted(w, text, width -| modal_chrome_cells);
     try w.writeAll(ansi.reset);
+    try ansi.styled(w, theme.pane_border_active, " " ++ box_chars.vertical);
+    try writeCrlf(w);
+}
+
+fn writeModalBorder(
+    w: *std.Io.Writer,
+    row: usize,
+    col: usize,
+    width: usize,
+    edge: ModalEdge,
+    theme: *const theme_mod.Theme,
+) !void {
+    try moveCursor(w, row, col);
+    try ansi.sgr(w, theme.pane_border_active);
+    const left = switch (edge) {
+        .top => box_chars.round_top_left,
+        .bottom => box_chars.round_bottom_left,
+    };
+    const right = switch (edge) {
+        .top => box_chars.round_top_right,
+        .bottom => box_chars.round_bottom_right,
+    };
+    try w.writeAll(left);
+    var i: usize = 0;
+    while (i < width -| 2) : (i += 1) try w.writeAll(box_chars.horizontal);
+    try w.writeAll(right);
+    try w.writeAll(ansi.reset);
+    try writeCrlf(w);
 }
 
 fn writePrimaryRow(
@@ -4129,6 +4181,26 @@ test "approval modal accepts and rejects with keyboard actions" {
         .decided => |decision| try testing.expect(!decision),
         else => return error.TestFailed,
     }
+}
+
+test "approval modal renders with themed chrome" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
+
+    try renderModalOverlay(
+        &aw.writer,
+        .{ .width = 80, .height = 24 },
+        .{ .file = "src/handler.ts", .choice = .approve },
+        &theme_mod.default,
+    );
+    buf = aw.toArrayList();
+
+    try testing.expect(std.mem.indexOf(u8, buf.items, "approval required") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "Apply verified edit to src/handler.ts?") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\x1b[") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\xe2\x95\xad") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\xe2\x95\xaf") != null);
 }
 
 test "resetToTranscript rebuilds feed from transcript entries" {
