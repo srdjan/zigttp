@@ -124,6 +124,20 @@ pub const LocalPolicyChecker = struct {
     }
 };
 
+/// Wasm-backed policy checker - Phase 2 skeleton.
+///
+/// `LocalPolicyChecker` and `WasmPolicyChecker` are interchangeable: both
+/// expose `check(input: PolicyInput) PolicyResult`. The runtime picks one at
+/// startup based on whether a Wasm artifact is present on disk. Call sites
+/// do not change between the two modes.
+pub const WasmPolicyChecker = struct {
+    pub fn check(self: WasmPolicyChecker, input: PolicyInput) PolicyResult {
+        _ = self;
+        _ = input;
+        @panic("phase 2: not implemented");
+    }
+};
+
 /// Emit a generic policy_denied event to the process-wide security stream.
 /// Spec section 12: every denial fires; allow-decisions may be sampled.
 pub fn emitDenied(input: PolicyInput, reason: DenyReason) void {
@@ -335,4 +349,12 @@ test "http.outbound host allowlist is case-insensitive" {
         .resource = .{ .kind = "host", .id = "evil.example.com" },
     });
     try std.testing.expectEqual(DenyReason.not_in_allowlist, other.deny);
+}
+
+test "WasmPolicyChecker matches LocalPolicyChecker for known fixtures" {
+    // Phase 2 contract: the Wasm-backed checker must produce identical
+    // results to the in-process checker for all fixtures in
+    // packages/zigts/src/fixtures/policy/. This test will fail until the
+    // interpreter is implemented; it locks in the equivalence contract.
+    return error.SkipZigTest; // remove this line once Phase 2 lands
 }
