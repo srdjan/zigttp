@@ -215,6 +215,62 @@ pub fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) 
     if (result.hasErrors()) std.process.exit(1);
 }
 
+pub fn runVerifyModuleManifest(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    if (hasHelpFlag(argv)) {
+        printVerifyModuleManifestHelp();
+        return;
+    }
+
+    var json_mode = false;
+    var manifest_path: ?[]const u8 = null;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            json_mode = true;
+        } else if (!std.mem.startsWith(u8, arg, "-") and manifest_path == null) {
+            manifest_path = arg;
+        } else {
+            printVerifyModuleManifestHelp();
+            return error.InvalidArguments;
+        }
+    }
+
+    const path = manifest_path orelse {
+        printVerifyModuleManifestHelp();
+        return error.MissingArgument;
+    };
+
+    const hash = rule_registry.policyHash();
+    var result = try module_audit.verifyManifestPath(allocator, path);
+    defer result.deinit(allocator);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+
+    if (json_mode) {
+        try module_audit.writeJsonEnvelope(w, &result, hash);
+    } else if (result.diagnostics.items.len == 0) {
+        try w.print("Verified module manifest: {s}\n", .{path});
+    } else {
+        try w.print("Verified module manifest: {d} issue(s)\n", .{result.diagnostics.items.len});
+        for (result.diagnostics.items) |diag| {
+            try w.print("  {s} {s}:{d}:{d}: {s}\n", .{
+                diag.diag.code,
+                diag.diag.file,
+                diag.diag.line,
+                diag.diag.column,
+                diag.diag.message,
+            });
+        }
+    }
+
+    buf = aw.toArrayList();
+    writeOwnedToStdout(buf.items);
+
+    if (result.hasErrors()) std.process.exit(1);
+}
+
 const VerifyModulesArgs = struct {
     json_mode: bool = false,
     builtins: bool = false,
@@ -293,6 +349,20 @@ fn printVerifyModulesHelp() void {
         \\and mismatches between the Zig binding and the module spec artifact.
         \\`--strict` upgrades missing-spec governance warnings into errors.
         \\Exit code 1 if any errors found.
+        \\
+    ;
+    writeOwnedToStdout(help);
+}
+
+fn printVerifyModuleManifestHelp() void {
+    const help =
+        \\zigts verify-module-manifest - validate a proof-carrying virtual module manifest
+        \\
+        \\Usage: zigts verify-module-manifest <manifest.json> [--json]
+        \\
+        \\Validates schema version, specifier, backend/state model, capabilities,
+        \\exports, effects, return kinds, labels, contract extraction rules, and laws.
+        \\Exit code 1 if any errors are found.
         \\
     ;
     writeOwnedToStdout(help);

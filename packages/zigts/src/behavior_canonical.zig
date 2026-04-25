@@ -99,9 +99,15 @@ pub const LawRegistry = struct {
 };
 
 fn defaultLookup(module: []const u8, func: []const u8) ?LookupResult {
-    const hit = builtin_modules.findFunction(func) orelse return null;
-    if (!std.mem.eql(u8, hit.binding.name, module)) return null;
-    return .{ .module_name = hit.binding.name, .binding = hit.func };
+    for (&builtin_modules.all) |*binding| {
+        if (!std.mem.eql(u8, binding.name, module) and !std.mem.eql(u8, binding.specifier, module)) continue;
+        for (binding.exports) |*candidate| {
+            if (std.mem.eql(u8, candidate.name, func)) {
+                return .{ .module_name = binding.name, .binding = candidate };
+            }
+        }
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------

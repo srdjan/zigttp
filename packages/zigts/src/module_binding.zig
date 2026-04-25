@@ -1017,7 +1017,6 @@ pub export fn zigttpSdkSqliteColumnText(
     out_len.* = len;
 }
 
-
 // -------------------------------------------------------------------------
 // Return type classification
 // -------------------------------------------------------------------------
@@ -1408,7 +1407,7 @@ pub const ModuleBinding = struct {
 /// Validate a set of module bindings at compile time.
 /// Produces clear compile errors for:
 ///   - duplicate specifiers
-///   - duplicate function names across modules
+///   - duplicate function names within a module
 ///   - state lifecycle inconsistency (stateful without init/deinit)
 ///   - specifier format (must start with "zigttp:" or "zigttp-ext:")
 ///   - function bindings missing both func and module_func
@@ -1461,21 +1460,14 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             }
         }
     }
-    // Check unique function names across all modules
-    for (bindings, 0..) |a, ai| {
+    // Check unique function names within each module. Different modules may
+    // export the same name because all proof metadata lookups must be keyed by
+    // (specifier, export_name).
+    for (bindings) |a| {
         for (a.exports, 0..) |af, afi| {
-            // Check within same module (later exports)
             for (a.exports[afi + 1 ..]) |af2| {
                 if (std.mem.eql(u8, af.name, af2.name)) {
                     @compileError("duplicate function name within " ++ a.specifier ++ ": " ++ af.name);
-                }
-            }
-            // Check across later modules
-            for (bindings[ai + 1 ..]) |b| {
-                for (b.exports) |bf| {
-                    if (std.mem.eql(u8, af.name, bf.name)) {
-                        @compileError("duplicate function name '" ++ af.name ++ "' in " ++ a.specifier ++ " and " ++ b.specifier);
-                    }
                 }
             }
         }

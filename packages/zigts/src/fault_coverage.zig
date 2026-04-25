@@ -227,7 +227,13 @@ pub const FaultCoverageChecker = struct {
 
     pub fn analyze(self: *FaultCoverageChecker) !void {
         var seen_funcs = std.StringHashMapUnmanaged(CallSiteEntry).empty;
-        defer seen_funcs.deinit(self.allocator);
+        defer {
+            var key_iter = seen_funcs.iterator();
+            while (key_iter.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+            seen_funcs.deinit(self.allocator);
+        }
 
         for (self.tests) |test_case| {
             // Determine external severity override for this test case's route
@@ -240,15 +246,20 @@ pub const FaultCoverageChecker = struct {
                     else => continue,
                 };
 
-                const gop = try seen_funcs.getOrPut(self.allocator, info.func);
+                const key = try std.fmt.allocPrint(self.allocator, "{s}\x00{s}", .{ info.module, info.func });
+                const gop = seen_funcs.getOrPut(self.allocator, key) catch |err| {
+                    self.allocator.free(key);
+                    return err;
+                };
                 if (!gop.found_existing) {
-                    var severity = lookupSeverity(info.func);
+                    var severity = lookupSeverity(info.module, info.func);
                     // Elevate via external override (use the higher of the two)
                     if (ext_override) |ext| {
                         severity = maxSeverity(severity, ext.severity);
                     }
                     if (severity == .none) {
-                        _ = seen_funcs.remove(info.func);
+                        _ = seen_funcs.remove(key);
+                        self.allocator.free(key);
                         continue;
                     }
                     gop.value_ptr.* = .{
@@ -259,7 +270,11 @@ pub const FaultCoverageChecker = struct {
                         .failure_status = 0,
                         .flagged = false,
                     };
-                } else if (gop.value_ptr.severity == .none) {
+                } else {
+                    self.allocator.free(key);
+                }
+
+                if (gop.value_ptr.severity == .none) {
                     continue;
                 } else if (ext_override) |ext| {
                     // Elevate existing entry if external override is more severe
@@ -418,9 +433,14 @@ pub const FaultCoverageChecker = struct {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn lookupSeverity(func_name: []const u8) mb.FailureSeverity {
-    if (builtin_modules.findFunction(func_name)) |entry| {
-        return entry.func.failure_severity;
+fn lookupSeverity(module_name: []const u8, func_name: []const u8) mb.FailureSeverity {
+    for (&builtin_modules.all) |*binding| {
+        if (!std.mem.eql(u8, binding.name, module_name) and !std.mem.eql(u8, binding.specifier, module_name)) continue;
+        for (binding.exports) |*candidate| {
+            if (std.mem.eql(u8, candidate.name, func_name)) {
+                return candidate.failure_severity;
+            }
+        }
     }
     return .none;
 }

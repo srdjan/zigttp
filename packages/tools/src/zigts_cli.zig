@@ -86,6 +86,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         try expert.runVerifyModules(allocator, argv[1..]);
         return;
     }
+    if (std.mem.eql(u8, command, "verify-module-manifest")) {
+        try expert.runVerifyModuleManifest(allocator, argv[1..]);
+        return;
+    }
     if (std.mem.eql(u8, command, "edit-simulate")) {
         try edit_simulate.runWithArgs(allocator, argv[1..]);
         return;
@@ -344,6 +348,7 @@ fn printHelp() void {
         \\  zigts verify-paths <file>... [--json]
         \\  zigts verify-modules <file>... [--strict] [--json]
         \\  zigts verify-modules --builtins [--strict] [--json]
+        \\  zigts verify-module-manifest <manifest.json> [--json]
         \\  zigts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
         \\  zigts describe-rule [rule-name|code] [--json] [--hash]
         \\  zigts search <keyword> [--json]

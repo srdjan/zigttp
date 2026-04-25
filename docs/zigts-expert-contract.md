@@ -11,6 +11,7 @@ Three identifiers appear in almost every response:
 - `compiler_version` — the embedded zigts compiler version. Currently `"0.16.0"` (see `packages/tools/src/expert_meta.zig`).
 - `policy_version` — the rule-set calendar version. Currently `"2026.04.2"` (see `packages/tools/src/expert_meta.zig`).
 - `policy_hash` — a content hash over the full rule registry, computed at startup from `zigts.rule_registry.policyHash()`. Stable across runs of the same binary; changes when rules are added, removed, or edited.
+- `module_registry_hash` — a content hash over the accepted virtual-module registry metadata. This is additive in v1 and lets clients detect proof metadata changes independently of rule text.
 
 A client that pins to v1 should also pin to a `policy_hash` and re-verify when it changes. The hash is the fastest way to detect that a rule's text or code moved without a version bump.
 
@@ -80,6 +81,7 @@ Emits compiler and policy metadata. Use it to record which policy a session or C
   "compiler_version": "0.16.0",
   "policy_version": "2026.04.2",
   "policy_hash": "<hex>",
+  "module_registry_hash": "<hex>",
   "rule_count": 42,
   "categories": {
     "verifier": 11,
@@ -92,7 +94,7 @@ Emits compiler and policy metadata. Use it to record which policy a session or C
 
 Fields:
 
-- `compiler_version`, `policy_version`, `policy_hash` — as described above.
+- `compiler_version`, `policy_version`, `policy_hash`, `module_registry_hash` — as described above.
 - `rule_count` (integer) — number of rules in the registry. Matches `categories.verifier + categories.policy + categories.property`.
 - `categories` (object, closed in v1) — rule counts by category. The three keys `verifier`, `policy`, `property` are guaranteed; new categories would be a v2 change.
 - `mode` (string) — always `"embedded"` in v1. Reserved for a future out-of-process mode.
@@ -159,6 +161,32 @@ Mode semantics:
 - `--builtins` audits the full authoritative public built-in set and reports every built-in module/spec file in `checked_files`.
 - Positional paths and `--builtins` are mutually exclusive.
 - `--strict` upgrades governance warnings that must block CI into errors. In v1 that means `ZVM003` ("built-in module has no module spec artifact") becomes error-severity instead of warning-severity.
+
+**Exit code:** `0` if no errors, `1` otherwise.
+
+## `zigts verify-module-manifest`
+
+Validates a proof-carrying virtual module manifest without requiring a Zig backend to be built.
+
+**Invocation:**
+
+```text
+zigts verify-module-manifest <manifest.json> --json
+```
+
+**Output shape:** identical to `verify-modules`:
+
+```json
+{
+  "ok": true,
+  "policy_version": "2026.04.2",
+  "policy_hash": "<hex>",
+  "checked_files": ["zigttp-module.json"],
+  "violations": [ /* JsonDiagnostic with ZVM00x codes */ ]
+}
+```
+
+The validator checks schema version, specifier prefix, backend/state model, capabilities, exports, effects, return kinds, labels, contract extraction rules, contract flags, laws, and duplicate export names within the module.
 
 **Exit code:** `0` if no errors, `1` otherwise.
 

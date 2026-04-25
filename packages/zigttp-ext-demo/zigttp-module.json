@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp-ext:math",
+  "backend": "native-zig",
+  "stateModel": "none",
+  "requiredCapabilities": [
+    "clock"
+  ],
+  "exports": [
+    {
+      "name": "double",
+      "params": [
+        "number"
+      ],
+      "returns": "number",
+      "effect": "read",
+      "traceable": true
+    },
+    {
+      "name": "isEven",
+      "params": [
+        "number"
+      ],
+      "returns": "boolean",
+      "effect": "read",
+      "traceable": true
+    },
+    {
+      "name": "clockModulo",
+      "params": [
+        "number"
+      ],
+      "returns": "number",
+      "effect": "read",
+      "traceable": true
+    }
+  ]
+}

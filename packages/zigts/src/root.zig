@@ -77,6 +77,7 @@ pub const rule_error = @import("rule_error.zig");
 pub const rule_registry = @import("rule_registry.zig");
 pub const ws_consistency = @import("ws_consistency.zig");
 pub const module_binding = @import("module_binding.zig");
+pub const module_manifest = @import("module_manifest.zig");
 pub const builtin_modules = @import("builtin_modules.zig");
 pub const security_events = @import("security_events.zig");
 pub const wasm = @import("wasm/root.zig");
