@@ -3105,10 +3105,18 @@ fn splitHeaderKV(headers: anytype, names: *[64][]const u8, values: *[64][]const 
 fn outboundHostViolation(rt: *Runtime, host: []const u8) ?[]const u8 {
     if (rt.config.outbound_allow_host) |allowed_host| {
         if (!ascii.eqlIgnoreCase(host, allowed_host)) {
+            zq.policy.emitDenied(.{
+                .action = .http_outbound,
+                .resource = .{ .kind = zq.policy.resource_kind_host, .id = host },
+            }, .not_in_allowlist);
             return allowed_host;
         }
     }
     if (!rt.ctx.capability_policy.allowsEgressHost(host)) {
+        zq.policy.emitDenied(.{
+            .action = .http_outbound,
+            .resource = .{ .kind = zq.policy.resource_kind_host, .id = host },
+        }, .not_in_allowlist);
         return "capability policy";
     }
     return null;

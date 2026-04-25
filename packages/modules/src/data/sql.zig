@@ -173,7 +173,11 @@ fn executeQuery(handle: *sdk.ModuleHandle, args: []const sdk.JSValue, mode: Exec
     if (args.len == 0) return util.throwTypeError(handle, "sql query name must be provided");
 
     const name = sdk.extractString(args[0]) orelse return util.throwTypeError(handle, "sql query name must be a string");
-    if (!sdk.allowsSqlQuery(handle, name)) return util.throwCapabilityPolicyError(handle, "sql query", name);
+    const allowed = switch (mode) {
+        .one, .many => sdk.allowsSqlQuery(handle, name),
+        .exec => sdk.allowsSqlWrite(handle, name),
+    };
+    if (!allowed) return util.throwCapabilityPolicyError(handle, "sql query", name);
 
     const store = getOrCreateStore(handle) catch return sdk.throwError(handle, "Error", "failed to initialize sql store");
     const statement = store.getQuery(name) orelse return sdk.throwError(handle, "Error", "SQL query not registered");

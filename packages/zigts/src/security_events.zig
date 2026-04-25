@@ -10,12 +10,19 @@ pub const SecurityEventKind = enum {
     policy_denied_env,
     policy_denied_cache,
     policy_denied_sql,
+    /// Generic policy denial carrying spec-section-12 fields (service,
+    /// action, resource.kind, resource.id, reason). Phase 1 emits this
+    /// alongside the legacy per-module kinds for new gate sites only.
+    policy_denied,
     arena_audit_failure,
     persistent_string_escape,
 };
 
 pub const max_module_len: usize = 32;
 pub const max_detail_len: usize = 128;
+pub const max_action_len: usize = 16;
+pub const max_resource_kind_len: usize = 16;
+pub const max_resource_id_len: usize = 64;
 
 pub const SecurityEvent = struct {
     kind: SecurityEventKind,
@@ -24,6 +31,13 @@ pub const SecurityEvent = struct {
     module_len: u8 = 0,
     detail_buf: [max_detail_len]u8 = undefined,
     detail_len: u8 = 0,
+    // Populated only for `.policy_denied`. Other kinds leave these at 0.
+    action_buf: [max_action_len]u8 = undefined,
+    action_len: u8 = 0,
+    resource_kind_buf: [max_resource_kind_len]u8 = undefined,
+    resource_kind_len: u8 = 0,
+    resource_id_buf: [max_resource_id_len]u8 = undefined,
+    resource_id_len: u8 = 0,
 
     pub fn init(
         kind: SecurityEventKind,
@@ -40,12 +54,46 @@ pub const SecurityEvent = struct {
         return event;
     }
 
+    /// Build a generic policy_denied event matching spec section 12 fields.
+    /// `service` lands in the module slot; `reason` lands in the detail slot.
+    pub fn initPolicyDenied(
+        service: []const u8,
+        action: []const u8,
+        resource_kind: []const u8,
+        resource_id: []const u8,
+        reason: []const u8,
+    ) SecurityEvent {
+        var event = SecurityEvent.init(.policy_denied, service, reason);
+        const an = @min(action.len, max_action_len);
+        @memcpy(event.action_buf[0..an], action[0..an]);
+        event.action_len = @intCast(an);
+        const rkn = @min(resource_kind.len, max_resource_kind_len);
+        @memcpy(event.resource_kind_buf[0..rkn], resource_kind[0..rkn]);
+        event.resource_kind_len = @intCast(rkn);
+        const rin = @min(resource_id.len, max_resource_id_len);
+        @memcpy(event.resource_id_buf[0..rin], resource_id[0..rin]);
+        event.resource_id_len = @intCast(rin);
+        return event;
+    }
+
     pub fn moduleSlice(self: *const SecurityEvent) []const u8 {
         return self.module_buf[0..self.module_len];
     }
 
     pub fn detailSlice(self: *const SecurityEvent) []const u8 {
         return self.detail_buf[0..self.detail_len];
+    }
+
+    pub fn actionSlice(self: *const SecurityEvent) []const u8 {
+        return self.action_buf[0..self.action_len];
+    }
+
+    pub fn resourceKindSlice(self: *const SecurityEvent) []const u8 {
+        return self.resource_kind_buf[0..self.resource_kind_len];
+    }
+
+    pub fn resourceIdSlice(self: *const SecurityEvent) []const u8 {
+        return self.resource_id_buf[0..self.resource_id_len];
     }
 };
 
@@ -168,7 +216,28 @@ pub fn emitGlobal(event: SecurityEvent) void {
 // -------------------------------------------------------------------------
 
 /// Write an event as a single JSONL line (including trailing newline).
+/// `.policy_denied` follows the spec section 12 shape; other kinds keep the
+/// legacy {kind, ts, module, detail} shape so existing JSONL consumers do
+/// not break.
 pub fn writeJsonLine(event: *const SecurityEvent, writer: anytype) !void {
+    if (event.kind == .policy_denied) {
+        try writer.print(
+            "{{\"event\":\"policy_denied\",\"ts\":{d},\"service\":\"",
+            .{event.timestamp_ns},
+        );
+        try json_utils.writeJsonStringContent(writer, event.moduleSlice());
+        try writer.writeAll("\",\"action\":\"");
+        try json_utils.writeJsonStringContent(writer, event.actionSlice());
+        try writer.writeAll("\",\"resource\":{\"kind\":\"");
+        try json_utils.writeJsonStringContent(writer, event.resourceKindSlice());
+        try writer.writeAll("\",\"id\":\"");
+        try json_utils.writeJsonStringContent(writer, event.resourceIdSlice());
+        try writer.writeAll("\"},\"reason\":\"");
+        try json_utils.writeJsonStringContent(writer, event.detailSlice());
+        try writer.writeAll("\"}\n");
+        return;
+    }
+
     try writer.print(
         "{{\"kind\":\"{s}\",\"ts\":{d},\"module\":\"",
         .{ @tagName(event.kind), event.timestamp_ns },
@@ -250,6 +319,39 @@ test "writeJsonLine emits valid JSONL" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"module\":\"zigttp:env\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "KEY\\\"with\\\\quotes") != null);
     try std.testing.expectEqual(@as(u8, '\n'), output.items[output.items.len - 1]);
+}
+
+test "writeJsonLine emits spec-section-12 shape for policy_denied" {
+    const allocator = std.testing.allocator;
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+
+    var event = SecurityEvent.initPolicyDenied(
+        "zigttp",
+        "db.write",
+        "sql_query",
+        "drop_table",
+        "not_in_allowlist",
+    );
+    event.timestamp_ns = 99;
+    try writeJsonLine(&event, &aw.writer);
+    output = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"event\":\"policy_denied\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"service\":\"zigttp\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"action\":\"db.write\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"resource\":{\"kind\":\"sql_query\",\"id\":\"drop_table\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"reason\":\"not_in_allowlist\"") != null);
+}
+
+test "initPolicyDenied truncates over-long fields" {
+    const long = "a" ** 256;
+    const event = SecurityEvent.initPolicyDenied("zigttp", long, long, long, long);
+    try std.testing.expectEqual(max_action_len, event.actionSlice().len);
+    try std.testing.expectEqual(max_resource_kind_len, event.resourceKindSlice().len);
+    try std.testing.expectEqual(max_resource_id_len, event.resourceIdSlice().len);
+    try std.testing.expectEqual(max_detail_len, event.detailSlice().len);
 }
 
 test "global stream init/deinit/emit" {
