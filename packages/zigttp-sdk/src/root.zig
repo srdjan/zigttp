@@ -795,17 +795,13 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                 @compileError("duplicate module specifier: " ++ a.specifier);
             }
         }
+    }
+
+    for (bindings) |a| {
         for (a.exports, 0..) |af, afi| {
             for (a.exports[afi + 1 ..]) |af2| {
                 if (std.mem.eql(u8, af.name, af2.name)) {
                     @compileError("duplicate function name within " ++ a.specifier ++ ": " ++ af.name);
-                }
-            }
-            for (bindings[i + 1 ..]) |b| {
-                for (b.exports) |bf| {
-                    if (std.mem.eql(u8, af.name, bf.name)) {
-                        @compileError("duplicate function name '" ++ af.name ++ "' in " ++ a.specifier ++ " and " ++ b.specifier);
-                    }
                 }
             }
         }

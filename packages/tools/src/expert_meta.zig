@@ -4,6 +4,8 @@
 const std = @import("std");
 const zigts = @import("zigts");
 const rule_registry = zigts.rule_registry;
+const builtin_modules = zigts.builtin_modules;
+const module_manifest = zigts.module_manifest;
 
 pub const compiler_version = "0.16.0";
 pub const policy_version = "2026.04.2";
@@ -19,6 +21,7 @@ pub const MetaInfo = struct {
     compiler_version: []const u8,
     policy_version: []const u8,
     policy_hash: [64]u8,
+    module_registry_hash: [64]u8,
     rule_count: usize,
     categories: Categories,
     mode: []const u8,
@@ -43,6 +46,7 @@ pub fn compute() MetaInfo {
         .compiler_version = compiler_version,
         .policy_version = policy_version,
         .policy_hash = rule_registry.policyHash(),
+        .module_registry_hash = module_manifest.registryHashFromBindings(&builtin_modules.all),
         .rule_count = rule_registry.all_rules.len,
         .categories = category_counts,
         .mode = mode,
@@ -51,11 +55,12 @@ pub fn compute() MetaInfo {
 
 pub fn writeJson(writer: anytype, info: *const MetaInfo) !void {
     try writer.print(
-        "{{\"compiler_version\":\"{s}\",\"policy_version\":\"{s}\",\"policy_hash\":\"{s}\",\"rule_count\":{d},\"categories\":{{\"verifier\":{d},\"policy\":{d},\"property\":{d}}},\"mode\":\"{s}\"}}\n",
+        "{{\"compiler_version\":\"{s}\",\"policy_version\":\"{s}\",\"policy_hash\":\"{s}\",\"module_registry_hash\":\"{s}\",\"rule_count\":{d},\"categories\":{{\"verifier\":{d},\"policy\":{d},\"property\":{d}}},\"mode\":\"{s}\"}}\n",
         .{
             info.compiler_version,
             info.policy_version,
             info.policy_hash,
+            info.module_registry_hash,
             info.rule_count,
             info.categories.verifier,
             info.categories.policy,
@@ -71,6 +76,7 @@ pub fn writeText(writer: anytype, info: *const MetaInfo) !void {
         \\  compiler: {s}
         \\  policy:   {s}
         \\  hash:     {s}
+        \\  modules:  {s}
         \\  rules:    {d} ({d} verifier, {d} policy, {d} property)
         \\  mode:     {s}
         \\
@@ -78,6 +84,7 @@ pub fn writeText(writer: anytype, info: *const MetaInfo) !void {
         info.compiler_version,
         info.policy_version,
         info.policy_hash,
+        info.module_registry_hash,
         info.rule_count,
         info.categories.verifier,
         info.categories.policy,
@@ -91,6 +98,7 @@ test "compute fills all fields" {
     try std.testing.expectEqualStrings("0.16.0", info.compiler_version);
     try std.testing.expectEqualStrings("2026.04.2", info.policy_version);
     try std.testing.expectEqualStrings("embedded", info.mode);
+    try std.testing.expectEqual(@as(usize, 64), info.module_registry_hash.len);
     try std.testing.expect(info.rule_count > 0);
     try std.testing.expectEqual(info.rule_count, info.categories.verifier + info.categories.policy + info.categories.property);
 }
@@ -108,6 +116,7 @@ test "writeJson produces parseable v1 envelope" {
 
     try std.testing.expect(std.mem.indexOf(u8, s, "\"compiler_version\":\"0.16.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"policy_version\":\"2026.04.2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"module_registry_hash\":\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"mode\":\"embedded\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"categories\":{") != null);
     try std.testing.expectEqual(@as(u8, '\n'), s[s.len - 1]);
@@ -127,5 +136,6 @@ test "writeText emits the human-readable report with pinned versions" {
     try std.testing.expect(std.mem.indexOf(u8, s, "zigts policy") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "compiler: 0.16.0") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "policy:   2026.04.2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "modules:  ") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "mode:     embedded") != null);
 }

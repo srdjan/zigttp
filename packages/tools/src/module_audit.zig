@@ -6,6 +6,7 @@ const writeJsonString = zigts.handler_contract.writeJsonString;
 
 const file_io = zigts.file_io;
 const builtin_modules = zigts.builtin_modules;
+const module_manifest = zigts.module_manifest;
 
 /// Write the v1 verify-modules envelope to `writer`. Single source of truth
 /// for the shape documented in docs/zigts-expert-contract.md.
@@ -204,6 +205,28 @@ pub fn verifyBuiltins(allocator: std.mem.Allocator, options: VerifyOptions) !Ver
     return result;
 }
 
+pub fn verifyManifestPath(allocator: std.mem.Allocator, path: []const u8) !VerifyResult {
+    var result = VerifyResult{};
+    errdefer result.deinit(allocator);
+
+    try result.checked_files.append(allocator, path);
+    const content = file_io.readFile(allocator, path, 256 * 1024) catch |err| {
+        const message = try std.fmt.allocPrint(allocator, "failed to read module manifest: {s}", .{@errorName(err)});
+        defer allocator.free(message);
+        try appendDiagnostic(allocator, &result.diagnostics, "ZVM010", "error", message, path, 1, 1, "ensure the manifest exists and is readable");
+        return result;
+    };
+    defer allocator.free(content);
+
+    var manifest = module_manifest.parse(allocator, content) catch |err| {
+        try appendManifestDiagnostic(allocator, &result.diagnostics, path, err);
+        return result;
+    };
+    defer manifest.deinit(allocator);
+
+    return result;
+}
+
 fn auditPath(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -314,11 +337,13 @@ fn auditModuleContentWithSpecPath(
         };
         defer allocator.free(spec_content);
 
-        const spec_specifier = parseSpecSpecifier(spec_content);
-        var spec_caps = try parseSpecCapabilities(allocator, spec_content);
-        defer spec_caps.deinit(allocator);
+        var manifest = module_manifest.parse(allocator, spec_content) catch |err| {
+            try appendManifestDiagnostic(allocator, diagnostics, path, err);
+            return;
+        };
+        defer manifest.deinit(allocator);
 
-        if (specifier == null or spec_specifier == null or !std.mem.eql(u8, specifier.?, spec_specifier.?)) {
+        if (specifier == null or !std.mem.eql(u8, specifier.?, manifest.specifier)) {
             try appendDiagnostic(
                 allocator,
                 diagnostics,
@@ -332,7 +357,7 @@ fn auditModuleContentWithSpecPath(
             );
         }
 
-        if (!sameStringSet(binding_caps.items, spec_caps.items)) {
+        if (!sameCapabilities(binding_caps.items, manifest.required_capabilities.items)) {
             try appendDiagnostic(
                 allocator,
                 diagnostics,
@@ -346,6 +371,27 @@ fn auditModuleContentWithSpecPath(
             );
         }
     }
+}
+
+fn appendManifestDiagnostic(
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayList(OwnedDiagnostic),
+    path: []const u8,
+    err: module_manifest.ManifestError,
+) !void {
+    const message = try std.fmt.allocPrint(allocator, "invalid module manifest: {s}", .{@errorName(err)});
+    defer allocator.free(message);
+    try appendDiagnostic(
+        allocator,
+        diagnostics,
+        "ZVM010",
+        "error",
+        message,
+        path,
+        1,
+        1,
+        "fix the manifest schema, enum values, duplicate exports, or required metadata",
+    );
 }
 
 fn checkForbiddenPatterns(
@@ -562,6 +608,22 @@ fn sameStringSet(a: []const []const u8, b: []const []const u8) bool {
     return true;
 }
 
+fn sameCapabilities(a: []const []const u8, b: []const zigts.module_binding.ModuleCapability) bool {
+    if (a.len != b.len) return false;
+    for (a) |item| {
+        const cap = std.meta.stringToEnum(zigts.module_binding.ModuleCapability, item) orelse return false;
+        var found = false;
+        for (b) |candidate| {
+            if (candidate == cap) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
 fn containsString(items: []const []const u8, needle: []const u8) bool {
     for (items) |item| {
         if (std.mem.eql(u8, item, needle)) return true;
@@ -674,8 +736,8 @@ test "verifyBuiltins reports the authoritative public module and spec set" {
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(builtin_modules.governanceEntries().len * 2, result.checked_files.items.len);
-    try std.testing.expect(containsString(result.checked_files.items, "packages/zigts/src/modules/env.zig"));
-    try std.testing.expect(containsString(result.checked_files.items, "packages/modules/module-specs/env.json"));
+    try std.testing.expect(containsString(result.checked_files.items, "packages/modules/src/platform/env.zig"));
+    try std.testing.expect(containsString(result.checked_files.items, "packages/modules/module-specs/platform/env.json"));
 }
 
 test "pathMatchesCanonical requires a path-separator boundary" {

@@ -1,1 +1,1 @@
-{"compiler_version":"0.16.0","policy_version":"2026.04.2","policy_hash":"422ab28140b13a9573992879733e01d952d74522e009765e1094649b7b856276","rule_count":27,"categories":{"verifier":13,"policy":8,"property":6},"mode":"embedded"}
+{"compiler_version":"0.16.0","policy_version":"2026.04.2","policy_hash":"422ab28140b13a9573992879733e01d952d74522e009765e1094649b7b856276","module_registry_hash":"d3095caeb22afc03f03c265cc4c68b5d693ee3f9585a73181de8a05c75628f93","rule_count":27,"categories":{"verifier":13,"policy":8,"property":6},"mode":"embedded"}
