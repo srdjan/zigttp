@@ -119,12 +119,58 @@ git checkout -- examples/autoloop/handler.ts
   error
 - `2`: flag parse error
 
+## Session persistence
+
+The autoloop CLI bootstraps the same session machinery as the
+interactive REPL: each run lands events to
+`$HOME/.zigttp/sessions/<cwd-hash>/<id>/events.jsonl`. The session id
+prints to stdout after the verdict line:
+
+```
+session: 0000019dc6219f77-6fe708132 (resume with `zigts expert --resume`)
+```
+
+`zigts expert --resume` from the same cwd opens the resulting session
+in the TUI - the witnesses tab populates with the witness diff each
+patch produced, and the user can replay or mint witnesses against the
+post-run handler state. Pass `--no-session` to skip persistence (the
+old in-memory behaviour).
+
+## Witness theater
+
+Each `verified_patch` event the autoloop emits carries the full
+witness body (request + IO stub script + property tag) for every
+counterexample the patch closed (`witnesses_defeated`) and any new
+counterexample it introduced (`witnesses_new`). Open the resulting
+session in the TUI to inspect them:
+
+```
+zigts expert --resume
+```
+
+The witnesses tab (press `w`, or Tab to cycle) shows the witnesses
+for the selected patch. Keystrokes:
+
+- `r` replays the selected witness against the post-patch handler.
+  The runtime executes the synthesised request under the witness's
+  IO stubs and the verdict (`PASS - violation reproduced` /
+  `FIXED - violation no longer reproduces` / `ERROR (...)`) renders
+  inline beneath the witness with the actual response excerpt.
+- `g` drives the autoloop scoped to that one witness's stable key.
+  Drive() declares `achieved` the moment the focused witness is
+  gone, even if other witnesses for the same property tag remain.
+- `m` mints the selected witness as a permanent regression test in
+  `<handler-dir>/witness-regressions.jsonl`. Future builds run the
+  case via `zig build -Dhandler=... -Dtest-file=witness-regressions.jsonl`.
+
+After each verified patch lands, the autoloop also auto-replays the
+witness diff against the post-patch handler and writes a single
+`auto-replay <file>: defeated still-defeated=N regressed=M; new
+reproduces=K unreached=L; errors=E; truncated=N` system_note. The
+note is durable - it travels with the session log.
+
 ## What it does not do yet
 
-- No session persistence of the autoloop run itself. `--no-session` is
-  implicit; the chained `verified_patch` and `autoloop_outcome` events
-  are emitted to the events log when an `events_path` is configured,
-  but the autoloop CLI does not open one today.
 - One plan per turn. The orchestrator stays compatible with the
   `apply_edit must be the only tool call` invariant elsewhere in the
   loop; batching is possible but would change the veto ordering.
@@ -132,6 +178,9 @@ git checkout -- examples/autoloop/handler.ts
   first plan shifts line numbers and invalidates the second plan's
   target. Fixed when repair-plan ordering learns line-delta tracking,
   or when plans emit byte offsets instead of line/column targets.
+- Sync-blocking dispatch. The TUI freezes for the duration of `g`
+  (autoloop) and `r` (replay). A worker-thread split is the next
+  ergonomic upgrade.
 
 ## Regression guard
 
