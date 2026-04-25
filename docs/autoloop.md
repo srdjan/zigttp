@@ -47,20 +47,15 @@ hash when one exists.
 ## Supported goals
 
 The v1 surface checks the flow-oriented goals the counterexample solver
-models:
+models. Other handler properties are available through `zigts_check` and
+contract proof output, but are not valid autoloop goals until the witness
+and repair tools support them directly.
 
 - `no_secret_leakage`
 - `no_credential_leakage`
 - `input_validated`
 - `pii_contained`
 - `injection_safe`
-
-The full property lattice (17 booleans on `HandlerProperties`) is
-validated at parse time — you can also pass `retry_safe`, `pure`,
-`idempotent`, `state_isolated`, `fault_covered`, and the rest. These
-are evaluated but have no counterexample witness today, so a run
-whose goals include them relies on the handler contract reporting
-`true` rather than on witness-driven repair.
 
 ## Smoke example
 

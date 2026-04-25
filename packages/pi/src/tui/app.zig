@@ -631,9 +631,11 @@ fn approveSelectedPatch(runtime: *TuiRuntime) !void {
             .{ hex[0..12], patch.file },
         );
     } else try std.fmt.allocPrint(allocator, "approved {s}", .{patch.file});
-    errdefer allocator.free(note);
+    var note_owned_by_transcript = false;
+    errdefer if (!note_owned_by_transcript) allocator.free(note);
 
     try runtime.session.transcript.entries.append(allocator, .{ .system_note = note });
+    note_owned_by_transcript = true;
 
     if (runtime.session.events_path) |path| {
         try session_events.appendEvent(allocator, path, .{ .system_note = note });

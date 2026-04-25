@@ -36,6 +36,7 @@ const pi_repair_plan_tool = @import("tools/pi_repair_plan.zig");
 const pi_apply_repair_plan_tool = @import("tools/pi_apply_repair_plan.zig");
 
 const Registry = registry_mod.Registry;
+const counterexample = @import("zigts").counterexample;
 
 pub fn buildMinimalRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
@@ -138,13 +139,13 @@ fn runAutoloop(
     }
     if (goals.len == 0) exitWithMessage("error: --goal list is empty\n", 2);
     for (goals) |goal| {
-        if (!session_state.isKnownProperty(goal)) {
+        if (!isAutoloopGoalSupported(goal)) {
             var stderr: [256]u8 = undefined;
             const line = std.fmt.bufPrint(
                 &stderr,
-                "error: unknown property '{s}' in --goal; try one of: retry_safe, pure, no_secret_leakage, no_credential_leakage, input_validated, pii_contained, injection_safe, idempotent, state_isolated, fault_covered, result_safe, optional_safe, deterministic, stateless, read_only, has_egress\n",
-                .{goal},
-            ) catch "error: unknown property in --goal\n";
+                "error: unsupported autoloop goal '{s}' in --goal; try one of: {s}\n",
+                .{ goal, supported_goal_list },
+            ) catch "error: unsupported autoloop goal in --goal\n";
             exitWithMessage(line, 2);
         }
     }
@@ -176,6 +177,20 @@ fn runAutoloop(
     try printAutoloopOutcome(allocator, outcome, &transcript, handler, goal_slices);
     if (outcome.verdict != .achieved) std.process.exit(1);
 }
+
+fn isAutoloopGoalSupported(goal: []const u8) bool {
+    return std.meta.stringToEnum(counterexample.PropertyTag, goal) != null;
+}
+
+/// Comma-separated PropertyTag names, derived from the enum at comptime so
+/// the user-facing error message stays in sync if a tag is added or removed.
+const supported_goal_list = blk: {
+    var out: []const u8 = "";
+    for (@typeInfo(counterexample.PropertyTag).@"enum".fields, 0..) |field, i| {
+        out = if (i == 0) field.name else out ++ ", " ++ field.name;
+    }
+    break :blk out;
+};
 
 fn printAutoloopOutcome(
     allocator: std.mem.Allocator,
@@ -735,23 +750,22 @@ test "buildRegistry + dispatchLine end-to-end against every tool" {
     try expectOkContains(&search_outcome, testing.allocator, "\"code\":");
 }
 
-
 test "parseExpertFlags: --goal sets goals csv" {
-    const argv = [_][]const u8{ "zigts", "expert", "--handler", "handler.ts", "--goal", "retry_safe,pure" };
+    const argv = [_][]const u8{ "zigts", "expert", "--handler", "handler.ts", "--goal", "no_secret_leakage,injection_safe" };
     const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqualStrings("retry_safe,pure", flags.goals.?);
+    try testing.expectEqualStrings("no_secret_leakage,injection_safe", flags.goals.?);
     try testing.expectEqualStrings("handler.ts", flags.handler.?);
 }
 
 test "parseExpertFlags: --goal= and --handler= attached forms" {
-    const argv = [_][]const u8{ "zigts", "expert", "--handler=h.ts", "--goal=retry_safe" };
+    const argv = [_][]const u8{ "zigts", "expert", "--handler=h.ts", "--goal=no_secret_leakage" };
     const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqualStrings("retry_safe", flags.goals.?);
+    try testing.expectEqualStrings("no_secret_leakage", flags.goals.?);
     try testing.expectEqualStrings("h.ts", flags.handler.?);
 }
 
 test "parseExpertFlags: --max-iters parses a positive integer" {
-    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "x", "--max-iters", "12" };
+    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--max-iters", "12" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(@as(u32, 12), flags.max_iters.?);
 }
@@ -767,18 +781,30 @@ test "parseExpertFlags: --max-iters rejects non-numeric" {
 }
 
 test "parseExpertFlags: --goal without --handler is rejected" {
-    const argv = [_][]const u8{ "zigts", "expert", "--goal", "retry_safe" };
+    const argv = [_][]const u8{ "zigts", "expert", "--goal", "no_secret_leakage" };
     try testing.expectError(error.GoalRequiresHandler, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --goal conflicts with --print" {
-    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "x", "--print", "hi" };
+    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--print", "hi" };
     try testing.expectError(error.GoalConflictsWithPrintOrRpc, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --goal conflicts with --mode rpc" {
-    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "x", "--mode", "rpc" };
+    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--mode", "rpc" };
     try testing.expectError(error.GoalConflictsWithPrintOrRpc, parseExpertFlags(argv[0..]));
+}
+
+test "isAutoloopGoalSupported accepts only counterexample property tags" {
+    try testing.expect(isAutoloopGoalSupported("no_secret_leakage"));
+    try testing.expect(isAutoloopGoalSupported("no_credential_leakage"));
+    try testing.expect(isAutoloopGoalSupported("input_validated"));
+    try testing.expect(isAutoloopGoalSupported("pii_contained"));
+    try testing.expect(isAutoloopGoalSupported("injection_safe"));
+
+    try testing.expect(!isAutoloopGoalSupported("retry_safe"));
+    try testing.expect(!isAutoloopGoalSupported("pure"));
+    try testing.expect(!isAutoloopGoalSupported("totally_not_a_property"));
 }
 
 test "splitCsv trims whitespace and drops empty entries" {
