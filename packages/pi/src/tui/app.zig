@@ -13,6 +13,7 @@ const app = @import("../app.zig");
 const transcript_mod = @import("../transcript.zig");
 const ui_payload_mod = @import("../ui_payload.zig");
 const session_events = @import("../session/events.zig");
+const session_state = @import("../session_state.zig");
 const registry_tool = @import("../registry/tool.zig");
 
 const LineEditor = line_editor.LineEditor;
@@ -611,17 +612,7 @@ fn handlePaneEvent(
 fn approveSelectedPatch(runtime: *TuiRuntime) !void {
     const allocator = runtime.allocator;
     const transcript_index = runtime.state.selectedLedgerIndex() orelse return;
-    const entry = runtime.session.transcript.at(transcript_index);
-    const patch = switch (entry.*) {
-        .verified_patch => |message| blk: {
-            const payload = message.ui_payload orelse return;
-            break :blk switch (payload) {
-                .verified_patch => |p| p,
-                else => return,
-            };
-        },
-        else => return,
-    };
+    const patch = session_state.patchPayload(runtime.session.transcript.at(transcript_index)) orelse return;
 
     const note = if (patch.patch_hash) |hash| blk: {
         const hex = std.fmt.bytesToHex(hash, .lower);
@@ -644,19 +635,8 @@ fn approveSelectedPatch(runtime: *TuiRuntime) !void {
 
 fn approvalGateClear(state: *const AppState, session: *const agent.AgentSession) bool {
     const transcript_index = state.selectedLedgerIndex() orelse return false;
-    const entry = session.transcript.at(transcript_index);
-    switch (entry.*) {
-        .verified_patch => |message| {
-            const payload = message.ui_payload orelse return false;
-            switch (payload) {
-                .verified_patch => |patch| {
-                    return patch.post_apply_ok and patch.witnesses_new.len == 0;
-                },
-                else => return false,
-            }
-        },
-        else => return false,
-    }
+    const patch = session_state.patchPayload(session.transcript.at(transcript_index)) orelse return false;
+    return patch.post_apply_ok and patch.witnesses_new.len == 0;
 }
 
 fn handleSubmit(
