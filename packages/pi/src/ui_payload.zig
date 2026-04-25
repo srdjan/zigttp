@@ -451,6 +451,155 @@ pub const SystemProofSummary = struct {
     }
 };
 
+/// One virtual-module call in a witness's IO stub script. Mirrors
+/// `zigts.counterexample.IoStubEntry` but holds owned strings so the body can
+/// outlive the analyzer that produced it.
+pub const WitnessStub = struct {
+    seq: u32,
+    module: []u8,
+    func: []u8,
+    result_json: []u8,
+
+    pub fn clone(self: WitnessStub, allocator: std.mem.Allocator) !WitnessStub {
+        const module_copy = try allocator.dupe(u8, self.module);
+        errdefer allocator.free(module_copy);
+        const func_copy = try allocator.dupe(u8, self.func);
+        errdefer allocator.free(func_copy);
+        const result_copy = try allocator.dupe(u8, self.result_json);
+        return .{
+            .seq = self.seq,
+            .module = module_copy,
+            .func = func_copy,
+            .result_json = result_copy,
+        };
+    }
+
+    pub fn deinit(self: *WitnessStub, allocator: std.mem.Allocator) void {
+        allocator.free(self.module);
+        allocator.free(self.func);
+        allocator.free(self.result_json);
+        self.* = .{ .seq = 0, .module = &.{}, .func = &.{}, .result_json = &.{} };
+    }
+};
+
+/// Concrete counterexample for a property violation: the request that drives
+/// the handler down the violating path, the IO stub script that pins the
+/// virtual-module return values, and the source span endpoints. Replayable
+/// via `zigts.counterexample.writeJsonl` against the runtime's `--test`
+/// path. The stable `key` is the same digest `witness_key.forWitness`
+/// produces; consumers compare witness identity by byte equality on `key`.
+pub const WitnessBody = struct {
+    key: []u8,
+    property: []u8,
+    summary: []u8,
+    origin_line: u32,
+    origin_column: u32,
+    sink_line: u32,
+    sink_column: u32,
+    request_method: []u8,
+    request_url: []u8,
+    request_has_auth: bool,
+    request_body: ?[]u8,
+    io_stubs: []WitnessStub,
+
+    pub fn clone(self: WitnessBody, allocator: std.mem.Allocator) !WitnessBody {
+        const key_copy = try allocator.dupe(u8, self.key);
+        errdefer allocator.free(key_copy);
+        const property_copy = try allocator.dupe(u8, self.property);
+        errdefer allocator.free(property_copy);
+        const summary_copy = try allocator.dupe(u8, self.summary);
+        errdefer allocator.free(summary_copy);
+        const method_copy = try allocator.dupe(u8, self.request_method);
+        errdefer allocator.free(method_copy);
+        const url_copy = try allocator.dupe(u8, self.request_url);
+        errdefer allocator.free(url_copy);
+        const body_copy: ?[]u8 = if (self.request_body) |b| try allocator.dupe(u8, b) else null;
+        errdefer if (body_copy) |b| allocator.free(b);
+
+        const stubs_copy = try allocator.alloc(WitnessStub, self.io_stubs.len);
+        errdefer allocator.free(stubs_copy);
+        for (stubs_copy) |*stub| stub.* = undefined;
+        var i: usize = 0;
+        errdefer {
+            while (i > 0) {
+                i -= 1;
+                stubs_copy[i].deinit(allocator);
+            }
+        }
+        while (i < self.io_stubs.len) : (i += 1) {
+            stubs_copy[i] = try self.io_stubs[i].clone(allocator);
+        }
+
+        return .{
+            .key = key_copy,
+            .property = property_copy,
+            .summary = summary_copy,
+            .origin_line = self.origin_line,
+            .origin_column = self.origin_column,
+            .sink_line = self.sink_line,
+            .sink_column = self.sink_column,
+            .request_method = method_copy,
+            .request_url = url_copy,
+            .request_has_auth = self.request_has_auth,
+            .request_body = body_copy,
+            .io_stubs = stubs_copy,
+        };
+    }
+
+    pub fn deinit(self: *WitnessBody, allocator: std.mem.Allocator) void {
+        allocator.free(self.key);
+        allocator.free(self.property);
+        allocator.free(self.summary);
+        allocator.free(self.request_method);
+        allocator.free(self.request_url);
+        if (self.request_body) |b| allocator.free(b);
+        for (self.io_stubs) |*stub| stub.deinit(allocator);
+        allocator.free(self.io_stubs);
+        self.* = .{
+            .key = &.{},
+            .property = &.{},
+            .summary = &.{},
+            .origin_line = 0,
+            .origin_column = 0,
+            .sink_line = 0,
+            .sink_column = 0,
+            .request_method = &.{},
+            .request_url = &.{},
+            .request_has_auth = false,
+            .request_body = null,
+            .io_stubs = &.{},
+        };
+    }
+};
+
+pub fn cloneWitnessBodySlice(
+    allocator: std.mem.Allocator,
+    items: []const WitnessBody,
+) ![]WitnessBody {
+    const copy = try allocator.alloc(WitnessBody, items.len);
+    errdefer allocator.free(copy);
+    for (copy) |*body| body.* = undefined;
+    var i: usize = 0;
+    errdefer {
+        while (i > 0) {
+            i -= 1;
+            copy[i].deinit(allocator);
+        }
+    }
+    while (i < items.len) : (i += 1) {
+        copy[i] = try items[i].clone(allocator);
+    }
+    return copy;
+}
+
+pub fn freeWitnessBodySlice(
+    allocator: std.mem.Allocator,
+    items: []WitnessBody,
+) void {
+    for (items) |*body| body.deinit(allocator);
+    allocator.free(items);
+}
+
 pub const VerifiedPatchPayload = struct {
     file: []u8,
     policy_hash: []u8,
@@ -471,8 +620,8 @@ pub const VerifiedPatchPayload = struct {
     patch_hash: ?[32]u8 = null,
     parent_hash: ?[32]u8 = null,
     goal_context: [][]u8 = &.{},
-    witnesses_defeated: [][]u8 = &.{},
-    witnesses_new: [][]u8 = &.{},
+    witnesses_defeated: []WitnessBody = &.{},
+    witnesses_new: []WitnessBody = &.{},
     post_apply_ok: bool,
     post_apply_summary: ?[]u8,
 
@@ -521,10 +670,10 @@ pub const VerifiedPatchPayload = struct {
         errdefer freeStringSlice(allocator, closed_witness_ids_copy);
         const goal_context_copy = try cloneStringSlice(allocator, self.goal_context);
         errdefer freeStringSlice(allocator, goal_context_copy);
-        const witnesses_defeated_copy = try cloneStringSlice(allocator, self.witnesses_defeated);
-        errdefer freeStringSlice(allocator, witnesses_defeated_copy);
-        const witnesses_new_copy = try cloneStringSlice(allocator, self.witnesses_new);
-        errdefer freeStringSlice(allocator, witnesses_new_copy);
+        const witnesses_defeated_copy = try cloneWitnessBodySlice(allocator, self.witnesses_defeated);
+        errdefer freeWitnessBodySlice(allocator, witnesses_defeated_copy);
+        const witnesses_new_copy = try cloneWitnessBodySlice(allocator, self.witnesses_new);
+        errdefer freeWitnessBodySlice(allocator, witnesses_new_copy);
         const post_apply_summary_copy: ?[]u8 = if (self.post_apply_summary) |s|
             try allocator.dupe(u8, s)
         else
@@ -572,8 +721,8 @@ pub const VerifiedPatchPayload = struct {
         freeStringSlice(allocator, self.repair_plan_ids);
         freeStringSlice(allocator, self.closed_witness_ids);
         freeStringSlice(allocator, self.goal_context);
-        freeStringSlice(allocator, self.witnesses_defeated);
-        freeStringSlice(allocator, self.witnesses_new);
+        freeWitnessBodySlice(allocator, self.witnesses_defeated);
+        freeWitnessBodySlice(allocator, self.witnesses_new);
         if (self.post_apply_summary) |s| allocator.free(s);
         self.* = .{
             .file = &.{},
@@ -1002,8 +1151,8 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
                 try writer.writeByte('"');
             }
             try writeOptionalStringArray(writer, "goal_context", patch.goal_context);
-            try writeOptionalStringArray(writer, "witnesses_defeated", patch.witnesses_defeated);
-            try writeOptionalStringArray(writer, "witnesses_new", patch.witnesses_new);
+            try writeOptionalWitnessBodyArray(writer, "witnesses_defeated", patch.witnesses_defeated);
+            try writeOptionalWitnessBodyArray(writer, "witnesses_new", patch.witnesses_new);
             try writer.writeAll(",\"post_apply_ok\":");
             try writer.writeAll(if (patch.post_apply_ok) "true" else "false");
             if (patch.post_apply_summary) |s| {
@@ -1203,10 +1352,10 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         errdefer freeStringSlice(allocator, closed_witness_ids);
         const goal_context = try parseStringArrayField(allocator, obj.get("goal_context"));
         errdefer freeStringSlice(allocator, goal_context);
-        const witnesses_defeated = try parseStringArrayField(allocator, obj.get("witnesses_defeated"));
-        errdefer freeStringSlice(allocator, witnesses_defeated);
-        const witnesses_new = try parseStringArrayField(allocator, obj.get("witnesses_new"));
-        errdefer freeStringSlice(allocator, witnesses_new);
+        const witnesses_defeated = try parseWitnessBodyArray(allocator, obj.get("witnesses_defeated"));
+        errdefer freeWitnessBodySlice(allocator, witnesses_defeated);
+        const witnesses_new = try parseWitnessBodyArray(allocator, obj.get("witnesses_new"));
+        errdefer freeWitnessBodySlice(allocator, witnesses_new);
         const patch_hash_opt = try parseHash32(obj.get("patch_hash"));
         const parent_hash_opt = try parseHash32(obj.get("parent_hash"));
 
@@ -1303,6 +1452,54 @@ fn writeOptionalStringArray(
     for (items, 0..) |item, i| {
         if (i > 0) try writer.writeByte(',');
         try json_writer.writeString(writer, item);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeOptionalWitnessBodyArray(
+    writer: *std.Io.Writer,
+    field_name: []const u8,
+    items: []const WitnessBody,
+) !void {
+    if (items.len == 0) return;
+    try writer.writeAll(",\"");
+    try writer.writeAll(field_name);
+    try writer.writeAll("\":[");
+    for (items, 0..) |body, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"key\":");
+        try json_writer.writeString(writer, body.key);
+        try writer.writeAll(",\"property\":");
+        try json_writer.writeString(writer, body.property);
+        try writer.writeAll(",\"summary\":");
+        try json_writer.writeString(writer, body.summary);
+        try writer.print(
+            ",\"origin\":{{\"line\":{d},\"column\":{d}}},\"sink\":{{\"line\":{d},\"column\":{d}}},\"request\":{{\"method\":",
+            .{ body.origin_line, body.origin_column, body.sink_line, body.sink_column },
+        );
+        try json_writer.writeString(writer, body.request_method);
+        try writer.writeAll(",\"url\":");
+        try json_writer.writeString(writer, body.request_url);
+        try writer.writeAll(",\"has_auth_header\":");
+        try writer.writeAll(if (body.request_has_auth) "true" else "false");
+        if (body.request_body) |b| {
+            try writer.writeAll(",\"body\":");
+            try json_writer.writeString(writer, b);
+        } else {
+            try writer.writeAll(",\"body\":null");
+        }
+        try writer.writeAll("},\"io_stubs\":[");
+        for (body.io_stubs, 0..) |stub, si| {
+            if (si > 0) try writer.writeByte(',');
+            try writer.print("{{\"seq\":{d},\"module\":", .{stub.seq});
+            try json_writer.writeString(writer, stub.module);
+            try writer.writeAll(",\"func\":");
+            try json_writer.writeString(writer, stub.func);
+            try writer.writeAll(",\"result_json\":");
+            try json_writer.writeString(writer, stub.result_json);
+            try writer.writeByte('}');
+        }
+        try writer.writeAll("]}");
     }
     try writer.writeByte(']');
 }
@@ -1489,12 +1686,112 @@ fn parseStringArrayField(allocator: std.mem.Allocator, value_opt: ?std.json.Valu
     return items;
 }
 
-fn getString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+fn parseWitnessBodyArray(
+    allocator: std.mem.Allocator,
+    value_opt: ?std.json.Value,
+) ![]WitnessBody {
+    const value = value_opt orelse return allocator.alloc(WitnessBody, 0);
+    if (value == .null) return allocator.alloc(WitnessBody, 0);
+    if (value != .array) return error.InvalidUiPayload;
+
+    const items = try allocator.alloc(WitnessBody, value.array.items.len);
+    errdefer allocator.free(items);
+    for (items) |*body| body.* = undefined;
+    var i: usize = 0;
+    errdefer {
+        while (i > 0) {
+            i -= 1;
+            items[i].deinit(allocator);
+        }
+        allocator.free(items);
+    }
+    while (i < value.array.items.len) : (i += 1) {
+        items[i] = try parseWitnessBody(allocator, value.array.items[i]);
+    }
+    return items;
+}
+
+fn parseWitnessBody(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !WitnessBody {
+    if (value != .object) return error.InvalidUiPayload;
+    const obj = value.object;
+
+    const origin_obj = obj.get("origin") orelse return error.InvalidUiPayload;
+    if (origin_obj != .object) return error.InvalidUiPayload;
+    const sink_obj = obj.get("sink") orelse return error.InvalidUiPayload;
+    if (sink_obj != .object) return error.InvalidUiPayload;
+    const request_obj = obj.get("request") orelse return error.InvalidUiPayload;
+    if (request_obj != .object) return error.InvalidUiPayload;
+
+    const key_copy = try allocator.dupe(u8, getString(obj, "key") orelse return error.InvalidUiPayload);
+    errdefer allocator.free(key_copy);
+    const property_copy = try allocator.dupe(u8, getString(obj, "property") orelse return error.InvalidUiPayload);
+    errdefer allocator.free(property_copy);
+    const summary_copy = try allocator.dupe(u8, getString(obj, "summary") orelse "");
+    errdefer allocator.free(summary_copy);
+    const method_copy = try allocator.dupe(u8, getString(request_obj.object, "method") orelse return error.InvalidUiPayload);
+    errdefer allocator.free(method_copy);
+    const url_copy = try allocator.dupe(u8, getString(request_obj.object, "url") orelse return error.InvalidUiPayload);
+    errdefer allocator.free(url_copy);
+    const has_auth = getBoolOrDefault(request_obj.object, "has_auth_header", false);
+    const body_text = try getOptionalString(request_obj.object, "body");
+    const body_copy: ?[]u8 = if (body_text) |t| try allocator.dupe(u8, t) else null;
+    errdefer if (body_copy) |b| allocator.free(b);
+
+    const stubs_value = obj.get("io_stubs") orelse return error.InvalidUiPayload;
+    if (stubs_value != .array) return error.InvalidUiPayload;
+    const stubs = try allocator.alloc(WitnessStub, stubs_value.array.items.len);
+    errdefer allocator.free(stubs);
+    for (stubs) |*stub| stub.* = undefined;
+    var si: usize = 0;
+    errdefer {
+        while (si > 0) {
+            si -= 1;
+            stubs[si].deinit(allocator);
+        }
+    }
+    while (si < stubs_value.array.items.len) : (si += 1) {
+        const stub_val = stubs_value.array.items[si];
+        if (stub_val != .object) return error.InvalidUiPayload;
+        const stub_obj = stub_val.object;
+        const seq_value = getUnsigned(stub_obj, "seq") orelse return error.InvalidUiPayload;
+        const module_copy = try allocator.dupe(u8, getString(stub_obj, "module") orelse return error.InvalidUiPayload);
+        errdefer allocator.free(module_copy);
+        const func_copy = try allocator.dupe(u8, getString(stub_obj, "func") orelse return error.InvalidUiPayload);
+        errdefer allocator.free(func_copy);
+        const result_copy = try allocator.dupe(u8, getString(stub_obj, "result_json") orelse return error.InvalidUiPayload);
+        stubs[si] = .{
+            .seq = @intCast(seq_value),
+            .module = module_copy,
+            .func = func_copy,
+            .result_json = result_copy,
+        };
+    }
+
+    return .{
+        .key = key_copy,
+        .property = property_copy,
+        .summary = summary_copy,
+        .origin_line = @intCast(getUnsigned(origin_obj.object, "line") orelse return error.InvalidUiPayload),
+        .origin_column = @intCast(getUnsigned(origin_obj.object, "column") orelse return error.InvalidUiPayload),
+        .sink_line = @intCast(getUnsigned(sink_obj.object, "line") orelse return error.InvalidUiPayload),
+        .sink_column = @intCast(getUnsigned(sink_obj.object, "column") orelse return error.InvalidUiPayload),
+        .request_method = method_copy,
+        .request_url = url_copy,
+        .request_has_auth = has_auth,
+        .request_body = body_copy,
+        .io_stubs = stubs,
+    };
+}
+
+pub fn getString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const value = obj.get(key) orelse return null;
     return if (value == .string) value.string else null;
 }
 
-fn getOptionalString(obj: std.json.ObjectMap, key: []const u8) !?[]const u8 {
+pub fn getOptionalString(obj: std.json.ObjectMap, key: []const u8) !?[]const u8 {
     const value = obj.get(key) orelse return null;
     return switch (value) {
         .null => null,
@@ -1503,21 +1800,21 @@ fn getOptionalString(obj: std.json.ObjectMap, key: []const u8) !?[]const u8 {
     };
 }
 
-fn getBool(obj: std.json.ObjectMap, key: []const u8) ?bool {
+pub fn getBool(obj: std.json.ObjectMap, key: []const u8) ?bool {
     const value = obj.get(key) orelse return null;
     return if (value == .bool) value.bool else null;
 }
 
-fn getBoolOrDefault(obj: std.json.ObjectMap, key: []const u8, default: bool) bool {
+pub fn getBoolOrDefault(obj: std.json.ObjectMap, key: []const u8, default: bool) bool {
     return getBool(obj, key) orelse default;
 }
 
-fn getInteger(obj: std.json.ObjectMap, key: []const u8) ?i64 {
+pub fn getInteger(obj: std.json.ObjectMap, key: []const u8) ?i64 {
     const value = obj.get(key) orelse return null;
     return if (value == .integer) value.integer else null;
 }
 
-fn getUnsigned(obj: std.json.ObjectMap, key: []const u8) ?usize {
+pub fn getUnsigned(obj: std.json.ObjectMap, key: []const u8) ?usize {
     const value = obj.get(key) orelse return null;
     if (value != .integer or value.integer < 0) return null;
     return std.math.cast(usize, value.integer);
@@ -1792,14 +2089,52 @@ test "verified_patch payload round-trips with rich proof metadata" {
             break :blk goals;
         },
         .witnesses_defeated = blk: {
-            const keys = try testing.allocator.alloc([]u8, 1);
-            keys[0] = try testing.allocator.dupe(u8, "d" ** 64);
-            break :blk keys;
+            const bodies = try testing.allocator.alloc(WitnessBody, 1);
+            bodies[0] = .{
+                .key = try testing.allocator.dupe(u8, "d" ** 64),
+                .property = try testing.allocator.dupe(u8, "no_secret_leakage"),
+                .summary = try testing.allocator.dupe(u8, "DB_KEY in response body"),
+                .origin_line = 5,
+                .origin_column = 9,
+                .sink_line = 7,
+                .sink_column = 12,
+                .request_method = try testing.allocator.dupe(u8, "GET"),
+                .request_url = try testing.allocator.dupe(u8, "/"),
+                .request_has_auth = false,
+                .request_body = null,
+                .io_stubs = blk_stubs: {
+                    const stubs = try testing.allocator.alloc(WitnessStub, 1);
+                    stubs[0] = .{
+                        .seq = 0,
+                        .module = try testing.allocator.dupe(u8, "env"),
+                        .func = try testing.allocator.dupe(u8, "env"),
+                        .result_json = try testing.allocator.dupe(u8, "\"secret-sentinel\""),
+                    };
+                    break :blk_stubs stubs;
+                },
+            };
+            break :blk bodies;
         },
         .witnesses_new = blk: {
-            const keys = try testing.allocator.alloc([]u8, 1);
-            keys[0] = try testing.allocator.dupe(u8, "e" ** 64);
-            break :blk keys;
+            const bodies = try testing.allocator.alloc(WitnessBody, 1);
+            bodies[0] = .{
+                .key = try testing.allocator.dupe(u8, "e" ** 64),
+                .property = try testing.allocator.dupe(u8, "injection_safe"),
+                .summary = try testing.allocator.dupe(u8, "unvalidated body reaches sql"),
+                .origin_line = 11,
+                .origin_column = 3,
+                .sink_line = 14,
+                .sink_column = 7,
+                .request_method = try testing.allocator.dupe(u8, "POST"),
+                .request_url = try testing.allocator.dupe(u8, "/api/items"),
+                .request_has_auth = true,
+                .request_body = try testing.allocator.dupe(u8, "{\"name\":\"x\"}"),
+                .io_stubs = blk_stubs: {
+                    const stubs = try testing.allocator.alloc(WitnessStub, 0);
+                    break :blk_stubs stubs;
+                },
+            };
+            break :blk bodies;
         },
         .post_apply_ok = true,
         .post_apply_summary = try testing.allocator.dupe(u8, "post-apply verification passed"),
@@ -1850,9 +2185,26 @@ test "verified_patch payload round-trips with rich proof metadata" {
             try testing.expectEqualStrings("retry_safe", patch.goal_context[0]);
             try testing.expectEqualStrings("no_secret_leakage", patch.goal_context[1]);
             try testing.expectEqual(@as(usize, 1), patch.witnesses_defeated.len);
-            try testing.expectEqualStrings("d" ** 64, patch.witnesses_defeated[0]);
+            try testing.expectEqualStrings("d" ** 64, patch.witnesses_defeated[0].key);
+            try testing.expectEqualStrings("no_secret_leakage", patch.witnesses_defeated[0].property);
+            try testing.expectEqualStrings("DB_KEY in response body", patch.witnesses_defeated[0].summary);
+            try testing.expectEqual(@as(u32, 5), patch.witnesses_defeated[0].origin_line);
+            try testing.expectEqualStrings("GET", patch.witnesses_defeated[0].request_method);
+            try testing.expect(!patch.witnesses_defeated[0].request_has_auth);
+            try testing.expect(patch.witnesses_defeated[0].request_body == null);
+            try testing.expectEqual(@as(usize, 1), patch.witnesses_defeated[0].io_stubs.len);
+            try testing.expectEqualStrings("env", patch.witnesses_defeated[0].io_stubs[0].module);
+            try testing.expectEqualStrings("\"secret-sentinel\"", patch.witnesses_defeated[0].io_stubs[0].result_json);
+
             try testing.expectEqual(@as(usize, 1), patch.witnesses_new.len);
-            try testing.expectEqualStrings("e" ** 64, patch.witnesses_new[0]);
+            try testing.expectEqualStrings("e" ** 64, patch.witnesses_new[0].key);
+            try testing.expectEqualStrings("injection_safe", patch.witnesses_new[0].property);
+            try testing.expectEqualStrings("POST", patch.witnesses_new[0].request_method);
+            try testing.expectEqualStrings("/api/items", patch.witnesses_new[0].request_url);
+            try testing.expect(patch.witnesses_new[0].request_has_auth);
+            try testing.expect(patch.witnesses_new[0].request_body != null);
+            try testing.expectEqualStrings("{\"name\":\"x\"}", patch.witnesses_new[0].request_body.?);
+            try testing.expectEqual(@as(usize, 0), patch.witnesses_new[0].io_stubs.len);
         },
         else => return error.TestFailed,
     }

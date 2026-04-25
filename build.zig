@@ -319,6 +319,24 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(runtime_exe);
 
+    // Witness replay shim - lets pi_app reach the runtime's replay path
+    // without taking a build dependency on the runtime stack. Both
+    // `zigts` and `zigttp` binaries register the same implementation
+    // before launching the agent loop.
+    const runtime_witness_replay_mod = b.createModule(.{
+        .root_source_file = runtime_dep.path("src/witness_replay_lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    runtime_witness_replay_mod.addImport("zigts", zigts_mod);
+    runtime_witness_replay_mod.addImport("pi_app", pi_app_mod);
+    runtime_witness_replay_mod.addAnonymousImport("embedded_handler", .{
+        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
+        .imports = &.{
+            .{ .name = "zigts", .module = zigts_mod },
+        },
+    });
+
     // Developer CLI — the primary user-facing `zigttp` binary. Contains init,
     // dev, serve, check, compile, prove, mock, link, expert, deploy, login,
     // logout, review, grants, revoke-grant, doctor. Links pi_app and the full
@@ -366,6 +384,7 @@ pub fn build(b: *std.Build) void {
     });
     zigts_exe.root_module.addImport("zigts_cli", zigts_cli_mod);
     zigts_exe.root_module.addImport("pi_app", pi_app_mod);
+    zigts_exe.root_module.addImport("runtime_witness_replay", runtime_witness_replay_mod);
     b.installArtifact(zigts_exe);
 
     const run_module_governance = b.addRunArtifact(zigts_exe);

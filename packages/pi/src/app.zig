@@ -36,6 +36,12 @@ const pi_goal_check_tool = @import("tools/pi_goal_check.zig");
 const pi_repair_plan_tool = @import("tools/pi_repair_plan.zig");
 const pi_apply_repair_plan_tool = @import("tools/pi_apply_repair_plan.zig");
 
+/// Re-exported so the runtime-side witness replay implementation can
+/// share the canonical `Verdict` type and function pointer signature.
+/// The host binary registers its replay function via
+/// `pi_app.witness_replay.setReplayFn` at startup.
+pub const witness_replay = @import("witness_replay.zig");
+
 const Registry = registry_mod.Registry;
 
 pub fn buildMinimalRegistry(allocator: std.mem.Allocator) !Registry {

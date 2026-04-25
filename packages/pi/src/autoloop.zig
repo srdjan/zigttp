@@ -24,6 +24,7 @@ const zigts = @import("zigts");
 const registry_mod = @import("registry/registry.zig");
 const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
+const witness_replay = @import("witness_replay.zig");
 const proof_enrichment = @import("proof_enrichment.zig");
 const session_state = @import("session_state.zig");
 const session_events = @import("session/events.zig");
@@ -83,7 +84,9 @@ pub fn drive(
 
         const check = try invokePathGoalsTool(allocator, registry, "pi_goal_check", options.file, options.goals);
         defer allocator.free(check);
-        if ((try parseGoalCheck(allocator, check)).ok) {
+        const check_result = try parseGoalCheckResult(allocator, check);
+        defer ui_payload.freeWitnessBodySlice(allocator, check_result.witnesses);
+        if (check_result.ok) {
             return finalize(allocator, transcript, options, .achieved, iter);
         }
 
@@ -102,6 +105,7 @@ pub fn drive(
             transcript,
             options,
             plans.items,
+            check_result.witnesses,
         );
 
         if (apply_outcome.regression) {
@@ -179,7 +183,12 @@ fn finalize(
     };
 }
 
-const GoalCheckResult = struct { ok: bool };
+const GoalCheckResult = struct {
+    ok: bool,
+    /// Counterexample bodies for every property tag the tool checked. Owned
+    /// by the caller; free via `ui_payload.freeWitnessBodySlice`.
+    witnesses: []ui_payload.WitnessBody,
+};
 
 // pi_goal_check and pi_repair_plan both set `ToolResult.ok` to reflect the
 // state of the thing they checked (goals met / no repair needed) rather than
@@ -224,16 +233,172 @@ fn buildPathGoalsJson(
     return buf.toOwnedSlice(allocator);
 }
 
-fn parseGoalCheck(allocator: std.mem.Allocator, json_text: []const u8) !GoalCheckResult {
+/// Single-pass parse of `pi_goal_check` output: extracts both the `ok`
+/// flag and every counterexample witness body. Tolerant of malformed
+/// witness entries (drops them) so the autoloop keeps making progress
+/// even if one witness payload is corrupt.
+fn parseGoalCheckResult(allocator: std.mem.Allocator, json_text: []const u8) !GoalCheckResult {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_text, .{}) catch {
         return error.InvalidToolOutput;
     };
     defer parsed.deinit();
 
     if (parsed.value != .object) return error.InvalidToolOutput;
-    const ok_val = parsed.value.object.get("ok") orelse return error.InvalidToolOutput;
+    const obj = parsed.value.object;
+    const ok_val = obj.get("ok") orelse return error.InvalidToolOutput;
     if (ok_val != .bool) return error.InvalidToolOutput;
-    return .{ .ok = ok_val.bool };
+
+    const witnesses_value = obj.get("witnesses") orelse {
+        return .{ .ok = ok_val.bool, .witnesses = try allocator.alloc(ui_payload.WitnessBody, 0) };
+    };
+    if (witnesses_value != .array) return error.InvalidToolOutput;
+
+    var bodies: std.ArrayList(ui_payload.WitnessBody) = .empty;
+    errdefer {
+        for (bodies.items) |*body| body.deinit(allocator);
+        bodies.deinit(allocator);
+    }
+
+    for (witnesses_value.array.items) |item| {
+        const body = parseSingleGoalCheckWitness(allocator, item) catch continue;
+        try bodies.append(allocator, body);
+    }
+
+    return .{ .ok = ok_val.bool, .witnesses = try bodies.toOwnedSlice(allocator) };
+}
+
+fn parseSingleGoalCheckWitness(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !ui_payload.WitnessBody {
+    if (value != .object) return error.InvalidToolOutput;
+    const obj = value.object;
+
+    const key_str = ui_payload.getString(obj, "key") orelse return error.InvalidToolOutput;
+    const property_str = ui_payload.getString(obj, "property") orelse return error.InvalidToolOutput;
+    const summary_str = (ui_payload.getOptionalString(obj, "summary") catch return error.InvalidToolOutput) orelse "";
+
+    const origin_obj_value = obj.get("origin") orelse return error.InvalidToolOutput;
+    if (origin_obj_value != .object) return error.InvalidToolOutput;
+    const sink_obj_value = obj.get("sink") orelse return error.InvalidToolOutput;
+    if (sink_obj_value != .object) return error.InvalidToolOutput;
+    const request_obj_value = obj.get("request") orelse return error.InvalidToolOutput;
+    if (request_obj_value != .object) return error.InvalidToolOutput;
+
+    const origin_line = try requireU32(origin_obj_value.object, "line");
+    const origin_column = try requireU32(origin_obj_value.object, "column");
+    const sink_line = try requireU32(sink_obj_value.object, "line");
+    const sink_column = try requireU32(sink_obj_value.object, "column");
+
+    const method_str = ui_payload.getString(request_obj_value.object, "method") orelse return error.InvalidToolOutput;
+    const url_str = ui_payload.getString(request_obj_value.object, "url") orelse return error.InvalidToolOutput;
+    const has_auth_value = request_obj_value.object.get("has_auth_header") orelse return error.InvalidToolOutput;
+    if (has_auth_value != .bool) return error.InvalidToolOutput;
+    const body_text = ui_payload.getOptionalString(request_obj_value.object, "body") catch return error.InvalidToolOutput;
+
+    const stubs_value = obj.get("io_stubs") orelse return error.InvalidToolOutput;
+    if (stubs_value != .array) return error.InvalidToolOutput;
+
+    const key_copy = try allocator.dupe(u8, key_str);
+    errdefer allocator.free(key_copy);
+    const property_copy = try allocator.dupe(u8, property_str);
+    errdefer allocator.free(property_copy);
+    const summary_copy = try allocator.dupe(u8, summary_str);
+    errdefer allocator.free(summary_copy);
+    const method_copy = try allocator.dupe(u8, method_str);
+    errdefer allocator.free(method_copy);
+    const url_copy = try allocator.dupe(u8, url_str);
+    errdefer allocator.free(url_copy);
+    const body_copy: ?[]u8 = if (body_text) |t| try allocator.dupe(u8, t) else null;
+    errdefer if (body_copy) |b| allocator.free(b);
+
+    const stubs = try allocator.alloc(ui_payload.WitnessStub, stubs_value.array.items.len);
+    errdefer allocator.free(stubs);
+    for (stubs) |*stub| stub.* = undefined;
+    var si: usize = 0;
+    errdefer {
+        while (si > 0) {
+            si -= 1;
+            stubs[si].deinit(allocator);
+        }
+    }
+    while (si < stubs_value.array.items.len) : (si += 1) {
+        const stub_value = stubs_value.array.items[si];
+        if (stub_value != .object) return error.InvalidToolOutput;
+        const stub_obj = stub_value.object;
+        const stub_seq = try requireU32(stub_obj, "seq");
+        // pi_goal_check emits the field as `fn` (the JS keyword) rather
+        // than `func`, and the value as a raw JSON literal under
+        // `result`. Translate to the persisted shape.
+        const stub_module = ui_payload.getString(stub_obj, "module") orelse return error.InvalidToolOutput;
+        const stub_func_value = stub_obj.get("fn") orelse return error.InvalidToolOutput;
+        if (stub_func_value != .string) return error.InvalidToolOutput;
+        const stub_result_value = stub_obj.get("result") orelse return error.InvalidToolOutput;
+
+        var result_buf: std.ArrayList(u8) = .empty;
+        defer result_buf.deinit(allocator);
+        var result_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &result_buf);
+        try std.json.Stringify.value(stub_result_value, .{}, &result_aw.writer);
+        result_buf = result_aw.toArrayList();
+
+        const module_copy = try allocator.dupe(u8, stub_module);
+        errdefer allocator.free(module_copy);
+        const func_copy = try allocator.dupe(u8, stub_func_value.string);
+        errdefer allocator.free(func_copy);
+        const result_copy = try result_buf.toOwnedSlice(allocator);
+
+        stubs[si] = .{
+            .seq = stub_seq,
+            .module = module_copy,
+            .func = func_copy,
+            .result_json = result_copy,
+        };
+    }
+
+    return .{
+        .key = key_copy,
+        .property = property_copy,
+        .summary = summary_copy,
+        .origin_line = origin_line,
+        .origin_column = origin_column,
+        .sink_line = sink_line,
+        .sink_column = sink_column,
+        .request_method = method_copy,
+        .request_url = url_copy,
+        .request_has_auth = has_auth_value.bool,
+        .request_body = body_copy,
+        .io_stubs = stubs,
+    };
+}
+
+fn requireU32(obj: std.json.ObjectMap, key: []const u8) !u32 {
+    const value = ui_payload.getUnsigned(obj, key) orelse return error.InvalidToolOutput;
+    return std.math.cast(u32, value) orelse error.InvalidToolOutput;
+}
+
+/// Return the subset of `a` whose `.key` does not appear in `b`. The result
+/// references the bodies in `a` in place; the caller still owns `a` and
+/// must not free it until done with the returned slice. Pass the slice
+/// through `ui_payload.WitnessBody.clone` when you need to outlive the
+/// source array.
+fn diffWitnessKeys(
+    allocator: std.mem.Allocator,
+    a: []const ui_payload.WitnessBody,
+    b: []const ui_payload.WitnessBody,
+) ![]const ui_payload.WitnessBody {
+    if (a.len == 0) return &.{};
+
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    for (b) |body| try seen.put(allocator, body.key, {});
+
+    var out: std.ArrayList(ui_payload.WitnessBody) = .empty;
+    errdefer out.deinit(allocator);
+    for (a) |body| {
+        if (seen.contains(body.key)) continue;
+        try out.append(allocator, body);
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 const RepairPlan = struct {
@@ -372,8 +537,16 @@ fn applyPlans(
     transcript: *transcript_mod.Transcript,
     options: DriveOptions,
     plans: []const RepairPlan,
+    initial_pre_witnesses: []const ui_payload.WitnessBody,
 ) !ApplyOutcome {
     var applied: u32 = 0;
+    // The first plan's "before" snapshot is the witness set drive() already
+    // computed for this iteration. Each subsequent plan inherits the
+    // previous plan's post-witnesses as its own pre-witnesses, so we never
+    // re-run pi_goal_check on a file whose state we already know.
+    var pre_witnesses: []ui_payload.WitnessBody = try ui_payload.cloneWitnessBodySlice(allocator, initial_pre_witnesses);
+    defer ui_payload.freeWitnessBodySlice(allocator, pre_witnesses);
+
     for (plans) |plan| {
         var candidate = invokeApply(allocator, registry, options.file, plan.raw_json) catch |err| switch (err) {
             error.InvalidToolOutput, error.ToolFailed => continue,
@@ -396,6 +569,30 @@ fn applyPlans(
             return error.FileWriteFailed;
         };
 
+        // Tolerant of post-check failures: if pi_goal_check is unavailable
+        // or returns garbage, fall back to an empty post-set so the patch
+        // still lands - the ledger just won't carry a defeated/new diff
+        // for this plan.
+        const post_check_json = invokePathGoalsTool(
+            allocator,
+            registry,
+            "pi_goal_check",
+            options.file,
+            options.goals,
+        ) catch null;
+        defer if (post_check_json) |text| allocator.free(text);
+        var post_result: ?GoalCheckResult = if (post_check_json) |text|
+            parseGoalCheckResult(allocator, text) catch null
+        else
+            null;
+        defer if (post_result) |*r| ui_payload.freeWitnessBodySlice(allocator, r.witnesses);
+
+        const post_witnesses: []const ui_payload.WitnessBody = if (post_result) |r| r.witnesses else &.{};
+        const defeated_view = try diffWitnessKeys(allocator, pre_witnesses, post_witnesses);
+        defer allocator.free(defeated_view);
+        const new_view = try diffWitnessKeys(allocator, post_witnesses, pre_witnesses);
+        defer allocator.free(new_view);
+
         const parent_hash = session_state.lastPatchHash(transcript, options.file);
         const plan_ids = [_][]const u8{plan.id};
 
@@ -410,6 +607,8 @@ fn applyPlans(
             .repair_plan_ids = &plan_ids,
             .parent_hash = parent_hash,
             .goal_context = options.goals,
+            .witnesses_defeated = defeated_view,
+            .witnesses_new = new_view,
         });
         errdefer payload.deinit(allocator);
 
@@ -439,6 +638,16 @@ fn applyPlans(
             } });
         }
 
+        // Auto-replay: confirm in the engine what the proof claimed about
+        // each defeated and new witness. The note lands in the transcript
+        // immediately after the verified_patch event so the user sees the
+        // executed verdicts alongside the proof badges. Skipped silently
+        // when no replay implementation is registered (unit-test paths,
+        // headless builds).
+        if (!regressed and witness_replay.isConfigured()) {
+            try emitWitnessReplaySummary(allocator, transcript, options, absolute, payload);
+        }
+
         if (regressed) {
             // Roll the file back. The verified_patch entry stays in the
             // transcript as an audit record of the attempt; the autoloop
@@ -460,15 +669,131 @@ fn applyPlans(
         }
 
         applied += 1;
+
+        // Hand off post-witnesses to become the next plan's pre-set: swap
+        // them with our pre_witnesses so the per-iteration defer frees the
+        // old pre and the function-exit defer frees the final pre. No
+        // clone, no extra pi_goal_check call.
+        if (post_result) |*r| {
+            const stolen = r.witnesses;
+            r.witnesses = pre_witnesses;
+            pre_witnesses = stolen;
+        }
     }
     return .{ .applied = applied };
 }
 
-/// A patch regresses if any bool property that was true in `before` is false
-/// in `after`. Witness-delta regression (a patch that closes one witness but
-/// introduces a different one) would also count, but witnesses_new is not
-/// populated from the autoloop yet - that lives with the goal-check diff
-/// step that D2 deferred.
+/// Replay every defeated and new witness against the post-patch handler
+/// and append a single system_note summarising the engine-confirmed
+/// verdicts. Defeated witnesses that still reproduce are surfaced as
+/// regressions; new witnesses that reproduce confirm the proof's claim
+/// that the patch introduced a real failure mode. Best-effort: a replay
+/// failure for any single witness is folded into the count rather than
+/// aborting the whole pass, so the system note always lands.
+///
+/// Capped at `max_witness_replays` so a patch with many witnesses cannot
+/// stall the autoloop on the slowest leg of an iteration. The truncated
+/// count is reported as `truncated=N` in the note so the user knows
+/// they are seeing a partial picture.
+const max_witness_replays: usize = 8;
+
+const ReplayCounts = struct {
+    reproduced: u32 = 0,
+    not_reproduced: u32 = 0,
+    errors: u32 = 0,
+    consumed: usize = 0,
+};
+
+/// Replay each witness in `bodies` (up to `budget` runs) and tally the
+/// outcomes. Errors and non-runs are counted separately so the caller
+/// can surface them distinctly. The function never aborts on a bad
+/// witness; the call always lands a tally.
+fn accumulateReplays(
+    allocator: std.mem.Allocator,
+    handler_path: []const u8,
+    bodies: []const ui_payload.WitnessBody,
+    budget: usize,
+) ReplayCounts {
+    var counts: ReplayCounts = .{};
+    for (bodies) |body| {
+        if (counts.consumed >= budget) break;
+        counts.consumed += 1;
+        const verdict_or_err = witness_replay.replay(allocator, handler_path, body);
+        if (verdict_or_err) |raw| {
+            var verdict = raw;
+            defer verdict.deinit(allocator);
+            if (!verdict.ran) {
+                counts.errors += 1;
+            } else if (verdict.reproducedViolation(body)) {
+                counts.reproduced += 1;
+            } else {
+                counts.not_reproduced += 1;
+            }
+        } else |_| {
+            counts.errors += 1;
+        }
+    }
+    return counts;
+}
+
+fn emitWitnessReplaySummary(
+    allocator: std.mem.Allocator,
+    transcript: *transcript_mod.Transcript,
+    options: DriveOptions,
+    handler_path: []const u8,
+    payload: ui_payload.VerifiedPatchPayload,
+) !void {
+    const total = payload.witnesses_defeated.len + payload.witnesses_new.len;
+    if (total == 0) return;
+
+    const defeated = accumulateReplays(
+        allocator,
+        handler_path,
+        payload.witnesses_defeated,
+        max_witness_replays,
+    );
+    const new_budget = if (max_witness_replays > defeated.consumed)
+        max_witness_replays - defeated.consumed
+    else
+        0;
+    const new_w = accumulateReplays(
+        allocator,
+        handler_path,
+        payload.witnesses_new,
+        new_budget,
+    );
+
+    const done = defeated.consumed + new_w.consumed;
+    const truncated: usize = if (total > done) total - done else 0;
+    const note = try std.fmt.allocPrint(
+        allocator,
+        "auto-replay {s}: defeated still-defeated={d} regressed={d}; new reproduces={d} unreached={d}; errors={d}; truncated={d}",
+        .{
+            options.file,
+            defeated.not_reproduced,
+            defeated.reproduced,
+            new_w.reproduced,
+            new_w.not_reproduced,
+            defeated.errors + new_w.errors,
+            truncated,
+        },
+    );
+    var note_owned_by_transcript = false;
+    errdefer if (!note_owned_by_transcript) allocator.free(note);
+
+    try transcript.entries.append(allocator, .{ .system_note = note });
+    note_owned_by_transcript = true;
+
+    if (options.events_path) |path| {
+        try session_events.appendEvent(allocator, path, .{ .system_note = note });
+    }
+}
+
+/// A patch regresses if any bool property that was true in `before` is
+/// false in `after`. The witness diff (`witnesses_new`) is now populated
+/// per patch but is not consulted here: a patch that introduces a new
+/// witness while preserving every property bool is considered safe at
+/// this layer; the witness pane surfaces it instead.
 fn detectRegression(payload: ui_payload.VerifiedPatchPayload) bool {
     const after = payload.after_properties orelse return false;
     const Visitor = struct {
@@ -786,4 +1111,128 @@ test "buildPathGoalsJson escapes special characters in the path" {
     defer allocator.free(out);
     try testing.expect(std.mem.indexOf(u8, out, "\"path\":\"a\\\"b.ts\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"retry_safe\"") != null);
+}
+
+test "parseGoalCheckResult returns ok=true with empty witnesses when absent" {
+    const allocator = testing.allocator;
+    const result = try parseGoalCheckResult(allocator, "{\"ok\":true,\"goals\":[]}");
+    defer ui_payload.freeWitnessBodySlice(allocator, result.witnesses);
+    try testing.expect(result.ok);
+    try testing.expectEqual(@as(usize, 0), result.witnesses.len);
+}
+
+test "parseGoalCheckResult extracts ok=false and a full witness body" {
+    const allocator = testing.allocator;
+    const input =
+        \\{"ok":false,"goals":["no_secret_leakage"],"witnesses":[
+        \\{"key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"property":"no_secret_leakage",
+        \\"origin":{"line":3,"column":9},
+        \\"sink":{"line":5,"column":12},
+        \\"summary":"DB_KEY in response",
+        \\"request":{"method":"GET","url":"/","has_auth_header":false},
+        \\"io_stubs":[{"seq":0,"module":"env","fn":"env","result":"sentinel"}]}
+        \\]}
+    ;
+    const result = try parseGoalCheckResult(allocator, input);
+    defer ui_payload.freeWitnessBodySlice(allocator, result.witnesses);
+
+    try testing.expect(!result.ok);
+    try testing.expectEqual(@as(usize, 1), result.witnesses.len);
+    try testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", result.witnesses[0].key);
+    try testing.expectEqualStrings("no_secret_leakage", result.witnesses[0].property);
+    try testing.expectEqualStrings("DB_KEY in response", result.witnesses[0].summary);
+    try testing.expectEqual(@as(u32, 3), result.witnesses[0].origin_line);
+    try testing.expectEqual(@as(u32, 5), result.witnesses[0].sink_line);
+    try testing.expectEqualStrings("GET", result.witnesses[0].request_method);
+    try testing.expectEqualStrings("/", result.witnesses[0].request_url);
+    try testing.expect(!result.witnesses[0].request_has_auth);
+    try testing.expect(result.witnesses[0].request_body == null);
+    try testing.expectEqual(@as(usize, 1), result.witnesses[0].io_stubs.len);
+    try testing.expectEqualStrings("env", result.witnesses[0].io_stubs[0].module);
+    try testing.expectEqualStrings("env", result.witnesses[0].io_stubs[0].func);
+    // The parsed `result` value is re-encoded as JSON before storing, so
+    // the persisted bytes are the JSON form (with surrounding quotes).
+    try testing.expectEqualStrings("\"sentinel\"", result.witnesses[0].io_stubs[0].result_json);
+}
+
+test "parseGoalCheckResult skips malformed witness entries instead of failing" {
+    const allocator = testing.allocator;
+    const input =
+        \\{"ok":false,"witnesses":[
+        \\{"property":"no_secret_leakage"},
+        \\{"key":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\"property":"injection_safe",
+        \\"origin":{"line":1,"column":1},
+        \\"sink":{"line":1,"column":1},
+        \\"summary":"x",
+        \\"request":{"method":"POST","url":"/x","has_auth_header":true,"body":"{}"},
+        \\"io_stubs":[]}
+        \\]}
+    ;
+    const result = try parseGoalCheckResult(allocator, input);
+    defer ui_payload.freeWitnessBodySlice(allocator, result.witnesses);
+
+    try testing.expectEqual(@as(usize, 1), result.witnesses.len);
+    try testing.expectEqualStrings("injection_safe", result.witnesses[0].property);
+    try testing.expectEqualStrings("POST", result.witnesses[0].request_method);
+    try testing.expect(result.witnesses[0].request_has_auth);
+    try testing.expect(result.witnesses[0].request_body != null);
+    try testing.expectEqualStrings("{}", result.witnesses[0].request_body.?);
+}
+
+test "diffWitnessKeys returns bodies in a but not b, keyed by stable hex" {
+    const allocator = testing.allocator;
+    const a = [_]ui_payload.WitnessBody{
+        .{
+            .key = @constCast("aa" ** 32),
+            .property = @constCast("no_secret_leakage"),
+            .summary = @constCast(""),
+            .origin_line = 1, .origin_column = 1, .sink_line = 1, .sink_column = 1,
+            .request_method = @constCast("GET"),
+            .request_url = @constCast("/"),
+            .request_has_auth = false,
+            .request_body = null,
+            .io_stubs = &.{},
+        },
+        .{
+            .key = @constCast("bb" ** 32),
+            .property = @constCast("injection_safe"),
+            .summary = @constCast(""),
+            .origin_line = 1, .origin_column = 1, .sink_line = 1, .sink_column = 1,
+            .request_method = @constCast("GET"),
+            .request_url = @constCast("/"),
+            .request_has_auth = false,
+            .request_body = null,
+            .io_stubs = &.{},
+        },
+    };
+    const b = [_]ui_payload.WitnessBody{
+        .{
+            .key = @constCast("aa" ** 32),
+            .property = @constCast("no_secret_leakage"),
+            .summary = @constCast(""),
+            .origin_line = 1, .origin_column = 1, .sink_line = 1, .sink_column = 1,
+            .request_method = @constCast("GET"),
+            .request_url = @constCast("/"),
+            .request_has_auth = false,
+            .request_body = null,
+            .io_stubs = &.{},
+        },
+    };
+
+    const diff = try diffWitnessKeys(allocator, &a, &b);
+    defer allocator.free(diff);
+    try testing.expectEqual(@as(usize, 1), diff.len);
+    try testing.expectEqualStrings("bb" ** 32, diff[0].key);
+    try testing.expectEqualStrings("injection_safe", diff[0].property);
+}
+
+test "diffWitnessKeys returns empty slice when a is empty" {
+    const allocator = testing.allocator;
+    const a: []const ui_payload.WitnessBody = &.{};
+    const b: []const ui_payload.WitnessBody = &.{};
+    const diff = try diffWitnessKeys(allocator, a, b);
+    defer allocator.free(diff);
+    try testing.expectEqual(@as(usize, 0), diff.len);
 }

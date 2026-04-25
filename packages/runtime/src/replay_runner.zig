@@ -56,14 +56,13 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
 
     std.log.info("Replaying {d} traces against {s}...\n", .{ groups.len, handler_source.filename });
 
-    for (groups, 0..) |group, trace_idx| {
+    for (groups) |group| {
         const result = replayOne(
             allocator,
             replay_config,
             handler_source.code,
             handler_source.filename,
             &group,
-            trace_idx,
         ) catch |err| {
             const failed_result = ReplayResult.fromReplayError(group, err);
             try results.append(allocator, failed_result);
@@ -82,14 +81,25 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
     }
 }
 
-/// Replay a single trace against the handler.
-fn replayOne(
+/// Replay a single parsed trace group against an in-memory handler.
+///
+/// `config.replay_file_path` MUST be non-null - it is the sentinel that
+/// makes `Runtime.init` install replay stubs for virtual modules instead
+/// of real implementations. Any non-null string works (the path is not
+/// re-read; `replayOne` operates on the supplied `handler_code` directly).
+///
+/// When `group.response` is null (the trace is a counterexample witness
+/// rather than a recorded run), `match` returns `true` whenever the
+/// handler executed without erroring and `actual_body_owned` carries an
+/// owned copy of the response body so callers can apply their own
+/// classifier (e.g. "did the secret sentinel appear?"). Caller owns the
+/// returned `ReplayResult` and must call `deinit` on it.
+pub fn replayOne(
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
     handler_code: []const u8,
     handler_filename: []const u8,
     group: *const trace.RequestTraceGroup,
-    _: usize,
 ) !ReplayResult {
     // Create a fresh runtime for each replay.
     // Config has replay_file_path set, so Runtime.init registers replay stubs
@@ -145,13 +155,21 @@ fn replayOne(
     defer response.deinit();
 
     const expected = group.response orelse {
+        // Witness case: no expected response was recorded. Hand back the
+        // actual body so the caller can decide whether the violation
+        // reproduced (e.g. a secret-leak classifier checks for the stub
+        // sentinel string in the body).
+        const body_copy = if (response.body.len == 0)
+            &[_]u8{}
+        else
+            try allocator.dupe(u8, response.body);
         return ReplayResult{
             .match = true,
             .expected_status = 200,
             .actual_status = response.status,
             .body_match = true,
             .expected_body_owned = &.{},
-            .actual_body_owned = &.{},
+            .actual_body_owned = body_copy,
             .io_divergences = replay_state.divergences,
             .io_total = @intCast(group.io_calls.len),
             .err = null,
