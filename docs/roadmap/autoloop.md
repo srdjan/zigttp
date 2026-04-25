@@ -34,7 +34,10 @@ One iteration is three tool calls:
    runs the compiler against the proposed content. When the candidate
    verifies, the autoloop writes the file and emits a chained
    `verified_patch` event (parent hash lookup via `session_state`
-   carries the chain forward).
+   carries the chain forward). Each event records the patch's witness
+   diff: counterexamples the patch closes (`witnesses_defeated`) and
+   any it introduces (`witnesses_new`), keyed by stable digest so the
+   ledger tracks them across edits.
 
 Iteration stops when the goals are met, the iteration budget is
 exhausted, the wall clock runs out (2 minutes by default), or three

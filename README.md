@@ -159,68 +159,16 @@ See [examples/htmx-todo/](examples/htmx-todo/) for a complete HTMX application.
 
 ## Virtual Modules
 
-zigttp provides native virtual modules via `import { ... } from "zigttp:*"` syntax. These run as native Zig code with zero JS interpretation overhead.
+zigttp exposes native Zig modules through `import { ... } from "zigttp:*"`.
+They provide common handler needs such as env access, crypto, validation,
+SQLite, cache, outbound fetch, durable workflows, WebSockets, and structured
+concurrent I/O.
 
-Most modules live in their own peer package `packages/modules/`, depending
-only on `packages/zigttp-sdk/`. The zigts engine imports the module
-bindings at comptime and adapts them through `module_binding_adapter.zig`.
-A handful of modules (`io`, `scope`, `durable`, plus the install-shim
-portions of `sql`, `fetch`, `service`, `websocket`) still live in
-`packages/zigts/src/modules/` because they require direct runtime
-integration (GC roots, threadlocal fetch state, runtime bootstrap).
-
-### Available Modules
-
-Modules are grouped by role; each cell in the Module column links to
-the per-module page. See [docs/virtual-modules/README.md](docs/virtual-modules/README.md)
-for the landing page and category index.
-
-| Module | Exports | Description |
-|--------|---------|-------------|
-| [`zigttp:env`](docs/virtual-modules/platform/env.md) | `env` | Environment variable access |
-| [`zigttp:crypto`](docs/virtual-modules/security/crypto.md) | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | Cryptographic functions |
-| [`zigttp:router`](docs/virtual-modules/http/router.md) | `routerMatch` | Pattern-matching HTTP router |
-| [`zigttp:auth`](docs/virtual-modules/security/auth.md) | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | JWT auth and webhook verification |
-| [`zigttp:validate`](docs/virtual-modules/security/validate.md) | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema validation with format validators (email, uuid, iso-date, iso-datetime) |
-| [`zigttp:decode`](docs/virtual-modules/security/decode.md) | `decodeJson`, `decodeForm`, `decodeQuery` | Schema-backed typed ingress for JSON, URL-encoded forms, and query strings |
-| [`zigttp:cache`](docs/virtual-modules/data/cache.md) | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
-| [`zigttp:sql`](docs/virtual-modules/data/sql.md) | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | Registered SQLite queries with build-time schema validation |
-| [`zigttp:service`](docs/virtual-modules/net/service.md) | `serviceCall` | Named internal service-to-service calls backed by `system.json` |
-| [`zigttp:fetch`](docs/virtual-modules/net/fetch.md) | `fetch` | Web-standard outbound HTTP with optional durable replay |
-| [`zigttp:websocket`](docs/virtual-modules/net/websocket.md) | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `roomFromPath`, `setAutoResponse` | WebSocket protocol termination with rooms, attachments, and codec-level auto-replies |
-| [`zigttp:io`](docs/virtual-modules/workflow/io.md) | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
-| [`zigttp:scope`](docs/virtual-modules/workflow/scope.md) | `scope`, `using`, `ensure` | Structured lifecycle management with deterministic cleanup at scope exit |
-| [`zigttp:compose`](docs/virtual-modules/workflow/compose.md) | `guard`, `pipe` | Compile-time handler composition via pipe operator |
-| [`zigttp:durable`](docs/virtual-modules/workflow/durable.md) | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, signals, and timeout-aware steps |
-| [`zigttp:url`](docs/virtual-modules/http/url.md) | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | URL parsing and query string encoding |
-| [`zigttp:id`](docs/virtual-modules/platform/id.md) | `uuid`, `ulid`, `nanoid` | ID generation (UUID v4, ULID, NanoID) |
-| [`zigttp:http`](docs/virtual-modules/http/http.md) | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` | HTTP utilities for cookies, content negotiation, CORS |
-| [`zigttp:log`](docs/virtual-modules/platform/log.md) | `logDebug`, `logInfo`, `logWarn`, `logError` | Structured logging to stderr |
-| [`zigttp:text`](docs/virtual-modules/platform/text.md) | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` | String utilities for HTML escaping, slugs, redaction |
-| [`zigttp:time`](docs/virtual-modules/platform/time.md) | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | Time formatting and arithmetic |
-| [`zigttp:ratelimit`](docs/virtual-modules/data/ratelimit.md) | `rateCheck`, `rateReset` | Per-key rate limiting with sliding windows |
-
-Each export carries an effect annotation used for handler property classification. See [docs/virtual-modules/README.md](docs/virtual-modules/README.md#effect-classification) for the full read/write/none breakdown across all 22 modules.
-
-Each module binding also declares the runtime capabilities its Zig implementation consumes (clock, random, crypto, stderr, filesystem, sqlite, env, runtime_callback, policy_check, network). These declarations are governance metadata for the module internals and do not affect the handler-facing effect classification or sandbox policy. Capability-checked helpers enforce them at call time: if a module reads the system clock but its binding omits `clock`, the call panics with a diagnostic naming the module and the missing capability.
-
-| Module | Runtime Capabilities |
-|--------|---------------------|
-| `zigttp:auth` | crypto, clock |
-| `zigttp:cache` | clock, policy_check |
-| `zigttp:crypto` | crypto |
-| `zigttp:env` | env, policy_check |
-| `zigttp:id` | clock, random |
-| `zigttp:io` | runtime_callback |
-| `zigttp:log` | clock, stderr |
-| `zigttp:ratelimit` | clock |
-| `zigttp:scope` | runtime_callback |
-| `zigttp:service` | filesystem, runtime_callback |
-| `zigttp:sql` | sqlite, policy_check |
-| `zigttp:durable` | runtime_callback |
-| `zigttp:compose`, `zigttp:decode`, `zigttp:http`, `zigttp:router`, `zigttp:text`, `zigttp:time`, `zigttp:url`, `zigttp:validate` | _(none)_ |
-
-Extension modules (via `zigttp-sdk`) declare capabilities the same way; the same checked helpers enforce them. Modules declaring no capabilities skip the enforcement wrapper at compile time.
+The canonical module index is [docs/virtual-modules/README.md](docs/virtual-modules/README.md).
+It links to each per-module API page and records the effect classification used
+by contract extraction. The implementation registry lives in
+`packages/zigts/src/builtin_modules.zig`; public module specs live under
+`packages/modules/module-specs/`.
 
 ### Auth Example
 
@@ -498,7 +446,7 @@ After each model turn the REPL prints cumulative token use for the session: `[to
 
 #### Property-goal autoloop
 
-`--goal <csv> --handler <path>` short-circuits the conversational run. The compiler drives a fixed `pi_goal_check → pi_repair_plan → pi_apply_repair_plan` cycle until every requested property flips green or a budget trips. The LLM is not in the loop here; only the compiler. Each successful apply lands a chained `verified_patch` event, and every exit path emits a durable `autoloop_outcome` event with the verdict, iteration count, per-goal met/unmet lists, and the final patch hash. Verdicts: `achieved`, `exhausted_iters`, `exhausted_time`, `stalled`, `regression_blocked`, `tool_failed`. A patch that demotes a previously-green property is rolled back and the session exits `regression_blocked`. Supported goals are the five flow-oriented PropertyTags: `no_secret_leakage`, `no_credential_leakage`, `input_validated`, `pii_contained`, `injection_safe`. Full reference: [docs/autoloop.md](docs/autoloop.md).
+`--goal <csv> --handler <path>` short-circuits the conversational run. The compiler drives a fixed `pi_goal_check → pi_repair_plan → pi_apply_repair_plan` cycle until every requested property flips green or a budget trips. The LLM is not in the loop here; only the compiler. Each successful apply lands a chained `verified_patch` event, and every exit path emits a durable `autoloop_outcome` event with the verdict, iteration count, per-goal met/unmet lists, and the final patch hash. Verdicts: `achieved`, `exhausted_iters`, `exhausted_time`, `stalled`, `regression_blocked`, `tool_failed`. A patch that demotes a previously-green property is rolled back and the session exits `regression_blocked`. Supported goals are the five flow-oriented PropertyTags: `no_secret_leakage`, `no_credential_leakage`, `input_validated`, `pii_contained`, `injection_safe`. Full reference: [docs/roadmap/autoloop.md](docs/roadmap/autoloop.md).
 
 #### Proof Delta Card
 
@@ -1131,16 +1079,15 @@ zig build -Doptimize=Debug -fincremental --error-style=minimal_clear
 
 ## Documentation
 
-- [User Guide](docs/user-guide.md) - Complete handler API reference, routing patterns, examples
+- [Documentation Index](docs/README.md) - Maintained entry point for guides, references, internals, and roadmap notes
+- [User Guide](docs/user-guide.md) - Handler API, routing patterns, examples
 - [Verification](docs/verification.md) - Compile-time handler verification: checks, diagnostics, examples
 - [Sound Mode](docs/sound-mode.md) - Type-directed analysis: arithmetic safety, `+` safety, tautology detection, truthiness, type-specialized codegen
-- [Architecture](docs/architecture.md) - System design, runtime model, concurrency, project structure
-- [Frontier](docs/frontier.md) - Strategic direction: core moat, next-frontier features, identity guardrails
 - [JSX Guide](docs/jsx-guide.md) - JSX/TSX usage and server-side rendering
 - [TypeScript](docs/typescript.md) - Type stripping, compile-time evaluation
 - [Performance](docs/performance.md) - Benchmarks, cold starts, optimizations, concurrent I/O
 - [Feature Detection](docs/feature-detection.md) - Unsupported feature detection matrix
-- [API Reference](docs/api-reference.md) - Zig embedding API, extending with native functions
+- [Architecture](docs/internals/architecture.md) - System design, runtime model, concurrency, project structure
 
 ## JavaScript Subset
 

@@ -8,7 +8,9 @@ sandboxing.
 
 The modules are grouped by role. Each page documents exports,
 compile-time proof interactions, runtime failures, and related
-modules.
+modules. The implementation registry is
+`packages/zigts/src/builtin_modules.zig`; public module specs live under
+`packages/modules/module-specs/`.
 
 ## Security
 
@@ -90,13 +92,17 @@ Runtime primitives with no domain coupling.
 Every export carries an effect annotation used for handler property
 classification:
 
-- **Read**: all of `security/*`, `platform/env`, `cacheGet`,
-  `cacheStats`, `sql`, `sqlOne`, `sqlMany`, `id/*`, `platform/time`.
-- **Write**: `cacheSet`, `cacheDelete`, `cacheIncr`, `sqlExec`,
-  `serviceCall`, `parallel`, `race`, `scope`, `using`, `ensure`,
-  every durable export, `log/*`, `ratelimit/*`.
-- **None**: `compose/*`, all of `platform/text`, `http/*`, `url/*`,
-  `router/*`.
+- **Read**: `env`, `cacheGet`, `cacheStats`, `id/*`,
+  `websocket.deserializeAttachment`, `websocket.getWebSockets`, and
+  `websocket.roomFromPath`.
+- **Write**: `cacheSet`, `cacheDelete`, `cacheIncr`, `sqlExec`, `fetch`,
+  `serviceCall`, `parallel`, `race`, `scope`, `using`, `ensure`, every
+  durable export, `websocket.send`, `websocket.close`,
+  `websocket.serializeAttachment`, `websocket.setAutoResponse`, `log/*`, and
+  `ratelimit/*`.
+- **None**: `auth/*`, `crypto/*`, `decode/*`, `validate/*`, `compose/*`,
+  `platform/text`, `platform/time`, `http/*`, `url/*`, `router/*`, `sql`,
+  `sqlOne`, and `sqlMany`.
 
-See `README.md` in the project root for the full feature matrix and
-the runtime capability table per module.
+For internal capability governance, see
+[`../internals/capabilities.md`](../internals/capabilities.md).

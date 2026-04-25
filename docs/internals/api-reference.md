@@ -1,6 +1,6 @@
 # API Reference: Zig Embedding & Advanced Configuration
 
-This document covers advanced server configuration and extending zigttp with native Zig functions. For handler JavaScript API, CLI options, and virtual modules, see [User Guide](user-guide.md).
+This document covers advanced server configuration and extending zigttp with native Zig functions. For handler JavaScript API, CLI options, and virtual modules, see [User Guide](../user-guide.md).
 
 ## Advanced Server Configuration (Zig API)
 

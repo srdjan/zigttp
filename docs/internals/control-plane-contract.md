@@ -6,13 +6,13 @@
 
 Everything below is derived from the following files. If this document and the code disagree, the code wins and this document is stale:
 
-- [`packages/runtime/src/deploy/control_plane.zig`](../packages/runtime/src/deploy/control_plane.zig) - HTTP client, URL construction, response parsing
-- [`packages/runtime/src/deploy/auth.zig`](../packages/runtime/src/deploy/auth.zig) - credential file format and location
-- [`packages/runtime/src/deploy/builder.zig`](../packages/runtime/src/deploy/builder.zig) - cross-compilation pipeline
-- [`packages/runtime/src/deploy/types.zig`](../packages/runtime/src/deploy/types.zig) - provider enum, arch enum, deploy result shape
-- [`packages/runtime/src/deploy/northflank_adapter.zig`](../packages/runtime/src/deploy/northflank_adapter.zig) - the one provider backend currently wired in
-- [`packages/runtime/src/deploy.zig`](../packages/runtime/src/deploy.zig) - proven-fact label assembly for OCI images
-- [`docs/deploy-tutorial.md`](deploy-tutorial.md) - user-facing walkthrough
+- [`packages/runtime/src/deploy/control_plane.zig`](../../packages/runtime/src/deploy/control_plane.zig) - HTTP client, URL construction, response parsing
+- [`packages/runtime/src/deploy/auth.zig`](../../packages/runtime/src/deploy/auth.zig) - credential file format and location
+- [`packages/runtime/src/deploy/builder.zig`](../../packages/runtime/src/deploy/builder.zig) - cross-compilation pipeline
+- [`packages/runtime/src/deploy/types.zig`](../../packages/runtime/src/deploy/types.zig) - provider enum, arch enum, deploy result shape
+- [`packages/runtime/src/deploy/northflank_adapter.zig`](../../packages/runtime/src/deploy/northflank_adapter.zig) - the one provider backend currently wired in
+- [`packages/runtime/src/deploy.zig`](../../packages/runtime/src/deploy.zig) - proven-fact label assembly for OCI images
+- [`docs/deploy-tutorial.md`](../deploy-tutorial.md) - user-facing walkthrough
 
 ## Base URL
 
