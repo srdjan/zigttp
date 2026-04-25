@@ -10,6 +10,7 @@ const rpc_mode = @import("rpc_mode.zig");
 const ledger = @import("ledger.zig");
 const autoloop = @import("autoloop.zig");
 const transcript_mod = @import("transcript.zig");
+const agent = @import("agent.zig");
 const session_state = @import("session_state.zig");
 const property_goals = @import("property_goals.zig");
 const tools_common = @import("tools/common.zig");
@@ -159,8 +160,20 @@ fn runAutoloop(
     const workspace_root = try tools_common.workspaceRoot(allocator);
     defer allocator.free(workspace_root);
 
-    var transcript: transcript_mod.Transcript = .{};
-    defer transcript.deinit(allocator);
+    // Bootstrap a session unless `--no-session` is passed: lets the
+    // autoloop's verified_patch and autoloop_outcome events persist to
+    // events.jsonl, so a follow-up `zigts expert --resume` can open
+    // the resulting witnesses tab on the same patches. Without
+    // session bootstrap the run is in-memory only (the original
+    // behaviour, kept for `--no-session`).
+    var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
+        .no_session = flags.no_session,
+        .no_persist_tool_output = flags.no_persist_tool_output,
+        .no_context_files = true, // autoloop doesn't need project context
+        .session_id = flags.session_id,
+        .resume_latest = flags.resume_latest,
+    });
+    defer session.deinit(allocator);
 
     var budget: autoloop.Budget = .{};
     if (flags.max_iters) |n| budget.max_iterations = n;
@@ -169,18 +182,24 @@ fn runAutoloop(
     defer allocator.free(goal_slices);
     for (goals, 0..) |g, i| goal_slices[i] = g;
 
-    const outcome = autoloop.drive(allocator, registry, &transcript, .{
+    const outcome = autoloop.drive(allocator, registry, &session.transcript, .{
         .workspace_root = workspace_root,
         .file = handler,
         .goals = goal_slices,
         .budget = budget,
+        .events_path = session.events_path,
     }) catch |err| {
         var stderr: [256]u8 = undefined;
         const line = std.fmt.bufPrint(&stderr, "autoloop error: {s}\n", .{@errorName(err)}) catch "autoloop error\n";
         exitWithMessage(line, 1);
     };
 
-    try printAutoloopOutcome(allocator, outcome, &transcript, handler, goal_slices);
+    try printAutoloopOutcome(allocator, outcome, &session.transcript, handler, goal_slices);
+    if (session.session_id) |sid| {
+        var stdout_buf: [128]u8 = undefined;
+        const line = std.fmt.bufPrint(&stdout_buf, "session: {s} (resume with `zigts expert --resume`)\n", .{sid}) catch "session persisted\n";
+        _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+    }
     if (outcome.verdict != .achieved) std.process.exit(1);
 }
 
