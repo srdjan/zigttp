@@ -463,9 +463,13 @@ zigts expert --print "..." --mode json   # NDJSON event stream to stdout
 
 # Line-delimited JSON-RPC 2.0 over stdio (long-lived session)
 zigts expert --mode rpc
+
+# Property-goal autoloop (compiler drives convergence; LLM is not in the loop)
+zigts expert --handler handler.ts --goal no_secret_leakage,injection_safe
+zigts expert --handler handler.ts --goal no_secret_leakage --max-iters 4
 ```
 
-In `--mode json`, each event is `{"v":1,"k":"<kind>","d":<payload>}`. Kinds: `user_text`, `model_text`, `tool_use`, `tool_result`, `proof_card`, `diagnostic_box`, `system_note`, `end`. Persisted `events.jsonl` lines use the same envelope for transcript events, but `end` is a live-stream-only sentinel emitted last on success. Errored runs may terminate without `end`, and session files do not persist it.
+In `--mode json`, each event is `{"v":1,"k":"<kind>","d":<payload>}`. Kinds: `user_text`, `model_text`, `tool_use`, `tool_result`, `proof_card`, `diagnostic_box`, `verified_patch`, `system_note`, `autoloop_outcome`, `end`. Persisted `events.jsonl` lines use the same envelope for transcript events, but `end` is a live-stream-only sentinel emitted last on success. Errored runs may terminate without `end`, and session files do not persist it.
 
 In `--mode rpc`, each stdin line is a JSON-RPC 2.0 request; each stdout response line is a result or error keyed by `id`. Methods: `turn`, `compact`, `session.info`, `tools.list`, `tools.invoke`, `skills.list`, `templates.{list,expand}`, `model.{list,set}`, `shutdown`. During a `turn`, each new transcript entry emits as a notification with method `"event"` before the final result lands.
 
@@ -491,6 +495,14 @@ The interactive REPL accepts slash commands alongside natural language:
 ```
 
 After each model turn the REPL prints cumulative token use for the session: `[tokens: in=N cache_r=N cache_w=N out=N]`. The totals reset when you start a new session or reload with `/new` or `/resume`.
+
+#### Property-goal autoloop
+
+`--goal <csv> --handler <path>` short-circuits the conversational run. The compiler drives a fixed `pi_goal_check → pi_repair_plan → pi_apply_repair_plan` cycle until every requested property flips green or a budget trips. The LLM is not in the loop here; only the compiler. Each successful apply lands a chained `verified_patch` event, and every exit path emits a durable `autoloop_outcome` event with the verdict, iteration count, per-goal met/unmet lists, and the final patch hash. Verdicts: `achieved`, `exhausted_iters`, `exhausted_time`, `stalled`, `regression_blocked`, `tool_failed`. A patch that demotes a previously-green property is rolled back and the session exits `regression_blocked`. Supported goals are the five flow-oriented PropertyTags: `no_secret_leakage`, `no_credential_leakage`, `input_validated`, `pii_contained`, `injection_safe`. Full reference: [docs/autoloop.md](docs/autoloop.md).
+
+#### Proof Delta Card
+
+In the interactive TUI's ledger view (default), each `verified_patch` opens to a Proof Delta Card showing property-change badges (`+retry_safe`, `-pure`), violations before → after, witness defeated/new counts, and the chain header (`patch <short> <- parent <short>`). The diff is collapsed by default; press `Enter` to expand. Single-key `A` approves the selected patch when the witness gate is clean (no pending or new witnesses), emitting an `approved <short-hash> for <file>` system note as the audit receipt. Tab cycles through the detail panes (Diff, Properties, Violations, Prove, System, Citations) for line-level inspection.
 
 The interactive surface runs as a bottom-anchored TUI: the status line (session, model, token totals) and input line stay pinned at the bottom while scrollback flows above. Redraws wrap in CSI `?2026h` / `?2026l` synchronized-output sequences so supporting terminals render each frame atomically. Two themes ship (`default`, `solarized-dark`); swap mid-session with `/settings theme <name>`.
 

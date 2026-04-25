@@ -3,7 +3,7 @@
 The autoloop turns `zigts expert` into a property-convergence engine. You
 state the properties you want proven on a handler; the compiler drives
 the session until the properties flip green or a budget trips. The model
-is not in the loop — the compiler is.
+is not in the loop; the compiler is.
 
 ## Invocation
 
@@ -28,7 +28,7 @@ One iteration is three tool calls:
    goal that fails. If no goals fail, the verdict is `achieved` and the
    run exits 0.
 2. `pi_repair_plan` reads the same diagnostics and emits typed edit
-   intents — a plan carries the repair kind, a line/column target, and a
+   intents; a plan carries the repair kind, a line/column target, and a
    template.
 3. For each plan, `pi_apply_repair_plan` dry-runs the candidate edit and
    runs the compiler against the proposed content. When the candidate
@@ -46,10 +46,10 @@ hash when one exists.
 
 ## Supported goals
 
-The v1 surface checks the flow-oriented goals the counterexample solver
-models. Other handler properties are available through `zigts_check` and
-contract proof output, but are not valid autoloop goals until the witness
-and repair tools support them directly.
+The v1 surface tracks the five flow-oriented goals the counterexample
+solver models. The wider PropertiesSnapshot lattice (17 booleans) shows
+up in `zigts_check` and contract proof output, but the autoloop only
+accepts goals the witness and repair tools can actually drive.
 
 - `no_secret_leakage`
 - `no_credential_leakage`
@@ -110,24 +110,25 @@ git checkout -- examples/autoloop/handler.ts
 
 ## Exit codes
 
-- `0` — `achieved`
-- `1` — any other verdict (`exhausted_iters`, `exhausted_time`,
+- `0`: `achieved`
+- `1`: any other verdict (`exhausted_iters`, `exhausted_time`,
   `stalled`, `regression_blocked`, `tool_failed`) or any unexpected
   error
-- `2` — flag parse error
+- `2`: flag parse error
 
 ## What it does not do yet
 
-- No session persistence of the autoloop run. `--no-session` is
-  implicit; the TUI ledger view (coming) will be the durable surface.
-- The orchestrator drives one plan per turn to stay compatible with the
+- No session persistence of the autoloop run itself. `--no-session` is
+  implicit; the chained `verified_patch` and `autoloop_outcome` events
+  are emitted to the events log when an `events_path` is configured,
+  but the autoloop CLI does not open one today.
+- One plan per turn. The orchestrator stays compatible with the
   `apply_edit must be the only tool call` invariant elsewhere in the
-  loop. Batching is possible but would change the veto ordering.
-- Multiple diagnostics on the same line cause ordering problems:
-  applying the first plan shifts line numbers and invalidates the
-  second plan's target. Addressed when repair-plan ordering learns
-  line-delta tracking, or when plans emit byte offsets instead of
-  line/column targets.
+  loop; batching is possible but would change the veto ordering.
+- Multiple diagnostics on the same line break ordering: applying the
+  first plan shifts line numbers and invalidates the second plan's
+  target. Fixed when repair-plan ordering learns line-delta tracking,
+  or when plans emit byte offsets instead of line/column targets.
 
 ## Regression guard
 
