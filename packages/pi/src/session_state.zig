@@ -18,6 +18,30 @@ const std = @import("std");
 const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
 
+/// Unwrap a transcript entry as a VerifiedPatchPayload for the requested
+/// file, or null if it is not a verified_patch entry, has no payload,
+/// carries a non-verified_patch payload, or is for a different file. The
+/// shared predicate behind every "find the latest patch for file" lookup
+/// in this module and in tui/app.zig.
+pub fn patchPayloadIfMatching(
+    entry: *const transcript_mod.OwnedEntry,
+    file: []const u8,
+) ?ui_payload.VerifiedPatchPayload {
+    switch (entry.*) {
+        .verified_patch => |message| {
+            const payload = message.ui_payload orelse return null;
+            switch (payload) {
+                .verified_patch => |patch| {
+                    if (!std.mem.eql(u8, patch.file, file)) return null;
+                    return patch;
+                },
+                else => return null,
+            }
+        },
+        else => return null,
+    }
+}
+
 /// Return the `after_properties` of the most recent verified_patch entry
 /// whose `file` matches, or null if no patch for that file has landed.
 pub fn currentProperties(
@@ -27,19 +51,8 @@ pub fn currentProperties(
     var i = transcript.len();
     while (i > 0) {
         i -= 1;
-        const entry = transcript.at(i);
-        switch (entry.*) {
-            .verified_patch => |message| {
-                const payload = message.ui_payload orelse continue;
-                switch (payload) {
-                    .verified_patch => |patch| {
-                        if (!std.mem.eql(u8, patch.file, file)) continue;
-                        return patch.after_properties;
-                    },
-                    else => continue,
-                }
-            },
-            else => {},
+        if (patchPayloadIfMatching(transcript.at(i), file)) |patch| {
+            return patch.after_properties;
         }
     }
     return null;
@@ -54,64 +67,11 @@ pub fn lastPatchHash(
     var i = transcript.len();
     while (i > 0) {
         i -= 1;
-        const entry = transcript.at(i);
-        switch (entry.*) {
-            .verified_patch => |message| {
-                const payload = message.ui_payload orelse continue;
-                switch (payload) {
-                    .verified_patch => |patch| {
-                        if (!std.mem.eql(u8, patch.file, file)) continue;
-                        return patch.patch_hash;
-                    },
-                    else => continue,
-                }
-            },
-            else => {},
+        if (patchPayloadIfMatching(transcript.at(i), file)) |patch| {
+            return patch.patch_hash;
         }
     }
     return null;
-}
-
-/// Count verified_patch entries for a file. Useful for iteration budgets
-/// (autoloop tracks patches_without_progress) and for UI indexing.
-pub fn patchCount(
-    transcript: *const transcript_mod.Transcript,
-    file: []const u8,
-) usize {
-    var count: usize = 0;
-    var i: usize = 0;
-    while (i < transcript.len()) : (i += 1) {
-        const entry = transcript.at(i);
-        switch (entry.*) {
-            .verified_patch => |message| {
-                const payload = message.ui_payload orelse continue;
-                switch (payload) {
-                    .verified_patch => |patch| {
-                        if (std.mem.eql(u8, patch.file, file)) count += 1;
-                    },
-                    else => {},
-                }
-            },
-            else => {},
-        }
-    }
-    return count;
-}
-
-/// Did the requested goal tags all flip to true on the latest patch for
-/// `file`? When no patch exists yet, or when after_properties is absent,
-/// returns false. Unknown goal names are treated as unsatisfied. The
-/// autoloop uses this as its termination check.
-pub fn goalsMet(
-    transcript: *const transcript_mod.Transcript,
-    file: []const u8,
-    goals: []const []const u8,
-) bool {
-    const props = currentProperties(transcript, file) orelse return false;
-    for (goals) |goal| {
-        if (!propertyByName(props, goal)) return false;
-    }
-    return true;
 }
 
 /// Read a PropertiesSnapshot field by its string name. Returns false for
@@ -260,54 +220,5 @@ test "lastPatchHash returns null when only legacy patches exist" {
     try appendPatch(testing.allocator, &tr, "handler.ts", null, zeroProps());
 
     try testing.expect(lastPatchHash(&tr, "handler.ts") == null);
-}
-
-test "patchCount counts only verified_patch entries for the file" {
-    var tr: transcript_mod.Transcript = .{};
-    defer tr.deinit(testing.allocator);
-
-    try appendPatch(testing.allocator, &tr, "handler.ts", null, zeroProps());
-    try appendPatch(testing.allocator, &tr, "other.ts", null, zeroProps());
-    try appendPatch(testing.allocator, &tr, "handler.ts", null, zeroProps());
-
-    try testing.expectEqual(@as(usize, 2), patchCount(&tr, "handler.ts"));
-    try testing.expectEqual(@as(usize, 1), patchCount(&tr, "other.ts"));
-    try testing.expectEqual(@as(usize, 0), patchCount(&tr, "missing.ts"));
-}
-
-test "goalsMet is true only when every goal is satisfied on the latest patch" {
-    var tr: transcript_mod.Transcript = .{};
-    defer tr.deinit(testing.allocator);
-
-    var p = zeroProps();
-    p.retry_safe = true;
-    p.pure = true;
-    try appendPatch(testing.allocator, &tr, "handler.ts", null, p);
-
-    const goals_all = [_][]const u8{ "retry_safe", "pure" };
-    try testing.expect(goalsMet(&tr, "handler.ts", &goals_all));
-
-    const goals_partial = [_][]const u8{ "retry_safe", "no_secret_leakage" };
-    try testing.expect(!goalsMet(&tr, "handler.ts", &goals_partial));
-}
-
-test "goalsMet treats unknown goal names as unsatisfied" {
-    var tr: transcript_mod.Transcript = .{};
-    defer tr.deinit(testing.allocator);
-
-    var p = zeroProps();
-    p.retry_safe = true;
-    try appendPatch(testing.allocator, &tr, "handler.ts", null, p);
-
-    const goals = [_][]const u8{ "retry_safe", "not_a_real_property" };
-    try testing.expect(!goalsMet(&tr, "handler.ts", &goals));
-}
-
-test "goalsMet is false when no patch exists for the file" {
-    var tr: transcript_mod.Transcript = .{};
-    defer tr.deinit(testing.allocator);
-
-    const goals = [_][]const u8{"retry_safe"};
-    try testing.expect(!goalsMet(&tr, "handler.ts", &goals));
 }
 
