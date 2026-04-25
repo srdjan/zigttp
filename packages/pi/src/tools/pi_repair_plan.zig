@@ -4,6 +4,7 @@ const std = @import("std");
 const zigts = @import("zigts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
+const property_goals = @import("../property_goals.zig");
 
 const ir = zigts.parser;
 const counterexample = zigts.counterexample;
@@ -65,14 +66,8 @@ fn decodeJson(
     return out;
 }
 
-const all_goals = [_]counterexample.PropertyTag{
-    .no_secret_leakage,
-    .no_credential_leakage,
-    .injection_safe,
-};
-
 fn parseGoal(s: []const u8) ?counterexample.PropertyTag {
-    return std.meta.stringToEnum(counterexample.PropertyTag, s);
+    return property_goals.parseDriveableGoal(s);
 }
 
 fn execute(
@@ -98,7 +93,7 @@ fn execute(
     var goals: std.ArrayListUnmanaged(counterexample.PropertyTag) = .empty;
     defer goals.deinit(allocator);
     if (args.len == 1) {
-        try goals.appendSlice(allocator, &all_goals);
+        try goals.appendSlice(allocator, &property_goals.supported_goals);
     } else {
         for (args[1..]) |g| {
             const tag = parseGoal(g) orelse {
@@ -437,6 +432,22 @@ test "decodeJson accepts path and goals" {
     try testing.expectEqual(@as(usize, 2), args.len);
     try testing.expectEqualStrings("h.ts", args[0]);
     try testing.expectEqualStrings("injection_safe", args[1]);
+}
+
+test "parseGoal rejects structural property tags" {
+    try testing.expectEqual(counterexample.PropertyTag.no_secret_leakage, parseGoal("no_secret_leakage").?);
+    try testing.expectEqual(counterexample.PropertyTag.no_credential_leakage, parseGoal("no_credential_leakage").?);
+    try testing.expectEqual(counterexample.PropertyTag.injection_safe, parseGoal("injection_safe").?);
+    try testing.expect(parseGoal("input_validated") == null);
+    try testing.expect(parseGoal("pii_contained") == null);
+}
+
+test "execute rejects structural property goals" {
+    var result = try execute(testing.allocator, &.{ "examples/handler/handler.ts", "pii_contained" });
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unknown goal pii_contained") != null);
 }
 
 test "tool description names repair plan authority boundary" {
