@@ -76,6 +76,65 @@ pub fn visibleCellEstimate(text: []const u8) usize {
     return visible;
 }
 
+/// Write a styled byte string capped to `width` visible cells, padding with
+/// spaces when shorter. SGR CSI sequences (`\x1b[...m`) are copied without
+/// counting toward width. If truncation happens while a style is active, the
+/// output is reset so the next row starts clean.
+pub fn writeFitted(w: *std.Io.Writer, text: []const u8, width: usize) !void {
+    if (width == 0) return;
+
+    var i: usize = 0;
+    var visible: usize = 0;
+    var truncated = false;
+    while (i < text.len) {
+        if (text[i] == 0x1b) {
+            const start = i;
+            i += 1;
+            if (i < text.len and text[i] == '[') i += 1;
+            while (i < text.len and text[i] != 'm') i += 1;
+            if (i < text.len) i += 1;
+            try w.writeAll(text[start..i]);
+            continue;
+        }
+
+        if (visible >= width) {
+            truncated = true;
+            break;
+        }
+
+        const next = utf8SequenceEnd(text, i);
+        try w.writeAll(text[i..next]);
+        visible += 1;
+        i = next;
+    }
+
+    if (i < text.len) truncated = true;
+    if (truncated) try w.writeAll(reset);
+    if (visible < width) try writeSpaces(w, width - visible);
+}
+
+fn utf8SequenceEnd(text: []const u8, start: usize) usize {
+    const b = text[start];
+    const len: usize = if ((b & 0x80) == 0)
+        1
+    else if ((b & 0xe0) == 0xc0)
+        2
+    else if ((b & 0xf0) == 0xe0)
+        3
+    else if ((b & 0xf8) == 0xf0)
+        4
+    else
+        1;
+    return @min(text.len, start + len);
+}
+
+fn writeSpaces(w: *std.Io.Writer, count: usize) !void {
+    var remaining = count;
+    while (remaining > 0) : (remaining -= 1) {
+        try w.writeByte(' ');
+    }
+}
+
 /// SGR segment: emit "\x1b[<params>m". Empty params emit a reset.
 pub fn sgr(w: *std.Io.Writer, params: []const u8) !void {
     if (params.len == 0) {
@@ -234,4 +293,30 @@ test "visibleCellEstimate: counts UTF-8 sequences as one cell each" {
     try testing.expectEqual(@as(usize, 3), visibleCellEstimate(middle_dot));
     // Box-drawing vertical bar (3-byte UTF-8) counts as 1 cell.
     try testing.expectEqual(@as(usize, 1), visibleCellEstimate("\xe2\x94\x82"));
+}
+
+test "writeFitted: truncates styled text by visible cells" {
+    const out = try collect(struct {
+        fn call(w: *std.Io.Writer) !void {
+            try writeFitted(w, "\x1b[31mhello world\x1b[0m", 5);
+        }
+    }.call);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "hello") != null);
+    try testing.expect(std.mem.indexOf(u8, out, " world") == null);
+    try testing.expectEqual(@as(usize, 5), visibleCellEstimate(out));
+    try testing.expect(std.mem.endsWith(u8, out, reset));
+}
+
+test "writeFitted: pads styled text when shorter than width" {
+    const out = try collect(struct {
+        fn call(w: *std.Io.Writer) !void {
+            try writeFitted(w, "\x1b[32mok\x1b[0m", 5);
+        }
+    }.call);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqual(@as(usize, 5), visibleCellEstimate(out));
+    try testing.expect(std.mem.endsWith(u8, out, "   "));
 }
