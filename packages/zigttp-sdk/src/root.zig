@@ -467,6 +467,15 @@ pub fn allowsSqlQuery(handle: *ModuleHandle, name: []const u8) bool {
     return zigttpSdkAllowsSqlQuery(handle, name.ptr, name.len);
 }
 
+extern fn zigttpSdkAllowsSqlWrite(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize) bool;
+
+/// Ask the capability policy whether a write SQL exec for `name` is
+/// permitted (action `db.write`). Phase 1 shares the backing allowlist with
+/// `allowsSqlQuery` but emits a generic `policy_denied` event on deny.
+pub fn allowsSqlWrite(handle: *ModuleHandle, name: []const u8) bool {
+    return zigttpSdkAllowsSqlWrite(handle, name.ptr, name.len);
+}
+
 extern fn zigttpSdkArrayPush(handle: *ModuleHandle, arr: JSValue, val: JSValue) bool;
 
 /// Append a value to the end of a JS array.

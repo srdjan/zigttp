@@ -1,0 +1,10 @@
+{
+  "input": {
+    "action": "db.write",
+    "resource": { "kind": "sql_query", "id": "drop_table" }
+  },
+  "policy": {
+    "sql": ["upsert_user"]
+  },
+  "expected": { "kind": "deny", "reason": "not_in_allowlist" }
+}

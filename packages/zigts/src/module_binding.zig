@@ -441,6 +441,30 @@ pub fn allowsSqlQueryChecked(ctx: *context.Context, name: []const u8) bool {
     return allowsSqlQueryForActiveModule(ctx, name) catch |err| panicCapabilityError(err, .policy_check);
 }
 
+pub fn allowsSqlWriteForActiveModule(
+    ctx: *context.Context,
+    name: []const u8,
+) ActiveCapabilityError!bool {
+    try requireActiveCapability(.policy_check);
+    const allowed = ctx.capability_policy.allowsSqlWrite(name);
+    if (!allowed) {
+        // Phase 1 dual-emit: legacy per-module event for existing JSONL
+        // consumers, generic policy_denied for spec section 12 shape.
+        // Phase 4 deprecates the legacy kinds once consumers migrate.
+        emitPolicyDenial(.policy_denied_sql, name);
+        const policy = @import("policy.zig");
+        policy.emitDenied(.{
+            .action = .db_write,
+            .resource = .{ .kind = policy.resource_kind_sql_query, .id = name },
+        }, .not_in_allowlist);
+    }
+    return allowed;
+}
+
+pub fn allowsSqlWriteChecked(ctx: *context.Context, name: []const u8) bool {
+    return allowsSqlWriteForActiveModule(ctx, name) catch |err| panicCapabilityError(err, .policy_check);
+}
+
 pub export fn zigttpSdkHasCapability(handle: *ModuleHandle, capability_tag: u8) bool {
     if (capability_tag > @intFromEnum(ModuleCapability.websocket)) return false;
     const capability: ModuleCapability = @enumFromInt(capability_tag);
@@ -788,6 +812,15 @@ pub export fn zigttpSdkAllowsSqlQuery(
 ) bool {
     const ctx = handleToContext(handle);
     return allowsSqlQueryChecked(ctx, name_ptr[0..name_len]);
+}
+
+pub export fn zigttpSdkAllowsSqlWrite(
+    handle: *ModuleHandle,
+    name_ptr: [*]const u8,
+    name_len: usize,
+) bool {
+    const ctx = handleToContext(handle);
+    return allowsSqlWriteChecked(ctx, name_ptr[0..name_len]);
 }
 
 pub export fn zigttpSdkArrayPush(

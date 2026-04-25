@@ -1,0 +1,7 @@
+{
+  "input": {
+    "action": "http.outbound"
+  },
+  "policy": {},
+  "expected": { "kind": "deny", "reason": "missing_resource" }
+}

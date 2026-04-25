@@ -1,0 +1,8 @@
+{
+  "input": {
+    "action": "db.migrate",
+    "resource": { "kind": "sql_query", "id": "migrate_users" }
+  },
+  "policy": {},
+  "expected": { "kind": "deny", "reason": "unknown_action" }
+}
