@@ -27,6 +27,55 @@ pub fn cursorLeft(w: *std.Io.Writer, cols: usize) !void {
 pub const sync_begin = "\x1b[?2026h";
 pub const sync_end = "\x1b[?2026l";
 
+/// UTF-8 encoding of U+00B7 "middle dot", used as the visual separator
+/// between status-line sections and other field groups.
+pub const middle_dot = " \xc2\xb7 ";
+
+/// Approximate the column count a styled byte string occupies on the
+/// terminal. Skips SGR escape sequences (CSI ... m) and counts each
+/// UTF-8 codepoint as one cell.
+///
+/// LIMITATIONS: this is a quick estimate, not a precise width
+/// calculation. It does NOT account for:
+///   - East Asian wide characters (CJK ideographs count as 1 here, but
+///     terminals render them as 2).
+///   - Combining characters / zero-width joiners (counted as 1 each).
+///   - Other CSI sequences that are not the SGR `\x1b[ ... m` form.
+///
+/// Suitable for the project's current renderers (ASCII text, box-drawing
+/// glyphs, and the middle-dot separator). Callers rendering arbitrary
+/// user content should consider a fuller wcwidth implementation.
+pub fn visibleCellEstimate(text: []const u8) usize {
+    var i: usize = 0;
+    var visible: usize = 0;
+    while (i < text.len) {
+        if (text[i] == 0x1b) {
+            i += 1;
+            if (i < text.len and text[i] == '[') i += 1;
+            while (i < text.len and text[i] != 'm') i += 1;
+            if (i < text.len) i += 1;
+            continue;
+        }
+        if ((text[i] & 0x80) == 0) {
+            visible += 1;
+            i += 1;
+        } else if ((text[i] & 0xe0) == 0xc0) {
+            visible += 1;
+            i += 2;
+        } else if ((text[i] & 0xf0) == 0xe0) {
+            visible += 1;
+            i += 3;
+        } else if ((text[i] & 0xf8) == 0xf0) {
+            visible += 1;
+            i += 4;
+        } else {
+            visible += 1;
+            i += 1;
+        }
+    }
+    return visible;
+}
+
 /// SGR segment: emit "\x1b[<params>m". Empty params emit a reset.
 pub fn sgr(w: *std.Io.Writer, params: []const u8) !void {
     if (params.len == 0) {
@@ -168,4 +217,21 @@ test "cursorLeft: zero columns is a no-op" {
     }.call);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("", out);
+}
+
+test "visibleCellEstimate: counts ASCII bytes one-for-one" {
+    try testing.expectEqual(@as(usize, 5), visibleCellEstimate("hello"));
+    try testing.expectEqual(@as(usize, 0), visibleCellEstimate(""));
+}
+
+test "visibleCellEstimate: skips SGR escape sequences" {
+    try testing.expectEqual(@as(usize, 5), visibleCellEstimate("\x1b[31mhello\x1b[0m"));
+    try testing.expectEqual(@as(usize, 5), visibleCellEstimate("\x1b[1;38;5;33mhello\x1b[0m"));
+}
+
+test "visibleCellEstimate: counts UTF-8 sequences as one cell each" {
+    // Middle-dot is 3 ASCII cells: " " + "\xc2\xb7" + " "
+    try testing.expectEqual(@as(usize, 3), visibleCellEstimate(middle_dot));
+    // Box-drawing vertical bar (3-byte UTF-8) counts as 1 cell.
+    try testing.expectEqual(@as(usize, 1), visibleCellEstimate("\xe2\x94\x82"));
 }

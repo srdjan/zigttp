@@ -1472,7 +1472,7 @@ fn renderStatusRow(
     const session_id = session.session_id orelse "ephemeral";
     const tok = session.token_totals;
 
-    const sep = " \xc2\xb7 "; // U+00B7 middle dot
+    const sep = ansi.middle_dot;
 
     var fields_buf: [1536]u8 = undefined;
     var fw = std.Io.Writer.fixed(&fields_buf);
@@ -1509,7 +1509,7 @@ fn renderStatusRow(
         try ansi.styled(&fw, notice_sgr, notice);
     }
     const buf = fw.buffered();
-    const visible = visibleCellEstimate(buf);
+    const visible = ansi.visibleCellEstimate(buf);
     try w.writeAll(buf);
     if (width > visible) try writeSpaces(w, width - visible);
 }
@@ -1831,45 +1831,14 @@ fn writePaneHeader(
     // Pad with spaces. Estimate visible cells: rough approximation at
     // count of bytes after stripping SGR; for the demo terminal width this
     // is fine.
-    const visible_estimate = visibleCellEstimate(header);
+    const visible_estimate = ansi.visibleCellEstimate(header);
     if (width > visible_estimate) {
         try writeSpaces(w, width - visible_estimate);
     }
 }
 
-fn visibleCellEstimate(text: []const u8) usize {
-    var i: usize = 0;
-    var visible: usize = 0;
-    while (i < text.len) {
-        if (text[i] == 0x1b) {
-            // Skip the SGR escape: ESC [ ... m
-            i += 1;
-            if (i < text.len and text[i] == '[') i += 1;
-            while (i < text.len and text[i] != 'm') i += 1;
-            if (i < text.len) i += 1;
-            continue;
-        }
-        // Treat each UTF-8 sequence as a single cell. A leading byte is
-        // detected by the high bits.
-        if ((text[i] & 0x80) == 0) {
-            visible += 1;
-            i += 1;
-        } else if ((text[i] & 0xe0) == 0xc0) {
-            visible += 1;
-            i += 2;
-        } else if ((text[i] & 0xf0) == 0xe0) {
-            visible += 1;
-            i += 3;
-        } else if ((text[i] & 0xf8) == 0xf0) {
-            visible += 1;
-            i += 4;
-        } else {
-            visible += 1;
-            i += 1;
-        }
-    }
-    return visible;
-}
+// `visibleCellEstimate` lives in `ansi.zig`; pane chrome uses
+// `ansi.visibleCellEstimate` to compute padding.
 
 fn buildLedgerLine(
     out: *[1024]u8,
@@ -2734,35 +2703,17 @@ fn writePropertiesSnapshot(
         switch (@typeInfo(field.type)) {
             .bool => {
                 const is_true = @field(value, field.name);
-                const truthy = if (is_true) "true" else "false";
-                const value_sgr = if (is_true) theme.delta_promoted else theme.delta_demoted;
                 if (cursor) |selected_index| {
-                    const selected = bool_index == selected_index;
-                    const lane = property_goals.classify(field.name).label();
-                    if (selected) {
-                        try ansi.styled(w, theme.accent_primary, "> ");
-                    } else {
-                        try w.writeAll("  ");
-                    }
-                    try w.writeAll("[");
-                    try ansi.styled(w, value_sgr, truthy);
-                    try w.writeAll("] ");
-                    if (selected) {
-                        try ansi.styled(w, theme.chip_focus, field.name);
-                    } else {
-                        try ansi.styled(w, theme.chip_idle, field.name);
-                    }
-                    try w.writeAll(" ");
-                    try ansi.sgr(w, theme.dim);
-                    try w.print("({s})", .{lane});
-                    try w.writeAll(ansi.reset);
-                    try w.writeByte('\n');
+                    try writePropertyChipNavigable(
+                        w,
+                        theme,
+                        field.name,
+                        is_true,
+                        bool_index == selected_index,
+                        property_goals.classify(field.name).label(),
+                    );
                 } else {
-                    try ansi.styled(w, theme.dim, "- ");
-                    try ansi.styled(w, theme.chip_idle, field.name);
-                    try ansi.styled(w, theme.dim, ": ");
-                    try ansi.styled(w, value_sgr, truthy);
-                    try w.writeByte('\n');
+                    try writePropertyChipPlain(w, theme, field.name, is_true);
                 }
                 bool_index += 1;
             },
@@ -2791,6 +2742,48 @@ fn writePropertiesSnapshot(
             else => @compileError("unsupported PropertiesSnapshot field type"),
         }
     }
+}
+
+fn writePropertyChipNavigable(
+    w: *std.Io.Writer,
+    theme: *const theme_mod.Theme,
+    name: []const u8,
+    is_true: bool,
+    selected: bool,
+    lane: []const u8,
+) !void {
+    const value_sgr = if (is_true) theme.delta_promoted else theme.delta_demoted;
+    const value_text = if (is_true) "true" else "false";
+    const name_sgr = if (selected) theme.chip_focus else theme.chip_idle;
+    if (selected) {
+        try ansi.styled(w, theme.accent_primary, "> ");
+    } else {
+        try w.writeAll("  ");
+    }
+    try w.writeAll("[");
+    try ansi.styled(w, value_sgr, value_text);
+    try w.writeAll("] ");
+    try ansi.styled(w, name_sgr, name);
+    try w.writeAll(" ");
+    try ansi.sgr(w, theme.dim);
+    try w.print("({s})", .{lane});
+    try w.writeAll(ansi.reset);
+    try w.writeByte('\n');
+}
+
+fn writePropertyChipPlain(
+    w: *std.Io.Writer,
+    theme: *const theme_mod.Theme,
+    name: []const u8,
+    is_true: bool,
+) !void {
+    const value_sgr = if (is_true) theme.delta_promoted else theme.delta_demoted;
+    const value_text = if (is_true) "true" else "false";
+    try ansi.styled(w, theme.dim, "- ");
+    try ansi.styled(w, theme.chip_idle, name);
+    try ansi.styled(w, theme.dim, ": ");
+    try ansi.styled(w, value_sgr, value_text);
+    try w.writeByte('\n');
 }
 
 fn writeCommandOutcomePayload(
@@ -3164,52 +3157,35 @@ fn ledgerTabShortLabel(tab: LedgerTab) []const u8 {
 /// every tab in order so the user can see where they are in the cycle.
 fn writeTabBar(w: *std.Io.Writer, current: LedgerTab, theme: *const theme_mod.Theme) !void {
     const tabs = [_]LedgerTab{ .delta, .diff, .properties, .violations, .prove, .system, .citations, .witnesses };
-    var underline_buf: [256]u8 = undefined;
-    var underline_len: usize = 0;
-    for (tabs, 0..) |t, idx| {
-        if (idx > 0) {
-            try ansi.styled(w, theme.dim, "  ");
-            if (underline_len + 2 <= underline_buf.len) {
-                @memset(underline_buf[underline_len .. underline_len + 2], ' ');
-                underline_len += 2;
-            }
-        }
-        const label = ledgerTabShortLabel(t);
-        if (t == current) {
-            try ansi.styled(w, theme.tab_active, label);
-            if (underline_len + label.len <= underline_buf.len) {
-                // Underline with U+2501 "heavy horizontal" - one byte for ASCII
-                // would underflow, but the rule line is rendered separately so
-                // we just track the byte count of the label here for spacing.
-                const fill: usize = if (label.len > underline_buf.len - underline_len)
-                    underline_buf.len - underline_len
-                else
-                    label.len;
-                @memset(underline_buf[underline_len .. underline_len + fill], 'X');
-                underline_len += fill;
-            }
-        } else {
-            try ansi.styled(w, theme.tab_idle, label);
-            if (underline_len + label.len <= underline_buf.len) {
-                @memset(underline_buf[underline_len .. underline_len + label.len], ' ');
-                underline_len += label.len;
-            }
-        }
+
+    // Two passes: paint the labels, then paint the underline beneath the
+    // active tab's columns. Pre-record each label and its kind so the
+    // underline pass can re-walk without re-evaluating.
+    var label_count: usize = 0;
+    var labels: [tabs.len][]const u8 = undefined;
+    var actives: [tabs.len]bool = undefined;
+    for (tabs) |t| {
+        labels[label_count] = ledgerTabShortLabel(t);
+        actives[label_count] = (t == current);
+        label_count += 1;
+    }
+
+    const inter_label_gap = "  ";
+    for (0..label_count) |idx| {
+        if (idx > 0) try ansi.styled(w, theme.dim, inter_label_gap);
+        const slot = if (actives[idx]) theme.tab_active else theme.tab_idle;
+        try ansi.styled(w, slot, labels[idx]);
     }
     try w.writeByte('\n');
 
-    // Underline rule beneath the active tab. We walk the same labels and
-    // emit a `━` (U+2501, 3 bytes UTF-8) under each char of the active
-    // label, spaces under the rest. The buffer above tracks `X` for active
-    // chars and ` ` for idle, which we now translate to wire bytes.
+    // Underline rule. For each label column, emit `─` (U+2500) under
+    // active labels and a space under idle labels. The gap columns
+    // between labels stay spaces.
     try ansi.sgr(w, theme.tab_underline);
-    var i: usize = 0;
-    while (i < underline_len) : (i += 1) {
-        if (underline_buf[i] == 'X') {
-            try w.writeAll("\xe2\x94\x80"); // U+2500 light horizontal
-        } else {
-            try w.writeByte(' ');
-        }
+    for (0..label_count) |idx| {
+        if (idx > 0) try writeSpaces(w, inter_label_gap.len);
+        const ch: []const u8 = if (actives[idx]) "\xe2\x94\x80" else " ";
+        for (0..labels[idx].len) |_| try w.writeAll(ch);
     }
     try w.writeAll(ansi.reset);
     try w.writeByte('\n');
