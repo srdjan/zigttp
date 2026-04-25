@@ -1510,9 +1510,7 @@ fn renderStatusRow(
         try ansi.styled(&fw, notice_sgr, notice);
     }
     const buf = fw.buffered();
-    const visible = ansi.visibleCellEstimate(buf);
-    try w.writeAll(buf);
-    if (width > visible) try writeSpaces(w, width - visible);
+    try ansi.writeFitted(w, buf, width);
 }
 
 fn statusNoticeSgr(notice: StatusNotice, theme: *const theme_mod.Theme) []const u8 {
@@ -1875,18 +1873,7 @@ fn writePaneHeader(
     }
     const header = fw.buffered();
 
-    // writeFitted truncates by visible width but does not understand SGR
-    // bytes; we emit the SGR directly and pass an estimate of the visible
-    // length to writeFitted via a guard. For simplicity at this width, just
-    // write it raw and pad with spaces to fill to `width`.
-    try w.writeAll(header);
-    // Pad with spaces. Estimate visible cells: rough approximation at
-    // count of bytes after stripping SGR; for the demo terminal width this
-    // is fine.
-    const visible_estimate = ansi.visibleCellEstimate(header);
-    if (width > visible_estimate) {
-        try writeSpaces(w, width - visible_estimate);
-    }
+    try ansi.writeFitted(w, header, width);
 }
 
 // `visibleCellEstimate` lives in `ansi.zig`; pane chrome uses
@@ -3707,6 +3694,29 @@ test "g on structural property shows honest boundary status" {
         buf.items,
         "structural property - not goal-driveable; edit the source to change it.",
     ) != null);
+}
+
+test "status row is capped to terminal width with themed text" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    session.session_id = try testing.allocator.dupe(u8, "01HF2J5K6M7N8P9Q0R1S2T3V4W");
+    session.token_totals = .{
+        .input_tokens = 12345,
+        .cache_read_input_tokens = 777,
+        .cache_creation_input_tokens = 888,
+        .output_tokens = 67890,
+    };
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
+    try renderStatusRow(&aw.writer, &session, &state, 80);
+    buf = aw.toArrayList();
+
+    try testing.expectEqual(@as(usize, 80), ansi.visibleCellEstimate(buf.items));
 }
 
 test "g on flow property dispatches the autoloop and surfaces in-flight state" {
