@@ -33,14 +33,21 @@ pub const Color = enum {
 
 pub const reset = ansi.reset;
 
-/// Unicode box-drawing characters. Kept as constants so any future
-/// switch to ASCII-only rendering is a single-file edit.
-const top_left = "\xe2\x94\x8c"; // ┌
-const top_right = "\xe2\x94\x90"; // ┐
-const bottom_left = "\xe2\x94\x94"; // └
-const bottom_right = "\xe2\x94\x98"; // ┘
-const horizontal = "\xe2\x94\x80"; // ─
-const vertical = "\xe2\x94\x82"; // │
+/// Unicode box-drawing characters. Kept as named constants so any
+/// future switch to ASCII-only rendering is a single-file edit.
+/// Public so other renderers (e.g. the modal overlay) can reuse the
+/// same glyph vocabulary instead of redefining UTF-8 byte sequences
+/// inline.
+pub const top_left = "\xe2\x94\x8c"; // ┌
+pub const top_right = "\xe2\x94\x90"; // ┐
+pub const bottom_left = "\xe2\x94\x94"; // └
+pub const bottom_right = "\xe2\x94\x98"; // ┘
+pub const horizontal = "\xe2\x94\x80"; // ─
+pub const vertical = "\xe2\x94\x82"; // │
+pub const round_top_left = "\xe2\x95\xad"; // ╭
+pub const round_top_right = "\xe2\x95\xae"; // ╮
+pub const round_bottom_left = "\xe2\x95\xb0"; // ╰
+pub const round_bottom_right = "\xe2\x95\xaf"; // ╯
 
 pub const Options = struct {
     title: []const u8,
