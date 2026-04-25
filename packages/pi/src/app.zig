@@ -11,6 +11,7 @@ const ledger = @import("ledger.zig");
 const autoloop = @import("autoloop.zig");
 const transcript_mod = @import("transcript.zig");
 const session_state = @import("session_state.zig");
+const property_goals = @import("property_goals.zig");
 const tools_common = @import("tools/common.zig");
 
 const meta_tool = @import("tools/zigts_expert_meta.zig");
@@ -36,7 +37,6 @@ const pi_repair_plan_tool = @import("tools/pi_repair_plan.zig");
 const pi_apply_repair_plan_tool = @import("tools/pi_apply_repair_plan.zig");
 
 const Registry = registry_mod.Registry;
-const counterexample = @import("zigts").counterexample;
 
 pub fn buildMinimalRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
@@ -139,12 +139,12 @@ fn runAutoloop(
     }
     if (goals.len == 0) exitWithMessage("error: --goal list is empty\n", 2);
     for (goals) |goal| {
-        if (!isAutoloopGoalSupported(goal)) {
+        if (!property_goals.isGoalDriveable(goal)) {
             var stderr: [256]u8 = undefined;
             const line = std.fmt.bufPrint(
                 &stderr,
                 "error: unsupported autoloop goal '{s}' in --goal; try one of: {s}\n",
-                .{ goal, supported_goal_list },
+                .{ goal, property_goals.supported_goal_list },
             ) catch "error: unsupported autoloop goal in --goal\n";
             exitWithMessage(line, 2);
         }
@@ -177,20 +177,6 @@ fn runAutoloop(
     try printAutoloopOutcome(allocator, outcome, &transcript, handler, goal_slices);
     if (outcome.verdict != .achieved) std.process.exit(1);
 }
-
-fn isAutoloopGoalSupported(goal: []const u8) bool {
-    return std.meta.stringToEnum(counterexample.PropertyTag, goal) != null;
-}
-
-/// Comma-separated PropertyTag names, derived from the enum at comptime so
-/// the user-facing error message stays in sync if a tag is added or removed.
-const supported_goal_list = blk: {
-    var out: []const u8 = "";
-    for (@typeInfo(counterexample.PropertyTag).@"enum".fields, 0..) |field, i| {
-        out = if (i == 0) field.name else out ++ ", " ++ field.name;
-    }
-    break :blk out;
-};
 
 fn printAutoloopOutcome(
     allocator: std.mem.Allocator,
@@ -793,18 +779,6 @@ test "parseExpertFlags: --goal conflicts with --print" {
 test "parseExpertFlags: --goal conflicts with --mode rpc" {
     const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--mode", "rpc" };
     try testing.expectError(error.GoalConflictsWithPrintOrRpc, parseExpertFlags(argv[0..]));
-}
-
-test "isAutoloopGoalSupported accepts only counterexample property tags" {
-    try testing.expect(isAutoloopGoalSupported("no_secret_leakage"));
-    try testing.expect(isAutoloopGoalSupported("no_credential_leakage"));
-    try testing.expect(isAutoloopGoalSupported("input_validated"));
-    try testing.expect(isAutoloopGoalSupported("pii_contained"));
-    try testing.expect(isAutoloopGoalSupported("injection_safe"));
-
-    try testing.expect(!isAutoloopGoalSupported("retry_safe"));
-    try testing.expect(!isAutoloopGoalSupported("pure"));
-    try testing.expect(!isAutoloopGoalSupported("totally_not_a_property"));
 }
 
 test "splitCsv trims whitespace and drops empty entries" {

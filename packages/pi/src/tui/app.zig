@@ -10,11 +10,14 @@ const repl = @import("../repl.zig");
 const agent = @import("../agent.zig");
 const loop = @import("../loop.zig");
 const app = @import("../app.zig");
+const autoloop = @import("../autoloop.zig");
 const transcript_mod = @import("../transcript.zig");
 const ui_payload_mod = @import("../ui_payload.zig");
 const session_events = @import("../session/events.zig");
 const session_state = @import("../session_state.zig");
+const property_goals = @import("../property_goals.zig");
 const registry_tool = @import("../registry/tool.zig");
+const tools_common = @import("../tools/common.zig");
 
 const LineEditor = line_editor.LineEditor;
 const KeyEvent = line_editor.KeyEvent;
@@ -40,6 +43,27 @@ pub const FocusMode = enum {
 pub const ViewMode = enum {
     ledger,
     chat,
+};
+
+const StatusNotice = union(enum) {
+    none,
+    structural_property,
+    invalid_property,
+    /// `g` was just pressed on a goal-driveable chip; the autoloop is in
+    /// flight. The slice is the property name and is owned by the comptime
+    /// PropertiesSnapshot field set, so no allocation is required.
+    goal_driving: []const u8,
+    /// The autoloop returned. Carries the verdict so the user can see
+    /// whether the chip went green or which budget tripped.
+    goal_completed: GoalCompleted,
+    /// The autoloop dispatch itself failed (workspace lookup, tool error,
+    /// allocation). Distinct from a non-`achieved` verdict.
+    goal_dispatch_error: []const u8,
+};
+
+const GoalCompleted = struct {
+    name: []const u8,
+    verdict: autoloop.AutoloopVerdict,
 };
 
 const LayoutMode = enum {
@@ -162,6 +186,7 @@ pub const AppState = struct {
     selected_ledger_index: usize = 0,
     feed_scroll: usize = 0,
     ledger_scroll: usize = 0,
+    selected_property_index: usize = 0,
     focus_mode: FocusMode = .composer,
     view_mode: ViewMode = .ledger,
     ledger_tab: LedgerTab = .delta,
@@ -169,8 +194,13 @@ pub const AppState = struct {
     composer: ComposerState = .{},
     inspector: InspectorState = .{},
     modal: ModalState = null,
+    status_notice: StatusNotice = .none,
     observed_transcript_len: usize = 0,
     layout_mode: LayoutMode = .split,
+    /// True while a property-goal autoloop is running on the main thread.
+    /// Single-flight guard: a second `g` press is dropped until the run
+    /// returns. Step 3 (async) replaces this with a worker-pipe wakeup.
+    autoloop_in_flight: bool = false,
 
     pub fn deinit(self: *AppState, allocator: std.mem.Allocator) void {
         self.feed_items.deinit(allocator);
@@ -216,6 +246,7 @@ pub const AppState = struct {
         }
         self.clampSelection();
         self.clampLedgerSelection();
+        self.clampPropertySelection();
     }
 
     pub fn resetToTranscript(
@@ -240,12 +271,14 @@ pub const AppState = struct {
         self.inspector.scroll_offset = 0;
         self.selected_feed_index = 0;
         self.selected_ledger_index = 0;
+        self.selected_property_index = 0;
         self.diff_expanded = false;
         self.ledger_items.clearRetainingCapacity();
         self.composer = .{
             .line = editor.line(),
             .cursor = editor.cursor(),
         };
+        self.status_notice = .none;
         while (self.observed_transcript_len < session.transcript.len()) : (self.observed_transcript_len += 1) {
             const entry = session.transcript.at(self.observed_transcript_len);
             try self.feed_items.append(allocator, .{
@@ -265,6 +298,7 @@ pub const AppState = struct {
         }
         self.clampSelection();
         self.clampLedgerSelection();
+        self.clampPropertySelection();
     }
 
     pub fn appendLocalToolResult(
@@ -334,6 +368,20 @@ pub const AppState = struct {
         if (self.selected_ledger_index >= self.ledger_items.items.len) {
             self.selected_ledger_index = self.ledger_items.items.len - 1;
         }
+    }
+
+    fn clampPropertySelection(self: *AppState) void {
+        if (property_goals.bool_property_count == 0) {
+            self.selected_property_index = 0;
+            return;
+        }
+        if (self.selected_property_index >= property_goals.bool_property_count) {
+            self.selected_property_index = property_goals.bool_property_count - 1;
+        }
+    }
+
+    fn clearStatusNotice(self: *AppState) void {
+        self.status_notice = .none;
     }
 };
 
@@ -466,6 +514,15 @@ pub fn run(
                             try approveSelectedPatch(&runtime);
                             try runtime.redrawFrame();
                         },
+                        .drive_goal => {
+                            // Paint the in-flight indicator before the
+                            // (currently sync-blocking) autoloop runs so
+                            // the user sees the chip-driving status notice
+                            // and not a stale frame for the duration.
+                            try runtime.redrawFrame();
+                            try driveSelectedGoal(&runtime, registry);
+                            try runtime.redrawFrame();
+                        },
                     }
                 },
             }
@@ -527,6 +584,12 @@ pub const PaneOutcome = enum {
     /// User pressed `A` on a selected ledger patch whose witness state is
     /// clean. Caller resolves by emitting an approval system_note.
     approve,
+    /// User pressed `g` on a selected goal-driveable property chip. The
+    /// caller redraws to surface the in-flight indicator, then invokes
+    /// `driveSelectedGoal` so the autoloop runs against the live session
+    /// transcript. The chip's file binds to the currently-selected ledger
+    /// patch.
+    drive_goal,
 };
 
 fn handlePaneEvent(
@@ -536,8 +599,10 @@ fn handlePaneEvent(
 ) PaneOutcome {
     switch (event.kind) {
         .tab => {
+            state.clearStatusNotice();
             if (state.view_mode == .ledger) {
                 state.ledger_tab = nextLedgerTab(state.ledger_tab);
+                state.clampPropertySelection();
                 state.focus_mode = .inspector;
             } else {
                 state.focus_mode = nextFocus(state.focus_mode);
@@ -545,8 +610,10 @@ fn handlePaneEvent(
             return .redraw;
         },
         .shift_tab => {
+            state.clearStatusNotice();
             if (state.view_mode == .ledger) {
                 state.ledger_tab = prevLedgerTab(state.ledger_tab);
+                state.clampPropertySelection();
                 state.focus_mode = .inspector;
             } else {
                 state.focus_mode = prevFocus(state.focus_mode);
@@ -557,7 +624,26 @@ fn handlePaneEvent(
             state.focus_mode = .composer;
             return .redraw;
         },
+        .left => {
+            if (state.view_mode == .ledger and state.ledger_tab == .properties) {
+                if (state.selected_property_index == 0) return .no_op;
+                state.clearStatusNotice();
+                state.selected_property_index -= 1;
+                return .redraw;
+            }
+            return .no_op;
+        },
+        .right => {
+            if (state.view_mode == .ledger and state.ledger_tab == .properties) {
+                if (state.selected_property_index + 1 >= property_goals.bool_property_count) return .no_op;
+                state.clearStatusNotice();
+                state.selected_property_index += 1;
+                return .redraw;
+            }
+            return .no_op;
+        },
         .up => {
+            state.clearStatusNotice();
             if (state.view_mode == .ledger) {
                 moveLedgerSelectionUp(state);
             } else {
@@ -566,6 +652,7 @@ fn handlePaneEvent(
             return .redraw;
         },
         .down => {
+            state.clearStatusNotice();
             if (state.view_mode == .ledger) {
                 moveLedgerSelectionDown(state);
             } else {
@@ -589,8 +676,43 @@ fn handlePaneEvent(
                 return .redraw;
             },
             'l', 'L' => {
+                state.clearStatusNotice();
                 state.view_mode = .ledger;
                 return .redraw;
+            },
+            'g', 'G' => {
+                if (state.view_mode != .ledger or state.ledger_tab != .properties) return .no_op;
+                if (state.autoloop_in_flight) return .no_op;
+                const name = property_goals.boolPropertyNameAt(state.selected_property_index) orelse {
+                    state.status_notice = .invalid_property;
+                    return .redraw;
+                };
+                switch (property_goals.classify(name)) {
+                    .goal_driveable => {
+                        // The chip's file binds to the currently-selected
+                        // ledger patch. No selection means no anchor and the
+                        // dispatch is meaningless.
+                        const idx = state.selectedLedgerIndex() orelse {
+                            state.status_notice = .invalid_property;
+                            return .redraw;
+                        };
+                        if (session_state.patchPayload(session.transcript.at(idx)) == null) {
+                            state.status_notice = .invalid_property;
+                            return .redraw;
+                        }
+                        state.autoloop_in_flight = true;
+                        state.status_notice = .{ .goal_driving = name };
+                        return .drive_goal;
+                    },
+                    .structural => {
+                        state.status_notice = .structural_property;
+                        return .redraw;
+                    },
+                    .unknown => {
+                        state.status_notice = .invalid_property;
+                        return .redraw;
+                    },
+                }
             },
             'A' => {
                 if (state.view_mode == .ledger and approvalGateClear(state, session)) {
@@ -637,6 +759,58 @@ fn approvalGateClear(state: *const AppState, session: *const agent.AgentSession)
     const transcript_index = state.selectedLedgerIndex() orelse return false;
     const patch = session_state.patchPayload(session.transcript.at(transcript_index)) orelse return false;
     return patch.post_apply_ok and patch.witnesses_new.len == 0;
+}
+
+/// Run the property-goal autoloop against the live session transcript for
+/// the chip the user pressed `g` on. The chip's file is the file of the
+/// currently-selected ledger patch; the chip's name is the property at the
+/// rail's cursor. handlePaneEvent has already validated both ends and
+/// flipped `autoloop_in_flight` true; this helper owns the dispatch and
+/// the post-run status update, and always clears `autoloop_in_flight` so a
+/// failure can never wedge the rail.
+///
+/// Sync-blocking by design at step 1: the UI freezes for the run. Step 3
+/// moves `autoloop.drive` to a worker thread and replaces the freeze with
+/// a self-pipe wakeup. The status notice is the same in either world.
+fn driveSelectedGoal(runtime: *TuiRuntime, registry: *const Registry) !void {
+    defer runtime.state.autoloop_in_flight = false;
+
+    const idx = runtime.state.selectedLedgerIndex() orelse {
+        runtime.state.status_notice = .invalid_property;
+        return;
+    };
+    const patch = session_state.patchPayload(runtime.session.transcript.at(idx)) orelse {
+        runtime.state.status_notice = .invalid_property;
+        return;
+    };
+    const name = property_goals.boolPropertyNameAt(runtime.state.selected_property_index) orelse {
+        runtime.state.status_notice = .invalid_property;
+        return;
+    };
+    if (!property_goals.isGoalDriveable(name)) {
+        runtime.state.status_notice = .invalid_property;
+        return;
+    }
+
+    const allocator = runtime.allocator;
+    const workspace_root = tools_common.workspaceRoot(allocator) catch {
+        runtime.state.status_notice = .{ .goal_dispatch_error = name };
+        return;
+    };
+    defer allocator.free(workspace_root);
+
+    const goals = [_][]const u8{name};
+    const outcome = autoloop.drive(allocator, registry, &runtime.session.transcript, .{
+        .workspace_root = workspace_root,
+        .file = patch.file,
+        .goals = &goals,
+        .events_path = runtime.session.events_path,
+    }) catch {
+        runtime.state.status_notice = .{ .goal_dispatch_error = name };
+        return;
+    };
+
+    runtime.state.status_notice = .{ .goal_completed = .{ .name = name, .verdict = outcome.verdict } };
 }
 
 fn handleSubmit(
@@ -851,24 +1025,50 @@ fn renderStatusRow(
     const session_id = session.session_id orelse "ephemeral";
     const tok = session.token_totals;
 
-    var line_buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(
-        &line_buf,
-        "session {s} | provider {s}/{s} | model {s} | in {d} out {d} | cache {d}/{d} | view {s} | focus {s}",
-        .{
-            session_id,
-            descriptor.provider_label,
-            descriptor.auth_label,
-            model,
-            tok.input_tokens,
-            tok.output_tokens,
-            tok.cache_read_input_tokens,
-            tok.cache_creation_input_tokens,
-            viewLabel(state.view_mode),
-            focusLabel(state.focus_mode),
-        },
-    ) catch "status";
+    var notice_buf: [256]u8 = undefined;
+    const notice = statusNoticeText(state.status_notice, &notice_buf);
+    const base_args = .{
+        session_id,
+        descriptor.provider_label,
+        descriptor.auth_label,
+        model,
+        tok.input_tokens,
+        tok.output_tokens,
+        tok.cache_read_input_tokens,
+        tok.cache_creation_input_tokens,
+        viewLabel(state.view_mode),
+        focusLabel(state.focus_mode),
+    };
+    const base_fmt = "session {s} | provider {s}/{s} | model {s} | in {d} out {d} | cache {d}/{d} | view {s} | focus {s}";
+    var line_buf: [1536]u8 = undefined;
+    const line = if (notice.len == 0)
+        std.fmt.bufPrint(&line_buf, base_fmt, base_args) catch "status"
+    else
+        std.fmt.bufPrint(&line_buf, base_fmt ++ " | {s}", base_args ++ .{notice}) catch "status";
     try writeFitted(w, line, width);
+}
+
+fn statusNoticeText(notice: StatusNotice, buf: *[256]u8) []const u8 {
+    return switch (notice) {
+        .none => "",
+        .structural_property => "structural property - not goal-driveable; edit the source to change it.",
+        .invalid_property => "invalid property selection",
+        .goal_driving => |name| std.fmt.bufPrint(
+            buf,
+            "driving goal {s}... (autoloop in flight)",
+            .{name},
+        ) catch "driving goal",
+        .goal_completed => |c| std.fmt.bufPrint(
+            buf,
+            "autoloop {s} on goal {s}",
+            .{ @tagName(c.verdict), c.name },
+        ) catch "autoloop completed",
+        .goal_dispatch_error => |name| std.fmt.bufPrint(
+            buf,
+            "autoloop dispatch failed for goal {s}",
+            .{name},
+        ) catch "autoloop dispatch failed",
+    };
 }
 
 fn renderSplitBody(
@@ -944,7 +1144,7 @@ fn renderComposer(
         },
         .ledger => switch (state.focus_mode) {
             .composer => "Enter submits. /chat switches back to transcript view.",
-            .feed, .inspector => "Up/Down move the patch rail. Tab cycles detail tabs. Enter toggles diff expansion. A approves when witness state is clean. c opens chat.",
+            .feed, .inspector => "Up/Down move the patch rail. Tab cycles detail tabs. Left/Right select property chips. g drives the selected goal green. A approves when witness state is clean. c opens chat.",
         },
     };
     try writeFitted(w, hints, width);
@@ -1296,7 +1496,13 @@ fn buildLedgerText(
     switch (entry.*) {
         .verified_patch => |message| {
             if (message.ui_payload) |payload| switch (payload) {
-                .verified_patch => |patch| try writeLedgerPatchPanel(w, patch, state.ledger_tab, state.diff_expanded),
+                .verified_patch => |patch| try writeLedgerPatchPanel(
+                    w,
+                    patch,
+                    state.ledger_tab,
+                    state.diff_expanded,
+                    state.selected_property_index,
+                ),
                 else => try writeTextBlock(w, message.llm_text),
             } else {
                 try writeTextBlock(w, message.llm_text);
@@ -1475,6 +1681,7 @@ fn writeLedgerPatchPanel(
     payload: ui_payload_mod.VerifiedPatchPayload,
     tab: LedgerTab,
     diff_expanded: bool,
+    selected_property_index: usize,
 ) !void {
     try w.print(
         "file: {s}\napplied_at_unix_ms: {d}\npolicy_hash: {s}\nstats: total={d} new={d} preexisting={d}\npost_apply_ok: {s}\n",
@@ -1525,9 +1732,9 @@ fn writeLedgerPatchPanel(
         },
         .properties => {
             try w.writeAll("Properties\n\nbefore:\n");
-            try writePropertiesSnapshot(w, payload.before_properties);
+            try writePropertiesSnapshot(w, payload.before_properties, null);
             try w.writeAll("\nafter:\n");
-            try writePropertiesSnapshot(w, payload.after_properties);
+            try writePropertiesSnapshot(w, payload.after_properties, selected_property_index);
         },
         .violations => {
             try w.writeAll("Violations\n\n");
@@ -1734,27 +1941,45 @@ fn writeShortHash(w: *std.Io.Writer, hash: [32]u8) !void {
 fn writePropertiesSnapshot(
     w: *std.Io.Writer,
     snapshot: ?ui_payload_mod.PropertiesSnapshot,
+    cursor: ?usize,
 ) !void {
-    if (snapshot) |value| {
-        inline for (@typeInfo(ui_payload_mod.PropertiesSnapshot).@"struct".fields) |field| {
-            switch (@typeInfo(field.type)) {
-                .bool => try w.print("- {s}: {s}\n", .{
-                    field.name,
-                    if (@field(value, field.name)) "true" else "false",
-                }),
-                .optional => {
+    const value = snapshot orelse {
+        try w.writeAll("(none)\n");
+        return;
+    };
+
+    var bool_index: usize = 0;
+    inline for (@typeInfo(ui_payload_mod.PropertiesSnapshot).@"struct".fields) |field| {
+        switch (@typeInfo(field.type)) {
+            .bool => {
+                const truthy = if (@field(value, field.name)) "true" else "false";
+                if (cursor) |selected_index| {
+                    const marker: u8 = if (bool_index == selected_index) '>' else ' ';
+                    const lane = property_goals.classify(field.name).label();
+                    try w.print("{c} [{s}] {s} ({s})\n", .{ marker, truthy, field.name, lane });
+                } else {
+                    try w.print("- {s}: {s}\n", .{ field.name, truthy });
+                }
+                bool_index += 1;
+            },
+            .optional => {
+                if (cursor == null) {
                     if (@field(value, field.name)) |number| {
                         try w.print("- {s}: {d}\n", .{ field.name, number });
                     } else {
                         try w.print("- {s}: null\n", .{field.name});
                     }
-                },
-                else => @compileError("unsupported PropertiesSnapshot field type"),
-            }
+                } else if (comptime std.mem.eql(u8, field.name, "max_io_depth")) {
+                    if (@field(value, field.name)) |number| {
+                        try w.print("  {s}: {d} (metric)\n", .{ field.name, number });
+                    } else {
+                        try w.print("  {s}: null (metric)\n", .{field.name});
+                    }
+                }
+            },
+            else => @compileError("unsupported PropertiesSnapshot field type"),
         }
-        return;
     }
-    try w.writeAll("(none)\n");
 }
 
 fn writeCommandOutcomePayload(
@@ -2436,6 +2661,148 @@ test "ledger proof-delta tab is the default and renders promoted/demoted badges"
     try testing.expect(std.mem.indexOf(u8, text, "witnesses") != null);
     try testing.expect(std.mem.indexOf(u8, text, "diff") != null);
     try testing.expect(std.mem.indexOf(u8, text, "Enter to expand") != null);
+}
+
+test "ledger properties tab marks goal-driveable and structural properties" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.ledger_tab = .properties;
+    state.selected_property_index = property_goals.boolPropertyIndexOf("pure").?;
+
+    const text = try buildInspectorText(testing.allocator, &state, &session);
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "> [false] pure (struct)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "[true] no_secret_leakage (goal)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "max_io_depth: 1 (metric)") != null);
+}
+
+test "ledger properties tab left and right move the property cursor" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.ledger_tab = .properties;
+    state.selected_property_index = 0;
+
+    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'g' }));
+    switch (state.status_notice) {
+        .none => return error.TestFailed,
+        else => {},
+    }
+
+    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(&state, &session, .{ .kind = .right }));
+    try testing.expectEqual(@as(usize, 1), state.selected_property_index);
+    switch (state.status_notice) {
+        .none => {},
+        else => return error.TestFailed,
+    }
+
+    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(&state, &session, .{ .kind = .left }));
+    try testing.expectEqual(@as(usize, 0), state.selected_property_index);
+
+    try testing.expectEqual(PaneOutcome.no_op, handlePaneEvent(&state, &session, .{ .kind = .left }));
+    try testing.expectEqual(@as(usize, 0), state.selected_property_index);
+
+    state.selected_property_index = property_goals.bool_property_count - 1;
+    try testing.expectEqual(PaneOutcome.no_op, handlePaneEvent(&state, &session, .{ .kind = .right }));
+    try testing.expectEqual(property_goals.bool_property_count - 1, state.selected_property_index);
+}
+
+test "g on structural property shows honest boundary status" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.ledger_tab = .properties;
+    state.selected_property_index = property_goals.boolPropertyIndexOf("pure").?;
+
+    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'g' }));
+    switch (state.status_notice) {
+        .structural_property => {},
+        else => return error.TestFailed,
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
+    try renderStatusRow(&aw.writer, &session, &state, 240);
+    buf = aw.toArrayList();
+    try testing.expect(std.mem.indexOf(
+        u8,
+        buf.items,
+        "structural property - not goal-driveable; edit the source to change it.",
+    ) != null);
+}
+
+test "g on flow property dispatches the autoloop and surfaces in-flight state" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.ledger_tab = .properties;
+    state.selected_property_index = property_goals.boolPropertyIndexOf("no_secret_leakage").?;
+
+    try testing.expectEqual(PaneOutcome.drive_goal, handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'g' }));
+    try testing.expect(state.autoloop_in_flight);
+    switch (state.status_notice) {
+        .goal_driving => |name| try testing.expectEqualStrings("no_secret_leakage", name),
+        else => return error.TestFailed,
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
+    try renderStatusRow(&aw.writer, &session, &state, 240);
+    buf = aw.toArrayList();
+    try testing.expect(std.mem.indexOf(u8, buf.items, "driving goal no_secret_leakage") != null);
+}
+
+test "g while autoloop is in flight is dropped" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.ledger_tab = .properties;
+    state.selected_property_index = property_goals.boolPropertyIndexOf("no_secret_leakage").?;
+    state.autoloop_in_flight = true;
+
+    // Single-flight guard: a second `g` while a drive is already running
+    // is silently ignored. The dispatch outcome must not fire twice or
+    // race the in-flight worker.
+    try testing.expectEqual(PaneOutcome.no_op, handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'g' }));
 }
 
 test "ledger pane hotkeys switch tabs and views" {
