@@ -241,8 +241,10 @@ fn execute(
         // Each witness is a JSON object rather than the JSONL shape that
         // trace replay consumes. Callers that want replay input can pass
         // individual witnesses through `counterexample.writeJsonl`.
+        try w.writeAll("{\"key\":\"");
+        try witness.stableKey(w);
         try w.print(
-            "{{\"property\":\"{s}\",\"origin\":{{\"line\":{d},\"column\":{d}}},\"sink\":{{\"line\":{d},\"column\":{d}}},\"summary\":",
+            "\",\"property\":\"{s}\",\"origin\":{{\"line\":{d},\"column\":{d}}},\"sink\":{{\"line\":{d},\"column\":{d}}},\"summary\":",
             .{ tag.asString(), span.line, span.column, span.line, span.column },
         );
         try json_utils.writeJsonString(w, diag.message);

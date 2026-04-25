@@ -13,6 +13,7 @@ const app = @import("../app.zig");
 const autoloop = @import("../autoloop.zig");
 const transcript_mod = @import("../transcript.zig");
 const ui_payload_mod = @import("../ui_payload.zig");
+const witness_replay = @import("../witness_replay.zig");
 const session_events = @import("../session/events.zig");
 const session_state = @import("../session_state.zig");
 const property_goals = @import("../property_goals.zig");
@@ -59,6 +60,25 @@ const StatusNotice = union(enum) {
     /// The autoloop dispatch itself failed (workspace lookup, tool error,
     /// allocation). Distinct from a non-`achieved` verdict.
     goal_dispatch_error: []const u8,
+    /// `r` was pressed on a witness but no replay implementation is
+    /// registered. Surfaced inline in the status row so the user knows
+    /// the keystroke was recognised but cannot run.
+    replay_unavailable,
+    /// Witness replay finished. The TUI uses this to surface `replayed
+    /// PASS/FIXED <key>` in the status row alongside the inline verdict
+    /// rendered in the witness pane.
+    replay_done: ReplayDone,
+    /// Witness replay errored before the engine could finish (file
+    /// missing, parse error, tool unwired). The error name surfaces in
+    /// the status row.
+    replay_error: []const u8,
+};
+
+const ReplayDone = struct {
+    reproduced: bool,
+    /// First 12 hex chars of the witness key. Borrowed from the witness
+    /// body; the verdict record itself owns the full key.
+    short_key: []const u8,
 };
 
 const GoalCompleted = struct {
@@ -93,6 +113,27 @@ pub const FeedItem = struct {
     kind: FeedItemKind,
 };
 
+/// Owned record of a witness replay verdict held in AppState. Pairs the
+/// stable witness key with the runtime's `Verdict` so the renderer can
+/// confirm the verdict still belongs to the currently-selected witness
+/// after the patch or selection changes.
+pub const WitnessVerdictRecord = struct {
+    /// Stable witness key the verdict applies to. Owned.
+    key: []u8,
+    verdict: witness_replay.Verdict,
+    /// Cached classification of `verdict` against the original witness
+    /// body (was the violation reproduced?). The renderer surfaces this
+    /// as PASS / FIXED so the user does not have to interpret status
+    /// codes themselves.
+    reproduced: bool,
+
+    pub fn deinit(self: *WitnessVerdictRecord, allocator: std.mem.Allocator) void {
+        allocator.free(self.key);
+        self.verdict.deinit(allocator);
+        self.* = .{ .key = &.{}, .verdict = .{ .ran = false, .actual_status = 0, .actual_body = &.{}, .error_text = null }, .reproduced = false };
+    }
+};
+
 const LedgerTab = enum {
     /// Proof-first summary: property delta, violations before/after, witness
     /// status, chain metadata. The default tab - callers trust the badges
@@ -104,6 +145,9 @@ const LedgerTab = enum {
     prove,
     system,
     citations,
+    /// Counterexample bodies (request + IO stub script) for each witness
+    /// the patch closed or introduced. Step 1 of the Witness Theater.
+    witnesses,
 };
 
 pub const ComposerState = struct {
@@ -201,11 +245,28 @@ pub const AppState = struct {
     /// Single-flight guard: a second `g` press is dropped until the run
     /// returns. Step 3 (async) replaces this with a worker-pipe wakeup.
     autoloop_in_flight: bool = false,
+    /// Cursor in the witnesses tab. Indexes (defeated ++ new) for the
+    /// currently selected ledger patch. Reset to 0 whenever the patch
+    /// selection changes.
+    selected_witness_index: usize = 0,
+    /// Verdict from the most recent `r` (replay) on the selected witness.
+    /// Owned. Cleared when the patch selection or witness selection
+    /// changes, or when the user explicitly clears it. The TUI renders
+    /// it inline below the selected witness in the witnesses tab.
+    witness_verdict: ?WitnessVerdictRecord = null,
 
     pub fn deinit(self: *AppState, allocator: std.mem.Allocator) void {
         self.feed_items.deinit(allocator);
         self.ledger_items.deinit(allocator);
         self.clearLocalResults(allocator);
+        self.clearWitnessVerdict(allocator);
+    }
+
+    pub fn clearWitnessVerdict(self: *AppState, allocator: std.mem.Allocator) void {
+        if (self.witness_verdict) |*record| {
+            record.deinit(allocator);
+            self.witness_verdict = null;
+        }
     }
 
     pub fn clearLocalResults(self: *AppState, allocator: std.mem.Allocator) void {
@@ -225,6 +286,7 @@ pub const AppState = struct {
         };
         if (self.observed_transcript_len > session.transcript.len()) {
             self.clearLocalResults(allocator);
+            self.clearWitnessVerdict(allocator);
             try self.rebuildTranscriptFeed(allocator, session, editor);
             return;
         }
@@ -506,7 +568,7 @@ pub fn run(
                     if (try handleComposerEvent(&runtime, registry, flags, approval_fn, event)) return;
                 },
                 .feed, .inspector => {
-                    switch (handlePaneEvent(&state, &session, event)) {
+                    switch (handlePaneEvent(runtime.allocator, &state, &session, event)) {
                         .no_op => {},
                         .redraw => try runtime.redrawFrame(),
                         .quit => return,
@@ -521,6 +583,11 @@ pub fn run(
                             // and not a stale frame for the duration.
                             try runtime.redrawFrame();
                             try driveSelectedGoal(&runtime, registry);
+                            try runtime.redrawFrame();
+                        },
+                        .replay_witness => {
+                            try runtime.redrawFrame();
+                            try replaySelectedWitness(&runtime);
                             try runtime.redrawFrame();
                         },
                     }
@@ -590,9 +657,15 @@ pub const PaneOutcome = enum {
     /// transcript. The chip's file binds to the currently-selected ledger
     /// patch.
     drive_goal,
+    /// User pressed `r` on a selected witness in the witnesses tab. The
+    /// caller resolves by invoking the registered witness replay impl
+    /// against the patch's handler file and storing the verdict in
+    /// `state.witness_verdict` for the next redraw.
+    replay_witness,
 };
 
 fn handlePaneEvent(
+    allocator: std.mem.Allocator,
     state: *AppState,
     session: *const agent.AgentSession,
     event: KeyEvent,
@@ -645,7 +718,11 @@ fn handlePaneEvent(
         .up => {
             state.clearStatusNotice();
             if (state.view_mode == .ledger) {
-                moveLedgerSelectionUp(state);
+                if (state.ledger_tab == .witnesses and state.focus_mode == .inspector) {
+                    moveWitnessSelectionUp(allocator, state);
+                } else {
+                    moveLedgerSelectionUp(allocator, state);
+                }
             } else {
                 moveSelectionUp(state);
             }
@@ -654,7 +731,11 @@ fn handlePaneEvent(
         .down => {
             state.clearStatusNotice();
             if (state.view_mode == .ledger) {
-                moveLedgerSelectionDown(state);
+                if (state.ledger_tab == .witnesses and state.focus_mode == .inspector) {
+                    moveWitnessSelectionDown(allocator, state, session);
+                } else {
+                    moveLedgerSelectionDown(allocator, state);
+                }
             } else {
                 moveSelectionDown(state);
             }
@@ -678,6 +759,13 @@ fn handlePaneEvent(
             'l', 'L' => {
                 state.clearStatusNotice();
                 state.view_mode = .ledger;
+                return .redraw;
+            },
+            'w', 'W' => {
+                state.clearStatusNotice();
+                state.view_mode = .ledger;
+                state.ledger_tab = .witnesses;
+                state.focus_mode = .inspector;
                 return .redraw;
             },
             'g', 'G' => {
@@ -713,6 +801,18 @@ fn handlePaneEvent(
                         return .redraw;
                     },
                 }
+            },
+            'r', 'R' => {
+                if (state.view_mode != .ledger or state.ledger_tab != .witnesses) return .no_op;
+                const total = witnessCountForSelectedPatch(state, session);
+                if (total == 0) return .no_op;
+                if (state.selected_witness_index >= total) return .no_op;
+                if (!witness_replay.isConfigured()) {
+                    state.status_notice = .{ .replay_unavailable = {} };
+                    return .redraw;
+                }
+                state.clearWitnessVerdict(allocator);
+                return .replay_witness;
             },
             'A' => {
                 if (state.view_mode == .ledger and approvalGateClear(state, session)) {
@@ -759,6 +859,78 @@ fn approvalGateClear(state: *const AppState, session: *const agent.AgentSession)
     const transcript_index = state.selectedLedgerIndex() orelse return false;
     const patch = session_state.patchPayload(session.transcript.at(transcript_index)) orelse return false;
     return patch.post_apply_ok and patch.witnesses_new.len == 0;
+}
+
+/// Replay the witness at `state.selected_witness_index` against the
+/// patch's handler file using the registered witness_replay impl. The
+/// verdict lands in `state.witness_verdict` (owned), and a one-line
+/// PASS/FIXED summary surfaces in the status row. Errors during replay
+/// (missing impl, file not found, parse failure) flow into
+/// `status_notice = .replay_error` rather than aborting the TUI.
+fn replaySelectedWitness(runtime: *TuiRuntime) !void {
+    const allocator = runtime.allocator;
+    const state = runtime.state;
+
+    const ledger_idx = state.selectedLedgerIndex() orelse {
+        state.status_notice = .{ .replay_error = "no patch selected" };
+        return;
+    };
+    const patch = session_state.patchPayload(runtime.session.transcript.at(ledger_idx)) orelse {
+        state.status_notice = .{ .replay_error = "selected entry is not a patch" };
+        return;
+    };
+
+    const witness = selectedWitness(patch, state.selected_witness_index) orelse {
+        state.status_notice = .{ .replay_error = "witness selection out of range" };
+        return;
+    };
+
+    const workspace_root = tools_common.workspaceRoot(allocator) catch {
+        state.status_notice = .{ .replay_error = "workspace root unresolved" };
+        return;
+    };
+    defer allocator.free(workspace_root);
+    const handler_path = tools_common.resolveInsideWorkspace(
+        allocator,
+        workspace_root,
+        patch.file,
+    ) catch {
+        state.status_notice = .{ .replay_error = "handler path not in workspace" };
+        return;
+    };
+    defer allocator.free(handler_path);
+
+    var verdict = witness_replay.replay(allocator, handler_path, witness) catch |err| {
+        state.status_notice = .{ .replay_error = @errorName(err) };
+        return;
+    };
+    errdefer verdict.deinit(allocator);
+
+    const reproduced = verdict.reproducedViolation(witness);
+    const key_copy = try allocator.dupe(u8, witness.key);
+    errdefer allocator.free(key_copy);
+
+    state.clearWitnessVerdict(allocator);
+    state.witness_verdict = .{
+        .key = key_copy,
+        .verdict = verdict,
+        .reproduced = reproduced,
+    };
+    state.status_notice = .{ .replay_done = .{
+        .reproduced = reproduced,
+        .short_key = state.witness_verdict.?.key[0..@min(12, state.witness_verdict.?.key.len)],
+    } };
+}
+
+/// Map a flat witness index (defeated ++ new) to the underlying body.
+fn selectedWitness(
+    patch: ui_payload_mod.VerifiedPatchPayload,
+    index: usize,
+) ?ui_payload_mod.WitnessBody {
+    if (index < patch.witnesses_defeated.len) return patch.witnesses_defeated[index];
+    const offset = index - patch.witnesses_defeated.len;
+    if (offset < patch.witnesses_new.len) return patch.witnesses_new[offset];
+    return null;
 }
 
 /// Run the property-goal autoloop against the live session transcript for
@@ -1068,6 +1240,17 @@ fn statusNoticeText(notice: StatusNotice, buf: *[256]u8) []const u8 {
             "autoloop dispatch failed for goal {s}",
             .{name},
         ) catch "autoloop dispatch failed",
+        .replay_unavailable => "witness replay unavailable in this build",
+        .replay_done => |d| std.fmt.bufPrint(
+            buf,
+            "replay {s} {s}",
+            .{ if (d.reproduced) "PASS" else "FIXED", d.short_key },
+        ) catch "replay finished",
+        .replay_error => |text| std.fmt.bufPrint(
+            buf,
+            "replay error: {s}",
+            .{text},
+        ) catch "replay error",
     };
 }
 
@@ -1502,6 +1685,10 @@ fn buildLedgerText(
                     state.ledger_tab,
                     state.diff_expanded,
                     state.selected_property_index,
+                    .{
+                        .selected_index = state.selected_witness_index,
+                        .verdict = state.witness_verdict,
+                    },
                 ),
                 else => try writeTextBlock(w, message.llm_text),
             } else {
@@ -1682,6 +1869,7 @@ fn writeLedgerPatchPanel(
     tab: LedgerTab,
     diff_expanded: bool,
     selected_property_index: usize,
+    witness_view: WitnessView,
 ) !void {
     try w.print(
         "file: {s}\napplied_at_unix_ms: {d}\npolicy_hash: {s}\nstats: total={d} new={d} preexisting={d}\npost_apply_ok: {s}\n",
@@ -1817,7 +2005,139 @@ fn writeLedgerPatchPanel(
                 try w.print("- {s}\n", .{citation});
             }
         },
+        .witnesses => try writeWitnessesTab(w, payload, witness_view),
     }
+}
+
+const WitnessView = struct {
+    selected_index: usize,
+    verdict: ?WitnessVerdictRecord,
+};
+
+/// Render the counterexample witness diff carried on this patch.
+/// Each witness shows the synthesised request, the IO stub script that
+/// pins virtual-module return values, the property tag it violates, and
+/// the origin/sink source spans. Defeated witnesses are the ones the
+/// patch closed; new witnesses are the ones it introduced. The selected
+/// witness is marked with `>` and, when a replay verdict is available,
+/// the verdict (PASS/FIXED + actual response) renders inline below it.
+fn writeWitnessesTab(
+    w: *std.Io.Writer,
+    payload: ui_payload_mod.VerifiedPatchPayload,
+    view: WitnessView,
+) !void {
+    try w.writeAll("Witnesses (r=replay selected, up/down=select)\n\n");
+    try writeWitnessSection(w, "defeated by this patch", payload.witnesses_defeated, 0, view);
+    try w.writeByte('\n');
+    try writeWitnessSection(
+        w,
+        "introduced by this patch",
+        payload.witnesses_new,
+        payload.witnesses_defeated.len,
+        view,
+    );
+}
+
+fn writeWitnessSection(
+    w: *std.Io.Writer,
+    title: []const u8,
+    bodies: []const ui_payload_mod.WitnessBody,
+    flat_offset: usize,
+    view: WitnessView,
+) !void {
+    try w.print("{s} ({d})\n", .{ title, bodies.len });
+    if (bodies.len == 0) {
+        try w.writeAll("  (none)\n");
+        return;
+    }
+    for (bodies, 0..) |body, i| {
+        const selected = (flat_offset + i) == view.selected_index;
+        try writeWitnessBody(w, i + 1, body, selected);
+        if (selected) try writeVerdictInline(w, view.verdict, body);
+    }
+}
+
+fn writeWitnessBody(
+    w: *std.Io.Writer,
+    index: usize,
+    body: ui_payload_mod.WitnessBody,
+    selected: bool,
+) !void {
+    const marker: u8 = if (selected) '>' else ' ';
+    try w.print("  {c} {d}. [{s}]\n", .{ marker, index, body.property });
+    try w.print("     {s} {s}", .{ body.request_method, body.request_url });
+    if (body.request_has_auth) try w.writeAll("  (auth)");
+    if (body.request_body) |b| try w.print("  body={s}", .{firstLine(b)});
+    try w.writeByte('\n');
+    try w.print(
+        "     origin {d}:{d} -> sink {d}:{d}\n",
+        .{ body.origin_line, body.origin_column, body.sink_line, body.sink_column },
+    );
+    if (body.summary.len > 0) {
+        try w.print("     summary: {s}\n", .{body.summary});
+    }
+    try w.print("     key: {s}\n", .{shortKey(body.key)});
+    if (body.io_stubs.len == 0) {
+        try w.writeAll("     io_stubs: (none)\n");
+    } else {
+        try w.writeAll("     io_stubs:\n");
+        for (body.io_stubs) |stub| {
+            try w.print(
+                "       {d}. {s}.{s}() -> {s}\n",
+                .{ stub.seq, stub.module, stub.func, stub.result_json },
+            );
+        }
+    }
+    try w.writeByte('\n');
+}
+
+fn writeVerdictInline(
+    w: *std.Io.Writer,
+    verdict_opt: ?WitnessVerdictRecord,
+    body: ui_payload_mod.WitnessBody,
+) !void {
+    const record = verdict_opt orelse return;
+    if (!std.mem.eql(u8, record.key, body.key)) return;
+
+    try w.writeAll("     replay: ");
+    if (!record.verdict.ran) {
+        try w.writeAll("ERROR");
+        if (record.verdict.error_text) |t| try w.print(" ({s})", .{t});
+        try w.writeByte('\n');
+        return;
+    }
+    if (record.reproduced) {
+        try w.writeAll("PASS - violation reproduced");
+    } else {
+        try w.writeAll("FIXED - violation no longer reproduces");
+    }
+    try w.print(" (status {d})\n", .{record.verdict.actual_status});
+    if (record.verdict.actual_body.len > 0) {
+        try w.writeAll("     actual: ");
+        try writeBodyExcerpt(w, record.verdict.actual_body, 160);
+        try w.writeByte('\n');
+    }
+}
+
+fn writeBodyExcerpt(w: *std.Io.Writer, body: []const u8, max_len: usize) !void {
+    const limit = @min(body.len, max_len);
+    var i: usize = 0;
+    while (i < limit) : (i += 1) {
+        const c = body[i];
+        if (c == '\n') {
+            try w.writeAll("\\n");
+        } else if (c < 0x20) {
+            try w.writeByte('?');
+        } else {
+            try w.writeByte(c);
+        }
+    }
+    if (body.len > max_len) try w.writeAll("...");
+}
+
+fn shortKey(key: []const u8) []const u8 {
+    if (key.len <= 12) return key;
+    return key[0..12];
 }
 
 /// Proof-first summary renderer. Property delta badges, violations before -> after,
@@ -2195,19 +2515,21 @@ fn nextLedgerTab(current: LedgerTab) LedgerTab {
         .violations => .prove,
         .prove => .system,
         .system => .citations,
-        .citations => .delta,
+        .citations => .witnesses,
+        .witnesses => .delta,
     };
 }
 
 fn prevLedgerTab(current: LedgerTab) LedgerTab {
     return switch (current) {
-        .delta => .citations,
+        .delta => .witnesses,
         .diff => .delta,
         .properties => .diff,
         .violations => .properties,
         .prove => .violations,
         .system => .prove,
         .citations => .system,
+        .witnesses => .citations,
     };
 }
 
@@ -2223,18 +2545,48 @@ fn moveSelectionDown(state: *AppState) void {
     state.inspector.scroll_offset = 0;
 }
 
-fn moveLedgerSelectionUp(state: *AppState) void {
+fn moveLedgerSelectionUp(allocator: std.mem.Allocator, state: *AppState) void {
     if (state.ledger_items.items.len == 0 or state.selected_ledger_index == 0) return;
     state.selected_ledger_index -= 1;
     state.inspector.scroll_offset = 0;
     state.diff_expanded = false;
+    state.selected_witness_index = 0;
+    state.clearWitnessVerdict(allocator);
 }
 
-fn moveLedgerSelectionDown(state: *AppState) void {
+fn moveLedgerSelectionDown(allocator: std.mem.Allocator, state: *AppState) void {
     if (state.ledger_items.items.len == 0 or state.selected_ledger_index + 1 >= state.ledger_items.items.len) return;
     state.selected_ledger_index += 1;
     state.inspector.scroll_offset = 0;
     state.diff_expanded = false;
+    state.selected_witness_index = 0;
+    state.clearWitnessVerdict(allocator);
+}
+
+fn moveWitnessSelectionUp(allocator: std.mem.Allocator, state: *AppState) void {
+    if (state.selected_witness_index == 0) return;
+    state.selected_witness_index -= 1;
+    state.clearWitnessVerdict(allocator);
+}
+
+fn moveWitnessSelectionDown(
+    allocator: std.mem.Allocator,
+    state: *AppState,
+    session: *const agent.AgentSession,
+) void {
+    const total = witnessCountForSelectedPatch(state, session);
+    if (state.selected_witness_index + 1 >= total) return;
+    state.selected_witness_index += 1;
+    state.clearWitnessVerdict(allocator);
+}
+
+fn witnessCountForSelectedPatch(
+    state: *const AppState,
+    session: *const agent.AgentSession,
+) usize {
+    const idx = state.selectedLedgerIndex() orelse return 0;
+    const payload = session_state.patchPayload(session.transcript.at(idx)) orelse return 0;
+    return payload.witnesses_defeated.len + payload.witnesses_new.len;
 }
 
 fn kindForTranscriptEntry(entry: *const transcript_mod.OwnedEntry) FeedItemKind {
@@ -2295,6 +2647,7 @@ fn ledgerTabLabel(tab: LedgerTab) []const u8 {
         .prove => "detail Prove",
         .system => "detail System",
         .citations => "detail Citations",
+        .witnesses => "detail Witnesses",
     };
 }
 
@@ -2546,7 +2899,7 @@ test "Tab and Esc move focus through panes" {
     try testing.expectEqual(FocusMode.feed, state.focus_mode);
     state.focus_mode = nextFocus(state.focus_mode);
     try testing.expectEqual(FocusMode.inspector, state.focus_mode);
-    _ = handlePaneEvent(&state, &session, .{ .kind = .esc });
+    _ = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .esc });
     try testing.expectEqual(FocusMode.composer, state.focus_mode);
 }
 
@@ -2699,27 +3052,27 @@ test "ledger properties tab left and right move the property cursor" {
     state.ledger_tab = .properties;
     state.selected_property_index = 0;
 
-    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'g' }));
+    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'g' }));
     switch (state.status_notice) {
         .none => return error.TestFailed,
         else => {},
     }
 
-    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(&state, &session, .{ .kind = .right }));
+    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .right }));
     try testing.expectEqual(@as(usize, 1), state.selected_property_index);
     switch (state.status_notice) {
         .none => {},
         else => return error.TestFailed,
     }
 
-    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(&state, &session, .{ .kind = .left }));
+    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .left }));
     try testing.expectEqual(@as(usize, 0), state.selected_property_index);
 
-    try testing.expectEqual(PaneOutcome.no_op, handlePaneEvent(&state, &session, .{ .kind = .left }));
+    try testing.expectEqual(PaneOutcome.no_op, handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .left }));
     try testing.expectEqual(@as(usize, 0), state.selected_property_index);
 
     state.selected_property_index = property_goals.bool_property_count - 1;
-    try testing.expectEqual(PaneOutcome.no_op, handlePaneEvent(&state, &session, .{ .kind = .right }));
+    try testing.expectEqual(PaneOutcome.no_op, handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .right }));
     try testing.expectEqual(property_goals.bool_property_count - 1, state.selected_property_index);
 }
 
@@ -2737,7 +3090,7 @@ test "g on structural property shows honest boundary status" {
     state.ledger_tab = .properties;
     state.selected_property_index = property_goals.boolPropertyIndexOf("pure").?;
 
-    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'g' }));
+    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'g' }));
     switch (state.status_notice) {
         .structural_property => {},
         else => return error.TestFailed,
@@ -2769,7 +3122,7 @@ test "g on flow property dispatches the autoloop and surfaces in-flight state" {
     state.ledger_tab = .properties;
     state.selected_property_index = property_goals.boolPropertyIndexOf("no_secret_leakage").?;
 
-    try testing.expectEqual(PaneOutcome.drive_goal, handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'g' }));
+    try testing.expectEqual(PaneOutcome.drive_goal, handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'g' }));
     try testing.expect(state.autoloop_in_flight);
     switch (state.status_notice) {
         .goal_driving => |name| try testing.expectEqualStrings("no_secret_leakage", name),
@@ -2802,7 +3155,7 @@ test "g while autoloop is in flight is dropped" {
     // Single-flight guard: a second `g` while a drive is already running
     // is silently ignored. The dispatch outcome must not fire twice or
     // race the in-flight worker.
-    try testing.expectEqual(PaneOutcome.no_op, handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'g' }));
+    try testing.expectEqual(PaneOutcome.no_op, handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'g' }));
 }
 
 test "ledger pane hotkeys switch tabs and views" {
@@ -2820,21 +3173,178 @@ test "ledger pane hotkeys switch tabs and views" {
     try testing.expectEqual(LedgerTab.delta, state.ledger_tab);
     try testing.expectEqual(ViewMode.ledger, state.view_mode);
 
-    _ = handlePaneEvent(&state, &session, .{ .kind = .tab });
+    _ = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .tab });
     try testing.expectEqual(LedgerTab.diff, state.ledger_tab);
     try testing.expectEqual(FocusMode.inspector, state.focus_mode);
 
-    _ = handlePaneEvent(&state, &session, .{ .kind = .shift_tab });
+    _ = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .shift_tab });
     try testing.expectEqual(LedgerTab.delta, state.ledger_tab);
 
-    _ = handlePaneEvent(&state, &session, .{ .kind = .enter });
+    _ = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .enter });
     try testing.expect(state.diff_expanded);
 
-    _ = handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'c' });
+    _ = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'c' });
     try testing.expectEqual(ViewMode.chat, state.view_mode);
 
-    _ = handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'l' });
+    _ = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'l' });
     try testing.expectEqual(ViewMode.ledger, state.view_mode);
+}
+
+test "ledger witnesses tab renders defeated and new counterexample bodies" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+    try injectTestWitnesses(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.ledger_tab = .witnesses;
+
+    const text = try buildInspectorText(testing.allocator, &state, &session);
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "Witnesses") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "defeated by this patch (1)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "[no_secret_leakage]") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "GET /") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "origin 5:9 -> sink 7:12") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "summary: DB_KEY in response") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "key: aaaaaaaaaaaa") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "env.env() -> \"sentinel\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "introduced by this patch (1)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "[injection_safe]") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "POST /api/items  (auth)") != null);
+}
+
+test "lowercase w jumps to the witnesses tab and focuses the inspector" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try appendTestVerifiedPatch(testing.allocator, &session);
+
+    var editor: LineEditor = .{};
+    defer editor.deinit(testing.allocator);
+
+    var state: AppState = .{};
+    defer state.deinit(testing.allocator);
+    try state.sync(testing.allocator, &session, &editor);
+    state.view_mode = .chat;
+    state.ledger_tab = .delta;
+    state.focus_mode = .composer;
+
+    try testing.expectEqual(PaneOutcome.redraw, handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'w' }));
+    try testing.expectEqual(ViewMode.ledger, state.view_mode);
+    try testing.expectEqual(LedgerTab.witnesses, state.ledger_tab);
+    try testing.expectEqual(FocusMode.inspector, state.focus_mode);
+}
+
+test "ledger tab cycler reaches witnesses after citations and wraps to delta" {
+    try testing.expectEqual(LedgerTab.witnesses, nextLedgerTab(.citations));
+    try testing.expectEqual(LedgerTab.delta, nextLedgerTab(.witnesses));
+    try testing.expectEqual(LedgerTab.witnesses, prevLedgerTab(.delta));
+}
+
+/// Replace the latest verified_patch entry's witness arrays with concrete
+/// bodies. Used by witness-pane render tests; constructed inline rather
+/// than baked into `appendTestVerifiedPatch` so the existing fixture stays
+/// minimal for tests that do not exercise witnesses.
+fn injectTestWitnesses(
+    allocator: std.mem.Allocator,
+    session: *agent.AgentSession,
+) !void {
+    const last_index = session.transcript.entries.items.len - 1;
+    const entry = &session.transcript.entries.items[last_index];
+    switch (entry.*) {
+        .verified_patch => |*vp| {
+            const payload_ptr = if (vp.ui_payload) |*p| p else return error.TestFailed;
+            switch (payload_ptr.*) {
+                .verified_patch => |*patch| {
+                    ui_payload_mod.freeWitnessBodySlice(allocator, patch.witnesses_defeated);
+                    ui_payload_mod.freeWitnessBodySlice(allocator, patch.witnesses_new);
+
+                    const defeated = try allocator.alloc(ui_payload_mod.WitnessBody, 1);
+                    defeated[0] = try buildTestWitness(
+                        allocator,
+                        "a" ** 64,
+                        "no_secret_leakage",
+                        "DB_KEY in response",
+                        .{ 5, 9 },
+                        .{ 7, 12 },
+                        "GET",
+                        "/",
+                        false,
+                        null,
+                        "env",
+                        "env",
+                        "\"sentinel\"",
+                    );
+
+                    const new_w = try allocator.alloc(ui_payload_mod.WitnessBody, 1);
+                    new_w[0] = try buildTestWitness(
+                        allocator,
+                        "b" ** 64,
+                        "injection_safe",
+                        "unvalidated body reaches sql",
+                        .{ 11, 3 },
+                        .{ 14, 7 },
+                        "POST",
+                        "/api/items",
+                        true,
+                        "{\"name\":\"x\"}",
+                        "sql",
+                        "sql",
+                        "{}",
+                    );
+
+                    patch.witnesses_defeated = defeated;
+                    patch.witnesses_new = new_w;
+                },
+                else => return error.TestFailed,
+            }
+        },
+        else => return error.TestFailed,
+    }
+}
+
+fn buildTestWitness(
+    allocator: std.mem.Allocator,
+    key: []const u8,
+    property: []const u8,
+    summary: []const u8,
+    origin: [2]u32,
+    sink: [2]u32,
+    method: []const u8,
+    url: []const u8,
+    has_auth: bool,
+    body: ?[]const u8,
+    stub_module: []const u8,
+    stub_func: []const u8,
+    stub_result: []const u8,
+) !ui_payload_mod.WitnessBody {
+    const stubs = try allocator.alloc(ui_payload_mod.WitnessStub, 1);
+    stubs[0] = .{
+        .seq = 0,
+        .module = try allocator.dupe(u8, stub_module),
+        .func = try allocator.dupe(u8, stub_func),
+        .result_json = try allocator.dupe(u8, stub_result),
+    };
+    return .{
+        .key = try allocator.dupe(u8, key),
+        .property = try allocator.dupe(u8, property),
+        .summary = try allocator.dupe(u8, summary),
+        .origin_line = origin[0],
+        .origin_column = origin[1],
+        .sink_line = sink[0],
+        .sink_column = sink[1],
+        .request_method = try allocator.dupe(u8, method),
+        .request_url = try allocator.dupe(u8, url),
+        .request_has_auth = has_auth,
+        .request_body = if (body) |b| try allocator.dupe(u8, b) else null,
+        .io_stubs = stubs,
+    };
 }
 
 test "uppercase A on a clean ledger patch returns .approve" {
@@ -2849,7 +3359,7 @@ test "uppercase A on a clean ledger patch returns .approve" {
     defer state.deinit(testing.allocator);
     try state.sync(testing.allocator, &session, &editor);
 
-    const outcome = handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'A' });
+    const outcome = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'A' });
     try testing.expectEqual(PaneOutcome.approve, outcome);
 }
 
@@ -2866,7 +3376,7 @@ test "uppercase A in chat view does not trigger approval" {
     try state.sync(testing.allocator, &session, &editor);
     state.view_mode = .chat;
 
-    const outcome = handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'A' });
+    const outcome = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'A' });
     try testing.expectEqual(PaneOutcome.redraw, outcome);
 }
 
@@ -2881,7 +3391,7 @@ test "uppercase A with no selected patch does not trigger approval" {
     defer state.deinit(testing.allocator);
     try state.sync(testing.allocator, &session, &editor);
 
-    const outcome = handlePaneEvent(&state, &session, .{ .kind = .char, .byte = 'A' });
+    const outcome = handlePaneEvent(testing.allocator, &state, &session, .{ .kind = .char, .byte = 'A' });
     try testing.expectEqual(PaneOutcome.redraw, outcome);
 }
 

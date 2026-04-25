@@ -1,6 +1,7 @@
 const std = @import("std");
 const zigts_cli = @import("zigts_cli");
 const pi_app = @import("pi_app");
+const runtime_witness_replay = @import("runtime_witness_replay");
 
 pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.smp_allocator;
@@ -46,6 +47,7 @@ fn runExpertCommand(argv: []const []const u8, allocator: std.mem.Allocator) !voi
     }
 
     pi_app.setInvocationArgv(argv);
+    pi_app.witness_replay.setReplayFn(runtime_witness_replay.replayWitnessJsonl);
     try pi_app.run(allocator);
 }
 

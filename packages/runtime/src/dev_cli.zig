@@ -94,6 +94,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
         std.debug.print("zigttp expert is deprecated; use `zigts expert`.\n", .{});
         const pi_app = @import("pi_app");
+        const witness_replay_lib = @import("witness_replay_lib.zig");
+        pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
         try pi_app.run(allocator);
         return;
     }

@@ -63,8 +63,8 @@ pub const BuildVerifiedPatchOptions = struct {
     patch_hash: ?[32]u8 = null,
     parent_hash: ?[32]u8 = null,
     goal_context: []const []const u8 = &.{},
-    witnesses_defeated: []const []const u8 = &.{},
-    witnesses_new: []const []const u8 = &.{},
+    witnesses_defeated: []const ui_payload.WitnessBody = &.{},
+    witnesses_new: []const ui_payload.WitnessBody = &.{},
 };
 
 pub fn buildVerifiedPatchPayload(
@@ -101,10 +101,10 @@ pub fn buildVerifiedPatchPayload(
     errdefer freeStringSlice(allocator, repair_plan_ids_copy);
     const goal_context_copy = try cloneStringSlice(allocator, options.goal_context);
     errdefer freeStringSlice(allocator, goal_context_copy);
-    const witnesses_defeated_copy = try cloneStringSlice(allocator, options.witnesses_defeated);
-    errdefer freeStringSlice(allocator, witnesses_defeated_copy);
-    const witnesses_new_copy = try cloneStringSlice(allocator, options.witnesses_new);
-    errdefer freeStringSlice(allocator, witnesses_new_copy);
+    const witnesses_defeated_copy = try ui_payload.cloneWitnessBodySlice(allocator, options.witnesses_defeated);
+    errdefer ui_payload.freeWitnessBodySlice(allocator, witnesses_defeated_copy);
+    const witnesses_new_copy = try ui_payload.cloneWitnessBodySlice(allocator, options.witnesses_new);
+    errdefer ui_payload.freeWitnessBodySlice(allocator, witnesses_new_copy);
 
     const patch_hash_value: [32]u8 = options.patch_hash orelse computePatchHash(options.before, analysis.unified_diff);
 
