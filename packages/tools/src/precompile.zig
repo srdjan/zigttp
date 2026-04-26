@@ -2136,87 +2136,63 @@ pub fn compileHandler(
         root,
     ) catch {};
 
-    // Node type map for type-directed codegen (populated by BoolChecker, consumed by CodeGen)
-    var node_type_map: zigts.bool_checker.NodeTypeMap = .empty;
-    defer node_type_map.deinit(allocator);
+    const ir_view_check = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const parsed = zigts.pipeline.ParsedModule.fromExisting(ir_view_check, root, &atoms);
 
-    // Run bool checker and type checker
+    var type_env_storage: zigts.pipeline.TypeEnvStorage = .{};
+    defer type_env_storage.deinit(allocator);
+    if (strip_result) |sr| {
+        type_env_storage.init(allocator, &sr.type_map);
+    }
+
+    var resolved = try zigts.pipeline.resolve(
+        allocator,
+        parsed,
+        .{ .type_env = type_env_storage.envPtr(), .service_type_context = stc_ptr },
+    );
+    defer resolved.deinit();
+
     {
-        const ir_view_check = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        var checker = zigts.BoolChecker.init(allocator, ir_view_check, &atoms);
-        defer checker.deinit();
-
-        const bool_error_count = try checker.check(root);
-        const bool_diags = checker.getDiagnostics();
-
+        const bool_diags = resolved.boolDiagnostics();
         if (bool_diags.len > 0 and !builtin.is_test) {
             std.debug.print("\n", .{});
             var bool_output: std.ArrayList(u8) = .empty;
             defer bool_output.deinit(allocator);
             var bool_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &bool_output);
-            checker.formatDiagnostics(source_to_parse, &bool_aw.writer) catch {};
+            resolved.formatBoolDiagnostics(source_to_parse, &bool_aw.writer) catch {};
             bool_output = bool_aw.toArrayList();
             if (bool_output.items.len > 0) {
                 std.debug.print("{s}", .{bool_output.items});
             }
             std.debug.print("{d} boolean check error(s), {d} warning(s)\n", .{
-                bool_error_count,
-                bool_diags.len - bool_error_count,
+                resolved.bool_error_count,
+                bool_diags.len - resolved.bool_error_count,
             });
         }
-
-        if (bool_error_count > 0) {
+        if (resolved.bool_error_count > 0) {
             if (!builtin.is_test) std.debug.print("\nBoolean check failed for {s}\n", .{filename});
             return error.SoundModeViolation;
         }
-
         if (!builtin.is_test) std.debug.print("Boolean check passed\n", .{});
+    }
 
-        // Extract node type map for codegen specialization (move ownership out of checker)
-        node_type_map = checker.node_types;
-        checker.node_types = .empty; // Prevent double-free in checker.deinit()
-
-        // TypeChecker: full type annotation checking (when TypeMap available from .ts/.tsx)
-        if (strip_result) |sr| {
-            const tm = sr.type_map;
-            var type_pool = zigts.TypePool.init(allocator);
-            defer type_pool.deinit(allocator);
-
-            var type_env = zigts.TypeEnv.init(allocator, &type_pool);
-            defer type_env.deinit();
-
-            zigts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
-            type_env.populateFromTypeMap(&tm);
-
-            var tc = zigts.type_checker.TypeChecker.init(
-                allocator,
-                ir_view_check,
-                &atoms,
-                &type_env,
-                stc_ptr,
-            );
-            defer tc.deinit();
-
-            const tc_errors = try tc.check(root);
-            const tc_diags = tc.getDiagnostics();
-
-            if (tc_diags.len > 0 and !builtin.is_test) {
-                var tc_output: std.ArrayList(u8) = .empty;
-                defer tc_output.deinit(allocator);
-                var tc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &tc_output);
-                tc.formatDiagnostics(source_to_parse, &tc_aw.writer) catch {};
-                tc_output = tc_aw.toArrayList();
-                if (tc_output.items.len > 0) {
-                    std.debug.print("{s}", .{tc_output.items});
-                }
+    if (type_env_storage.envPtr() != null) {
+        const tc_diags = resolved.typeDiagnostics();
+        if (tc_diags.len > 0 and !builtin.is_test) {
+            var tc_output: std.ArrayList(u8) = .empty;
+            defer tc_output.deinit(allocator);
+            var tc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &tc_output);
+            resolved.formatTypeDiagnostics(source_to_parse, &tc_aw.writer) catch {};
+            tc_output = tc_aw.toArrayList();
+            if (tc_output.items.len > 0) {
+                std.debug.print("{s}", .{tc_output.items});
             }
-
-            if (tc_errors > 0) {
-                if (!builtin.is_test) std.debug.print("\nType check failed for {s}\n", .{filename});
-                return error.SoundModeViolation;
-            }
-            if (!builtin.is_test) std.debug.print("Type check passed\n", .{});
         }
+        if (resolved.type_error_count > 0) {
+            if (!builtin.is_test) std.debug.print("\nType check failed for {s}\n", .{filename});
+            return error.SoundModeViolation;
+        }
+        if (!builtin.is_test) std.debug.print("Type check passed\n", .{});
     }
 
     // Unified violations list: collects from FlowChecker, HandlerVerifier, and
@@ -2238,30 +2214,9 @@ pub fn compileHandler(
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = zigts.handler_verifier.findHandlerFunction(ir_view, root);
 
-        var verify_type_pool: ?zigts.TypePool = null;
-        var verify_type_env: ?zigts.TypeEnv = null;
-        var verify_type_checker: ?zigts.TypeChecker = null;
-        defer if (verify_type_checker) |*checker| checker.deinit();
-        defer if (verify_type_env) |*env| env.deinit();
-        defer if (verify_type_pool) |*pool| pool.deinit(allocator);
-
-        const verifier_env: ?*const zigts.TypeEnv = if (strip_result) |sr| blk: {
-            verify_type_pool = zigts.TypePool.init(allocator);
-            verify_type_env = zigts.TypeEnv.init(allocator, &verify_type_pool.?);
-            zigts.modules.populateModuleTypes(&verify_type_env.?, &verify_type_pool.?, allocator);
-            verify_type_env.?.populateFromTypeMap(&sr.type_map);
-            verify_type_checker = zigts.TypeChecker.init(
-                allocator,
-                ir_view,
-                &atoms,
-                &verify_type_env.?,
-                stc_ptr,
-            );
-            _ = verify_type_checker.?.check(root) catch 0;
-            break :blk &verify_type_env.?;
-        } else null;
-
-        const verifier_type_checker: ?*const zigts.TypeChecker = if (verify_type_checker) |*checker| checker else null;
+        const verifier_env: ?*const zigts.TypeEnv = type_env_storage.envPtr();
+        const verifier_type_checker: ?*const zigts.TypeChecker =
+            if (resolved.type_checker) |*tc| tc else null;
 
         if (handler_fn) |hf| {
             var verifier = zigts.HandlerVerifier.init(allocator, ir_view, &atoms, verifier_env, verifier_type_checker);
@@ -2272,7 +2227,6 @@ pub fn compileHandler(
 
             if (diags.len > 0 and !builtin.is_test) {
                 std.debug.print("\n", .{});
-                // Format diagnostics to a buffer and print via debug.print
                 var diag_output: std.ArrayList(u8) = .empty;
                 defer diag_output.deinit(allocator);
                 var diag_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &diag_output);
@@ -2367,9 +2321,11 @@ pub fn compileHandler(
     );
     defer code_gen.deinit();
 
-    // Wire type annotations from BoolChecker for type-directed opcode specialization
-    if (node_type_map.count() > 0) {
-        code_gen.setNodeTypes(&node_type_map);
+    // Wire type annotations from BoolChecker for type-directed opcode specialization.
+    // The map is owned by `resolved.bool_checker`; pass-through borrow is safe
+    // because `resolved` outlives the codegen pass.
+    if (resolved.bool_checker.node_types.count() > 0) {
+        code_gen.setNodeTypes(&resolved.bool_checker.node_types);
     }
 
     const func = try code_gen.generate(root);
