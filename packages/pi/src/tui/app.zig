@@ -288,9 +288,11 @@ pub const AppState = struct {
     status_notice: StatusNotice = .none,
     observed_transcript_len: usize = 0,
     layout_mode: LayoutMode = .split,
-    /// True while a property-goal autoloop is running on the main thread.
-    /// Single-flight guard: a second `g` press is dropped until the run
-    /// returns. Step 3 (async) replaces this with a worker-pipe wakeup.
+    /// True while a property-goal autoloop or witness replay is running
+    /// on the worker thread. Single-flight guard (a second `g`/`r` press
+    /// is dropped until the run returns) and renderer gate
+    /// (`state.sync` skips transcript walks while it is true so the
+    /// worker's appends stay invisible to the main thread).
     autoloop_in_flight: bool = false,
     /// Cursor in the witnesses tab. Indexes (defeated ++ new) for the
     /// currently selected ledger patch. Reset to 0 whenever the patch
@@ -302,9 +304,10 @@ pub const AppState = struct {
     /// it inline below the selected witness in the witnesses tab.
     witness_verdict: ?WitnessVerdictRecord = null,
     /// Pending witness-scoped goal drive: stable key copy stashed by the
-    /// `g` keystroke handler in the witnesses tab, consumed by
-    /// `driveSelectedGoal` and freed there. Non-null only between the
-    /// keystroke and the autoloop dispatch (a few milliseconds at most).
+    /// `g` keystroke handler in the witnesses tab, read by
+    /// `prepareDriveJob` to populate the worker's focus key, and freed
+    /// in `applyDriveResult` when the worker returns. Non-null between
+    /// the keystroke and that apply step.
     pending_witness_focus: ?PendingWitnessFocus = null,
 
     pub fn deinit(self: *AppState, allocator: std.mem.Allocator) void {
@@ -742,15 +745,10 @@ pub fn run(
             // second press while cancel is already pending falls
             // through to the existing quit path so the user can
             // force-exit.
-            if (event.kind == .ctrl_c and state.autoloop_in_flight) {
-                if (runtime.worker_ctx) |ctx| {
-                    if (!ctx.cancel.requested()) {
-                        ctx.cancel.request();
-                        state.status_notice = .cancelling;
-                        try runtime.redrawFrame();
-                        continue;
-                    }
-                }
+            if (event.kind == .ctrl_c and requestCancel(&runtime)) {
+                state.status_notice = .cancelling;
+                try runtime.redrawFrame();
+                continue;
             }
 
             switch (state.focus_mode) {
@@ -861,6 +859,8 @@ fn freeWorkerJob(allocator: std.mem.Allocator, job: WorkerJob) void {
 
 fn freeWorkerResult(allocator: std.mem.Allocator, result: *WorkerResult) void {
     switch (result.*) {
+        // Drive outcomes carry only borrowed strings (property name from
+        // the comptime table, verdict tag) - nothing to free.
         .drive => {},
         .replay => |*outcome| switch (outcome.*) {
             .success => |*s| {
@@ -883,6 +883,37 @@ fn workerEntry(ctx: *WorkerCtx) void {
     // main thread after its read.
     const wakeup_byte: [1]u8 = .{1};
     _ = std.c.write(ctx.runtime.pipe_w, &wakeup_byte, 1);
+}
+
+/// Take ownership of a prepared `WorkerJob`, allocate its `WorkerCtx`,
+/// and spawn the worker thread. On any failure the job is freed and
+/// the partially-allocated ctx is destroyed; the caller's own errdefer
+/// handles AppState cleanup (clearing `autoloop_in_flight`, etc.).
+fn attachWorker(runtime: *TuiRuntime, job: WorkerJob, registry: *const Registry) !void {
+    errdefer freeWorkerJob(runtime.allocator, job);
+    const ctx = try runtime.allocator.create(WorkerCtx);
+    errdefer runtime.allocator.destroy(ctx);
+    ctx.* = .{
+        .allocator = runtime.allocator,
+        .runtime = runtime,
+        .registry = registry,
+        .job = job,
+    };
+    const thread = try std.Thread.spawn(.{}, workerEntry, .{ctx});
+    runtime.worker = thread;
+    runtime.worker_ctx = ctx;
+}
+
+/// Initiate cancel for the in-flight worker. Returns true if the call
+/// is what flipped the token (caller should paint `cancelling` and
+/// continue). Returns false if there is no worker or cancel was
+/// already pending; the caller falls through to existing quit
+/// semantics in the second case.
+fn requestCancel(runtime: *TuiRuntime) bool {
+    const ctx = runtime.worker_ctx orelse return false;
+    if (ctx.cancel.requested()) return false;
+    ctx.cancel.request();
+    return true;
 }
 
 fn handleComposerEvent(
@@ -945,9 +976,9 @@ pub const PaneOutcome = enum {
     apply_feature_plan,
     /// User pressed `g` on a selected goal-driveable property chip. The
     /// caller redraws to surface the in-flight indicator, then invokes
-    /// `driveSelectedGoal` so the autoloop runs against the live session
-    /// transcript. The chip's file binds to the currently-selected ledger
-    /// patch.
+    /// `spawnDriveWorker` so the autoloop runs on a worker thread
+    /// against the live session transcript. The chip's file binds to
+    /// the currently-selected ledger patch.
     drive_goal,
     /// User pressed `r` on a selected witness in the witnesses tab. The
     /// caller resolves by invoking the registered witness replay impl
@@ -1336,23 +1367,8 @@ fn spawnReplayWorker(runtime: *TuiRuntime) !void {
         try runtime.redrawFrame();
         return;
     };
-    errdefer {
-        runtime.state.autoloop_in_flight = false;
-        freeReplayJob(runtime.allocator, job);
-    }
-
-    const ctx = try runtime.allocator.create(WorkerCtx);
-    errdefer runtime.allocator.destroy(ctx);
-    ctx.* = .{
-        .allocator = runtime.allocator,
-        .runtime = runtime,
-        .registry = undefined,
-        .job = .{ .replay = job },
-    };
-
-    const thread = try std.Thread.spawn(.{}, workerEntry, .{ctx});
-    runtime.worker = thread;
-    runtime.worker_ctx = ctx;
+    errdefer runtime.state.autoloop_in_flight = false;
+    try attachWorker(runtime, .{ .replay = job }, undefined);
 }
 
 /// Map a flat witness index (defeated ++ new) to the underlying body.
@@ -1505,10 +1521,10 @@ fn appendWitnessRegression(
 
 /// Validate the selected witness, stash a focus key in AppState, and
 /// hand off via `.drive_goal`. The autoloop dispatcher
-/// (`driveSelectedGoal`) reads `pending_witness_focus` to decide
-/// whether the run targets a property chip or a specific witness.
-/// Returns `.redraw` with a status notice on any failure (no patch
-/// selected, witness out of range, property not goal-driveable).
+/// (`prepareDriveJob`) reads `pending_witness_focus` to decide whether
+/// the run targets a property chip or a specific witness. Returns
+/// `.redraw` with a status notice on any failure (no patch selected,
+/// witness out of range, property not goal-driveable).
 fn dispatchWitnessGoal(
     allocator: std.mem.Allocator,
     state: *AppState,
@@ -1657,21 +1673,8 @@ fn spawnDriveWorker(runtime: *TuiRuntime, registry: *const Registry) !void {
     errdefer {
         runtime.state.autoloop_in_flight = false;
         runtime.state.clearPendingWitnessFocus(runtime.allocator);
-        freeDriveJob(runtime.allocator, job);
     }
-
-    const ctx = try runtime.allocator.create(WorkerCtx);
-    errdefer runtime.allocator.destroy(ctx);
-    ctx.* = .{
-        .allocator = runtime.allocator,
-        .runtime = runtime,
-        .registry = registry,
-        .job = .{ .drive = job },
-    };
-
-    const thread = try std.Thread.spawn(.{}, workerEntry, .{ctx});
-    runtime.worker = thread;
-    runtime.worker_ctx = ctx;
+    try attachWorker(runtime, .{ .drive = job }, registry);
 }
 
 fn handleSubmit(
