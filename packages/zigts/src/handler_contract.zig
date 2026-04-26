@@ -5600,9 +5600,9 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writeJsonString(writer, service_call.route_pattern);
         try writer.writeAll(",\n");
         try writer.print("      \"dynamic\": {s},\n", .{if (service_call.dynamic) "true" else "false"});
-        try writeKnownListJson(writer, "pathParams", service_call.path_params);
-        try writeKnownListJson(writer, "queryKeys", service_call.query_keys);
-        try writeKnownListJson(writer, "headerKeys", service_call.header_keys);
+        try writeKnownListJson(writer, "pathParams", "pathParamsDynamic", service_call.path_params);
+        try writeKnownListJson(writer, "queryKeys", "queryDynamic", service_call.query_keys);
+        try writeKnownListJson(writer, "headerKeys", "headerDynamic", service_call.header_keys);
         try writer.print("      \"hasBody\": {s},\n", .{if (service_call.body.isPresent()) "true" else "false"});
         try writer.print("      \"bodyDynamic\": {s}\n", .{if (service_call.body.isDynamic()) "true" else "false"});
         try writer.writeAll("    }");
@@ -6079,10 +6079,15 @@ fn writeApiParamJson(writer: anytype, param: *const ApiParamInfo) !void {
     try writer.writeAll("\n          }");
 }
 
-/// Emit a KnownList as the legacy `<key>: [...]` array plus `<key>Dynamic`
-/// boolean, preserving wire-format compatibility with older contract.json
-/// readers. `.dynamic` writes an empty array and dynamic=true.
-fn writeKnownListJson(writer: anytype, comptime field: []const u8, list: ServiceCallInfo.KnownList) !void {
+/// Emit a KnownList as the legacy array plus dynamic boolean, preserving
+/// wire-format compatibility with older contract.json readers. `.dynamic`
+/// writes an empty array and dynamic=true.
+fn writeKnownListJson(
+    writer: anytype,
+    comptime field: []const u8,
+    comptime dynamic_field: []const u8,
+    list: ServiceCallInfo.KnownList,
+) !void {
     try writer.writeAll("      \"" ++ field ++ "\": [");
     switch (list) {
         .complete => |entries| for (entries.items, 0..) |name, j| {
@@ -6092,7 +6097,7 @@ fn writeKnownListJson(writer: anytype, comptime field: []const u8, list: Service
         .dynamic => {},
     }
     try writer.writeAll("],\n");
-    try writer.print("      \"" ++ field ++ "Dynamic\": {s},\n", .{if (list.isDynamic()) "true" else "false"});
+    try writer.print("      \"" ++ dynamic_field ++ "\": {s},\n", .{if (list.isDynamic()) "true" else "false"});
 }
 
 fn writeApiBodyJson(writer: anytype, body: *const ApiBodyInfo) !void {
@@ -6328,6 +6333,66 @@ test "parseFromJson roundtrip" {
     try std.testing.expect(parsed.verification.?.exhaustive_returns);
     try std.testing.expect(!parsed.verification.?.results_safe);
     try std.testing.expect(parsed.verification.?.bytecode_verified);
+}
+
+test "parseFromJson roundtrip preserves dynamic service call keys" {
+    const allocator = std.testing.allocator;
+
+    const path = try allocator.dupe(u8, "dynamic.ts");
+    var service_calls: std.ArrayList(ServiceCallInfo) = .empty;
+    try service_calls.append(allocator, .{
+        .service = try allocator.dupe(u8, "search"),
+        .route_pattern = try allocator.dupe(u8, "GET /search"),
+        .path_params = .{ .complete = .empty },
+        .query_keys = .dynamic,
+        .header_keys = .dynamic,
+        .body = .none,
+    });
+
+    var original = HandlerContract{
+        .handler = .{ .path = path, .line = 1, .column = 1 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .service_calls = service_calls,
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
+        .api = emptyApiInfo(),
+        .verification = null,
+        .aot = null,
+    };
+    defer original.deinit(allocator);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try writeContractJson(&original, &aw.writer);
+    output = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"queryDynamic\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"headerDynamic\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "queryKeysDynamic") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "headerKeysDynamic") == null);
+
+    var parsed = try parseFromJson(allocator, output.items);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.service_calls.items.len);
+    try std.testing.expect(parsed.service_calls.items[0].query_keys.isDynamic());
+    try std.testing.expect(parsed.service_calls.items[0].header_keys.isDynamic());
 }
 
 test "parseFromJson roundtrip preserves durable workflow" {
