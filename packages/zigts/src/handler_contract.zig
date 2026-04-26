@@ -14,44 +14,14 @@
 //! the parser and atom table that produced it.
 
 const std = @import("std");
-const api_schema = @import("api_schema.zig");
 const json_utils = @import("json_utils.zig");
-const ir = @import("parser/ir.zig");
-const object = @import("object.zig");
-const context = @import("context.zig");
 const module_binding = @import("module_binding.zig");
-const builtin_modules = @import("builtin_modules.zig");
-const bytecode = @import("bytecode.zig");
-const handler_analyzer = @import("handler_analyzer.zig");
-const type_checker_mod = @import("type_checker.zig");
-const type_env_mod = @import("type_env.zig");
-const type_pool_mod = @import("type_pool.zig");
-const rule_registry = @import("rule_registry.zig");
 const contract_json_writer = @import("contract_json_writer.zig");
 const contract_json_parser = @import("contract_json_parser.zig");
 const contract_types = @import("contract_types.zig");
 const contract_builder = @import("contract_builder.zig");
 
-
-const Node = ir.Node;
-const NodeIndex = ir.NodeIndex;
-const NodeTag = ir.NodeTag;
-const IrView = ir.IrView;
-const null_node = ir.null_node;
-const HandlerPattern = bytecode.HandlerPattern;
-const PatternDispatchTable = bytecode.PatternDispatchTable;
-const TypeChecker = type_checker_mod.TypeChecker;
-const TypeEnv = type_env_mod.TypeEnv;
-
-// -------------------------------------------------------------------------
-// Contract data types (extracted to contract_types.zig)
-// -------------------------------------------------------------------------
-//
-// Every public name is re-exported below so existing call sites
-// (`handler_contract.HandlerContract`, `handler_contract.ApiRouteInfo`, etc.)
-// resolve unchanged. Internal references in this file (ContractBuilder,
-// ContractDiff, tests) also bind through these re-exports.
-
+// Re-exports from contract_types.zig
 pub const HandlerLoc = contract_types.HandlerLoc;
 pub const RouteInfo = contract_types.RouteInfo;
 pub const EnvInfo = contract_types.EnvInfo;
@@ -93,26 +63,10 @@ pub const CapabilityMatrix = contract_types.CapabilityMatrix;
 pub const computeCapabilityMatrix = contract_types.computeCapabilityMatrix;
 pub const HandlerContract = contract_types.HandlerContract;
 
-// -------------------------------------------------------------------------
-// Contract builder (extracted to contract_builder.zig)
-// -------------------------------------------------------------------------
-//
-// `ContractBuilder` and its tightly-coupled private helpers
-// (containsApiParam, containsRequestBodySchemaRef, responseVariantMatches,
-// schemaSpecFromCandidate, eqlOptionalString, lowerAsciiOwned,
-// ParsedRouteKey/parseRouteKey, contentTypeFor, currentPolicyHashRaw)
-// live in `contract_builder.zig`. Re-exports keep
-// `handler_contract.ContractBuilder` working for external callers
-// (precompile.zig, root.zig, ws_consistency.zig).
-
+// Re-exports from contract_builder.zig
 pub const ContractBuilder = contract_builder.ContractBuilder;
 
 pub const containsString = json_utils.containsString;
-
-
-// -------------------------------------------------------------------------
-// Host extraction from URL strings
-// -------------------------------------------------------------------------
 
 /// Extract hostname from a URL string (e.g. "https://api.example.com/path" -> "api.example.com")
 pub fn extractHost(url: []const u8) []const u8 {
@@ -135,26 +89,9 @@ pub fn extractHost(url: []const u8) []const u8 {
 }
 
 
-// -------------------------------------------------------------------------
-// JSON deserialization
-// -------------------------------------------------------------------------
-//
-// `parseFromJson` + `JsonParser` + per-section parser helpers live in
-// `contract_json_parser.zig`. Re-exports keep external callers
-// (prove.zig, prove_upgrade.zig, system_linker.zig) and the round-trip
-// tests below the cut on the same namespace.
-
+// Re-exports from contract_json_parser.zig and contract_json_writer.zig
 pub const parseFromJson = contract_json_parser.parseFromJson;
 pub const JsonParser = contract_json_parser.JsonParser;
-
-// -------------------------------------------------------------------------
-// JSON serialization
-// -------------------------------------------------------------------------
-//
-// `writeContractJson` and its private emit helpers live in
-// `contract_json_writer.zig`; this re-export keeps the existing call sites
-// (zigts_cli, tests below) on the same namespace.
-
 pub const writeContractJson = contract_json_writer.writeContractJson;
 
 pub fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
