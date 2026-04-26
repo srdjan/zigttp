@@ -36,6 +36,8 @@ const gen_tests_tool = @import("tools/gen_tests.zig");
 const pi_goal_check_tool = @import("tools/pi_goal_check.zig");
 const pi_repair_plan_tool = @import("tools/pi_repair_plan.zig");
 const pi_apply_repair_plan_tool = @import("tools/pi_apply_repair_plan.zig");
+const pi_feature_plan_tool = @import("tools/pi_feature_plan.zig");
+const pi_apply_feature_plan_tool = @import("tools/pi_apply_feature_plan.zig");
 
 /// Re-exported so the runtime-side witness replay implementation can
 /// share the canonical `Verdict` type and function pointer signature.
@@ -79,6 +81,8 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, pi_goal_check_tool.tool);
     try reg.register(allocator, pi_repair_plan_tool.tool);
     try reg.register(allocator, pi_apply_repair_plan_tool.tool);
+    try reg.register(allocator, pi_feature_plan_tool.tool);
+    try reg.register(allocator, pi_apply_feature_plan_tool.tool);
 
     return reg;
 }
