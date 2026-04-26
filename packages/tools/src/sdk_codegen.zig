@@ -321,7 +321,7 @@ fn buildRoutePlans(
                 continue;
             }
             const body = route.request_bodies.items[0];
-            if (body.dynamic) {
+            if (body.schema.isDynamic()) {
                 try appendSkipped(skipped, allocator, idx, "request body is dynamic");
                 continue;
             }
@@ -335,7 +335,7 @@ fn buildRoutePlans(
                 try appendSkipped(skipped, allocator, idx, "request body content type is not supported");
                 continue;
             }
-            if (body.schema_ref) |schema_ref| {
+            if (body.schema.schemaRef()) |schema_ref| {
                 const alias = findSchemaAlias(schema_aliases.items, schema_ref) orelse {
                     try appendSkipped(skipped, allocator, idx, "request schema is not representable as TypeScript");
                     continue;
@@ -404,7 +404,7 @@ fn buildRoutePlans(
 
             for (route.responses.items) |response| {
                 if (skip_reason != null) break;
-                if (response.dynamic) {
+                if (response.schema.isDynamic()) {
                     skip_reason = "response schema is dynamic";
                     break;
                 }
@@ -418,14 +418,14 @@ fn buildRoutePlans(
                 }
                 const status = response.status orelse 200;
                 const arm_type_name: []const u8 = arm_blk: {
-                    if (response.schema_ref) |schema_ref| {
+                    if (response.schema.schemaRef()) |schema_ref| {
                         const alias = findSchemaAlias(schema_aliases.items, schema_ref) orelse {
                             skip_reason = "response schema is not representable as TypeScript";
                             break :arm_blk "";
                         };
                         break :arm_blk alias.type_name;
                     }
-                    if (response.schema_json) |schema_json| {
+                    if (response.schema.schemaJson()) |schema_json| {
                         var parsed = parsedSchema(allocator, schema_json) catch {
                             skip_reason = "response schema is not representable as TypeScript";
                             break :arm_blk "";
@@ -469,7 +469,7 @@ fn buildRoutePlans(
             continue;
         }
         const response = route.responses.items[0];
-        if (response.dynamic) {
+        if (response.schema.isDynamic()) {
             try appendSkipped(skipped, allocator, idx, "response schema is dynamic");
             continue;
         }
@@ -479,14 +479,14 @@ fn buildRoutePlans(
         }
 
         const response_type_name = blk: {
-            if (response.schema_ref) |schema_ref| {
+            if (response.schema.schemaRef()) |schema_ref| {
                 const alias = findSchemaAlias(schema_aliases.items, schema_ref) orelse {
                     try appendSkipped(skipped, allocator, idx, "response schema is not representable as TypeScript");
                     continue;
                 };
                 break :blk alias.type_name;
             }
-            if (response.schema_json) |schema_json| {
+            if (response.schema.schemaJson()) |schema_json| {
                 var parsed = parsedSchema(allocator, schema_json) catch {
                     try appendSkipped(skipped, allocator, idx, "response schema is not representable as TypeScript");
                     continue;
@@ -1305,12 +1305,12 @@ test "writeTypeScriptClient emits discriminated union for multi-response route" 
     try responses.append(allocator, .{
         .status = 200,
         .content_type = try allocator.dupe(u8, "application/json"),
-        .schema_ref = try allocator.dupe(u8, "user"),
+        .schema = .{ .ref = try allocator.dupe(u8, "user") },
     });
     try responses.append(allocator, .{
         .status = 404,
         .content_type = try allocator.dupe(u8, "application/json"),
-        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"error\":{\"type\":\"string\"}},\"required\":[\"error\"]}"),
+        .schema = .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"error\":{\"type\":\"string\"}},\"required\":[\"error\"]}") },
     });
 
     var routes: std.ArrayList(ApiRouteInfo) = .empty;

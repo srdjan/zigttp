@@ -175,9 +175,9 @@ fn buildServiceTypeContextFromContracts(
                 allocator.free(responses);
             }
             for (api_route.responses.items, 0..) |response, response_idx| {
-                const schema_json = if (response.schema_json) |raw_schema|
+                const schema_json = if (response.schema.schemaJson()) |raw_schema|
                     try allocator.dupe(u8, raw_schema)
-                else if (response.schema_ref) |schema_ref|
+                else if (response.schema.schemaRef()) |schema_ref|
                     if (findSchemaJsonByName(&contract, schema_ref)) |resolved_schema|
                         try allocator.dupe(u8, resolved_schema)
                     else
@@ -195,7 +195,7 @@ fn buildServiceTypeContextFromContracts(
                     else
                         null,
                     .schema_json = schema_json,
-                    .dynamic = response.dynamic,
+                    .dynamic = response.schema.isDynamic(),
                 };
             }
 

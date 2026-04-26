@@ -1320,9 +1320,9 @@ fn compareRequestBodies(
 
     for (old.request_bodies.items) |old_body| {
         const new_body = findRequestBody(new.request_bodies.items, old_body.content_type) orelse return .breaking;
-        if (old_body.dynamic or new_body.dynamic) return .dynamic;
         if (!eqlOptionalString(old_body.content_type, new_body.content_type)) return .breaking;
-        const schema_change = try compareBodySchemas(allocator, old_body.schema_ref, old_body.schema_json, new_body.schema_ref, new_body.schema_json);
+        const schema_change = try compareSchemaSpecs(allocator, old_body.schema, new_body.schema);
+        if (schema_change == .dynamic) return .dynamic;
         if (schema_change != .unchanged) return .breaking;
     }
 
@@ -1345,9 +1345,11 @@ fn compareResponses(
         if (old.response_status != new.response_status) return .breaking;
         if (!eqlOptionalString(old.response_content_type, new.response_content_type)) return .breaking;
 
-        if (old.response_schema_dynamic or new.response_schema_dynamic) return .dynamic;
-
-        return try compareBodySchemas(allocator, old.response_schema_ref, old.response_schema_json, new.response_schema_ref, new.response_schema_json);
+        return try compareSchemaSpecs(
+            allocator,
+            schemaSpecView(old.response_schema_ref, old.response_schema_json, old.response_schema_dynamic),
+            schemaSpecView(new.response_schema_ref, new.response_schema_json, new.response_schema_dynamic),
+        );
     }
 
     if (old.responses_dynamic or new.responses_dynamic or old.response_schema_dynamic or new.response_schema_dynamic) return .dynamic;
@@ -1356,8 +1358,7 @@ fn compareResponses(
     var has_addition = false;
     for (old.responses.items) |old_response| {
         const new_response = findResponse(new.responses.items, old_response.status, old_response.content_type) orelse return .breaking;
-        if (old_response.dynamic or new_response.dynamic) return .dynamic;
-        const schema_change = try compareBodySchemas(allocator, old_response.schema_ref, old_response.schema_json, new_response.schema_ref, new_response.schema_json);
+        const schema_change = try compareSchemaSpecs(allocator, old_response.schema, new_response.schema);
         if (schema_change == .breaking) return .breaking;
         if (schema_change == .dynamic) return .dynamic;
         if (schema_change == .additive) has_addition = true;
@@ -1377,25 +1378,47 @@ fn findResponse(
     return null;
 }
 
-fn compareBodySchemas(
+/// Borrowed-slice view of legacy scalar schema fields shaped as a SchemaSpec
+/// for `compareSchemaSpecs`. The returned union must NOT be deinit'd: the
+/// payload slices alias the caller's storage. Read-only use only.
+fn schemaSpecView(
+    schema_ref: ?[]const u8,
+    schema_json: ?[]const u8,
+    is_dynamic: bool,
+) handler_contract.SchemaSpec {
+    if (is_dynamic) return .dynamic;
+    if (schema_json) |s| return .{ .inline_json = s };
+    if (schema_ref) |s| return .{ .ref = s };
+    return .none;
+}
+
+/// Compare two body schemas via exhaustive variant matching. Mixed-shape
+/// pairs (one ref, one inline_json) and asymmetric none/something pairs
+/// degrade to `.dynamic` rather than `.breaking`, matching the prior
+/// behavior where one absent field signaled "cannot prove a structural diff".
+fn compareSchemaSpecs(
     allocator: std.mem.Allocator,
-    old_schema_ref: ?[]const u8,
-    old_schema_json: ?[]const u8,
-    new_schema_ref: ?[]const u8,
-    new_schema_json: ?[]const u8,
+    old_schema: handler_contract.SchemaSpec,
+    new_schema: handler_contract.SchemaSpec,
 ) !ApiResponseChange {
-    if (old_schema_ref != null or new_schema_ref != null) {
-        if (old_schema_ref == null or new_schema_ref == null) return .dynamic;
-        if (std.mem.eql(u8, old_schema_ref.?, new_schema_ref.?)) return .unchanged;
-        return .breaking;
-    }
-
-    if (old_schema_json != null or new_schema_json != null) {
-        if (old_schema_json == null or new_schema_json == null) return .dynamic;
-        return try compareSchemaJson(allocator, old_schema_json.?, new_schema_json.?);
-    }
-
-    return .unchanged;
+    return switch (old_schema) {
+        .dynamic => .dynamic,
+        .none => switch (new_schema) {
+            .none => .unchanged,
+            .ref, .inline_json => .dynamic,
+            .dynamic => .dynamic,
+        },
+        .ref => |old_ref| switch (new_schema) {
+            .ref => |new_ref| if (std.mem.eql(u8, old_ref, new_ref)) .unchanged else .breaking,
+            .none, .inline_json => .dynamic,
+            .dynamic => .dynamic,
+        },
+        .inline_json => |old_json| switch (new_schema) {
+            .inline_json => |new_json| try compareSchemaJson(allocator, old_json, new_json),
+            .none, .ref => .dynamic,
+            .dynamic => .dynamic,
+        },
+    };
 }
 
 fn compareSchemaJson(
