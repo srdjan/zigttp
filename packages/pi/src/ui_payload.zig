@@ -235,6 +235,142 @@ pub const RepairCandidatePayload = struct {
     }
 };
 
+pub const FeaturePlanStep = struct {
+    id: []u8,
+    title: []u8,
+    detail: []u8,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        id: []const u8,
+        title: []const u8,
+        detail: []const u8,
+    ) !FeaturePlanStep {
+        return .{
+            .id = try allocator.dupe(u8, id),
+            .title = try allocator.dupe(u8, title),
+            .detail = try allocator.dupe(u8, detail),
+        };
+    }
+
+    pub fn clone(self: FeaturePlanStep, allocator: std.mem.Allocator) !FeaturePlanStep {
+        return init(allocator, self.id, self.title, self.detail);
+    }
+
+    pub fn deinit(self: *FeaturePlanStep, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.title);
+        allocator.free(self.detail);
+        self.* = .{ .id = &.{}, .title = &.{}, .detail = &.{} };
+    }
+};
+
+pub const FeaturePlanPayload = struct {
+    plan_id: []u8,
+    file: []u8,
+    feature_kind: []u8,
+    method: []u8,
+    path: []u8,
+    handler_name: []u8,
+    steps: []FeaturePlanStep,
+    proposed_content: []u8,
+    unified_diff: []u8,
+    verification_ok: bool,
+    verification_summary: []u8,
+    stats: ProofStats,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        plan_id: []const u8,
+        file: []const u8,
+        feature_kind: []const u8,
+        method: []const u8,
+        path: []const u8,
+        handler_name: []const u8,
+        steps: []const FeaturePlanStep,
+        proposed_content: []const u8,
+        unified_diff: []const u8,
+        verification_ok: bool,
+        verification_summary: []const u8,
+        stats: ProofStats,
+    ) !FeaturePlanPayload {
+        const owned_steps = try allocator.alloc(FeaturePlanStep, steps.len);
+        errdefer allocator.free(owned_steps);
+        for (owned_steps) |*step| step.* = undefined;
+        var i: usize = 0;
+        errdefer {
+            while (i > 0) {
+                i -= 1;
+                owned_steps[i].deinit(allocator);
+            }
+            allocator.free(owned_steps);
+        }
+        while (i < steps.len) : (i += 1) {
+            owned_steps[i] = try steps[i].clone(allocator);
+        }
+        return .{
+            .plan_id = try allocator.dupe(u8, plan_id),
+            .file = try allocator.dupe(u8, file),
+            .feature_kind = try allocator.dupe(u8, feature_kind),
+            .method = try allocator.dupe(u8, method),
+            .path = try allocator.dupe(u8, path),
+            .handler_name = try allocator.dupe(u8, handler_name),
+            .steps = owned_steps,
+            .proposed_content = try allocator.dupe(u8, proposed_content),
+            .unified_diff = try allocator.dupe(u8, unified_diff),
+            .verification_ok = verification_ok,
+            .verification_summary = try allocator.dupe(u8, verification_summary),
+            .stats = stats,
+        };
+    }
+
+    pub fn clone(self: FeaturePlanPayload, allocator: std.mem.Allocator) !FeaturePlanPayload {
+        return init(
+            allocator,
+            self.plan_id,
+            self.file,
+            self.feature_kind,
+            self.method,
+            self.path,
+            self.handler_name,
+            self.steps,
+            self.proposed_content,
+            self.unified_diff,
+            self.verification_ok,
+            self.verification_summary,
+            self.stats,
+        );
+    }
+
+    pub fn deinit(self: *FeaturePlanPayload, allocator: std.mem.Allocator) void {
+        allocator.free(self.plan_id);
+        allocator.free(self.file);
+        allocator.free(self.feature_kind);
+        allocator.free(self.method);
+        allocator.free(self.path);
+        allocator.free(self.handler_name);
+        for (self.steps) |*step| step.deinit(allocator);
+        allocator.free(self.steps);
+        allocator.free(self.proposed_content);
+        allocator.free(self.unified_diff);
+        allocator.free(self.verification_summary);
+        self.* = .{
+            .plan_id = &.{},
+            .file = &.{},
+            .feature_kind = &.{},
+            .method = &.{},
+            .path = &.{},
+            .handler_name = &.{},
+            .steps = &.{},
+            .proposed_content = &.{},
+            .unified_diff = &.{},
+            .verification_ok = false,
+            .verification_summary = &.{},
+            .stats = .{ .total = 0, .new = 0, .preexisting = null },
+        };
+    }
+};
+
 pub const PropertiesSnapshot = struct {
     pure: bool,
     read_only: bool,
@@ -844,6 +980,7 @@ pub const UiPayload = union(enum) {
     proof_card: ProofCardPayload,
     command_outcome: CommandOutcomePayload,
     repair_candidate: RepairCandidatePayload,
+    feature_plan: FeaturePlanPayload,
     verified_patch: VerifiedPatchPayload,
     plain_text: []u8,
 
@@ -854,6 +991,7 @@ pub const UiPayload = union(enum) {
             .proof_card => |payload| .{ .proof_card = try payload.clone(allocator) },
             .command_outcome => |payload| .{ .command_outcome = try payload.clone(allocator) },
             .repair_candidate => |payload| .{ .repair_candidate = try payload.clone(allocator) },
+            .feature_plan => |payload| .{ .feature_plan = try payload.clone(allocator) },
             .verified_patch => |payload| .{ .verified_patch = try payload.clone(allocator) },
             .plain_text => |text| .{ .plain_text = try allocator.dupe(u8, text) },
         };
@@ -866,6 +1004,7 @@ pub const UiPayload = union(enum) {
             .proof_card => |*payload| payload.deinit(allocator),
             .command_outcome => |*payload| payload.deinit(allocator),
             .repair_candidate => |*payload| payload.deinit(allocator),
+            .feature_plan => |*payload| payload.deinit(allocator),
             .verified_patch => |*payload| payload.deinit(allocator),
             .plain_text => |text| allocator.free(text),
         }
@@ -986,6 +1125,48 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
             try writer.writeAll(",\"new\":");
             try writer.print("{d}", .{candidate.stats.new});
             if (candidate.stats.preexisting) |preexisting| {
+                try writer.writeAll(",\"preexisting\":");
+                try writer.print("{d}", .{preexisting});
+            }
+            try writer.writeByte('}');
+        },
+        .feature_plan => |plan| {
+            try writer.writeAll("\"kind\":\"feature_plan\",\"plan_id\":");
+            try json_writer.writeString(writer, plan.plan_id);
+            try writer.writeAll(",\"file\":");
+            try json_writer.writeString(writer, plan.file);
+            try writer.writeAll(",\"feature_kind\":");
+            try json_writer.writeString(writer, plan.feature_kind);
+            try writer.writeAll(",\"method\":");
+            try json_writer.writeString(writer, plan.method);
+            try writer.writeAll(",\"path\":");
+            try json_writer.writeString(writer, plan.path);
+            try writer.writeAll(",\"handler_name\":");
+            try json_writer.writeString(writer, plan.handler_name);
+            try writer.writeAll(",\"steps\":[");
+            for (plan.steps, 0..) |step, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writer.writeAll("{\"id\":");
+                try json_writer.writeString(writer, step.id);
+                try writer.writeAll(",\"title\":");
+                try json_writer.writeString(writer, step.title);
+                try writer.writeAll(",\"detail\":");
+                try json_writer.writeString(writer, step.detail);
+                try writer.writeByte('}');
+            }
+            try writer.writeAll("],\"proposed_content\":");
+            try json_writer.writeString(writer, plan.proposed_content);
+            try writer.writeAll(",\"unified_diff\":");
+            try json_writer.writeString(writer, plan.unified_diff);
+            try writer.writeAll(",\"verification_ok\":");
+            try writer.writeAll(if (plan.verification_ok) "true" else "false");
+            try writer.writeAll(",\"verification_summary\":");
+            try json_writer.writeString(writer, plan.verification_summary);
+            try writer.writeAll(",\"stats\":{\"total\":");
+            try writer.print("{d}", .{plan.stats.total});
+            try writer.writeAll(",\"new\":");
+            try writer.print("{d}", .{plan.stats.new});
+            if (plan.stats.preexisting) |preexisting| {
                 try writer.writeAll(",\"preexisting\":");
                 try writer.print("{d}", .{preexisting});
             }
@@ -1319,6 +1500,65 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
                     null,
             },
         ) };
+    }
+    if (std.mem.eql(u8, kind_val.string, "feature_plan")) {
+        const stats_val = obj.get("stats") orelse return error.InvalidUiPayload;
+        if (stats_val != .object) return error.InvalidUiPayload;
+        const steps_val = obj.get("steps") orelse return error.InvalidUiPayload;
+        if (steps_val != .array) return error.InvalidUiPayload;
+
+        const steps = try allocator.alloc(FeaturePlanStep, steps_val.array.items.len);
+        errdefer allocator.free(steps);
+        for (steps) |*step| step.* = undefined;
+        var i: usize = 0;
+        errdefer {
+            while (i > 0) {
+                i -= 1;
+                steps[i].deinit(allocator);
+            }
+            allocator.free(steps);
+        }
+        while (i < steps_val.array.items.len) : (i += 1) {
+            const step_val = steps_val.array.items[i];
+            if (step_val != .object) return error.InvalidUiPayload;
+            const step_obj = step_val.object;
+            steps[i] = try FeaturePlanStep.init(
+                allocator,
+                getString(step_obj, "id") orelse return error.InvalidUiPayload,
+                getString(step_obj, "title") orelse return error.InvalidUiPayload,
+                getString(step_obj, "detail") orelse return error.InvalidUiPayload,
+            );
+        }
+
+        var payload = try FeaturePlanPayload.init(
+            allocator,
+            getString(obj, "plan_id") orelse return error.InvalidUiPayload,
+            getString(obj, "file") orelse return error.InvalidUiPayload,
+            getString(obj, "feature_kind") orelse return error.InvalidUiPayload,
+            getString(obj, "method") orelse return error.InvalidUiPayload,
+            getString(obj, "path") orelse return error.InvalidUiPayload,
+            getString(obj, "handler_name") orelse return error.InvalidUiPayload,
+            steps,
+            getString(obj, "proposed_content") orelse return error.InvalidUiPayload,
+            getString(obj, "unified_diff") orelse "",
+            getBool(obj, "verification_ok") orelse return error.InvalidUiPayload,
+            getString(obj, "verification_summary") orelse return error.InvalidUiPayload,
+            .{
+                .total = @intCast(getUnsigned(stats_val.object, "total") orelse return error.InvalidUiPayload),
+                .new = @intCast(getUnsigned(stats_val.object, "new") orelse return error.InvalidUiPayload),
+                .preexisting = if (getUnsigned(stats_val.object, "preexisting")) |preexisting|
+                    @intCast(preexisting)
+                else
+                    null,
+            },
+        );
+        errdefer payload.deinit(allocator);
+        while (i > 0) {
+            i -= 1;
+            steps[i].deinit(allocator);
+        }
+        allocator.free(steps);
+        return .{ .feature_plan = payload };
     }
     if (std.mem.eql(u8, kind_val.string, "verified_patch")) {
         const file = getString(obj, "file") orelse return error.InvalidUiPayload;

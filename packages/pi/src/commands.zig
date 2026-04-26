@@ -26,6 +26,7 @@ pub const command_table = [_]CommandRow{
     .{ .slash = "/verify", .explicit = "verify-paths", .tool = "zigts_expert_verify_paths", .takes_trailing_args = true },
     .{ .slash = null, .explicit = "verify-modules", .tool = "zigts_expert_verify_modules", .takes_trailing_args = true },
     .{ .slash = "/check", .explicit = "check", .tool = "zigts_check", .takes_trailing_args = true },
+    .{ .slash = "/feature", .explicit = null, .tool = "pi_feature_plan", .takes_trailing_args = true },
     .{ .slash = "/build", .explicit = null, .tool = "zig_build_step", .takes_trailing_args = true },
     .{ .slash = "/test", .explicit = null, .tool = "zig_test_step", .takes_trailing_args = true },
 };

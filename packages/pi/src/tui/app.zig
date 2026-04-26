@@ -22,6 +22,7 @@ const session_state = @import("../session_state.zig");
 const property_goals = @import("../property_goals.zig");
 const registry_tool = @import("../registry/tool.zig");
 const tools_common = @import("../tools/common.zig");
+const json_writer = @import("../providers/anthropic/json_writer.zig");
 
 const LineEditor = line_editor.LineEditor;
 const KeyEvent = line_editor.KeyEvent;
@@ -765,6 +766,10 @@ pub fn run(
                             try approveSelectedPatch(&runtime);
                             try runtime.redrawFrame();
                         },
+                        .apply_feature_plan => {
+                            try applySelectedFeaturePlan(&runtime, registry);
+                            try runtime.redrawFrame();
+                        },
                         .drive_goal => {
                             // Paint the in-flight indicator before the
                             // worker takes over so the user sees the
@@ -934,6 +939,10 @@ pub const PaneOutcome = enum {
     /// User pressed `A` on a selected ledger patch whose witness state is
     /// clean. Caller resolves by emitting an approval system_note.
     approve,
+    /// User pressed `A` on a local feature plan preview. Caller resolves by
+    /// invoking `pi_apply_feature_plan`, which reruns the compiler veto before
+    /// writing and returns a verified patch payload.
+    apply_feature_plan,
     /// User pressed `g` on a selected goal-driveable property chip. The
     /// caller redraws to surface the in-flight indicator, then invokes
     /// `driveSelectedGoal` so the autoloop runs against the live session
@@ -1125,6 +1134,10 @@ fn handlePaneEvent(
             },
             'A' => {
                 if (state.autoloop_in_flight) return .no_op;
+                if (selectedFeaturePlan(state)) |plan| {
+                    if (plan.verification_ok) return .apply_feature_plan;
+                    return .redraw;
+                }
                 if (state.view_mode == .ledger and approvalGateClear(state, session)) {
                     return .approve;
                 }
@@ -1135,6 +1148,67 @@ fn handlePaneEvent(
         .ctrl_c, .eof => return .quit,
         else => return .no_op,
     }
+}
+
+fn selectedFeaturePlan(state: *const AppState) ?*const ui_payload_mod.FeaturePlanPayload {
+    const item = state.selectedFeedItem() orelse return null;
+    const local_index = switch (item.source) {
+        .local_result => |index| index,
+        else => return null,
+    };
+    if (local_index >= state.local_results.items.len) return null;
+    const payload = state.local_results.items[local_index].ui_payload orelse return null;
+    return switch (payload) {
+        .feature_plan => |*plan| plan,
+        else => null,
+    };
+}
+
+fn applySelectedFeaturePlan(runtime: *TuiRuntime, registry: *const Registry) !void {
+    const allocator = runtime.allocator;
+    const plan = selectedFeaturePlan(runtime.state) orelse return;
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+    try w.writeAll("{\"file\":");
+    try json_writer.writeString(w, plan.file);
+    try w.writeAll(",\"proposed_content\":");
+    try json_writer.writeString(w, plan.proposed_content);
+    try w.writeByte('}');
+    buf = aw.toArrayList();
+
+    var result = try registry.invokeJson(allocator, "pi_apply_feature_plan", buf.items);
+    defer result.deinit(allocator);
+
+    if (result.ok and result.ui_payload != null) {
+        switch (result.ui_payload.?) {
+            .verified_patch => {
+                const payload = try result.ui_payload.?.clone(allocator);
+                errdefer {
+                    var owned = payload;
+                    owned.deinit(allocator);
+                }
+                const text = try allocator.dupe(u8, result.llm_text);
+                errdefer allocator.free(text);
+                try runtime.session.transcript.entries.append(allocator, .{ .verified_patch = .{
+                    .llm_text = text,
+                    .ui_payload = payload,
+                } });
+                if (runtime.session.events_path) |path| {
+                    try session_events.appendEvent(allocator, path, .{ .verified_patch = .{
+                        .llm_text = text,
+                        .ui_payload = payload,
+                    } });
+                }
+                return;
+            },
+            else => {},
+        }
+    }
+
+    try runtime.state.appendLocalToolResult(allocator, "apply feature", &result);
 }
 
 /// Approval is only offered on a selected patch with no new witnesses and
@@ -2511,6 +2585,7 @@ fn writePayloadOrText(
             .proof_card => |proof| try writeProofCardPayload(w, proof),
             .command_outcome => |outcome| try writeCommandOutcomePayload(w, outcome),
             .repair_candidate => |candidate| try writeRepairCandidatePayload(w, candidate),
+            .feature_plan => |plan| try writeFeaturePlanPayload(w, plan),
             .session_tree => |tree| try writeSessionTreePayload(w, tree),
             .verified_patch => |patch| try writeVerifiedPatchPayload(w, patch),
         }
@@ -2579,6 +2654,39 @@ fn writeRepairCandidatePayload(
     }
     try w.print("\nsummary: {s}\n\nproposed_content:\n", .{payload.verification_summary});
     try writeTextBlock(w, payload.proposed_content);
+}
+
+fn writeFeaturePlanPayload(
+    w: *std.Io.Writer,
+    payload: ui_payload_mod.FeaturePlanPayload,
+) !void {
+    try w.print(
+        "plan_id: {s}\nfile: {s}\nfeature: {s} {s} {s}\nhandler: {s}\nverification_ok: {s}\nstats: total={d} new={d}",
+        .{
+            payload.plan_id,
+            payload.file,
+            payload.feature_kind,
+            payload.method,
+            payload.path,
+            payload.handler_name,
+            if (payload.verification_ok) "true" else "false",
+            payload.stats.total,
+            payload.stats.new,
+        },
+    );
+    if (payload.stats.preexisting) |count| {
+        try w.print(" preexisting={d}", .{count});
+    }
+    try w.print("\nsummary: {s}\n\nplan:\n", .{payload.verification_summary});
+    for (payload.steps, 0..) |step, i| {
+        try w.print("{d}. {s} [{s}]\n   {s}\n", .{ i + 1, step.title, step.id, step.detail });
+    }
+    try w.writeAll("\ndiff:\n");
+    if (payload.unified_diff.len == 0) {
+        try w.writeAll("(no diff)\n");
+    } else {
+        try writeTextBlock(w, payload.unified_diff);
+    }
 }
 
 fn writeVerifiedPatchPayload(
@@ -3479,6 +3587,7 @@ fn summaryText(llm_text: []const u8, payload: ?UiPayload) []const u8 {
             .proof_card => |proof| return if (proof.summary.len > 0) firstLine(proof.summary) else firstLine(proof.title),
             .command_outcome => |outcome| return if (outcome.title.len > 0) firstLine(outcome.title) else firstLine(outcome.command),
             .repair_candidate => |candidate| return firstLine(candidate.plan_id),
+            .feature_plan => |plan| return firstLine(plan.plan_id),
             .verified_patch => |patch| return firstLine(patch.file),
             .plain_text => |text| return firstLine(text),
             .session_tree => {},
