@@ -58,9 +58,9 @@ pub const PoolingThresholds = struct {
 
 /// Map proven contract properties to a lifecycle policy. Null falls back to
 /// `.reuse_bounded_by_count`.
-pub fn derivePoolingPolicy(contract: ?*const RuntimeContract) PoolingPolicy {
+pub fn derivePoolingPolicy(contract: ?*const ValidatedRuntimeContract) PoolingPolicy {
     const rc = contract orelse return .reuse_bounded_by_count;
-    const p = rc.properties;
+    const p = rc.properties();
     if (p.pure and p.deterministic and p.state_isolated) return .reuse_unbounded;
     if (p.read_only and p.state_isolated) return .reuse_bounded_by_ttl;
     return .reuse_bounded_by_count;
@@ -134,9 +134,95 @@ pub const RuntimeContract = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Raw / Validated newtype split (WS3)
+//
+// `parseContractJson` and `fromHandlerContract` return a `RawRuntimeContract` —
+// a wrapper that only exposes deinit + summary inspection. The runtime hot path
+// accepts `ValidatedRuntimeContract`, which is constructible only via
+// `validate`. That gates the three integrity checks (capability matrix, policy
+// hash, embedded artifact hash) at the type-signature level: a caller cannot
+// accidentally hand an unvalidated contract to the request loop.
+//
+// Env-var presence stays a separate `validateEnvVars` call on Validated so the
+// server can keep emitting one error line per missing var; environment state is
+// a deployment concern, not a contract integrity invariant.
+// ---------------------------------------------------------------------------
+
+pub const RawRuntimeContract = struct {
+    inner: RuntimeContract,
+
+    pub fn deinit(self: *RawRuntimeContract) void {
+        self.inner.deinit();
+    }
+
+    /// Read-only view for tools that only need summary fields (e.g. `attest`)
+    /// without forcing validation.
+    pub fn rawView(self: *const RawRuntimeContract) *const RuntimeContract {
+        return &self.inner;
+    }
+};
+
+pub const ValidatedRuntimeContract = struct {
+    inner: RuntimeContract,
+
+    pub fn deinit(self: *ValidatedRuntimeContract) void {
+        self.inner.deinit();
+    }
+
+    pub fn view(self: *const ValidatedRuntimeContract) *const RuntimeContract {
+        return &self.inner;
+    }
+
+    pub fn properties(self: *const ValidatedRuntimeContract) Properties {
+        return self.inner.properties;
+    }
+
+    pub fn websocket(self: *const ValidatedRuntimeContract) WebSocketInfo {
+        return self.inner.websocket;
+    }
+
+    pub fn hasCapability(self: *const ValidatedRuntimeContract, cap: ModuleCapability) bool {
+        return self.inner.hasCapability(cap);
+    }
+
+    pub fn matchesRoute(
+        self: *const ValidatedRuntimeContract,
+        method: []const u8,
+        path: []const u8,
+    ) bool {
+        return self.inner.matchesRoute(method, path);
+    }
+};
+
+pub const ValidateOptions = struct {
+    /// Embedded bytecode blob whose SHA-256 must match the contract's
+    /// `artifact_sha256`. Skipping the check for a non-zero hash is unsafe;
+    /// pass null only when the contract carries no artifact hash (live reload
+    /// from in-memory HandlerContract) or when the caller is genuinely running
+    /// without embedded bytecode.
+    bytecode: ?[]const u8 = null,
+};
+
+/// Promote a Raw contract to Validated by enforcing integrity invariants:
+/// capability-matrix drift, policy-hash drift, and artifact-hash drift. On
+/// success, the inner storage transfers into the returned Validated; on
+/// failure, it is freed.
+pub fn validate(
+    raw: RawRuntimeContract,
+    opts: ValidateOptions,
+) !ValidatedRuntimeContract {
+    var inner = raw.inner;
+    errdefer inner.deinit();
+    try verifyCapabilityMatrix(&inner);
+    try verifyPolicyHash(&inner);
+    try verifyArtifactHash(&inner, opts.bytecode);
+    return .{ .inner = inner };
+}
+
 /// Parse a contract JSON blob into a RuntimeContract.
 /// Extracts only the fields needed at runtime; ignores everything else.
-pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RuntimeContract {
+pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawRuntimeContract {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
     defer parsed.deinit();
 
@@ -243,7 +329,7 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !Runt
         }
     }
 
-    return .{
+    return .{ .inner = .{
         .env_vars = try env_vars.toOwnedSlice(allocator),
         .env_dynamic = env_dynamic,
         .routes = try routes.toOwnedSlice(allocator),
@@ -255,7 +341,7 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !Runt
         .policy_hash = policy_hash,
         .modules = try modules.toOwnedSlice(allocator),
         .allocator = allocator,
-    };
+    } };
 }
 
 fn readSandboxHex(obj: std.json.ObjectMap, key: []const u8, out: *[32]u8) void {
@@ -355,11 +441,11 @@ fn matchPath(pattern: []const u8, path: []const u8) bool {
 }
 
 /// Validate that all proven env vars are set. Returns list of missing var names.
-pub fn validateEnvVars(allocator: std.mem.Allocator, contract: *const RuntimeContract) ![]const []const u8 {
+pub fn validateEnvVars(allocator: std.mem.Allocator, contract: *const ValidatedRuntimeContract) ![]const []const u8 {
     var missing: std.ArrayList([]const u8) = .empty;
     errdefer missing.deinit(allocator);
 
-    for (contract.env_vars) |name| {
+    for (contract.view().env_vars) |name| {
         const name_z = try allocator.dupeZ(u8, name);
         defer allocator.free(name_z);
         if (std.c.getenv(name_z) == null) {
@@ -370,9 +456,9 @@ pub fn validateEnvVars(allocator: std.mem.Allocator, contract: *const RuntimeCon
     return try missing.toOwnedSlice(allocator);
 }
 
-/// Build a RuntimeContract directly from an engine HandlerContract.
+/// Build a RawRuntimeContract directly from an engine HandlerContract.
 /// Allocates all strings with the given allocator. Caller owns the result.
-pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContract) !RuntimeContract {
+pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContract) !RawRuntimeContract {
     // Copy env vars
     var env_vars: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -418,7 +504,7 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         try modules.append(allocator, try allocator.dupe(u8, m));
     }
 
-    return .{
+    return .{ .inner = .{
         .env_vars = try env_vars.toOwnedSlice(allocator),
         .env_dynamic = hc.env.dynamic,
         .routes = try routes.toOwnedSlice(allocator),
@@ -447,7 +533,7 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         .policy_hash = hc.policy_hash,
         .modules = try modules.toOwnedSlice(allocator),
         .allocator = allocator,
-    };
+    } };
 }
 
 /// Rebuild the capability matrix from the currently-linked registry for
@@ -523,8 +609,9 @@ test "parseContractJson extracts websocket event presence flags" {
         \\  "behaviorsExhaustive": false
         \\}
     ;
-    var contract = try parseContractJson(allocator, source);
-    defer contract.deinit();
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
+    const contract = &raw.inner;
 
     try std.testing.expect(contract.websocket.on_open);
     try std.testing.expect(contract.websocket.on_message);
@@ -558,8 +645,9 @@ test "parseContractJson defaults websocket to all-false when section absent" {
         \\  "behaviorsExhaustive": false
         \\}
     ;
-    var contract = try parseContractJson(allocator, source);
-    defer contract.deinit();
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
+    const contract = &raw.inner;
 
     try std.testing.expect(!contract.websocket.on_open);
     try std.testing.expect(!contract.websocket.on_message);
@@ -594,8 +682,9 @@ test "parseContractJson minimal" {
         \\}
     ;
 
-    var contract = try parseContractJson(allocator, source);
-    defer contract.deinit();
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
+    const contract = &raw.inner;
 
     try std.testing.expectEqual(@as(usize, 2), contract.env_vars.len);
     try std.testing.expectEqualStrings("JWT_SECRET", contract.env_vars[0]);
@@ -631,8 +720,9 @@ test "parseContractJson with properties and routes" {
         \\}
     ;
 
-    var contract = try parseContractJson(allocator, source);
-    defer contract.deinit();
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
+    const contract = &raw.inner;
 
     try std.testing.expectEqual(@as(usize, 1), contract.env_vars.len);
     try std.testing.expectEqualStrings("API_KEY", contract.env_vars[0]);
@@ -803,8 +893,9 @@ test "fromHandlerContract converts properties and env vars" {
     // Add an env var
     try hc.env.literal.append(allocator, try allocator.dupe(u8, "API_KEY"));
 
-    var rc = try fromHandlerContract(allocator, &hc);
-    defer rc.deinit();
+    var raw = try fromHandlerContract(allocator, &hc);
+    defer raw.deinit();
+    const rc = &raw.inner;
 
     try std.testing.expectEqual(@as(usize, 1), rc.env_vars.len);
     try std.testing.expectEqualStrings("API_KEY", rc.env_vars[0]);
@@ -831,8 +922,9 @@ test "parseContractJson reads sandbox block" {
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;
-    var contract = try parseContractJson(allocator, source);
-    defer contract.deinit();
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
+    const contract = &raw.inner;
 
     try std.testing.expect(contract.capabilities != null);
     try std.testing.expectEqual(@as(u8, 2), contract.capabilities.?.len);
@@ -840,6 +932,45 @@ test "parseContractJson reads sandbox block" {
     try std.testing.expect(contract.hasCapability(.crypto));
     try std.testing.expect(!contract.hasCapability(.stderr));
     try std.testing.expectEqual(@as(usize, 2), contract.modules.len);
+}
+
+test "validate promotes Raw to Validated when integrity checks pass" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 13,
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "modules": [],
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "api": {"routes": [], "routesDynamic": false}
+        \\}
+    ;
+    const raw = try parseContractJson(allocator, source);
+    var validated = try validate(raw, .{});
+    defer validated.deinit();
+
+    try std.testing.expect(validated.view().capabilities == null);
+}
+
+test "validate rejects artifact-hash drift" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 13,
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "modules": [],
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "api": {"routes": [], "routesDynamic": false}
+        \\}
+    ;
+    var raw = try parseContractJson(allocator, source);
+    raw.inner.artifact_sha256 = [_]u8{0xAB} ** 32;
+    try std.testing.expectError(
+        error.ArtifactHashMismatch,
+        validate(raw, .{ .bytecode = "totally different" }),
+    );
 }
 
 test "parseContractJson returns null capabilities when sandbox block is absent" {
@@ -854,8 +985,9 @@ test "parseContractJson returns null capabilities when sandbox block is absent" 
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;
-    var contract = try parseContractJson(allocator, source);
-    defer contract.deinit();
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
+    const contract = &raw.inner;
     try std.testing.expect(contract.capabilities == null);
     try std.testing.expect(!contract.hasCapability(.crypto));
 }
@@ -936,7 +1068,7 @@ test "derivePoolingPolicy: null contract falls back to bounded count" {
 }
 
 test "derivePoolingPolicy: pure+deterministic+isolated = unbounded" {
-    var contract = RuntimeContract{
+    const contract = RuntimeContract{
         .env_vars = &.{},
         .env_dynamic = false,
         .routes = &.{},
@@ -948,11 +1080,12 @@ test "derivePoolingPolicy: pure+deterministic+isolated = unbounded" {
         },
         .allocator = std.testing.allocator,
     };
-    try std.testing.expectEqual(PoolingPolicy.reuse_unbounded, derivePoolingPolicy(&contract));
+    var validated = ValidatedRuntimeContract{ .inner = contract };
+    try std.testing.expectEqual(PoolingPolicy.reuse_unbounded, derivePoolingPolicy(&validated));
 }
 
 test "derivePoolingPolicy: read_only+isolated = ttl" {
-    var contract = RuntimeContract{
+    const contract = RuntimeContract{
         .env_vars = &.{},
         .env_dynamic = false,
         .routes = &.{},
@@ -963,11 +1096,12 @@ test "derivePoolingPolicy: read_only+isolated = ttl" {
         },
         .allocator = std.testing.allocator,
     };
-    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_ttl, derivePoolingPolicy(&contract));
+    var validated = ValidatedRuntimeContract{ .inner = contract };
+    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_ttl, derivePoolingPolicy(&validated));
 }
 
 test "derivePoolingPolicy: has_egress = bounded count" {
-    var contract = RuntimeContract{
+    const contract = RuntimeContract{
         .env_vars = &.{},
         .env_dynamic = false,
         .routes = &.{},
@@ -978,7 +1112,8 @@ test "derivePoolingPolicy: has_egress = bounded count" {
         },
         .allocator = std.testing.allocator,
     };
-    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&contract));
+    var validated = ValidatedRuntimeContract{ .inner = contract };
+    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&validated));
 }
 
 test "verifyPolicyHash passes when hash matches live registry" {
@@ -1062,7 +1197,7 @@ test "verifyArtifactHash skips when hash is absent" {
 }
 
 test "derivePoolingPolicy: !state_isolated = bounded count" {
-    var contract = RuntimeContract{
+    const contract = RuntimeContract{
         .env_vars = &.{},
         .env_dynamic = false,
         .routes = &.{},
@@ -1074,5 +1209,6 @@ test "derivePoolingPolicy: !state_isolated = bounded count" {
         },
         .allocator = std.testing.allocator,
     };
-    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&contract));
+    var validated = ValidatedRuntimeContract{ .inner = contract };
+    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&validated));
 }
