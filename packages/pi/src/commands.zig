@@ -27,6 +27,7 @@ pub const command_table = [_]CommandRow{
     .{ .slash = null, .explicit = "verify-modules", .tool = "zigts_expert_verify_modules", .takes_trailing_args = true },
     .{ .slash = "/check", .explicit = "check", .tool = "zigts_check", .takes_trailing_args = true },
     .{ .slash = "/feature", .explicit = null, .tool = "pi_feature_plan", .takes_trailing_args = true },
+    .{ .slash = "/forge", .explicit = null, .tool = "pi_forge_route", .takes_trailing_args = true },
     .{ .slash = "/build", .explicit = null, .tool = "zig_build_step", .takes_trailing_args = true },
     .{ .slash = "/test", .explicit = null, .tool = "zig_test_step", .takes_trailing_args = true },
 };
@@ -171,6 +172,14 @@ test "lookup /rule forwards trailing args" {
     try testing.expectEqualStrings("zigts_expert_describe_rule", cmd.tool_name);
     try testing.expectEqual(@as(usize, 1), cmd.args.len);
     try testing.expectEqualStrings("ZTS303", cmd.args[0]);
+}
+
+test "lookup /forge forwards route spec" {
+    const argv = [_][]const u8{ "/forge", "route", "file=handler.ts", "method=GET", "path=/health" };
+    const cmd = lookup(&argv) orelse return error.TestFailed;
+    try testing.expectEqualStrings("pi_forge_route", cmd.tool_name);
+    try testing.expectEqual(@as(usize, 4), cmd.args.len);
+    try testing.expectEqualStrings("route", cmd.args[0]);
 }
 
 test "isQuit and isHelp recognize aliases" {

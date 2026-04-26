@@ -337,7 +337,7 @@ fn writePlan(
     try writer.writeAll("]}");
 }
 
-fn concreteTemplate(
+pub fn concreteTemplate(
     allocator: std.mem.Allocator,
     plan: repair_plan.Plan,
     subject_name: ?[]const u8,
@@ -363,7 +363,7 @@ fn concreteTemplate(
     };
 }
 
-fn repairSubjectName(
+pub fn repairSubjectName(
     ir_view: ir.IrView,
     atoms: *zigts.context.AtomTable,
     diag: handler_verifier.Diagnostic,

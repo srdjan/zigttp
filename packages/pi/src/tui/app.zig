@@ -1169,6 +1169,10 @@ fn handlePaneEvent(
                     if (plan.verification_ok) return .apply_feature_plan;
                     return .redraw;
                 }
+                if (selectedForgeRun(state)) |forge| {
+                    if (forge.success) return .apply_feature_plan;
+                    return .redraw;
+                }
                 if (state.view_mode == .ledger and approvalGateClear(state, session)) {
                     return .approve;
                 }
@@ -1195,18 +1199,45 @@ fn selectedFeaturePlan(state: *const AppState) ?*const ui_payload_mod.FeaturePla
     };
 }
 
-fn applySelectedFeaturePlan(runtime: *TuiRuntime, registry: *const Registry) !void {
-    const allocator = runtime.allocator;
-    const plan = selectedFeaturePlan(runtime.state) orelse return;
+fn selectedForgeRun(state: *const AppState) ?*const ui_payload_mod.ForgeRunPayload {
+    const item = state.selectedFeedItem() orelse return null;
+    const local_index = switch (item.source) {
+        .local_result => |index| index,
+        else => return null,
+    };
+    if (local_index >= state.local_results.items.len) return null;
+    const payload = state.local_results.items[local_index].ui_payload orelse return null;
+    return switch (payload) {
+        .forge_run => |*forge| forge,
+        else => null,
+    };
+}
 
+fn applySelectedFeaturePlan(runtime: *TuiRuntime, registry: *const Registry) !void {
+    if (selectedFeaturePlan(runtime.state)) |plan| {
+        try applyFeatureCandidate(runtime, registry, plan.file, plan.proposed_content);
+        return;
+    }
+    if (selectedForgeRun(runtime.state)) |forge| {
+        try applyFeatureCandidate(runtime, registry, forge.file, forge.final_content);
+    }
+}
+
+fn applyFeatureCandidate(
+    runtime: *TuiRuntime,
+    registry: *const Registry,
+    file: []const u8,
+    proposed_content: []const u8,
+) !void {
+    const allocator = runtime.allocator;
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     const w = &aw.writer;
     try w.writeAll("{\"file\":");
-    try json_writer.writeString(w, plan.file);
+    try json_writer.writeString(w, file);
     try w.writeAll(",\"proposed_content\":");
-    try json_writer.writeString(w, plan.proposed_content);
+    try json_writer.writeString(w, proposed_content);
     try w.writeByte('}');
     buf = aw.toArrayList();
 
@@ -2589,6 +2620,7 @@ fn writePayloadOrText(
             .command_outcome => |outcome| try writeCommandOutcomePayload(w, outcome),
             .repair_candidate => |candidate| try writeRepairCandidatePayload(w, candidate),
             .feature_plan => |plan| try writeFeaturePlanPayload(w, plan),
+            .forge_run => |forge| try writeForgeRunPayload(w, forge),
             .session_tree => |tree| try writeSessionTreePayload(w, tree),
             .verified_patch => |patch| try writeVerifiedPatchPayload(w, patch),
         }
@@ -2683,6 +2715,42 @@ fn writeFeaturePlanPayload(
     try w.print("\nsummary: {s}\n\nplan:\n", .{payload.verification_summary});
     for (payload.steps, 0..) |step, i| {
         try w.print("{d}. {s} [{s}]\n   {s}\n", .{ i + 1, step.title, step.id, step.detail });
+    }
+    try w.writeAll("\ndiff:\n");
+    if (payload.unified_diff.len == 0) {
+        try w.writeAll("(no diff)\n");
+    } else {
+        try writeTextBlock(w, payload.unified_diff);
+    }
+}
+
+fn writeForgeRunPayload(
+    w: *std.Io.Writer,
+    payload: ui_payload_mod.ForgeRunPayload,
+) !void {
+    try w.print(
+        "run_id: {s}\nfile: {s}\nfeature: {s} {s} {s}\nhandler: {s}\nsuccess: {s}\nstats: total={d} new={d}",
+        .{
+            payload.run_id,
+            payload.file,
+            payload.feature_kind,
+            payload.method,
+            payload.path,
+            payload.handler_name,
+            if (payload.success) "true" else "false",
+            payload.stats.total,
+            payload.stats.new,
+        },
+    );
+    if (payload.stats.preexisting) |count| {
+        try w.print(" preexisting={d}", .{count});
+    }
+    try w.print("\nsummary: {s}\nterminal: {s}\n\nrun:\n", .{
+        payload.verification_summary,
+        payload.terminal_reason,
+    });
+    for (payload.steps, 0..) |step, i| {
+        try w.print("{d}. {s} [{s}] {s}\n   {s}\n", .{ i + 1, step.title, step.id, step.state, step.detail });
     }
     try w.writeAll("\ndiff:\n");
     if (payload.unified_diff.len == 0) {
@@ -3591,6 +3659,7 @@ fn summaryText(llm_text: []const u8, payload: ?UiPayload) []const u8 {
             .command_outcome => |outcome| return if (outcome.title.len > 0) firstLine(outcome.title) else firstLine(outcome.command),
             .repair_candidate => |candidate| return firstLine(candidate.plan_id),
             .feature_plan => |plan| return firstLine(plan.plan_id),
+            .forge_run => |forge| return firstLine(forge.run_id),
             .verified_patch => |patch| return firstLine(patch.file),
             .plain_text => |text| return firstLine(text),
             .session_tree => {},

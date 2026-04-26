@@ -371,6 +371,152 @@ pub const FeaturePlanPayload = struct {
     }
 };
 
+pub const ForgeRunStep = struct {
+    id: []u8,
+    title: []u8,
+    state: []u8,
+    detail: []u8,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        id: []const u8,
+        title: []const u8,
+        state: []const u8,
+        detail: []const u8,
+    ) !ForgeRunStep {
+        return .{
+            .id = try allocator.dupe(u8, id),
+            .title = try allocator.dupe(u8, title),
+            .state = try allocator.dupe(u8, state),
+            .detail = try allocator.dupe(u8, detail),
+        };
+    }
+
+    pub fn clone(self: ForgeRunStep, allocator: std.mem.Allocator) !ForgeRunStep {
+        return init(allocator, self.id, self.title, self.state, self.detail);
+    }
+
+    pub fn deinit(self: *ForgeRunStep, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.title);
+        allocator.free(self.state);
+        allocator.free(self.detail);
+        self.* = .{ .id = &.{}, .title = &.{}, .state = &.{}, .detail = &.{} };
+    }
+};
+
+pub const ForgeRunPayload = struct {
+    run_id: []u8,
+    file: []u8,
+    feature_kind: []u8,
+    method: []u8,
+    path: []u8,
+    handler_name: []u8,
+    steps: []ForgeRunStep,
+    final_content: []u8,
+    unified_diff: []u8,
+    success: bool,
+    terminal_reason: []u8,
+    verification_summary: []u8,
+    stats: ProofStats,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        run_id: []const u8,
+        file: []const u8,
+        feature_kind: []const u8,
+        method: []const u8,
+        path: []const u8,
+        handler_name: []const u8,
+        steps: []const ForgeRunStep,
+        final_content: []const u8,
+        unified_diff: []const u8,
+        success: bool,
+        terminal_reason: []const u8,
+        verification_summary: []const u8,
+        stats: ProofStats,
+    ) !ForgeRunPayload {
+        const owned_steps = try allocator.alloc(ForgeRunStep, steps.len);
+        errdefer allocator.free(owned_steps);
+        for (owned_steps) |*step| step.* = undefined;
+        var i: usize = 0;
+        errdefer {
+            while (i > 0) {
+                i -= 1;
+                owned_steps[i].deinit(allocator);
+            }
+            allocator.free(owned_steps);
+        }
+        while (i < steps.len) : (i += 1) {
+            owned_steps[i] = try steps[i].clone(allocator);
+        }
+        return .{
+            .run_id = try allocator.dupe(u8, run_id),
+            .file = try allocator.dupe(u8, file),
+            .feature_kind = try allocator.dupe(u8, feature_kind),
+            .method = try allocator.dupe(u8, method),
+            .path = try allocator.dupe(u8, path),
+            .handler_name = try allocator.dupe(u8, handler_name),
+            .steps = owned_steps,
+            .final_content = try allocator.dupe(u8, final_content),
+            .unified_diff = try allocator.dupe(u8, unified_diff),
+            .success = success,
+            .terminal_reason = try allocator.dupe(u8, terminal_reason),
+            .verification_summary = try allocator.dupe(u8, verification_summary),
+            .stats = stats,
+        };
+    }
+
+    pub fn clone(self: ForgeRunPayload, allocator: std.mem.Allocator) !ForgeRunPayload {
+        return init(
+            allocator,
+            self.run_id,
+            self.file,
+            self.feature_kind,
+            self.method,
+            self.path,
+            self.handler_name,
+            self.steps,
+            self.final_content,
+            self.unified_diff,
+            self.success,
+            self.terminal_reason,
+            self.verification_summary,
+            self.stats,
+        );
+    }
+
+    pub fn deinit(self: *ForgeRunPayload, allocator: std.mem.Allocator) void {
+        allocator.free(self.run_id);
+        allocator.free(self.file);
+        allocator.free(self.feature_kind);
+        allocator.free(self.method);
+        allocator.free(self.path);
+        allocator.free(self.handler_name);
+        for (self.steps) |*step| step.deinit(allocator);
+        allocator.free(self.steps);
+        allocator.free(self.final_content);
+        allocator.free(self.unified_diff);
+        allocator.free(self.terminal_reason);
+        allocator.free(self.verification_summary);
+        self.* = .{
+            .run_id = &.{},
+            .file = &.{},
+            .feature_kind = &.{},
+            .method = &.{},
+            .path = &.{},
+            .handler_name = &.{},
+            .steps = &.{},
+            .final_content = &.{},
+            .unified_diff = &.{},
+            .success = false,
+            .terminal_reason = &.{},
+            .verification_summary = &.{},
+            .stats = .{ .total = 0, .new = 0, .preexisting = null },
+        };
+    }
+};
+
 pub const PropertiesSnapshot = struct {
     pure: bool,
     read_only: bool,
@@ -981,6 +1127,7 @@ pub const UiPayload = union(enum) {
     command_outcome: CommandOutcomePayload,
     repair_candidate: RepairCandidatePayload,
     feature_plan: FeaturePlanPayload,
+    forge_run: ForgeRunPayload,
     verified_patch: VerifiedPatchPayload,
     plain_text: []u8,
 
@@ -992,6 +1139,7 @@ pub const UiPayload = union(enum) {
             .command_outcome => |payload| .{ .command_outcome = try payload.clone(allocator) },
             .repair_candidate => |payload| .{ .repair_candidate = try payload.clone(allocator) },
             .feature_plan => |payload| .{ .feature_plan = try payload.clone(allocator) },
+            .forge_run => |payload| .{ .forge_run = try payload.clone(allocator) },
             .verified_patch => |payload| .{ .verified_patch = try payload.clone(allocator) },
             .plain_text => |text| .{ .plain_text = try allocator.dupe(u8, text) },
         };
@@ -1005,6 +1153,7 @@ pub const UiPayload = union(enum) {
             .command_outcome => |*payload| payload.deinit(allocator),
             .repair_candidate => |*payload| payload.deinit(allocator),
             .feature_plan => |*payload| payload.deinit(allocator),
+            .forge_run => |*payload| payload.deinit(allocator),
             .verified_patch => |*payload| payload.deinit(allocator),
             .plain_text => |text| allocator.free(text),
         }
@@ -1167,6 +1316,52 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
             try writer.writeAll(",\"new\":");
             try writer.print("{d}", .{plan.stats.new});
             if (plan.stats.preexisting) |preexisting| {
+                try writer.writeAll(",\"preexisting\":");
+                try writer.print("{d}", .{preexisting});
+            }
+            try writer.writeByte('}');
+        },
+        .forge_run => |run| {
+            try writer.writeAll("\"kind\":\"forge_run\",\"run_id\":");
+            try json_writer.writeString(writer, run.run_id);
+            try writer.writeAll(",\"file\":");
+            try json_writer.writeString(writer, run.file);
+            try writer.writeAll(",\"feature_kind\":");
+            try json_writer.writeString(writer, run.feature_kind);
+            try writer.writeAll(",\"method\":");
+            try json_writer.writeString(writer, run.method);
+            try writer.writeAll(",\"path\":");
+            try json_writer.writeString(writer, run.path);
+            try writer.writeAll(",\"handler_name\":");
+            try json_writer.writeString(writer, run.handler_name);
+            try writer.writeAll(",\"steps\":[");
+            for (run.steps, 0..) |step, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writer.writeAll("{\"id\":");
+                try json_writer.writeString(writer, step.id);
+                try writer.writeAll(",\"title\":");
+                try json_writer.writeString(writer, step.title);
+                try writer.writeAll(",\"state\":");
+                try json_writer.writeString(writer, step.state);
+                try writer.writeAll(",\"detail\":");
+                try json_writer.writeString(writer, step.detail);
+                try writer.writeByte('}');
+            }
+            try writer.writeAll("],\"final_content\":");
+            try json_writer.writeString(writer, run.final_content);
+            try writer.writeAll(",\"unified_diff\":");
+            try json_writer.writeString(writer, run.unified_diff);
+            try writer.writeAll(",\"success\":");
+            try writer.writeAll(if (run.success) "true" else "false");
+            try writer.writeAll(",\"terminal_reason\":");
+            try json_writer.writeString(writer, run.terminal_reason);
+            try writer.writeAll(",\"verification_summary\":");
+            try json_writer.writeString(writer, run.verification_summary);
+            try writer.writeAll(",\"stats\":{\"total\":");
+            try writer.print("{d}", .{run.stats.total});
+            try writer.writeAll(",\"new\":");
+            try writer.print("{d}", .{run.stats.new});
+            if (run.stats.preexisting) |preexisting| {
                 try writer.writeAll(",\"preexisting\":");
                 try writer.print("{d}", .{preexisting});
             }
@@ -1559,6 +1754,67 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         }
         allocator.free(steps);
         return .{ .feature_plan = payload };
+    }
+    if (std.mem.eql(u8, kind_val.string, "forge_run")) {
+        const stats_val = obj.get("stats") orelse return error.InvalidUiPayload;
+        if (stats_val != .object) return error.InvalidUiPayload;
+        const steps_val = obj.get("steps") orelse return error.InvalidUiPayload;
+        if (steps_val != .array) return error.InvalidUiPayload;
+
+        const steps = try allocator.alloc(ForgeRunStep, steps_val.array.items.len);
+        errdefer allocator.free(steps);
+        for (steps) |*step| step.* = undefined;
+        var i: usize = 0;
+        errdefer {
+            while (i > 0) {
+                i -= 1;
+                steps[i].deinit(allocator);
+            }
+            allocator.free(steps);
+        }
+        while (i < steps_val.array.items.len) : (i += 1) {
+            const step_val = steps_val.array.items[i];
+            if (step_val != .object) return error.InvalidUiPayload;
+            const step_obj = step_val.object;
+            steps[i] = try ForgeRunStep.init(
+                allocator,
+                getString(step_obj, "id") orelse return error.InvalidUiPayload,
+                getString(step_obj, "title") orelse return error.InvalidUiPayload,
+                getString(step_obj, "state") orelse return error.InvalidUiPayload,
+                getString(step_obj, "detail") orelse return error.InvalidUiPayload,
+            );
+        }
+
+        var payload = try ForgeRunPayload.init(
+            allocator,
+            getString(obj, "run_id") orelse return error.InvalidUiPayload,
+            getString(obj, "file") orelse return error.InvalidUiPayload,
+            getString(obj, "feature_kind") orelse return error.InvalidUiPayload,
+            getString(obj, "method") orelse return error.InvalidUiPayload,
+            getString(obj, "path") orelse return error.InvalidUiPayload,
+            getString(obj, "handler_name") orelse return error.InvalidUiPayload,
+            steps,
+            getString(obj, "final_content") orelse return error.InvalidUiPayload,
+            getString(obj, "unified_diff") orelse "",
+            getBool(obj, "success") orelse return error.InvalidUiPayload,
+            getString(obj, "terminal_reason") orelse return error.InvalidUiPayload,
+            getString(obj, "verification_summary") orelse return error.InvalidUiPayload,
+            .{
+                .total = @intCast(getUnsigned(stats_val.object, "total") orelse return error.InvalidUiPayload),
+                .new = @intCast(getUnsigned(stats_val.object, "new") orelse return error.InvalidUiPayload),
+                .preexisting = if (getUnsigned(stats_val.object, "preexisting")) |preexisting|
+                    @intCast(preexisting)
+                else
+                    null,
+            },
+        );
+        errdefer payload.deinit(allocator);
+        while (i > 0) {
+            i -= 1;
+            steps[i].deinit(allocator);
+        }
+        allocator.free(steps);
+        return .{ .forge_run = payload };
     }
     if (std.mem.eql(u8, kind_val.string, "verified_patch")) {
         const file = getString(obj, "file") orelse return error.InvalidUiPayload;
@@ -2207,6 +2463,46 @@ test "repair candidate payload round-trips" {
             try testing.expect(candidate.verification_ok);
             try testing.expectEqual(@as(u32, 0), candidate.stats.new);
             try testing.expect(std.mem.indexOf(u8, candidate.proposed_content, "Response.json") != null);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "forge run payload round-trips" {
+    const steps = try testing.allocator.alloc(ForgeRunStep, 2);
+    steps[0] = try ForgeRunStep.init(testing.allocator, "generate_candidate", "generate route candidate", "passed", "Synthesized handleGetHealth.");
+    steps[1] = try ForgeRunStep.init(testing.allocator, "prove_candidate", "prove candidate", "passed", "0 new violations.");
+
+    var payload: UiPayload = .{ .forge_run = try ForgeRunPayload.init(
+        testing.allocator,
+        "forge:route:GET:/health",
+        "handler.ts",
+        "route",
+        "GET",
+        "/health",
+        "handleGetHealth",
+        steps,
+        "function handleGetHealth(req) { return Response.json({ ok: true }); }",
+        "@@ -1,1 +1,1 @@\n-old\n+new\n",
+        true,
+        "candidate has zero new compiler violations; ready for approval",
+        "0 total, 0 new, 0 preexisting",
+        .{ .total = 0, .new = 0, .preexisting = 0 },
+    ) };
+    for (steps) |*step| step.deinit(testing.allocator);
+    testing.allocator.free(steps);
+    defer payload.deinit(testing.allocator);
+
+    var roundtripped = try roundTrip(testing.allocator, payload);
+    defer roundtripped.deinit(testing.allocator);
+
+    switch (roundtripped) {
+        .forge_run => |run| {
+            try testing.expectEqualStrings("forge:route:GET:/health", run.run_id);
+            try testing.expect(run.success);
+            try testing.expectEqual(@as(usize, 2), run.steps.len);
+            try testing.expectEqualStrings("passed", run.steps[1].state);
+            try testing.expect(std.mem.indexOf(u8, run.final_content, "handleGetHealth") != null);
         },
         else => return error.TestFailed,
     }
