@@ -29,7 +29,7 @@ pub const tool: registry_mod.ToolDef = .{
     .execute = execute,
 };
 
-const RouteSpec = struct {
+pub const RouteSpec = struct {
     file: []const u8,
     method: []const u8,
     path: []const u8,
@@ -55,11 +55,11 @@ pub fn execute(
 ) anyerror!registry_mod.ToolResult {
     var spec_arena = std.heap.ArenaAllocator.init(allocator);
     defer spec_arena.deinit();
-    const spec = parseArgs(spec_arena.allocator(), args) catch |err| switch (err) {
+    const spec = parseRouteSpecArgs(spec_arena.allocator(), args) catch |err| switch (err) {
         error.InvalidToolArgsJson => return registry_mod.ToolResult.err(allocator, usage()),
         else => return err,
     };
-    if (!validMethod(spec.method) or spec.path.len == 0 or spec.path[0] != '/') {
+    if (!validRouteSpec(spec)) {
         return registry_mod.ToolResult.err(allocator, name ++ ": method must be an HTTP verb and path must start with /\n");
     }
 
@@ -161,11 +161,11 @@ pub fn execute(
     };
 }
 
-fn usage() []const u8 {
+pub fn usage() []const u8 {
     return name ++ ": usage: /feature route file=<handler.ts> method=<GET|POST|...> path=</path> [body=<schema>] [response=<schema>] [status=<code>]\n";
 }
 
-fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !RouteSpec {
+pub fn parseRouteSpecArgs(allocator: std.mem.Allocator, args: []const []const u8) !RouteSpec {
     if (args.len == 0) return error.InvalidToolArgsJson;
     if (args.len == 1 and std.mem.indexOfScalar(u8, args[0], '{') != null) {
         return parseJsonSpec(allocator, args[0]);
@@ -212,6 +212,10 @@ fn parseKvSpec(allocator: std.mem.Allocator, args: []const []const u8) !RouteSpe
     return spec;
 }
 
+pub fn validRouteSpec(spec: RouteSpec) bool {
+    return validMethod(spec.method) and spec.path.len > 0 and spec.path[0] == '/';
+}
+
 fn validMethod(method: []const u8) bool {
     const methods = [_][]const u8{ "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
     for (methods) |candidate| {
@@ -220,7 +224,7 @@ fn validMethod(method: []const u8) bool {
     return false;
 }
 
-fn routeHandlerName(allocator: std.mem.Allocator, method: []const u8, path: []const u8) ![]u8 {
+pub fn routeHandlerName(allocator: std.mem.Allocator, method: []const u8, path: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, "handle");
@@ -247,7 +251,7 @@ fn appendPascalToken(allocator: std.mem.Allocator, out: *std.ArrayList(u8), toke
     }
 }
 
-fn synthesizeRoute(
+pub fn synthesizeRoute(
     allocator: std.mem.Allocator,
     source: []const u8,
     spec: RouteSpec,
@@ -361,7 +365,7 @@ fn stripFunctionHandlerAlloc(allocator: std.mem.Allocator, source: []const u8) !
     return null;
 }
 
-fn buildSteps(
+pub fn buildSteps(
     allocator: std.mem.Allocator,
     spec: RouteSpec,
     handler_name: []const u8,
