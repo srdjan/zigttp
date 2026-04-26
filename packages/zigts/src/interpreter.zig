@@ -14,203 +14,46 @@ const string = @import("string.zig");
 const jit = @import("jit/root.zig");
 const type_feedback = @import("type_feedback.zig");
 const builtins = @import("builtins/root.zig");
-const build_options = @import("build_options");
+const perf = @import("interpreter/perf.zig");
+const jit_policy = @import("interpreter/jit_policy.zig");
+const ic = @import("interpreter/ic.zig");
 
 const empty_code: [0]u8 = .{};
-const tier_count = std.meta.fields(bytecode.CompilationTier).len;
+const tier_count = perf.tier_count;
 
-pub const enable_opcode_histogram = build_options.perf_histogram;
+pub const PerfStats = perf.PerfStats;
+pub const enable_opcode_histogram = perf.enable_opcode_histogram;
+const countNonZeroHistogramEntries = perf.countNonZeroHistogramEntries;
 
-pub const PerfStats = struct {
-    backedge_count: u32 = 0,
-    pic_hits: u32 = 0,
-    pic_misses: u32 = 0,
-    deopt_count: u32 = 0,
-    mega_recoveries: u32 = 0,
-    tier_promotions: [tier_count]u32 = [_]u32{0} ** tier_count,
-    promotion_attempted: u32 = 0,
-    promotion_succeeded: u32 = 0,
-    promotion_rejected_deopt_storm: u32 = 0,
-    opcode_histogram_enabled: bool = enable_opcode_histogram,
-    opcode_histogram_nonzero: u32 = 0,
-    opcode_histogram: [256]u32 = [_]u32{0} ** 256,
-};
+pub const JitPolicy = jit_policy.JitPolicy;
+pub const getJitPolicy = jit_policy.getJitPolicy;
+pub const getJitThreshold = jit_policy.getJitThreshold;
+pub const getJitFeedbackWarmup = jit_policy.getJitFeedbackWarmup;
+pub const setJitPolicy = jit_policy.setJitPolicy;
+pub const setJitThreshold = jit_policy.setJitThreshold;
+pub const setJitFeedbackWarmup = jit_policy.setJitFeedbackWarmup;
+pub const disableJitForTests = jit_policy.disableJitForTests;
+pub const isTieringDeoptSuppressEnabled = jit_policy.isTieringDeoptSuppressEnabled;
+pub const resetTieringDeoptSuppressCache = jit_policy.resetTieringDeoptSuppressCache;
+const jitDisabled = jit_policy.jitDisabled;
 
-fn countNonZeroHistogramEntries(histogram: []const u32) u32 {
-    var count: u32 = 0;
-    for (histogram) |entry| {
-        if (entry > 0) count +|= 1;
-    }
-    return count;
-}
+pub const PICEntry = ic.PICEntry;
+pub const PIC_ENTRIES = ic.PIC_ENTRIES;
+pub const pic_entries_tracks_feedback = ic.pic_entries_tracks_feedback;
+pub const effective_pic_cap = ic.effective_pic_cap;
+pub const PolymorphicInlineCache = ic.PolymorphicInlineCache;
+pub const IC_CACHE_SIZE = ic.IC_CACHE_SIZE;
+pub const getPicMegaRecoveryWindow = ic.getPicMegaRecoveryWindow;
+pub const isPicRecoveryDisabled = ic.isPicRecoveryDisabled;
 
 pub threadlocal var current_interpreter: ?*Interpreter = null;
 
-var jit_disabled_cache: ?bool = null;
 var call_trace_cache: ?bool = null;
 var call_trace_limit_cache: usize = 0;
 var call_trace_limit_cached = false;
 var call_guard_cache: usize = 0;
 var call_guard_cached = false;
 threadlocal var call_trace_count: usize = 0;
-
-// ============================================================================
-// JIT Policy Configuration
-// ============================================================================
-
-/// JIT compilation policy for FaaS-aware optimization.
-pub const JitPolicy = enum {
-    /// Never JIT compile - pure interpreter mode (fastest cold start)
-    disabled,
-    /// Default: JIT after threshold (balanced)
-    lazy,
-    /// Lower threshold for faster warmup (more aggressive)
-    eager,
-};
-
-/// Current JIT policy (defaults to lazy, overridable via env or API)
-var jit_policy_cache: ?JitPolicy = null;
-
-/// Current JIT threshold (defaults to bytecode.JIT_THRESHOLD, overridable via env or API)
-var jit_threshold_cache: ?u32 = null;
-/// Warmup count for type feedback before JIT compilation
-var jit_feedback_warmup_cache: ?u32 = null;
-
-/// Get current JIT policy (cached, reads ZTS_JIT_POLICY env on first call)
-pub fn getJitPolicy() JitPolicy {
-    if (jit_policy_cache) |cached| return cached;
-    if (std.c.getenv("ZTS_JIT_POLICY")) |policy_ptr| {
-        const policy_str = std.mem.sliceTo(policy_ptr, 0);
-        const policy = std.meta.stringToEnum(JitPolicy, policy_str) orelse .lazy;
-        jit_policy_cache = policy;
-        return policy;
-    }
-    jit_policy_cache = .lazy;
-    return .lazy;
-}
-
-/// Get current JIT threshold (cached, reads ZTS_JIT_THRESHOLD env on first call)
-pub fn getJitThreshold() u32 {
-    if (jit_threshold_cache) |cached| return cached;
-    if (std.c.getenv("ZTS_JIT_THRESHOLD")) |threshold_ptr| {
-        const threshold_str = std.mem.sliceTo(threshold_ptr, 0);
-        const threshold = std.fmt.parseInt(u32, threshold_str, 10) catch bytecode.JIT_THRESHOLD;
-        jit_threshold_cache = threshold;
-        return threshold;
-    }
-    // Eager policy uses lower threshold
-    const policy = getJitPolicy();
-    const threshold = switch (policy) {
-        .disabled => std.math.maxInt(u32), // Never reached
-        .lazy => bytecode.JIT_THRESHOLD,
-        .eager => bytecode.JIT_THRESHOLD / 4, // 25 calls instead of 100
-    };
-    jit_threshold_cache = threshold;
-    return threshold;
-}
-
-/// Get warmup calls for type feedback collection before JIT compilation.
-/// Can be overridden by ZTS_JIT_FEEDBACK_WARMUP.
-pub fn getJitFeedbackWarmup() u32 {
-    if (jit_feedback_warmup_cache) |cached| return cached;
-    if (std.c.getenv("ZTS_JIT_FEEDBACK_WARMUP")) |warmup_ptr| {
-        const warmup_str = std.mem.sliceTo(warmup_ptr, 0);
-        const warmup = std.fmt.parseInt(u32, warmup_str, 10) catch 50;
-        jit_feedback_warmup_cache = warmup;
-        return warmup;
-    }
-    const policy = getJitPolicy();
-    const warmup: u32 = switch (policy) {
-        .disabled => @intCast(std.math.maxInt(u32)),
-        .lazy => 50,
-        .eager => 10,
-    };
-    jit_feedback_warmup_cache = warmup;
-    return warmup;
-}
-
-/// Set JIT policy programmatically (overrides env var)
-pub fn setJitPolicy(policy: JitPolicy) void {
-    jit_policy_cache = policy;
-    jit_threshold_cache = null; // Reset threshold to recalculate based on policy
-    jit_feedback_warmup_cache = null; // Reset warmup to recalculate based on policy
-}
-
-/// Set JIT threshold programmatically (overrides env var and policy default)
-pub fn setJitThreshold(threshold: u32) void {
-    jit_threshold_cache = threshold;
-}
-
-/// Set feedback warmup count programmatically (overrides env var and policy default).
-pub fn setJitFeedbackWarmup(warmup: u32) void {
-    jit_feedback_warmup_cache = warmup;
-}
-
-/// Force-disable JIT in the current process (used by tests that exercise
-/// multithreaded runtime behavior without JIT stability guarantees yet).
-pub fn disableJitForTests() void {
-    jit_disabled_cache = true;
-    jit_policy_cache = .disabled;
-}
-
-// ============================================================================
-// PIC megamorphic recovery tunables
-// ============================================================================
-
-var pic_mega_recovery_window_cache: ?u16 = null;
-var pic_recovery_disabled_cache: ?bool = null;
-var tiering_deopt_suppress_cache: ?bool = null;
-
-/// Number of consecutive monomorphic observations after a PIC goes megamorphic
-/// before it is allowed to reset and re-specialize on the dominant shape.
-/// Overridable via ZTS_PIC_MEGA_RECOVERY_WINDOW.
-pub fn getPicMegaRecoveryWindow() u16 {
-    if (pic_mega_recovery_window_cache) |cached| return cached;
-    const default_window: u16 = 32;
-    if (std.c.getenv("ZTS_PIC_MEGA_RECOVERY_WINDOW")) |raw_ptr| {
-        const raw = std.mem.sliceTo(raw_ptr, 0);
-        const parsed = std.fmt.parseUnsigned(u16, raw, 10) catch default_window;
-        pic_mega_recovery_window_cache = if (parsed == 0) default_window else parsed;
-    } else {
-        pic_mega_recovery_window_cache = default_window;
-    }
-    return pic_mega_recovery_window_cache.?;
-}
-
-/// When ZTS_PIC_DISABLE_RECOVERY is set, PICs stay megamorphic permanently
-/// (legacy behavior) instead of attempting recovery after a stable shape window.
-pub fn isPicRecoveryDisabled() bool {
-    if (pic_recovery_disabled_cache) |cached| return cached;
-    const disabled = std.c.getenv("ZTS_PIC_DISABLE_RECOVERY") != null;
-    pic_recovery_disabled_cache = disabled;
-    return disabled;
-}
-
-/// When ZTS_TIERING_DEOPT_SUPPRESS is set, functions that recently deopted
-/// repeatedly are denied promotion to optimized_candidate for a cooldown
-/// window. Defaults to off until field data confirms the heuristic.
-pub fn isTieringDeoptSuppressEnabled() bool {
-    if (tiering_deopt_suppress_cache) |cached| return cached;
-    const enabled = std.c.getenv("ZTS_TIERING_DEOPT_SUPPRESS") != null;
-    tiering_deopt_suppress_cache = enabled;
-    return enabled;
-}
-
-/// Reset the cached tiering suppression env read; tests use this to toggle
-/// behavior without restarting the process.
-pub fn resetTieringDeoptSuppressCache() void {
-    tiering_deopt_suppress_cache = null;
-}
-
-fn jitDisabled() bool {
-    // Check policy first
-    if (getJitPolicy() == .disabled) return true;
-    // Then check legacy env var
-    if (jit_disabled_cache) |cached| return cached;
-    const disabled = std.c.getenv("ZTS_DISABLE_JIT") != null;
-    jit_disabled_cache = disabled;
-    return disabled;
-}
 
 fn callTraceEnabled() bool {
     if (call_trace_cache) |cached| return cached;
@@ -324,143 +167,6 @@ fn traceBytecodeWindow(self: *Interpreter, center_off: usize) void {
         pos += info.size;
     }
 }
-
-/// Single entry in a polymorphic inline cache
-/// Stores hidden class index and slot offset for one observed shape
-pub const PICEntry = struct {
-    hidden_class_idx: object.HiddenClassIndex,
-    slot_offset: u16,
-};
-
-/// Number of entries in a polymorphic inline cache
-/// 8 entries provides good coverage for common polymorphic patterns
-/// while keeping memory overhead reasonable per IC site
-pub const PIC_ENTRIES = 8;
-
-/// When true, cap the number of distinct shapes the PIC caches at
-/// `type_feedback.MAX_POLYMORPHIC_SHAPES` so that PIC and the upstream
-/// type-feedback layer agree on what counts as megamorphic. The underlying
-/// `entries` array stays at PIC_ENTRIES to preserve memory layout and the
-/// JIT's inline PIC_CHECK_COUNT assumptions. Flip to false for reversion.
-pub const pic_entries_tracks_feedback = true;
-
-/// Effective cap on distinct shapes the PIC will cache before going megamorphic.
-pub const effective_pic_cap: u8 = if (pic_entries_tracks_feedback)
-    type_feedback.MAX_POLYMORPHIC_SHAPES
-else
-    PIC_ENTRIES;
-
-/// Polymorphic Inline Cache for property access optimization
-/// Caches up to `effective_pic_cap` (hidden_class, slot_offset) pairs per access site
-/// Falls back to megamorphic mode when more shapes are observed
-pub const PolymorphicInlineCache = struct {
-    /// Cached entries (only first `count` are valid)
-    /// Initialize all entries with invalid hidden class to prevent JIT false matches
-    /// on uninitialized memory (JIT checks first PIC_CHECK_COUNT entries inline)
-    entries: [PIC_ENTRIES]PICEntry = [_]PICEntry{.{ .hidden_class_idx = .none, .slot_offset = 0 }} ** PIC_ENTRIES,
-    /// Number of valid entries (0..effective_pic_cap)
-    count: u8 = 0,
-    /// Index of most recently hit entry
-    last_hit: u8 = 0,
-    /// Megamorphic flag: true when > effective_pic_cap shapes observed
-    /// When megamorphic, skip caching unless a recovery window elapses with a single shape
-    megamorphic: bool = false,
-    /// Shape being watched for megamorphic recovery
-    recovery_candidate: object.HiddenClassIndex = .none,
-    /// Consecutive observations of `recovery_candidate` while megamorphic
-    consec_same_shape: u16 = 0,
-    /// Latched when update() performed a megamorphic->monomorphic recovery
-    /// Callers read and reset it to increment PerfStats.mega_recoveries.
-    just_recovered: bool = false,
-
-    /// Lookup hidden class in cache, return slot offset if found
-    pub inline fn lookup(self: *PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex) ?u16 {
-        // Linear search through valid entries
-        if (self.count == 0) return null;
-        if (self.last_hit < self.count) {
-            const entry = self.entries[self.last_hit];
-            if (entry.hidden_class_idx == hidden_class_idx) {
-                return entry.slot_offset;
-            }
-        }
-        for (self.entries[0..self.count], 0..) |entry, idx| {
-            if (entry.hidden_class_idx == hidden_class_idx) {
-                self.last_hit = @intCast(idx);
-                return entry.slot_offset;
-            }
-        }
-        return null;
-    }
-
-    /// Update cache with new (hidden_class_idx, slot_offset) pair
-    /// Returns true if the shape is now cached, false if still rejected as megamorphic.
-    /// If recovery triggers, `just_recovered` is set so callers can observe it.
-    pub inline fn update(self: *PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex, slot_offset: u16) bool {
-        if (self.megamorphic) {
-            if (isPicRecoveryDisabled()) return false;
-            if (self.recovery_candidate == hidden_class_idx and hidden_class_idx != .none) {
-                self.consec_same_shape +|= 1;
-                if (self.consec_same_shape >= getPicMegaRecoveryWindow()) {
-                    self.entries[0] = .{ .hidden_class_idx = hidden_class_idx, .slot_offset = slot_offset };
-                    self.count = 1;
-                    self.last_hit = 0;
-                    self.megamorphic = false;
-                    self.consec_same_shape = 0;
-                    self.recovery_candidate = .none;
-                    self.just_recovered = true;
-                    return true;
-                }
-            } else {
-                self.recovery_candidate = hidden_class_idx;
-                self.consec_same_shape = 1;
-            }
-            return false;
-        }
-
-        // Check if already cached (update existing entry)
-        for (self.entries[0..self.count], 0..) |*entry, idx| {
-            if (entry.hidden_class_idx == hidden_class_idx) {
-                entry.slot_offset = slot_offset;
-                self.last_hit = @intCast(idx);
-                return true;
-            }
-        }
-
-        // Add new entry if space available (capped at effective_pic_cap, not PIC_ENTRIES)
-        if (self.count < effective_pic_cap) {
-            self.entries[self.count] = .{
-                .hidden_class_idx = hidden_class_idx,
-                .slot_offset = slot_offset,
-            };
-            self.last_hit = self.count;
-            self.count += 1;
-            return true;
-        }
-
-        // Cache full with new shape: transition to megamorphic
-        self.megamorphic = true;
-        self.recovery_candidate = .none;
-        self.consec_same_shape = 0;
-        return false;
-    }
-
-    /// Reset cache to initial state (for debugging/testing)
-    pub fn reset(self: *PolymorphicInlineCache) void {
-        self.count = 0;
-        self.last_hit = 0;
-        self.megamorphic = false;
-        self.recovery_candidate = .none;
-        self.consec_same_shape = 0;
-        self.just_recovered = false;
-    }
-};
-
-/// Maximum number of inline cache slots per compilation unit.
-/// Each get_field_ic/put_field_ic instruction references a cache index.
-/// Must match codegen.IC_CACHE_SIZE. IC indices are globally unique across
-/// all functions in a file, so this must be large enough for the total
-/// property access count across all functions.
-pub const IC_CACHE_SIZE = 512;
 
 /// Interpreter state
 pub const Interpreter = struct {
@@ -7400,8 +7106,8 @@ test "tiering: deopt storm suppresses optimized promotion when enabled" {
     defer ctx.deinit();
 
     // Force the feature on for this test. Restore default after.
-    tiering_deopt_suppress_cache = true;
-    defer tiering_deopt_suppress_cache = null;
+    jit_policy.setTieringDeoptSuppressForTests(true);
+    defer jit_policy.setTieringDeoptSuppressForTests(null);
 
     var func = bytecode.FunctionBytecode{
         .header = .{},
@@ -7446,8 +7152,8 @@ test "tiering: deopt storm does not suppress when feature is disabled" {
     defer ctx.deinit();
 
     // Feature explicitly off.
-    tiering_deopt_suppress_cache = false;
-    defer tiering_deopt_suppress_cache = null;
+    jit_policy.setTieringDeoptSuppressForTests(false);
+    defer jit_policy.setTieringDeoptSuppressForTests(null);
 
     var func = bytecode.FunctionBytecode{
         .header = .{},
