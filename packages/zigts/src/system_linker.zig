@@ -347,8 +347,8 @@ fn findResponseSchemaJson(
     route: *const handler_contract.ApiRouteInfo,
     response: handler_contract.ApiResponseInfo,
 ) ?[]const u8 {
-    if (response.schema_json) |schema_json| return schema_json;
-    if (response.schema_ref) |schema_ref| {
+    if (response.schema.schemaJson()) |schema_json| return schema_json;
+    if (response.schema.schemaRef()) |schema_ref| {
         for (contract.api.schemas.items) |schema| {
             if (std.mem.eql(u8, schema.name, schema_ref)) return schema.schema_json;
         }
@@ -387,7 +387,7 @@ fn analyzePayloadProof(
         return payloadGap(allocator, link, "target route has no declared responses");
 
     for (api_route.responses.items) |response| {
-        if (response.dynamic)
+        if (response.schema.isDynamic())
             return payloadGap(allocator, link, "target route response schema is dynamic");
         if (response.status == null)
             return payloadGap(allocator, link, "target route response status is unknown");
@@ -414,7 +414,7 @@ fn analyzePayloadProof(
 }
 
 fn pathParamProvided(call: handler_contract.ServiceCallInfo, name: []const u8) bool {
-    return handler_contract.containsString(call.path_params.items, name);
+    return handler_contract.containsString(call.path_params.items(), name);
 }
 
 pub fn collectRoutePathParamNames(
@@ -459,7 +459,7 @@ fn validateServiceCallShape(
     }
 
     for (required_path_params.items) |name| {
-        if (call.path_params_dynamic) {
+        if (call.path_params.isDynamic()) {
             return try std.fmt.allocPrint(allocator, "serviceCall cannot prove path param '{s}'", .{name});
         }
         if (!pathParamProvided(call, name)) {
@@ -469,30 +469,29 @@ fn validateServiceCallShape(
 
     for (route.query_params.items) |param| {
         if (!param.required) continue;
-        if (call.query_dynamic) {
+        if (call.query_keys.isDynamic()) {
             return try std.fmt.allocPrint(allocator, "serviceCall cannot prove query param '{s}'", .{param.name});
         }
-        if (!handler_contract.containsString(call.query_keys.items, param.name)) {
+        if (!handler_contract.containsString(call.query_keys.items(), param.name)) {
             return try std.fmt.allocPrint(allocator, "serviceCall is missing query param '{s}'", .{param.name});
         }
     }
 
     for (route.header_params.items) |param| {
         if (!param.required) continue;
-        if (call.header_dynamic) {
+        if (call.header_keys.isDynamic()) {
             return try std.fmt.allocPrint(allocator, "serviceCall cannot prove header '{s}'", .{param.name});
         }
-        if (!handler_contract.containsString(call.header_keys.items, param.name)) {
+        if (!handler_contract.containsString(call.header_keys.items(), param.name)) {
             return try std.fmt.allocPrint(allocator, "serviceCall is missing header '{s}'", .{param.name});
         }
     }
 
     if (route.request_bodies.items.len > 0 and !route.request_bodies_dynamic) {
-        if (call.body_dynamic) {
-            return try allocator.dupe(u8, "serviceCall cannot prove request body presence");
-        }
-        if (!call.has_body) {
-            return try allocator.dupe(u8, "serviceCall is missing required request body");
+        switch (call.body) {
+            .dynamic => return try allocator.dupe(u8, "serviceCall cannot prove request body presence"),
+            .none => return try allocator.dupe(u8, "serviceCall is missing required request body"),
+            .present => {},
         }
     }
 
@@ -1575,11 +1574,11 @@ test "linkSystem: serviceCall links named services" {
     try service_calls.append(allocator, .{
         .service = try allocator.dupe(u8, "users"),
         .route_pattern = try allocator.dupe(u8, "GET /api/users/:id"),
-        .path_params = blk: {
+        .path_params = .{ .complete = blk: {
             var params: std.ArrayList([]const u8) = .empty;
             try params.append(allocator, try allocator.dupe(u8, "id"));
             break :blk params;
-        },
+        } },
     });
     contracts[0].service_calls = service_calls;
 
@@ -1640,11 +1639,11 @@ test "linkSystem: payload proof is reported for JSON service responses" {
     try service_calls.append(allocator, .{
         .service = try allocator.dupe(u8, "users"),
         .route_pattern = try allocator.dupe(u8, "GET /api/users/:id"),
-        .path_params = blk: {
+        .path_params = .{ .complete = blk: {
             var params: std.ArrayList([]const u8) = .empty;
             try params.append(allocator, try allocator.dupe(u8, "id"));
             break :blk params;
-        },
+        } },
     });
     contracts[0].service_calls = service_calls;
 
@@ -1653,7 +1652,7 @@ test "linkSystem: payload proof is reported for JSON service responses" {
     try responses.append(allocator, .{
         .status = 200,
         .content_type = try allocator.dupe(u8, "application/json"),
-        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+        .schema = .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}") },
     });
     var api_routes: std.ArrayList(handler_contract.ApiRouteInfo) = .empty;
     try api_routes.append(allocator, .{
@@ -1699,11 +1698,11 @@ test "linkSystem: payload proof gap is explicit for dynamic responses" {
     try service_calls.append(allocator, .{
         .service = try allocator.dupe(u8, "users"),
         .route_pattern = try allocator.dupe(u8, "GET /api/users/:id"),
-        .path_params = blk: {
+        .path_params = .{ .complete = blk: {
             var params: std.ArrayList([]const u8) = .empty;
             try params.append(allocator, try allocator.dupe(u8, "id"));
             break :blk params;
-        },
+        } },
     });
     contracts[0].service_calls = service_calls;
 
@@ -1712,7 +1711,7 @@ test "linkSystem: payload proof gap is explicit for dynamic responses" {
     try responses.append(allocator, .{
         .status = 200,
         .content_type = try allocator.dupe(u8, "application/json"),
-        .dynamic = true,
+        .schema = .dynamic,
     });
     var api_routes: std.ArrayList(handler_contract.ApiRouteInfo) = .empty;
     try api_routes.append(allocator, .{

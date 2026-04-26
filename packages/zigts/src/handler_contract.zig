@@ -306,24 +306,61 @@ pub const ApiParamInfo = struct {
     }
 };
 
+pub const SchemaSpec = union(enum) {
+    none,
+    ref: []const u8, // owned
+    inline_json: []const u8, // owned
+    dynamic,
+
+    pub fn schemaRef(self: SchemaSpec) ?[]const u8 {
+        return switch (self) {
+            .ref => |s| s,
+            else => null,
+        };
+    }
+
+    pub fn schemaJson(self: SchemaSpec) ?[]const u8 {
+        return switch (self) {
+            .inline_json => |s| s,
+            else => null,
+        };
+    }
+
+    pub fn isDynamic(self: SchemaSpec) bool {
+        return self == .dynamic;
+    }
+
+    pub fn deinitOwned(self: SchemaSpec, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .ref => |s| allocator.free(s),
+            .inline_json => |s| allocator.free(s),
+            .none, .dynamic => {},
+        }
+    }
+
+    pub fn dupeOwned(self: SchemaSpec, allocator: std.mem.Allocator) !SchemaSpec {
+        return switch (self) {
+            .none => .none,
+            .ref => |s| .{ .ref = try allocator.dupe(u8, s) },
+            .inline_json => |s| .{ .inline_json = try allocator.dupe(u8, s) },
+            .dynamic => .dynamic,
+        };
+    }
+};
+
 pub const ApiBodyInfo = struct {
     content_type: ?[]const u8 = null, // owned when present
-    schema_ref: ?[]const u8 = null, // owned when present
-    schema_json: ?[]const u8 = null, // owned when present
-    dynamic: bool = false,
+    schema: SchemaSpec = .none,
 
     pub fn deinit(self: *ApiBodyInfo, allocator: std.mem.Allocator) void {
         if (self.content_type) |content_type| allocator.free(content_type);
-        if (self.schema_ref) |schema_ref| allocator.free(schema_ref);
-        if (self.schema_json) |schema_json| allocator.free(schema_json);
+        self.schema.deinitOwned(allocator);
     }
 
     pub fn dupeOwned(self: ApiBodyInfo, allocator: std.mem.Allocator) !ApiBodyInfo {
         return .{
             .content_type = try dupeOptionalString(allocator, self.content_type),
-            .schema_ref = try dupeOptionalString(allocator, self.schema_ref),
-            .schema_json = try dupeOptionalString(allocator, self.schema_json),
-            .dynamic = self.dynamic,
+            .schema = try self.schema.dupeOwned(allocator),
         };
     }
 };
@@ -331,23 +368,18 @@ pub const ApiBodyInfo = struct {
 pub const ApiResponseInfo = struct {
     status: ?u16 = null,
     content_type: ?[]const u8 = null, // owned when present
-    schema_ref: ?[]const u8 = null, // owned when present
-    schema_json: ?[]const u8 = null, // owned when present
-    dynamic: bool = false,
+    schema: SchemaSpec = .none,
 
     pub fn deinit(self: *ApiResponseInfo, allocator: std.mem.Allocator) void {
         if (self.content_type) |content_type| allocator.free(content_type);
-        if (self.schema_ref) |schema_ref| allocator.free(schema_ref);
-        if (self.schema_json) |schema_json| allocator.free(schema_json);
+        self.schema.deinitOwned(allocator);
     }
 
     pub fn dupeOwned(self: ApiResponseInfo, allocator: std.mem.Allocator) !ApiResponseInfo {
         return .{
             .status = self.status,
             .content_type = try dupeOptionalString(allocator, self.content_type),
-            .schema_ref = try dupeOptionalString(allocator, self.schema_ref),
-            .schema_json = try dupeOptionalString(allocator, self.schema_json),
-            .dynamic = self.dynamic,
+            .schema = try self.schema.dupeOwned(allocator),
         };
     }
 };
@@ -692,32 +724,79 @@ pub const BehaviorPath = struct {
 pub const ServiceCallInfo = struct {
     service: []const u8, // owned
     route_pattern: []const u8, // owned
+    /// Service or route_pattern is computed at runtime. When true, the
+    /// per-surface fields below carry no useful information.
     dynamic: bool = false,
-    path_params: std.ArrayList([]const u8) = .empty, // each entry owned
-    path_params_dynamic: bool = false,
-    query_keys: std.ArrayList([]const u8) = .empty, // each entry owned
-    query_dynamic: bool = false,
-    header_keys: std.ArrayList([]const u8) = .empty, // each entry owned
-    header_dynamic: bool = false,
-    has_body: bool = false,
-    body_dynamic: bool = false,
+    path_params: KnownList = .{ .complete = .empty },
+    query_keys: KnownList = .{ .complete = .empty },
+    header_keys: KnownList = .{ .complete = .empty },
+    body: BodySpec = .none,
 
-    pub fn markAllDynamic(self: *ServiceCallInfo) void {
-        self.path_params_dynamic = true;
-        self.query_dynamic = true;
-        self.header_dynamic = true;
-        self.body_dynamic = true;
+    /// A statically-enumerated list of string keys, or "opaque" when the
+    /// analyzer could not prove the set is complete. The system linker
+    /// treats `.dynamic` as "cannot prove" and fails closed on required keys.
+    pub const KnownList = union(enum) {
+        complete: std.ArrayList([]const u8), // each entry owned
+        dynamic,
+
+        pub fn isDynamic(self: KnownList) bool {
+            return self == .dynamic;
+        }
+
+        pub fn items(self: KnownList) []const []const u8 {
+            return switch (self) {
+                .complete => |list| list.items,
+                .dynamic => &.{},
+            };
+        }
+
+        pub fn deinitOwned(self: *KnownList, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .complete => |*list| {
+                    for (list.items) |s| allocator.free(s);
+                    list.deinit(allocator);
+                },
+                .dynamic => {},
+            }
+        }
+
+        pub fn markDynamic(self: *KnownList, allocator: std.mem.Allocator) void {
+            self.deinitOwned(allocator);
+            self.* = .dynamic;
+        }
+    };
+
+    /// Three-state body presence: no body field, body present (statically
+    /// inspectable), or body present but opaque at compile time. Replaces the
+    /// prior `has_body: bool` + `body_dynamic: bool` pair where some
+    /// combinations were meaningless.
+    pub const BodySpec = union(enum) {
+        none,
+        present,
+        dynamic,
+
+        pub fn isDynamic(self: BodySpec) bool {
+            return self == .dynamic;
+        }
+
+        pub fn isPresent(self: BodySpec) bool {
+            return self != .none;
+        }
+    };
+
+    pub fn markAllDynamic(self: *ServiceCallInfo, allocator: std.mem.Allocator) void {
+        self.path_params.markDynamic(allocator);
+        self.query_keys.markDynamic(allocator);
+        self.header_keys.markDynamic(allocator);
+        self.body = .dynamic;
     }
 
     pub fn deinit(self: *ServiceCallInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.service);
         allocator.free(self.route_pattern);
-        for (self.path_params.items) |param| allocator.free(param);
-        self.path_params.deinit(allocator);
-        for (self.query_keys.items) |key| allocator.free(key);
-        self.query_keys.deinit(allocator);
-        for (self.header_keys.items) |key| allocator.free(key);
-        self.header_keys.deinit(allocator);
+        self.path_params.deinitOwned(allocator);
+        self.query_keys.deinitOwned(allocator);
+        self.header_keys.deinitOwned(allocator);
     }
 };
 
@@ -2386,13 +2465,13 @@ pub const ContractBuilder = struct {
 
     fn extractServiceCallInit(self: *ContractBuilder, init_idx: NodeIndex, service_call: *ServiceCallInfo) !void {
         const tag = self.ir_view.getTag(init_idx) orelse {
-            service_call.markAllDynamic();
+            service_call.markAllDynamic(self.allocator);
             return;
         };
         if (tag == .lit_null or tag == .lit_undefined) return;
 
         const init_obj = self.resolveObjectLiteralNode(init_idx) orelse {
-            service_call.markAllDynamic();
+            service_call.markAllDynamic(self.allocator);
             return;
         };
         const obj = self.ir_view.getObject(init_obj) orelse return;
@@ -2404,24 +2483,39 @@ pub const ContractBuilder = struct {
             const key = self.getObjectPropertyKey(prop.key) orelse continue;
 
             if (std.mem.eql(u8, key, "params")) {
-                try self.extractServiceObjectKeys(prop.value, &service_call.path_params, &service_call.path_params_dynamic);
+                service_call.path_params.deinitOwned(self.allocator);
+                service_call.path_params = try self.extractKnownList(prop.value);
             } else if (std.mem.eql(u8, key, "query")) {
-                try self.extractServiceObjectKeys(prop.value, &service_call.query_keys, &service_call.query_dynamic);
+                service_call.query_keys.deinitOwned(self.allocator);
+                service_call.query_keys = try self.extractKnownList(prop.value);
             } else if (std.mem.eql(u8, key, "headers")) {
-                try self.extractServiceObjectKeys(prop.value, &service_call.header_keys, &service_call.header_dynamic);
+                service_call.header_keys.deinitOwned(self.allocator);
+                service_call.header_keys = try self.extractKnownList(prop.value);
             } else if (std.mem.eql(u8, key, "body")) {
                 const body_tag = self.ir_view.getTag(prop.value) orelse {
-                    service_call.has_body = true;
-                    service_call.body_dynamic = true;
+                    service_call.body = .dynamic;
                     continue;
                 };
                 if (body_tag == .lit_null or body_tag == .lit_undefined) continue;
-                service_call.has_body = true;
-                if (body_tag != .lit_string) {
-                    service_call.body_dynamic = true;
-                }
+                service_call.body = if (body_tag == .lit_string) .present else .dynamic;
             }
         }
+    }
+
+    fn extractKnownList(self: *ContractBuilder, node_idx: NodeIndex) !ServiceCallInfo.KnownList {
+        var items: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (items.items) |s| self.allocator.free(s);
+            items.deinit(self.allocator);
+        }
+        var dynamic = false;
+        try self.extractServiceObjectKeys(node_idx, &items, &dynamic);
+        if (dynamic) {
+            for (items.items) |s| self.allocator.free(s);
+            items.deinit(self.allocator);
+            return .dynamic;
+        }
+        return .{ .complete = items };
     }
 
     fn extractServiceObjectKeys(
@@ -3026,7 +3120,7 @@ pub const ContractBuilder = struct {
             if (containsRequestBodySchemaRef(route.request_bodies.items, schema_ref)) continue;
             try route.request_bodies.append(self.allocator, .{
                 .content_type = try self.allocator.dupe(u8, "application/json"),
-                .schema_ref = try self.allocator.dupe(u8, schema_ref),
+                .schema = .{ .ref = try self.allocator.dupe(u8, schema_ref) },
             });
         }
     }
@@ -3058,7 +3152,7 @@ pub const ContractBuilder = struct {
     ) !void {
         for (route.request_bodies.items) |body| {
             const body_content_type = body.content_type orelse continue;
-            const body_schema_ref = body.schema_ref orelse continue;
+            const body_schema_ref = body.schema.schemaRef() orelse continue;
             if (std.mem.eql(u8, body_content_type, content_type) and std.mem.eql(u8, body_schema_ref, schema_ref)) {
                 return;
             }
@@ -3066,7 +3160,7 @@ pub const ContractBuilder = struct {
 
         try route.request_bodies.append(self.allocator, .{
             .content_type = try self.allocator.dupe(u8, content_type),
-            .schema_ref = try self.allocator.dupe(u8, schema_ref),
+            .schema = .{ .ref = try self.allocator.dupe(u8, schema_ref) },
         });
     }
 
@@ -3195,7 +3289,7 @@ pub const ContractBuilder = struct {
         }
 
         const response = route.responses.items[0];
-        if (response.dynamic) {
+        if (response.schema.isDynamic()) {
             route.response_schema_dynamic = true;
             return;
         }
@@ -3204,10 +3298,10 @@ pub const ContractBuilder = struct {
         if (response.content_type) |content_type| {
             route.response_content_type = try self.allocator.dupe(u8, content_type);
         }
-        if (response.schema_ref) |schema_ref| {
+        if (response.schema.schemaRef()) |schema_ref| {
             route.response_schema_ref = try self.allocator.dupe(u8, schema_ref);
         }
-        if (response.schema_json) |schema_json| {
+        if (response.schema.schemaJson()) |schema_json| {
             route.response_schema_json = try self.allocator.dupe(u8, schema_json);
         }
     }
@@ -3227,15 +3321,7 @@ pub const ContractBuilder = struct {
                 try self.allocator.dupe(u8, content_type)
             else
                 null,
-            .schema_ref = if (candidate.schema_ref) |schema_ref|
-                try self.allocator.dupe(u8, schema_ref)
-            else
-                null,
-            .schema_json = if (candidate.schema_json) |schema_json|
-                try self.allocator.dupe(u8, schema_json)
-            else
-                null,
-            .dynamic = candidate.dynamic,
+            .schema = try schemaSpecFromCandidate(self.allocator, candidate),
         });
     }
 
@@ -3423,7 +3509,7 @@ fn containsApiParam(items: []const ApiParamInfo, needle: []const u8) bool {
 
 fn containsRequestBodySchemaRef(items: []const ApiBodyInfo, needle: []const u8) bool {
     for (items) |item| {
-        if (item.schema_ref) |schema_ref| {
+        if (item.schema.schemaRef()) |schema_ref| {
             if (std.mem.eql(u8, schema_ref, needle)) return true;
         }
     }
@@ -3433,9 +3519,21 @@ fn containsRequestBodySchemaRef(items: []const ApiBodyInfo, needle: []const u8) 
 fn responseVariantMatches(existing: ApiResponseInfo, candidate: *const ContractBuilder.ResponseSchemaCandidate) bool {
     return existing.status == candidate.status and
         eqlOptionalString(existing.content_type, candidate.content_type) and
-        eqlOptionalString(existing.schema_ref, candidate.schema_ref) and
-        eqlOptionalString(existing.schema_json, candidate.schema_json) and
-        existing.dynamic == candidate.dynamic;
+        eqlOptionalString(existing.schema.schemaRef(), candidate.schema_ref) and
+        eqlOptionalString(existing.schema.schemaJson(), candidate.schema_json) and
+        existing.schema.isDynamic() == candidate.dynamic;
+}
+
+/// Mirror ContractBuilder.ResponseSchemaCandidate's separate fields into the
+/// SchemaSpec union with the same precedence used by the JSON parser.
+fn schemaSpecFromCandidate(
+    allocator: std.mem.Allocator,
+    candidate: *const ContractBuilder.ResponseSchemaCandidate,
+) !SchemaSpec {
+    if (candidate.dynamic) return .dynamic;
+    if (candidate.schema_json) |s| return .{ .inline_json = try allocator.dupe(u8, s) };
+    if (candidate.schema_ref) |s| return .{ .ref = try allocator.dupe(u8, s) };
+    return .none;
 }
 
 fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {
@@ -3945,11 +4043,28 @@ fn parseServiceCalls(parser: *JsonParser, allocator: std.mem.Allocator, contract
         }
 
         if (!parser.consume('{')) return error.InvalidJson;
-        var service_call = ServiceCallInfo{
-            .service = try allocator.dupe(u8, ""),
-            .route_pattern = try allocator.dupe(u8, ""),
-        };
-        errdefer service_call.deinit(allocator);
+
+        var service: []const u8 = try allocator.dupe(u8, "");
+        var route_pattern: []const u8 = try allocator.dupe(u8, "");
+        var dynamic_flag = false;
+        var path_params: std.ArrayList([]const u8) = .empty;
+        var path_params_dynamic = false;
+        var query_keys: std.ArrayList([]const u8) = .empty;
+        var query_dynamic_flag = false;
+        var header_keys: std.ArrayList([]const u8) = .empty;
+        var header_dynamic_flag = false;
+        var has_body = false;
+        var body_dynamic = false;
+        errdefer {
+            allocator.free(service);
+            allocator.free(route_pattern);
+            for (path_params.items) |s| allocator.free(s);
+            path_params.deinit(allocator);
+            for (query_keys.items) |s| allocator.free(s);
+            query_keys.deinit(allocator);
+            for (header_keys.items) |s| allocator.free(s);
+            header_keys.deinit(allocator);
+        }
 
         while (true) {
             parser.skipWhitespace();
@@ -3965,36 +4080,76 @@ fn parseServiceCalls(parser: *JsonParser, allocator: std.mem.Allocator, contract
             if (!parser.consume(':')) return error.InvalidJson;
 
             if (std.mem.eql(u8, key, "service")) {
-                allocator.free(service_call.service);
-                service_call.service = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+                allocator.free(service);
+                service = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
             } else if (std.mem.eql(u8, key, "route")) {
-                allocator.free(service_call.route_pattern);
-                service_call.route_pattern = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+                allocator.free(route_pattern);
+                route_pattern = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
             } else if (std.mem.eql(u8, key, "dynamic")) {
-                service_call.dynamic = parser.readBool() orelse false;
+                dynamic_flag = parser.readBool() orelse false;
             } else if (std.mem.eql(u8, key, "pathParams")) {
-                try parseStringArray(parser, allocator, &service_call.path_params);
+                try parseStringArray(parser, allocator, &path_params);
             } else if (std.mem.eql(u8, key, "pathParamsDynamic")) {
-                service_call.path_params_dynamic = parser.readBool() orelse false;
+                path_params_dynamic = parser.readBool() orelse false;
             } else if (std.mem.eql(u8, key, "queryKeys")) {
-                try parseStringArray(parser, allocator, &service_call.query_keys);
+                try parseStringArray(parser, allocator, &query_keys);
             } else if (std.mem.eql(u8, key, "queryDynamic")) {
-                service_call.query_dynamic = parser.readBool() orelse false;
+                query_dynamic_flag = parser.readBool() orelse false;
             } else if (std.mem.eql(u8, key, "headerKeys")) {
-                try parseStringArray(parser, allocator, &service_call.header_keys);
+                try parseStringArray(parser, allocator, &header_keys);
             } else if (std.mem.eql(u8, key, "headerDynamic")) {
-                service_call.header_dynamic = parser.readBool() orelse false;
+                header_dynamic_flag = parser.readBool() orelse false;
             } else if (std.mem.eql(u8, key, "hasBody")) {
-                service_call.has_body = parser.readBool() orelse false;
+                has_body = parser.readBool() orelse false;
             } else if (std.mem.eql(u8, key, "bodyDynamic")) {
-                service_call.body_dynamic = parser.readBool() orelse false;
+                body_dynamic = parser.readBool() orelse false;
             } else {
                 parser.skipValue();
             }
         }
 
-        try contract.service_calls.append(allocator, service_call);
+        try contract.service_calls.append(allocator, .{
+            .service = service,
+            .route_pattern = route_pattern,
+            .dynamic = dynamic_flag,
+            .path_params = pickKnownList(allocator, &path_params, path_params_dynamic),
+            .query_keys = pickKnownList(allocator, &query_keys, query_dynamic_flag),
+            .header_keys = pickKnownList(allocator, &header_keys, header_dynamic_flag),
+            .body = pickBodySpec(has_body, body_dynamic),
+        });
+        // Successful append moves ownership; null the locals so errdefer above
+        // is a no-op.
+        service = "";
+        route_pattern = "";
+        path_params = .empty;
+        query_keys = .empty;
+        header_keys = .empty;
     }
+}
+
+/// Discriminate accumulator into a KnownList. When the dynamic flag is set we
+/// drop any partially-enumerated keys, since the linker treats `.dynamic` as
+/// "cannot prove" and ignores partial state anyway.
+fn pickKnownList(
+    allocator: std.mem.Allocator,
+    items: *std.ArrayList([]const u8),
+    is_dynamic: bool,
+) ServiceCallInfo.KnownList {
+    if (is_dynamic) {
+        for (items.items) |s| allocator.free(s);
+        items.deinit(allocator);
+        items.* = .empty;
+        return .dynamic;
+    }
+    const taken = items.*;
+    items.* = .empty;
+    return .{ .complete = taken };
+}
+
+fn pickBodySpec(has_body: bool, body_dynamic: bool) ServiceCallInfo.BodySpec {
+    if (body_dynamic) return .dynamic;
+    if (has_body) return .present;
+    return .none;
 }
 
 fn parseSqlSection(
@@ -4645,8 +4800,15 @@ fn parseApiBodies(
         parser.skipWhitespace();
         if (!parser.consume('{')) return error.InvalidJson;
 
-        var body = ApiBodyInfo{};
-        errdefer body.deinit(allocator);
+        var content_type: ?[]const u8 = null;
+        var schema_ref: ?[]const u8 = null;
+        var schema_json: ?[]const u8 = null;
+        var is_dynamic = false;
+        errdefer {
+            if (content_type) |s| allocator.free(s);
+            if (schema_ref) |s| allocator.free(s);
+            if (schema_json) |s| allocator.free(s);
+        }
 
         while (true) {
             parser.skipWhitespace();
@@ -4662,23 +4824,59 @@ fn parseApiBodies(
             if (!parser.consume(':')) return error.InvalidJson;
 
             if (std.mem.eql(u8, key, "contentType")) {
-                body.content_type = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
+                content_type = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
             } else if (std.mem.eql(u8, key, "schemaRef")) {
-                body.schema_ref = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
+                schema_ref = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
             } else if (std.mem.eql(u8, key, "schema")) {
                 if (!parser.readNull()) {
                     const raw = parser.readRawValue() orelse return error.InvalidJson;
-                    body.schema_json = try allocator.dupe(u8, raw);
+                    schema_json = try allocator.dupe(u8, raw);
                 }
             } else if (std.mem.eql(u8, key, "dynamic")) {
-                body.dynamic = parser.readBool() orelse false;
+                is_dynamic = parser.readBool() orelse false;
             } else {
                 parser.skipValue();
             }
         }
 
-        try list.append(allocator, body);
+        const schema = pickSchemaSpec(allocator, &schema_ref, &schema_json, is_dynamic);
+
+        try list.append(allocator, .{
+            .content_type = content_type,
+            .schema = schema,
+        });
+        content_type = null;
     }
+}
+
+/// Discriminate accumulator into a SchemaSpec with precedence dynamic >
+/// inline_json > ref > none. Older contracts may have populated more than one
+/// schema field; we keep the strongest and free the rest, then null the
+/// accumulator slots so the caller's errdefer doesn't double-free.
+fn pickSchemaSpec(
+    allocator: std.mem.Allocator,
+    schema_ref: *?[]const u8,
+    schema_json: *?[]const u8,
+    is_dynamic: bool,
+) SchemaSpec {
+    if (is_dynamic) {
+        if (schema_ref.*) |s| allocator.free(s);
+        if (schema_json.*) |s| allocator.free(s);
+        schema_ref.* = null;
+        schema_json.* = null;
+        return .dynamic;
+    }
+    if (schema_json.*) |s| {
+        if (schema_ref.*) |r| allocator.free(r);
+        schema_ref.* = null;
+        schema_json.* = null;
+        return .{ .inline_json = s };
+    }
+    if (schema_ref.*) |s| {
+        schema_ref.* = null;
+        return .{ .ref = s };
+    }
+    return .none;
 }
 
 fn parseApiResponses(
@@ -4697,8 +4895,16 @@ fn parseApiResponses(
         parser.skipWhitespace();
         if (!parser.consume('{')) return error.InvalidJson;
 
-        var response = ApiResponseInfo{};
-        errdefer response.deinit(allocator);
+        var status: ?u16 = null;
+        var content_type: ?[]const u8 = null;
+        var schema_ref: ?[]const u8 = null;
+        var schema_json: ?[]const u8 = null;
+        var is_dynamic = false;
+        errdefer {
+            if (content_type) |s| allocator.free(s);
+            if (schema_ref) |s| allocator.free(s);
+            if (schema_json) |s| allocator.free(s);
+        }
 
         while (true) {
             parser.skipWhitespace();
@@ -4714,24 +4920,31 @@ fn parseApiResponses(
             if (!parser.consume(':')) return error.InvalidJson;
 
             if (std.mem.eql(u8, key, "status")) {
-                response.status = if (parser.readNull()) null else (parser.readU16() orelse null);
+                status = if (parser.readNull()) null else (parser.readU16() orelse null);
             } else if (std.mem.eql(u8, key, "contentType")) {
-                response.content_type = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
+                content_type = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
             } else if (std.mem.eql(u8, key, "schemaRef")) {
-                response.schema_ref = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
+                schema_ref = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
             } else if (std.mem.eql(u8, key, "schema")) {
                 if (!parser.readNull()) {
                     const raw = parser.readRawValue() orelse return error.InvalidJson;
-                    response.schema_json = try allocator.dupe(u8, raw);
+                    schema_json = try allocator.dupe(u8, raw);
                 }
             } else if (std.mem.eql(u8, key, "dynamic")) {
-                response.dynamic = parser.readBool() orelse false;
+                is_dynamic = parser.readBool() orelse false;
             } else {
                 parser.skipValue();
             }
         }
 
-        try list.append(allocator, response);
+        const schema = pickSchemaSpec(allocator, &schema_ref, &schema_json, is_dynamic);
+
+        try list.append(allocator, .{
+            .status = status,
+            .content_type = content_type,
+            .schema = schema,
+        });
+        content_type = null;
     }
 }
 
@@ -4742,7 +4955,7 @@ fn backfillApiRouteCollections(allocator: std.mem.Allocator, route: *ApiRouteInf
             if (containsRequestBodySchemaRef(route.request_bodies.items, schema_ref)) continue;
             try route.request_bodies.append(allocator, .{
                 .content_type = try allocator.dupe(u8, "application/json"),
-                .schema_ref = try allocator.dupe(u8, schema_ref),
+                .schema = .{ .ref = try allocator.dupe(u8, schema_ref) },
             });
         }
     }
@@ -4755,12 +4968,30 @@ fn backfillApiRouteCollections(allocator: std.mem.Allocator, route: *ApiRouteInf
         try route.responses.append(allocator, .{
             .status = route.response_status,
             .content_type = try dupeOptionalString(allocator, route.response_content_type),
-            .schema_ref = try dupeOptionalString(allocator, route.response_schema_ref),
-            .schema_json = try dupeOptionalString(allocator, route.response_schema_json),
-            .dynamic = route.response_schema_dynamic,
+            .schema = try schemaSpecFromLegacyFields(
+                allocator,
+                route.response_schema_ref,
+                route.response_schema_json,
+                route.response_schema_dynamic,
+            ),
         });
         route.responses_dynamic = route.responses_dynamic or route.response_schema_dynamic;
     }
+}
+
+/// Mirror legacy scalar route response fields into a SchemaSpec, preserving
+/// precedence dynamic > inline_json > ref > none and duplicating owned bytes
+/// since the legacy fields stay alive on the route.
+fn schemaSpecFromLegacyFields(
+    allocator: std.mem.Allocator,
+    schema_ref: ?[]const u8,
+    schema_json: ?[]const u8,
+    is_dynamic: bool,
+) !SchemaSpec {
+    if (is_dynamic) return .dynamic;
+    if (schema_json) |s| return .{ .inline_json = try allocator.dupe(u8, s) };
+    if (schema_ref) |s| return .{ .ref = try allocator.dupe(u8, s) };
+    return .none;
 }
 
 fn parseVerification(parser: *JsonParser, contract: *HandlerContract) !void {
@@ -5369,29 +5600,11 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writeJsonString(writer, service_call.route_pattern);
         try writer.writeAll(",\n");
         try writer.print("      \"dynamic\": {s},\n", .{if (service_call.dynamic) "true" else "false"});
-        try writer.writeAll("      \"pathParams\": [");
-        for (service_call.path_params.items, 0..) |name, j| {
-            if (j > 0) try writer.writeAll(", ");
-            try writeJsonString(writer, name);
-        }
-        try writer.writeAll("],\n");
-        try writer.print("      \"pathParamsDynamic\": {s},\n", .{if (service_call.path_params_dynamic) "true" else "false"});
-        try writer.writeAll("      \"queryKeys\": [");
-        for (service_call.query_keys.items, 0..) |name, j| {
-            if (j > 0) try writer.writeAll(", ");
-            try writeJsonString(writer, name);
-        }
-        try writer.writeAll("],\n");
-        try writer.print("      \"queryDynamic\": {s},\n", .{if (service_call.query_dynamic) "true" else "false"});
-        try writer.writeAll("      \"headerKeys\": [");
-        for (service_call.header_keys.items, 0..) |name, j| {
-            if (j > 0) try writer.writeAll(", ");
-            try writeJsonString(writer, name);
-        }
-        try writer.writeAll("],\n");
-        try writer.print("      \"headerDynamic\": {s},\n", .{if (service_call.header_dynamic) "true" else "false"});
-        try writer.print("      \"hasBody\": {s},\n", .{if (service_call.has_body) "true" else "false"});
-        try writer.print("      \"bodyDynamic\": {s}\n", .{if (service_call.body_dynamic) "true" else "false"});
+        try writeKnownListJson(writer, "pathParams", service_call.path_params);
+        try writeKnownListJson(writer, "queryKeys", service_call.query_keys);
+        try writeKnownListJson(writer, "headerKeys", service_call.header_keys);
+        try writer.print("      \"hasBody\": {s},\n", .{if (service_call.body.isPresent()) "true" else "false"});
+        try writer.print("      \"bodyDynamic\": {s}\n", .{if (service_call.body.isDynamic()) "true" else "false"});
         try writer.writeAll("    }");
     }
     if (contract.service_calls.items.len > 0) {
@@ -5866,6 +6079,22 @@ fn writeApiParamJson(writer: anytype, param: *const ApiParamInfo) !void {
     try writer.writeAll("\n          }");
 }
 
+/// Emit a KnownList as the legacy `<key>: [...]` array plus `<key>Dynamic`
+/// boolean, preserving wire-format compatibility with older contract.json
+/// readers. `.dynamic` writes an empty array and dynamic=true.
+fn writeKnownListJson(writer: anytype, comptime field: []const u8, list: ServiceCallInfo.KnownList) !void {
+    try writer.writeAll("      \"" ++ field ++ "\": [");
+    switch (list) {
+        .complete => |entries| for (entries.items, 0..) |name, j| {
+            if (j > 0) try writer.writeAll(", ");
+            try writeJsonString(writer, name);
+        },
+        .dynamic => {},
+    }
+    try writer.writeAll("],\n");
+    try writer.print("      \"" ++ field ++ "Dynamic\": {s},\n", .{if (list.isDynamic()) "true" else "false"});
+}
+
 fn writeApiBodyJson(writer: anytype, body: *const ApiBodyInfo) !void {
     try writer.writeAll("\n          {\n");
     try writer.writeAll("            \"contentType\": ");
@@ -5876,20 +6105,20 @@ fn writeApiBodyJson(writer: anytype, body: *const ApiBodyInfo) !void {
     }
     try writer.writeAll(",\n");
     try writer.writeAll("            \"schemaRef\": ");
-    if (body.schema_ref) |schema_ref| {
+    if (body.schema.schemaRef()) |schema_ref| {
         try writeJsonString(writer, schema_ref);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\n");
     try writer.writeAll("            \"schema\": ");
-    if (body.schema_json) |schema_json| {
+    if (body.schema.schemaJson()) |schema_json| {
         try writer.writeAll(schema_json);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\n");
-    try writer.print("            \"dynamic\": {s}\n", .{if (body.dynamic) "true" else "false"});
+    try writer.print("            \"dynamic\": {s}\n", .{if (body.schema.isDynamic()) "true" else "false"});
     try writer.writeAll("          }");
 }
 
@@ -5910,20 +6139,20 @@ fn writeApiResponseJson(writer: anytype, response: *const ApiResponseInfo) !void
     }
     try writer.writeAll(",\n");
     try writer.writeAll("            \"schemaRef\": ");
-    if (response.schema_ref) |schema_ref| {
+    if (response.schema.schemaRef()) |schema_ref| {
         try writeJsonString(writer, schema_ref);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\n");
     try writer.writeAll("            \"schema\": ");
-    if (response.schema_json) |schema_json| {
+    if (response.schema.schemaJson()) |schema_json| {
         try writer.writeAll(schema_json);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\n");
-    try writer.print("            \"dynamic\": {s}\n", .{if (response.dynamic) "true" else "false"});
+    try writer.print("            \"dynamic\": {s}\n", .{if (response.schema.isDynamic()) "true" else "false"});
     try writer.writeAll("          }");
 }
 
@@ -6020,22 +6249,22 @@ test "parseFromJson roundtrip" {
     try service_calls.append(allocator, .{
         .service = try allocator.dupe(u8, "users"),
         .route_pattern = try allocator.dupe(u8, "GET /api/users/:id"),
-        .path_params = blk: {
+        .path_params = .{ .complete = blk: {
             var params: std.ArrayList([]const u8) = .empty;
             try params.append(allocator, try allocator.dupe(u8, "id"));
             break :blk params;
-        },
-        .query_keys = blk: {
+        } },
+        .query_keys = .{ .complete = blk: {
             var keys: std.ArrayList([]const u8) = .empty;
             try keys.append(allocator, try allocator.dupe(u8, "expand"));
             break :blk keys;
-        },
-        .header_keys = blk: {
+        } },
+        .header_keys = .{ .complete = blk: {
             var keys: std.ArrayList([]const u8) = .empty;
             try keys.append(allocator, try allocator.dupe(u8, "x-auth"));
             break :blk keys;
-        },
-        .has_body = false,
+        } },
+        .body = .none,
     });
 
     var original = HandlerContract{
@@ -6089,8 +6318,8 @@ test "parseFromJson roundtrip" {
     try std.testing.expectEqual(@as(usize, 1), parsed.service_calls.items.len);
     try std.testing.expectEqualStrings("users", parsed.service_calls.items[0].service);
     try std.testing.expectEqualStrings("GET /api/users/:id", parsed.service_calls.items[0].route_pattern);
-    try std.testing.expectEqual(@as(usize, 1), parsed.service_calls.items[0].path_params.items.len);
-    try std.testing.expectEqualStrings("id", parsed.service_calls.items[0].path_params.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), parsed.service_calls.items[0].path_params.items().len);
+    try std.testing.expectEqualStrings("id", parsed.service_calls.items[0].path_params.items()[0]);
     try std.testing.expect(parsed.durable.used);
     try std.testing.expect(parsed.durable.keys.dynamic);
     try std.testing.expect(parsed.scope.used);
@@ -6211,13 +6440,13 @@ test "parseFromJson roundtrip preserves api route response schema" {
     var request_bodies: std.ArrayList(ApiBodyInfo) = .empty;
     try request_bodies.append(allocator, .{
         .content_type = try allocator.dupe(u8, "application/json"),
-        .schema_ref = try allocator.dupe(u8, "user.create"),
+        .schema = .{ .ref = try allocator.dupe(u8, "user.create") },
     });
     var responses: std.ArrayList(ApiResponseInfo) = .empty;
     try responses.append(allocator, .{
         .status = 200,
         .content_type = try allocator.dupe(u8, "application/json"),
-        .schema_ref = try allocator.dupe(u8, "user"),
+        .schema = .{ .ref = try allocator.dupe(u8, "user") },
     });
 
     var routes: std.ArrayList(ApiRouteInfo) = .empty;
@@ -6297,7 +6526,7 @@ test "parseFromJson roundtrip preserves api route response schema" {
     try std.testing.expectEqual(@as(usize, 1), route.header_params.items.len);
     try std.testing.expectEqualStrings("authorization", route.header_params.items[0].name);
     try std.testing.expectEqual(@as(usize, 1), route.request_bodies.items.len);
-    try std.testing.expectEqualStrings("user.create", route.request_bodies.items[0].schema_ref.?);
+    try std.testing.expectEqualStrings("user.create", route.request_bodies.items[0].schema.schemaRef().?);
     try std.testing.expectEqual(@as(usize, 1), route.responses.items.len);
     try std.testing.expectEqual(@as(u16, 200), route.responses.items[0].status.?);
     try std.testing.expectEqualStrings("user", route.response_schema_ref.?);

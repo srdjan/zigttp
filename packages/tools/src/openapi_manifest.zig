@@ -230,7 +230,7 @@ fn writeResponses(writer: anytype, contract: *const HandlerContract, route: *con
 
     for (route.responses.items, 0..) |response, idx| {
         if (idx > 0) try writer.writeAll(",\n");
-        try writeSingleResponse(writer, contract, response.status, response.content_type, response.schema_ref, response.schema_json);
+        try writeSingleResponse(writer, contract, response.status, response.content_type, response.schema.schemaRef(), response.schema.schemaJson());
     }
 }
 
@@ -350,7 +350,7 @@ fn writeRequestBodies(writer: anytype, contract: *const HandlerContract, route: 
         try writeJsonString(writer, body.content_type orelse "application/octet-stream");
         try writer.writeAll(": {\n");
         try writer.writeAll("              \"schema\": ");
-        try writeContentSchema(writer, contract, body.content_type orelse "application/octet-stream", body.schema_ref, body.schema_json);
+        try writeContentSchema(writer, contract, body.content_type orelse "application/octet-stream", body.schema.schemaRef(), body.schema.schemaJson());
         try writer.writeAll("\n");
         try writer.writeAll("            }");
     }
@@ -429,18 +429,18 @@ test "writeOpenApiJson renders schema and route" {
     var request_bodies: std.ArrayList(handler_contract.ApiBodyInfo) = .empty;
     try request_bodies.append(allocator, .{
         .content_type = try allocator.dupe(u8, "application/json"),
-        .schema_ref = try allocator.dupe(u8, "user"),
+        .schema = .{ .ref = try allocator.dupe(u8, "user") },
     });
     var responses: std.ArrayList(handler_contract.ApiResponseInfo) = .empty;
     try responses.append(allocator, .{
         .status = 201,
         .content_type = try allocator.dupe(u8, "application/json"),
-        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+        .schema = .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}") },
     });
     try responses.append(allocator, .{
         .status = 401,
         .content_type = try allocator.dupe(u8, "application/json"),
-        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"error\":{\"type\":\"string\"}},\"required\":[\"error\"]}"),
+        .schema = .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"error\":{\"type\":\"string\"}},\"required\":[\"error\"]}") },
     });
 
     var routes: std.ArrayList(handler_contract.ApiRouteInfo) = .empty;
