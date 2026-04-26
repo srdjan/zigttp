@@ -1241,16 +1241,26 @@ pub fn runCheckOnlyFromSource(
         root,
     ) catch {};
 
-    // Stage 5: Bool checker (sound mode)
+    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const parsed = zigts.pipeline.ParsedModule.fromExisting(ir_view, root, &atoms);
+
+    var type_env_storage: zigts.pipeline.TypeEnvStorage = .{};
+    defer type_env_storage.deinit(allocator);
+    if (strip_result) |sr| {
+        type_env_storage.init(allocator, &sr.type_map);
+    }
+
+    var resolved = try zigts.pipeline.resolve(
+        allocator,
+        parsed,
+        .{ .type_env = type_env_storage.envPtr(), .service_type_context = stc_ptr },
+    );
+    defer resolved.deinit();
+
     {
-        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        var checker = zigts.BoolChecker.init(allocator, ir_view, &atoms);
-        defer checker.deinit();
-
-        result.bool_errors = @intCast(try checker.check(root));
-        const bool_diags = checker.getDiagnostics();
+        const bool_diags = resolved.boolDiagnostics();
+        result.bool_errors = @intCast(resolved.bool_error_count);
         result.bool_warnings = @intCast(bool_diags.len -| result.bool_errors);
-
         if (bool_diags.len > 0) {
             if (json_mode) {
                 for (bool_diags) |diag| {
@@ -1262,40 +1272,20 @@ pub fn runCheckOnlyFromSource(
                 var buf: std.ArrayList(u8) = .empty;
                 defer buf.deinit(allocator);
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-                checker.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+                resolved.formatBoolDiagnostics(source_to_parse, &aw.writer) catch {};
                 buf = aw.toArrayList();
                 if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
             }
         }
-
         if (result.bool_errors > 0) {
             return result;
         }
-
-        result.bool_specializations = checker.node_types.count();
+        result.bool_specializations = resolved.bool_checker.node_types.count();
     }
 
-    // Stage 6: Type checker (TS only)
-    if (strip_result) |sr| {
-        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        const tm = sr.type_map;
-        var type_pool = zigts.TypePool.init(allocator);
-        defer type_pool.deinit(allocator);
-        var type_env = zigts.TypeEnv.init(allocator, &type_pool);
-        defer type_env.deinit();
-        zigts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
-        type_env.populateFromTypeMap(&tm);
-
-        var tc = zigts.type_checker.TypeChecker.init(
-            allocator,
-            ir_view,
-            &atoms,
-            &type_env,
-            stc_ptr,
-        );
-        defer tc.deinit();
-        result.type_errors = @intCast(try tc.check(root));
-        const tc_diags = tc.getDiagnostics();
+    if (type_env_storage.envPtr() != null) {
+        const tc_diags = resolved.typeDiagnostics();
+        result.type_errors = @intCast(resolved.type_error_count);
         if (tc_diags.len > 0) {
             if (json_mode) {
                 for (tc_diags) |diag| {
@@ -1307,7 +1297,7 @@ pub fn runCheckOnlyFromSource(
                 var buf: std.ArrayList(u8) = .empty;
                 defer buf.deinit(allocator);
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-                tc.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+                resolved.formatTypeDiagnostics(source_to_parse, &aw.writer) catch {};
                 buf = aw.toArrayList();
                 if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
             }
@@ -1319,116 +1309,71 @@ pub fn runCheckOnlyFromSource(
 
     if (skip_contract) return result;
 
-    // Stage 7: Handler verification (7 checks)
     var verify_info: ?VerificationInfo = null;
-    {
-        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        const handler_fn = zigts.handler_verifier.findHandlerFunction(ir_view, root);
+    var checked_opt: ?zigts.pipeline.CheckedModule = null;
+    defer if (checked_opt) |*c| c.deinit();
+    if (zigts.handler_verifier.findHandlerFunction(ir_view, root)) |hf| {
+        var checked = try zigts.pipeline.check(allocator, &resolved, hf);
+        result.verify_ran = true;
+        result.verify_errors = @intCast(checked.verifier_error_count);
+        const verifier_diags = checked.verifierDiagnostics();
+        result.verify_warnings = @intCast(verifier_diags.len -| result.verify_errors);
 
-        var verify_type_pool: ?zigts.TypePool = null;
-        var verify_type_env: ?zigts.TypeEnv = null;
-        var verify_type_checker: ?zigts.TypeChecker = null;
-        defer if (verify_type_checker) |*c| c.deinit();
-        defer if (verify_type_env) |*e| e.deinit();
-        defer if (verify_type_pool) |*p| p.deinit(allocator);
-
-        const verifier_env: ?*const zigts.TypeEnv = if (strip_result) |sr| blk: {
-            verify_type_pool = zigts.TypePool.init(allocator);
-            verify_type_env = zigts.TypeEnv.init(allocator, &verify_type_pool.?);
-            zigts.modules.populateModuleTypes(&verify_type_env.?, &verify_type_pool.?, allocator);
-            verify_type_env.?.populateFromTypeMap(&sr.type_map);
-            verify_type_checker = zigts.TypeChecker.init(
-                allocator,
-                ir_view,
-                &atoms,
-                &verify_type_env.?,
-                stc_ptr,
-            );
-            _ = verify_type_checker.?.check(root) catch 0;
-            break :blk &verify_type_env.?;
-        } else null;
-
-        const verifier_tc: ?*const zigts.TypeChecker = if (verify_type_checker) |*c| c else null;
-
-        if (handler_fn) |hf| {
-            result.verify_ran = true;
-            var verifier = zigts.HandlerVerifier.init(allocator, ir_view, &atoms, verifier_env, verifier_tc);
-            defer verifier.deinit();
-
-            result.verify_errors = @intCast(try verifier.verify(hf));
-            const diags = verifier.getDiagnostics();
-            result.verify_warnings = @intCast(diags.len -| result.verify_errors);
-
-            if (diags.len > 0) {
-                if (json_mode) {
-                    for (diags) |diag| {
-                        if (json_diag.fromVerifierDiagnostic(diag, ir_view, handler_path)) |jd| {
-                            result.json_diagnostics.append(allocator, jd) catch {};
-                        }
-                    }
-                } else {
-                    var buf: std.ArrayList(u8) = .empty;
-                    defer buf.deinit(allocator);
-                    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-                    verifier.formatDiagnostics(source_to_parse, &aw.writer) catch {};
-                    buf = aw.toArrayList();
-                    if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
-                }
-            }
-
-            if (result.verify_errors == 0) {
-                result.exhaustive_returns = true;
-                result.results_safe = true;
-                result.optionals_safe = true;
-                result.state_isolated = !verifier.has_module_mutation;
-                verify_info = .{
-                    .exhaustive_returns = true,
-                    .results_safe = true,
-                    .unreachable_code = false,
-                    .bytecode_verified = false,
-                };
-                // Check for unreachable code warnings
-                for (diags) |d| {
-                    if (d.kind == .unreachable_after_return) {
-                        result.no_unreachable = false;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // Stage 7.5: data flow provenance. Runs once here and stays alive for
-    // stage 8 so buildContractWithPolicy can reuse its diagnostics and
-    // properties instead of walking the IR a second time. Also feeds
-    // `json_diagnostics` so `zigts verify-paths --json` surfaces flow
-    // violations alongside the other checkers.
-    var flow_checker_opt: ?zigts.FlowChecker = null;
-    defer if (flow_checker_opt) |*fc| fc.deinit();
-    {
-        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        if (zigts.handler_verifier.findHandlerFunction(ir_view, root)) |hf| {
-            flow_checker_opt = zigts.FlowChecker.init(allocator, ir_view, &atoms);
-            const fc = &flow_checker_opt.?;
-            result.flow_errors = @intCast(try fc.check(hf));
-            const flow_diags = fc.getDiagnostics();
-            result.flow_warnings = @intCast(flow_diags.len -| result.flow_errors);
-
+        if (verifier_diags.len > 0) {
             if (json_mode) {
-                for (flow_diags) |diag| {
-                    if (json_diag.fromFlowDiagnostic(diag, ir_view, handler_path)) |jd| {
+                for (verifier_diags) |diag| {
+                    if (json_diag.fromVerifierDiagnostic(diag, ir_view, handler_path)) |jd| {
                         result.json_diagnostics.append(allocator, jd) catch {};
                     }
                 }
+            } else {
+                var buf: std.ArrayList(u8) = .empty;
+                defer buf.deinit(allocator);
+                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+                checked.verifier.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+                buf = aw.toArrayList();
+                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
             }
-            // Non-JSON stderr output is emitted by buildContractWithPolicy
-            // from the same FlowChecker instance; avoid printing twice.
         }
+
+        if (result.verify_errors == 0) {
+            result.exhaustive_returns = true;
+            result.results_safe = true;
+            result.optionals_safe = true;
+            result.state_isolated = !checked.verifier.has_module_mutation;
+            verify_info = .{
+                .exhaustive_returns = true,
+                .results_safe = true,
+                .unreachable_code = false,
+                .bytecode_verified = false,
+            };
+            for (verifier_diags) |d| {
+                if (d.kind == .unreachable_after_return) {
+                    result.no_unreachable = false;
+                    break;
+                }
+            }
+        }
+
+        result.flow_errors = @intCast(checked.flow_error_count);
+        const flow_diags = checked.flowDiagnostics();
+        result.flow_warnings = @intCast(flow_diags.len -| result.flow_errors);
+        if (json_mode) {
+            for (flow_diags) |diag| {
+                if (json_diag.fromFlowDiagnostic(diag, ir_view, handler_path)) |jd| {
+                    result.json_diagnostics.append(allocator, jd) catch {};
+                }
+            }
+        }
+        // Non-JSON stderr output is emitted by buildContractWithPolicy from the
+        // same FlowChecker instance; avoid printing twice.
+
+        checked_opt = checked;
     }
 
     // Stage 8: Contract. Pass the precomputed FlowChecker through so its
     // flow block reuses the already-populated state instead of rerunning.
-    const flow_in = if (flow_checker_opt) |*fc| fc else null;
+    const flow_in: ?*const zigts.FlowChecker = if (checked_opt) |*c| &c.flow_checker else null;
     result.contract = try buildContractWithPolicy(
         allocator,
         &js_parser,
@@ -1456,7 +1401,6 @@ pub fn runCheckOnlyFromSource(
 
     // Stage 9: Path generation + Stage 10: Fault coverage
     {
-        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = findHandlerFunction(ir_view, root);
         if (handler_fn) |hf| {
             var gen = zigts.PathGenerator.init(allocator, ir_view, &atoms);

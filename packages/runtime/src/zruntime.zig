@@ -1019,69 +1019,55 @@ pub const Runtime = struct {
             return err;
         };
 
-        // Run BoolChecker and TypeChecker on parsed IR
         {
             const ir_view = zq.parser.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
+            const parsed = zq.pipeline.ParsedModule.fromExisting(ir_view, p.root_node, &self.ctx.atoms);
 
-            // BoolChecker: strict boolean enforcement
-            var checker = zq.BoolChecker.init(self.allocator, ir_view, &self.ctx.atoms);
-            defer checker.deinit();
+            var type_env_storage: zq.pipeline.TypeEnvStorage = .{};
+            defer type_env_storage.deinit(self.allocator);
+            if (strip_result) |sr| {
+                type_env_storage.init(self.allocator, &sr.type_map);
+            }
 
-            const error_count = try checker.check(p.root_node);
-            const diags = checker.getDiagnostics();
+            var resolved = try zq.pipeline.resolve(
+                self.allocator,
+                parsed,
+                .{ .type_env = type_env_storage.envPtr() },
+            );
+            defer resolved.deinit();
 
-            if (diags.len > 0) {
+            const bool_diags = resolved.boolDiagnostics();
+            if (bool_diags.len > 0) {
                 var diag_output: std.ArrayList(u8) = .empty;
                 defer diag_output.deinit(self.allocator);
                 var diag_aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &diag_output);
-                checker.formatDiagnostics(source_to_parse, &diag_aw.writer) catch {};
+                resolved.formatBoolDiagnostics(source_to_parse, &diag_aw.writer) catch {};
                 diag_output = diag_aw.toArrayList();
                 if (diag_output.items.len > 0) {
                     std.log.err("{s}", .{diag_output.items});
                 }
                 std.log.err("{d} boolean check error(s), {d} warning(s)", .{
-                    error_count,
-                    diags.len - error_count,
+                    resolved.bool_error_count,
+                    bool_diags.len - resolved.bool_error_count,
                 });
             }
-
-            if (error_count > 0) {
+            if (resolved.bool_error_count > 0) {
                 return error.SoundModeViolation;
             }
 
-            // TypeChecker: full type annotation checking (when TypeMap available from .ts/.tsx stripping)
-            if (strip_result) |sr| {
-                const tm = sr.type_map;
-                var type_pool = zq.TypePool.init(self.allocator);
-                defer type_pool.deinit(self.allocator);
-
-                var type_env = zq.TypeEnv.init(self.allocator, &type_pool);
-                defer type_env.deinit();
-
-                // Populate module types and user-declared types
-                zq.modules.populateModuleTypes(&type_env, &type_pool, self.allocator);
-                type_env.populateFromTypeMap(&tm);
-
-                var tc = zq.TypeChecker.init(self.allocator, ir_view, &self.ctx.atoms, &type_env, null);
-                defer tc.deinit();
-
-                const tc_errors = try tc.check(p.root_node);
-                const tc_diags = tc.getDiagnostics();
-
-                if (tc_diags.len > 0) {
-                    var tc_output: std.ArrayList(u8) = .empty;
-                    defer tc_output.deinit(self.allocator);
-                    var tc_aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &tc_output);
-                    tc.formatDiagnostics(source_to_parse, &tc_aw.writer) catch {};
-                    tc_output = tc_aw.toArrayList();
-                    if (tc_output.items.len > 0) {
-                        std.log.err("{s}", .{tc_output.items});
-                    }
+            const type_diags = resolved.typeDiagnostics();
+            if (type_diags.len > 0) {
+                var tc_output: std.ArrayList(u8) = .empty;
+                defer tc_output.deinit(self.allocator);
+                var tc_aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &tc_output);
+                resolved.formatTypeDiagnostics(source_to_parse, &tc_aw.writer) catch {};
+                tc_output = tc_aw.toArrayList();
+                if (tc_output.items.len > 0) {
+                    std.log.err("{s}", .{tc_output.items});
                 }
-
-                if (tc_errors > 0) {
-                    return error.SoundModeViolation;
-                }
+            }
+            if (resolved.type_error_count > 0) {
+                return error.SoundModeViolation;
             }
         }
 
