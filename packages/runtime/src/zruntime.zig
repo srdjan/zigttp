@@ -7123,6 +7123,29 @@ test "HandlerPool basic operations" {
     try std.testing.expectEqualStrings("ok", response.body);
 }
 
+// Uses testing.allocator directly so leaks fail rather than being absorbed
+// by an arena.
+test "HandlerPool teardown leaves no leaks under testing.allocator" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const handler_code = "function handler(req) { return Response.text('ok'); }";
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2, 0);
+    defer pool.deinit();
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try pool.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqualStrings("ok", response.body);
+}
+
 test "HandlerPool bytecode cache" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
