@@ -174,10 +174,6 @@ note is durable - it travels with the session log.
 - One plan per turn. The orchestrator stays compatible with the
   `apply_edit must be the only tool call` invariant elsewhere in the
   loop; batching is possible but would change the veto ordering.
-- Multiple diagnostics on the same line break ordering: applying the
-  first plan shifts line numbers and invalidates the second plan's
-  target. Fixed when repair-plan ordering learns line-delta tracking,
-  or when plans emit byte offsets instead of line/column targets.
 
 ## Regression guard
 

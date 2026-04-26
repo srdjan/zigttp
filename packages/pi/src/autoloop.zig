@@ -457,6 +457,14 @@ const RepairPlan = struct {
     /// Verbatim JSON source of the plan object, suitable for re-serialization
     /// into pi_apply_repair_plan's `plan` input.
     raw_json: []u8,
+    /// 1-based line target lifted from `edit_intent.line` during parse.
+    /// `applyPlans` sorts by this descending so an earlier plan's
+    /// insertion cannot shift a later plan's target. Zero when the
+    /// plan's intent has no line (e.g. `add_trailing_return`); those
+    /// sort to the bottom and apply last, which is harmless because
+    /// trailing-return inserts at end-of-function regardless of
+    /// earlier insertions.
+    line_target: u32 = 0,
 };
 
 const RepairPlanList = struct {
@@ -511,11 +519,31 @@ fn parseRepairPlans(allocator: std.mem.Allocator, json_text: []const u8) !Repair
         items[next] = .{
             .id = id_copy,
             .raw_json = try raw_buf.toOwnedSlice(allocator),
+            .line_target = extractEditIntentLine(plan_val),
         };
         next += 1;
     }
 
     return .{ .items = items };
+}
+
+fn comparePlanLineDesc(_: void, a: RepairPlan, b: RepairPlan) bool {
+    return a.line_target > b.line_target;
+}
+
+/// Pull `edit_intent.line` out of a parsed plan JSON value. Returns 0
+/// when the field is missing or not an integer; downstream sort puts
+/// such plans at the bottom of the apply order. Tolerant by design:
+/// the autoloop already silently skips plans whose `apply_repair_plan`
+/// returns `ok: false`, so a missing line just means "apply this last".
+fn extractEditIntentLine(plan_val: std.json.Value) u32 {
+    if (plan_val != .object) return 0;
+    const intent = plan_val.object.get("edit_intent") orelse return 0;
+    if (intent != .object) return 0;
+    const line = intent.object.get("line") orelse return 0;
+    if (line != .integer) return 0;
+    if (line.integer <= 0) return 0;
+    return std.math.cast(u32, line.integer) orelse 0;
 }
 
 const ApplyResult = struct {
@@ -587,9 +615,15 @@ fn applyPlans(
     registry: *const registry_mod.Registry,
     transcript: *transcript_mod.Transcript,
     options: DriveOptions,
-    plans: []const RepairPlan,
+    plans: []RepairPlan,
     initial_pre_witnesses: []const ui_payload.WitnessBody,
 ) !ApplyOutcome {
+    // Apply highest-line edits first so a lower-line insertion does
+    // not shift a later plan's target. Stable sort: equal-line plans
+    // keep their batch order, preserving today's stacked-guard
+    // behavior on literal same-line collisions.
+    std.sort.insertion(RepairPlan, plans, {}, comparePlanLineDesc);
+
     var applied: u32 = 0;
     // The first plan's "before" snapshot is the witness set drive() already
     // computed for this iteration. Each subsequent plan inherits the
@@ -1184,6 +1218,49 @@ test "parseRepairPlans extracts ids and re-serializes plan bodies" {
     try testing.expectEqualStrings("p2", plans.items[1].id);
     try testing.expect(std.mem.indexOf(u8, plans.items[0].raw_json, "insert_guard_before_line") != null);
     try testing.expect(std.mem.indexOf(u8, plans.items[1].raw_json, "add_trailing_return") != null);
+    try testing.expectEqual(@as(u32, 3), plans.items[0].line_target);
+    try testing.expectEqual(@as(u32, 10), plans.items[1].line_target);
+}
+
+test "parseRepairPlans yields line_target=0 when edit_intent.line is absent" {
+    const allocator = testing.allocator;
+    const input =
+        \\{"plans":[{"id":"p1","edit_intent":{"kind":"insert_guard_before_line","template":""}}]}
+    ;
+    var plans = try parseRepairPlans(allocator, input);
+    defer plans.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), plans.items.len);
+    try testing.expectEqual(@as(u32, 0), plans.items[0].line_target);
+}
+
+test "applyPlans-sort places higher-line plans first, stable on ties" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var plans = [_]RepairPlan{
+        .{ .id = try a.dupe(u8, "low"), .raw_json = try a.dupe(u8, "{}"), .line_target = 5 },
+        .{ .id = try a.dupe(u8, "high"), .raw_json = try a.dupe(u8, "{}"), .line_target = 12 },
+        .{ .id = try a.dupe(u8, "mid"), .raw_json = try a.dupe(u8, "{}"), .line_target = 8 },
+        // Two plans tied at line 5; the one ordered first in the input
+        // should still be first after sort (stable).
+        .{ .id = try a.dupe(u8, "low_dup"), .raw_json = try a.dupe(u8, "{}"), .line_target = 5 },
+        .{ .id = try a.dupe(u8, "no_line"), .raw_json = try a.dupe(u8, "{}"), .line_target = 0 },
+    };
+
+    std.sort.insertion(RepairPlan, &plans, {}, comparePlanLineDesc);
+
+    try testing.expectEqualStrings("high", plans[0].id);
+    try testing.expectEqualStrings("mid", plans[1].id);
+    // Stable: "low" came before "low_dup" in the input batch, so it
+    // applies first when the two collide on line 5.
+    try testing.expectEqualStrings("low", plans[2].id);
+    try testing.expectEqualStrings("low_dup", plans[3].id);
+    // line_target=0 sorts to the bottom (e.g., add_trailing_return
+    // plans whose intent has no specific line). Harmless: those edits
+    // are not sensitive to earlier line shifts.
+    try testing.expectEqualStrings("no_line", plans[4].id);
 }
 
 test "buildPathGoalsJson escapes special characters in the path" {
