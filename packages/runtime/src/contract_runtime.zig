@@ -135,18 +135,16 @@ pub const RuntimeContract = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Raw / Validated newtype split (WS3)
+// Raw / Validated newtype split
 //
-// `parseContractJson` and `fromHandlerContract` return a `RawRuntimeContract` —
-// a wrapper that only exposes deinit + summary inspection. The runtime hot path
-// accepts `ValidatedRuntimeContract`, which is constructible only via
-// `validate`. That gates the three integrity checks (capability matrix, policy
-// hash, embedded artifact hash) at the type-signature level: a caller cannot
-// accidentally hand an unvalidated contract to the request loop.
+// `parseContractJson` and `fromHandlerContract` return a `RawRuntimeContract`.
+// The runtime hot path accepts `ValidatedRuntimeContract`, which is
+// constructible only via `validate`. That gates the three integrity checks
+// (capability matrix, policy hash, embedded artifact hash) at the type level
+// so the request loop cannot be wired against an unvalidated contract.
 //
-// Env-var presence stays a separate `validateEnvVars` call on Validated so the
-// server can keep emitting one error line per missing var; environment state is
-// a deployment concern, not a contract integrity invariant.
+// Env-var presence stays a separate `validateEnvVars` call so the server keeps
+// emitting one error line per missing var.
 // ---------------------------------------------------------------------------
 
 pub const RawRuntimeContract = struct {
