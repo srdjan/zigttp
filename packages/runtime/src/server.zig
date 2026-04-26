@@ -25,6 +25,7 @@ const QueryParam = http_types.QueryParam;
 
 const contract_runtime = @import("contract_runtime.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
+const ValidatedRuntimeContract = contract_runtime.ValidatedRuntimeContract;
 const ws_gateway = @import("ws_gateway.zig");
 const ws_frame_loop = @import("ws_frame_loop.zig");
 const websocket_pool = @import("websocket_pool.zig");
@@ -248,7 +249,7 @@ const ConnectionPool = struct {
         // signals the outer loop to skip the fd close — the frame loop
         // owns the socket lifecycle from here on.
         if (self.server.contract) |*contract| {
-            if (contract.websocket.on_message and requestIsWebSocketUpgrade(request.headers.items)) {
+            if (contract.websocket().on_message and requestIsWebSocketUpgrade(request.headers.items)) {
                 const request_view = HttpRequestView{
                     .method = request.method,
                     .url = request.url,
@@ -927,7 +928,7 @@ pub const Server = struct {
     running: bool,
     request_count: std.atomic.Value(u64),
     conn_pool: ?*ConnectionPool,
-    contract: ?RuntimeContract,
+    contract: ?ValidatedRuntimeContract,
     proof_cache: ?proof_adapter.ProofCache,
     security_logger: ?*SecurityLogger,
     /// WebSocket connection registry. Initialised lazily on the first
@@ -1020,7 +1021,7 @@ pub const Server = struct {
 
     /// Replace the runtime contract and reconfigure the proof cache.
     /// Called by live reload after a handler swap with a new contract.
-    pub fn updateContract(self: *Self, new_contract: contract_runtime.RuntimeContract) void {
+    pub fn updateContract(self: *Self, new_contract: ValidatedRuntimeContract) void {
         if (self.contract) |*c| c.deinit();
         self.contract = new_contract;
 
@@ -1031,11 +1032,11 @@ pub const Server = struct {
             self.proof_cache = null;
         }
 
-        const p = new_contract.properties;
+        const p = self.contract.?.properties();
         if (p.pure or (p.deterministic and p.read_only)) {
             self.proof_cache = proof_adapter.ProofCache.init(
                 self.allocator,
-                new_contract.properties,
+                p,
                 .{},
             );
         }
@@ -1080,28 +1081,40 @@ pub const Server = struct {
             });
         }
 
-        // Parse embedded contract (if present) for runtime optimizations
+        // Parse embedded contract (if present), then promote to Validated.
+        // Validation enforces capability/policy/artifact integrity at the
+        // type-signature level: the rest of the server only sees a contract
+        // that has cleared those checks.
         if (self.config.contract_json) |json| {
-            self.contract = contract_runtime.parseContractJson(self.allocator, json) catch |err| blk: {
-                std.log.warn("Failed to parse embedded contract: {} (continuing without)", .{err});
-                break :blk null;
-            };
+            const raw_opt: ?contract_runtime.RawRuntimeContract =
+                contract_runtime.parseContractJson(self.allocator, json) catch |err| blk: {
+                    std.log.warn("Failed to parse embedded contract: {} (continuing without)", .{err});
+                    break :blk null;
+                };
+            if (raw_opt) |raw| {
+                self.contract = contract_runtime.validate(raw, .{
+                    .bytecode = self.embedded_bytecode,
+                }) catch |err| {
+                    switch (err) {
+                        error.CapabilityMatrixMismatch => std.log.err(
+                            "sandbox: capability matrix drift - rebuild the handler contract against this runtime",
+                            .{},
+                        ),
+                        error.PolicyHashMismatch => std.log.err(
+                            "sandbox: policy hash drift - rebuild the handler contract against this runtime",
+                            .{},
+                        ),
+                        error.ArtifactHashMismatch => std.log.err(
+                            "sandbox: embedded bytecode does not match contract artifact hash",
+                            .{},
+                        ),
+                    }
+                    return err;
+                };
+            }
         }
 
         if (self.contract) |*contract| {
-            contract_runtime.verifyCapabilityMatrix(contract) catch |err| {
-                std.log.err("sandbox: capability matrix drift - rebuild the handler contract against this runtime", .{});
-                return err;
-            };
-            contract_runtime.verifyPolicyHash(contract) catch |err| {
-                std.log.err("sandbox: policy hash drift - rebuild the handler contract against this runtime", .{});
-                return err;
-            };
-            contract_runtime.verifyArtifactHash(contract, self.embedded_bytecode) catch |err| {
-                std.log.err("sandbox: embedded bytecode does not match contract artifact hash", .{});
-                return err;
-            };
-
             logContractSummary(contract);
 
             // Fail fast if proven env vars are missing
@@ -1119,11 +1132,11 @@ pub const Server = struct {
 
         // Initialize proof-driven response cache if handler is deterministic + read_only
         if (self.contract) |*contract| {
-            const p = contract.properties;
+            const p = contract.properties();
             if (p.pure or (p.deterministic and p.read_only)) {
                 self.proof_cache = proof_adapter.ProofCache.init(
                     self.allocator,
-                    contract.properties,
+                    p,
                     .{},
                 );
                 std.log.info("   Proof cache: enabled (handler proven deterministic + read_only)", .{});
@@ -1133,7 +1146,7 @@ pub const Server = struct {
         // Apply the lifecycle policy: CLI override wins, otherwise derive
         // from contract properties.
         if (self.pool) |*p| {
-            const contract_ptr: ?*const RuntimeContract = if (self.contract) |*c| c else null;
+            const contract_ptr: ?*const ValidatedRuntimeContract = if (self.contract) |*c| c else null;
             const effective = self.config.lifecycle_override orelse
                 contract_runtime.derivePoolingPolicy(contract_ptr);
             p.setPoolingPolicy(effective);
@@ -2305,13 +2318,14 @@ fn isCanonicalPathInsideRoot(allocator: std.mem.Allocator, io: Io, static_root: 
     return boundary == '/' or boundary == '\\';
 }
 
-fn logContractSummary(contract: *const RuntimeContract) void {
-    const p = &contract.properties;
+fn logContractSummary(contract: *const ValidatedRuntimeContract) void {
+    const inner = contract.view();
+    const p = &inner.properties;
     std.log.info("Contract loaded: {d} env vars{s}, {d} routes{s}", .{
-        contract.env_vars.len,
-        if (contract.env_dynamic) @as([]const u8, " (+dynamic)") else "",
-        contract.routes.len,
-        if (contract.routes_dynamic) @as([]const u8, " (+dynamic)") else "",
+        inner.env_vars.len,
+        if (inner.env_dynamic) @as([]const u8, " (+dynamic)") else "",
+        inner.routes.len,
+        if (inner.routes_dynamic) @as([]const u8, " (+dynamic)") else "",
     });
 
     // Log proven properties as a separate line for clarity

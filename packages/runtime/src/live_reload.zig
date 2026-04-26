@@ -232,12 +232,20 @@ pub const LiveReloadState = struct {
 
             if (update_contract) {
                 if (self.current_contract) |*hc| {
-                    const rt_contract = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
+                    const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
                         printReload("Failed to build runtime contract: {}.\n", .{err});
                         printReload("Handler swapped. {d} runtime(s) invalidated.\n", .{invalidated});
                         return;
                     };
-                    self.server.updateContract(rt_contract);
+                    // Live reload validates without an embedded artifact: the
+                    // HandlerContract carries hashes only when the original build
+                    // emitted them, and verifyArtifactHash skips when absent.
+                    const validated = contract_runtime.validate(raw, .{}) catch |err| {
+                        printReload("Contract failed validation: {}.\n", .{err});
+                        printReload("Handler swapped. {d} runtime(s) invalidated.\n", .{invalidated});
+                        return;
+                    };
+                    self.server.updateContract(validated);
 
                     if (self.server.proof_cache != null) {
                         printProve("Proof cache: enabled (deterministic + read_only)\n", .{});

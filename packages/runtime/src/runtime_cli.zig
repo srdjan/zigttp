@@ -84,11 +84,12 @@ fn attestCommand(allocator: std.mem.Allocator) !void {
         std.process.exit(1);
     };
 
-    var contract = contract_runtime.parseContractJson(allocator, contract_json) catch {
+    var raw = contract_runtime.parseContractJson(allocator, contract_json) catch {
         shared.writeStdoutLine("{\"error\":\"failed to parse contract\"}");
         std.process.exit(1);
     };
-    defer contract.deinit();
+    defer raw.deinit();
+    const contract = raw.rawView();
 
     var actual: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(payload.bytecode, &actual, .{});
