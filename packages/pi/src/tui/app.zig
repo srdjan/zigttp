@@ -88,6 +88,16 @@ const StatusNotice = union(enum) {
     /// `m` was pressed but minting could not proceed: missing verdict,
     /// witness selection out of range, or filesystem failure.
     mint_error: []const u8,
+    /// User pressed Ctrl-C while a worker was in flight; the cancel
+    /// flag has been set and the worker is bailing at the next phase
+    /// boundary. Stays painted until the worker actually returns.
+    cancelling,
+    /// The autoloop returned because cancel was observed. Property
+    /// name borrowed from the comptime table.
+    goal_cancelled: []const u8,
+    /// The replay worker returned but the user had requested cancel,
+    /// so the verdict is dropped on the floor.
+    replay_cancelled,
 };
 
 const ReplayDone = struct {
@@ -333,6 +343,11 @@ pub const AppState = struct {
             .line = editor.line(),
             .cursor = editor.cursor(),
         };
+        // While a worker holds the transcript, do not walk new entries.
+        // Pre-grown capacity at dispatch keeps existing indices stable
+        // for the renderer; new appends are absorbed on worker
+        // completion when `applyWorkerResult` clears this flag.
+        if (self.autoloop_in_flight) return;
         if (self.observed_transcript_len > session.transcript.len()) {
             self.clearLocalResults(allocator);
             self.clearWitnessVerdict(allocator);
@@ -539,11 +554,98 @@ const ModalAction = union(enum) {
     decided: bool,
 };
 
+/// Inputs to the autoloop worker. All slices owned by the dispatch
+/// allocator; `name` is borrowed from the comptime property table.
+const DriveJob = struct {
+    workspace_root: []u8,
+    file: []u8,
+    name: []const u8,
+    focus_key: ?[]u8,
+    events_path: ?[]u8,
+};
+
+/// Inputs to the replay worker. The witness body is cloned at dispatch
+/// so the worker never reads the live transcript.
+const ReplayJob = struct {
+    workspace_root: []u8,
+    handler_path: []u8,
+    witness: ui_payload_mod.WitnessBody,
+};
+
+const DriveSuccess = struct {
+    name: []const u8,
+    verdict: autoloop.AutoloopVerdict,
+};
+
+const DriveOutcome = union(enum) {
+    success: DriveSuccess,
+    /// Property name (borrowed). Surfaced as `goal_dispatch_error` in
+    /// the status row when the autoloop tool plumbing failed.
+    dispatch_error: []const u8,
+    /// Property name (borrowed). The autoloop returned because the
+    /// cancel token was observed at a phase boundary.
+    cancelled: []const u8,
+};
+
+const ReplaySuccess = struct {
+    verdict: witness_replay.Verdict,
+    /// Owned key copy that becomes `state.witness_verdict.key` on apply.
+    key: []u8,
+    reproduced: bool,
+};
+
+const ReplayOutcome = union(enum) {
+    success: ReplaySuccess,
+    /// `@errorName(...)` slice (static memory) when the replay engine
+    /// failed before producing a verdict.
+    err: []const u8,
+    /// User pressed Ctrl-C; the replay finished but its verdict is
+    /// dropped on the floor.
+    cancelled,
+};
+
+const WorkerJob = union(enum) {
+    drive: DriveJob,
+    replay: ReplayJob,
+};
+
+const WorkerResult = union(enum) {
+    drive: DriveOutcome,
+    replay: ReplayOutcome,
+};
+
+/// Heap-allocated handoff between the main thread and the worker. The
+/// main thread owns it before spawn; the worker reads it during the
+/// run; the main thread frees it after the join. The `cancel` token
+/// is shared: the main thread calls `request()` on Ctrl-C, the worker
+/// checks `requested()` at autoloop phase boundaries.
+const WorkerCtx = struct {
+    allocator: std.mem.Allocator,
+    runtime: *TuiRuntime,
+    registry: *const Registry,
+    job: WorkerJob,
+    cancel: autoloop.Cancel = .{},
+};
+
 const TuiRuntime = struct {
     allocator: std.mem.Allocator,
     session: *agent.AgentSession,
     editor: *LineEditor,
     state: *AppState,
+    /// Self-pipe: the worker writes one byte to `pipe_w` when its
+    /// result is ready; the main poll loop watches `pipe_r` to wake
+    /// up and apply the result.
+    pipe_r: std.posix.fd_t,
+    pipe_w: std.posix.fd_t,
+    worker: ?std.Thread = null,
+    /// Worker writes here, then writes one byte to the pipe; main
+    /// reads the pipe (a kernel-mediated release/acquire barrier),
+    /// then reads this slot. No mutex is required because the pipe
+    /// I/O and `thread.join()` are the synchronization points.
+    worker_result: ?WorkerResult = null,
+    /// Owned by the main thread; the worker only reads it. Freed in
+    /// `applyWorkerResult` after the join.
+    worker_ctx: ?*WorkerCtx = null,
 
     fn syncState(self: *TuiRuntime) !void {
         try self.state.sync(self.allocator, self.session, self.editor);
@@ -587,18 +689,41 @@ pub fn run(
     var state: AppState = .{};
     defer state.deinit(allocator);
 
+    var pipe_fds: [2]std.posix.fd_t = undefined;
+    if (std.posix.system.pipe(&pipe_fds) != 0) return error.PipeFailed;
+
     var runtime: TuiRuntime = .{
         .allocator = allocator,
         .session = &session,
         .editor = &editor,
         .state = &state,
+        .pipe_r = pipe_fds[0],
+        .pipe_w = pipe_fds[1],
     };
+    defer cleanupRuntime(&runtime);
+
     const approval_fn = selectApprovalFn(policy, &runtime);
 
     try runtime.redrawFrame();
 
     var input_buf: [256]u8 = undefined;
     while (true) {
+        var pollfds = [_]std.posix.pollfd{
+            .{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = runtime.pipe_r, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+        _ = std.posix.poll(&pollfds, -1) catch |err| switch (err) {
+            else => return err,
+        };
+
+        if (pollfds[1].revents & std.posix.POLL.IN != 0) {
+            try drainWorkerWakeup(runtime.pipe_r);
+            try applyWorkerResult(&runtime);
+            try runtime.redrawFrame();
+        }
+
+        if (pollfds[0].revents & std.posix.POLL.IN == 0) continue;
+
         const n = std.posix.read(std.posix.STDIN_FILENO, &input_buf) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
@@ -611,6 +736,21 @@ pub fn run(
             i += consumed;
 
             if (state.modal != null) continue;
+
+            // Ctrl-C while a worker is running becomes "cancel". A
+            // second press while cancel is already pending falls
+            // through to the existing quit path so the user can
+            // force-exit.
+            if (event.kind == .ctrl_c and state.autoloop_in_flight) {
+                if (runtime.worker_ctx) |ctx| {
+                    if (!ctx.cancel.requested()) {
+                        ctx.cancel.request();
+                        state.status_notice = .cancelling;
+                        try runtime.redrawFrame();
+                        continue;
+                    }
+                }
+            }
 
             switch (state.focus_mode) {
                 .composer => {
@@ -627,17 +767,14 @@ pub fn run(
                         },
                         .drive_goal => {
                             // Paint the in-flight indicator before the
-                            // (currently sync-blocking) autoloop runs so
-                            // the user sees the chip-driving status notice
-                            // and not a stale frame for the duration.
+                            // worker takes over so the user sees the
+                            // chip-driving notice immediately.
                             try runtime.redrawFrame();
-                            try driveSelectedGoal(&runtime, registry);
-                            try runtime.redrawFrame();
+                            try spawnDriveWorker(&runtime, registry);
                         },
                         .replay_witness => {
                             try runtime.redrawFrame();
-                            try replaySelectedWitness(&runtime);
-                            try runtime.redrawFrame();
+                            try spawnReplayWorker(&runtime);
                         },
                         .mint_witness => {
                             try mintSelectedWitness(&runtime);
@@ -648,6 +785,99 @@ pub fn run(
             }
         }
     }
+}
+
+/// Closes the self-pipe and joins any in-flight worker before `run`
+/// returns. The drained result is applied for its allocator-owned
+/// fields so leaks do not survive a Ctrl-C exit. We request cancel
+/// before the join so a hard quit short-circuits the worker at the
+/// next phase boundary instead of waiting out its full budget.
+fn cleanupRuntime(runtime: *TuiRuntime) void {
+    if (runtime.worker_ctx) |ctx| ctx.cancel.request();
+    if (runtime.worker) |t| {
+        t.join();
+        runtime.worker = null;
+    }
+    if (runtime.worker_result) |*result| freeWorkerResult(runtime.allocator, result);
+    runtime.worker_result = null;
+    if (runtime.worker_ctx) |ctx| {
+        freeWorkerJob(runtime.allocator, ctx.job);
+        runtime.allocator.destroy(ctx);
+        runtime.worker_ctx = null;
+    }
+    _ = std.posix.system.close(runtime.pipe_r);
+    _ = std.posix.system.close(runtime.pipe_w);
+}
+
+/// The worker writes exactly one byte per result, so a one-byte read
+/// is enough; the next poll cycle handles any subsequent byte. No
+/// nonblock loop required.
+fn drainWorkerWakeup(pipe_r: std.posix.fd_t) !void {
+    var buf: [1]u8 = undefined;
+    _ = try std.posix.read(pipe_r, &buf);
+}
+
+/// Pull the result out of the slot, join the worker thread, free the
+/// job inputs and the heap context, then apply the result to AppState.
+/// Idempotent when no worker is in flight (early return).
+fn applyWorkerResult(runtime: *TuiRuntime) !void {
+    const maybe_result = runtime.worker_result;
+    runtime.worker_result = null;
+
+    if (maybe_result == null) return;
+    const result = maybe_result.?;
+
+    if (runtime.worker) |t| {
+        t.join();
+        runtime.worker = null;
+    }
+
+    var job_owner: ?WorkerJob = null;
+    if (runtime.worker_ctx) |ctx| {
+        job_owner = ctx.job;
+        runtime.allocator.destroy(ctx);
+        runtime.worker_ctx = null;
+    }
+
+    runtime.state.autoloop_in_flight = false;
+    switch (result) {
+        .drive => |outcome| applyDriveResult(runtime, outcome),
+        .replay => |outcome| applyReplayResult(runtime, outcome),
+    }
+    if (job_owner) |j| freeWorkerJob(runtime.allocator, j);
+}
+
+fn freeWorkerJob(allocator: std.mem.Allocator, job: WorkerJob) void {
+    switch (job) {
+        .drive => |j| freeDriveJob(allocator, j),
+        .replay => |j| freeReplayJob(allocator, j),
+    }
+}
+
+fn freeWorkerResult(allocator: std.mem.Allocator, result: *WorkerResult) void {
+    switch (result.*) {
+        .drive => {},
+        .replay => |*outcome| switch (outcome.*) {
+            .success => |*s| {
+                allocator.free(s.key);
+                s.verdict.deinit(allocator);
+            },
+            .err, .cancelled => {},
+        },
+    }
+}
+
+fn workerEntry(ctx: *WorkerCtx) void {
+    const result: WorkerResult = switch (ctx.job) {
+        .drive => |job| .{ .drive = runDriveJob(ctx.allocator, ctx.registry, ctx.runtime.session, job, &ctx.cancel) },
+        .replay => |job| .{ .replay = runReplayJob(ctx.allocator, job, &ctx.cancel) },
+    };
+    ctx.runtime.worker_result = result;
+    // The pipe write doubles as a release barrier: any store the
+    // worker made before the byte hits the pipe is visible to the
+    // main thread after its read.
+    const wakeup_byte: [1]u8 = .{1};
+    _ = std.c.write(ctx.runtime.pipe_w, &wakeup_byte, 1);
 }
 
 fn handleComposerEvent(
@@ -867,6 +1097,7 @@ fn handlePaneEvent(
             },
             'r', 'R' => {
                 if (state.view_mode != .ledger or state.ledger_tab != .witnesses) return .no_op;
+                if (state.autoloop_in_flight) return .no_op;
                 const total = witnessCountForSelectedPatch(state, session);
                 if (total == 0) return .no_op;
                 if (state.selected_witness_index >= total) return .no_op;
@@ -875,10 +1106,12 @@ fn handlePaneEvent(
                     return .redraw;
                 }
                 state.clearWitnessVerdict(allocator);
+                state.autoloop_in_flight = true;
                 return .replay_witness;
             },
             'm', 'M' => {
                 if (state.view_mode != .ledger or state.ledger_tab != .witnesses) return .no_op;
+                if (state.autoloop_in_flight) return .no_op;
                 if (state.witness_verdict == null) {
                     state.status_notice = .{ .mint_error = "no recent verdict; press r first" };
                     return .redraw;
@@ -891,6 +1124,7 @@ fn handlePaneEvent(
                 return .mint_witness;
             },
             'A' => {
+                if (state.autoloop_in_flight) return .no_op;
                 if (state.view_mode == .ledger and approvalGateClear(state, session)) {
                     return .approve;
                 }
@@ -943,59 +1177,108 @@ fn approvalGateClear(state: *const AppState, session: *const agent.AgentSession)
 /// PASS/FIXED summary surfaces in the status row. Errors during replay
 /// (missing impl, file not found, parse failure) flow into
 /// `status_notice = .replay_error` rather than aborting the TUI.
-fn replaySelectedWitness(runtime: *TuiRuntime) !void {
+///
+/// Same prepare/run/apply split as the autoloop dispatcher: the witness
+/// body is cloned at dispatch so the worker thread never reads the live
+/// transcript, and the verdict is moved into AppState on apply.
+fn prepareReplayJob(runtime: *TuiRuntime) !ReplayJob {
+    const allocator = runtime.allocator;
+    const ledger_idx = runtime.state.selectedLedgerIndex() orelse return error.NoSelection;
+    const patch = session_state.patchPayload(runtime.session.transcript.at(ledger_idx)) orelse return error.NotAPatch;
+    const witness_ref = selectedWitness(patch, runtime.state.selected_witness_index) orelse return error.OutOfRange;
+
+    const workspace_root = try tools_common.workspaceRoot(allocator);
+    errdefer allocator.free(workspace_root);
+
+    const handler_path = try tools_common.resolveInsideWorkspace(allocator, workspace_root, patch.file);
+    errdefer allocator.free(handler_path);
+
+    const witness_clone = try witness_ref.clone(allocator);
+
+    return .{
+        .workspace_root = workspace_root,
+        .handler_path = handler_path,
+        .witness = witness_clone,
+    };
+}
+
+fn freeReplayJob(allocator: std.mem.Allocator, job: ReplayJob) void {
+    allocator.free(job.workspace_root);
+    allocator.free(job.handler_path);
+    var w = job.witness;
+    w.deinit(allocator);
+}
+
+fn runReplayJob(
+    allocator: std.mem.Allocator,
+    job: ReplayJob,
+    cancel: *const autoloop.Cancel,
+) ReplayOutcome {
+    var verdict = witness_replay.replay(allocator, job.handler_path, job.witness) catch |err| {
+        return .{ .err = @errorName(err) };
+    };
+    if (cancel.requested()) {
+        verdict.deinit(allocator);
+        return .cancelled;
+    }
+    const reproduced = verdict.reproducedViolation(job.witness);
+    const key_copy = allocator.dupe(u8, job.witness.key) catch {
+        verdict.deinit(allocator);
+        return .{ .err = "OutOfMemory" };
+    };
+    return .{ .success = .{ .verdict = verdict, .key = key_copy, .reproduced = reproduced } };
+}
+
+fn applyReplayResult(runtime: *TuiRuntime, outcome: ReplayOutcome) void {
     const allocator = runtime.allocator;
     const state = runtime.state;
+    switch (outcome) {
+        .success => |s| {
+            state.clearWitnessVerdict(allocator);
+            state.witness_verdict = .{
+                .key = s.key,
+                .verdict = s.verdict,
+                .reproduced = s.reproduced,
+            };
+            state.status_notice = .{ .replay_done = .{
+                .reproduced = s.reproduced,
+                .short_key = shortKey(state.witness_verdict.?.key),
+            } };
+        },
+        .err => |name| state.status_notice = .{ .replay_error = name },
+        .cancelled => state.status_notice = .replay_cancelled,
+    }
+}
 
-    const ledger_idx = state.selectedLedgerIndex() orelse {
-        state.status_notice = .{ .replay_error = "no patch selected" };
+fn spawnReplayWorker(runtime: *TuiRuntime) !void {
+    const job = prepareReplayJob(runtime) catch |err| {
+        runtime.state.autoloop_in_flight = false;
+        runtime.state.status_notice = .{ .replay_error = switch (err) {
+            error.NoSelection => "no patch selected",
+            error.NotAPatch => "selected entry is not a patch",
+            error.OutOfRange => "witness selection out of range",
+            else => @errorName(err),
+        } };
+        try runtime.redrawFrame();
         return;
     };
-    const patch = session_state.patchPayload(runtime.session.transcript.at(ledger_idx)) orelse {
-        state.status_notice = .{ .replay_error = "selected entry is not a patch" };
-        return;
+    errdefer {
+        runtime.state.autoloop_in_flight = false;
+        freeReplayJob(runtime.allocator, job);
+    }
+
+    const ctx = try runtime.allocator.create(WorkerCtx);
+    errdefer runtime.allocator.destroy(ctx);
+    ctx.* = .{
+        .allocator = runtime.allocator,
+        .runtime = runtime,
+        .registry = undefined,
+        .job = .{ .replay = job },
     };
 
-    const witness = selectedWitness(patch, state.selected_witness_index) orelse {
-        state.status_notice = .{ .replay_error = "witness selection out of range" };
-        return;
-    };
-
-    const workspace_root = tools_common.workspaceRoot(allocator) catch {
-        state.status_notice = .{ .replay_error = "workspace root unresolved" };
-        return;
-    };
-    defer allocator.free(workspace_root);
-    const handler_path = tools_common.resolveInsideWorkspace(
-        allocator,
-        workspace_root,
-        patch.file,
-    ) catch {
-        state.status_notice = .{ .replay_error = "handler path not in workspace" };
-        return;
-    };
-    defer allocator.free(handler_path);
-
-    var verdict = witness_replay.replay(allocator, handler_path, witness) catch |err| {
-        state.status_notice = .{ .replay_error = @errorName(err) };
-        return;
-    };
-    errdefer verdict.deinit(allocator);
-
-    const reproduced = verdict.reproducedViolation(witness);
-    const key_copy = try allocator.dupe(u8, witness.key);
-    errdefer allocator.free(key_copy);
-
-    state.clearWitnessVerdict(allocator);
-    state.witness_verdict = .{
-        .key = key_copy,
-        .verdict = verdict,
-        .reproduced = reproduced,
-    };
-    state.status_notice = .{ .replay_done = .{
-        .reproduced = reproduced,
-        .short_key = shortKey(state.witness_verdict.?.key),
-    } };
+    const thread = try std.Thread.spawn(.{}, workerEntry, .{ctx});
+    runtime.worker = thread;
+    runtime.worker_ctx = ctx;
 }
 
 /// Map a flat witness index (defeated ++ new) to the underlying body.
@@ -1189,75 +1472,132 @@ fn dispatchWitnessGoal(
     return .drive_goal;
 }
 
-/// Run the property-goal autoloop against the live session transcript for
-/// the chip or witness the user pressed `g` on. The dispatcher reads
-/// `pending_witness_focus` to choose between two anchors:
+/// Property-goal autoloop dispatch is split across three functions so
+/// the long-running `autoloop.drive` call can run on a worker thread:
 ///
-///   * Witness-focused: the loop converges on a single counterexample
-///     by stable key, regardless of unrelated witnesses still live for
-///     the same property tag.
-///   * Chip-focused (default): the loop converges on the entire
-///     property class for the chip the user selected on the properties
-///     tab.
+///   * `prepareDriveJob` (main): validates the chip or witness anchor,
+///     dups the inputs the worker needs, and pre-grows the transcript
+///     so the worker's appends do not realloc out from under the
+///     renderer.
+///   * `runDriveJob` (worker): calls `autoloop.drive`. Its only writes
+///     to shared state are transcript appends, which fit inside the
+///     pre-grown capacity.
+///   * `applyDriveResult` (main): paints the verdict (or dispatch
+///     error) into the status row and clears the pending witness focus.
 ///
-/// In both cases the file is the currently-selected ledger patch's
-/// file; `handlePaneEvent` has already validated the anchor and flipped
-/// `autoloop_in_flight` true, so this helper owns the dispatch and the
-/// post-run status update, and always clears `autoloop_in_flight` so a
-/// failure can never wedge the rail.
-///
-/// Sync-blocking by design at step 1: the UI freezes for the run. Step 3
-/// moves `autoloop.drive` to a worker thread and replaces the freeze with
-/// a self-pipe wakeup. The status notice is the same in either world.
-fn driveSelectedGoal(runtime: *TuiRuntime, registry: *const Registry) !void {
+/// `handlePaneEvent` flips `autoloop_in_flight` true when it returns
+/// `.drive_goal`; `applyWorkerResult` flips it back. While it is true
+/// the renderer skips `state.sync` so transcript indices stay frozen
+/// for the duration of the run.
+fn prepareDriveJob(runtime: *TuiRuntime) !DriveJob {
     const allocator = runtime.allocator;
-    defer runtime.state.autoloop_in_flight = false;
-    defer runtime.state.clearPendingWitnessFocus(allocator);
-
-    const idx = runtime.state.selectedLedgerIndex() orelse {
-        runtime.state.status_notice = .invalid_property;
-        return;
-    };
-    const patch = session_state.patchPayload(runtime.session.transcript.at(idx)) orelse {
-        runtime.state.status_notice = .invalid_property;
-        return;
-    };
+    const idx = runtime.state.selectedLedgerIndex() orelse return error.NoSelection;
+    const patch = session_state.patchPayload(runtime.session.transcript.at(idx)) orelse return error.NoSelection;
 
     const name: []const u8 = if (runtime.state.pending_witness_focus) |focus|
         focus.property
     else blk: {
-        const chip_name = property_goals.boolPropertyNameAt(runtime.state.selected_property_index) orelse {
-            runtime.state.status_notice = .invalid_property;
-            return;
-        };
-        if (!property_goals.isGoalDriveable(chip_name)) {
-            runtime.state.status_notice = .invalid_property;
-            return;
-        }
+        const chip_name = property_goals.boolPropertyNameAt(runtime.state.selected_property_index) orelse return error.NoSelection;
+        if (!property_goals.isGoalDriveable(chip_name)) return error.NoSelection;
         break :blk chip_name;
     };
 
-    const focus_key: ?[]const u8 = if (runtime.state.pending_witness_focus) |f| f.key else null;
+    const workspace_root = try tools_common.workspaceRoot(allocator);
+    errdefer allocator.free(workspace_root);
 
-    const workspace_root = tools_common.workspaceRoot(allocator) catch {
-        runtime.state.status_notice = .{ .goal_dispatch_error = name };
-        return;
-    };
-    defer allocator.free(workspace_root);
+    const file_copy = try allocator.dupe(u8, patch.file);
+    errdefer allocator.free(file_copy);
 
-    const goals = [_][]const u8{name};
-    const outcome = autoloop.drive(allocator, registry, &runtime.session.transcript, .{
+    const focus_key_copy: ?[]u8 = if (runtime.state.pending_witness_focus) |f|
+        try allocator.dupe(u8, f.key)
+    else
+        null;
+    errdefer if (focus_key_copy) |k| allocator.free(k);
+
+    const events_copy: ?[]u8 = if (runtime.session.events_path) |p|
+        try allocator.dupe(u8, p)
+    else
+        null;
+    errdefer if (events_copy) |p| allocator.free(p);
+
+    // Pre-grow so `autoloop.drive` can append verified_patch and
+    // system_note entries without reallocating the underlying buffer.
+    // The autoloop budget caps appends well below this slack.
+    try runtime.session.transcript.entries.ensureUnusedCapacity(allocator, 64);
+
+    return .{
         .workspace_root = workspace_root,
-        .file = patch.file,
+        .file = file_copy,
+        .name = name,
+        .focus_key = focus_key_copy,
+        .events_path = events_copy,
+    };
+}
+
+fn freeDriveJob(allocator: std.mem.Allocator, job: DriveJob) void {
+    allocator.free(job.workspace_root);
+    allocator.free(job.file);
+    if (job.focus_key) |k| allocator.free(k);
+    if (job.events_path) |p| allocator.free(p);
+}
+
+fn runDriveJob(
+    allocator: std.mem.Allocator,
+    registry: *const Registry,
+    session: *agent.AgentSession,
+    job: DriveJob,
+    cancel: *const autoloop.Cancel,
+) DriveOutcome {
+    const goals = [_][]const u8{job.name};
+    const outcome = autoloop.drive(allocator, registry, &session.transcript, .{
+        .workspace_root = job.workspace_root,
+        .file = job.file,
         .goals = &goals,
-        .events_path = runtime.session.events_path,
-        .focus_witness_key = focus_key,
+        .events_path = job.events_path,
+        .focus_witness_key = job.focus_key,
+        .cancel = cancel,
     }) catch {
-        runtime.state.status_notice = .{ .goal_dispatch_error = name };
+        return .{ .dispatch_error = job.name };
+    };
+    if (outcome.verdict == .cancelled) return .{ .cancelled = job.name };
+    return .{ .success = .{ .name = job.name, .verdict = outcome.verdict } };
+}
+
+fn applyDriveResult(runtime: *TuiRuntime, outcome: DriveOutcome) void {
+    runtime.state.clearPendingWitnessFocus(runtime.allocator);
+    switch (outcome) {
+        .success => |s| runtime.state.status_notice = .{ .goal_completed = .{ .name = s.name, .verdict = s.verdict } },
+        .dispatch_error => |name| runtime.state.status_notice = .{ .goal_dispatch_error = name },
+        .cancelled => |name| runtime.state.status_notice = .{ .goal_cancelled = name },
+    }
+}
+
+fn spawnDriveWorker(runtime: *TuiRuntime, registry: *const Registry) !void {
+    const job = prepareDriveJob(runtime) catch {
+        runtime.state.autoloop_in_flight = false;
+        runtime.state.clearPendingWitnessFocus(runtime.allocator);
+        runtime.state.status_notice = .invalid_property;
+        try runtime.redrawFrame();
         return;
     };
+    errdefer {
+        runtime.state.autoloop_in_flight = false;
+        runtime.state.clearPendingWitnessFocus(runtime.allocator);
+        freeDriveJob(runtime.allocator, job);
+    }
 
-    runtime.state.status_notice = .{ .goal_completed = .{ .name = name, .verdict = outcome.verdict } };
+    const ctx = try runtime.allocator.create(WorkerCtx);
+    errdefer runtime.allocator.destroy(ctx);
+    ctx.* = .{
+        .allocator = runtime.allocator,
+        .runtime = runtime,
+        .registry = registry,
+        .job = .{ .drive = job },
+    };
+
+    const thread = try std.Thread.spawn(.{}, workerEntry, .{ctx});
+    runtime.worker = thread;
+    runtime.worker_ctx = ctx;
 }
 
 fn handleSubmit(
@@ -1517,10 +1857,10 @@ fn statusNoticeSgr(notice: StatusNotice, theme: *const theme_mod.Theme) []const 
     return switch (notice) {
         .none => "",
         .structural_property, .invalid_property => theme.severity_warn,
-        .goal_driving, .witness_driving => theme.verdict_pending,
+        .goal_driving, .witness_driving, .cancelling => theme.verdict_pending,
         .goal_completed => theme.severity_info,
         .goal_dispatch_error, .replay_error, .mint_error => theme.severity_error,
-        .replay_unavailable => theme.severity_warn,
+        .replay_unavailable, .goal_cancelled, .replay_cancelled => theme.severity_warn,
         .replay_done => |d| if (d.reproduced) theme.verdict_pass else theme.verdict_fixed,
         .mint_done => theme.severity_info,
     };
@@ -1572,6 +1912,13 @@ fn statusNoticeText(notice: StatusNotice, buf: *[256]u8) []const u8 {
             "mint error: {s}",
             .{text},
         ) catch "mint error",
+        .cancelling => "cancelling... (waiting for next phase boundary)",
+        .goal_cancelled => |name| std.fmt.bufPrint(
+            buf,
+            "autoloop cancelled on goal {s}",
+            .{name},
+        ) catch "autoloop cancelled",
+        .replay_cancelled => "replay cancelled",
     };
 }
 

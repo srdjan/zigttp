@@ -34,6 +34,24 @@ const json_writer = @import("providers/anthropic/json_writer.zig");
 
 pub const AutoloopVerdict = session_events.AutoloopVerdict;
 
+/// Cooperative cancel token shared between the TUI's main thread and
+/// the autoloop worker. The TUI calls `request()` (e.g. on Ctrl-C)
+/// and the worker checks `requested()` at phase boundaries: top of
+/// each iteration, between plans in `applyPlans`, and between
+/// witnesses in `accumulateReplays`. There is no pre-emption inside a
+/// running compiler tool or interpreter step.
+pub const Cancel = struct {
+    flag: std.atomic.Value(bool) = .init(false),
+
+    pub fn request(self: *Cancel) void {
+        self.flag.store(true, .release);
+    }
+
+    pub fn requested(self: *const Cancel) bool {
+        return self.flag.load(.acquire);
+    }
+};
+
 pub const Budget = struct {
     max_iterations: u32 = 8,
     max_wall_time_ms: i64 = 120_000,
@@ -56,7 +74,16 @@ pub const DriveOptions = struct {
     /// Lets the witness pane drive convergence on one specific
     /// counterexample instead of the whole property class.
     focus_witness_key: ?[]const u8 = null,
+    /// Optional cooperative cancel token. When `requested()` reads
+    /// true, the loop short-circuits to `.cancelled` at the next phase
+    /// boundary. Null disables cancellation (test paths without a TUI).
+    cancel: ?*const Cancel = null,
 };
+
+inline fn cancelRequested(options: DriveOptions) bool {
+    if (options.cancel) |c| return c.requested();
+    return false;
+}
 
 pub const Outcome = struct {
     verdict: AutoloopVerdict,
@@ -84,6 +111,9 @@ pub fn drive(
     var last_goals_met_count: u32 = countMetGoals(transcript, options.file, options.goals);
 
     while (iter < options.budget.max_iterations) : (iter += 1) {
+        if (cancelRequested(options)) {
+            return finalize(allocator, transcript, options, .cancelled, iter);
+        }
         if (tools_common.nowUnixMs() - start_ms > options.budget.max_wall_time_ms) {
             return finalize(allocator, transcript, options, .exhausted_time, iter);
         }
@@ -116,6 +146,9 @@ pub fn drive(
 
         if (apply_outcome.regression) {
             return finalize(allocator, transcript, options, .regression_blocked, iter + 1);
+        }
+        if (cancelRequested(options)) {
+            return finalize(allocator, transcript, options, .cancelled, iter + 1);
         }
 
         const current_met = countMetGoals(transcript, options.file, options.goals);
@@ -566,6 +599,7 @@ fn applyPlans(
     defer ui_payload.freeWitnessBodySlice(allocator, pre_witnesses);
 
     for (plans) |plan| {
+        if (cancelRequested(options)) return .{ .applied = applied };
         var candidate = invokeApply(allocator, registry, options.file, plan.raw_json) catch |err| switch (err) {
             error.InvalidToolOutput, error.ToolFailed => continue,
             else => return err,
@@ -731,10 +765,12 @@ fn accumulateReplays(
     handler_path: []const u8,
     bodies: []const ui_payload.WitnessBody,
     budget: usize,
+    cancel: ?*const Cancel,
 ) ReplayCounts {
     var counts: ReplayCounts = .{};
     for (bodies) |body| {
         if (counts.consumed >= budget) break;
+        if (cancel) |c| if (c.requested()) break;
         counts.consumed += 1;
         const verdict_or_err = witness_replay.replay(allocator, handler_path, body);
         if (verdict_or_err) |raw| {
@@ -769,6 +805,7 @@ fn emitWitnessReplaySummary(
         handler_path,
         payload.witnesses_defeated,
         max_witness_replays,
+        options.cancel,
     );
     const new_budget = if (max_witness_replays > defeated.consumed)
         max_witness_replays - defeated.consumed
@@ -779,6 +816,7 @@ fn emitWitnessReplaySummary(
         handler_path,
         payload.witnesses_new,
         new_budget,
+        options.cancel,
     );
 
     const done = defeated.consumed + new_w.consumed;
@@ -916,6 +954,31 @@ test "drive returns .achieved when goal_check reports ok on the first iteration"
     });
 
     try testing.expectEqual(AutoloopVerdict.achieved, outcome.verdict);
+    try testing.expectEqual(@as(u32, 0), outcome.iterations);
+}
+
+test "drive returns .cancelled when the cancel token is set before the first iteration" {
+    const allocator = testing.allocator;
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(allocator);
+
+    try registry.register(allocator, goalCheckTool(StubTool.alwaysFailingGoalCheck));
+    try registry.register(allocator, repairPlanTool(StubTool.emptyRepairPlan));
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+
+    var cancel: Cancel = .{};
+    cancel.request();
+
+    const outcome = try drive(allocator, &registry, &transcript, .{
+        .workspace_root = ".",
+        .file = "handler.ts",
+        .goals = &.{"retry_safe"},
+        .cancel = &cancel,
+    });
+
+    try testing.expectEqual(AutoloopVerdict.cancelled, outcome.verdict);
     try testing.expectEqual(@as(u32, 0), outcome.iterations);
 }
 
