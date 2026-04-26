@@ -2477,6 +2477,7 @@ pub const Interpreter = struct {
                     bc_ptr,
                     @enumFromInt(bc_ptr.name_atom),
                 );
+                try self.ctx.bytecode_functions.append(self.ctx.allocator, func_obj);
                 try self.ctx.push(func_obj.toValue());
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -2495,6 +2496,7 @@ pub const Interpreter = struct {
                     @enumFromInt(bc_ptr.name_atom),
                 );
                 func_obj.flags.is_async = true;
+                try self.ctx.bytecode_functions.append(self.ctx.allocator, func_obj);
                 try self.ctx.push(func_obj.toValue());
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -2538,6 +2540,7 @@ pub const Interpreter = struct {
                     @enumFromInt(bc_ptr.name_atom),
                     upvalues,
                 );
+                try self.ctx.bytecode_functions.append(self.ctx.allocator, closure_obj);
                 try self.ctx.push(closure_obj.toValue());
                 continue :sw @enumFromInt(self.pc[0]);
             },

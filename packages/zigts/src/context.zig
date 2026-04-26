@@ -256,6 +256,10 @@ pub const Context = struct {
     /// Builtin objects registered during initialization (Math, JSON, etc.)
     /// Tracked for proper cleanup in deinit
     builtin_objects: std.ArrayList(*object.JSObject),
+    /// Bytecode functions created by make_function/make_async/make_closure.
+    /// Owns nested FunctionBytecode payloads (codegen does not free these;
+    /// see CodeGen.freeOwnedConstantPayloads contract).
+    bytecode_functions: std.ArrayList(*object.JSObject),
     /// Cached HTTP shapes for fast Request/Response creation
     http_shapes: ?HttpShapeCache,
     /// Cached vnode shape for fast JSX virtual DOM node creation
@@ -328,6 +332,7 @@ pub const Context = struct {
             .code_allocator = null,
             .jit_metrics = .{},
             .builtin_objects = .empty,
+            .bytecode_functions = .empty,
             .http_shapes = null,
             .vnode_shape = null,
             .http_strings = null,
@@ -796,6 +801,11 @@ pub const Context = struct {
                 slot.* = null;
             }
         }
+
+        for (self.bytecode_functions.items) |obj| {
+            obj.destroyFull(self.allocator);
+        }
+        self.bytecode_functions.deinit(self.allocator);
 
         // Destroy prototypes with destroyBuiltin to clean up their method properties
         if (self.hidden_class_pool) |pool| {
