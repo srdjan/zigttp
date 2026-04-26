@@ -178,9 +178,6 @@ note is durable - it travels with the session log.
   first plan shifts line numbers and invalidates the second plan's
   target. Fixed when repair-plan ordering learns line-delta tracking,
   or when plans emit byte offsets instead of line/column targets.
-- Sync-blocking dispatch. The TUI freezes for the duration of `g`
-  (autoloop) and `r` (replay). A worker-thread split is the next
-  ergonomic upgrade.
 
 ## Regression guard
 
