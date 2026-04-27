@@ -15,6 +15,7 @@ const value = @import("../value.zig");
 const string = @import("../string.zig");
 const arena_mod = @import("../arena.zig");
 const interpreter = @import("../interpreter.zig");
+const trace = @import("trace.zig");
 const Interpreter = interpreter.Interpreter;
 
 pub fn addValuesSlow(interp: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
@@ -25,11 +26,11 @@ pub fn addValuesSlow(interp: *Interpreter, a: value.JSValue, b: value.JSValue) !
     }
     // Float path
     const an = a.toNumber() orelse {
-        interpreter.traceTypeError(interp, "add(a)", a, b);
+        trace.traceTypeError(interp, "add(a)", a, b);
         return error.TypeError;
     };
     const bn = b.toNumber() orelse {
-        interpreter.traceTypeError(interp, "add(b)", a, b);
+        trace.traceTypeError(interp, "add(b)", a, b);
         return error.TypeError;
     };
     return try interp.allocFloat(an + bn);
@@ -39,11 +40,11 @@ pub fn addValuesSlow(interp: *Interpreter, a: value.JSValue, b: value.JSValue) !
 pub fn addNumericOnly(interp: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
     @branchHint(.cold);
     const an = a.toNumber() orelse {
-        interpreter.traceTypeError(interp, "add_num(a)", a, b);
+        trace.traceTypeError(interp, "add_num(a)", a, b);
         return error.TypeError;
     };
     const bn = b.toNumber() orelse {
-        interpreter.traceTypeError(interp, "add_num(b)", a, b);
+        trace.traceTypeError(interp, "add_num(b)", a, b);
         return error.TypeError;
     };
     return try interp.allocFloat(an + bn);
@@ -52,11 +53,11 @@ pub fn addNumericOnly(interp: *Interpreter, a: value.JSValue, b: value.JSValue) 
 pub fn subValuesSlow(interp: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
     @branchHint(.cold);
     const an = a.toNumber() orelse {
-        interpreter.traceTypeError(interp, "sub(a)", a, b);
+        trace.traceTypeError(interp, "sub(a)", a, b);
         return error.TypeError;
     };
     const bn = b.toNumber() orelse {
-        interpreter.traceTypeError(interp, "sub(b)", a, b);
+        trace.traceTypeError(interp, "sub(b)", a, b);
         return error.TypeError;
     };
     return try interp.allocFloat(an - bn);
@@ -65,11 +66,11 @@ pub fn subValuesSlow(interp: *Interpreter, a: value.JSValue, b: value.JSValue) !
 pub fn mulValuesSlow(interp: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
     @branchHint(.cold);
     const an = a.toNumber() orelse {
-        interpreter.traceTypeError(interp, "mul(a)", a, b);
+        trace.traceTypeError(interp, "mul(a)", a, b);
         return error.TypeError;
     };
     const bn = b.toNumber() orelse {
-        interpreter.traceTypeError(interp, "mul(b)", a, b);
+        trace.traceTypeError(interp, "mul(b)", a, b);
         return error.TypeError;
     };
     return try interp.allocFloat(an * bn);
@@ -332,11 +333,11 @@ pub fn valueToString(interp: *Interpreter, val: value.JSValue) !*string.JSString
 
 pub inline fn divValues(interp: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
     const an = a.toNumber() orelse {
-        interpreter.traceTypeError(interp, "div(a)", a, b);
+        trace.traceTypeError(interp, "div(a)", a, b);
         return error.TypeError;
     };
     const bn = b.toNumber() orelse {
-        interpreter.traceTypeError(interp, "div(b)", a, b);
+        trace.traceTypeError(interp, "div(b)", a, b);
         return error.TypeError;
     };
     return try interp.allocFloat(an / bn);
@@ -344,11 +345,11 @@ pub inline fn divValues(interp: *Interpreter, a: value.JSValue, b: value.JSValue
 
 pub inline fn powValues(interp: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
     const an = a.toNumber() orelse {
-        interpreter.traceTypeError(interp, "pow(a)", a, b);
+        trace.traceTypeError(interp, "pow(a)", a, b);
         return error.TypeError;
     };
     const bn = b.toNumber() orelse {
-        interpreter.traceTypeError(interp, "pow(b)", a, b);
+        trace.traceTypeError(interp, "pow(b)", a, b);
         return error.TypeError;
     };
     return try interp.allocFloat(std.math.pow(f64, an, bn));
