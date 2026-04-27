@@ -34,6 +34,12 @@ pub const object = @import("object.zig");
 pub const context = @import("context.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const interpreter = @import("interpreter.zig");
+
+// JIT C-ABI helpers are referenced from generated machine code via `extern fn`.
+// Anchor the module here so the linker emits the symbols.
+comptime {
+    _ = @import("interpreter/jit_intrinsics.zig");
+}
 pub const type_feedback = @import("type_feedback.zig");
 pub const builtins = @import("builtins/root.zig");
 // New two-pass parser with proper function compilation
