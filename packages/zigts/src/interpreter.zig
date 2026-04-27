@@ -23,6 +23,7 @@ const trace = @import("interpreter/trace.zig");
 const cmp = @import("interpreter/cmp.zig");
 const frame = @import("interpreter/frame.zig");
 const call = @import("interpreter/call.zig");
+const alloc = @import("interpreter/alloc.zig");
 
 const empty_code: [0]u8 = .{};
 const tier_count = perf.tier_count;
@@ -355,7 +356,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const idx = readU16(self.pc);
                 self.pc += 2;
-                try self.ctx.push(try self.getConstant(idx));
+                try self.ctx.push(try alloc.getConstant(self, idx));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .dup => {
@@ -898,7 +899,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const a = self.ctx.pop();
                 const cond_bool = a.toConditionBool() orelse {
-                    self.ctx.exception = try self.createBoolError(a);
+                    self.ctx.exception = try alloc.createBoolError(self, a);
                     break :sw value.JSValue.undefined_val;
                 };
                 try self.ctx.push(value.JSValue.fromBool(!cond_bool));
@@ -1017,7 +1018,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const cond = self.ctx.pop();
                 const cond_bool = cond.toConditionBool() orelse {
-                    self.ctx.exception = try self.createBoolError(cond);
+                    self.ctx.exception = try alloc.createBoolError(self, cond);
                     break :sw value.JSValue.undefined_val;
                 };
                 const offset = readI16(self.pc);
@@ -1031,7 +1032,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const cond = self.ctx.pop();
                 const cond_bool = cond.toConditionBool() orelse {
-                    self.ctx.exception = try self.createBoolError(cond);
+                    self.ctx.exception = try alloc.createBoolError(self, cond);
                     break :sw value.JSValue.undefined_val;
                 };
                 const offset = readI16(self.pc);
@@ -1055,7 +1056,7 @@ pub const Interpreter = struct {
             // ========================================
             .new_object => {
                 self.advanceOp();
-                const obj = try self.createObject();
+                const obj = try alloc.createObject(self);
                 try self.ctx.push(obj.toValue());
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -1063,7 +1064,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const length = readU16(self.pc);
                 self.pc += 2;
-                const obj = try self.createArray();
+                const obj = try alloc.createArray(self);
                 obj.setArrayLength(@intCast(length));
                 try self.ctx.push(obj.toValue());
                 continue :sw @enumFromInt(self.pc[0]);
@@ -1077,7 +1078,7 @@ pub const Interpreter = struct {
                 _ = prop_count;
 
                 const class_idx = self.ctx.getLiteralShape(shape_idx) orelse {
-                    const obj = try self.createObject();
+                    const obj = try alloc.createObject(self);
                     try self.ctx.push(obj.toValue());
                     continue :sw @enumFromInt(self.pc[0]);
                 };
@@ -1379,7 +1380,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const const_idx = readU16(self.pc);
                 self.pc += 2;
-                const bc_val = try self.getConstant(const_idx);
+                const bc_val = try alloc.getConstant(self, const_idx);
                 if (!bc_val.isExternPtr()) return error.TypeError;
                 const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
                 const root_class_idx = self.ctx.root_class_idx;
@@ -1397,7 +1398,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const const_idx = readU16(self.pc);
                 self.pc += 2;
-                const bc_val = try self.getConstant(const_idx);
+                const bc_val = try alloc.getConstant(self, const_idx);
                 if (!bc_val.isExternPtr()) return error.TypeError;
                 const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
                 const root_class_idx = self.ctx.root_class_idx;
@@ -1419,7 +1420,7 @@ pub const Interpreter = struct {
                 const upvalue_count: u8 = self.pc[0];
                 self.pc += 1;
 
-                const bc_val = try self.getConstant(const_idx);
+                const bc_val = try alloc.getConstant(self, const_idx);
                 if (!bc_val.isExternPtr()) return error.TypeError;
                 const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
 
@@ -1628,7 +1629,7 @@ pub const Interpreter = struct {
                 const const_idx = readU16(self.pc);
                 const argc: u8 = self.pc[2];
                 self.pc += 3;
-                try self.ctx.push(try self.getConstant(const_idx));
+                try self.ctx.push(try alloc.getConstant(self, const_idx));
                 self.call_opcode_offset = 4;
                 try call.doCall(self, argc, false);
                 self.call_opcode_offset = 2;
@@ -1811,7 +1812,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const module_idx = readU16(self.pc);
                 self.pc += 2;
-                const module_name_val = try self.getConstant(module_idx);
+                const module_name_val = try alloc.getConstant(self, module_idx);
                 _ = module_name_val;
                 const namespace = try self.ctx.createObject(null);
                 try self.ctx.push(namespace.toValue());
@@ -1821,7 +1822,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const name_idx = readU16(self.pc);
                 self.pc += 2;
-                const name_val = try self.getConstant(name_idx);
+                const name_val = try alloc.getConstant(self, name_idx);
                 _ = name_val;
                 const namespace_val = self.ctx.pop();
                 if (namespace_val.isObject()) {
@@ -1888,7 +1889,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const cond = self.ctx.pop();
                 const cond_bool = cond.toConditionBool() orelse {
-                    self.ctx.exception = try self.createBoolError(cond);
+                    self.ctx.exception = try alloc.createBoolError(self, cond);
                     return error.TypeError;
                 };
                 const offset = readI16(self.pc);
@@ -1912,7 +1913,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const divisor_idx = readU16(self.pc);
                 self.pc += 2;
-                const divisor_val = try self.getConstant(divisor_idx);
+                const divisor_val = try alloc.getConstant(self, divisor_idx);
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
@@ -1939,7 +1940,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const divisor_idx = readU16(self.pc);
                 self.pc += 2;
-                const divisor_val = try self.getConstant(divisor_idx);
+                const divisor_val = try alloc.getConstant(self, divisor_idx);
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
@@ -1965,7 +1966,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const divisor_idx = readU16(self.pc);
                 self.pc += 2;
-                const divisor_val = try self.getConstant(divisor_idx);
+                const divisor_val = try alloc.getConstant(self, divisor_idx);
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
@@ -2026,7 +2027,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const divisor_idx = readU16(self.pc);
                 self.pc += 2;
-                const divisor_val = try self.getConstant(divisor_idx);
+                const divisor_val = try alloc.getConstant(self, divisor_idx);
                 const sp = self.ctx.sp;
                 const a = self.ctx.stack[sp - 1];
 
@@ -2402,30 +2403,6 @@ pub const Interpreter = struct {
         return value.JSValue.fromFloat(v);
     }
 
-    fn createObject(self: *Interpreter) !*object.JSObject {
-        const root_class_idx = self.ctx.root_class_idx;
-        // Use arena for ephemeral object allocation if hybrid mode enabled
-        if (self.ctx.hybrid) |h| {
-            return object.JSObject.createWithArena(h.arena, root_class_idx, null, self.ctx.hidden_class_pool) orelse
-                return error.OutOfMemory;
-        }
-        return try object.JSObject.create(self.ctx.allocator, root_class_idx, null, self.ctx.hidden_class_pool);
-    }
-
-    fn createArray(self: *Interpreter) !*object.JSObject {
-        const root_class_idx = self.ctx.root_class_idx;
-        // Use arena for ephemeral array allocation if hybrid mode enabled
-        if (self.ctx.hybrid) |h| {
-            const obj = object.JSObject.createArrayWithArena(h.arena, root_class_idx) orelse
-                return error.OutOfMemory;
-            obj.prototype = self.ctx.array_prototype;
-            return obj;
-        }
-        const obj = try object.JSObject.createArray(self.ctx.allocator, root_class_idx);
-        obj.prototype = self.ctx.array_prototype;
-        return obj;
-    }
-
     /// Create a string using hybrid allocator if available
     /// Ephemeral strings use arena allocation, persistent strings use standard allocator
     pub inline fn createString(self: *Interpreter, s: []const u8) !*string.JSString {
@@ -2434,33 +2411,6 @@ pub const Interpreter = struct {
                 return error.OutOfMemory;
         }
         return try string.createString(self.ctx.allocator, s);
-    }
-
-    fn createBoolError(self: *Interpreter, val: value.JSValue) !value.JSValue {
-        const type_name = val.typeOf();
-        const prefix = "condition rejected: ";
-        const suffix = " has no falsy state";
-        // Build error message
-        var buf: [80]u8 = undefined;
-        const total = @min(prefix.len + type_name.len + suffix.len, buf.len);
-        @memcpy(buf[0..prefix.len], prefix);
-        const type_copy_len = @min(type_name.len, total - prefix.len);
-        @memcpy(buf[prefix.len..][0..type_copy_len], type_name[0..type_copy_len]);
-        const suffix_len = @min(suffix.len, total - prefix.len - type_copy_len);
-        @memcpy(buf[prefix.len + type_copy_len ..][0..suffix_len], suffix[0..suffix_len]);
-        const msg = buf[0 .. prefix.len + type_copy_len + suffix_len];
-        const js_str = blk: {
-            if (self.ctx.hybrid) |h| {
-                break :blk string.createStringWithArena(h.arena, msg) orelse return error.OutOfMemory;
-            }
-            break :blk try string.createString(self.ctx.allocator, msg);
-        };
-        return value.JSValue.fromPtr(js_str);
-    }
-
-    fn getConstant(self: *Interpreter, idx: u16) !value.JSValue {
-        if (idx >= self.constants.len) return error.InvalidConstant;
-        return self.constants[idx];
     }
 
 };
