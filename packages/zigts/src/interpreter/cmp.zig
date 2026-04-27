@@ -1,16 +1,12 @@
 //! Pure ECMAScript-style value primitives: ordering, loose equality, and
-//! string-length lookup across flat/rope/slice representations. Used by
-//! the comparison and length opcodes in dispatch and by JIT intrinsics.
-//!
-//! Lived as top-level free functions on interpreter.zig until the Slice E
-//! split. None of these take an Interpreter -- they are referentially
-//! transparent and safe to call from any context.
+//! string-length lookup across flat/rope/slice representations. None take
+//! an Interpreter -- referentially transparent, safe to call from anywhere.
 
 const std = @import("std");
 const value = @import("../value.zig");
 const string = @import("../string.zig");
 
-pub fn compareValues(a: value.JSValue, b: value.JSValue) !std.math.Order {
+pub inline fn compareValues(a: value.JSValue, b: value.JSValue) !std.math.Order {
     // Integer fast path
     if (a.isInt() and b.isInt()) {
         return std.math.order(a.getInt(), b.getInt());
@@ -26,7 +22,7 @@ pub fn compareValues(a: value.JSValue, b: value.JSValue) !std.math.Order {
 }
 
 /// Loose equality (==)
-pub fn looseEquals(a: value.JSValue, b: value.JSValue) bool {
+pub inline fn looseEquals(a: value.JSValue, b: value.JSValue) bool {
     // Same type - strict equals
     if (a.raw == b.raw) return true;
 
@@ -46,7 +42,7 @@ pub fn looseEquals(a: value.JSValue, b: value.JSValue) bool {
 }
 
 /// Length of any string type: flat JSString, RopeNode, or SliceString.
-pub fn getAnyStringLength(val: value.JSValue) value.JSValue {
+pub inline fn getAnyStringLength(val: value.JSValue) value.JSValue {
     if (val.isString()) {
         const str = val.toPtr(string.JSString);
         return value.JSValue.fromInt(@intCast(str.len));

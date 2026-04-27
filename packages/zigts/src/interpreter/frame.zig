@@ -1,17 +1,6 @@
-//! Frame-state and upvalue lifecycle helpers.
-//!
-//! `pushState`/`popState` save and restore the per-frame interpreter state
-//! (pc, code_end, constants, current_func, plus context counters) across a
-//! nested call. `captureUpvalue`/`closeUpvaluesAbove` manage the linked
-//! list of open upvalues that lexically references locals on the value
-//! stack.
-//!
-//! Lived as methods on `Interpreter` until the Slice F split. Moved here
-//! as free functions taking `*Interpreter` so frame management is no
-//! longer tangled with the dispatch-heavy interpreter.zig. The nested
-//! `MAX_STATE_DEPTH` and `SavedState` types are now `pub` on Interpreter
-//! to allow this access.
+//! Frame-state and upvalue lifecycle helpers, plus the bytecode call entry.
 
+const std = @import("std");
 const value = @import("../value.zig");
 const bytecode = @import("../bytecode.zig");
 const object = @import("../object.zig");
@@ -42,7 +31,7 @@ pub fn pushState(self: *Interpreter) InterpreterError!void {
 }
 
 pub fn popState(self: *Interpreter) void {
-    @import("std").debug.assert(self.state_depth > 0);
+    std.debug.assert(self.state_depth > 0);
     self.state_depth -= 1;
     const state = self.state_stack[self.state_depth];
     self.pc = state.pc;
@@ -56,8 +45,6 @@ pub fn popState(self: *Interpreter) void {
     self.ctx.exception = state.exception;
 }
 
-/// Capture a local variable as an upvalue.
-/// Reuses an existing open upvalue when one already points at the slot.
 pub fn captureUpvalue(self: *Interpreter, local_idx: u8) !*object.Upvalue {
     const local_ptr = self.ctx.getLocalPtr(local_idx);
 
@@ -96,7 +83,6 @@ pub fn captureUpvalue(self: *Interpreter, local_idx: u8) !*object.Upvalue {
     return new_uv;
 }
 
-/// Close all open upvalues that reference slots at or above the given index.
 pub fn closeUpvaluesAbove(self: *Interpreter, local_idx: u8) void {
     const threshold = self.ctx.getLocalPtr(local_idx);
 
@@ -116,15 +102,11 @@ pub fn closeUpvaluesAbove(self: *Interpreter, local_idx: u8) void {
     }
 }
 
-/// Execute a bytecode function with given arguments and return the result.
-///
-/// Lifecycle: profile entry (and possibly trigger JIT compile), save the
-/// caller's interpreter state, push a call frame on the context stack,
-/// initialize locals from `args` (undefined for missing positions),
-/// dispatch via JIT or interpreter, then pop the frame and restore.
-///
-/// Closures: callers must set up upvalue access on `func_val` before
-/// arrival; this function relies on the context's scope chain.
+// TODO: the JIT-promotion ladder below (lines marked "Profile function entry"
+// through "Optimized tier promotion") is duplicated in interpreter.zig's
+// `run()` method. The two have already drifted: `run()` carries an extra
+// hot-loop backedge branch. Extract a shared `jit_compile.maybePromote(...)`
+// helper once both sites can reach it cleanly.
 pub fn callBytecodeFunction(
     self: *Interpreter,
     func_val: value.JSValue,
@@ -134,10 +116,9 @@ pub fn callBytecodeFunction(
 ) InterpreterError!value.JSValue {
     trace.traceCall(self, "bc enter", @intCast(args.len), false);
     defer trace.traceCall(self, "bc exit", @intCast(args.len), false);
-    // Cast away const for profiling/JIT - safe because we only modify profiling fields
+    // const_cast safe: only profiling fields are mutated below.
     const func_bc_mut = @constCast(func_bc);
 
-    // Profile function entry and potentially trigger JIT compilation
     const is_candidate = self.profileFunctionEntry(func_bc_mut);
     if (is_candidate) {
         jit_compile.allocateTypeFeedback(self, func_bc_mut) catch {};

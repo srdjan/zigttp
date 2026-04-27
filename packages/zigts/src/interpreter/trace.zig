@@ -1,14 +1,10 @@
 //! Diagnostic call/type tracing for the interpreter.
 //!
-//! Activated by env vars `ZTS_TRACE_CALLS` (master switch),
-//! `ZTS_TRACE_CALLS_LIMIT` (per-thread call-event budget), `ZTS_CALL_GUARD`
-//! (max call depth before guard logging), and `ZTS_TRACE_BC_FULL` (dump
-//! the full bytecode window instead of a +/-12 op slice).
-//!
-//! Lived as top-level free functions on interpreter.zig until the Slice D
-//! split. State is module-private; the cache flags are reused once the env
-//! probe lands. `call_trace_count` is threadlocal so per-worker budgets
-//! don't bleed across pooled handler runs.
+//! Env vars: `ZTS_TRACE_CALLS` (master switch), `ZTS_TRACE_CALLS_LIMIT`
+//! (per-thread call-event budget), `ZTS_CALL_GUARD` (max call depth before
+//! guard logging), `ZTS_TRACE_BC_FULL` (dump full bytecode window instead
+//! of a +/-12 op slice). `call_trace_count` is threadlocal so per-worker
+//! budgets don't bleed across pooled handler runs.
 
 const std = @import("std");
 const value = @import("../value.zig");
@@ -23,7 +19,7 @@ var call_guard_cache: usize = 0;
 var call_guard_cached = false;
 threadlocal var call_trace_count: usize = 0;
 
-pub fn callTraceEnabled() bool {
+pub inline fn callTraceEnabled() bool {
     if (call_trace_cache) |cached| return cached;
     const enabled = std.c.getenv("ZTS_TRACE_CALLS") != null;
     call_trace_cache = enabled;
