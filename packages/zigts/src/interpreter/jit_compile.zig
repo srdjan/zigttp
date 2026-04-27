@@ -1,14 +1,7 @@
-//! JIT tier-promotion and type-feedback lifecycle helpers.
-//!
-//! These ran as methods on `Interpreter` until the Slice B split. They live
-//! here as free functions taking `*Interpreter` so the dispatch-heavy
-//! interpreter.zig stays focused on the dispatch loop. All `Interpreter`
-//! field accesses (`pic_cache`, `tier_promotions`, `current_func`, ...)
-//! work because struct fields are pub by default in Zig.
-//!
-//! The hot-path recorders (recordBinaryOpFeedback / recordPropertyFeedback /
-//! recordCallSiteFeedback) stay `pub inline fn` so call sites in dispatch
-//! still inline.
+//! JIT tier-promotion and type-feedback lifecycle helpers. The hot-path
+//! recorders (`recordBinaryOpFeedback` / `recordPropertyFeedback` /
+//! `recordCallSiteFeedback`) are `pub inline fn` so dispatch sites inline
+//! them across the module boundary.
 
 const std = @import("std");
 const compat = @import("../compat.zig");
