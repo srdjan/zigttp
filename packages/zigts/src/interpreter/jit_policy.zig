@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
+const env_cache = @import("env_cache.zig");
 
 /// JIT compilation policy for FaaS-aware optimization.
 pub const JitPolicy = enum {
@@ -99,20 +100,14 @@ pub fn disableJitForTests() void {
 
 pub fn jitDisabled() bool {
     if (getJitPolicy() == .disabled) return true;
-    if (jit_disabled_cache) |cached| return cached;
-    const disabled = std.c.getenv("ZTS_DISABLE_JIT") != null;
-    jit_disabled_cache = disabled;
-    return disabled;
+    return env_cache.cachedBoolPresent("ZTS_DISABLE_JIT", &jit_disabled_cache);
 }
 
 /// When ZTS_TIERING_DEOPT_SUPPRESS is set, functions that recently deopted
 /// repeatedly are denied promotion to optimized_candidate for a cooldown
 /// window. Defaults to off until field data confirms the heuristic.
 pub fn isTieringDeoptSuppressEnabled() bool {
-    if (tiering_deopt_suppress_cache) |cached| return cached;
-    const enabled = std.c.getenv("ZTS_TIERING_DEOPT_SUPPRESS") != null;
-    tiering_deopt_suppress_cache = enabled;
-    return enabled;
+    return env_cache.cachedBoolPresent("ZTS_TIERING_DEOPT_SUPPRESS", &tiering_deopt_suppress_cache);
 }
 
 /// Reset the cached tiering suppression env read; tests use this to toggle
