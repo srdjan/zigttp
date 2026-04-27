@@ -15,6 +15,7 @@ const object = @import("../object.zig");
 const builtins = @import("../builtins/root.zig");
 const interpreter = @import("../interpreter.zig");
 const Interpreter = interpreter.Interpreter;
+const arith = @import("arith.zig");
 
 /// JIT helper: perform a call/call_method from compiled code.
 /// Pops arguments and function from the context stack using interpreter logic,
@@ -294,7 +295,7 @@ pub export fn jitConcatN(ctx: *context.Context, count: u8) value.JSValue {
         return value.JSValue.exception_val;
     };
 
-    const result = interp.concatNValues(count) catch {
+    const result = arith.concatNValues(interp, count) catch {
         ctx.throwException(value.JSValue.exception_val);
         return value.JSValue.exception_val;
     };
