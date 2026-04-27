@@ -9,6 +9,7 @@
 const std = @import("std");
 const value = @import("../value.zig");
 const bytecode = @import("../bytecode.zig");
+const object = @import("../object.zig");
 const env_cache = @import("env_cache.zig");
 const interpreter = @import("../interpreter.zig");
 const Interpreter = interpreter.Interpreter;
@@ -71,6 +72,30 @@ pub fn traceLastOp(self: *Interpreter, label: []const u8) void {
             "[typeerror] {s} op={s} depth={} sp={} fp={}\n",
             .{ label, @tagName(self.last_op), self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
         );
+    }
+}
+
+pub fn traceNotCallable(self: *Interpreter, func_val: value.JSValue, this_val: value.JSValue) void {
+    if (!callTraceEnabled()) return;
+    std.debug.print(
+        "[call] not-callable type={s} func={} this={} depth={} sp={} fp={}\n",
+        .{ func_val.typeOf(), func_val, this_val, self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
+    );
+    if (func_val.isObject()) {
+        const obj = object.JSObject.fromValue(func_val);
+        std.debug.print(
+            "[call] not-callable object class={} callable={} generator={} async={}\n",
+            .{
+                @intFromEnum(obj.class_id),
+                @intFromBool(obj.flags.is_callable),
+                @intFromBool(obj.flags.is_generator),
+                @intFromBool(obj.flags.is_async),
+            },
+        );
+    }
+    if (self.current_func) |cur| {
+        const pc_off = @as(usize, @intCast(@intFromPtr(self.pc) - @intFromPtr(cur.code.ptr)));
+        std.debug.print("[call] not-callable pc_off={} func_locals={}\n", .{ pc_off, cur.local_count });
     }
 }
 
