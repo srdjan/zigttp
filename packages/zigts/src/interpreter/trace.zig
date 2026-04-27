@@ -24,11 +24,11 @@ pub inline fn callTraceEnabled() bool {
 }
 
 pub fn callTraceLimit() usize {
-    return env_cache.cachedUsizeNonzero("ZTS_TRACE_CALLS_LIMIT", &call_trace_limit_cache, 200);
+    return env_cache.cachedUintNonzero(usize, "ZTS_TRACE_CALLS_LIMIT", &call_trace_limit_cache, 200);
 }
 
 pub fn callGuardDepth() usize {
-    return env_cache.cachedUsize("ZTS_CALL_GUARD", &call_guard_cache, 0);
+    return env_cache.cachedUint(usize, "ZTS_CALL_GUARD", &call_guard_cache, 0);
 }
 
 pub fn traceCall(self: *Interpreter, label: []const u8, argc: u8, is_method: bool) void {

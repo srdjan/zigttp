@@ -9,6 +9,7 @@
 const std = @import("std");
 const object = @import("../object.zig");
 const type_feedback = @import("../type_feedback.zig");
+const env_cache = @import("env_cache.zig");
 
 var pic_mega_recovery_window_cache: ?u16 = null;
 var pic_recovery_disabled_cache: ?bool = null;
@@ -17,25 +18,13 @@ var pic_recovery_disabled_cache: ?bool = null;
 /// before it is allowed to reset and re-specialize on the dominant shape.
 /// Overridable via ZTS_PIC_MEGA_RECOVERY_WINDOW.
 pub fn getPicMegaRecoveryWindow() u16 {
-    if (pic_mega_recovery_window_cache) |cached| return cached;
-    const default_window: u16 = 32;
-    if (std.c.getenv("ZTS_PIC_MEGA_RECOVERY_WINDOW")) |raw_ptr| {
-        const raw = std.mem.sliceTo(raw_ptr, 0);
-        const parsed = std.fmt.parseUnsigned(u16, raw, 10) catch default_window;
-        pic_mega_recovery_window_cache = if (parsed == 0) default_window else parsed;
-    } else {
-        pic_mega_recovery_window_cache = default_window;
-    }
-    return pic_mega_recovery_window_cache.?;
+    return env_cache.cachedUintNonzero(u16, "ZTS_PIC_MEGA_RECOVERY_WINDOW", &pic_mega_recovery_window_cache, 32);
 }
 
 /// When ZTS_PIC_DISABLE_RECOVERY is set, PICs stay megamorphic permanently
 /// (legacy behavior) instead of attempting recovery after a stable shape window.
 pub fn isPicRecoveryDisabled() bool {
-    if (pic_recovery_disabled_cache) |cached| return cached;
-    const disabled = std.c.getenv("ZTS_PIC_DISABLE_RECOVERY") != null;
-    pic_recovery_disabled_cache = disabled;
-    return disabled;
+    return env_cache.cachedBoolPresent("ZTS_PIC_DISABLE_RECOVERY", &pic_recovery_disabled_cache);
 }
 
 /// Single entry in a polymorphic inline cache
