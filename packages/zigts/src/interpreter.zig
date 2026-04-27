@@ -223,12 +223,16 @@ pub const Interpreter = struct {
         self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
     }
 
-    /// Run bytecode function
+    /// Run bytecode function. Public entry point.
+    // TODO: the JIT-promotion ladder below is also present in
+    // `interpreter/frame.zig:callBytecodeFunction`. The two have drifted -
+    // run() carries an extra hot-loop backedge promotion branch that
+    // callBytecodeFunction lacks. Extract a shared `jit_compile.maybePromote(...)`
+    // helper once both sites can reach it cleanly.
     pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
-        // Cast away const for profiling/JIT - safe because we only modify profiling fields
+        // const_cast safe: only profiling fields are mutated below.
         const func_mut = @constCast(func);
 
-        // Profile function entry and potentially trigger JIT compilation
         const is_candidate = self.profileFunctionEntry(func_mut);
         if (is_candidate) {
             // Allocate type feedback for future optimization
@@ -325,9 +329,11 @@ pub const Interpreter = struct {
         };
     }
 
-    /// Stable cross-package entry point. Implementation lives in
-    /// `interpreter/frame.zig`; external callers stay on the method form.
-    pub fn callBytecodeFunction(
+    /// Method form preserved so cross-package callers in
+    /// `packages/runtime/src/zruntime.zig` and `packages/tools/src/precompile.zig`
+    /// can keep using `interp.callBytecodeFunction(...)` without reaching
+    /// into a sibling module.
+    pub inline fn callBytecodeFunction(
         self: *Interpreter,
         func_val: value.JSValue,
         func_bc: *const bytecode.FunctionBytecode,
