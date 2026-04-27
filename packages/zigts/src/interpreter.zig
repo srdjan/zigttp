@@ -22,6 +22,7 @@ const arith = @import("interpreter/arith.zig");
 const trace = @import("interpreter/trace.zig");
 const cmp = @import("interpreter/cmp.zig");
 const frame = @import("interpreter/frame.zig");
+const call = @import("interpreter/call.zig");
 
 const empty_code: [0]u8 = .{};
 const tier_count = perf.tier_count;
@@ -1670,7 +1671,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const argc: u8 = self.pc[0];
                 self.pc += 1;
-                try self.doCall(argc, false);
+                try call.doCall(self, argc, false);
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .call_method => {
@@ -1711,14 +1712,14 @@ pub const Interpreter = struct {
                     }
                 }
 
-                try self.doCall(argc, true);
+                try call.doCall(self, argc, true);
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .tail_call => {
                 self.advanceOp();
                 const argc: u8 = self.pc[0];
                 self.pc += 1;
-                try self.doCall(argc, false);
+                try call.doCall(self, argc, false);
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .push_const_call => {
@@ -1728,7 +1729,7 @@ pub const Interpreter = struct {
                 self.pc += 3;
                 try self.ctx.push(try self.getConstant(const_idx));
                 self.call_opcode_offset = 4;
-                try self.doCall(argc, false);
+                try call.doCall(self, argc, false);
                 self.call_opcode_offset = 2;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -1746,30 +1747,30 @@ pub const Interpreter = struct {
                     const js_obj = object.JSObject.fromValue(obj);
                     const pool = self.ctx.hidden_class_pool orelse {
                         try self.ctx.push(value.JSValue.undefined_val);
-                        try self.doCall(argc, true);
+                        try call.doCall(self, argc, true);
                         continue :sw @enumFromInt(self.pc[0]);
                     };
                     if (js_obj.getProperty(pool, atom)) |method| {
                         try self.ctx.push(method);
-                        try self.doCall(argc, true);
+                        try call.doCall(self, argc, true);
                         continue :sw @enumFromInt(self.pc[0]);
                     }
                 } else if (obj.isAnyString()) {
                     if (self.ctx.string_prototype) |proto| {
                         const pool = self.ctx.hidden_class_pool orelse {
                             try self.ctx.push(value.JSValue.undefined_val);
-                            try self.doCall(argc, true);
+                            try call.doCall(self, argc, true);
                             continue :sw @enumFromInt(self.pc[0]);
                         };
                         if (proto.getProperty(pool, atom)) |method| {
                             try self.ctx.push(method);
-                            try self.doCall(argc, true);
+                            try call.doCall(self, argc, true);
                             continue :sw @enumFromInt(self.pc[0]);
                         }
                     }
                 }
                 try self.ctx.push(value.JSValue.undefined_val);
-                try self.doCall(argc, true);
+                try call.doCall(self, argc, true);
                 continue :sw @enumFromInt(self.pc[0]);
             },
 
@@ -2265,7 +2266,7 @@ pub const Interpreter = struct {
                 // feedback currently flows through feedback_site_map keyed on bc offset.
                 self.pc += 3;
                 self.call_opcode_offset = 4;
-                try self.doCall(argc, false);
+                try call.doCall(self, argc, false);
                 self.call_opcode_offset = 2;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -2561,218 +2562,6 @@ pub const Interpreter = struct {
         return self.constants[idx];
     }
 
-    /// Maximum arguments for stack-based allocation (security limit)
-    pub const MAX_STACK_ARGS = 256;
-
-    /// Perform function call, dispatching to native functions, bytecode functions,
-    /// generators, or async functions as appropriate.
-    ///
-    /// Stack layout on entry:
-    ///   Regular call: [func, arg0, arg1, ..., argN-1] (argc values after func)
-    ///   Method call:  [obj, func, arg0, arg1, ..., argN-1] (obj is 'this')
-    ///
-    /// Call dispatch order:
-    /// 1. Pop arguments from stack into local array
-    /// 2. Pop function value
-    /// 3. For method calls, pop 'this' value
-    /// 4. Check if value is callable (has function data)
-    /// 5. Dispatch based on function type:
-    ///    - Native: Call C/Zig function directly, push result
-    ///    - Generator: Create generator object, initialize locals, push iterator
-    ///    - Async: Execute synchronously, wrap result in Promise-like object
-    ///    - Bytecode: Call via callBytecodeFunction, push result
-    ///
-    /// Security: Limits argc to MAX_STACK_ARGS (256) to prevent stack buffer overflow.
-    pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!void {
-        // Stack layout for regular call: [func, arg0, arg1, ..., argN-1]
-        // Stack layout for method call: [obj, func, arg0, arg1, ..., argN-1]
-
-        // CRITICAL: Bounds check to prevent buffer overflow (security fix)
-        if (argc > MAX_STACK_ARGS) {
-            return error.TooManyArguments;
-        }
-        trace.traceCall(self, "enter", argc, is_method);
-        defer trace.traceCall(self, "exit", argc, is_method);
-        const guard = trace.callGuardDepth();
-        if (guard != 0 and self.ctx.call_depth >= guard) {
-            trace.traceCall(self, "guard", argc, is_method);
-            return error.CallStackOverflow;
-        }
-
-        // Collect arguments (in reverse order from stack)
-        var args: [MAX_STACK_ARGS]value.JSValue = undefined;
-        var i: usize = argc;
-        while (i > 0) {
-            i -= 1;
-            args[i] = self.ctx.pop();
-        }
-
-        // Pop function
-        const func_val = self.ctx.pop();
-
-        // Pop 'this' for method calls
-        const this_val = if (is_method) self.ctx.pop() else value.JSValue.undefined_val;
-
-        // Check if callable
-        if (!func_val.isCallable()) {
-            if (trace.callTraceEnabled()) {
-                std.debug.print(
-                    "[call] not-callable type={s} func={} this={} depth={} sp={} fp={}\n",
-                    .{ func_val.typeOf(), func_val, this_val, self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
-                );
-                if (func_val.isObject()) {
-                    const obj = object.JSObject.fromValue(func_val);
-                    std.debug.print(
-                        "[call] not-callable object class={} callable={} generator={} async={}\n",
-                        .{
-                            @intFromEnum(obj.class_id),
-                            @intFromBool(obj.flags.is_callable),
-                            @intFromBool(obj.flags.is_generator),
-                            @intFromBool(obj.flags.is_async),
-                        },
-                    );
-                }
-                if (self.current_func) |cur| {
-                    const pc_off = @as(usize, @intCast(@intFromPtr(self.pc) - @intFromPtr(cur.code.ptr)));
-                    std.debug.print("[call] not-callable pc_off={} func_locals={}\n", .{ pc_off, cur.local_count });
-                }
-            }
-            return error.NotCallable;
-        }
-
-        // Get the function object
-        const func_obj = object.JSObject.fromValue(func_val);
-
-        // Check for native function
-        if (func_obj.getNativeFunctionData()) |native_data| {
-            // Fast dispatch for hot builtins - bypass wrapper overhead
-            const result: value.JSValue = switch (native_data.builtin_id) {
-                .json_parse => builtins.jsonParse(self.ctx, this_val, args[0..argc]),
-                .json_stringify => builtins.jsonStringify(self.ctx, this_val, args[0..argc]),
-                .string_index_of => builtins.stringIndexOf(self.ctx, this_val, args[0..argc]),
-                .string_slice => builtins.stringSlice(self.ctx, this_val, args[0..argc]),
-                // Math methods - direct calls without error handling wrapper
-                .math_floor => builtins.mathFloor(self.ctx, this_val, args[0..argc]),
-                .math_ceil => builtins.mathCeil(self.ctx, this_val, args[0..argc]),
-                .math_round => builtins.mathRound(self.ctx, this_val, args[0..argc]),
-                .math_abs => builtins.mathAbs(self.ctx, this_val, args[0..argc]),
-                .math_min => builtins.mathMin(self.ctx, this_val, args[0..argc]),
-                .math_max => builtins.mathMax(self.ctx, this_val, args[0..argc]),
-                // Number parsing
-                .parse_int => builtins.numberParseInt(self.ctx, this_val, args[0..argc]),
-                .parse_float => builtins.numberParseFloat(self.ctx, this_val, args[0..argc]),
-                .none => blk: {
-                    // Generic path for non-hot builtins
-                    break :blk native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
-                        if (err == error.DurableSuspended) return error.DurableSuspended;
-                        const func_name = if (native_data.name.toPredefinedName()) |name| name else "<native>";
-                        std.log.err("Native function '{s}' error: {}", .{ func_name, err });
-                        self.ctx.throwException(value.JSValue.exception_val);
-                        return error.NativeFunctionError;
-                    };
-                },
-            };
-            // Check for exception from direct builtin calls
-            if (self.ctx.hasException()) {
-                return error.NativeFunctionError;
-            }
-            try self.ctx.push(result);
-            return;
-        }
-
-        // Closure or bytecode function
-        const closure_data = func_obj.getClosureData();
-        const func_bc_opt = if (closure_data) |cd|
-            cd.bytecode
-        else if (func_obj.getBytecodeFunctionData()) |bc_data|
-            bc_data.bytecode
-        else
-            null;
-
-        // Record call site feedback for inlining decisions
-        jit_compile.recordCallSiteFeedback(self, func_bc_opt);
-
-        if (func_bc_opt) |func_bc| {
-            // Set current closure context for this call (null for non-closures)
-            const prev_closure = self.current_closure;
-            self.current_closure = closure_data;
-            defer self.current_closure = prev_closure;
-
-            // Check if this is a generator function (using cached flag)
-            if (func_obj.flags.is_generator) {
-                // Create a generator object instead of executing
-                const root_class_idx = self.ctx.root_class_idx;
-                const gen_obj = if (self.ctx.hybrid) |h|
-                    (object.JSObject.createGeneratorWithArena(
-                        h.arena,
-                        root_class_idx,
-                        func_bc,
-                        self.ctx.generator_prototype,
-                    ) orelse return error.OutOfMemory)
-                else
-                    (object.JSObject.createGenerator(
-                        self.ctx.allocator,
-                        root_class_idx,
-                        func_bc,
-                        self.ctx.generator_prototype,
-                    ) catch return error.OutOfMemory);
-
-                // Initialize generator locals with arguments
-                const gen_data = gen_obj.getGeneratorData().?;
-                var local_idx: usize = 0;
-                while (local_idx < gen_data.locals.len) : (local_idx += 1) {
-                    if (local_idx < argc) {
-                        gen_data.locals[local_idx] = args[local_idx];
-                    }
-                }
-
-                try self.ctx.push(gen_obj.toValue());
-                return;
-            }
-
-            // Check if this is an async function (using cached flag)
-            if (func_obj.flags.is_async) {
-                // Execute async function synchronously and wrap result in Promise-like object
-                // For full async support, we'd need an event loop and proper Promise integration
-                // This simplified version executes synchronously and returns a resolved Promise
-                const result = try frame.callBytecodeFunction(self, func_val, func_bc, this_val, args[0..argc]);
-
-                // Create a resolved Promise-like object {then: fn, value: result}
-                const promise_obj = self.ctx.createObject(null) catch {
-                    return error.OutOfMemory;
-                };
-
-                // Store the resolved value
-                const value_atom = self.ctx.atoms.intern("value") catch return error.OutOfMemory;
-                self.ctx.setPropertyChecked(promise_obj, value_atom, result) catch |err| {
-                    return switch (err) {
-                        error.ArenaObjectEscape => error.ArenaObjectEscape,
-                        else => error.OutOfMemory,
-                    };
-                };
-
-                // Add a 'then' method (simplified - just calls callback with value)
-                // For a full implementation, we'd create a proper Promise with thenable support
-                const then_atom = self.ctx.atoms.intern("then") catch return error.OutOfMemory;
-                self.ctx.setPropertyChecked(promise_obj, then_atom, value.JSValue.true_val) catch |err| {
-                    return switch (err) {
-                        error.ArenaObjectEscape => error.ArenaObjectEscape,
-                        else => error.OutOfMemory,
-                    };
-                };
-
-                try self.ctx.push(promise_obj.toValue());
-                return;
-            }
-
-            const result = try frame.callBytecodeFunction(self, func_val, func_bc, this_val, args[0..argc]);
-            try self.ctx.push(result);
-            return;
-        }
-
-        // Unknown function type
-        try self.ctx.push(value.JSValue.undefined_val);
-    }
 };
 
 // ============================================================================

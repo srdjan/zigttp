@@ -18,6 +18,7 @@ const Interpreter = interpreter.Interpreter;
 const arith = @import("arith.zig");
 const cmp = @import("cmp.zig");
 const frame = @import("frame.zig");
+const call = @import("call.zig");
 
 /// JIT helper: perform a call/call_method from compiled code.
 /// Pops arguments and function from the context stack using interpreter logic,
@@ -28,7 +29,7 @@ pub export fn jitCall(ctx: *context.Context, argc: u8, is_method: u8) value.JSVa
         return value.JSValue.exception_val;
     };
 
-    interp.doCall(argc, is_method != 0) catch {
+    call.doCall(interp, argc, is_method != 0) catch {
         ctx.throwException(value.JSValue.exception_val);
         return value.JSValue.exception_val;
     };
@@ -62,7 +63,7 @@ pub export fn jitCallBytecode(
     const func_val = ctx.stack[func_idx];
 
     if (!func_val.isCallable()) {
-        interp.doCall(argc, is_method_bool) catch {
+        call.doCall(interp, argc, is_method_bool) catch {
             ctx.throwException(value.JSValue.exception_val);
             return value.JSValue.exception_val;
         };
@@ -71,7 +72,7 @@ pub export fn jitCallBytecode(
 
     const func_obj = object.JSObject.fromValue(func_val);
     if (func_obj.flags.is_generator or func_obj.flags.is_async) {
-        interp.doCall(argc, is_method_bool) catch {
+        call.doCall(interp, argc, is_method_bool) catch {
             ctx.throwException(value.JSValue.exception_val);
             return value.JSValue.exception_val;
         };
@@ -87,18 +88,18 @@ pub export fn jitCallBytecode(
         null;
 
     if (func_bc_opt == null or func_bc_opt.? != expected_bc) {
-        interp.doCall(argc, is_method_bool) catch {
+        call.doCall(interp, argc, is_method_bool) catch {
             ctx.throwException(value.JSValue.exception_val);
             return value.JSValue.exception_val;
         };
         return ctx.pop();
     }
 
-    if (argc > Interpreter.MAX_STACK_ARGS) {
+    if (argc > call.MAX_STACK_ARGS) {
         ctx.throwException(value.JSValue.exception_val);
         return value.JSValue.exception_val;
     }
-    var args: [Interpreter.MAX_STACK_ARGS]value.JSValue = undefined;
+    var args: [call.MAX_STACK_ARGS]value.JSValue = undefined;
     var i: usize = argc;
     while (i > 0) {
         i -= 1;
@@ -151,11 +152,11 @@ pub export fn jitCallBytecodeFast(
 
     const closure_data = func_obj.getClosureData();
 
-    if (argc > Interpreter.MAX_STACK_ARGS) {
+    if (argc > call.MAX_STACK_ARGS) {
         ctx.throwException(value.JSValue.exception_val);
         return value.JSValue.exception_val;
     }
-    var args: [Interpreter.MAX_STACK_ARGS]value.JSValue = undefined;
+    var args: [call.MAX_STACK_ARGS]value.JSValue = undefined;
     var i: usize = argc;
     while (i > 0) {
         i -= 1;
