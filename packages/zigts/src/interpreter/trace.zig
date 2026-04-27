@@ -9,48 +9,26 @@
 const std = @import("std");
 const value = @import("../value.zig");
 const bytecode = @import("../bytecode.zig");
+const env_cache = @import("env_cache.zig");
 const interpreter = @import("../interpreter.zig");
 const Interpreter = interpreter.Interpreter;
 
 var call_trace_cache: ?bool = null;
-var call_trace_limit_cache: usize = 0;
-var call_trace_limit_cached = false;
-var call_guard_cache: usize = 0;
-var call_guard_cached = false;
+var call_trace_limit_cache: ?usize = null;
+var call_guard_cache: ?usize = null;
+var trace_bc_full_cache: ?bool = null;
 threadlocal var call_trace_count: usize = 0;
 
 pub inline fn callTraceEnabled() bool {
-    if (call_trace_cache) |cached| return cached;
-    const enabled = std.c.getenv("ZTS_TRACE_CALLS") != null;
-    call_trace_cache = enabled;
-    return enabled;
+    return env_cache.cachedBoolPresent("ZTS_TRACE_CALLS", &call_trace_cache);
 }
 
 pub fn callTraceLimit() usize {
-    if (call_trace_limit_cached) return call_trace_limit_cache;
-    const default_limit: usize = 200;
-    if (std.c.getenv("ZTS_TRACE_CALLS_LIMIT")) |raw_ptr| {
-        const raw = std.mem.sliceTo(raw_ptr, 0);
-        const parsed = std.fmt.parseUnsigned(usize, raw, 10) catch default_limit;
-        call_trace_limit_cache = if (parsed == 0) default_limit else parsed;
-    } else {
-        call_trace_limit_cache = default_limit;
-    }
-    call_trace_limit_cached = true;
-    return call_trace_limit_cache;
+    return env_cache.cachedUsizeNonzero("ZTS_TRACE_CALLS_LIMIT", &call_trace_limit_cache, 200);
 }
 
 pub fn callGuardDepth() usize {
-    if (call_guard_cached) return call_guard_cache;
-    if (std.c.getenv("ZTS_CALL_GUARD")) |raw_ptr| {
-        const raw = std.mem.sliceTo(raw_ptr, 0);
-        const parsed = std.fmt.parseUnsigned(usize, raw, 10) catch 0;
-        call_guard_cache = parsed;
-    } else {
-        call_guard_cache = 0;
-    }
-    call_guard_cached = true;
-    return call_guard_cache;
+    return env_cache.cachedUsize("ZTS_CALL_GUARD", &call_guard_cache, 0);
 }
 
 pub fn traceCall(self: *Interpreter, label: []const u8, argc: u8, is_method: bool) void {
@@ -101,7 +79,7 @@ pub fn traceBytecodeWindow(self: *Interpreter, center_off: usize) void {
     const cur = self.current_func orelse return;
     const code = cur.code;
     if (code.len == 0) return;
-    const full = std.c.getenv("ZTS_TRACE_BC_FULL") != null;
+    const full = env_cache.cachedBoolPresent("ZTS_TRACE_BC_FULL", &trace_bc_full_cache);
     const window: usize = 12;
     const start = if (full) 0 else if (center_off > window) center_off - window else 0;
     const end = if (full) code.len else @min(code.len, center_off + window);
