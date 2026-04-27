@@ -51,6 +51,8 @@ pub fn resetProfilingCounters(self: *Interpreter) void {
     self.opcode_histogram = [_]u32{0} ** 256;
 }
 
+/// Update a PIC and observe whether it performed a megamorphic recovery,
+/// bumping PerfStats.mega_recoveries when it does.
 pub inline fn updatePic(
     self: *Interpreter,
     pic: *PolymorphicInlineCache,

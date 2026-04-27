@@ -12,27 +12,27 @@ pub inline fn cachedBoolPresent(name: [*:0]const u8, cache: *?bool) bool {
     return present;
 }
 
-/// Parse env var as usize with a fallback default. Cached after the first
-/// read. A parse failure also yields `default`.
-pub inline fn cachedUsize(name: [*:0]const u8, cache: *?usize, default: usize) usize {
+/// Parse env var as an unsigned integer of type `T` with a fallback default.
+/// Cached after the first read. A parse failure also yields `default`.
+pub inline fn cachedUint(comptime T: type, name: [*:0]const u8, cache: *?T, default: T) T {
     if (cache.*) |c| return c;
-    const result: usize = blk: {
+    const result: T = blk: {
         const raw_ptr = std.c.getenv(name) orelse break :blk default;
         const raw = std.mem.sliceTo(raw_ptr, 0);
-        break :blk std.fmt.parseUnsigned(usize, raw, 10) catch default;
+        break :blk std.fmt.parseUnsigned(T, raw, 10) catch default;
     };
     cache.* = result;
     return result;
 }
 
-/// Like `cachedUsize` but also treats a parsed `0` as "use default", for
+/// Like `cachedUint` but also treats a parsed `0` as "use default", for
 /// flags where 0 is meaningless.
-pub inline fn cachedUsizeNonzero(name: [*:0]const u8, cache: *?usize, default: usize) usize {
+pub inline fn cachedUintNonzero(comptime T: type, name: [*:0]const u8, cache: *?T, default: T) T {
     if (cache.*) |c| return c;
-    const result: usize = blk: {
+    const result: T = blk: {
         const raw_ptr = std.c.getenv(name) orelse break :blk default;
         const raw = std.mem.sliceTo(raw_ptr, 0);
-        const parsed = std.fmt.parseUnsigned(usize, raw, 10) catch break :blk default;
+        const parsed = std.fmt.parseUnsigned(T, raw, 10) catch break :blk default;
         break :blk if (parsed == 0) default else parsed;
     };
     cache.* = result;
