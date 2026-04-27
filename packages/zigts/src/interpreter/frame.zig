@@ -102,11 +102,6 @@ pub fn closeUpvaluesAbove(self: *Interpreter, local_idx: u8) void {
     }
 }
 
-// TODO: the JIT-promotion ladder below (lines marked "Profile function entry"
-// through "Optimized tier promotion") is duplicated in interpreter.zig's
-// `run()` method. The two have already drifted: `run()` carries an extra
-// hot-loop backedge branch. Extract a shared `jit_compile.maybePromote(...)`
-// helper once both sites can reach it cleanly.
 pub fn callBytecodeFunction(
     self: *Interpreter,
     func_val: value.JSValue,
@@ -119,41 +114,7 @@ pub fn callBytecodeFunction(
     // const_cast safe: only profiling fields are mutated below.
     const func_bc_mut = @constCast(func_bc);
 
-    const is_candidate = self.profileFunctionEntry(func_bc_mut);
-    if (is_candidate) {
-        jit_compile.allocateTypeFeedback(self, func_bc_mut) catch {};
-
-        // If no feedback sites exist, compile immediately
-        if (func_bc_mut.type_feedback_ptr == null and func_bc_mut.feedback_site_map == null) {
-            jit_compile.tryCompileBaseline(self, func_bc_mut) catch {};
-        }
-    }
-
-    // Compile after feedback warmup if eligible
-    if (!jit_policy.jitDisabled() and func_bc_mut.tier == .baseline_candidate and func_bc_mut.type_feedback_ptr != null) {
-        const warmup_target = jit_policy.getJitThreshold() + jit_policy.getJitFeedbackWarmup();
-        if (func_bc_mut.execution_count >= warmup_target) {
-            jit_compile.tryCompileBaseline(self, func_bc_mut) catch {};
-        }
-    }
-
-    // After warmup with type feedback, compile to baseline.
-    // (Hot-loop promotion uses post-execution feedback allocation -- see allocateTypeFeedbackDeferred below.)
-    if (!jit_policy.jitDisabled() and func_bc_mut.tier == .baseline_candidate and func_bc_mut.execution_count < jit_policy.getJitThreshold()) {
-        if (func_bc_mut.type_feedback_ptr) |tf| {
-            const baseline_warmup: u32 = 50;
-            if (func_bc_mut.execution_count >= baseline_warmup or tf.totalHits() > 100) {
-                jit_compile.tryCompileBaseline(self, func_bc_mut) catch {};
-            }
-        }
-    }
-
-    // Optimized tier promotion: compile when promoted from baseline by hot loop
-    if (!jit_policy.jitDisabled() and func_bc_mut.tier == .optimized_candidate) {
-        jit_compile.tryCompileOptimized(self, func_bc_mut) catch {
-            jit_compile.setTier(self, func_bc_mut, .baseline);
-        };
-    }
+    jit_compile.maybePromote(self, func_bc_mut, .nested);
 
     try pushState(self);
     defer popState(self);
@@ -238,61 +199,15 @@ pub fn callBytecodeFunction(
     return result;
 }
 
-/// Public entry point for executing a top-level bytecode function.
-///
-/// Sibling to `callBytecodeFunction` -- the JIT-promotion ladder is the
-/// same shape but with one extra hot-loop backedge promotion branch
-/// (functions can become baseline_candidate via the loop counter, not
-/// just execution_count). See the TODO above callBytecodeFunction --
-/// once both call sites are colocated, fold into a shared helper.
-///
-/// Unlike `callBytecodeFunction`, this is the outermost frame: no
-/// pushState/popState, no errdefer-popFrame, locals are seeded with
-/// `undefined` rather than caller-supplied args, and the JIT-compiled
-/// path returns directly without re-entering the upvalue cleanup.
+/// Top-level execution entry. Unlike `callBytecodeFunction`, this is the
+/// outermost frame: no pushState/popState, no errdefer-popFrame, locals
+/// seeded with `undefined` rather than caller-supplied args, JIT-compiled
+/// path returns directly without re-entering upvalue cleanup.
 pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
     // const_cast safe: only profiling fields are mutated below.
     const func_mut = @constCast(func);
 
-    const is_candidate = self.profileFunctionEntry(func_mut);
-    if (is_candidate) {
-        jit_compile.allocateTypeFeedback(self, func_mut) catch {};
-
-        // If no feedback sites exist, compile immediately
-        if (func_mut.type_feedback_ptr == null and func_mut.feedback_site_map == null) {
-            jit_compile.tryCompileBaseline(self, func_mut) catch {};
-        }
-    }
-
-    // Compile after feedback warmup if eligible
-    if (!jit_policy.jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.type_feedback_ptr != null) {
-        const warmup_target = jit_policy.getJitThreshold() + jit_policy.getJitFeedbackWarmup();
-        if (func_mut.execution_count >= warmup_target) {
-            jit_compile.tryCompileBaseline(self, func_mut) catch {};
-        }
-    }
-
-    // Hot-loop promotion: a function can reach baseline_candidate via the
-    // backedge counter alone (without hitting the execution-count threshold).
-    // Use a shorter feedback warmup since hot loops accumulate fast.
-    if (!jit_policy.jitDisabled() and func_mut.tier == .baseline_candidate and
-        func_mut.backedge_count >= bytecode.LOOP_JIT_THRESHOLD)
-    {
-        if (func_mut.type_feedback_ptr == null) {
-            jit_compile.allocateTypeFeedback(self, func_mut) catch {};
-        }
-        const hot_loop_warmup: u32 = 5;
-        if (func_mut.type_feedback_ptr != null and func_mut.execution_count >= hot_loop_warmup) {
-            jit_compile.tryCompileBaseline(self, func_mut) catch {};
-        }
-    }
-
-    // Optimized tier promotion: compile when promoted from baseline
-    if (!jit_policy.jitDisabled() and func_mut.tier == .optimized_candidate) {
-        jit_compile.tryCompileOptimized(self, func_mut) catch {
-            jit_compile.setTier(self, func_mut, .baseline);
-        };
-    }
+    jit_compile.maybePromote(self, func_mut, .entry);
 
     // Allocate space for locals
     const local_count = func.local_count;
