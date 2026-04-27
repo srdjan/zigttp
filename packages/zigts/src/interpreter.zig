@@ -227,10 +227,6 @@ pub const Interpreter = struct {
     /// Public entry point. Method form preserved so cross-package callers
     /// in `packages/runtime/src/zruntime.zig` and
     /// `packages/tools/src/precompile.zig` keep using `interp.run(...)`.
-    /// Implementation lives in `interpreter/frame.zig` next to its sibling
-    /// `callBytecodeFunction`; the two share a JIT-promotion ladder that
-    /// has drifted (run carries an extra hot-loop backedge branch) -- see
-    /// the TODO at the top of `frame.callBytecodeFunction`.
     pub inline fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
         return frame.run(self, func);
     }

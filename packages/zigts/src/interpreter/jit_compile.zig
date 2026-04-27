@@ -17,6 +17,7 @@ const bytecode = @import("../bytecode.zig");
 const context = @import("../context.zig");
 const type_feedback = @import("../type_feedback.zig");
 const jit = @import("../jit/root.zig");
+const jit_policy = @import("jit_policy.zig");
 const interpreter = @import("../interpreter.zig");
 const Interpreter = interpreter.Interpreter;
 
@@ -293,5 +294,75 @@ pub fn cleanupCompiledCode(allocator: std.mem.Allocator, func: *bytecode.Functio
         const compiled: *jit.CompiledCode = @ptrCast(@alignCast(cc));
         allocator.destroy(compiled);
         func.compiled_code = null;
+    }
+}
+
+/// Run the JIT-promotion ladder for a function entry. Both `frame.run`
+/// (top-level entry) and `frame.callBytecodeFunction` (nested call) share
+/// the profile + initial-compile + warmup-target + optimized-tier cascade
+/// but diverge on a single mid-stage trigger:
+///
+///   - `.entry`     -- run from `frame.run`. Add a hot-loop backedge
+///                     promotion branch so functions that hit
+///                     `LOOP_JIT_THRESHOLD` get baseline-compiled with a
+///                     short feedback warmup.
+///   - `.nested`    -- run from `frame.callBytecodeFunction`. Add a
+///                     totalHits-based baseline-warmup branch so
+///                     frequently-hit feedback sites trigger compile
+///                     before the full warmup target.
+pub const PromotionMode = enum { entry, nested };
+
+pub fn maybePromote(interp: *Interpreter, func: *bytecode.FunctionBytecode, mode: PromotionMode) void {
+    const is_candidate = interp.profileFunctionEntry(func);
+    if (is_candidate) {
+        allocateTypeFeedback(interp, func) catch {};
+        if (func.type_feedback_ptr == null and func.feedback_site_map == null) {
+            tryCompileBaseline(interp, func) catch {};
+        }
+    }
+
+    // Compile after feedback warmup if eligible.
+    if (!jit_policy.jitDisabled() and func.tier == .baseline_candidate and func.type_feedback_ptr != null) {
+        const warmup_target = jit_policy.getJitThreshold() + jit_policy.getJitFeedbackWarmup();
+        if (func.execution_count >= warmup_target) {
+            tryCompileBaseline(interp, func) catch {};
+        }
+    }
+
+    switch (mode) {
+        .entry => {
+            // Hot-loop backedge: a function can reach baseline_candidate via
+            // the loop counter alone. Use a shorter warmup since hot loops
+            // accumulate fast.
+            if (!jit_policy.jitDisabled() and func.tier == .baseline_candidate and
+                func.backedge_count >= bytecode.LOOP_JIT_THRESHOLD)
+            {
+                if (func.type_feedback_ptr == null) {
+                    allocateTypeFeedback(interp, func) catch {};
+                }
+                const hot_loop_warmup: u32 = 5;
+                if (func.type_feedback_ptr != null and func.execution_count >= hot_loop_warmup) {
+                    tryCompileBaseline(interp, func) catch {};
+                }
+            }
+        },
+        .nested => {
+            // Pre-warmup baseline compile for hot feedback sites.
+            if (!jit_policy.jitDisabled() and func.tier == .baseline_candidate and func.execution_count < jit_policy.getJitThreshold()) {
+                if (func.type_feedback_ptr) |tf| {
+                    const baseline_warmup: u32 = 50;
+                    if (func.execution_count >= baseline_warmup or tf.totalHits() > 100) {
+                        tryCompileBaseline(interp, func) catch {};
+                    }
+                }
+            }
+        },
+    }
+
+    // Optimized tier promotion: compile when promoted from baseline by hot loop.
+    if (!jit_policy.jitDisabled() and func.tier == .optimized_candidate) {
+        tryCompileOptimized(interp, func) catch {
+            setTier(interp, func, .baseline);
+        };
     }
 }
