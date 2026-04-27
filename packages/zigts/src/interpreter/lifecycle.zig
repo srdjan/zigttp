@@ -24,17 +24,6 @@ pub fn init(ctx: *context.Context) Interpreter {
         .state_stack = undefined,
         .state_depth = 0,
         .pic_cache = [_]PolymorphicInlineCache{.{}} ** IC_CACHE_SIZE,
-        .backedge_count = 0,
-        .pic_hits = 0,
-        .pic_misses = 0,
-        .deopt_count = 0,
-        .mega_recoveries = 0,
-        .tier_promotions = [_]u32{0} ** perf.tier_count,
-        .promotion_attempted = 0,
-        .promotion_succeeded = 0,
-        .promotion_rejected_deopt_storm = 0,
-        .opcode_histogram = [_]u32{0} ** 256,
-        .last_op = .nop,
     };
 }
 
