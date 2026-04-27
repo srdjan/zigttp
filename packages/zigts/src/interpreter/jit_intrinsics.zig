@@ -16,6 +16,7 @@ const builtins = @import("../builtins/root.zig");
 const interpreter = @import("../interpreter.zig");
 const Interpreter = interpreter.Interpreter;
 const arith = @import("arith.zig");
+const cmp = @import("cmp.zig");
 
 /// JIT helper: perform a call/call_method from compiled code.
 /// Pops arguments and function from the context stack using interpreter logic,
@@ -204,7 +205,7 @@ pub export fn jitGetFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_
         return value.JSValue.undefined_val;
     } else if (obj_val.isAnyString()) {
         if (atom == .length) {
-            return interpreter.getAnyStringLength(obj_val);
+            return cmp.getAnyStringLength(obj_val);
         }
         if (ctx.string_prototype) |proto| {
             const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
