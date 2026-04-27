@@ -256,19 +256,15 @@ zigttp/
 │   │   │   ├── comptime.zig     # Compile-time expression evaluator
 │   │   │   ├── handler_contract.zig # Contract extraction from IR
 │   │   │   ├── handler_policy.zig # Runtime policy + contract-to-policy conversion
-│   │   │   ├── modules/
-│   │   │   │   ├── io.zig       # Structured concurrent I/O (parallel, race)
-│   │   │   │   ├── auth.zig     # JWT, HMAC, webhook verification
-│   │   │   │   ├── cache.zig    # In-memory KV cache with LRU
-│   │   │   │   ├── validate.zig # JSON Schema validation
-│   │   │   │   ├── env.zig      # Environment variable access
-│   │   │   │   ├── crypto.zig   # SHA-256, HMAC, base64
-│   │   │   │   ├── router.zig   # Pattern-matching HTTP router
-│   │   │   │   ├── sql.zig      # SQLite query execution with allowlisting
-│   │   │   │   ├── compose.zig  # Guard-based handler composition
-│   │   │   │   ├── durable.zig  # Durable execution (run, step, sleep, signal)
-│   │   │   │   ├── resolver.zig # Module resolver and wiring
-│   │   │   │   └── root.zig     # Module registry
+│   │   │   ├── modules/             # Engine-bound module surfaces (need
+│   │   │   │   │                    # runtime hooks; pure-binding modules
+│   │   │   │   │                    # live in packages/modules/src/)
+│   │   │   │   ├── data/sql.zig     # SQL store install bridge
+│   │   │   │   ├── internal/        # Module loader, resolver, compiler,
+│   │   │   │   │                    # file_resolver, module_graph, types
+│   │   │   │   ├── net/             # fetch, service, websocket
+│   │   │   │   ├── workflow/        # durable, io, scope
+│   │   │   │   └── root.zig         # Module registry
 │   │   │   ├── jit/
 │   │   │   │   └── baseline.zig # Baseline JIT compiler (x86-64, ARM64)
 │   │   │   ├── type_feedback.zig    # Call site profiling
@@ -405,7 +401,7 @@ Each virtual module declares a `pub const binding: ModuleBinding` struct - the s
 For the planned redesign of third-party virtual modules, see [Extension Model](../design/extension-model.md).
 
 Consumers that previously maintained separate hardcoded tables now read from the registry:
-- **Type checker** (`packages/zigts/src/types.zig`): maps `ReturnKind` to `TypeIndex` via `mapReturnKind()`
+- **Type checker** (`packages/zigts/src/modules/internal/types.zig`): maps `ReturnKind` to `TypeIndex` via `mapReturnKind()`
 - **Handler verifier**: looks up result/optional producers via `builtin_modules.findFunction()`
 - **Bool checker**: maps `ReturnKind` to `ExprType` via `returnKindToExprType()`
 - **Contract builder**: uses `GenericBinding` entries populated from `FunctionBinding.contract_extractions` and `contract_flags`
