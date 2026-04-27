@@ -53,13 +53,13 @@ HTTP: `server.zig`, runtime management: `zruntime.zig`, live reload: `live_reloa
 
 Request flow: accept connection, check proven route table (contract-aware pre-filter), check proof cache for deterministic+read_only handlers (`proof_adapter.zig`), acquire isolated runtime from HandlerPool (LockFreePool-backed), convert to JS Request, invoke handler, extract Response, release runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, proof cache activation, and property logging (`contract_runtime.zig`).
 
-Key patterns: `Result(T)` for error handling (ok/err variants), hidden classes for inline caching, request-scoped arena allocation, guard composition via pipe operator (`packages/zigts/src/modules/compose.zig`).
+Key patterns: `Result(T)` for error handling (ok/err variants), hidden classes for inline caching, request-scoped arena allocation, guard composition via pipe operator (`packages/modules/src/workflow/compose.zig`).
 
-For detailed architecture: [docs/architecture.md](docs/architecture.md). For performance internals: [docs/performance.md](docs/performance.md).
+For detailed architecture: [docs/internals/architecture.md](docs/internals/architecture.md). For performance internals: [docs/performance.md](docs/performance.md).
 
 ## Virtual Modules
 
-Import via `import { fn } from "zigttp:module"`. Implementations in `packages/zigts/src/modules/`. Each module declares a `ModuleBinding` in `module_binding.zig` as single source of truth. Bindings also declare `required_capabilities` (clock, crypto, random, stderr, etc.) enforced at call time by shared checked helpers in `module_binding.zig`. Modules with no capabilities skip the enforcement wrapper at compile time.
+Import via `import { fn } from "zigttp:module"`. Implementations in `packages/modules/src/` (peer package). Each module declares a `ModuleBinding` in `packages/zigts/src/module_binding.zig` as single source of truth. Bindings also declare `required_capabilities` (clock, crypto, random, stderr, etc.) enforced at call time by shared checked helpers in `module_binding.zig`. Modules with no capabilities skip the enforcement wrapper at compile time.
 
 | Module | Key Exports |
 |--------|-------------|
@@ -77,6 +77,7 @@ Import via `import { fn } from "zigttp:module"`. Implementations in `packages/zi
 | `zigttp:io` | `parallel`, `race` |
 | `zigttp:durable` | `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` |
 | `zigttp:compose` | `guard`, `pipe` |
+| `zigttp:scope` | `scope`, `using`, `ensure` |
 | `zigttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` |
 | `zigttp:id` | `uuid`, `ulid`, `nanoid` |
 | `zigttp:http` | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` |

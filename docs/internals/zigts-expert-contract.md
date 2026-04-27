@@ -148,7 +148,7 @@ zigts verify-modules --builtins [--strict] --json
   "ok": true,
   "policy_version": "2026.04.2",
   "policy_hash": "<hex>",
-  "checked_files": ["packages/zigts/src/modules/env.zig"],
+  "checked_files": ["packages/modules/src/platform/env.zig"],
   "violations": [ /* JsonDiagnostic with ZVM00x codes */ ]
 }
 ```
