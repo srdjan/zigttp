@@ -2306,8 +2306,6 @@ pub const Interpreter = struct {
         return arith.addValuesSlow(self, a, b);
     }
 
-    /// Slow path for addition - handles strings and floats
-    /// Subtract two values - optimized for integer fast path
     inline fn subValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
         // Integer fast path
         if (a.isInt() and b.isInt()) {
