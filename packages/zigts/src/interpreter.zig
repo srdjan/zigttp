@@ -128,7 +128,7 @@ pub const Interpreter = struct {
 
     /// Profile function entry: increment execution count, check for JIT threshold
     /// Returns true if function should be promoted to JIT candidate
-    inline fn profileFunctionEntry(self: *Interpreter, func: *bytecode.FunctionBytecode) bool {
+    pub inline fn profileFunctionEntry(self: *Interpreter, func: *bytecode.FunctionBytecode) bool {
         // Use non-atomic increment for single-threaded interpreter
         func.execution_count +%= 1;
         if (jitDisabled()) return false;
@@ -325,20 +325,8 @@ pub const Interpreter = struct {
         };
     }
 
-    /// Execute a bytecode function with given arguments and return the result.
-    ///
-    /// This function handles the full lifecycle of a JavaScript function call:
-    /// 1. Saves current interpreter state (pc, code_end, constants)
-    /// 2. Pushes a new call frame onto the context's call stack
-    /// 3. Sets up local variables from arguments (undefined for missing args)
-    /// 4. Executes the function's bytecode via dispatch()
-    /// 5. Restores state and returns the result value
-    ///
-    /// Closures: If func_val is a closure, the caller should have already set up
-    /// upvalue access. The function uses the context's scope chain for upvalues.
-    ///
-    /// Errors: Returns InterpreterError on stack overflow, type errors, or
-    /// unhandled exceptions. The call frame is always cleaned up via errdefer.
+    /// Stable cross-package entry point. Implementation lives in
+    /// `interpreter/frame.zig`; external callers stay on the method form.
     pub fn callBytecodeFunction(
         self: *Interpreter,
         func_val: value.JSValue,
@@ -346,139 +334,7 @@ pub const Interpreter = struct {
         this_val: value.JSValue,
         args: []const value.JSValue,
     ) InterpreterError!value.JSValue {
-        trace.traceCall(self, "bc enter", @intCast(args.len), false);
-        defer trace.traceCall(self, "bc exit", @intCast(args.len), false);
-        // Cast away const for profiling/JIT - safe because we only modify profiling fields
-        const func_bc_mut = @constCast(func_bc);
-
-        // Profile function entry and potentially trigger JIT compilation
-        const is_candidate = self.profileFunctionEntry(func_bc_mut);
-        if (is_candidate) {
-            // Allocate type feedback for future optimization
-            jit_compile.allocateTypeFeedback(self, func_bc_mut) catch {};
-
-            // If no feedback sites exist, compile immediately
-            if (func_bc_mut.type_feedback_ptr == null and func_bc_mut.feedback_site_map == null) {
-                jit_compile.tryCompileBaseline(self, func_bc_mut) catch {
-                    // Compilation failed (other than UnsupportedOpcode) - continue with interpreter
-                };
-            }
-        }
-
-        // Compile after feedback warmup if eligible
-        if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate and func_bc_mut.type_feedback_ptr != null) {
-            const warmup_target = getJitThreshold() + getJitFeedbackWarmup();
-            if (func_bc_mut.execution_count >= warmup_target) {
-                jit_compile.tryCompileBaseline(self, func_bc_mut) catch {
-                    // Compilation failed (other than UnsupportedOpcode) - continue with interpreter
-                };
-            }
-        }
-
-        // Hot loop path: functions promoted via hot loop need type feedback warmup
-        // Type feedback allocation now happens post-execution to avoid corrupting
-        // register state. See allocateTypeFeedbackDeferred() calls below.
-
-        // After warmup with type feedback, compile to baseline
-        if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate and func_bc_mut.execution_count < getJitThreshold()) {
-            if (func_bc_mut.type_feedback_ptr) |tf| {
-                const baseline_warmup: u32 = 50;
-                if (func_bc_mut.execution_count >= baseline_warmup or tf.totalHits() > 100) {
-                    jit_compile.tryCompileBaseline(self, func_bc_mut) catch {};
-                }
-            }
-        }
-
-        // Optimized tier promotion: compile when promoted from baseline by hot loop
-        if (!jitDisabled() and func_bc_mut.tier == .optimized_candidate) {
-            jit_compile.tryCompileOptimized(self, func_bc_mut) catch {
-                // Compilation failed - stay at baseline
-                jit_compile.setTier(self, func_bc_mut, .baseline);
-            };
-        }
-
-        try frame.pushState(self);
-        defer frame.popState(self);
-
-        // Push call frame
-        try self.ctx.pushFrame(func_val, this_val, @intFromPtr(self.pc));
-        errdefer {
-            frame.closeUpvaluesAbove(self, 0);
-            _ = self.ctx.popFrame();
-        }
-
-        // Set up new function's locals with arguments
-        const local_count = func_bc.local_count;
-        try self.ctx.ensureStack(local_count);
-
-        var local_idx: usize = 0;
-        while (local_idx < local_count) : (local_idx += 1) {
-            if (local_idx < args.len) {
-                try self.ctx.push(args[local_idx]);
-            } else {
-                try self.ctx.push(value.JSValue.undefined_val);
-            }
-        }
-
-        // Check if function is JIT-compiled and execute via JIT
-        if (!jitDisabled() and (func_bc.tier == .baseline or func_bc.tier == .optimized)) {
-            if (func_bc.compiled_code) |cc_opaque| {
-                const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
-                const prev_func = self.current_func;
-                const prev_constants = self.constants;
-                const prev_code_end = self.code_end;
-                const prev_pc = self.pc;
-                self.current_func = func_bc;
-                self.constants = func_bc.constants;
-                self.code_end = func_bc.code.ptr + func_bc.code.len;
-                self.pc = func_bc.code.ptr;
-                defer {
-                    self.current_func = prev_func;
-                    self.constants = prev_constants;
-                    self.code_end = prev_code_end;
-                    self.pc = prev_pc;
-                }
-                const prev_interp = current_interpreter;
-                current_interpreter = self;
-                defer current_interpreter = prev_interp;
-                // Set interpreter pointer in context for IC fast path
-                self.ctx.jit_interpreter = @ptrCast(self);
-                defer self.ctx.jit_interpreter = null;
-                const result_raw = cc.execute(self.ctx);
-                const result = value.JSValue{ .raw = result_raw };
-
-                frame.closeUpvaluesAbove(self, 0);
-                _ = self.ctx.popFrame();
-
-                // Allocate type feedback after function completes (safe boundary)
-                if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate) {
-                    jit_compile.allocateTypeFeedbackDeferred(self, func_bc_mut) catch {};
-                }
-
-                return result;
-            }
-        }
-
-        // Fall back to interpreter
-        self.pc = func_bc.code.ptr;
-        self.code_end = func_bc.code.ptr + func_bc.code.len;
-        self.constants = func_bc.constants;
-        self.current_func = func_bc;
-
-        const result = self.dispatch() catch |err| {
-            if (err == error.TypeError) trace.traceLastOp(self, "dispatch");
-            return err;
-        };
-
-        frame.closeUpvaluesAbove(self, 0);
-        _ = self.ctx.popFrame();
-
-        // Allocate type feedback after function completes (safe boundary)
-        if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate) {
-            jit_compile.allocateTypeFeedbackDeferred(self, func_bc_mut) catch {};
-        }
-
-        return result;
+        return frame.callBytecodeFunction(self, func_val, func_bc, this_val, args);
     }
 
     /// Error set for interpreter operations
@@ -2873,7 +2729,7 @@ pub const Interpreter = struct {
                 // Execute async function synchronously and wrap result in Promise-like object
                 // For full async support, we'd need an event loop and proper Promise integration
                 // This simplified version executes synchronously and returns a resolved Promise
-                const result = try self.callBytecodeFunction(func_val, func_bc, this_val, args[0..argc]);
+                const result = try frame.callBytecodeFunction(self, func_val, func_bc, this_val, args[0..argc]);
 
                 // Create a resolved Promise-like object {then: fn, value: result}
                 const promise_obj = self.ctx.createObject(null) catch {
@@ -2903,7 +2759,7 @@ pub const Interpreter = struct {
                 return;
             }
 
-            const result = try self.callBytecodeFunction(func_val, func_bc, this_val, args[0..argc]);
+            const result = try frame.callBytecodeFunction(self, func_val, func_bc, this_val, args[0..argc]);
             try self.ctx.push(result);
             return;
         }
@@ -4071,8 +3927,8 @@ test "JIT: deopt on type mismatch in specialized add" {
         value.JSValue.fromInt(2),
     };
 
-    _ = try interp.callBytecodeFunction(func_val, add_func, this_val, int_args[0..]);
-    _ = try interp.callBytecodeFunction(func_val, add_func, this_val, int_args[0..]);
+    _ = try frame.callBytecodeFunction(&interp, func_val, add_func, this_val, int_args[0..]);
+    _ = try frame.callBytecodeFunction(&interp, func_val, add_func, this_val, int_args[0..]);
 
     try std.testing.expect(add_func.compiled_code != null);
 
@@ -4088,7 +3944,7 @@ test "JIT: deopt on type mismatch in specialized add" {
     };
 
     jit.deopt.resetDeoptStats();
-    const result = try interp.callBytecodeFunction(func_val, add_func, this_val, str_args[0..]);
+    const result = try frame.callBytecodeFunction(&interp, func_val, add_func, this_val, str_args[0..]);
     try std.testing.expect(result.isString());
     const result_str = result.toPtr(string.JSString);
     try std.testing.expectEqualStrings("ab", result_str.data());

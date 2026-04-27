@@ -17,6 +17,7 @@ const interpreter = @import("../interpreter.zig");
 const Interpreter = interpreter.Interpreter;
 const arith = @import("arith.zig");
 const cmp = @import("cmp.zig");
+const frame = @import("frame.zig");
 
 /// JIT helper: perform a call/call_method from compiled code.
 /// Pops arguments and function from the context stack using interpreter logic,
@@ -111,7 +112,7 @@ pub export fn jitCallBytecode(
     interp.current_closure = closure_data;
     defer interp.current_closure = prev_closure;
 
-    const result = interp.callBytecodeFunction(func_val, expected_bc, this_val, args[0..argc]) catch {
+    const result = frame.callBytecodeFunction(interp, func_val, expected_bc, this_val, args[0..argc]) catch {
         ctx.throwException(value.JSValue.exception_val);
         return value.JSValue.exception_val;
     };
@@ -168,7 +169,7 @@ pub export fn jitCallBytecodeFast(
     interp.current_closure = closure_data;
     defer interp.current_closure = prev_closure;
 
-    const result = interp.callBytecodeFunction(func_val, expected_bc, this_val, args[0..argc]) catch {
+    const result = frame.callBytecodeFunction(interp, func_val, expected_bc, this_val, args[0..argc]) catch {
         ctx.throwException(value.JSValue.exception_val);
         return value.JSValue.exception_val;
     };
