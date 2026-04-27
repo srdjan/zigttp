@@ -24,6 +24,7 @@ const cmp = @import("interpreter/cmp.zig");
 const frame = @import("interpreter/frame.zig");
 const call = @import("interpreter/call.zig");
 const alloc = @import("interpreter/alloc.zig");
+const util = @import("interpreter/util.zig");
 
 const empty_code: [0]u8 = .{};
 const tier_count = perf.tier_count;
@@ -347,14 +348,14 @@ pub const Interpreter = struct {
             },
             .push_i16 => {
                 self.advanceOp();
-                const val = readI16(self.pc);
+                const val = util.readI16(self.pc);
                 self.pc += 2;
                 try self.ctx.push(value.JSValue.fromInt(val));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .push_const => {
                 self.advanceOp();
-                const idx = readU16(self.pc);
+                const idx = util.readU16(self.pc);
                 self.pc += 2;
                 try self.ctx.push(try alloc.getConstant(self, idx));
                 continue :sw @enumFromInt(self.pc[0]);
@@ -914,7 +915,7 @@ pub const Interpreter = struct {
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
-                self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) & toInt32(b));
+                self.ctx.stack[sp - 2] = value.JSValue.fromInt(util.toInt32(a) & util.toInt32(b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -923,7 +924,7 @@ pub const Interpreter = struct {
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
-                self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) | toInt32(b));
+                self.ctx.stack[sp - 2] = value.JSValue.fromInt(util.toInt32(a) | util.toInt32(b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -932,7 +933,7 @@ pub const Interpreter = struct {
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
-                self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) ^ toInt32(b));
+                self.ctx.stack[sp - 2] = value.JSValue.fromInt(util.toInt32(a) ^ util.toInt32(b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -940,7 +941,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const sp = self.ctx.sp;
                 const a = self.ctx.stack[sp - 1];
-                self.ctx.stack[sp - 1] = value.JSValue.fromInt(~toInt32(a));
+                self.ctx.stack[sp - 1] = value.JSValue.fromInt(~util.toInt32(a));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .shl => {
@@ -948,8 +949,8 @@ pub const Interpreter = struct {
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
-                const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
-                self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) << shift);
+                const shift: u5 = @intCast(@as(u32, @bitCast(util.toInt32(b))) & 0x1F);
+                self.ctx.stack[sp - 2] = value.JSValue.fromInt(util.toInt32(a) << shift);
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -958,8 +959,8 @@ pub const Interpreter = struct {
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
-                const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
-                self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) >> shift);
+                const shift: u5 = @intCast(@as(u32, @bitCast(util.toInt32(b))) & 0x1F);
+                self.ctx.stack[sp - 2] = value.JSValue.fromInt(util.toInt32(a) >> shift);
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -968,8 +969,8 @@ pub const Interpreter = struct {
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
-                const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
-                const ua: u32 = @bitCast(toInt32(a));
+                const shift: u5 = @intCast(@as(u32, @bitCast(util.toInt32(b))) & 0x1F);
+                const ua: u32 = @bitCast(util.toInt32(a));
                 self.ctx.stack[sp - 2] = value.JSValue.fromInt(@bitCast(ua >> shift));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
@@ -980,7 +981,7 @@ pub const Interpreter = struct {
             // ========================================
             .goto => {
                 self.advanceOp();
-                const offset = readI16(self.pc);
+                const offset = util.readI16(self.pc);
                 self.pc += 2;
                 if (offset < 0) {
                     if (false) {
@@ -999,7 +1000,7 @@ pub const Interpreter = struct {
             },
             .loop => {
                 self.advanceOp();
-                const offset = readI16(self.pc);
+                const offset = util.readI16(self.pc);
                 self.pc += 2;
                 if (false) {
                     if (self.current_func) |func| {
@@ -1021,7 +1022,7 @@ pub const Interpreter = struct {
                     self.ctx.exception = try alloc.createBoolError(self, cond);
                     break :sw value.JSValue.undefined_val;
                 };
-                const offset = readI16(self.pc);
+                const offset = util.readI16(self.pc);
                 self.pc += 2;
                 if (cond_bool) {
                     self.offsetPc(offset);
@@ -1035,7 +1036,7 @@ pub const Interpreter = struct {
                     self.ctx.exception = try alloc.createBoolError(self, cond);
                     break :sw value.JSValue.undefined_val;
                 };
-                const offset = readI16(self.pc);
+                const offset = util.readI16(self.pc);
                 self.pc += 2;
                 if (!cond_bool) {
                     self.offsetPc(offset);
@@ -1062,7 +1063,7 @@ pub const Interpreter = struct {
             },
             .new_array => {
                 self.advanceOp();
-                const length = readU16(self.pc);
+                const length = util.readU16(self.pc);
                 self.pc += 2;
                 const obj = try alloc.createArray(self);
                 obj.setArrayLength(@intCast(length));
@@ -1071,7 +1072,7 @@ pub const Interpreter = struct {
             },
             .new_object_literal => {
                 self.advanceOp();
-                const shape_idx = readU16(self.pc);
+                const shape_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const prop_count = self.pc[0];
                 self.pc += 1;
@@ -1102,7 +1103,7 @@ pub const Interpreter = struct {
             },
             .get_field => {
                 self.advanceOp();
-                const atom_idx = readU16(self.pc);
+                const atom_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 const obj_val = self.ctx.pop();
@@ -1141,7 +1142,7 @@ pub const Interpreter = struct {
             },
             .put_field => {
                 self.advanceOp();
-                const atom_idx = readU16(self.pc);
+                const atom_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 const val = self.ctx.pop();
@@ -1155,7 +1156,7 @@ pub const Interpreter = struct {
             },
             .put_field_keep => {
                 self.advanceOp();
-                const atom_idx = readU16(self.pc);
+                const atom_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 const val = self.ctx.pop();
@@ -1170,8 +1171,8 @@ pub const Interpreter = struct {
             },
             .get_field_ic => {
                 self.advanceOp();
-                const atom_idx = readU16(self.pc);
-                const cache_idx = readU16(self.pc + 2);
+                const atom_idx = util.readU16(self.pc);
+                const cache_idx = util.readU16(self.pc + 2);
                 self.pc += 4;
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 const obj_val = self.ctx.pop();
@@ -1223,8 +1224,8 @@ pub const Interpreter = struct {
             },
             .put_field_ic => {
                 self.advanceOp();
-                const atom_idx = readU16(self.pc);
-                const cache_idx = readU16(self.pc + 2);
+                const atom_idx = util.readU16(self.pc);
+                const cache_idx = util.readU16(self.pc + 2);
                 self.pc += 4;
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 const val = self.ctx.pop();
@@ -1344,7 +1345,7 @@ pub const Interpreter = struct {
             },
             .get_global => {
                 self.advanceOp();
-                const atom_idx = readU16(self.pc);
+                const atom_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 if (self.ctx.getGlobal(atom)) |val| {
@@ -1356,7 +1357,7 @@ pub const Interpreter = struct {
             },
             .put_global => {
                 self.advanceOp();
-                const atom_idx = readU16(self.pc);
+                const atom_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 const val = self.ctx.pop();
@@ -1365,7 +1366,7 @@ pub const Interpreter = struct {
             },
             .define_global => {
                 self.advanceOp();
-                const atom_idx = readU16(self.pc);
+                const atom_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 const val = self.ctx.pop();
@@ -1378,7 +1379,7 @@ pub const Interpreter = struct {
             // ========================================
             .make_function => {
                 self.advanceOp();
-                const const_idx = readU16(self.pc);
+                const const_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const bc_val = try alloc.getConstant(self, const_idx);
                 if (!bc_val.isExternPtr()) return error.TypeError;
@@ -1396,7 +1397,7 @@ pub const Interpreter = struct {
             },
             .make_async => {
                 self.advanceOp();
-                const const_idx = readU16(self.pc);
+                const const_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const bc_val = try alloc.getConstant(self, const_idx);
                 if (!bc_val.isExternPtr()) return error.TypeError;
@@ -1415,7 +1416,7 @@ pub const Interpreter = struct {
             },
             .make_closure => {
                 self.advanceOp();
-                const const_idx = readU16(self.pc);
+                const const_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const upvalue_count: u8 = self.pc[0];
                 self.pc += 1;
@@ -1626,7 +1627,7 @@ pub const Interpreter = struct {
             },
             .push_const_call => {
                 self.advanceOp();
-                const const_idx = readU16(self.pc);
+                const const_idx = util.readU16(self.pc);
                 const argc: u8 = self.pc[2];
                 self.pc += 3;
                 try self.ctx.push(try alloc.getConstant(self, const_idx));
@@ -1637,7 +1638,7 @@ pub const Interpreter = struct {
             },
             .get_field_call => {
                 self.advanceOp();
-                const atom_idx = readU16(self.pc);
+                const atom_idx = util.readU16(self.pc);
                 const argc: u8 = self.pc[2];
                 self.pc += 3;
                 self.call_opcode_offset = 4;
@@ -1682,7 +1683,7 @@ pub const Interpreter = struct {
             .for_of_next => {
                 // Stack: [iterable, index] -> [iterable, index+1, element] or jump to end
                 self.advanceOp();
-                const end_offset = readI16(self.pc);
+                const end_offset = util.readI16(self.pc);
                 self.pc += 2;
                 const sp = self.ctx.sp;
                 const idx_val = self.ctx.stack[sp - 1];
@@ -1746,7 +1747,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const local_idx = self.pc[0];
                 self.pc += 1;
-                const end_offset = readI16(self.pc);
+                const end_offset = util.readI16(self.pc);
                 self.pc += 2;
                 const sp = self.ctx.sp;
                 const idx_val = self.ctx.stack[sp - 1];
@@ -1810,7 +1811,7 @@ pub const Interpreter = struct {
             // ========================================
             .import_module => {
                 self.advanceOp();
-                const module_idx = readU16(self.pc);
+                const module_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const module_name_val = try alloc.getConstant(self, module_idx);
                 _ = module_name_val;
@@ -1820,7 +1821,7 @@ pub const Interpreter = struct {
             },
             .import_name => {
                 self.advanceOp();
-                const name_idx = readU16(self.pc);
+                const name_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const name_val = try alloc.getConstant(self, name_idx);
                 _ = name_val;
@@ -1851,7 +1852,7 @@ pub const Interpreter = struct {
             },
             .export_name => {
                 self.advanceOp();
-                const name_idx = readU16(self.pc);
+                const name_idx = util.readU16(self.pc);
                 self.pc += 2;
                 _ = name_idx;
                 _ = self.ctx.pop();
@@ -1892,7 +1893,7 @@ pub const Interpreter = struct {
                     self.ctx.exception = try alloc.createBoolError(self, cond);
                     return error.TypeError;
                 };
-                const offset = readI16(self.pc);
+                const offset = util.readI16(self.pc);
                 self.pc += 2;
                 if (!cond_bool) {
                     self.offsetPc(offset);
@@ -1902,7 +1903,7 @@ pub const Interpreter = struct {
             .drop_goto => {
                 self.advanceOp();
                 _ = self.ctx.pop();
-                const offset = readI16(self.pc);
+                const offset = util.readI16(self.pc);
                 self.pc += 2;
                 self.offsetPc(offset);
                 continue :sw @enumFromInt(self.pc[0]);
@@ -1911,7 +1912,7 @@ pub const Interpreter = struct {
             // Fused arithmetic-modulo
             .add_mod => {
                 self.advanceOp();
-                const divisor_idx = readU16(self.pc);
+                const divisor_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const divisor_val = try alloc.getConstant(self, divisor_idx);
                 const sp = self.ctx.sp;
@@ -1933,12 +1934,12 @@ pub const Interpreter = struct {
                 // Fallback to normal path
                 self.ctx.sp = sp - 2;
                 const add_result = try self.addValues(a, b);
-                self.ctx.pushUnchecked(try modValues(add_result, divisor_val));
+                self.ctx.pushUnchecked(try util.modValues(add_result, divisor_val));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .sub_mod => {
                 self.advanceOp();
-                const divisor_idx = readU16(self.pc);
+                const divisor_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const divisor_val = try alloc.getConstant(self, divisor_idx);
                 const sp = self.ctx.sp;
@@ -1959,12 +1960,12 @@ pub const Interpreter = struct {
                 }
                 self.ctx.sp = sp - 2;
                 const sub_result = try self.subValues(a, b);
-                self.ctx.pushUnchecked(try modValues(sub_result, divisor_val));
+                self.ctx.pushUnchecked(try util.modValues(sub_result, divisor_val));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .mul_mod => {
                 self.advanceOp();
-                const divisor_idx = readU16(self.pc);
+                const divisor_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const divisor_val = try alloc.getConstant(self, divisor_idx);
                 const sp = self.ctx.sp;
@@ -1985,7 +1986,7 @@ pub const Interpreter = struct {
                 }
                 self.ctx.sp = sp - 2;
                 const mul_result = try self.mulValues(a, b);
-                self.ctx.pushUnchecked(try modValues(mul_result, divisor_val));
+                self.ctx.pushUnchecked(try util.modValues(mul_result, divisor_val));
                 continue :sw @enumFromInt(self.pc[0]);
             },
 
@@ -2000,7 +2001,7 @@ pub const Interpreter = struct {
                     self.ctx.stack[sp - 1] = value.JSValue.fromInt(a.getInt() >> 1);
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                self.ctx.stack[sp - 1] = value.JSValue.fromInt(toInt32(a) >> 1);
+                self.ctx.stack[sp - 1] = value.JSValue.fromInt(util.toInt32(a) >> 1);
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .mul_2 => {
@@ -2025,7 +2026,7 @@ pub const Interpreter = struct {
             },
             .mod_const => {
                 self.advanceOp();
-                const divisor_idx = readU16(self.pc);
+                const divisor_idx = util.readU16(self.pc);
                 self.pc += 2;
                 const divisor_val = try alloc.getConstant(self, divisor_idx);
                 const sp = self.ctx.sp;
@@ -2040,7 +2041,7 @@ pub const Interpreter = struct {
                         continue :sw @enumFromInt(self.pc[0]);
                     }
                 }
-                self.ctx.stack[sp - 1] = try modValues(a, divisor_val);
+                self.ctx.stack[sp - 1] = try util.modValues(a, divisor_val);
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .mod_const_i8 => {
@@ -2055,7 +2056,7 @@ pub const Interpreter = struct {
                     self.ctx.stack[sp - 1] = value.JSValue.fromInt(@rem(a.getInt(), divisor));
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                self.ctx.stack[sp - 1] = try modValues(a, value.JSValue.fromInt(divisor));
+                self.ctx.stack[sp - 1] = try util.modValues(a, value.JSValue.fromInt(divisor));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .add_const_i8 => {
@@ -2414,49 +2415,6 @@ pub const Interpreter = struct {
     }
 
 };
-
-// ============================================================================
-// Helper Functions (standalone, used by interpreter)
-// ============================================================================
-
-/// Modulo two values
-/// Modulo operation - optimized for integer fast path, with float fallback
-inline fn modValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
-    if (a.isInt() and b.isInt()) {
-        const bv = b.getInt();
-        if (bv == 0) return error.DivisionByZero;
-        return value.JSValue.fromInt(@rem(a.getInt(), bv));
-    }
-    // Float fallback: JS % works on all numeric types
-    const an = a.toNumber() orelse return error.TypeError;
-    const bn = b.toNumber() orelse return error.TypeError;
-    if (bn == 0.0) return value.JSValue.nan_val;
-    return value.JSValue.fromFloat(@rem(an, bn));
-}
-
-/// Compare two values
-/// Convert value to Int32 (for bitwise operations, per ECMAScript ToInt32)
-inline fn toInt32(v: value.JSValue) i32 {
-    if (v.isInt()) return v.getInt();
-    if (v.isFloat64()) {
-        const f = v.getFloat64();
-        if (std.math.isNan(f) or std.math.isInf(f) or f == 0) return 0;
-        // ToInt32 truncation
-        const int_val: i64 = @intFromFloat(@trunc(f));
-        return @truncate(int_val);
-    }
-    return 0;
-}
-
-/// Read i16 from bytecode
-fn readI16(pc: [*]const u8) i16 {
-    return @bitCast(@as(u16, pc[0]) | (@as(u16, pc[1]) << 8));
-}
-
-/// Read u16 from bytecode
-fn readU16(pc: [*]const u8) u16 {
-    return @as(u16, pc[0]) | (@as(u16, pc[1]) << 8);
-}
 
 test "Interpreter basic arithmetic" {
     const allocator = std.testing.allocator;
