@@ -160,23 +160,14 @@ pub const Interpreter = struct {
         lifecycle.recordDeopt(self);
     }
 
-    /// Offset the program counter by a signed value
-    /// Consolidates the verbose type-casting pattern used throughout dispatch
     inline fn offsetPc(self: *Interpreter, offset: i16) void {
         self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
     }
 
-    /// Public entry point. Method form preserved so cross-package callers
-    /// in `packages/runtime/src/zruntime.zig` and
-    /// `packages/tools/src/precompile.zig` keep using `interp.run(...)`.
     pub inline fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
         return frame.run(self, func);
     }
 
-    /// Method form preserved so cross-package callers in
-    /// `packages/runtime/src/zruntime.zig` and `packages/tools/src/precompile.zig`
-    /// can keep using `interp.callBytecodeFunction(...)` without reaching
-    /// into a sibling module.
     pub inline fn callBytecodeFunction(
         self: *Interpreter,
         func_val: value.JSValue,
@@ -2335,9 +2326,8 @@ pub const Interpreter = struct {
         return arith.mulValuesSlow(self, a, b);
     }
 
+    /// Box an f64 inline via NaN-boxing -- no allocation despite the name.
     pub inline fn allocFloat(self: *Interpreter, v: f64) !value.JSValue {
-        // NaN-boxing: ALL f64 values are stored inline - no heap allocation!
-        // This eliminates the 41.6x performance gap in mathOps benchmark.
         _ = self;
         return value.JSValue.fromFloat(v);
     }
