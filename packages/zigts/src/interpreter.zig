@@ -18,6 +18,7 @@ const perf = @import("interpreter/perf.zig");
 const jit_policy = @import("interpreter/jit_policy.zig");
 const ic = @import("interpreter/ic.zig");
 const jit_compile = @import("interpreter/jit_compile.zig");
+const arith = @import("interpreter/arith.zig");
 
 const empty_code: [0]u8 = .{};
 const tier_count = perf.tier_count;
@@ -118,7 +119,7 @@ pub fn getAnyStringLength(val: value.JSValue) value.JSValue {
     return value.JSValue.fromInt(0);
 }
 
-fn traceTypeError(self: *Interpreter, label: []const u8, a: value.JSValue, b: value.JSValue) void {
+pub fn traceTypeError(self: *Interpreter, label: []const u8, a: value.JSValue, b: value.JSValue) void {
     if (!callTraceEnabled()) return;
     std.debug.print(
         "[typeerror] {s} a_type={s} a={} b_type={s} b={} depth={} sp={} fp={}\n",
@@ -961,7 +962,7 @@ pub const Interpreter = struct {
                     // Slow path for strings/floats
                     @branchHint(.cold);
                     self.ctx.sp = sp - 2;
-                    self.ctx.pushUnchecked(try self.addValuesSlow(a, b));
+                    self.ctx.pushUnchecked(try arith.addValuesSlow(self, a, b));
                     continue :sw @enumFromInt(self.pc[0]);
                 }
             },
@@ -989,7 +990,7 @@ pub const Interpreter = struct {
                 } else {
                     @branchHint(.cold);
                     self.ctx.sp = sp - 2;
-                    self.ctx.pushUnchecked(try self.subValuesSlow(a, b));
+                    self.ctx.pushUnchecked(try arith.subValuesSlow(self, a, b));
                     continue :sw @enumFromInt(self.pc[0]);
                 }
             },
@@ -1017,7 +1018,7 @@ pub const Interpreter = struct {
                 } else {
                     @branchHint(.cold);
                     self.ctx.sp = sp - 2;
-                    self.ctx.pushUnchecked(try self.mulValuesSlow(a, b));
+                    self.ctx.pushUnchecked(try arith.mulValuesSlow(self, a, b));
                     continue :sw @enumFromInt(self.pc[0]);
                 }
             },
@@ -1026,7 +1027,7 @@ pub const Interpreter = struct {
                 const b = self.ctx.pop();
                 const a = self.ctx.pop();
                 jit_compile.recordBinaryOpFeedback(self, a, b);
-                self.ctx.pushUnchecked(try self.divValues(a, b));
+                self.ctx.pushUnchecked(try arith.divValues(self, a, b));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .mod => {
@@ -1051,13 +1052,13 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const b = self.ctx.pop();
                 const a = self.ctx.pop();
-                try self.ctx.push(try self.powValues(a, b));
+                try self.ctx.push(try arith.powValues(self, a, b));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .neg => {
                 self.advanceOp();
                 const a = self.ctx.pop();
-                try self.ctx.push(try self.negValue(a));
+                try self.ctx.push(try arith.negValue(self, a));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .inc => {
@@ -1108,7 +1109,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const count = self.pc[0];
                 self.pc += 1;
-                const result = try self.concatNValues(count);
+                const result = try arith.concatNValues(self, count);
                 try self.ctx.push(result);
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -2649,7 +2650,7 @@ pub const Interpreter = struct {
                 }
                 // Numeric-only slow path (no string dispatch)
                 self.ctx.sp = sp - 2;
-                self.ctx.pushUnchecked(try self.addNumericOnly(a, b));
+                self.ctx.pushUnchecked(try arith.addNumericOnly(self, a, b));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .sub_num => {
@@ -2673,7 +2674,7 @@ pub const Interpreter = struct {
                     continue :sw @enumFromInt(self.pc[0]);
                 }
                 self.ctx.sp = sp - 2;
-                self.ctx.pushUnchecked(try self.subValuesSlow(a, b));
+                self.ctx.pushUnchecked(try arith.subValuesSlow(self, a, b));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .mul_num => {
@@ -2697,14 +2698,14 @@ pub const Interpreter = struct {
                     continue :sw @enumFromInt(self.pc[0]);
                 }
                 self.ctx.sp = sp - 2;
-                self.ctx.pushUnchecked(try self.mulValuesSlow(a, b));
+                self.ctx.pushUnchecked(try arith.mulValuesSlow(self, a, b));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .div_num => {
                 self.advanceOp();
                 const b = self.ctx.pop();
                 const a = self.ctx.pop();
-                self.ctx.pushUnchecked(try self.divValues(a, b));
+                self.ctx.pushUnchecked(try arith.divValues(self, a, b));
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .lt_num => {
@@ -2773,7 +2774,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const b = self.ctx.pop();
                 const a = self.ctx.pop();
-                self.ctx.pushUnchecked(try self.concatToString(a, b));
+                self.ctx.pushUnchecked(try arith.concatToString(self, a, b));
                 continue :sw @enumFromInt(self.pc[0]);
             },
 
@@ -2813,42 +2814,10 @@ pub const Interpreter = struct {
             return try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) + @as(f64, @floatFromInt(b.getInt())));
         }
         // Slow path: strings or floats
-        return self.addValuesSlow(a, b);
+        return arith.addValuesSlow(self, a, b);
     }
 
     /// Slow path for addition - handles strings and floats
-    fn addValuesSlow(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
-        @branchHint(.cold);
-        // String concatenation - if either operand is any string type (flat, rope, or slice)
-        if (a.isAnyString() or b.isAnyString()) {
-            return try self.concatToString(a, b);
-        }
-        // Float path
-        const an = a.toNumber() orelse {
-            traceTypeError(self, "add(a)", a, b);
-            return error.TypeError;
-        };
-        const bn = b.toNumber() orelse {
-            traceTypeError(self, "add(b)", a, b);
-            return error.TypeError;
-        };
-        return try self.allocFloat(an + bn);
-    }
-
-    /// Numeric-only add slow path for add_num opcode (no string dispatch).
-    fn addNumericOnly(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
-        @branchHint(.cold);
-        const an = a.toNumber() orelse {
-            traceTypeError(self, "add_num(a)", a, b);
-            return error.TypeError;
-        };
-        const bn = b.toNumber() orelse {
-            traceTypeError(self, "add_num(b)", a, b);
-            return error.TypeError;
-        };
-        return try self.allocFloat(an + bn);
-    }
-
     /// Subtract two values - optimized for integer fast path
     inline fn subValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
         // Integer fast path
@@ -2861,20 +2830,7 @@ pub const Interpreter = struct {
             return try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) - @as(f64, @floatFromInt(b.getInt())));
         }
         // Slow path
-        return self.subValuesSlow(a, b);
-    }
-
-    fn subValuesSlow(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
-        @branchHint(.cold);
-        const an = a.toNumber() orelse {
-            traceTypeError(self, "sub(a)", a, b);
-            return error.TypeError;
-        };
-        const bn = b.toNumber() orelse {
-            traceTypeError(self, "sub(b)", a, b);
-            return error.TypeError;
-        };
-        return try self.allocFloat(an - bn);
+        return arith.subValuesSlow(self, a, b);
     }
 
     /// Multiply two values - optimized for integer fast path
@@ -2889,324 +2845,10 @@ pub const Interpreter = struct {
             return try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) * @as(f64, @floatFromInt(b.getInt())));
         }
         // Slow path
-        return self.mulValuesSlow(a, b);
+        return arith.mulValuesSlow(self, a, b);
     }
 
-    fn mulValuesSlow(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
-        @branchHint(.cold);
-        const an = a.toNumber() orelse {
-            traceTypeError(self, "mul(a)", a, b);
-            return error.TypeError;
-        };
-        const bn = b.toNumber() orelse {
-            traceTypeError(self, "mul(b)", a, b);
-            return error.TypeError;
-        };
-        return try self.allocFloat(an * bn);
-    }
-
-    /// Convert value to string and concatenate
-    /// Uses rope data structure for O(1) concatenation instead of O(n) copying
-    fn concatToString(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
-        // Use rope-based concatenation for hybrid mode (arena allocation)
-        if (self.ctx.hybrid) |h| {
-            return self.concatToStringRope(a, b, h.arena);
-        }
-
-        // Non-hybrid mode: use traditional concatenation
-        // (Rope optimization is most valuable with arena allocation)
-
-        // Fast path: string + number (very common pattern)
-        const str_a = try self.valueToString(a);
-        defer if (!a.isAnyString()) string.freeString(self.ctx.allocator, str_a);
-
-        const str_b = try self.valueToString(b);
-        defer if (!b.isAnyString()) string.freeString(self.ctx.allocator, str_b);
-
-        const result = try string.concatStrings(self.ctx.allocator, str_a, str_b);
-        return value.JSValue.fromPtr(result);
-    }
-
-    /// Rope-based string concatenation - O(1) operation!
-    /// This is the key optimization for stringBuild benchmark
-    fn concatToStringRope(self: *Interpreter, a: value.JSValue, b: value.JSValue, arena: *@import("arena.zig").Arena) !value.JSValue {
-        // Case 1: Both are already ropes - O(1) concat
-        if (a.isRope() and b.isRope()) {
-            const rope_a = a.toPtr(string.RopeNode);
-            const rope_b = b.toPtr(string.RopeNode);
-            const result = string.concatRopesWithArena(arena, rope_a, rope_b) orelse
-                return error.OutOfMemory;
-            return value.JSValue.fromPtr(result);
-        }
-
-        // Case 2: Left is rope, right is string - O(1) concat
-        if (a.isRope() and b.isString()) {
-            const rope_a = a.toPtr(string.RopeNode);
-            const str_b = b.toPtr(string.JSString);
-            const result = string.concatRopeStringWithArena(arena, rope_a, str_b) orelse
-                return error.OutOfMemory;
-            return value.JSValue.fromPtr(result);
-        }
-
-        // Case 3: Left is string, right is rope
-        if (a.isString() and b.isRope()) {
-            const str_a = a.toPtr(string.JSString);
-            const rope_b = b.toPtr(string.RopeNode);
-            const leaf_a = string.createRopeLeafWithArena(arena, str_a) orelse
-                return error.OutOfMemory;
-            const result = string.concatRopesWithArena(arena, leaf_a, rope_b) orelse
-                return error.OutOfMemory;
-            return value.JSValue.fromPtr(result);
-        }
-
-        // Case 4: Both are strings - create rope for future O(1) concats
-        if (a.isString() and b.isString()) {
-            const str_a = a.toPtr(string.JSString);
-            const str_b = b.toPtr(string.JSString);
-
-            // Small optimization: for very short strings, flat concat is fine
-            // The rope overhead isn't worth it for tiny strings
-            if (str_a.len + str_b.len < 64) {
-                const result = string.concatStringsWithArena(arena, str_a, str_b) orelse
-                    return error.OutOfMemory;
-                return value.JSValue.fromPtr(result);
-            }
-
-            // Create rope for larger strings
-            const result = string.createRopeFromStringsWithArena(arena, str_a, str_b) orelse
-                return error.OutOfMemory;
-            return value.JSValue.fromPtr(result);
-        }
-
-        // Case 4b: Handle string slices - flatten and concat
-        // SliceString on either side: flatten to flat string and use string path
-        if (a.isStringSlice() or b.isStringSlice()) {
-            const str_a = try self.valueToStringArena(a, arena);
-            const str_b = try self.valueToStringArena(b, arena);
-
-            if (str_a.len + str_b.len < 64) {
-                const result = string.concatStringsWithArena(arena, str_a, str_b) orelse
-                    return error.OutOfMemory;
-                return value.JSValue.fromPtr(result);
-            }
-
-            const result = string.createRopeFromStringsWithArena(arena, str_a, str_b) orelse
-                return error.OutOfMemory;
-            return value.JSValue.fromPtr(result);
-        }
-
-        // Case 5: Left is rope, right needs conversion
-        if (a.isRope()) {
-            const rope_a = a.toPtr(string.RopeNode);
-            const str_b = try self.valueToStringArena(b, arena);
-            const result = string.concatRopeStringWithArena(arena, rope_a, str_b) orelse
-                return error.OutOfMemory;
-            return value.JSValue.fromPtr(result);
-        }
-
-        // Case 6: Right is rope, left needs conversion
-        if (b.isRope()) {
-            const rope_b = b.toPtr(string.RopeNode);
-            const str_a = try self.valueToStringArena(a, arena);
-            const leaf_a = string.createRopeLeafWithArena(arena, str_a) orelse
-                return error.OutOfMemory;
-            const result = string.concatRopesWithArena(arena, leaf_a, rope_b) orelse
-                return error.OutOfMemory;
-            return value.JSValue.fromPtr(result);
-        }
-
-        // Case 7: Neither is string/rope - convert both
-        const str_a = try self.valueToStringArena(a, arena);
-        const str_b = try self.valueToStringArena(b, arena);
-
-        // For general case, use flat concat (ropes mainly benefit repeated concats)
-        const result = string.concatStringsWithArena(arena, str_a, str_b) orelse
-            return error.OutOfMemory;
-        return value.JSValue.fromPtr(result);
-    }
-
-    /// Convert value to string using arena allocation
-    fn valueToStringArena(self: *Interpreter, val: value.JSValue, arena: *@import("arena.zig").Arena) !*string.JSString {
-        // Handle rope: flatten to string
-        if (val.isRope()) {
-            const rope = val.toPtr(string.RopeNode);
-            return rope.flattenWithArena(arena) orelse error.OutOfMemory;
-        }
-
-        // Handle string: return directly
-        if (val.isString()) {
-            return val.toPtr(string.JSString);
-        }
-
-        // Handle string slice: flatten to string
-        if (val.isStringSlice()) {
-            const slice = val.toPtr(string.SliceString);
-            return slice.flattenWithArena(arena) orelse error.OutOfMemory;
-        }
-
-        // Handle number
-        if (val.isInt()) {
-            var buf: [32]u8 = undefined;
-            const n = val.getInt();
-            if (self.ctx.small_int_cache.get(n)) |cached| {
-                return cached;
-            }
-            const slice = string.formatIntToBuf(&buf, n);
-            return string.createStringWithArena(arena, slice) orelse error.OutOfMemory;
-        }
-
-        if (val.isFloat64()) {
-            var buf: [64]u8 = undefined;
-            const slice = string.formatFloatToBuf(&buf, val.getFloat64());
-            return string.createStringWithArena(arena, slice) orelse error.OutOfMemory;
-        }
-
-        // Handle other types
-        if (val.isNull()) {
-            return string.createStringWithArena(arena, "null") orelse error.OutOfMemory;
-        }
-        if (val.isUndefined()) {
-            return string.createStringWithArena(arena, "undefined") orelse error.OutOfMemory;
-        }
-        if (val.isTrue()) {
-            return string.createStringWithArena(arena, "true") orelse error.OutOfMemory;
-        }
-        if (val.isFalse()) {
-            return string.createStringWithArena(arena, "false") orelse error.OutOfMemory;
-        }
-
-        // Object: call toString if available, otherwise return "[object Object]"
-        return string.createStringWithArena(arena, "[object Object]") orelse error.OutOfMemory;
-    }
-
-    /// Concatenate N values from the stack into a single string.
-    /// This is much more efficient than chained binary concatenation
-    /// because it calculates total length once and allocates a single buffer.
-    pub fn concatNValues(self: *Interpreter, count: u8) !value.JSValue {
-        if (count == 0) {
-            return value.JSValue.fromPtr(try self.createString(""));
-        }
-        if (count == 1) {
-            const val = self.ctx.pop();
-            const str = try self.valueToString(val);
-            return value.JSValue.fromPtr(str);
-        }
-
-        // Pop all values in reverse order to get left-to-right order
-        var values: [16]value.JSValue = undefined;
-        var i: u8 = count;
-        while (i > 0) : (i -= 1) {
-            values[i - 1] = self.ctx.pop();
-        }
-
-        // Convert all values to strings
-        var strings: [16]*const string.JSString = undefined;
-        for (0..count) |j| {
-            strings[j] = try self.valueToString(values[j]);
-        }
-
-        // Use concatMany for single-allocation concatenation
-        if (self.ctx.hybrid) |h| {
-            const result = string.concatManyWithArena(h.arena, strings[0..count]) orelse
-                return error.OutOfMemory;
-            return value.JSValue.fromPtr(result);
-        }
-
-        const result = try string.concatMany(self.ctx.allocator, strings[0..count]);
-        return value.JSValue.fromPtr(result);
-    }
-
-    /// Convert a JSValue to a JSString
-    fn valueToString(self: *Interpreter, val: value.JSValue) !*string.JSString {
-        if (val.isString()) {
-            return val.toPtr(string.JSString);
-        }
-        // Handle rope: flatten to flat string
-        if (val.isRope()) {
-            const rope = val.toPtr(string.RopeNode);
-            return try rope.flatten(self.ctx.allocator);
-        }
-        // Handle string slice: flatten to flat string
-        if (val.isStringSlice()) {
-            const slice = val.toPtr(string.SliceString);
-            return try slice.flatten(self.ctx.allocator);
-        }
-        if (val.isInt()) {
-            const n = val.getInt();
-            // Fast path: use cached strings for small integers 0-99
-            if (self.ctx.small_int_cache.get(n)) |cached| {
-                return cached;
-            }
-            // Fallback: format larger integers
-            var buf: [32]u8 = undefined;
-            const slice = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return try self.createString("0");
-            return try self.createString(slice);
-        }
-        if (val.isNull()) {
-            return try self.createString("null");
-        }
-        if (val.isUndefined()) {
-            return try self.createString("undefined");
-        }
-        if (val.isTrue()) {
-            return try self.createString("true");
-        }
-        if (val.isFalse()) {
-            return try self.createString("false");
-        }
-        if (val.isObject()) {
-            return try self.createString("[object Object]");
-        }
-        // Float
-        if (val.toNumber()) |n| {
-            var buf: [64]u8 = undefined;
-            const slice = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return try self.createString("NaN");
-            return try self.createString(slice);
-        }
-        return try self.createString("undefined");
-    }
-
-    fn divValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
-        // Division always produces float in JS
-        const an = a.toNumber() orelse {
-            traceTypeError(self, "div(a)", a, b);
-            return error.TypeError;
-        };
-        const bn = b.toNumber() orelse {
-            traceTypeError(self, "div(b)", a, b);
-            return error.TypeError;
-        };
-        return try self.allocFloat(an / bn);
-    }
-
-    fn powValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
-        const an = a.toNumber() orelse {
-            traceTypeError(self, "pow(a)", a, b);
-            return error.TypeError;
-        };
-        const bn = b.toNumber() orelse {
-            traceTypeError(self, "pow(b)", a, b);
-            return error.TypeError;
-        };
-        return try self.allocFloat(std.math.pow(f64, an, bn));
-    }
-
-    fn negValue(self: *Interpreter, a: value.JSValue) !value.JSValue {
-        if (a.isInt()) {
-            const v = a.getInt();
-            if (v == std.math.minInt(i32)) {
-                // Negating minInt overflows
-                return try self.allocFloat(-@as(f64, @floatFromInt(v)));
-            }
-            return value.JSValue.fromInt(-v);
-        }
-        if (a.isFloat64()) {
-            return try self.allocFloat(-a.getFloat64());
-        }
-        return error.TypeError;
-    }
-
-    fn allocFloat(self: *Interpreter, v: f64) !value.JSValue {
+    pub inline fn allocFloat(self: *Interpreter, v: f64) !value.JSValue {
         // NaN-boxing: ALL f64 values are stored inline - no heap allocation!
         // This eliminates the 41.6x performance gap in mathOps benchmark.
         _ = self;
@@ -3239,8 +2881,7 @@ pub const Interpreter = struct {
 
     /// Create a string using hybrid allocator if available
     /// Ephemeral strings use arena allocation, persistent strings use standard allocator
-    fn createString(self: *Interpreter, s: []const u8) !*string.JSString {
-        // Use arena for ephemeral string allocation if hybrid mode enabled
+    pub inline fn createString(self: *Interpreter, s: []const u8) !*string.JSString {
         if (self.ctx.hybrid) |h| {
             return string.createStringWithArena(h.arena, s) orelse
                 return error.OutOfMemory;
