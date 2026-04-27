@@ -1,14 +1,6 @@
-//! Cold-path arithmetic and string-concatenation helpers.
-//!
-//! These ran as methods on `Interpreter` until the Slice C split. They live
-//! here as free functions taking `*Interpreter` so the dispatch-heavy
-//! interpreter.zig stays focused on the dispatch loop. Struct fields are
-//! pub by default in Zig, so `interp.ctx`, `interp.constants`, etc. work
-//! the same as in a method body.
-//!
-//! Hot inline fast-path wrappers (subValues, mulValues, allocFloat) stay
-//! in interpreter.zig so dispatch keeps inlining them; this module owns
-//! their `@branchHint(.cold)` slow-path counterparts.
+//! Cold-path arithmetic and string-concatenation helpers. The hot integer
+//! fast paths and `allocFloat` wrapper live in interpreter.zig so dispatch
+//! keeps inlining them; everything here is `@branchHint(.cold)`.
 
 const std = @import("std");
 const value = @import("../value.zig");
