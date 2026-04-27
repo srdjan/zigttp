@@ -4,7 +4,6 @@
 //! Implements all opcodes from bytecode.zig.
 
 const std = @import("std");
-const compat = @import("compat.zig");
 const value = @import("value.zig");
 const bytecode = @import("bytecode.zig");
 const context = @import("context.zig");
@@ -30,7 +29,7 @@ const lifecycle = @import("interpreter/lifecycle.zig");
 const tier_count = perf.tier_count;
 
 pub const PerfStats = perf.PerfStats;
-pub const enable_opcode_histogram = perf.enable_opcode_histogram;
+const enable_opcode_histogram = perf.enable_opcode_histogram;
 
 pub const JitPolicy = jit_policy.JitPolicy;
 pub const getJitPolicy = jit_policy.getJitPolicy;
@@ -41,17 +40,13 @@ pub const setJitThreshold = jit_policy.setJitThreshold;
 pub const setJitFeedbackWarmup = jit_policy.setJitFeedbackWarmup;
 pub const disableJitForTests = jit_policy.disableJitForTests;
 pub const isTieringDeoptSuppressEnabled = jit_policy.isTieringDeoptSuppressEnabled;
-pub const resetTieringDeoptSuppressCache = jit_policy.resetTieringDeoptSuppressCache;
 const jitDisabled = jit_policy.jitDisabled;
 
 pub const PICEntry = ic.PICEntry;
-pub const PIC_ENTRIES = ic.PIC_ENTRIES;
-pub const pic_entries_tracks_feedback = ic.pic_entries_tracks_feedback;
-pub const effective_pic_cap = ic.effective_pic_cap;
+const effective_pic_cap = ic.effective_pic_cap;
 pub const PolymorphicInlineCache = ic.PolymorphicInlineCache;
 pub const IC_CACHE_SIZE = ic.IC_CACHE_SIZE;
-pub const getPicMegaRecoveryWindow = ic.getPicMegaRecoveryWindow;
-pub const isPicRecoveryDisabled = ic.isPicRecoveryDisabled;
+const getPicMegaRecoveryWindow = ic.getPicMegaRecoveryWindow;
 
 pub threadlocal var current_interpreter: ?*Interpreter = null;
 
