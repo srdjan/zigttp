@@ -44,28 +44,7 @@ pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!vo
     const this_val = if (is_method) self.ctx.pop() else value.JSValue.undefined_val;
 
     if (!func_val.isCallable()) {
-        if (trace.callTraceEnabled()) {
-            std.debug.print(
-                "[call] not-callable type={s} func={} this={} depth={} sp={} fp={}\n",
-                .{ func_val.typeOf(), func_val, this_val, self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
-            );
-            if (func_val.isObject()) {
-                const obj = object.JSObject.fromValue(func_val);
-                std.debug.print(
-                    "[call] not-callable object class={} callable={} generator={} async={}\n",
-                    .{
-                        @intFromEnum(obj.class_id),
-                        @intFromBool(obj.flags.is_callable),
-                        @intFromBool(obj.flags.is_generator),
-                        @intFromBool(obj.flags.is_async),
-                    },
-                );
-            }
-            if (self.current_func) |cur| {
-                const pc_off = @as(usize, @intCast(@intFromPtr(self.pc) - @intFromPtr(cur.code.ptr)));
-                std.debug.print("[call] not-callable pc_off={} func_locals={}\n", .{ pc_off, cur.local_count });
-            }
-        }
+        trace.traceNotCallable(self, func_val, this_val);
         return error.NotCallable;
     }
 
