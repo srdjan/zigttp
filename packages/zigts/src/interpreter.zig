@@ -224,110 +224,15 @@ pub const Interpreter = struct {
         self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
     }
 
-    /// Run bytecode function. Public entry point.
-    // TODO: the JIT-promotion ladder below is also present in
-    // `interpreter/frame.zig:callBytecodeFunction`. The two have drifted -
-    // run() carries an extra hot-loop backedge promotion branch that
-    // callBytecodeFunction lacks. Extract a shared `jit_compile.maybePromote(...)`
-    // helper once both sites can reach it cleanly.
-    pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
-        // const_cast safe: only profiling fields are mutated below.
-        const func_mut = @constCast(func);
-
-        const is_candidate = self.profileFunctionEntry(func_mut);
-        if (is_candidate) {
-            // Allocate type feedback for future optimization
-            jit_compile.allocateTypeFeedback(self, func_mut) catch {};
-
-            // If no feedback sites exist, compile immediately
-            if (func_mut.type_feedback_ptr == null and func_mut.feedback_site_map == null) {
-                jit_compile.tryCompileBaseline(self, func_mut) catch {
-                    // Compilation failed - continue with interpreter
-                };
-            }
-        }
-
-        // Compile after feedback warmup if eligible
-        if (!jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.type_feedback_ptr != null) {
-            const warmup_target = getJitThreshold() + getJitFeedbackWarmup();
-            if (func_mut.execution_count >= warmup_target) {
-                jit_compile.tryCompileBaseline(self, func_mut) catch {
-                    // Compilation failed - continue with interpreter
-                };
-            }
-        }
-
-        // Hot loop promotion: compile after type feedback warmup for functions with hot loops
-        // Functions can become baseline_candidate via execution_count OR hot loop detection
-        if (!jitDisabled() and func_mut.tier == .baseline_candidate and
-            func_mut.backedge_count >= bytecode.LOOP_JIT_THRESHOLD)
-        {
-            // Allocate type feedback if not present
-            if (func_mut.type_feedback_ptr == null) {
-                jit_compile.allocateTypeFeedback(self, func_mut) catch {};
-            }
-            // Wait for feedback warmup before compiling (need call site feedback for inlining)
-            // Use a shorter warmup than normal since hot loops execute frequently
-            const hot_loop_warmup: u32 = 5;
-            if (func_mut.type_feedback_ptr != null and func_mut.execution_count >= hot_loop_warmup) {
-                jit_compile.tryCompileBaseline(self, func_mut) catch {};
-            }
-        }
-
-        // Optimized tier promotion: compile when promoted from baseline
-        if (!jitDisabled() and func_mut.tier == .optimized_candidate) {
-            jit_compile.tryCompileOptimized(self, func_mut) catch {
-                // Compilation failed - stay at baseline
-                jit_compile.setTier(self, func_mut, .baseline);
-            };
-        }
-
-        // Allocate space for locals
-        const local_count = func.local_count;
-        try self.ctx.ensureStack(local_count);
-        for (0..local_count) |_| {
-            try self.ctx.push(value.JSValue.undefined_val);
-        }
-
-        // Check if function is JIT-compiled and execute via JIT
-        if (!jitDisabled() and (func.tier == .baseline or func.tier == .optimized)) {
-            if (func.compiled_code) |cc_opaque| {
-                const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
-                const prev_func = self.current_func;
-                const prev_constants = self.constants;
-                const prev_code_end = self.code_end;
-                const prev_pc = self.pc;
-                self.current_func = func;
-                self.constants = func.constants;
-                self.code_end = func.code.ptr + func.code.len;
-                self.pc = func.code.ptr;
-                defer {
-                    self.current_func = prev_func;
-                    self.constants = prev_constants;
-                    self.code_end = prev_code_end;
-                    self.pc = prev_pc;
-                }
-                const prev_interp = current_interpreter;
-                current_interpreter = self;
-                defer current_interpreter = prev_interp;
-                // Set interpreter pointer in context for IC fast path
-                self.ctx.jit_interpreter = @ptrCast(self);
-                defer self.ctx.jit_interpreter = null;
-                const result_raw = cc.execute(self.ctx);
-                return value.JSValue{ .raw = result_raw };
-            }
-        }
-
-        // Fall back to interpreter
-        self.pc = func.code.ptr;
-        self.code_end = func.code.ptr + func.code.len;
-        self.constants = func.constants;
-        self.current_func = func;
-
-        return self.dispatch() catch |err| {
-            if (err == error.TypeError) trace.traceLastOp(self, "run");
-            return err;
-        };
+    /// Public entry point. Method form preserved so cross-package callers
+    /// in `packages/runtime/src/zruntime.zig` and
+    /// `packages/tools/src/precompile.zig` keep using `interp.run(...)`.
+    /// Implementation lives in `interpreter/frame.zig` next to its sibling
+    /// `callBytecodeFunction`; the two share a JIT-promotion ladder that
+    /// has drifted (run carries an extra hot-loop backedge branch) -- see
+    /// the TODO at the top of `frame.callBytecodeFunction`.
+    pub inline fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
+        return frame.run(self, func);
     }
 
     /// Method form preserved so cross-package callers in
