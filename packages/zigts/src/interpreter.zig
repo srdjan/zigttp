@@ -17,6 +17,7 @@ const builtins = @import("builtins/root.zig");
 const perf = @import("interpreter/perf.zig");
 const jit_policy = @import("interpreter/jit_policy.zig");
 const ic = @import("interpreter/ic.zig");
+const jit_compile = @import("interpreter/jit_compile.zig");
 
 const empty_code: [0]u8 = .{};
 const tier_count = perf.tier_count;
@@ -101,7 +102,7 @@ fn traceCall(self: *Interpreter, label: []const u8, argc: u8, is_method: bool) v
 }
 
 /// Get length of any string type: flat JSString, RopeNode, or SliceString
-fn getAnyStringLength(val: value.JSValue) value.JSValue {
+pub fn getAnyStringLength(val: value.JSValue) value.JSValue {
     if (val.isString()) {
         const str = val.toPtr(string.JSString);
         return value.JSValue.fromInt(@intCast(str.len));
@@ -249,7 +250,7 @@ pub const Interpreter = struct {
         if (jitDisabled()) return false;
         if (func.execution_count == getJitThreshold() and func.tier == .interpreted) {
             self.promotion_attempted +%= 1;
-            self.setTier(func, .baseline_candidate);
+            jit_compile.setTier(self, func, .baseline_candidate);
             self.promotion_succeeded +%= 1;
             return true;
         }
@@ -266,7 +267,7 @@ pub const Interpreter = struct {
                 self.promotion_rejected_deopt_storm +%= 1;
                 return false;
             }
-            self.setTier(func, .optimized_candidate);
+            jit_compile.setTier(self, func, .optimized_candidate);
             self.promotion_succeeded +%= 1;
             return true;
         }
@@ -332,349 +333,6 @@ pub const Interpreter = struct {
         self.deopt_count +%= 1;
     }
 
-    pub fn setTier(self: *Interpreter, func: *bytecode.FunctionBytecode, new_tier: bytecode.CompilationTier) void {
-        const old_tier = func.tier;
-        if (old_tier == new_tier) return;
-        func.tier = new_tier;
-        if (@intFromEnum(new_tier) > @intFromEnum(old_tier)) {
-            self.tier_promotions[@intFromEnum(new_tier)] +%= 1;
-        }
-    }
-
-    /// Try to compile a function using the baseline JIT compiler.
-    /// On success, stores compiled code in func.compiled_code and sets tier to .baseline.
-    /// On UnsupportedOpcode, marks the function as interpreted (won't retry).
-    /// Other errors are propagated.
-    fn tryCompileBaseline(self: *Interpreter, func: *bytecode.FunctionBytecode) !void {
-        // Get or create the JIT code allocator
-        const code_alloc = try self.ctx.getOrCreateCodeAllocator();
-
-        var timer: ?compat.Timer = null;
-        if (context.enable_jit_metrics) {
-            timer = compat.Timer.start() catch null;
-        }
-
-        // Try to compile (pass hidden_class_pool for monomorphic property optimization)
-        const compiled = jit.compileFunction(self.ctx.allocator, code_alloc, func, self.ctx.hidden_class_pool) catch |err| {
-            switch (err) {
-                jit.CompileError.UnsupportedOpcode => {
-                    // Function uses opcodes we can't compile yet - stay interpreted
-                    self.setTier(func, .interpreted);
-                    self.ctx.recordJitFailure();
-                    return;
-                },
-                else => return err,
-            }
-        };
-
-        if (timer) |*t| {
-            self.ctx.recordJitCompile(t.read(), compiled.code.len, func.code.len);
-        }
-
-        // Allocate CompiledCode struct on heap and store it
-        const compiled_ptr = try self.ctx.allocator.create(jit.CompiledCode);
-        compiled_ptr.* = compiled;
-        func.compiled_code = compiled_ptr;
-        self.setTier(func, .baseline);
-    }
-
-    /// Try to compile a function using the optimized JIT tier.
-    /// On success, stores compiled code in func.compiled_code and sets tier to .optimized.
-    /// On UnsupportedOpcode (no optimizable loops), stays at baseline tier.
-    fn tryCompileOptimized(self: *Interpreter, func: *bytecode.FunctionBytecode) !void {
-        // Get or create the JIT code allocator
-        const code_alloc = try self.ctx.getOrCreateCodeAllocator();
-
-        var timer: ?compat.Timer = null;
-        if (context.enable_jit_metrics) {
-            timer = compat.Timer.start() catch null;
-        }
-
-        // Try to compile with optimized tier
-        const compiled = jit.compileOptimized(self.ctx.allocator, code_alloc, func, self.ctx.hidden_class_pool) catch |err| {
-            switch (err) {
-                jit.CompileError.UnsupportedOpcode => {
-                    // No optimizable loops found - stay at baseline
-                    self.setTier(func, .baseline);
-                    return;
-                },
-                else => return err,
-            }
-        };
-
-        if (timer) |*t| {
-            self.ctx.recordJitCompile(t.read(), compiled.code.len, func.code.len);
-        }
-
-        // Free old baseline compiled code if it exists
-        if (func.compiled_code) |old_ptr| {
-            const old_code: *jit.CompiledCode = @ptrCast(@alignCast(old_ptr));
-            self.ctx.allocator.destroy(old_code);
-        }
-
-        // Allocate CompiledCode struct on heap and store it
-        const compiled_ptr = try self.ctx.allocator.create(jit.CompiledCode);
-        compiled_ptr.* = compiled;
-        func.compiled_code = compiled_ptr;
-        self.setTier(func, .optimized);
-    }
-
-    /// Allocate type feedback vector for a function
-    /// Scans bytecode to count and map feedback sites
-    ///
-    /// CRITICAL: This function performs heap allocations that may trigger
-    /// arena growth. It MUST only be called at safe boundaries when no
-    /// active stack frames rely on stable memory addresses.
-    ///
-    /// Safe to call:
-    /// - After function returns (in defer block)
-    /// - Before function first executes
-    ///
-    /// NOT safe to call:
-    /// - During function execution
-    /// - Mid-bytecode dispatch
-    /// - When registers hold active computation state
-    fn allocateTypeFeedback(self: *Interpreter, func: *bytecode.FunctionBytecode) !void {
-        if (func.type_feedback_ptr != null) return; // Already allocated
-
-        // Count feedback sites by scanning bytecode
-        var binary_op_count: u32 = 0;
-        var call_site_count: u32 = 0;
-        var pc: usize = 0;
-
-        while (pc < func.code.len) {
-            const op: bytecode.Opcode = @enumFromInt(func.code[pc]);
-            pc += 1;
-
-            switch (op) {
-                // Binary ops that benefit from type feedback
-                .add, .sub, .mul, .div, .mod => {
-                    binary_op_count += 2; // Two operands per binary op
-                },
-                // Property access with hidden class feedback
-                .get_field_ic, .put_field_ic => {
-                    binary_op_count += 1; // One object per access
-                    pc += 4; // Skip atom_idx (u16) and cache_idx (u16)
-                },
-                // Function calls
-                .call, .call_method => {
-                    call_site_count += 1;
-                    pc += 1; // Skip argc
-                },
-                .call_ic => {
-                    call_site_count += 1;
-                    pc += 3; // Skip argc + u16 cache_idx
-                },
-                // Fused call opcodes also need call site feedback
-                .push_const_call => {
-                    call_site_count += 1;
-                    pc += 3; // Skip u16 const_idx + u8 argc
-                },
-                .get_field_call => {
-                    call_site_count += 1;
-                    pc += 3; // Skip u16 atom_idx + u8 argc
-                },
-                // Skip other opcodes based on their encoding
-                else => {
-                    pc += getOpcodeSize(op);
-                },
-            }
-        }
-
-        // No feedback sites needed
-        if (binary_op_count == 0 and call_site_count == 0) return;
-
-        // Allocate the type feedback vector
-        const tf = try type_feedback.TypeFeedback.init(
-            self.ctx.allocator,
-            binary_op_count,
-            call_site_count,
-        );
-        errdefer tf.deinit();
-
-        // Create bytecode offset to site index mapping
-        const site_map = try self.ctx.allocator.alloc(u16, func.code.len);
-        errdefer self.ctx.allocator.free(site_map);
-        @memset(site_map, 0xFFFF); // Mark unmapped offsets
-
-        // Second pass: populate the mapping
-        var site_idx: u16 = 0;
-        var call_idx: u16 = 0;
-        pc = 0;
-
-        while (pc < func.code.len) {
-            const op: bytecode.Opcode = @enumFromInt(func.code[pc]);
-            const op_offset = pc;
-            pc += 1;
-
-            switch (op) {
-                .add, .sub, .mul, .div, .mod => {
-                    site_map[op_offset] = site_idx;
-                    site_idx += 2;
-                },
-                .get_field_ic, .put_field_ic => {
-                    site_map[op_offset] = site_idx;
-                    site_idx += 1;
-                    pc += 4;
-                },
-                .call, .call_method => {
-                    // Store call site index with high bit set to distinguish
-                    site_map[op_offset] = call_idx | 0x8000;
-                    call_idx += 1;
-                    pc += 1;
-                },
-                .call_ic => {
-                    site_map[op_offset] = call_idx | 0x8000;
-                    call_idx += 1;
-                    pc += 3;
-                },
-                // Fused call opcodes also get call site entries
-                .push_const_call => {
-                    site_map[op_offset] = call_idx | 0x8000;
-                    call_idx += 1;
-                    pc += 3;
-                },
-                .get_field_call => {
-                    site_map[op_offset] = call_idx | 0x8000;
-                    call_idx += 1;
-                    pc += 3;
-                },
-                else => {
-                    pc += getOpcodeSize(op);
-                },
-            }
-        }
-
-        // Store in function
-        func.type_feedback_ptr = tf;
-        func.feedback_site_map = site_map;
-    }
-
-    /// Allocate type feedback for a function after it completes execution.
-    /// This ensures stack and register state remain stable during execution.
-    ///
-    /// CRITICAL: Only call at safe boundaries when no active stack frames
-    /// rely on stable memory addresses.
-    fn allocateTypeFeedbackDeferred(self: *Interpreter, func: *bytecode.FunctionBytecode) !void {
-        if (func.type_feedback_ptr != null) return; // Already allocated
-        if (func.tier != .baseline_candidate) return; // Not a candidate
-        if (func.execution_count < 3) return; // Wait for warmup
-
-        try self.allocateTypeFeedback(func);
-    }
-
-    /// Get the size of an opcode's operands (not including the opcode byte itself)
-    fn getOpcodeSize(op: bytecode.Opcode) usize {
-        return switch (op) {
-            // No operands (0 bytes)
-            .nop, .push_0, .push_1, .push_2, .push_3, .push_null, .push_undefined, .push_true, .push_false => 0,
-            .dup, .drop, .swap, .rot3, .halt, .get_length, .dup2 => 0,
-            .get_loc_0, .get_loc_1, .get_loc_2, .get_loc_3, .put_loc_0, .put_loc_1, .put_loc_2, .put_loc_3 => 0,
-            .add, .sub, .mul, .div, .mod, .pow, .neg, .inc, .dec => 0,
-            .math_floor, .math_ceil, .math_round, .math_abs, .math_min2, .math_max2 => 0,
-            .bit_and, .bit_or, .bit_xor, .bit_not, .shl, .shr, .ushr => 0,
-            .lt, .lte, .gt, .gte, .eq, .neq, .strict_eq, .strict_neq, .not => 0,
-            .ret, .ret_undefined => 0,
-            .get_elem, .put_elem => 0,
-            .new_object, .array_spread, .call_spread => 0,
-            .typeof, .to_number => 0,
-            .shr_1, .mul_2, .await_val, .make_async, .import_default, .export_default => 0,
-            .add_num, .sub_num, .mul_num, .div_num, .lt_num, .gt_num, .lte_num, .gte_num, .concat_2 => 0,
-
-            // 1-byte operand
-            .push_i8, .get_loc, .put_loc => 1,
-            .call, .call_method, .tail_call => 1,
-            .get_upvalue, .put_upvalue, .close_upvalue => 1,
-            .add_const_i8, .sub_const_i8, .mul_const_i8, .mod_const_i8, .lt_const_i8, .le_const_i8 => 1,
-            .set_slot, .concat_n => 1,
-
-            // 2-byte operand (u16 or i16)
-            .push_i16, .push_const, .loop => 2,
-            .goto, .if_true, .if_false, .drop_goto => 2,
-            .get_field, .put_field, .put_field_keep => 2,
-            .new_array, .get_global, .put_global, .define_global, .make_function => 2,
-            .import_module, .import_name, .export_name => 2,
-            .for_of_next, .add_mod, .sub_mod, .mul_mod, .mod_const => 2,
-
-            // 3-byte operand
-            .get_loc_add, .get_loc_get_loc_add => 2,
-            .push_const_call, .make_closure, .call_ic => 3,
-            .new_object_literal => 3, // u16 shape_idx + u8 prop_count
-
-            // 4-byte operands
-            .get_field_ic, .put_field_ic, .if_false_goto => 4,
-            .for_of_next_put_loc, .get_field_call => 4,
-
-            // Catch-all for any new/unknown opcodes
-            _ => 0,
-        };
-    }
-
-    /// Record type feedback for a binary operation
-    /// Called from dispatch loop when type_feedback is allocated
-    inline fn recordBinaryOpFeedback(self: *Interpreter, a: value.JSValue, b: value.JSValue) void {
-        const func = self.current_func orelse return;
-        const tf = func.type_feedback_ptr orelse return;
-        const site_map = func.feedback_site_map orelse return;
-
-        // Calculate bytecode offset (pc was already incremented past the opcode)
-        const bc_offset = @intFromPtr(self.pc) - @intFromPtr(func.code.ptr) - 1;
-        if (bc_offset >= site_map.len) return;
-
-        const site_idx = site_map[bc_offset];
-        if (site_idx == 0xFFFF) return; // Not a feedback site
-
-        // Record both operand types
-        if (site_idx + 1 < tf.sites.len) {
-            tf.sites[site_idx].record(a);
-            tf.sites[site_idx + 1].record(b);
-        }
-    }
-
-    /// Record type feedback for property access
-    inline fn recordPropertyFeedback(self: *Interpreter, obj: value.JSValue) void {
-        const func = self.current_func orelse return;
-        const tf = func.type_feedback_ptr orelse return;
-        const site_map = func.feedback_site_map orelse return;
-
-        // Calculate bytecode offset (pc was already incremented past opcode + operands)
-        // For get_field_ic: opcode (1) + atom_idx (2) + cache_idx (2) = 5 bytes total
-        const bc_offset = @intFromPtr(self.pc) - @intFromPtr(func.code.ptr) - 5;
-        if (bc_offset >= site_map.len) return;
-
-        const site_idx = site_map[bc_offset];
-        if (site_idx == 0xFFFF) return;
-
-        if (site_idx < tf.sites.len) {
-            tf.sites[site_idx].record(obj);
-        }
-    }
-
-    /// Record call site feedback for function inlining decisions
-    /// Records which function is being called at this call site
-    inline fn recordCallSiteFeedback(self: *Interpreter, callee_bc: ?*const bytecode.FunctionBytecode) void {
-        const func = self.current_func orelse return;
-        const tf = func.type_feedback_ptr orelse return;
-        const site_map = func.feedback_site_map orelse return;
-
-        // Calculate bytecode offset using the caller-set opcode distance
-        const pc_offset = self.call_opcode_offset;
-        const func_code_start = @intFromPtr(func.code.ptr);
-        const pc_addr = @intFromPtr(self.pc);
-        if (pc_addr < func_code_start + pc_offset) return;
-        const bc_offset = pc_addr - func_code_start - pc_offset;
-        if (bc_offset >= site_map.len) return;
-
-        const site_idx = site_map[bc_offset];
-        // Call sites have high bit set (0x8000)
-        if ((site_idx & 0x8000) == 0) return;
-        const call_idx = site_idx & 0x7FFF;
-
-        if (call_idx < tf.call_sites.len) {
-            tf.call_sites[call_idx].recordCallee(callee_bc);
-        }
-    }
-
     /// Offset the program counter by a signed value
     /// Consolidates the verbose type-casting pattern used throughout dispatch
     inline fn offsetPc(self: *Interpreter, offset: i16) void {
@@ -690,11 +348,11 @@ pub const Interpreter = struct {
         const is_candidate = self.profileFunctionEntry(func_mut);
         if (is_candidate) {
             // Allocate type feedback for future optimization
-            self.allocateTypeFeedback(func_mut) catch {};
+            jit_compile.allocateTypeFeedback(self, func_mut) catch {};
 
             // If no feedback sites exist, compile immediately
             if (func_mut.type_feedback_ptr == null and func_mut.feedback_site_map == null) {
-                self.tryCompileBaseline(func_mut) catch {
+                jit_compile.tryCompileBaseline(self, func_mut) catch {
                     // Compilation failed - continue with interpreter
                 };
             }
@@ -704,7 +362,7 @@ pub const Interpreter = struct {
         if (!jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.type_feedback_ptr != null) {
             const warmup_target = getJitThreshold() + getJitFeedbackWarmup();
             if (func_mut.execution_count >= warmup_target) {
-                self.tryCompileBaseline(func_mut) catch {
+                jit_compile.tryCompileBaseline(self, func_mut) catch {
                     // Compilation failed - continue with interpreter
                 };
             }
@@ -717,21 +375,21 @@ pub const Interpreter = struct {
         {
             // Allocate type feedback if not present
             if (func_mut.type_feedback_ptr == null) {
-                self.allocateTypeFeedback(func_mut) catch {};
+                jit_compile.allocateTypeFeedback(self, func_mut) catch {};
             }
             // Wait for feedback warmup before compiling (need call site feedback for inlining)
             // Use a shorter warmup than normal since hot loops execute frequently
             const hot_loop_warmup: u32 = 5;
             if (func_mut.type_feedback_ptr != null and func_mut.execution_count >= hot_loop_warmup) {
-                self.tryCompileBaseline(func_mut) catch {};
+                jit_compile.tryCompileBaseline(self, func_mut) catch {};
             }
         }
 
         // Optimized tier promotion: compile when promoted from baseline
         if (!jitDisabled() and func_mut.tier == .optimized_candidate) {
-            self.tryCompileOptimized(func_mut) catch {
+            jit_compile.tryCompileOptimized(self, func_mut) catch {
                 // Compilation failed - stay at baseline
-                self.setTier(func_mut, .baseline);
+                jit_compile.setTier(self, func_mut, .baseline);
             };
         }
 
@@ -913,11 +571,11 @@ pub const Interpreter = struct {
         const is_candidate = self.profileFunctionEntry(func_bc_mut);
         if (is_candidate) {
             // Allocate type feedback for future optimization
-            self.allocateTypeFeedback(func_bc_mut) catch {};
+            jit_compile.allocateTypeFeedback(self, func_bc_mut) catch {};
 
             // If no feedback sites exist, compile immediately
             if (func_bc_mut.type_feedback_ptr == null and func_bc_mut.feedback_site_map == null) {
-                self.tryCompileBaseline(func_bc_mut) catch {
+                jit_compile.tryCompileBaseline(self, func_bc_mut) catch {
                     // Compilation failed (other than UnsupportedOpcode) - continue with interpreter
                 };
             }
@@ -927,7 +585,7 @@ pub const Interpreter = struct {
         if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate and func_bc_mut.type_feedback_ptr != null) {
             const warmup_target = getJitThreshold() + getJitFeedbackWarmup();
             if (func_bc_mut.execution_count >= warmup_target) {
-                self.tryCompileBaseline(func_bc_mut) catch {
+                jit_compile.tryCompileBaseline(self, func_bc_mut) catch {
                     // Compilation failed (other than UnsupportedOpcode) - continue with interpreter
                 };
             }
@@ -942,16 +600,16 @@ pub const Interpreter = struct {
             if (func_bc_mut.type_feedback_ptr) |tf| {
                 const baseline_warmup: u32 = 50;
                 if (func_bc_mut.execution_count >= baseline_warmup or tf.totalHits() > 100) {
-                    self.tryCompileBaseline(func_bc_mut) catch {};
+                    jit_compile.tryCompileBaseline(self, func_bc_mut) catch {};
                 }
             }
         }
 
         // Optimized tier promotion: compile when promoted from baseline by hot loop
         if (!jitDisabled() and func_bc_mut.tier == .optimized_candidate) {
-            self.tryCompileOptimized(func_bc_mut) catch {
+            jit_compile.tryCompileOptimized(self, func_bc_mut) catch {
                 // Compilation failed - stay at baseline
-                self.setTier(func_bc_mut, .baseline);
+                jit_compile.setTier(self, func_bc_mut, .baseline);
             };
         }
 
@@ -1010,7 +668,7 @@ pub const Interpreter = struct {
 
                 // Allocate type feedback after function completes (safe boundary)
                 if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate) {
-                    self.allocateTypeFeedbackDeferred(func_bc_mut) catch {};
+                    jit_compile.allocateTypeFeedbackDeferred(self, func_bc_mut) catch {};
                 }
 
                 return result;
@@ -1033,7 +691,7 @@ pub const Interpreter = struct {
 
         // Allocate type feedback after function completes (safe boundary)
         if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate) {
-            self.allocateTypeFeedbackDeferred(func_bc_mut) catch {};
+            jit_compile.allocateTypeFeedbackDeferred(self, func_bc_mut) catch {};
         }
 
         return result;
@@ -1282,7 +940,7 @@ pub const Interpreter = struct {
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 // Record type feedback for JIT optimization
-                self.recordBinaryOpFeedback(a, b);
+                jit_compile.recordBinaryOpFeedback(self, a, b);
                 // Inline integer fast path
                 if (a.isInt() and b.isInt()) {
                     @branchHint(.likely);
@@ -1312,7 +970,7 @@ pub const Interpreter = struct {
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
-                self.recordBinaryOpFeedback(a, b);
+                jit_compile.recordBinaryOpFeedback(self, a, b);
                 if (a.isInt() and b.isInt()) {
                     @branchHint(.likely);
                     const ai = a.getInt();
@@ -1340,7 +998,7 @@ pub const Interpreter = struct {
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
-                self.recordBinaryOpFeedback(a, b);
+                jit_compile.recordBinaryOpFeedback(self, a, b);
                 if (a.isInt() and b.isInt()) {
                     @branchHint(.likely);
                     const ai = a.getInt();
@@ -1367,7 +1025,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const b = self.ctx.pop();
                 const a = self.ctx.pop();
-                self.recordBinaryOpFeedback(a, b);
+                jit_compile.recordBinaryOpFeedback(self, a, b);
                 self.ctx.pushUnchecked(try self.divValues(a, b));
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -1376,7 +1034,7 @@ pub const Interpreter = struct {
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
-                self.recordBinaryOpFeedback(a, b);
+                jit_compile.recordBinaryOpFeedback(self, a, b);
                 if (a.isInt() and b.isInt()) {
                     @branchHint(.likely);
                     const bv = b.getInt();
@@ -1968,7 +1626,7 @@ pub const Interpreter = struct {
                 self.pc += 4;
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 const obj_val = self.ctx.pop();
-                self.recordPropertyFeedback(obj_val);
+                jit_compile.recordPropertyFeedback(self, obj_val);
 
                 if (obj_val.isObject()) {
                     const obj = object.JSObject.fromValue(obj_val);
@@ -2022,7 +1680,7 @@ pub const Interpreter = struct {
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 const val = self.ctx.pop();
                 const obj_val = self.ctx.pop();
-                self.recordPropertyFeedback(obj_val);
+                jit_compile.recordPropertyFeedback(self, obj_val);
 
                 if (obj_val.isObject()) {
                     const obj = object.JSObject.fromValue(obj_val);
@@ -3424,7 +3082,7 @@ pub const Interpreter = struct {
     /// Concatenate N values from the stack into a single string.
     /// This is much more efficient than chained binary concatenation
     /// because it calculates total length once and allocates a single buffer.
-    fn concatNValues(self: *Interpreter, count: u8) !value.JSValue {
+    pub fn concatNValues(self: *Interpreter, count: u8) !value.JSValue {
         if (count == 0) {
             return value.JSValue.fromPtr(try self.createString(""));
         }
@@ -3618,7 +3276,7 @@ pub const Interpreter = struct {
     }
 
     /// Maximum arguments for stack-based allocation (security limit)
-    const MAX_STACK_ARGS = 256;
+    pub const MAX_STACK_ARGS = 256;
 
     /// Perform function call, dispatching to native functions, bytecode functions,
     /// generators, or async functions as appropriate.
@@ -3639,7 +3297,7 @@ pub const Interpreter = struct {
     ///    - Bytecode: Call via callBytecodeFunction, push result
     ///
     /// Security: Limits argc to MAX_STACK_ARGS (256) to prevent stack buffer overflow.
-    fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!void {
+    pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!void {
         // Stack layout for regular call: [func, arg0, arg1, ..., argN-1]
         // Stack layout for method call: [obj, func, arg0, arg1, ..., argN-1]
 
@@ -3746,7 +3404,7 @@ pub const Interpreter = struct {
             null;
 
         // Record call site feedback for inlining decisions
-        self.recordCallSiteFeedback(func_bc_opt);
+        jit_compile.recordCallSiteFeedback(self, func_bc_opt);
 
         if (func_bc_opt) |func_bc| {
             // Set current closure context for this call (null for non-closures)
@@ -3831,413 +3489,6 @@ pub const Interpreter = struct {
     }
 };
 
-/// JIT helper: perform a call/call_method from compiled code.
-/// Pops arguments and function from the context stack using interpreter logic,
-/// then returns the result as a JSValue.
-pub export fn jitCall(ctx: *context.Context, argc: u8, is_method: u8) value.JSValue {
-    const interp = current_interpreter orelse {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    };
-
-    interp.doCall(argc, is_method != 0) catch {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    };
-
-    return ctx.pop();
-}
-
-/// JIT helper: perform a monomorphic bytecode call from compiled code.
-/// Verifies the callee matches the expected bytecode function and then
-/// dispatches directly to callBytecodeFunction. Falls back to doCall otherwise.
-pub export fn jitCallBytecode(
-    ctx: *context.Context,
-    expected_bc: *const bytecode.FunctionBytecode,
-    argc: u8,
-    is_method: u8,
-) value.JSValue {
-    const interp = current_interpreter orelse {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    };
-
-    const is_method_bool = is_method != 0;
-    const sp = ctx.sp;
-    const needed: usize = @as(usize, argc) + 1 + @as(usize, @intFromBool(is_method_bool));
-    if (sp < needed) {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    }
-
-    // Peek function value without modifying the stack.
-    const func_idx = sp - 1 - @as(usize, argc);
-    const func_val = ctx.stack[func_idx];
-
-    if (!func_val.isCallable()) {
-        interp.doCall(argc, is_method_bool) catch {
-            ctx.throwException(value.JSValue.exception_val);
-            return value.JSValue.exception_val;
-        };
-        return ctx.pop();
-    }
-
-    const func_obj = object.JSObject.fromValue(func_val);
-    if (func_obj.flags.is_generator or func_obj.flags.is_async) {
-        interp.doCall(argc, is_method_bool) catch {
-            ctx.throwException(value.JSValue.exception_val);
-            return value.JSValue.exception_val;
-        };
-        return ctx.pop();
-    }
-
-    const closure_data = func_obj.getClosureData();
-    const func_bc_opt = if (closure_data) |cd|
-        cd.bytecode
-    else if (func_obj.getBytecodeFunctionData()) |bc_data|
-        bc_data.bytecode
-    else
-        null;
-
-    if (func_bc_opt == null or func_bc_opt.? != expected_bc) {
-        interp.doCall(argc, is_method_bool) catch {
-            ctx.throwException(value.JSValue.exception_val);
-            return value.JSValue.exception_val;
-        };
-        return ctx.pop();
-    }
-
-    // Collect arguments (in reverse order from stack)
-    if (argc > Interpreter.MAX_STACK_ARGS) {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    }
-    var args: [Interpreter.MAX_STACK_ARGS]value.JSValue = undefined;
-    var i: usize = argc;
-    while (i > 0) {
-        i -= 1;
-        args[i] = ctx.pop();
-    }
-
-    // Pop function and optional this
-    _ = ctx.pop(); // func_val
-    const this_val = if (is_method_bool) ctx.pop() else value.JSValue.undefined_val;
-
-    // Set current closure context if needed
-    const prev_closure = interp.current_closure;
-    interp.current_closure = closure_data;
-    defer interp.current_closure = prev_closure;
-
-    const result = interp.callBytecodeFunction(func_val, expected_bc, this_val, args[0..argc]) catch {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    };
-
-    return result;
-}
-
-/// JIT helper: fast path for monomorphic bytecode call when guards have already verified:
-/// - The value is a pointer to an object
-/// - The object is a bytecode function (not generator/async)
-/// - The bytecode matches expected_bc
-/// This skips redundant validation for maximum performance.
-pub export fn jitCallBytecodeFast(
-    ctx: *context.Context,
-    expected_bc: *const bytecode.FunctionBytecode,
-    argc: u8,
-    is_method: u8,
-) value.JSValue {
-    const interp = current_interpreter orelse {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    };
-
-    const is_method_bool = is_method != 0;
-    const sp = ctx.sp;
-
-    // Minimal stack bounds check
-    const needed: usize = @as(usize, argc) + 1 + @as(usize, @intFromBool(is_method_bool));
-    if (sp < needed) {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    }
-
-    // Get function value - guards already verified it's a valid bytecode function
-    const func_idx = sp - 1 - @as(usize, argc);
-    const func_val = ctx.stack[func_idx];
-    const func_obj = object.JSObject.fromValue(func_val);
-
-    // Get closure data - guards verified this is a bytecode function
-    const closure_data = func_obj.getClosureData();
-
-    // Collect arguments (in reverse order from stack)
-    if (argc > Interpreter.MAX_STACK_ARGS) {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    }
-    var args: [Interpreter.MAX_STACK_ARGS]value.JSValue = undefined;
-    var i: usize = argc;
-    while (i > 0) {
-        i -= 1;
-        args[i] = ctx.pop();
-    }
-
-    // Pop function and optional this
-    _ = ctx.pop(); // func_val
-    const this_val = if (is_method_bool) ctx.pop() else value.JSValue.undefined_val;
-
-    // Set current closure context if needed
-    const prev_closure = interp.current_closure;
-    interp.current_closure = closure_data;
-    defer interp.current_closure = prev_closure;
-
-    // Direct call to bytecode function - no additional validation needed
-    const result = interp.callBytecodeFunction(func_val, expected_bc, this_val, args[0..argc]) catch {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    };
-
-    return result;
-}
-
-/// JIT helper: get_field_ic using the interpreter's PIC cache.
-pub export fn jitGetFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_idx: u16, cache_idx: u16) value.JSValue {
-    const interp = current_interpreter orelse {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    };
-
-    const atom: object.Atom = @enumFromInt(atom_idx);
-    if (obj_val.isObject()) {
-        const obj = object.JSObject.fromValue(obj_val);
-        const pic = &interp.pic_cache[cache_idx];
-
-        if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
-            interp.pic_hits +%= 1;
-            return obj.getSlot(slot_offset);
-        }
-
-        interp.pic_misses +%= 1;
-        const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
-        if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
-            interp.updatePic(pic, obj.hidden_class_idx, slot_offset);
-            return obj.getSlot(slot_offset);
-        }
-        if (obj.getProperty(pool, atom)) |prop_val| {
-            return prop_val;
-        }
-        return value.JSValue.undefined_val;
-    } else if (obj_val.isAnyString()) {
-        if (atom == .length) {
-            return getAnyStringLength(obj_val);
-        }
-        if (ctx.string_prototype) |proto| {
-            const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
-            return proto.getProperty(pool, atom) orelse value.JSValue.undefined_val;
-        }
-        return value.JSValue.undefined_val;
-    }
-
-    return value.JSValue.undefined_val;
-}
-
-/// JIT helper: put_field_ic using the interpreter's PIC cache.
-pub export fn jitPutFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_idx: u16, val: value.JSValue, cache_idx: u16) value.JSValue {
-    const interp = current_interpreter orelse {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    };
-
-    const atom: object.Atom = @enumFromInt(atom_idx);
-    if (obj_val.isObject()) {
-        const obj = object.JSObject.fromValue(obj_val);
-        const pic = &interp.pic_cache[cache_idx];
-
-        if (ctx.enforce_arena_escape and ctx.hybrid != null and !obj.flags.is_arena and ctx.isEphemeralValue(val)) {
-            ctx.throwException(value.JSValue.exception_val);
-            return value.JSValue.exception_val;
-        }
-
-        if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
-            interp.pic_hits +%= 1;
-            obj.setSlot(slot_offset, val);
-            return val;
-        }
-
-        interp.pic_misses +%= 1;
-        const pool = ctx.hidden_class_pool orelse {
-            ctx.setPropertyChecked(obj, atom, val) catch {
-                ctx.throwException(value.JSValue.exception_val);
-                return value.JSValue.exception_val;
-            };
-            return val;
-        };
-
-        if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
-            interp.updatePic(pic, obj.hidden_class_idx, slot_offset);
-            obj.setSlot(slot_offset, val);
-            return val;
-        }
-
-        ctx.setPropertyChecked(obj, atom, val) catch {
-            ctx.throwException(value.JSValue.exception_val);
-            return value.JSValue.exception_val;
-        };
-    }
-
-    return val;
-}
-
-// ============================================================================
-// JIT Math Intrinsics
-// ============================================================================
-
-/// JIT helper: Math.floor with one argument (pops from stack, returns result)
-pub export fn jitMathFloor(ctx: *context.Context, arg: value.JSValue) value.JSValue {
-    return builtins.mathFloor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{arg});
-}
-
-/// JIT helper: Math.ceil with one argument
-pub export fn jitMathCeil(ctx: *context.Context, arg: value.JSValue) value.JSValue {
-    return builtins.mathCeil(ctx, value.JSValue.undefined_val, &[_]value.JSValue{arg});
-}
-
-/// JIT helper: Math.round with one argument
-pub export fn jitMathRound(ctx: *context.Context, arg: value.JSValue) value.JSValue {
-    return builtins.mathRound(ctx, value.JSValue.undefined_val, &[_]value.JSValue{arg});
-}
-
-/// JIT helper: Math.abs with one argument
-pub export fn jitMathAbs(ctx: *context.Context, arg: value.JSValue) value.JSValue {
-    return builtins.mathAbs(ctx, value.JSValue.undefined_val, &[_]value.JSValue{arg});
-}
-
-/// JIT helper: Math.min with two arguments
-pub export fn jitMathMin2(ctx: *context.Context, arg1: value.JSValue, arg2: value.JSValue) value.JSValue {
-    return builtins.mathMin(ctx, value.JSValue.undefined_val, &[_]value.JSValue{ arg1, arg2 });
-}
-
-/// JIT helper: Math.max with two arguments
-pub export fn jitMathMax2(ctx: *context.Context, arg1: value.JSValue, arg2: value.JSValue) value.JSValue {
-    return builtins.mathMax(ctx, value.JSValue.undefined_val, &[_]value.JSValue{ arg1, arg2 });
-}
-
-/// JIT helper: concatenate N values from the stack into a single string
-/// Uses the interpreter's concatNValues which leverages concatMany for single-allocation
-pub export fn jitConcatN(ctx: *context.Context, count: u8) value.JSValue {
-    const interp = current_interpreter orelse {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    };
-
-    const result = interp.concatNValues(count) catch {
-        ctx.throwException(value.JSValue.exception_val);
-        return value.JSValue.exception_val;
-    };
-
-    return result;
-}
-
-/// JIT helper: for_of_next iteration step
-/// Stack before: [iterable, index]
-/// If not done: updates index to index+1, pushes element, returns 1
-/// If done: returns 0 (caller should jump to end_offset)
-/// On error: returns 0 (treat as done)
-pub export fn jitForOfNext(ctx: *context.Context) u64 {
-    const sp = ctx.sp;
-    if (sp < 2) return 0; // Error: not enough stack
-
-    const idx_val = ctx.stack[sp - 1];
-    const iter_val = ctx.stack[sp - 2];
-
-    // Array fast path
-    if (iter_val.isObject() and idx_val.isInt()) {
-        const obj = object.JSObject.fromValue(iter_val);
-        const idx = idx_val.getInt();
-        if (idx >= 0 and obj.class_id == .array) {
-            const idx_u: u32 = @intCast(idx);
-            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
-            if (idx_u < len) {
-                // Get element
-                const element = obj.getIndexUnchecked(idx_u);
-                // Update index on stack
-                ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                // Push element
-                ctx.stack[sp] = element;
-                ctx.sp = sp + 1;
-                return 1; // Continue iteration
-            }
-        }
-        // Range iterator fast path
-        else if (idx >= 0 and obj.class_id == .range_iterator) {
-            const idx_u: u32 = @intCast(idx);
-            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
-            if (idx_u < len) {
-                // Compute element: start + idx * step
-                const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
-                const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
-                const element = value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step);
-                // Update index on stack
-                ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                // Push element
-                ctx.stack[sp] = element;
-                ctx.sp = sp + 1;
-                return 1; // Continue iteration
-            }
-        }
-    }
-    return 0; // Done (or error)
-}
-
-/// JIT helper: for_of_next_put_loc - same as forOfNext but stores to local
-/// Stack before: [iterable, index]
-/// If not done: updates index to index+1, stores element to local, returns 1
-/// If done: returns 0 (caller should jump to end_offset)
-pub export fn jitForOfNextPutLoc(ctx: *context.Context, local_idx: u8) u64 {
-    const sp = ctx.sp;
-    const fp = ctx.fp;
-    if (sp < 2) return 0;
-
-    const idx_val = ctx.stack[sp - 1];
-    const iter_val = ctx.stack[sp - 2];
-
-    // Array fast path
-    if (iter_val.isObject() and idx_val.isInt()) {
-        const obj = object.JSObject.fromValue(iter_val);
-        const idx = idx_val.getInt();
-        if (idx >= 0 and obj.class_id == .array) {
-            const idx_u: u32 = @intCast(idx);
-            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
-            if (idx_u < len) {
-                // Get element
-                const element = obj.getIndexUnchecked(idx_u);
-                // Update index on stack
-                ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                // Store to local (no push)
-                ctx.stack[fp + local_idx] = element;
-                return 1; // Continue iteration
-            }
-        }
-        // Range iterator fast path
-        else if (idx >= 0 and obj.class_id == .range_iterator) {
-            const idx_u: u32 = @intCast(idx);
-            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
-            if (idx_u < len) {
-                // Compute element: start + idx * step
-                const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
-                const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
-                const element = value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step);
-                // Update index on stack
-                ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                // Store to local (no push)
-                ctx.stack[fp + local_idx] = element;
-                return 1; // Continue iteration
-            }
-        }
-    }
-    return 0; // Done
-}
-
 // ============================================================================
 // Helper Functions (standalone, used by interpreter)
 // ============================================================================
@@ -4314,25 +3565,6 @@ fn readI16(pc: [*]const u8) i16 {
 /// Read u16 from bytecode
 fn readU16(pc: [*]const u8) u16 {
     return @as(u16, pc[0]) | (@as(u16, pc[1]) << 8);
-}
-
-fn cleanupTypeFeedback(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode) void {
-    if (func.type_feedback_ptr) |tf| {
-        tf.deinit();
-        func.type_feedback_ptr = null;
-    }
-    if (func.feedback_site_map) |site_map| {
-        allocator.free(site_map);
-        func.feedback_site_map = null;
-    }
-}
-
-fn cleanupCompiledCode(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode) void {
-    if (func.compiled_code) |cc| {
-        const compiled: *jit.CompiledCode = @ptrCast(@alignCast(cc));
-        allocator.destroy(compiled);
-        func.compiled_code = null;
-    }
 }
 
 test "Interpreter basic arithmetic" {
@@ -5283,8 +4515,8 @@ test "JIT: inlined call deopts on callee change" {
         .constants = &holder_const,
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &caller_func);
-    defer cleanupCompiledCode(allocator, &caller_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, &caller_func);
+    defer jit_compile.cleanupCompiledCode(allocator, &caller_func);
 
     const warmup_calls = type_feedback.InliningPolicy.MIN_CALL_COUNT + 1;
     var i: u32 = 0;
@@ -5376,11 +4608,11 @@ test "call_ic: operational parity with .call and feedback is recorded" {
         .constants = &callee_const,
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &caller_func);
-    defer cleanupCompiledCode(allocator, &caller_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, &caller_func);
+    defer jit_compile.cleanupCompiledCode(allocator, &caller_func);
 
     // Force feedback allocation so call_ic recording has a slot to write.
-    try interp.allocateTypeFeedback(&caller_func);
+    try jit_compile.allocateTypeFeedback(&interp, &caller_func);
 
     const res = try interp.run(&caller_func);
     try std.testing.expectEqual(@as(i32, 42), res.getInt());
@@ -5441,7 +4673,7 @@ test "JIT: deopt on type mismatch in specialized add" {
 
     const add_obj = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, add_func, .length);
     defer add_obj.destroyFull(allocator);
-    defer cleanupTypeFeedback(allocator, add_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, add_func);
 
     const func_val = add_obj.toValue();
     const this_val = value.JSValue.undefined_val;
@@ -5567,8 +4799,8 @@ test "JIT: Math int fast paths" {
         .constants = &abs_consts,
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_abs);
-    defer cleanupCompiledCode(allocator, &func_abs);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_abs);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_abs);
     try Runner.run(&interp, &func_abs, .{ .float = 2147483648.0 });
 
     // Math.floor(5) -> 5
@@ -5596,8 +4828,8 @@ test "JIT: Math int fast paths" {
         .constants = &.{},
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_floor);
-    defer cleanupCompiledCode(allocator, &func_floor);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_floor);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_floor);
     try Runner.run(&interp, &func_floor, .{ .int = 5 });
 
     // Math.ceil(5) -> 5
@@ -5625,8 +4857,8 @@ test "JIT: Math int fast paths" {
         .constants = &.{},
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_ceil);
-    defer cleanupCompiledCode(allocator, &func_ceil);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_ceil);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_ceil);
     try Runner.run(&interp, &func_ceil, .{ .int = 5 });
 
     // Math.round(5) -> 5
@@ -5654,8 +4886,8 @@ test "JIT: Math int fast paths" {
         .constants = &.{},
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_round);
-    defer cleanupCompiledCode(allocator, &func_round);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_round);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_round);
     try Runner.run(&interp, &func_round, .{ .int = 5 });
 
     // Math.min(7, -3) -> -3
@@ -5685,8 +4917,8 @@ test "JIT: Math int fast paths" {
         .constants = &.{},
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_min);
-    defer cleanupCompiledCode(allocator, &func_min);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_min);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_min);
     try Runner.run(&interp, &func_min, .{ .int = -3 });
 
     // Math.max(7, -3) -> 7
@@ -5716,8 +4948,8 @@ test "JIT: Math int fast paths" {
         .constants = &.{},
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_max);
-    defer cleanupCompiledCode(allocator, &func_max);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_max);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_max);
     try Runner.run(&interp, &func_max, .{ .int = 7 });
 
     // Mixed int/float cases (force helper path)
@@ -5756,8 +4988,8 @@ test "JIT: Math int fast paths" {
         .constants = &absf_consts,
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_absf);
-    defer cleanupCompiledCode(allocator, &func_absf);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_absf);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_absf);
     try Runner.run(&interp, &func_absf, .{ .float = 2.5 });
 
     // Math.floor(5.5) -> 5
@@ -5787,8 +5019,8 @@ test "JIT: Math int fast paths" {
         .constants = &floorf_consts,
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_floorf);
-    defer cleanupCompiledCode(allocator, &func_floorf);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_floorf);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_floorf);
     try Runner.run(&interp, &func_floorf, .{ .int = 5 });
 
     // Math.ceil(-3.2) -> -3
@@ -5818,8 +5050,8 @@ test "JIT: Math int fast paths" {
         .constants = &ceilf_consts,
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_ceilf);
-    defer cleanupCompiledCode(allocator, &func_ceilf);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_ceilf);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_ceilf);
     try Runner.run(&interp, &func_ceilf, .{ .int = -3 });
 
     // Math.round(2.6) -> 3
@@ -5849,8 +5081,8 @@ test "JIT: Math int fast paths" {
         .constants = &roundf_consts,
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_roundf);
-    defer cleanupCompiledCode(allocator, &func_roundf);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_roundf);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_roundf);
     try Runner.run(&interp, &func_roundf, .{ .int = 3 });
 
     // Math.min(7, 3.5) -> 3.5
@@ -5882,8 +5114,8 @@ test "JIT: Math int fast paths" {
         .constants = &minf_consts,
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_minf);
-    defer cleanupCompiledCode(allocator, &func_minf);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_minf);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_minf);
     try Runner.run(&interp, &func_minf, .{ .float = 3.5 });
 
     // Math.max(-2, 4.75) -> 4.75
@@ -5915,8 +5147,8 @@ test "JIT: Math int fast paths" {
         .constants = &maxf_consts,
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, &func_maxf);
-    defer cleanupCompiledCode(allocator, &func_maxf);
+    defer jit_compile.cleanupTypeFeedback(allocator, &func_maxf);
+    defer jit_compile.cleanupCompiledCode(allocator, &func_maxf);
     try Runner.run(&interp, &func_maxf, .{ .float = 4.75 });
 }
 
@@ -7340,7 +6572,7 @@ test "JIT integration: tryCompileBaseline triggers on threshold" {
     try std.testing.expectEqual(bytecode.CompilationTier.baseline_candidate, func.tier);
 
     // Try to compile
-    try interp.tryCompileBaseline(&func);
+    try jit_compile.tryCompileBaseline(&interp, &func);
 
     // Should now be compiled
     try std.testing.expectEqual(bytecode.CompilationTier.baseline, func.tier);
@@ -7386,7 +6618,7 @@ test "JIT integration: unsupported opcodes stay interpreted" {
     };
 
     // Try to compile - should fail with UnsupportedOpcode and revert to interpreted
-    try interp.tryCompileBaseline(&func);
+    try jit_compile.tryCompileBaseline(&interp, &func);
 
     // Should stay interpreted (not baseline)
     try std.testing.expectEqual(bytecode.CompilationTier.interpreted, func.tier);
