@@ -43,6 +43,10 @@ pub fn traceCall(self: *Interpreter, label: []const u8, argc: u8, is_method: boo
     );
 }
 
+fn pcOffset(self: *const Interpreter, cur: *const bytecode.FunctionBytecode) usize {
+    return @intCast(@intFromPtr(self.pc) - @intFromPtr(cur.code.ptr));
+}
+
 pub fn traceTypeError(self: *Interpreter, label: []const u8, a: value.JSValue, b: value.JSValue) void {
     if (!callTraceEnabled()) return;
     std.debug.print(
@@ -50,7 +54,7 @@ pub fn traceTypeError(self: *Interpreter, label: []const u8, a: value.JSValue, b
         .{ label, a.typeOf(), a, b.typeOf(), b, self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
     );
     if (self.current_func) |cur| {
-        const pc_off = @as(usize, @intCast(@intFromPtr(self.pc) - @intFromPtr(cur.code.ptr)));
+        const pc_off = pcOffset(self, cur);
         std.debug.print("[typeerror] pc_off={} last_op={s}\n", .{ pc_off, @tagName(self.last_op) });
         const op_off = if (pc_off > 0) pc_off - 1 else 0;
         traceBytecodeWindow(self, op_off);
@@ -60,7 +64,7 @@ pub fn traceTypeError(self: *Interpreter, label: []const u8, a: value.JSValue, b
 pub fn traceLastOp(self: *Interpreter, label: []const u8) void {
     if (!callTraceEnabled()) return;
     if (self.current_func) |cur| {
-        const pc_off = @as(usize, @intCast(@intFromPtr(self.pc) - @intFromPtr(cur.code.ptr)));
+        const pc_off = pcOffset(self, cur);
         std.debug.print(
             "[typeerror] {s} op={s} pc_off={} depth={} sp={} fp={}\n",
             .{ label, @tagName(self.last_op), pc_off, self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
@@ -94,8 +98,7 @@ pub fn traceNotCallable(self: *Interpreter, func_val: value.JSValue, this_val: v
         );
     }
     if (self.current_func) |cur| {
-        const pc_off = @as(usize, @intCast(@intFromPtr(self.pc) - @intFromPtr(cur.code.ptr)));
-        std.debug.print("[call] not-callable pc_off={} func_locals={}\n", .{ pc_off, cur.local_count });
+        std.debug.print("[call] not-callable pc_off={} func_locals={}\n", .{ pcOffset(self, cur), cur.local_count });
     }
 }
 
