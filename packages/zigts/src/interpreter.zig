@@ -21,6 +21,7 @@ const jit_compile = @import("interpreter/jit_compile.zig");
 const arith = @import("interpreter/arith.zig");
 const trace = @import("interpreter/trace.zig");
 const cmp = @import("interpreter/cmp.zig");
+const frame = @import("interpreter/frame.zig");
 
 const empty_code: [0]u8 = .{};
 const tier_count = perf.tier_count;
@@ -54,8 +55,8 @@ pub threadlocal var current_interpreter: ?*Interpreter = null;
 
 /// Interpreter state
 pub const Interpreter = struct {
-    const MAX_STATE_DEPTH = 1024;
-    const SavedState = struct {
+    pub const MAX_STATE_DEPTH = 1024;
+    pub const SavedState = struct {
         pc: [*]const u8,
         code_end: [*]const u8,
         constants: []const value.JSValue,
@@ -324,106 +325,6 @@ pub const Interpreter = struct {
         };
     }
 
-    fn pushState(self: *Interpreter) InterpreterError!void {
-        if (self.state_depth >= MAX_STATE_DEPTH) {
-            return error.CallStackOverflow;
-        }
-        self.state_stack[self.state_depth] = .{
-            .pc = self.pc,
-            .code_end = self.code_end,
-            .constants = self.constants,
-            .current_func = self.current_func,
-            .sp = self.ctx.sp,
-            .fp = self.ctx.fp,
-            .call_depth = self.ctx.call_depth,
-            .catch_depth = self.ctx.catch_depth,
-            .exception = self.ctx.exception,
-        };
-        self.state_depth += 1;
-    }
-
-    fn popState(self: *Interpreter) void {
-        std.debug.assert(self.state_depth > 0);
-        self.state_depth -= 1;
-        const state = self.state_stack[self.state_depth];
-        self.pc = state.pc;
-        self.code_end = state.code_end;
-        self.constants = state.constants;
-        self.current_func = state.current_func;
-        self.ctx.sp = state.sp;
-        self.ctx.fp = state.fp;
-        self.ctx.call_depth = state.call_depth;
-        self.ctx.catch_depth = state.catch_depth;
-        self.ctx.exception = state.exception;
-    }
-
-    /// Capture a local variable as an upvalue
-    /// Reuses existing open upvalue if one exists, otherwise creates new one
-    fn captureUpvalue(self: *Interpreter, local_idx: u8) !*object.Upvalue {
-        // Get pointer to the local slot
-        const local_ptr = self.ctx.getLocalPtr(local_idx);
-
-        // Search for existing open upvalue pointing to this slot
-        var prev: ?*object.Upvalue = null;
-        var current = self.open_upvalues;
-        while (current) |uv| {
-            switch (uv.location) {
-                .open => |ptr| {
-                    if (ptr == local_ptr) {
-                        // Found existing upvalue for this slot
-                        return uv;
-                    }
-                    // Upvalues are ordered by slot address (higher addresses first)
-                    // If we've passed the slot, we need to insert here
-                    if (@intFromPtr(ptr) < @intFromPtr(local_ptr)) {
-                        break;
-                    }
-                },
-                .closed => {},
-            }
-            prev = uv;
-            current = uv.next;
-        }
-
-        // Create new open upvalue from pool
-        const new_uv = try self.ctx.gc_state.acquireUpvalue();
-        new_uv.* = object.Upvalue.init(local_ptr);
-
-        // Insert into linked list
-        if (prev) |p| {
-            new_uv.next = p.next;
-            p.next = new_uv;
-        } else {
-            new_uv.next = self.open_upvalues;
-            self.open_upvalues = new_uv;
-        }
-
-        return new_uv;
-    }
-
-    /// Close all open upvalues that reference slots at or above the given index
-    fn closeUpvaluesAbove(self: *Interpreter, local_idx: u8) void {
-        const threshold = self.ctx.getLocalPtr(local_idx);
-
-        while (self.open_upvalues) |uv| {
-            switch (uv.location) {
-                .open => |ptr| {
-                    if (@intFromPtr(ptr) < @intFromPtr(threshold)) {
-                        // This upvalue is below the threshold, stop
-                        break;
-                    }
-                    // Close this upvalue
-                    uv.close();
-                    self.open_upvalues = uv.next;
-                },
-                .closed => {
-                    // Already closed, remove from list
-                    self.open_upvalues = uv.next;
-                },
-            }
-        }
-    }
-
     /// Execute a bytecode function with given arguments and return the result.
     ///
     /// This function handles the full lifecycle of a JavaScript function call:
@@ -496,13 +397,13 @@ pub const Interpreter = struct {
             };
         }
 
-        try self.pushState();
-        defer self.popState();
+        try frame.pushState(self);
+        defer frame.popState(self);
 
         // Push call frame
         try self.ctx.pushFrame(func_val, this_val, @intFromPtr(self.pc));
         errdefer {
-            self.closeUpvaluesAbove(0);
+            frame.closeUpvaluesAbove(self, 0);
             _ = self.ctx.popFrame();
         }
 
@@ -546,7 +447,7 @@ pub const Interpreter = struct {
                 const result_raw = cc.execute(self.ctx);
                 const result = value.JSValue{ .raw = result_raw };
 
-                self.closeUpvaluesAbove(0);
+                frame.closeUpvaluesAbove(self, 0);
                 _ = self.ctx.popFrame();
 
                 // Allocate type feedback after function completes (safe boundary)
@@ -569,7 +470,7 @@ pub const Interpreter = struct {
             return err;
         };
 
-        self.closeUpvaluesAbove(0);
+        frame.closeUpvaluesAbove(self, 0);
         _ = self.ctx.popFrame();
 
         // Allocate type feedback after function completes (safe boundary)
@@ -1764,7 +1665,7 @@ pub const Interpreter = struct {
                 for (0..upvalue_count) |i| {
                     const info = bc_ptr.upvalue_info[i];
                     if (info.is_local) {
-                        upvalues[i] = try self.captureUpvalue(info.index);
+                        upvalues[i] = try frame.captureUpvalue(self, info.index);
                     } else {
                         if (self.current_closure) |closure| {
                             upvalues[i] = closure.upvalues[info.index];
@@ -1823,7 +1724,7 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const local_idx = self.pc[0];
                 self.pc += 1;
-                self.closeUpvaluesAbove(local_idx);
+                frame.closeUpvaluesAbove(self, local_idx);
                 continue :sw @enumFromInt(self.pc[0]);
             },
 
