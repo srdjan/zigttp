@@ -19,6 +19,7 @@ const jit_policy = @import("interpreter/jit_policy.zig");
 const ic = @import("interpreter/ic.zig");
 const jit_compile = @import("interpreter/jit_compile.zig");
 const arith = @import("interpreter/arith.zig");
+const trace = @import("interpreter/trace.zig");
 
 const empty_code: [0]u8 = .{};
 const tier_count = perf.tier_count;
@@ -50,58 +51,6 @@ pub const isPicRecoveryDisabled = ic.isPicRecoveryDisabled;
 
 pub threadlocal var current_interpreter: ?*Interpreter = null;
 
-var call_trace_cache: ?bool = null;
-var call_trace_limit_cache: usize = 0;
-var call_trace_limit_cached = false;
-var call_guard_cache: usize = 0;
-var call_guard_cached = false;
-threadlocal var call_trace_count: usize = 0;
-
-fn callTraceEnabled() bool {
-    if (call_trace_cache) |cached| return cached;
-    const enabled = std.c.getenv("ZTS_TRACE_CALLS") != null;
-    call_trace_cache = enabled;
-    return enabled;
-}
-
-fn callTraceLimit() usize {
-    if (call_trace_limit_cached) return call_trace_limit_cache;
-    const default_limit: usize = 200;
-    if (std.c.getenv("ZTS_TRACE_CALLS_LIMIT")) |raw_ptr| {
-        const raw = std.mem.sliceTo(raw_ptr, 0);
-        const parsed = std.fmt.parseUnsigned(usize, raw, 10) catch default_limit;
-        call_trace_limit_cache = if (parsed == 0) default_limit else parsed;
-    } else {
-        call_trace_limit_cache = default_limit;
-    }
-    call_trace_limit_cached = true;
-    return call_trace_limit_cache;
-}
-
-fn callGuardDepth() usize {
-    if (call_guard_cached) return call_guard_cache;
-    if (std.c.getenv("ZTS_CALL_GUARD")) |raw_ptr| {
-        const raw = std.mem.sliceTo(raw_ptr, 0);
-        const parsed = std.fmt.parseUnsigned(usize, raw, 10) catch 0;
-        call_guard_cache = parsed;
-    } else {
-        call_guard_cache = 0;
-    }
-    call_guard_cached = true;
-    return call_guard_cache;
-}
-
-fn traceCall(self: *Interpreter, label: []const u8, argc: u8, is_method: bool) void {
-    if (!callTraceEnabled()) return;
-    const limit = callTraceLimit();
-    if (call_trace_count >= limit) return;
-    call_trace_count += 1;
-    std.debug.print(
-        "[call] {s} depth={} sp={} fp={} argc={} method={}\n",
-        .{ label, self.ctx.call_depth, self.ctx.sp, self.ctx.fp, argc, @intFromBool(is_method) },
-    );
-}
-
 /// Get length of any string type: flat JSString, RopeNode, or SliceString
 pub fn getAnyStringLength(val: value.JSValue) value.JSValue {
     if (val.isString()) {
@@ -117,57 +66,6 @@ pub fn getAnyStringLength(val: value.JSValue) value.JSValue {
         return value.JSValue.fromInt(@intCast(slice.len));
     }
     return value.JSValue.fromInt(0);
-}
-
-pub fn traceTypeError(self: *Interpreter, label: []const u8, a: value.JSValue, b: value.JSValue) void {
-    if (!callTraceEnabled()) return;
-    std.debug.print(
-        "[typeerror] {s} a_type={s} a={} b_type={s} b={} depth={} sp={} fp={}\n",
-        .{ label, a.typeOf(), a, b.typeOf(), b, self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
-    );
-    if (self.current_func) |cur| {
-        const pc_off = @as(usize, @intCast(@intFromPtr(self.pc) - @intFromPtr(cur.code.ptr)));
-        std.debug.print("[typeerror] pc_off={} last_op={s}\n", .{ pc_off, @tagName(self.last_op) });
-        const op_off = if (pc_off > 0) pc_off - 1 else 0;
-        traceBytecodeWindow(self, op_off);
-    }
-}
-
-fn traceLastOp(self: *Interpreter, label: []const u8) void {
-    if (!callTraceEnabled()) return;
-    if (self.current_func) |cur| {
-        const pc_off = @as(usize, @intCast(@intFromPtr(self.pc) - @intFromPtr(cur.code.ptr)));
-        std.debug.print(
-            "[typeerror] {s} op={s} pc_off={} depth={} sp={} fp={}\n",
-            .{ label, @tagName(self.last_op), pc_off, self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
-        );
-        const op_off = if (pc_off > 0) pc_off - 1 else 0;
-        traceBytecodeWindow(self, op_off);
-    } else {
-        std.debug.print(
-            "[typeerror] {s} op={s} depth={} sp={} fp={}\n",
-            .{ label, @tagName(self.last_op), self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
-        );
-    }
-}
-
-fn traceBytecodeWindow(self: *Interpreter, center_off: usize) void {
-    if (!callTraceEnabled()) return;
-    const cur = self.current_func orelse return;
-    const code = cur.code;
-    if (code.len == 0) return;
-    const full = std.c.getenv("ZTS_TRACE_BC_FULL") != null;
-    const window: usize = 12;
-    const start = if (full) 0 else if (center_off > window) center_off - window else 0;
-    const end = if (full) code.len else @min(code.len, center_off + window);
-    var pos: usize = start;
-    while (pos < end) {
-        const op: bytecode.Opcode = @enumFromInt(code[pos]);
-        const info = bytecode.getOpcodeInfo(op);
-        std.debug.print("[bytecode] +{} {s}\n", .{ pos, @tagName(op) });
-        if (info.size == 0) break;
-        pos += info.size;
-    }
 }
 
 /// Interpreter state
@@ -437,7 +335,7 @@ pub const Interpreter = struct {
         self.current_func = func;
 
         return self.dispatch() catch |err| {
-            if (err == error.TypeError) traceLastOp(self, "run");
+            if (err == error.TypeError) trace.traceLastOp(self, "run");
             return err;
         };
     }
@@ -563,8 +461,8 @@ pub const Interpreter = struct {
         this_val: value.JSValue,
         args: []const value.JSValue,
     ) InterpreterError!value.JSValue {
-        traceCall(self, "bc enter", @intCast(args.len), false);
-        defer traceCall(self, "bc exit", @intCast(args.len), false);
+        trace.traceCall(self, "bc enter", @intCast(args.len), false);
+        defer trace.traceCall(self, "bc exit", @intCast(args.len), false);
         // Cast away const for profiling/JIT - safe because we only modify profiling fields
         const func_bc_mut = @constCast(func_bc);
 
@@ -683,7 +581,7 @@ pub const Interpreter = struct {
         self.current_func = func_bc;
 
         const result = self.dispatch() catch |err| {
-            if (err == error.TypeError) traceLastOp(self, "dispatch");
+            if (err == error.TypeError) trace.traceLastOp(self, "dispatch");
             return err;
         };
 
@@ -2946,11 +2844,11 @@ pub const Interpreter = struct {
         if (argc > MAX_STACK_ARGS) {
             return error.TooManyArguments;
         }
-        traceCall(self, "enter", argc, is_method);
-        defer traceCall(self, "exit", argc, is_method);
-        const guard = callGuardDepth();
+        trace.traceCall(self, "enter", argc, is_method);
+        defer trace.traceCall(self, "exit", argc, is_method);
+        const guard = trace.callGuardDepth();
         if (guard != 0 and self.ctx.call_depth >= guard) {
-            traceCall(self, "guard", argc, is_method);
+            trace.traceCall(self, "guard", argc, is_method);
             return error.CallStackOverflow;
         }
 
@@ -2970,7 +2868,7 @@ pub const Interpreter = struct {
 
         // Check if callable
         if (!func_val.isCallable()) {
-            if (callTraceEnabled()) {
+            if (trace.callTraceEnabled()) {
                 std.debug.print(
                     "[call] not-callable type={s} func={} this={} depth={} sp={} fp={}\n",
                     .{ func_val.typeOf(), func_val, this_val, self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
