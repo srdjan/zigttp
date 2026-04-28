@@ -3,6 +3,7 @@ const zigts = @import("zigts");
 const types = @import("types.zig");
 const io_util = @import("io_util.zig");
 const json_util = @import("json_util.zig");
+const review = @import("review.zig");
 
 pub const Entry = struct {
     provider: types.Provider,
@@ -14,6 +15,13 @@ pub const Entry = struct {
     url: ?[]const u8,
     last_image_digest: ?[]const u8,
     managed_env_keys: []const []const u8,
+    /// Snapshot of the contract's proof-shaped facts captured after the last
+    /// successful deploy, used at next-deploy time to compute the review-card
+    /// delta. Backward-compatible: older state files that lack this field
+    /// load with `null` and the next deploy renders a "first deploy" card.
+    /// Persisted contents are exclusively contract-derived identifiers; no
+    /// env values, tokens, or PII ever enter this snapshot.
+    last_review_facts: ?review.ReviewFacts = null,
 
     pub fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -25,6 +33,7 @@ pub const Entry = struct {
         if (self.last_image_digest) |value| allocator.free(value);
         for (self.managed_env_keys) |value| allocator.free(value);
         allocator.free(self.managed_env_keys);
+        if (self.last_review_facts) |*facts| facts.deinit(allocator);
     }
 };
 
@@ -131,6 +140,10 @@ pub fn save(allocator: std.mem.Allocator, store: *const Store) !void {
         try json.beginArray();
         for (entry.managed_env_keys) |key| try json.write(key);
         try json.endArray();
+        if (entry.last_review_facts) |*facts| {
+            try json.objectField("lastReviewFacts");
+            try facts.writeJson(&json);
+        }
         try json.endObject();
     }
     try json.endArray();
@@ -154,6 +167,14 @@ fn parseEntry(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Entry {
         if (item != .string) return error.InvalidDeployState;
         try managed.append(allocator, try allocator.dupe(u8, item.string));
     }
+    var last_review_facts: ?review.ReviewFacts = null;
+    errdefer if (last_review_facts) |*facts| facts.deinit(allocator);
+    if (obj.get("lastReviewFacts")) |value| {
+        if (value == .object) {
+            last_review_facts = try review.ReviewFacts.parseJson(allocator, value.object);
+        }
+    }
+
     return .{
         .provider = provider,
         .name = json_util.dupeRequired(allocator, obj, "name") catch return error.InvalidDeployState,
@@ -164,6 +185,7 @@ fn parseEntry(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Entry {
         .url = try json_util.dupeOptional(allocator, obj, "url"),
         .last_image_digest = try json_util.dupeOptional(allocator, obj, "lastImageDigest"),
         .managed_env_keys = try managed.toOwnedSlice(allocator),
+        .last_review_facts = last_review_facts,
     };
 }
 
@@ -183,8 +205,10 @@ test "state store round trips entries" {
 
     const old_cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
     defer std.testing.allocator.free(old_cwd);
-    try std.posix.chdir(tmp.sub_path);
-    defer std.posix.chdir(old_cwd) catch {};
+    var tmp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path_len = try tmp.dir.realPath(std.testing.io, &tmp_path_buf);
+    try std.Io.Threaded.chdir(tmp_path_buf[0..tmp_path_len]);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     var store = Store{ .entries = try std.testing.allocator.alloc(Entry, 0) };
     defer store.deinit(std.testing.allocator);

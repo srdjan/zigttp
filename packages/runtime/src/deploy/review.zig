@@ -1,0 +1,1378 @@
+//! Deploy Proof Review
+//!
+//! Projects what the compiler proved about a handler into a small, persistable
+//! `ReviewFacts` struct, derives a `ReviewDelta` against the previous deploy's
+//! facts, and renders a single concise card the user reads before any upload
+//! starts. Vocabulary is deliberately aligned with `live_reload.formatUpgradeDiff`:
+//! `safe` / `safe_with_additions` / `breaking`. Vocabulary alignment matters
+//! because a developer iterating with `zigttp dev --watch --prove` should see
+//! the same words at deploy time without context-switching.
+//!
+//! Persistence rule: ReviewFacts contains only contract-derived identifiers.
+//! No env values, no tokens, no credentials, no PII ever round-trips through
+//! the persisted `last_review_facts` snapshot.
+//!
+//! Ownership: `ReviewFacts.fromProvenFacts` allocates owned copies of every
+//! string so the result outlives the source contract. `deriveDelta` produces
+//! outer slices whose elements are borrowed from the inputs; the delta's
+//! deinit only frees the outer slices. `renderReviewCard` writes to a
+//! borrowed `std.Io.Writer` and does not allocate.
+
+const std = @import("std");
+const json_util = @import("json_util.zig");
+const zigts_cli = @import("zigts_cli");
+
+const ProvenFacts = zigts_cli.deploy_manifest.ProvenFacts;
+
+// Verdict mirrors `upgrade_verifier.UpgradeVerdict` so the deploy-time card
+// uses the same words the watch-loop diff already trains the user on. We do
+// not import that enum directly: the deploy review derives its verdict from
+// a lightweight `ReviewDelta` rather than a full HandlerContract pair, and
+// keeping a local enum lets the persisted facts stay simple.
+pub const Verdict = enum {
+    safe,
+    safe_with_additions,
+    breaking,
+
+    pub fn toString(self: Verdict) []const u8 {
+        return switch (self) {
+            .safe => "safe",
+            .safe_with_additions => "safe_with_additions",
+            .breaking => "breaking",
+        };
+    }
+};
+
+/// Mirrors `contract_diff.ProofLevel`. Duplicated locally so review.zig stays
+/// independent of zigts contract types and so persisted JSON uses simple
+/// stable strings rather than re-exporting the engine enum.
+pub const ProofLevel = enum {
+    complete,
+    partial,
+    none,
+
+    pub fn toString(self: ProofLevel) []const u8 {
+        return switch (self) {
+            .complete => "complete",
+            .partial => "partial",
+            .none => "none",
+        };
+    }
+
+    pub fn fromString(s: []const u8) ProofLevel {
+        if (std.mem.eql(u8, s, "complete")) return .complete;
+        if (std.mem.eql(u8, s, "partial")) return .partial;
+        return .none;
+    }
+
+    /// Higher rank means stronger proof. Used to detect downgrades.
+    fn rank(self: ProofLevel) u8 {
+        return switch (self) {
+            .complete => 2,
+            .partial => 1,
+            .none => 0,
+        };
+    }
+};
+
+pub const Route = struct {
+    pattern: []const u8,
+    is_prefix: bool,
+
+    fn lessThan(_: void, a: Route, b: Route) bool {
+        const cmp = std.mem.order(u8, a.pattern, b.pattern);
+        if (cmp != .eq) return cmp == .lt;
+        return @intFromBool(a.is_prefix) < @intFromBool(b.is_prefix);
+    }
+
+    fn eql(a: Route, b: Route) bool {
+        return a.is_prefix == b.is_prefix and std.mem.eql(u8, a.pattern, b.pattern);
+    }
+};
+
+// Properties carries the property booleans that show up in the contract.
+// Defaults match what extractProvenFacts uses when contract.properties is null,
+// so a missing-field parse round-trips the same shape an absent properties
+// block would have produced.
+pub const Properties = struct {
+    retry_safe: bool = false,
+    read_only: bool = false,
+    injection_safe: bool = true,
+    idempotent: bool = false,
+    state_isolated: bool = true,
+    no_secret_leakage: bool = true,
+    no_credential_leakage: bool = true,
+    input_validated: bool = true,
+    pii_contained: bool = true,
+    results_safe: bool = false,
+    fault_covered: bool = false,
+};
+
+const PropertyMeta = struct {
+    field: []const u8,
+    json_key: []const u8,
+    label: []const u8,
+};
+
+const property_metas = [_]PropertyMeta{
+    .{ .field = "retry_safe", .json_key = "retrySafe", .label = "retry-safe" },
+    .{ .field = "read_only", .json_key = "readOnly", .label = "read-only" },
+    .{ .field = "injection_safe", .json_key = "injectionSafe", .label = "injection-safe" },
+    .{ .field = "idempotent", .json_key = "idempotent", .label = "idempotent" },
+    .{ .field = "state_isolated", .json_key = "stateIsolated", .label = "state-isolated" },
+    .{ .field = "no_secret_leakage", .json_key = "noSecretLeakage", .label = "no-secret-leakage" },
+    .{ .field = "no_credential_leakage", .json_key = "noCredentialLeakage", .label = "no-credential-leakage" },
+    .{ .field = "input_validated", .json_key = "inputValidated", .label = "input-validated" },
+    .{ .field = "pii_contained", .json_key = "piiContained", .label = "pii-contained" },
+    .{ .field = "results_safe", .json_key = "resultsSafe", .label = "results-safe" },
+    .{ .field = "fault_covered", .json_key = "faultCovered", .label = "fault-covered" },
+};
+
+// ReviewFacts is the persisted-and-rendered projection of a contract. Strings
+// are owned and freed in deinit. Routes are owned (pattern bytes duped).
+pub const ReviewFacts = struct {
+    contract_sha: []const u8,
+    proof_level: ProofLevel,
+    env_keys: []const []const u8,
+    egress_hosts: []const []const u8,
+    cache_namespaces: []const []const u8,
+    routes: []const Route,
+    capabilities: []const []const u8,
+    properties: Properties,
+
+    /// Build owned facts from the same ProvenFacts the deploy already extracts
+    /// (so we cannot drift from what `buildProofLabels` and `extractProvenFacts`
+    /// have already canonicalised). Capability strings come from
+    /// `contract.capabilities.slice()` in the caller; we accept them as a
+    /// borrowed list to keep this module free of zigts contract types.
+    pub fn fromProvenFacts(
+        allocator: std.mem.Allocator,
+        facts: *const ProvenFacts,
+        capabilities: []const []const u8,
+        contract_sha: []const u8,
+    ) !ReviewFacts {
+        const env_keys = try dupeSortedDedupedStrings(allocator, facts.env_vars);
+        errdefer freeStringList(allocator, env_keys);
+        const egress_hosts = try dupeSortedDedupedStrings(allocator, facts.egress_hosts);
+        errdefer freeStringList(allocator, egress_hosts);
+        const cache_namespaces = try dupeSortedDedupedStrings(allocator, facts.cache_namespaces);
+        errdefer freeStringList(allocator, cache_namespaces);
+        const caps = try dupeSortedDedupedStrings(allocator, capabilities);
+        errdefer freeStringList(allocator, caps);
+
+        const routes = try dupeSortedDedupedRoutes(allocator, facts.routes);
+        errdefer freeRouteList(allocator, routes);
+
+        const sha = try allocator.dupe(u8, contract_sha);
+        errdefer allocator.free(sha);
+
+        return .{
+            .contract_sha = sha,
+            .proof_level = ProofLevel.fromString(facts.proof_level.toString()),
+            .env_keys = env_keys,
+            .egress_hosts = egress_hosts,
+            .cache_namespaces = cache_namespaces,
+            .routes = routes,
+            .capabilities = caps,
+            .properties = .{
+                .retry_safe = facts.retry_safe,
+                .read_only = facts.read_only,
+                .injection_safe = facts.injection_safe,
+                .idempotent = facts.idempotent,
+                .state_isolated = facts.state_isolated,
+                .no_secret_leakage = facts.no_secret_leakage,
+                .no_credential_leakage = facts.no_credential_leakage,
+                .input_validated = facts.input_validated,
+                .pii_contained = facts.pii_contained,
+                .results_safe = facts.results_safe,
+                .fault_covered = facts.fault_covered,
+            },
+        };
+    }
+
+    pub fn deinit(self: *ReviewFacts, allocator: std.mem.Allocator) void {
+        allocator.free(self.contract_sha);
+        freeStringList(allocator, self.env_keys);
+        freeStringList(allocator, self.egress_hosts);
+        freeStringList(allocator, self.cache_namespaces);
+        freeStringList(allocator, self.capabilities);
+        freeRouteList(allocator, self.routes);
+    }
+
+    pub fn writeJson(self: *const ReviewFacts, json: *std.json.Stringify) !void {
+        try json.beginObject();
+        try json.objectField("contractSha");
+        try json.write(self.contract_sha);
+        try json.objectField("proofLevel");
+        try json.write(self.proof_level.toString());
+        try json.objectField("envKeys");
+        try writeStringArray(json, self.env_keys);
+        try json.objectField("egressHosts");
+        try writeStringArray(json, self.egress_hosts);
+        try json.objectField("cacheNamespaces");
+        try writeStringArray(json, self.cache_namespaces);
+        try json.objectField("capabilities");
+        try writeStringArray(json, self.capabilities);
+        try json.objectField("routes");
+        try json.beginArray();
+        for (self.routes) |r| {
+            try json.beginObject();
+            try json.objectField("pattern");
+            try json.write(r.pattern);
+            try json.objectField("isPrefix");
+            try json.write(r.is_prefix);
+            try json.endObject();
+        }
+        try json.endArray();
+        try json.objectField("properties");
+        try json.beginObject();
+        inline for (property_metas) |meta| {
+            try json.objectField(meta.json_key);
+            try json.write(@field(self.properties, meta.field));
+        }
+        try json.endObject();
+        try json.endObject();
+    }
+
+    /// Backward-compatible parser: missing arrays default to empty, missing
+    /// strings default to "none"/"" so older deploy-state.json entries still
+    /// load. Per the v1 plan, an entry without `lastReviewFacts` is treated
+    /// by the caller as "no baseline" rather than parsed via this function.
+    pub fn parseJson(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !ReviewFacts {
+        const sha_value: []const u8 = json_util.getString(obj, "contractSha") orelse "";
+        const sha = try allocator.dupe(u8, sha_value);
+        errdefer allocator.free(sha);
+
+        const level = ProofLevel.fromString(json_util.getString(obj, "proofLevel") orelse "none");
+
+        const env_keys = try parseStringArray(allocator, obj, "envKeys");
+        errdefer freeStringList(allocator, env_keys);
+        const egress_hosts = try parseStringArray(allocator, obj, "egressHosts");
+        errdefer freeStringList(allocator, egress_hosts);
+        const cache_namespaces = try parseStringArray(allocator, obj, "cacheNamespaces");
+        errdefer freeStringList(allocator, cache_namespaces);
+        const capabilities = try parseStringArray(allocator, obj, "capabilities");
+        errdefer freeStringList(allocator, capabilities);
+
+        const routes = try parseRouteArray(allocator, obj);
+        errdefer freeRouteList(allocator, routes);
+
+        var props = Properties{};
+        if (obj.get("properties")) |props_value| {
+            if (props_value == .object) {
+                inline for (property_metas) |meta| {
+                    if (props_value.object.get(meta.json_key)) |v| {
+                        if (v == .bool) @field(props, meta.field) = v.bool;
+                    }
+                }
+            }
+        }
+
+        return .{
+            .contract_sha = sha,
+            .proof_level = level,
+            .env_keys = env_keys,
+            .egress_hosts = egress_hosts,
+            .cache_namespaces = cache_namespaces,
+            .routes = routes,
+            .capabilities = capabilities,
+            .properties = props,
+        };
+    }
+};
+
+pub const PropertyChange = struct {
+    /// Borrowed pointer into property_metas; outlives any DeployReview built
+    /// in the same process. Render code must not free.
+    name: []const u8,
+    label: []const u8,
+    old_value: bool,
+    new_value: bool,
+};
+
+pub const ProofLevelChange = struct {
+    old: ProofLevel,
+    new: ProofLevel,
+};
+
+// ReviewDelta holds outer slices that the delta owns; each element references
+// strings owned by the input ReviewFacts (so deinit only frees the outer
+// slices). Routes are also borrowed. Field defaults express the "empty
+// delta" so callers (especially classify-style unit tests) can build a
+// delta varying just the field of interest.
+pub const ReviewDelta = struct {
+    added_env: []const []const u8 = &.{},
+    removed_env: []const []const u8 = &.{},
+    added_egress: []const []const u8 = &.{},
+    removed_egress: []const []const u8 = &.{},
+    added_cache: []const []const u8 = &.{},
+    removed_cache: []const []const u8 = &.{},
+    added_routes: []const Route = &.{},
+    removed_routes: []const Route = &.{},
+    added_capabilities: []const []const u8 = &.{},
+    removed_capabilities: []const []const u8 = &.{},
+    proof_level_change: ?ProofLevelChange = null,
+    promoted_properties: []const PropertyChange = &.{},
+    demoted_properties: []const PropertyChange = &.{},
+
+    pub fn isEmpty(self: *const ReviewDelta) bool {
+        return self.added_env.len == 0 and self.removed_env.len == 0 and
+            self.added_egress.len == 0 and self.removed_egress.len == 0 and
+            self.added_cache.len == 0 and self.removed_cache.len == 0 and
+            self.added_routes.len == 0 and self.removed_routes.len == 0 and
+            self.added_capabilities.len == 0 and self.removed_capabilities.len == 0 and
+            self.proof_level_change == null and
+            self.promoted_properties.len == 0 and self.demoted_properties.len == 0;
+    }
+
+    /// Breaking signals: any removal, any property demotion, any proof-level
+    /// downgrade. Rationale matches the watch-loop verdict: the dev who saw
+    /// `breaking` while editing should see the same word at deploy.
+    pub fn hasBreaking(self: *const ReviewDelta) bool {
+        if (self.removed_env.len > 0) return true;
+        if (self.removed_egress.len > 0) return true;
+        if (self.removed_cache.len > 0) return true;
+        if (self.removed_routes.len > 0) return true;
+        if (self.removed_capabilities.len > 0) return true;
+        if (self.demoted_properties.len > 0) return true;
+        if (self.proof_level_change) |change| {
+            if (change.old.rank() > change.new.rank()) return true;
+        }
+        return false;
+    }
+
+    pub fn deinit(self: *ReviewDelta, allocator: std.mem.Allocator) void {
+        allocator.free(self.added_env);
+        allocator.free(self.removed_env);
+        allocator.free(self.added_egress);
+        allocator.free(self.removed_egress);
+        allocator.free(self.added_cache);
+        allocator.free(self.removed_cache);
+        allocator.free(self.added_routes);
+        allocator.free(self.removed_routes);
+        allocator.free(self.added_capabilities);
+        allocator.free(self.removed_capabilities);
+        allocator.free(self.promoted_properties);
+        allocator.free(self.demoted_properties);
+    }
+};
+
+/// Derive a delta of `current` against `baseline`. With no baseline the delta
+/// is empty by construction so `classify` returns `.safe` for first deploys;
+/// the renderer separately surfaces "baseline: none" so that case is still
+/// distinguishable in output.
+pub fn deriveDelta(
+    allocator: std.mem.Allocator,
+    current: *const ReviewFacts,
+    baseline: ?*const ReviewFacts,
+) !ReviewDelta {
+    if (baseline == null) return .{};
+    const b = baseline.?;
+
+    const added_env = try setDiff(allocator, current.env_keys, b.env_keys);
+    errdefer allocator.free(added_env);
+    const removed_env = try setDiff(allocator, b.env_keys, current.env_keys);
+    errdefer allocator.free(removed_env);
+
+    const added_egress = try setDiff(allocator, current.egress_hosts, b.egress_hosts);
+    errdefer allocator.free(added_egress);
+    const removed_egress = try setDiff(allocator, b.egress_hosts, current.egress_hosts);
+    errdefer allocator.free(removed_egress);
+
+    const added_cache = try setDiff(allocator, current.cache_namespaces, b.cache_namespaces);
+    errdefer allocator.free(added_cache);
+    const removed_cache = try setDiff(allocator, b.cache_namespaces, current.cache_namespaces);
+    errdefer allocator.free(removed_cache);
+
+    const added_caps = try setDiff(allocator, current.capabilities, b.capabilities);
+    errdefer allocator.free(added_caps);
+    const removed_caps = try setDiff(allocator, b.capabilities, current.capabilities);
+    errdefer allocator.free(removed_caps);
+
+    const added_routes = try routeDiff(allocator, current.routes, b.routes);
+    errdefer allocator.free(added_routes);
+    const removed_routes = try routeDiff(allocator, b.routes, current.routes);
+    errdefer allocator.free(removed_routes);
+
+    var promoted: std.ArrayList(PropertyChange) = .empty;
+    errdefer promoted.deinit(allocator);
+    var demoted: std.ArrayList(PropertyChange) = .empty;
+    errdefer demoted.deinit(allocator);
+    inline for (property_metas) |meta| {
+        const old_v = @field(b.properties, meta.field);
+        const new_v = @field(current.properties, meta.field);
+        if (old_v != new_v) {
+            const change = PropertyChange{
+                .name = meta.field,
+                .label = meta.label,
+                .old_value = old_v,
+                .new_value = new_v,
+            };
+            if (!old_v and new_v) {
+                try promoted.append(allocator, change);
+            } else {
+                try demoted.append(allocator, change);
+            }
+        }
+    }
+
+    const level_change: ?ProofLevelChange = if (current.proof_level == b.proof_level)
+        null
+    else
+        .{ .old = b.proof_level, .new = current.proof_level };
+
+    return .{
+        .added_env = added_env,
+        .removed_env = removed_env,
+        .added_egress = added_egress,
+        .removed_egress = removed_egress,
+        .added_cache = added_cache,
+        .removed_cache = removed_cache,
+        .added_routes = added_routes,
+        .removed_routes = removed_routes,
+        .added_capabilities = added_caps,
+        .removed_capabilities = removed_caps,
+        .proof_level_change = level_change,
+        .promoted_properties = try promoted.toOwnedSlice(allocator),
+        .demoted_properties = try demoted.toOwnedSlice(allocator),
+    };
+}
+
+pub fn classify(delta: *const ReviewDelta) Verdict {
+    if (delta.hasBreaking()) return .breaking;
+    if (delta.isEmpty()) return .safe;
+    return .safe_with_additions;
+}
+
+pub const DriftStatus = struct {
+    reason: []const u8, // borrowed
+};
+
+pub const PlanRequiredSummary = struct {
+    plan_id: []const u8,
+    review_url: ?[]const u8,
+    covered_reasons: []const []const u8,
+    uncovered_reasons: []const []const u8,
+};
+
+// DeployReview owns its `current` and `delta`. `baseline` is borrowed: it
+// lives in the caller's deploy state (or in a test fixture) and outlives
+// the render call. The drift and plan_required substructures borrow strings
+// from caller-owned data and must outlive the render call only.
+pub const DeployReview = struct {
+    handler_path: []const u8, // borrowed
+    service_name: []const u8, // borrowed
+    region: []const u8, // borrowed
+    current: ReviewFacts,
+    baseline: ?*const ReviewFacts = null,
+    delta: ReviewDelta,
+    drift: ?DriftStatus = null,
+    plan_required: ?PlanRequiredSummary = null,
+
+    pub const InitParams = struct {
+        handler_path: []const u8,
+        service_name: []const u8,
+        region: []const u8,
+        facts: *const ProvenFacts,
+        capability_names: []const []const u8,
+        contract_sha: []const u8,
+        baseline: ?*const ReviewFacts = null,
+        drift: ?DriftStatus = null,
+        plan_required: ?PlanRequiredSummary = null,
+    };
+
+    /// Build a DeployReview from caller inputs. The labeled-block + errdefer
+    /// here are load-bearing: a struct-literal that called `deriveDelta`
+    /// inline would leak `current`'s allocations if `deriveDelta` errored,
+    /// because the caller's `defer review.deinit` is only installed once
+    /// init returns. A function-scope errdefer would instead double-free on
+    /// a later error after ownership transferred into the returned struct.
+    pub fn init(allocator: std.mem.Allocator, params: InitParams) !DeployReview {
+        return build: {
+            var current = try ReviewFacts.fromProvenFacts(
+                allocator,
+                params.facts,
+                params.capability_names,
+                params.contract_sha,
+            );
+            errdefer current.deinit(allocator);
+            const delta = try deriveDelta(allocator, &current, params.baseline);
+            break :build DeployReview{
+                .handler_path = params.handler_path,
+                .service_name = params.service_name,
+                .region = params.region,
+                .current = current,
+                .baseline = params.baseline,
+                .delta = delta,
+                .drift = params.drift,
+                .plan_required = params.plan_required,
+            };
+        };
+    }
+
+    pub fn verdict(self: *const DeployReview) Verdict {
+        return classify(&self.delta);
+    }
+
+    pub fn deinit(self: *DeployReview, allocator: std.mem.Allocator) void {
+        self.current.deinit(allocator);
+        self.delta.deinit(allocator);
+    }
+};
+
+pub const RenderOptions = struct {
+    /// Reserved for a follow-up; v1 ships with no ANSI to keep snapshot tests
+    /// trivial. The flag exists so deploy.zig can detect TTYs today and gate
+    /// future color additions without an API churn.
+    use_color: bool = false,
+};
+
+/// Render the review card to `writer`. Output is deterministic for the same
+/// inputs so snapshot tests stay stable. Caller flushes the writer.
+pub fn renderReviewCard(
+    allocator: std.mem.Allocator,
+    review: *const DeployReview,
+    writer: *std.Io.Writer,
+    opts: RenderOptions,
+) !void {
+    _ = opts;
+    _ = allocator;
+
+    try writer.writeAll("Proof review:\n");
+    try writeKv(writer, "  Handler:    ", review.handler_path);
+    try writeKv(writer, "  Service:    ", review.service_name);
+    try writeKv(writer, "  Region:     ", review.region);
+    try writeKv(writer, "  Contract:   ", review.current.contract_sha);
+    try writeKv(writer, "  Proof:      ", review.current.proof_level.toString());
+
+    try writer.writeAll("  Proven:     ");
+    var any_proven = false;
+    inline for (property_metas) |meta| {
+        if (@field(review.current.properties, meta.field)) {
+            if (any_proven) try writer.writeAll(", ");
+            try writer.writeAll(meta.label);
+            any_proven = true;
+        }
+    }
+    if (!any_proven) try writer.writeAll("(none)");
+    try writer.writeAll("\n");
+
+    try writer.print("  Surface:    {d} route(s), {d} env, {d} egress, {d} cache, {d} cap(s)\n", .{
+        review.current.routes.len,
+        review.current.env_keys.len,
+        review.current.egress_hosts.len,
+        review.current.cache_namespaces.len,
+        review.current.capabilities.len,
+    });
+
+    if (review.baseline == null) {
+        try writer.writeAll("  Baseline:   none (first deploy)\n");
+    } else {
+        try writeKv(writer, "  Baseline:   ", review.baseline.?.contract_sha);
+        try renderDelta(writer, &review.delta);
+    }
+
+    try writeKv(writer, "  Verdict:    ", review.verdict().toString());
+
+    if (review.drift) |d| {
+        try writeKv(writer, "  Drift:      ", d.reason);
+        try writer.writeAll("              re-run with --confirm to apply\n");
+    }
+    if (review.plan_required) |plan| {
+        try writer.writeAll("  Review:     capability review required\n");
+        try writeKv(writer, "  Plan ID:    ", plan.plan_id);
+        if (plan.review_url) |url| try writeKv(writer, "  URL:        ", url);
+        for (plan.covered_reasons) |r| {
+            try writer.writeAll("    already granted: ");
+            try writer.writeAll(r);
+            try writer.writeAll("\n");
+        }
+        for (plan.uncovered_reasons) |r| {
+            try writer.writeAll("    needs review:    ");
+            try writer.writeAll(r);
+            try writer.writeAll("\n");
+        }
+        try writer.writeAll("              approve the plan, then re-run\n");
+    }
+    if (review.drift == null and review.plan_required == null) {
+        try writer.writeAll("  Blockers:   none\n");
+    }
+}
+
+fn renderDelta(writer: *std.Io.Writer, delta: *const ReviewDelta) !void {
+    if (delta.isEmpty()) {
+        try writer.writeAll("  Changes:    (none)\n");
+        return;
+    }
+    try renderSetChange(writer, "Routes", delta.added_routes.len, delta.removed_routes.len);
+    try renderSetChange(writer, "Env keys", delta.added_env.len, delta.removed_env.len);
+    try renderSetChange(writer, "Egress", delta.added_egress.len, delta.removed_egress.len);
+    try renderSetChange(writer, "Caches", delta.added_cache.len, delta.removed_cache.len);
+    try renderSetChange(writer, "Caps", delta.added_capabilities.len, delta.removed_capabilities.len);
+
+    for (delta.added_routes) |r| {
+        try writer.writeAll("    + route ");
+        try writer.writeAll(r.pattern);
+        if (r.is_prefix) try writer.writeAll(" (prefix)");
+        try writer.writeAll("\n");
+    }
+    for (delta.removed_routes) |r| {
+        try writer.writeAll("    - route ");
+        try writer.writeAll(r.pattern);
+        if (r.is_prefix) try writer.writeAll(" (prefix)");
+        try writer.writeAll("\n");
+    }
+    for (delta.added_env) |k| try writeBulletLine(writer, "    + env ", k);
+    for (delta.removed_env) |k| try writeBulletLine(writer, "    - env ", k);
+    for (delta.added_egress) |h| try writeBulletLine(writer, "    + egress ", h);
+    for (delta.removed_egress) |h| try writeBulletLine(writer, "    - egress ", h);
+    for (delta.added_cache) |n| try writeBulletLine(writer, "    + cache ", n);
+    for (delta.removed_cache) |n| try writeBulletLine(writer, "    - cache ", n);
+    for (delta.added_capabilities) |c| try writeBulletLine(writer, "    + cap ", c);
+    for (delta.removed_capabilities) |c| try writeBulletLine(writer, "    - cap ", c);
+
+    for (delta.promoted_properties) |p| try writeBulletLine(writer, "    + property ", p.label);
+    for (delta.demoted_properties) |p| try writeBulletLine(writer, "    - property ", p.label);
+
+    if (delta.proof_level_change) |change| {
+        try writer.writeAll("    proof: ");
+        try writer.writeAll(change.old.toString());
+        try writer.writeAll(" -> ");
+        try writer.writeAll(change.new.toString());
+        try writer.writeAll("\n");
+    }
+}
+
+fn renderSetChange(writer: *std.Io.Writer, name: []const u8, added: usize, removed: usize) !void {
+    if (added == 0 and removed == 0) return;
+    try writer.print("  {s:<10}  +{d} added, -{d} removed\n", .{ name, added, removed });
+}
+
+fn writeKv(writer: *std.Io.Writer, prefix: []const u8, value: []const u8) !void {
+    try writer.writeAll(prefix);
+    try writer.writeAll(value);
+    try writer.writeAll("\n");
+}
+
+fn writeBulletLine(writer: *std.Io.Writer, prefix: []const u8, value: []const u8) !void {
+    try writer.writeAll(prefix);
+    try writer.writeAll(value);
+    try writer.writeAll("\n");
+}
+
+// ---------------------------------------------------------------------------
+// String / route helpers
+// ---------------------------------------------------------------------------
+
+fn dupeSortedDedupedStrings(
+    allocator: std.mem.Allocator,
+    items: []const []const u8,
+) ![]const []const u8 {
+    if (items.len == 0) {
+        return try allocator.alloc([]const u8, 0);
+    }
+    var temp = try allocator.alloc([]const u8, items.len);
+    defer allocator.free(temp);
+    for (items, 0..) |s, i| temp[i] = s;
+    std.mem.sort([]const u8, temp, {}, lessThanSlice);
+
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (out.items) |s| allocator.free(s);
+        out.deinit(allocator);
+    }
+    var prev: ?[]const u8 = null;
+    for (temp) |s| {
+        if (prev) |p| {
+            if (std.mem.eql(u8, p, s)) continue;
+        }
+        const owned = try allocator.dupe(u8, s);
+        errdefer allocator.free(owned);
+        try out.append(allocator, owned);
+        prev = s;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn dupeSortedDedupedRoutes(
+    allocator: std.mem.Allocator,
+    items: []const zigts_cli.deploy_manifest.ProvenRoute,
+) ![]const Route {
+    if (items.len == 0) {
+        return try allocator.alloc(Route, 0);
+    }
+    var temp = try allocator.alloc(Route, items.len);
+    defer allocator.free(temp);
+    for (items, 0..) |r, i| temp[i] = .{ .pattern = r.pattern, .is_prefix = r.is_prefix };
+    std.mem.sort(Route, temp, {}, Route.lessThan);
+
+    var out: std.ArrayList(Route) = .empty;
+    errdefer {
+        for (out.items) |r| allocator.free(r.pattern);
+        out.deinit(allocator);
+    }
+    var prev: ?Route = null;
+    for (temp) |r| {
+        if (prev) |p| {
+            if (Route.eql(p, r)) continue;
+        }
+        const pattern = try allocator.dupe(u8, r.pattern);
+        errdefer allocator.free(pattern);
+        try out.append(allocator, .{ .pattern = pattern, .is_prefix = r.is_prefix });
+        prev = r;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn lessThanSlice(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
+fn freeStringList(allocator: std.mem.Allocator, items: []const []const u8) void {
+    for (items) |s| allocator.free(s);
+    allocator.free(items);
+}
+
+fn freeRouteList(allocator: std.mem.Allocator, items: []const Route) void {
+    for (items) |r| allocator.free(r.pattern);
+    allocator.free(items);
+}
+
+fn writeStringArray(json: *std.json.Stringify, items: []const []const u8) !void {
+    try json.beginArray();
+    for (items) |s| try json.write(s);
+    try json.endArray();
+}
+
+fn parseStringArray(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+    key: []const u8,
+) ![]const []const u8 {
+    const value = obj.get(key) orelse return try allocator.alloc([]const u8, 0);
+    if (value != .array) return error.InvalidReviewFacts;
+    const out = try allocator.alloc([]const u8, value.array.items.len);
+    errdefer allocator.free(out);
+    var n: usize = 0;
+    errdefer for (out[0..n]) |s| allocator.free(s);
+    for (value.array.items) |item| {
+        if (item != .string) return error.InvalidReviewFacts;
+        out[n] = try allocator.dupe(u8, item.string);
+        n += 1;
+    }
+    return out;
+}
+
+fn parseRouteArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]const Route {
+    const value = obj.get("routes") orelse return try allocator.alloc(Route, 0);
+    if (value != .array) return error.InvalidReviewFacts;
+    const out = try allocator.alloc(Route, value.array.items.len);
+    errdefer allocator.free(out);
+    var n: usize = 0;
+    errdefer for (out[0..n]) |r| allocator.free(r.pattern);
+    for (value.array.items) |item| {
+        if (item != .object) return error.InvalidReviewFacts;
+        const pattern_str = json_util.getString(item.object, "pattern") orelse return error.InvalidReviewFacts;
+        const is_prefix = blk: {
+            const v = item.object.get("isPrefix") orelse break :blk false;
+            if (v != .bool) return error.InvalidReviewFacts;
+            break :blk v.bool;
+        };
+        out[n] = .{
+            .pattern = try allocator.dupe(u8, pattern_str),
+            .is_prefix = is_prefix,
+        };
+        n += 1;
+    }
+    return out;
+}
+
+fn setDiff(
+    allocator: std.mem.Allocator,
+    a: []const []const u8,
+    b: []const []const u8,
+) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (a) |s| {
+        if (!containsString(b, s)) try out.append(allocator, s);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn routeDiff(
+    allocator: std.mem.Allocator,
+    a: []const Route,
+    b: []const Route,
+) ![]const Route {
+    var out: std.ArrayList(Route) = .empty;
+    errdefer out.deinit(allocator);
+    for (a) |r| {
+        if (!containsRoute(b, r)) try out.append(allocator, r);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn containsString(haystack: []const []const u8, needle: []const u8) bool {
+    for (haystack) |s| {
+        if (std.mem.eql(u8, s, needle)) return true;
+    }
+    return false;
+}
+
+fn containsRoute(haystack: []const Route, needle: Route) bool {
+    for (haystack) |r| {
+        if (Route.eql(r, needle)) return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "classify: empty delta returns safe" {
+    const delta: ReviewDelta = .{};
+    try std.testing.expectEqual(Verdict.safe, classify(&delta));
+}
+
+test "classify: only additions returns safe_with_additions" {
+    const added = [_][]const u8{"NEW_KEY"};
+    const delta = ReviewDelta{ .added_env = &added };
+    try std.testing.expectEqual(Verdict.safe_with_additions, classify(&delta));
+}
+
+test "classify: any removal is breaking" {
+    const removed = [_][]const u8{"GONE_KEY"};
+    const delta = ReviewDelta{ .removed_env = &removed };
+    try std.testing.expectEqual(Verdict.breaking, classify(&delta));
+}
+
+test "classify: property demotion is breaking" {
+    const demoted = [_]PropertyChange{.{
+        .name = "results_safe",
+        .label = "results-safe",
+        .old_value = true,
+        .new_value = false,
+    }};
+    const delta = ReviewDelta{ .demoted_properties = &demoted };
+    try std.testing.expectEqual(Verdict.breaking, classify(&delta));
+}
+
+test "classify: proof level downgrade is breaking" {
+    const delta = ReviewDelta{
+        .proof_level_change = .{ .old = .complete, .new = .partial },
+    };
+    try std.testing.expectEqual(Verdict.breaking, classify(&delta));
+}
+
+test "classify: proof level upgrade is safe_with_additions" {
+    const delta = ReviewDelta{
+        .proof_level_change = .{ .old = .partial, .new = .complete },
+    };
+    try std.testing.expectEqual(Verdict.safe_with_additions, classify(&delta));
+}
+
+test "deriveDelta: no baseline yields empty delta" {
+    const allocator = std.testing.allocator;
+    const current = ReviewFacts{
+        .contract_sha = "sha-current",
+        .proof_level = .complete,
+        .env_keys = &[_][]const u8{"PORT"},
+        .egress_hosts = &.{},
+        .cache_namespaces = &.{},
+        .routes = &.{},
+        .capabilities = &.{},
+        .properties = .{},
+    };
+    var delta = try deriveDelta(allocator, &current, null);
+    defer delta.deinit(allocator);
+    try std.testing.expect(delta.isEmpty());
+    try std.testing.expectEqual(Verdict.safe, classify(&delta));
+}
+
+test "deriveDelta: detects added env, removed route, demoted property" {
+    const allocator = std.testing.allocator;
+    var baseline = ReviewFacts{
+        .contract_sha = "sha-old",
+        .proof_level = .complete,
+        .env_keys = try allocator.dupe([]const u8, &[_][]const u8{"PORT"}),
+        .egress_hosts = &.{},
+        .cache_namespaces = &.{},
+        .routes = blk: {
+            var arr = try allocator.alloc(Route, 1);
+            arr[0] = .{ .pattern = try allocator.dupe(u8, "/api/v1/users"), .is_prefix = false };
+            break :blk arr;
+        },
+        .capabilities = &.{},
+        .properties = .{ .results_safe = true },
+    };
+    defer {
+        allocator.free(baseline.env_keys);
+        for (baseline.routes) |r| allocator.free(r.pattern);
+        allocator.free(baseline.routes);
+    }
+
+    var current = ReviewFacts{
+        .contract_sha = "sha-new",
+        .proof_level = .complete,
+        .env_keys = try allocator.dupe([]const u8, &[_][]const u8{ "PORT", "DB_URL" }),
+        .egress_hosts = &.{},
+        .cache_namespaces = &.{},
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = &.{},
+        .properties = .{ .results_safe = false },
+    };
+    defer {
+        allocator.free(current.env_keys);
+        allocator.free(current.routes);
+    }
+
+    var delta = try deriveDelta(allocator, &current, &baseline);
+    defer delta.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), delta.added_env.len);
+    try std.testing.expectEqualStrings("DB_URL", delta.added_env[0]);
+    try std.testing.expectEqual(@as(usize, 1), delta.removed_routes.len);
+    try std.testing.expectEqualStrings("/api/v1/users", delta.removed_routes[0].pattern);
+    try std.testing.expectEqual(@as(usize, 1), delta.demoted_properties.len);
+    try std.testing.expectEqualStrings("results_safe", delta.demoted_properties[0].name);
+    try std.testing.expectEqual(Verdict.breaking, classify(&delta));
+}
+
+test "fromProvenFacts: projects every field from ProvenFacts" {
+    const allocator = std.testing.allocator;
+    const env_in = [_][]const u8{ "PORT", "DB_URL" };
+    const egress_in = [_][]const u8{"api.example.com"};
+    const cache_in = [_][]const u8{"sessions"};
+    const caps_in = [_][]const u8{ "network", "clock" };
+    const ProvenRoute = zigts_cli.deploy_manifest.ProvenRoute;
+    const routes_in = [_]ProvenRoute{
+        .{ .pattern = "/users", .is_prefix = true },
+        .{ .pattern = "/healthz", .is_prefix = false },
+    };
+
+    const facts = ProvenFacts{
+        .handler_name = "demo",
+        .handler_path = "src/handler.ts",
+        .env_vars = &env_in,
+        .env_proven = true,
+        .egress_hosts = &egress_in,
+        .egress_proven = true,
+        .cache_namespaces = &cache_in,
+        .cache_proven = true,
+        .routes = &routes_in,
+        .proof_level = .complete,
+        .checks_passed = &.{},
+        .retry_safe = true,
+        .read_only = true,
+        .injection_safe = false,
+        .idempotent = true,
+        .state_isolated = false,
+        .no_secret_leakage = false,
+        .no_credential_leakage = false,
+        .input_validated = false,
+        .pii_contained = false,
+        .results_safe = true,
+        .fault_covered = true,
+    };
+
+    var review = try ReviewFacts.fromProvenFacts(allocator, &facts, &caps_in, "sha-xyz");
+    defer review.deinit(allocator);
+
+    try std.testing.expectEqualStrings("sha-xyz", review.contract_sha);
+    try std.testing.expectEqual(ProofLevel.complete, review.proof_level);
+
+    // env_keys are sorted+deduped (DB_URL < PORT lexicographically).
+    try std.testing.expectEqual(@as(usize, 2), review.env_keys.len);
+    try std.testing.expectEqualStrings("DB_URL", review.env_keys[0]);
+    try std.testing.expectEqualStrings("PORT", review.env_keys[1]);
+
+    try std.testing.expectEqual(@as(usize, 1), review.egress_hosts.len);
+    try std.testing.expectEqualStrings("api.example.com", review.egress_hosts[0]);
+
+    try std.testing.expectEqual(@as(usize, 1), review.cache_namespaces.len);
+    try std.testing.expectEqualStrings("sessions", review.cache_namespaces[0]);
+
+    // capabilities sorted: clock < network.
+    try std.testing.expectEqual(@as(usize, 2), review.capabilities.len);
+    try std.testing.expectEqualStrings("clock", review.capabilities[0]);
+    try std.testing.expectEqualStrings("network", review.capabilities[1]);
+
+    // routes sorted by pattern: /healthz < /users.
+    try std.testing.expectEqual(@as(usize, 2), review.routes.len);
+    try std.testing.expectEqualStrings("/healthz", review.routes[0].pattern);
+    try std.testing.expect(!review.routes[0].is_prefix);
+    try std.testing.expectEqualStrings("/users", review.routes[1].pattern);
+    try std.testing.expect(review.routes[1].is_prefix);
+
+    // Property booleans projected verbatim.
+    try std.testing.expect(review.properties.retry_safe);
+    try std.testing.expect(review.properties.read_only);
+    try std.testing.expect(!review.properties.injection_safe);
+    try std.testing.expect(review.properties.idempotent);
+    try std.testing.expect(!review.properties.state_isolated);
+    try std.testing.expect(!review.properties.no_secret_leakage);
+    try std.testing.expect(!review.properties.no_credential_leakage);
+    try std.testing.expect(!review.properties.input_validated);
+    try std.testing.expect(!review.properties.pii_contained);
+    try std.testing.expect(review.properties.results_safe);
+    try std.testing.expect(review.properties.fault_covered);
+}
+
+test "fromProvenFacts: dedupes duplicate env keys" {
+    const allocator = std.testing.allocator;
+    const env_in = [_][]const u8{ "PORT", "DB_URL", "PORT" };
+    const facts = ProvenFacts{
+        .handler_name = "demo",
+        .handler_path = "src/handler.ts",
+        .env_vars = &env_in,
+        .env_proven = true,
+        .egress_hosts = &.{},
+        .egress_proven = true,
+        .cache_namespaces = &.{},
+        .cache_proven = true,
+        .routes = &.{},
+        .proof_level = .none,
+        .checks_passed = &.{},
+    };
+
+    var review = try ReviewFacts.fromProvenFacts(allocator, &facts, &.{}, "sha-1");
+    defer review.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), review.env_keys.len);
+    try std.testing.expectEqualStrings("DB_URL", review.env_keys[0]);
+    try std.testing.expectEqualStrings("PORT", review.env_keys[1]);
+}
+
+test "ReviewFacts: writeJson then parseJson round trips" {
+    const allocator = std.testing.allocator;
+    var facts = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-1"),
+        .proof_level = .complete,
+        .env_keys = blk: {
+            var arr = try allocator.alloc([]const u8, 2);
+            arr[0] = try allocator.dupe(u8, "DB_URL");
+            arr[1] = try allocator.dupe(u8, "PORT");
+            break :blk arr;
+        },
+        .egress_hosts = blk: {
+            var arr = try allocator.alloc([]const u8, 1);
+            arr[0] = try allocator.dupe(u8, "api.example.com");
+            break :blk arr;
+        },
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = blk: {
+            var arr = try allocator.alloc(Route, 1);
+            arr[0] = .{ .pattern = try allocator.dupe(u8, "/users"), .is_prefix = true };
+            break :blk arr;
+        },
+        .capabilities = blk: {
+            var arr = try allocator.alloc([]const u8, 1);
+            arr[0] = try allocator.dupe(u8, "network");
+            break :blk arr;
+        },
+        .properties = .{ .results_safe = true, .read_only = true },
+    };
+    defer facts.deinit(allocator);
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    var json: std.json.Stringify = .{ .writer = &aw.writer };
+    try facts.writeJson(&json);
+
+    const bytes = aw.writer.buffered();
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+
+    var round = try ReviewFacts.parseJson(allocator, parsed.value.object);
+    defer round.deinit(allocator);
+
+    try std.testing.expectEqualStrings(facts.contract_sha, round.contract_sha);
+    try std.testing.expectEqual(facts.proof_level, round.proof_level);
+    try std.testing.expectEqual(@as(usize, 2), round.env_keys.len);
+    try std.testing.expectEqualStrings("DB_URL", round.env_keys[0]);
+    try std.testing.expectEqualStrings("PORT", round.env_keys[1]);
+    try std.testing.expectEqual(@as(usize, 1), round.egress_hosts.len);
+    try std.testing.expectEqualStrings("api.example.com", round.egress_hosts[0]);
+    try std.testing.expectEqual(@as(usize, 1), round.routes.len);
+    try std.testing.expectEqualStrings("/users", round.routes[0].pattern);
+    try std.testing.expect(round.routes[0].is_prefix);
+    try std.testing.expectEqual(@as(usize, 1), round.capabilities.len);
+    try std.testing.expectEqualStrings("network", round.capabilities[0]);
+    try std.testing.expect(round.properties.results_safe);
+    try std.testing.expect(round.properties.read_only);
+    try std.testing.expect(!round.properties.retry_safe);
+}
+
+test "ReviewFacts.parseJson tolerates missing optional fields" {
+    const allocator = std.testing.allocator;
+    const input = "{\"contractSha\":\"sha-x\"}";
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{});
+    defer parsed.deinit();
+    var facts = try ReviewFacts.parseJson(allocator, parsed.value.object);
+    defer facts.deinit(allocator);
+    try std.testing.expectEqualStrings("sha-x", facts.contract_sha);
+    try std.testing.expectEqual(ProofLevel.none, facts.proof_level);
+    try std.testing.expectEqual(@as(usize, 0), facts.env_keys.len);
+    try std.testing.expectEqual(@as(usize, 0), facts.routes.len);
+    try std.testing.expect(!facts.properties.results_safe);
+    try std.testing.expect(facts.properties.injection_safe); // default true
+}
+
+test "renderReviewCard: first deploy shows baseline none and no blockers" {
+    const allocator = std.testing.allocator;
+    var current = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-1"),
+        .proof_level = .complete,
+        .env_keys = blk: {
+            var arr = try allocator.alloc([]const u8, 1);
+            arr[0] = try allocator.dupe(u8, "PORT");
+            break :blk arr;
+        },
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{ .results_safe = true },
+    };
+    var delta = try deriveDelta(allocator, &current, null);
+    var review = DeployReview{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "us-east",
+        .current = current,
+        .baseline = null,
+        .delta = delta,
+    };
+    defer review.deinit(allocator);
+    _ = &delta;
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try renderReviewCard(allocator, &review, &aw.writer, .{});
+
+    const out = aw.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Proof review:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Handler:    src/handler.ts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Service:    demo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Proof:      complete") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "results-safe") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Baseline:   none (first deploy)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    safe") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Blockers:   none") != null);
+}
+
+test "renderReviewCard: drift section is included when drift is set" {
+    const allocator = std.testing.allocator;
+    var current = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-2"),
+        .proof_level = .complete,
+        .env_keys = try allocator.alloc([]const u8, 0),
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{},
+    };
+    var delta = try deriveDelta(allocator, &current, null);
+    var review = DeployReview{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "us-east",
+        .current = current,
+        .delta = delta,
+        .drift = .{ .reason = "scope changed" },
+    };
+    defer review.deinit(allocator);
+    _ = &delta;
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try renderReviewCard(allocator, &review, &aw.writer, .{});
+    const out = aw.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Drift:      scope changed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "--confirm") != null);
+}
+
+test "renderReviewCard: additive deploy shows added route and env" {
+    const allocator = std.testing.allocator;
+    var baseline = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-old"),
+        .proof_level = .complete,
+        .env_keys = blk: {
+            var arr = try allocator.alloc([]const u8, 1);
+            arr[0] = try allocator.dupe(u8, "PORT");
+            break :blk arr;
+        },
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{},
+    };
+    defer baseline.deinit(allocator);
+    var current = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-new"),
+        .proof_level = .complete,
+        .env_keys = blk: {
+            var arr = try allocator.alloc([]const u8, 2);
+            arr[0] = try allocator.dupe(u8, "DB_URL");
+            arr[1] = try allocator.dupe(u8, "PORT");
+            break :blk arr;
+        },
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = blk: {
+            var arr = try allocator.alloc(Route, 1);
+            arr[0] = .{ .pattern = try allocator.dupe(u8, "/healthz"), .is_prefix = false };
+            break :blk arr;
+        },
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{},
+    };
+    var review = DeployReview{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "us-east",
+        .current = current,
+        .baseline = &baseline,
+        .delta = try deriveDelta(allocator, &current, &baseline),
+    };
+    defer review.deinit(allocator);
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try renderReviewCard(allocator, &review, &aw.writer, .{});
+    const out = aw.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Baseline:   sha-old") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "+ env DB_URL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "+ route /healthz") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    safe_with_additions") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Blockers:   none") != null);
+}
+
+test "renderReviewCard: demoted property is breaking with bullet" {
+    const allocator = std.testing.allocator;
+    var baseline = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-old"),
+        .proof_level = .complete,
+        .env_keys = try allocator.alloc([]const u8, 0),
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{ .read_only = true, .results_safe = true },
+    };
+    defer baseline.deinit(allocator);
+    var current = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-new"),
+        .proof_level = .complete,
+        .env_keys = try allocator.alloc([]const u8, 0),
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{ .read_only = false, .results_safe = true },
+    };
+    var review = DeployReview{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "us-east",
+        .current = current,
+        .baseline = &baseline,
+        .delta = try deriveDelta(allocator, &current, &baseline),
+    };
+    defer review.deinit(allocator);
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try renderReviewCard(allocator, &review, &aw.writer, .{});
+    const out = aw.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "- property read-only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    breaking") != null);
+}
+
+test "renderReviewCard: promoted property renders + bullet" {
+    const allocator = std.testing.allocator;
+    var baseline = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-old"),
+        .proof_level = .complete,
+        .env_keys = try allocator.alloc([]const u8, 0),
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{ .read_only = false },
+    };
+    defer baseline.deinit(allocator);
+    var current = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-new"),
+        .proof_level = .complete,
+        .env_keys = try allocator.alloc([]const u8, 0),
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{ .read_only = true },
+    };
+    var review = DeployReview{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "us-east",
+        .current = current,
+        .baseline = &baseline,
+        .delta = try deriveDelta(allocator, &current, &baseline),
+    };
+    defer review.deinit(allocator);
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try renderReviewCard(allocator, &review, &aw.writer, .{});
+    const out = aw.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "+ property read-only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    safe_with_additions") != null);
+}
+
+test "renderReviewCard: plan_required section lists reasons" {
+    const allocator = std.testing.allocator;
+    var current = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-3"),
+        .proof_level = .complete,
+        .env_keys = try allocator.alloc([]const u8, 0),
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{},
+    };
+    var delta = try deriveDelta(allocator, &current, null);
+    const covered = [_][]const u8{"network egress to api.x"};
+    const uncovered = [_][]const u8{"crypto capability"};
+    var review = DeployReview{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "us-east",
+        .current = current,
+        .delta = delta,
+        .plan_required = .{
+            .plan_id = "plan-1",
+            .review_url = "https://control/deploy/plans/plan-1",
+            .covered_reasons = &covered,
+            .uncovered_reasons = &uncovered,
+        },
+    };
+    defer review.deinit(allocator);
+    _ = &delta;
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try renderReviewCard(allocator, &review, &aw.writer, .{});
+    const out = aw.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "capability review required") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Plan ID:    plan-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "URL:        https://control/deploy/plans/plan-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "already granted: network egress to api.x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "needs review:    crypto capability") != null);
+}
