@@ -31,6 +31,7 @@ const ws_frame_loop = @import("ws_frame_loop.zig");
 const websocket_pool = @import("websocket_pool.zig");
 const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
+const proof_audit_ring = @import("proof_audit_ring.zig");
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
 
@@ -279,6 +280,7 @@ const ConnectionPool = struct {
         // Route pre-filtering (threaded path)
         if (self.server.contract) |*contract| {
             if (!contract.matchesRoute(request.method, request.path)) {
+                proof_audit_ring.pushRouteBlocked(request.method, request.path);
                 self.sendErrorSync(fd, 404, "Not Found") catch {};
                 return outcome_if_alive;
             }
@@ -292,6 +294,7 @@ const ConnectionPool = struct {
                 var cached_opt = cache.get(key, req_allocator);
                 if (cached_opt != null) {
                     defer cached_opt.?.deinit();
+                    proof_audit_ring.pushCacheHit(request.method, request.path);
                     self.sendResponseSync(fd, &cached_opt.?, keep_alive) catch return .close;
                     return outcome_if_alive;
                 }
@@ -1365,6 +1368,7 @@ pub const Server = struct {
         // we can return 404 directly from Zig without entering the JS runtime.
         if (self.contract) |*contract| {
             if (!contract.matchesRoute(request.method, request.path)) {
+                proof_audit_ring.pushRouteBlocked(request.method, request.path);
                 try self.sendErrorResponse(stream, io, 404, "Not Found");
                 if (self.config.log_requests) {
                     std.log.info("[pre-filter] {s} {s} -> 404 (no matching proven route)", .{
@@ -1383,6 +1387,7 @@ pub const Server = struct {
                 var cached_opt = cache.get(key, req_allocator);
                 if (cached_opt != null) {
                     defer cached_opt.?.deinit();
+                    proof_audit_ring.pushCacheHit(request.method, request.path);
                     try self.sendResponse(stream, io, &cached_opt.?, keep_alive);
                     if (self.config.log_requests) {
                         const count = self.request_count.fetchAdd(1, .monotonic) + 1;

@@ -11,4 +11,6 @@ test {
     _ = @import("deploy/review.zig");
     _ = @import("proof_ledger.zig");
     _ = @import("proofs_cli.zig");
+    _ = @import("proof_card_tui.zig");
+    _ = @import("proof_audit_ring.zig");
 }
