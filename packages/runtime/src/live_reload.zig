@@ -21,6 +21,9 @@ const precompile = zigts_cli.precompile;
 const contract_diff = zigts.contract_diff;
 const upgrade_verifier = zigts_cli.upgrade_verifier;
 const HandlerContract = zigts.HandlerContract;
+const deploy_manifest = zigts_cli.deploy_manifest;
+const review_facts_mod = @import("deploy/review.zig");
+const proof_ledger = @import("proof_ledger.zig");
 
 pub const LiveReloadConfig = struct {
     /// Enable contract diffing (--prove)
@@ -45,6 +48,10 @@ pub const LiveReloadState = struct {
     previous_code: ?[]const u8,
     previous_stamp: u64,
     watch_paths: []const []const u8,
+    /// Last source-bytes sha logged to .zigttp/proofs.jsonl. Suppresses
+    /// duplicate appends when the watcher fires for a no-op save (or when
+    /// our own ledger write trips the recursive directory walk).
+    last_ledger_sha: ?[std.crypto.hash.sha2.Sha256.digest_length * 2]u8,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -62,6 +69,7 @@ pub const LiveReloadState = struct {
             .previous_code = null,
             .previous_stamp = 0,
             .watch_paths = watch_paths,
+            .last_ledger_sha = null,
         };
     }
 
@@ -198,6 +206,7 @@ pub const LiveReloadState = struct {
                     if (verdict != .safe and verdict != .safe_with_additions) {
                         printProve("Verdict: {s}. Applying anyway (--force-swap).\n", .{verdict.toString()});
                     }
+                    self.tryLogSwap(&new_contract, new_code.?);
                     self.updateCurrentContract(new_contract);
                     self.doSwap(&new_code, true);
                 } else {
@@ -205,6 +214,7 @@ pub const LiveReloadState = struct {
                     new_contract.deinit(self.allocator);
                 }
             } else {
+                self.tryLogSwap(&new_contract, new_code.?);
                 self.updateCurrentContract(new_contract);
                 self.doSwap(&new_code, true);
             }
@@ -216,6 +226,29 @@ pub const LiveReloadState = struct {
     fn updateCurrentContract(self: *LiveReloadState, new_contract: HandlerContract) void {
         if (self.current_contract) |*c| c.deinit(self.allocator);
         self.current_contract = new_contract;
+    }
+
+    /// Hash the source, dedupe against the last logged sha, and append a
+    /// `kind=swap` row when the proven facts have actually changed. Failures
+    /// warn but never block the swap.
+    fn tryLogSwap(
+        self: *LiveReloadState,
+        contract: *const HandlerContract,
+        source_bytes: []const u8,
+    ) void {
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(source_bytes, &digest, .{});
+        const sha_hex = std.fmt.bytesToHex(digest, .lower);
+
+        if (self.last_ledger_sha) |prev| {
+            if (std.mem.eql(u8, &sha_hex, &prev)) return;
+        }
+
+        appendSwapToLedger(self.allocator, contract, self.handler_path, &sha_hex) catch |err| {
+            printProve("Proof ledger append failed: {}. Swap continues.\n", .{err});
+            return;
+        };
+        self.last_ledger_sha = sha_hex;
     }
 
     /// Take ownership of new_code and swap the handler pool.
@@ -362,6 +395,42 @@ fn printProve(comptime fmt: []const u8, args: anytype) void {
 
 fn printRaw(comptime fmt: []const u8, args: anytype) void {
     std.debug.print(fmt, args);
+}
+
+/// Project the new contract into ReviewFacts and append a `kind=swap` row to
+/// `.zigttp/proofs.jsonl`. `sha_hex` is the source-bytes sha256 hex (already
+/// computed by the caller for dedupe).
+fn appendSwapToLedger(
+    allocator: std.mem.Allocator,
+    contract: *const HandlerContract,
+    handler_path: []const u8,
+    sha_hex: []const u8,
+) !void {
+    var extract = try deploy_manifest.extractProvenFacts(allocator, contract);
+    defer {
+        allocator.free(extract.checks_buf);
+        allocator.free(extract.routes_buf);
+    }
+
+    const caps_slice = contract.capabilities.slice();
+    const cap_names = try allocator.alloc([]const u8, caps_slice.len);
+    defer allocator.free(cap_names);
+    for (caps_slice, 0..) |cap, i| cap_names[i] = @tagName(cap);
+
+    var facts = try review_facts_mod.ReviewFacts.fromProvenFacts(
+        allocator,
+        &extract.facts,
+        cap_names,
+        sha_hex,
+    );
+    defer facts.deinit(allocator);
+
+    try proof_ledger.appendEvent(allocator, .{
+        .kind = .swap,
+        .facts = &facts,
+        .handler_path = handler_path,
+        .service_name = null,
+    });
 }
 
 // ============================================================================

@@ -16,6 +16,7 @@ const first_run = @import("deploy/first_run.zig");
 const io_util = @import("deploy/io_util.zig");
 const printer_mod = @import("deploy/printer.zig");
 const review_mod = @import("deploy/review.zig");
+const proof_ledger = @import("proof_ledger.zig");
 
 const Printer = printer_mod.Printer;
 
@@ -282,6 +283,19 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
             capability_names,
             contract_sha256,
         );
+    }
+
+    // Best-effort; cloud action already succeeded.
+    if (review_facts_for_state) |*facts_for_ledger| {
+        proof_ledger.appendEvent(allocator, .{
+            .kind = .deploy,
+            .facts = facts_for_ledger,
+            .handler_path = handler_path,
+            .service_name = service_name,
+        }) catch |err| {
+            printer.warn("Proof ledger append failed (deploy succeeded). The card above was not recorded for `zigttp proofs`.");
+            std.log.debug("proof ledger append error: {}", .{err});
+        };
     }
 
     try store.put(allocator, .{

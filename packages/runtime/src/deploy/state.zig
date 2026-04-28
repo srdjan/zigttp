@@ -189,7 +189,7 @@ fn parseEntry(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Entry {
     };
 }
 
-fn ensureStateDir() !void {
+pub fn ensureStateDir() !void {
     var io_backend = io_util.threadedIo(std.heap.smp_allocator);
     defer io_backend.deinit();
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), ".zigttp");

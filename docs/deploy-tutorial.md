@@ -46,6 +46,22 @@ zigttp grants [project-name]
 zigttp revoke-grant <grant-id>
 ```
 
+## Proof review card
+
+After every successful `zigttp deploy`, the CLI prints a review card showing what the compiler proved about this version: contract sha, proof level, proven properties, the route/env/egress/cache/capability surface, and a verdict against the previous deploy. The verdict words (`safe`, `safe_with_additions`, `breaking`) are the same ones `zigttp dev --watch --prove` already uses, so the language matches between dev and deploy.
+
+The CLI also appends the row to `.zigttp/proofs.jsonl` so the timeline survives across deploys. Browse with:
+
+```bash
+zigttp proofs list                              # recent deploys and live-reload swaps
+zigttp proofs show HEAD                         # re-render the card from the latest entry
+zigttp proofs diff HEAD~1 HEAD                  # what changed between the last two entries
+zigttp proofs export --format md > receipt.md   # shareable receipt for a PR
+zigttp proofs export --format svg > badge.svg   # verdict badge for a README
+```
+
+Refs accept `HEAD`, `HEAD~N`, or a contract sha prefix. The ledger persists only contract-derived identifiers (env var names, egress hosts, cache namespaces, route patterns, capability names, the contract sha, boolean property flags); no env values, tokens, or PII enter the file.
+
 ## Updates
 
 Re-run `zigttp deploy` any time. zigttp reuses the same service and updates it in place to the newly built image digest.

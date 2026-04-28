@@ -9,4 +9,6 @@ test {
     _ = @import("dev_cli.zig");
     _ = @import("deploy/state.zig");
     _ = @import("deploy/review.zig");
+    _ = @import("proof_ledger.zig");
+    _ = @import("proofs_cli.zig");
 }

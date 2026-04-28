@@ -43,6 +43,8 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 
 **Proven live reload.** `--watch --prove` watches handler files and hot-swaps them in-process on every save. The server recompiles the handler, extracts its behavioral contract, diffs it against the running version, and applies the change only when the upgrade verdict is `safe` or `safe_with_additions`. Breaking changes (removed routes, lost critical properties) block the swap and print the diff. `--force-swap` overrides the block. Without `--prove`, `--watch` hot-reloads without contract proof. Compilation errors keep the old handler running. Durable handlers refuse live swap because replay state depends on handler identity.
 
+**Proof ledger.** Every successful `zigttp deploy` and every `dev --watch --prove` swap appends one row to `.zigttp/proofs.jsonl` with the proven facts (env keys, egress hosts, cache namespaces, routes, capabilities, properties), the contract sha, and a verdict against the prior entry. The verdict words match the deploy card and the live-reload diff. `zigttp proofs list` browses the timeline, `proofs show <ref>` re-renders any past entry, `proofs diff <a> <b>` derives the delta between two entries, `proofs watch` tails new ones, and `proofs export --format md|html|svg` produces a markdown receipt, HTML doc, or SVG verdict badge. Refs accept `HEAD`, `HEAD~N`, or a contract sha prefix. The ledger persists only contract-derived identifiers; no env values, tokens, or PII.
+
 **Contract-driven mock server.** `zigts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
 
 **Generated tests.** `zigts gen-tests handler.ts -o handler.test.jsonl` writes a JSONL test file from the same behavioral path enumeration the compiler uses internally. Each proven execution path becomes one runnable test case: synthesized request, ordered I/O stubs, expected status. The output runs immediately via `--test` or `zigts mock`. The `zigts expert` agent calls this automatically after edits so the test suite stays in sync with the proof.
@@ -385,6 +387,29 @@ produce identical digests. Proof facts from the handler contract (proof level,
 env var names, egress hosts, cache namespaces, routes, handler
 properties) are encoded as JSON arrays in OCI image labels so
 provenance survives in the registry.
+
+### `zigttp proofs`
+
+Browse the local proof ledger at `.zigttp/proofs.jsonl`. `zigttp deploy`
+and `dev --watch --prove` swaps append rows; `proofs` itself never
+writes. Each row carries a verdict (`safe`, `safe_with_additions`,
+`breaking`) computed against the prior row.
+
+```bash
+zigttp proofs                              # last 10 entries, newest last
+zigttp proofs list                         # explicit form
+zigttp proofs show <ref>                   # re-render the review card from a past entry
+zigttp proofs diff <a> <b>                 # render the card for <b> using <a> as baseline
+zigttp proofs watch                        # tail new entries as they land (Ctrl+C to exit)
+zigttp proofs export                       # markdown receipt to stdout (defaults: --ref HEAD, --format md)
+zigttp proofs export --format html         # self-contained HTML doc
+zigttp proofs export --format svg          # verdict badge for a README
+zigttp proofs export --ref HEAD~2 --format md
+```
+
+Refs may be `HEAD`, `HEAD~N`, or a contract sha prefix. The exporter
+prints to stdout; redirect to commit a receipt or badge alongside the
+PR description.
 
 ### zigts CLI (compiler and analyzer)
 

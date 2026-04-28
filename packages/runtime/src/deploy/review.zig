@@ -108,13 +108,13 @@ pub const Properties = struct {
     fault_covered: bool = false,
 };
 
-const PropertyMeta = struct {
+pub const PropertyMeta = struct {
     field: []const u8,
     json_key: []const u8,
     label: []const u8,
 };
 
-const property_metas = [_]PropertyMeta{
+pub const property_metas = [_]PropertyMeta{
     .{ .field = "retry_safe", .json_key = "retrySafe", .label = "retry-safe" },
     .{ .field = "read_only", .json_key = "readOnly", .label = "read-only" },
     .{ .field = "injection_safe", .json_key = "injectionSafe", .label = "injection-safe" },
