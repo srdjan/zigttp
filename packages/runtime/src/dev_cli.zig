@@ -6,6 +6,7 @@ const zigts = @import("zigts");
 const self_extract = @import("self_extract.zig");
 const zigts_cli = @import("zigts_cli");
 const deploy = @import("deploy.zig");
+const proofs_cli = @import("proofs_cli.zig");
 const precompile = zigts_cli.precompile;
 const shared = @import("cli_shared.zig");
 const runtime_cli = @import("runtime_cli.zig");
@@ -257,6 +258,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (std.mem.eql(u8, command, "logout")) {
         try deploy.logout(allocator);
+        return;
+    }
+    if (std.mem.eql(u8, command, "proofs")) {
+        // Expected user-input errors are explained on stderr by proofs_cli
+        // itself; only unexpected ones (allocator, etc.) bubble.
+        proofs_cli.run(allocator, user_args[1..]) catch |err| {
+            if (proofs_cli.isExpectedUserError(err)) return;
+            return err;
+        };
         return;
     }
     if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version")) {
@@ -763,6 +773,7 @@ fn printHelp() void {
         \\  zigttp grants [project-name]            List reusable capability grants
         \\  zigttp revoke-grant <grant-id>          Revoke a reusable capability grant
         \\  zigttp logout                           Forget saved sign-in credentials
+        \\  zigttp proofs [list|show|diff|watch|export]  Browse the proof ledger
         \\  zigttp prove <old.json> <new.json>      Upgrade safety check
         \\  zigttp mock <tests.jsonl> [--port N]    Mock server from tests
         \\  zigttp link <system.json>               Cross-handler linking
