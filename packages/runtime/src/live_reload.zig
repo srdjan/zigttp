@@ -24,6 +24,8 @@ const HandlerContract = zigts.HandlerContract;
 const deploy_manifest = zigts_cli.deploy_manifest;
 const review_facts_mod = @import("deploy/review.zig");
 const proof_ledger = @import("proof_ledger.zig");
+const proof_card_tui = @import("proof_card_tui.zig");
+const printer_mod = @import("deploy/printer.zig");
 
 pub const LiveReloadConfig = struct {
     /// Enable contract diffing (--prove)
@@ -162,6 +164,13 @@ pub const LiveReloadState = struct {
             };
             analysis.contract = null;
 
+            // Hash the source bytes once: the HUD uses the prefix as the
+            // contract identifier in its status bar, and the ledger uses the
+            // full hex for change-detection on swap.
+            var sha_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(new_code.?, &sha_digest, .{});
+            const sha_hex = std.fmt.bytesToHex(sha_digest, .lower);
+
             if (self.current_contract) |*old_contract| {
                 if (new_contract.durable.used) {
                     printProve("Handler uses durable execution. Live swap refused.\n", .{});
@@ -198,7 +207,7 @@ pub const LiveReloadState = struct {
                 };
                 defer manifest.deinit(self.allocator);
 
-                formatUpgradeDiff(&manifest);
+                self.renderHud(&new_contract, old_contract, elapsed_ms, &sha_hex);
 
                 const verdict = manifest.verdict;
                 const should_swap = verdict == .safe or verdict == .safe_with_additions or self.config.force_swap;
@@ -206,7 +215,7 @@ pub const LiveReloadState = struct {
                     if (verdict != .safe and verdict != .safe_with_additions) {
                         printProve("Verdict: {s}. Applying anyway (--force-swap).\n", .{verdict.toString()});
                     }
-                    self.tryLogSwap(&new_contract, new_code.?);
+                    self.tryLogSwap(&new_contract, &sha_hex);
                     self.updateCurrentContract(new_contract);
                     self.doSwap(&new_code, true);
                 } else {
@@ -214,7 +223,8 @@ pub const LiveReloadState = struct {
                     new_contract.deinit(self.allocator);
                 }
             } else {
-                self.tryLogSwap(&new_contract, new_code.?);
+                self.renderHud(&new_contract, null, elapsed_ms, &sha_hex);
+                self.tryLogSwap(&new_contract, &sha_hex);
                 self.updateCurrentContract(new_contract);
                 self.doSwap(&new_code, true);
             }
@@ -228,27 +238,84 @@ pub const LiveReloadState = struct {
         self.current_contract = new_contract;
     }
 
-    /// Hash the source, dedupe against the last logged sha, and append a
-    /// `kind=swap` row when the proven facts have actually changed. Failures
-    /// warn but never block the swap.
+    /// Dedupe against the last logged sha and append a `kind=swap` row when
+    /// the proven facts have actually changed. Failures warn but never block
+    /// the swap. `sha_hex` is the hex digest of the source bytes, computed by
+    /// the caller so the HUD render path can share it.
     fn tryLogSwap(
         self: *LiveReloadState,
         contract: *const HandlerContract,
-        source_bytes: []const u8,
+        sha_hex: *const [std.crypto.hash.sha2.Sha256.digest_length * 2]u8,
     ) void {
-        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(source_bytes, &digest, .{});
-        const sha_hex = std.fmt.bytesToHex(digest, .lower);
-
         if (self.last_ledger_sha) |prev| {
-            if (std.mem.eql(u8, &sha_hex, &prev)) return;
+            if (std.mem.eql(u8, sha_hex, &prev)) return;
         }
 
-        appendSwapToLedger(self.allocator, contract, self.handler_path, &sha_hex) catch |err| {
+        appendSwapToLedger(self.allocator, contract, self.handler_path, sha_hex) catch |err| {
             printProve("Proof ledger append failed: {}. Swap continues.\n", .{err});
             return;
         };
-        self.last_ledger_sha = sha_hex;
+        self.last_ledger_sha = sha_hex.*;
+    }
+
+    /// Render the live HUD frame for the new contract relative to the running
+    /// baseline. Failures degrade silently to a single `[prove]` warning so
+    /// a renderer bug can never block a swap. `sha_hex` is the source-bytes
+    /// hex digest, shared with the ledger-append path to avoid double-hashing.
+    fn renderHud(
+        self: *LiveReloadState,
+        new_contract: *const HandlerContract,
+        baseline_contract: ?*const HandlerContract,
+        elapsed_ms: u64,
+        sha_hex: *const [std.crypto.hash.sha2.Sha256.digest_length * 2]u8,
+    ) void {
+        self.renderHudInner(new_contract, baseline_contract, elapsed_ms, sha_hex) catch |err| {
+            printProve("HUD render skipped: {}\n", .{err});
+        };
+    }
+
+    fn renderHudInner(
+        self: *LiveReloadState,
+        new_contract: *const HandlerContract,
+        baseline_contract: ?*const HandlerContract,
+        elapsed_ms: u64,
+        sha_hex: *const [std.crypto.hash.sha2.Sha256.digest_length * 2]u8,
+    ) !void {
+        var new_facts = try factsFromContract(self.allocator, new_contract, sha_hex[0..16]);
+        defer new_facts.deinit(self.allocator);
+
+        var maybe_baseline_facts: ?review_facts_mod.ReviewFacts = null;
+        defer if (maybe_baseline_facts) |*b| b.deinit(self.allocator);
+        if (baseline_contract) |bc| {
+            const baseline_label: []const u8 = if (self.last_ledger_sha) |prev|
+                prev[0..16]
+            else
+                "(unknown)";
+            maybe_baseline_facts = try factsFromContract(self.allocator, bc, baseline_label);
+        }
+
+        const baseline_ptr: ?*const review_facts_mod.ReviewFacts =
+            if (maybe_baseline_facts) |*b| b else null;
+
+        var delta = try review_facts_mod.deriveDelta(self.allocator, &new_facts, baseline_ptr);
+        defer delta.deinit(self.allocator);
+
+        const card = review_facts_mod.ProofCard{
+            .handler_path = self.handler_path,
+            .service_name = "dev",
+            .region = "local",
+            .current = &new_facts,
+            .baseline = baseline_ptr,
+            .delta = &delta,
+        };
+
+        var stderr_buf: [16 * 1024]u8 = undefined;
+        var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
+        const recompile_ms: u32 = @intCast(@min(elapsed_ms, std.math.maxInt(u32)));
+        try proof_card_tui.writeProofCardFrame(self.allocator, &card, &stderr_writer.interface, .{
+            .recompile_ms = recompile_ms,
+        });
+        stderr_writer.interface.flush() catch {};
     }
 
     /// Take ownership of new_code and swap the handler pool.
@@ -298,54 +365,31 @@ pub const LiveReloadState = struct {
 // Output formatting
 // ---------------------------------------------------------------------------
 
-fn formatUpgradeDiff(manifest: *const upgrade_verifier.UpgradeManifest) void {
-    const s = manifest.surface;
-
-    // Routes
-    if (s.routes_added > 0 or s.routes_removed > 0 or s.routes_unchanged > 0) {
-        printProve("Routes: ", .{});
-        if (s.routes_added > 0) printRaw("+{d} added", .{s.routes_added});
-        if (s.routes_removed > 0) {
-            if (s.routes_added > 0) printRaw(", ", .{});
-            printRaw("-{d} removed", .{s.routes_removed});
-        }
-        if (s.routes_unchanged > 0) {
-            if (s.routes_added > 0 or s.routes_removed > 0) printRaw(", ", .{});
-            printRaw("{d} unchanged", .{s.routes_unchanged});
-        }
-        printRaw("\n", .{});
+/// Project a HandlerContract into the persisted-and-rendered ReviewFacts
+/// shape. Used by both the HUD render path and the proof-ledger append path
+/// so dev mode and the ledger never disagree on the proven surface.
+fn factsFromContract(
+    allocator: std.mem.Allocator,
+    contract: *const HandlerContract,
+    contract_sha: []const u8,
+) !review_facts_mod.ReviewFacts {
+    var extract = try deploy_manifest.extractProvenFacts(allocator, contract);
+    defer {
+        allocator.free(extract.checks_buf);
+        allocator.free(extract.routes_buf);
     }
 
-    // Property changes
-    if (manifest.property_regressions.items.len > 0) {
-        for (manifest.property_regressions.items) |reg| {
-            printProve("Property lost: {s} (severity: {s})\n", .{
-                reg.field,
-                @tagName(reg.severity),
-            });
-        }
-    }
-    if (manifest.property_gains.items.len > 0) {
-        for (manifest.property_gains.items) |gain| {
-            printProve("Property gained: {s}\n", .{gain.field});
-        }
-    }
+    const caps_slice = contract.capabilities.slice();
+    const cap_names = try allocator.alloc([]const u8, caps_slice.len);
+    defer allocator.free(cap_names);
+    for (caps_slice, 0..) |cap, i| cap_names[i] = @tagName(cap);
 
-    // Behavioral summary
-    if (manifest.behavioral) |b| {
-        printProve("Behaviors: {d} preserved, {d} added, {d} changed, {d} removed\n", .{
-            b.preserved,
-            b.added,
-            b.response_changed,
-            b.removed,
-        });
-    }
-
-    // Verdict
-    printProve("Verdict: {s}\n", .{manifest.verdict.toString()});
-    if (manifest.justification.len > 0) {
-        printProve("Reason: {s}\n", .{manifest.justification});
-    }
+    return review_facts_mod.ReviewFacts.fromProvenFacts(
+        allocator,
+        &extract.facts,
+        cap_names,
+        contract_sha,
+    );
 }
 
 /// Compute a hash over all watched paths (files and directory contents).
@@ -393,10 +437,6 @@ fn printProve(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("[prove]  " ++ fmt, args);
 }
 
-fn printRaw(comptime fmt: []const u8, args: anytype) void {
-    std.debug.print(fmt, args);
-}
-
 /// Project the new contract into ReviewFacts and append a `kind=swap` row to
 /// `.zigttp/proofs.jsonl`. `sha_hex` is the source-bytes sha256 hex (already
 /// computed by the caller for dedupe).
@@ -406,23 +446,7 @@ fn appendSwapToLedger(
     handler_path: []const u8,
     sha_hex: []const u8,
 ) !void {
-    var extract = try deploy_manifest.extractProvenFacts(allocator, contract);
-    defer {
-        allocator.free(extract.checks_buf);
-        allocator.free(extract.routes_buf);
-    }
-
-    const caps_slice = contract.capabilities.slice();
-    const cap_names = try allocator.alloc([]const u8, caps_slice.len);
-    defer allocator.free(cap_names);
-    for (caps_slice, 0..) |cap, i| cap_names[i] = @tagName(cap);
-
-    var facts = try review_facts_mod.ReviewFacts.fromProvenFacts(
-        allocator,
-        &extract.facts,
-        cap_names,
-        sha_hex,
-    );
+    var facts = try factsFromContract(allocator, contract, sha_hex);
     defer facts.deinit(allocator);
 
     try proof_ledger.appendEvent(allocator, .{

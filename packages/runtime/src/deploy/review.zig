@@ -527,28 +527,61 @@ pub const RenderOptions = struct {
     use_color: bool = false,
 };
 
-/// Render the review card to `writer`. Output is deterministic for the same
-/// inputs so snapshot tests stay stable. Caller flushes the writer.
-pub fn renderReviewCard(
-    allocator: std.mem.Allocator,
-    review: *const DeployReview,
-    writer: *std.Io.Writer,
-    opts: RenderOptions,
-) !void {
-    _ = opts;
-    _ = allocator;
+/// ProofCard is the source-agnostic projection a renderer needs. It borrows
+/// every field from longer-lived data (a DeployReview, a ledger entry, a
+/// live-reload session) so the same card can drive deploy, `zigttp proofs
+/// show`, the live HUD, and HTML/SVG export. No allocations, no ownership.
+///
+/// Fields are intentionally a strict subset of DeployReview plus a few that
+/// callers without a DeployReview (proofs ledger replay, live HUD) can fill
+/// directly. `verdict` is computed from `delta` to avoid a third source of
+/// truth on top of `classify` and `DeployReview.verdict`.
+pub const ProofCard = struct {
+    handler_path: []const u8,
+    service_name: []const u8,
+    region: []const u8,
+    current: *const ReviewFacts,
+    baseline: ?*const ReviewFacts = null,
+    delta: *const ReviewDelta,
+    drift: ?DriftStatus = null,
+    plan_required: ?PlanRequiredSummary = null,
 
+    pub fn verdict(self: *const ProofCard) Verdict {
+        return classify(self.delta);
+    }
+
+    /// Build a card view of an existing DeployReview. The card borrows every
+    /// pointer from `review`, so the review must outlive the card.
+    pub fn fromDeployReview(review: *const DeployReview) ProofCard {
+        return .{
+            .handler_path = review.handler_path,
+            .service_name = review.service_name,
+            .region = review.region,
+            .current = &review.current,
+            .baseline = review.baseline,
+            .delta = &review.delta,
+            .drift = review.drift,
+            .plan_required = review.plan_required,
+        };
+    }
+};
+
+/// Render the proof card as plaintext. The TUI writer in `proof_card_tui.zig`
+/// consumes the same `ProofCard` to populate frame cells. Output is
+/// deterministic for the same inputs so snapshot tests stay stable. Caller
+/// flushes the writer.
+pub fn writeProofCardPlaintext(card: *const ProofCard, writer: *std.Io.Writer) !void {
     try writer.writeAll("Proof review:\n");
-    try writeKv(writer, "  Handler:    ", review.handler_path);
-    try writeKv(writer, "  Service:    ", review.service_name);
-    try writeKv(writer, "  Region:     ", review.region);
-    try writeKv(writer, "  Contract:   ", review.current.contract_sha);
-    try writeKv(writer, "  Proof:      ", review.current.proof_level.toString());
+    try writeKv(writer, "  Handler:    ", card.handler_path);
+    try writeKv(writer, "  Service:    ", card.service_name);
+    try writeKv(writer, "  Region:     ", card.region);
+    try writeKv(writer, "  Contract:   ", card.current.contract_sha);
+    try writeKv(writer, "  Proof:      ", card.current.proof_level.toString());
 
     try writer.writeAll("  Proven:     ");
     var any_proven = false;
     inline for (property_metas) |meta| {
-        if (@field(review.current.properties, meta.field)) {
+        if (@field(card.current.properties, meta.field)) {
             if (any_proven) try writer.writeAll(", ");
             try writer.writeAll(meta.label);
             any_proven = true;
@@ -558,27 +591,27 @@ pub fn renderReviewCard(
     try writer.writeAll("\n");
 
     try writer.print("  Surface:    {d} route(s), {d} env, {d} egress, {d} cache, {d} cap(s)\n", .{
-        review.current.routes.len,
-        review.current.env_keys.len,
-        review.current.egress_hosts.len,
-        review.current.cache_namespaces.len,
-        review.current.capabilities.len,
+        card.current.routes.len,
+        card.current.env_keys.len,
+        card.current.egress_hosts.len,
+        card.current.cache_namespaces.len,
+        card.current.capabilities.len,
     });
 
-    if (review.baseline == null) {
+    if (card.baseline == null) {
         try writer.writeAll("  Baseline:   none (first deploy)\n");
     } else {
-        try writeKv(writer, "  Baseline:   ", review.baseline.?.contract_sha);
-        try renderDelta(writer, &review.delta);
+        try writeKv(writer, "  Baseline:   ", card.baseline.?.contract_sha);
+        try renderDelta(writer, card.delta);
     }
 
-    try writeKv(writer, "  Verdict:    ", review.verdict().toString());
+    try writeKv(writer, "  Verdict:    ", card.verdict().toString());
 
-    if (review.drift) |d| {
+    if (card.drift) |d| {
         try writeKv(writer, "  Drift:      ", d.reason);
         try writer.writeAll("              re-run with --confirm to apply\n");
     }
-    if (review.plan_required) |plan| {
+    if (card.plan_required) |plan| {
         try writer.writeAll("  Review:     capability review required\n");
         try writeKv(writer, "  Plan ID:    ", plan.plan_id);
         if (plan.review_url) |url| try writeKv(writer, "  URL:        ", url);
@@ -594,9 +627,22 @@ pub fn renderReviewCard(
         }
         try writer.writeAll("              approve the plan, then re-run\n");
     }
-    if (review.drift == null and review.plan_required == null) {
+    if (card.drift == null and card.plan_required == null) {
         try writer.writeAll("  Blockers:   none\n");
     }
+}
+
+/// Convenience wrapper for callers that already hold a `DeployReview`.
+pub fn renderReviewCard(
+    allocator: std.mem.Allocator,
+    review: *const DeployReview,
+    writer: *std.Io.Writer,
+    opts: RenderOptions,
+) !void {
+    _ = allocator;
+    _ = opts;
+    const card = ProofCard.fromDeployReview(review);
+    try writeProofCardPlaintext(&card, writer);
 }
 
 fn renderDelta(writer: *std.Io.Writer, delta: *const ReviewDelta) !void {
@@ -1375,4 +1421,44 @@ test "renderReviewCard: plan_required section lists reasons" {
     try std.testing.expect(std.mem.indexOf(u8, out, "URL:        https://control/deploy/plans/plan-1") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "already granted: network egress to api.x") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "needs review:    crypto capability") != null);
+}
+
+test "writeProofCardPlaintext: renders a card built without a DeployReview" {
+    const allocator = std.testing.allocator;
+    var current = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-card"),
+        .proof_level = .complete,
+        .env_keys = blk: {
+            var arr = try allocator.alloc([]const u8, 1);
+            arr[0] = try allocator.dupe(u8, "PORT");
+            break :blk arr;
+        },
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{ .read_only = true },
+    };
+    defer current.deinit(allocator);
+    var delta = try deriveDelta(allocator, &current, null);
+    defer delta.deinit(allocator);
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "us-east",
+        .current = &current,
+        .baseline = null,
+        .delta = &delta,
+    };
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeProofCardPlaintext(&card, &aw.writer);
+    const out = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Contract:   sha-card") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "read-only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Baseline:   none (first deploy)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    safe") != null);
 }
