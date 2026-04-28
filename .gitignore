@@ -34,6 +34,11 @@ proof-report.txt
 proof.json
 codedb.snapshot
 
+# External metadoor generator-pack scratch (consumed via
+# `precompile --generator-pack`; regenerated on demand by the
+# metadoor tool). Never commit.
+.metadoor-*/
+
 # Defense-in-depth: ignore any 16-char scratch dirs at repo root. The
 # root cause (tests in packages/pi/src/loop.zig passing bare tmp.sub_path
 # as workspace_root) was fixed by routing writes through
