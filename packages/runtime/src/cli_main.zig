@@ -7,4 +7,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 test {
     _ = @import("dev_cli.zig");
+    _ = @import("deploy/state.zig");
+    _ = @import("deploy/review.zig");
 }

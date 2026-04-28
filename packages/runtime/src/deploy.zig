@@ -15,6 +15,7 @@ const autodetect = @import("deploy/autodetect.zig");
 const first_run = @import("deploy/first_run.zig");
 const io_util = @import("deploy/io_util.zig");
 const printer_mod = @import("deploy/printer.zig");
+const review_mod = @import("deploy/review.zig");
 
 const Printer = printer_mod.Printer;
 
@@ -98,34 +99,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const contract_sha256 = try sha256Hex(allocator, contract_json);
     defer allocator.free(contract_sha256);
 
-    const session_outcome = try fetchDeploySessionWithAuthRetry(
-        allocator,
-        service_name,
-        effective_region,
-        contract_json,
-        contract_sha256,
-        printer,
-    );
-    var session = switch (session_outcome) {
-        .approved => |session| session,
-        .plan_required => |plan_value| {
-            var plan = plan_value;
-            defer plan.deinit(allocator);
-            try printDeployPlanRequired(allocator, printer, &plan);
-            return error.ControlPlaneReviewRequired;
-        },
-    };
-    defer session.deinit(allocator);
-
-    if (session.grant_ids.len > 0) {
-        const joined = try std.mem.join(allocator, ", ", session.grant_ids);
-        defer allocator.free(joined);
-        printer.line("  Grants:     ", joined);
-    }
-
-    const image_repo = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ session.namespace, service_name });
-    defer allocator.free(image_repo);
-
+    // Extract proven facts and the capability set up-front so both deploy
+    // branches (the normal path and the plan_required early-return path) can
+    // render the same Proof Review card. This also lets us fail fast on a
+    // malformed contract before any network call.
     var proven_extract: ?struct {
         facts: deploy_manifest.ProvenFacts,
         checks_buf: [][]const u8,
@@ -144,6 +121,56 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
             .routes_buf = extract.routes_buf,
         };
     }
+
+    const capability_names = try collectCapabilityNames(allocator, &contract);
+    defer allocator.free(capability_names);
+
+    const session_outcome = try fetchDeploySessionWithAuthRetry(
+        allocator,
+        service_name,
+        effective_region,
+        contract_json,
+        contract_sha256,
+        printer,
+    );
+    var session = switch (session_outcome) {
+        .approved => |session| session,
+        .plan_required => |plan_value| {
+            var plan = plan_value;
+            defer plan.deinit(allocator);
+            // Render the review card with the plan_required summary embedded
+            // so the user sees the proof context alongside the review reasons,
+            // not a bare "Capability review required" warning.
+            if (proven_extract) |*ex| {
+                try renderProofReview(allocator, printer, .{
+                    .handler_path = handler_path,
+                    .service_name = service_name,
+                    .region = effective_region,
+                    .facts = &ex.facts,
+                    .capability_names = capability_names,
+                    .contract_sha = contract_sha256,
+                    .baseline = priorFacts(previous),
+                    .plan_required = .{
+                        .plan_id = plan.plan_id,
+                        .review_url = plan.review_url,
+                        .covered_reasons = plan.covered_reasons,
+                        .uncovered_reasons = if (plan.uncovered_reasons.len > 0) plan.uncovered_reasons else plan.diff_reasons,
+                    },
+                });
+            }
+            return error.ControlPlaneReviewRequired;
+        },
+    };
+    defer session.deinit(allocator);
+
+    if (session.grant_ids.len > 0) {
+        const joined = try std.mem.join(allocator, ", ", session.grant_ids);
+        defer allocator.free(joined);
+        printer.line("  Grants:     ", joined);
+    }
+
+    const image_repo = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ session.namespace, service_name });
+    defer allocator.free(image_repo);
 
     const arch: types_mod.Arch = .amd64;
     var build_result = try builder.buildLinuxArtifact(allocator, handler_path, arch.targetTriple());
@@ -172,8 +199,27 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         env_vars,
     );
     defer if (reconciliation.warning) |warning| allocator.free(warning);
+
+    const drift_status: ?review_mod.DriftStatus =
+        if (reconciliation.action == .replace_requires_confirm)
+            .{ .reason = reconciliation.warning orelse "deploy state drift" }
+        else
+            null;
+
+    if (proven_extract) |*ex| {
+        try renderProofReview(allocator, printer, .{
+            .handler_path = handler_path,
+            .service_name = service_name,
+            .region = session.region,
+            .facts = &ex.facts,
+            .capability_names = capability_names,
+            .contract_sha = contract_sha256,
+            .baseline = priorFacts(previous),
+            .drift = drift_status,
+        });
+    }
+
     if (reconciliation.action == .replace_requires_confirm) {
-        if (reconciliation.warning) |warning| printer.warn(warning);
         if (!options.confirm) return error.DeployDrift;
     }
 
@@ -227,6 +273,17 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         }
     }
 
+    var review_facts_for_state: ?review_mod.ReviewFacts = null;
+    errdefer if (review_facts_for_state) |*f| f.deinit(allocator);
+    if (proven_extract) |*ex| {
+        review_facts_for_state = try review_mod.ReviewFacts.fromProvenFacts(
+            allocator,
+            &ex.facts,
+            capability_names,
+            contract_sha256,
+        );
+    }
+
     try store.put(allocator, .{
         .provider = session.provider,
         .name = try allocator.dupe(u8, service_name),
@@ -237,7 +294,9 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         .url = if (result.url) |value| try allocator.dupe(u8, value) else null,
         .last_image_digest = try allocator.dupe(u8, image.image_digest_ref),
         .managed_env_keys = try managedEnvKeys(allocator, env_vars),
+        .last_review_facts = review_facts_for_state,
     });
+    review_facts_for_state = null;
     try state.save(allocator, &store);
 
     const public_url = result.url orelse session.url_hint;
@@ -879,36 +938,12 @@ fn sha256Hex(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     return try allocator.dupe(u8, &std.fmt.bytesToHex(digest, .lower));
 }
 
-fn printDeployPlanRequired(
-    allocator: std.mem.Allocator,
-    printer: Printer,
-    plan: *const control_plane.DeployPlanRequired,
-) !void {
-    printer.warn("Capability review required before this deploy can continue.");
-    printer.line("  Plan ID:    ", plan.plan_id);
-    if (plan.review_url) |review_url| {
-        printer.line("  Review:     ", review_url);
-    }
-
-    for (plan.covered_reasons) |reason| {
-        const line = try std.fmt.allocPrint(allocator, "  already granted: {s}", .{reason});
-        defer allocator.free(line);
-        printer.warn(line);
-    }
-    const reasons = if (plan.uncovered_reasons.len > 0) plan.uncovered_reasons else plan.diff_reasons;
-    for (reasons) |reason| {
-        const line = try std.fmt.allocPrint(allocator, "  needs review:    {s}", .{reason});
-        defer allocator.free(line);
-        printer.warn(line);
-    }
-    printer.warn("Approve the plan, then re-run `zigttp deploy`.");
-}
-
 fn printReviewStatus(
     _: std.mem.Allocator,
     printer: Printer,
     plan: *const control_plane.DeployPlanStatus,
 ) !void {
+    printer.line("Proof review:", "");
     printer.line("  Plan ID:    ", plan.id);
     printer.line("  Project:    ", plan.project_name);
     printer.line("  Status:     ", plan.status);
@@ -931,6 +966,46 @@ fn printReviewStatus(
     for (plan.diff_reasons) |reason| {
         printer.line("  Risk:       ", reason);
     }
+}
+
+// Two-level optional flatten: the previous deploy entry may be absent, and
+// even when present its `last_review_facts` snapshot is itself optional
+// (older entries pre-date that field). Returns a borrowed pointer for the
+// review module's `baseline` field.
+fn priorFacts(previous: ?*const state.Entry) ?*const review_mod.ReviewFacts {
+    const entry = previous orelse return null;
+    if (entry.last_review_facts) |*facts| return facts;
+    return null;
+}
+
+// Project the contract's capability matrix into owned tag-name strings the
+// review module can consume. Caller frees the outer slice; the elements
+// point into the program's static enum-tag table and must NOT be freed.
+fn collectCapabilityNames(
+    allocator: std.mem.Allocator,
+    contract: *const zigts.HandlerContract,
+) ![]const []const u8 {
+    const matrix_slice = contract.capabilities.slice();
+    const out = try allocator.alloc([]const u8, matrix_slice.len);
+    for (matrix_slice, 0..) |cap, i| out[i] = @tagName(cap);
+    return out;
+}
+
+// Build the DeployReview from caller-supplied init params and render it to
+// printer.stdout. Caller passes a fully-formed InitParams so the proof
+// context (handler, service, contract sha, baseline, drift, plan_required)
+// reads as labelled fields at the call site rather than a long positional
+// argument list.
+fn renderProofReview(
+    allocator: std.mem.Allocator,
+    printer: Printer,
+    params: review_mod.DeployReview.InitParams,
+) !void {
+    var review_view = try review_mod.DeployReview.init(allocator, params);
+    defer review_view.deinit(allocator);
+
+    try review_mod.renderReviewCard(allocator, &review_view, printer.stdout, .{});
+    printer.stdout.flush() catch {};
 }
 
 fn printCapabilityGrants(
@@ -1734,29 +1809,6 @@ test "revokeCapabilityGrantWithAuthRetry retries after rejected saved token" {
     try std.testing.expectEqual(@as(usize, 2), TestCtx.revoke_calls);
     try std.testing.expectEqual(@as(usize, 1), TestCtx.clear_calls);
     try std.testing.expectEqualStrings("revoked", grant.status);
-}
-
-test "printDeployPlanRequired shows review summary" {
-    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
-    defer buffered.deinit();
-
-    var plan = control_plane.DeployPlanRequired{
-        .plan_id = try std.testing.allocator.dupe(u8, "plan-1"),
-        .review_url = try std.testing.allocator.dupe(u8, "https://control/deploy/plans/plan-1"),
-        .baseline_sha = null,
-        .proposed_sha = null,
-        .expires_at = null,
-        .diff_reasons = try std.testing.allocator.dupe([]u8, &.{try std.testing.allocator.dupe(u8, "new env read: SECRET_KEY")}),
-        .covered_reasons = try std.testing.allocator.dupe([]u8, &.{try std.testing.allocator.dupe(u8, "new env read: DATABASE_URL")}),
-        .uncovered_reasons = try std.testing.allocator.dupe([]u8, &.{try std.testing.allocator.dupe(u8, "new effect: write")}),
-    };
-    defer plan.deinit(std.testing.allocator);
-
-    try printDeployPlanRequired(std.testing.allocator, buffered.printer(), &plan);
-
-    try std.testing.expect(std.mem.indexOf(u8, buffered.stdoutSlice(), "Plan ID:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffered.stderrSlice(), "already granted") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffered.stderrSlice(), "needs review") != null);
 }
 
 test "printReviewStatus shows plan details" {
