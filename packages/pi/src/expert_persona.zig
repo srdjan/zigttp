@@ -92,6 +92,14 @@ const prologue =
     \\  pi_apply_repair_plan        - dry-run one repair intent into proposed
     \\                                source and compiler-verify it before
     \\                                drafting the edit
+    \\  pi_feature_plan             - preview a typed route feature plan from
+    \\                                a structured mini-spec without writing
+    \\  pi_forge_route              - synthesize and compiler-prove a route
+    \\                                candidate; returns an approved-for-apply
+    \\                                preview when no new violations remain
+    \\  pi_apply_feature_plan       - write an approved feature/forge candidate
+    \\                                after rerunning the compiler veto against
+    \\                                the current file contents
     \\  zig_build_step              - run `zig build <step>`
     \\  zig_test_step               - run `zig build test...`
     \\
@@ -106,6 +114,9 @@ const prologue =
     \\  Cross-handler system proof             -> zigts_expert_system_proof
     \\  Proof-guided repair plan               -> pi_repair_plan
     \\  Compiler-authored repair dry-run       -> pi_apply_repair_plan
+    \\  Preview a new route without writing    -> pi_feature_plan
+    \\  Add/prove a new route candidate         -> pi_forge_route
+    \\  Apply an approved route candidate       -> pi_apply_feature_plan
     \\  Virtual module implementation audit    -> zigts_expert_verify_modules
     \\  List files in workspace                -> workspace_list_files
     \\  Read a source file                     -> workspace_read_file
@@ -136,6 +147,17 @@ const prologue =
     \\the current on-disk proof state. Use the proof_card returned by
     \\compiler veto to validate the draft's post-edit properties, because
     \\apply_edit candidates are checked before they are written to disk.
+    \\
+    \\Proof-first route authoring:
+    \\When the user asks to add a handler route, use the compiler-native
+    \\Route Forge path before drafting manual code. Convert the request into
+    \\a structured route mini-spec (`file`, `method`, `path`, optional
+    \\`body_schema`, optional `status`) and call `pi_forge_route`. If the
+    \\user asks only to preview or plan, call `pi_feature_plan` instead.
+    \\Treat the returned diff as the candidate source of truth. Do not write
+    \\the candidate yourself; approved candidates must flow through
+    \\`pi_apply_feature_plan`, which reruns the compiler veto and records a
+    \\proof-carrying `verified_patch`.
     \\
     \\Never reach for JavaScript idioms that are compile errors in zigts:
     \\try/catch, classes, var, null, ==/!=, ++/--. Use Result types, plain
@@ -435,6 +457,16 @@ test "persona lists explicit contract and system proof tools" {
     try testing.expect(std.mem.indexOf(u8, prompt, "zigts_expert_prove_patch") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "zigts_expert_system_proof") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Contract-pair compatibility proof") != null);
+}
+
+test "persona routes new route requests through Route Forge" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pi_feature_plan") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pi_forge_route") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pi_apply_feature_plan") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Proof-first route authoring") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "verified_patch") != null);
 }
 
 test "persona does not include project context markers" {

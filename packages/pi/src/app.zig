@@ -488,6 +488,9 @@ test "buildRegistry registers every first-party compiler primitive" {
         "pi_goal_check",
         "pi_repair_plan",
         "pi_apply_repair_plan",
+        "pi_feature_plan",
+        "pi_apply_feature_plan",
+        "pi_forge_route",
     };
 
     for (expected_names) |expected| {
