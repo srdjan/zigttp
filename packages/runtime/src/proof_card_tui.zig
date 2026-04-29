@@ -80,8 +80,56 @@ pub fn writeProofCardFrame(
     }
 
     try writeBorder(writer, widths);
+    if (try buildWhyRow(allocator, card)) |why_line| {
+        defer allocator.free(why_line);
+        try writeFullRow(writer, widths, why_line);
+        try writeBorder(writer, widths);
+    }
     try writeStatusBar(writer, widths, card);
     try writeBorder(writer, widths);
+}
+
+/// Build the Why-on-regression row content for the live HUD: when a property
+/// demoted between this prove cycle and the baseline AND the live-reload path
+/// supplied a cause for that property, surface "Why: -<prop> at handler.ts:N: <snippet>".
+/// Returns null when there is nothing to say (no demotions, no causes, or no
+/// match between the two). Caller frees the returned slice.
+fn buildWhyRow(
+    allocator: std.mem.Allocator,
+    card: *const review.ProofCard,
+) !?[]u8 {
+    if (card.property_causes.len == 0) return null;
+    if (card.delta.demoted_properties.len == 0) return null;
+
+    for (card.delta.demoted_properties) |demoted| {
+        for (card.property_causes) |cause| {
+            if (std.mem.eql(u8, cause.field, demoted.name)) {
+                return try std.fmt.allocPrint(
+                    allocator,
+                    "Why: -{s} at {s}:{d}: {s}",
+                    .{ demoted.label, card.handler_path, cause.line, cause.snippet },
+                );
+            }
+        }
+    }
+    return null;
+}
+
+/// Render a single full-width row that spans every pane (no internal pipes).
+/// Used for the Why-on-regression row, which is one logical message and reads
+/// better unbroken than packed into the three-pane grid.
+fn writeFullRow(
+    writer: *std.Io.Writer,
+    widths: ColumnWidths,
+    content: []const u8,
+) !void {
+    const inside_width: usize =
+        @as(usize, widths.properties) + @as(usize, widths.surface) + @as(usize, widths.requests) + 2;
+    try writer.writeAll("|");
+    const visible: usize = @min(content.len, inside_width);
+    try writer.writeAll(content[0..visible]);
+    try writer.splatByteAll(' ', inside_width - visible);
+    try writer.writeAll("|\n");
 }
 
 /// Render the verdict / contract sha / baseline sha row at the bottom of the
@@ -460,4 +508,113 @@ test "writeProofCardFrame: recompile_ms surfaces in properties header" {
     const out = aw.writer.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, out, "145ms recompile") != null);
+}
+
+test "writeProofCardFrame: renders Why row when a demoted property has a cause" {
+    const allocator = std.testing.allocator;
+
+    // Baseline: deterministic = true (proven). Current: deterministic = false
+    // (regressed). Everything else stays equal so the only delta entry is the
+    // deterministic demotion.
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+    var baseline = try buildTestFacts(allocator);
+    defer baseline.deinit(allocator);
+    current.properties.deterministic = false;
+    baseline.properties.deterministic = true;
+
+    var delta = try review.deriveDelta(allocator, &current, &baseline);
+    defer delta.deinit(allocator);
+
+    const causes = [_]review.PropertyCauseEntry{.{
+        .field = "deterministic",
+        .line = 14,
+        .column = 9,
+        .snippet = "Date.now()",
+    }};
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "local",
+        .current = &current,
+        .baseline = &baseline,
+        .delta = &delta,
+        .property_causes = causes[0..],
+    };
+
+    audit_ring.clear();
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeProofCardFrame(allocator, &card, &aw.writer, .{});
+    const out = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Why: -deterministic at src/handler.ts:14: Date.now()") != null);
+}
+
+test "writeProofCardFrame: no Why row when there are no demotions" {
+    const allocator = std.testing.allocator;
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+
+    // No baseline -> empty delta -> no demotions.
+    var delta = try review.deriveDelta(allocator, &current, null);
+    defer delta.deinit(allocator);
+
+    const causes = [_]review.PropertyCauseEntry{.{
+        .field = "deterministic",
+        .line = 14,
+        .column = 9,
+        .snippet = "Date.now()",
+    }};
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "local",
+        .current = &current,
+        .baseline = null,
+        .delta = &delta,
+        .property_causes = causes[0..],
+    };
+
+    audit_ring.clear();
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeProofCardFrame(allocator, &card, &aw.writer, .{});
+    const out = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Why:") == null);
+}
+
+test "writeProofCardFrame: demotion without a matching cause renders no Why row" {
+    const allocator = std.testing.allocator;
+
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+    var baseline = try buildTestFacts(allocator);
+    defer baseline.deinit(allocator);
+    current.properties.deterministic = false;
+    baseline.properties.deterministic = true;
+
+    var delta = try review.deriveDelta(allocator, &current, &baseline);
+    defer delta.deinit(allocator);
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "local",
+        .current = &current,
+        .baseline = &baseline,
+        .delta = &delta,
+        // property_causes intentionally empty.
+    };
+
+    audit_ring.clear();
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeProofCardFrame(allocator, &card, &aw.writer, .{});
+    const out = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Why:") == null);
 }

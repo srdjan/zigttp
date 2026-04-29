@@ -32,6 +32,7 @@ const websocket_pool = @import("websocket_pool.zig");
 const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const proof_audit_ring = @import("proof_audit_ring.zig");
+const studio_mod = @import("studio.zig");
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
 
@@ -244,6 +245,14 @@ const ConnectionPool = struct {
         const keep_alive = self.server.config.keep_alive and client_wants_keep_alive;
         const outcome_if_alive: RequestOutcome = if (keep_alive) .keep_alive else .close;
 
+        if (self.server.config.studio and studio_mod.isStudioPath(request.path)) {
+            self.handleStudioRequestSync(fd, request.path, keep_alive, req_allocator) catch |err| {
+                std.log.warn("studio request failed for {s}: {}", .{ request.path, err });
+                self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
+            };
+            return outcome_if_alive;
+        }
+
         // WebSocket upgrade: if the handler contract advertises an
         // onMessage export and the request carries an RFC 6455 upgrade,
         // hand the fd off to the ws frame-loop thread. `.transferred`
@@ -336,6 +345,49 @@ const ConnectionPool = struct {
         }
 
         return outcome_if_alive;
+    }
+
+    fn handleStudioRequestSync(
+        self: *ConnectionPool,
+        fd: std.posix.fd_t,
+        path: []const u8,
+        keep_alive: bool,
+        allocator: std.mem.Allocator,
+    ) !void {
+        var response = HttpResponse.init(allocator);
+        defer response.deinit();
+
+        if (std.mem.eql(u8, path, "/_zigttp/studio") or std.mem.eql(u8, path, "/_zigttp/studio/")) {
+            try response.putHeaderBorrowed("Content-Type", "text/html; charset=utf-8");
+            response.body = studio_mod.index_html;
+            self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
+            return;
+        }
+
+        if (self.server.studio == null) {
+            response.status = 404;
+            response.body = "Studio disabled";
+            try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+            self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
+            return;
+        }
+        const studio = &self.server.studio.?;
+
+        if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) {
+            const body = try studio.stateJsonCopy(allocator);
+            response.setBodyOwned(body);
+            try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+            self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
+            return;
+        }
+
+        if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) {
+            const body = try studio.generatedTests(allocator);
+            response.setBodyOwned(body);
+            try response.putHeaderBorrowed("Content-Type", "application/x-ndjson; charset=utf-8");
+            self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
+            return;
+        }
     }
 
     fn readRequestData(self: *ConnectionPool, fd: std.posix.fd_t, allocator: std.mem.Allocator) ![]u8 {
@@ -890,6 +942,9 @@ pub const ServerConfig = struct {
     /// Operator override of the contract-derived pooling policy. Null
     /// means "use the policy derived from the contract properties".
     lifecycle_override: ?contract_runtime.PoolingPolicy = null,
+
+    /// Local author workbench at /_zigttp/studio.
+    studio: bool = false,
 };
 
 pub const HandlerSource = union(enum) {
@@ -934,6 +989,7 @@ pub const Server = struct {
     contract: ?ValidatedRuntimeContract,
     proof_cache: ?proof_adapter.ProofCache,
     security_logger: ?*SecurityLogger,
+    studio: ?studio_mod.State,
     /// WebSocket connection registry. Initialised lazily on the first
     /// upgrade attempt; a handler with no WS exports pays zero cost.
     ws_pool: ?websocket_pool.Pool = null,
@@ -995,6 +1051,7 @@ pub const Server = struct {
             .contract = null,
             .proof_cache = null,
             .security_logger = null,
+            .studio = null,
             .ws_pool = null,
         };
     }
@@ -1008,6 +1065,7 @@ pub const Server = struct {
         if (self.ws_pool) |*wsp| wsp.deinit();
         if (self.contract) |*c| c.deinit();
         if (self.security_logger) |logger| logger.deinit();
+        if (self.studio) |*studio| studio.deinit();
         zq.security_events.deinitGlobal();
         self.static_cache.deinit();
         if (self.evented_ready) {
@@ -1053,6 +1111,18 @@ pub const Server = struct {
         // Process-wide security event stream. Emits to an uninitialized
         // stream are silent no-ops, so this just sizes the ring once.
         try zq.security_events.initGlobal(self.allocator, 128);
+
+        if (self.config.studio) {
+            switch (self.config.handler) {
+                .file_path => |path| {
+                    self.studio = studio_mod.State.init(self.allocator, path) catch |err| blk: {
+                        std.log.warn("Studio disabled: {}", .{err});
+                        break :blk null;
+                    };
+                },
+                else => std.log.warn("Studio requires a file-based handler; continuing without studio.", .{}),
+            }
+        }
 
         if (self.config.security_log_path) |path| {
             self.security_logger = SecurityLogger.start(self.allocator, path) catch |err| blk: {
@@ -1175,6 +1245,9 @@ pub const Server = struct {
         self.running = true;
 
         std.log.info("Server listening on http://{s}:{d}", .{ self.config.host, self.config.port });
+        if (self.studio != null) {
+            std.log.info("Studio available at http://{s}:{d}/_zigttp/studio", .{ self.config.host, self.config.port });
+        }
         std.log.info("   Pool size: {d} runtimes", .{self.config.pool_size});
     }
 
@@ -1354,6 +1427,11 @@ pub const Server = struct {
 
         // Only keep alive if both client wants it AND server has it enabled AND not first request timeout
         const keep_alive = self.config.keep_alive and client_wants_keep_alive;
+
+        if (self.config.studio and studio_mod.isStudioPath(request.path)) {
+            try self.handleStudioRequest(stream, io, request.path, keep_alive, req_allocator);
+            return keep_alive;
+        }
 
         // Handle static files if configured
         if (self.config.static_dir) |static_dir| {
@@ -1628,6 +1706,50 @@ pub const Server = struct {
             .content_length = fast_slots.content_length,
             .content_type = fast_slots.content_type,
         };
+    }
+
+    fn handleStudioRequest(
+        self: *Self,
+        stream: *net.Stream,
+        io: Io,
+        path: []const u8,
+        keep_alive: bool,
+        allocator: std.mem.Allocator,
+    ) !void {
+        var response = HttpResponse.init(allocator);
+        defer response.deinit();
+
+        if (std.mem.eql(u8, path, "/_zigttp/studio") or std.mem.eql(u8, path, "/_zigttp/studio/")) {
+            try response.putHeaderBorrowed("Content-Type", "text/html; charset=utf-8");
+            response.body = studio_mod.index_html;
+            try self.sendResponse(stream, io, &response, keep_alive);
+            return;
+        }
+
+        if (self.studio == null) {
+            response.status = 404;
+            response.body = "Studio disabled";
+            try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+            try self.sendResponse(stream, io, &response, keep_alive);
+            return;
+        }
+        const studio = &self.studio.?;
+
+        if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) {
+            const body = try studio.stateJsonCopy(allocator);
+            response.setBodyOwned(body);
+            try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+            try self.sendResponse(stream, io, &response, keep_alive);
+            return;
+        }
+
+        if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) {
+            const body = try studio.generatedTests(allocator);
+            response.setBodyOwned(body);
+            try response.putHeaderBorrowed("Content-Type", "application/x-ndjson; charset=utf-8");
+            try self.sendResponse(stream, io, &response, keep_alive);
+            return;
+        }
     }
 
     fn sendResponse(self: *Self, stream: *net.Stream, io: Io, response: *HttpResponse, keep_alive: bool) !void {
