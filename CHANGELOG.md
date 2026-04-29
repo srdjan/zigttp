@@ -18,6 +18,7 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 - `zigts expert`: skills catalog with `/skills` and `/skill:<name>` - lists baked-in skill shortcuts and sends the selected skill body as a model prompt.
 - `zigts expert`: prompt template catalog with `/templates` and `/template:<name> [args...]` - lists baked-in templates and expands positional args (`{{1}}`, `{{2}}`, `{{args}}`) before sending.
 - `zigts expert`: `/settings`, `/hotkeys`, and `/changelog` informational commands.
+- `zigts expert`: Route Forge v1 with `/feature route ...` preview, `/forge route ...` compiler-proven route candidates, and explicit TUI apply through the existing compiler veto.
 - Root-level `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, and `CODEOWNERS`.
 - This `CHANGELOG.md`.
 - `docs/capabilities.md` - complete capability enforcement map: every `ModuleCapability` variant, which virtual modules declare it, and the enforcement helpers (`pushActiveModuleContext`, `requireCapability`, `wrapNativeFnWithCapabilities`) that gate it. Explains the thread-local context model that makes capability enforcement compose with `HandlerPool`.

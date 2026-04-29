@@ -49,6 +49,8 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 
 **Generated tests.** `zigts gen-tests handler.ts -o handler.test.jsonl` writes a JSONL test file from the same behavioral path enumeration the compiler uses internally. Each proven execution path becomes one runnable test case: synthesized request, ordered I/O stubs, expected status. The output runs immediately via `--test` or `zigts mock`. The `zigts expert` agent calls this automatically after edits so the test suite stays in sync with the proof.
 
+**Proof-first Route Forge.** `zigts expert` can author new routes through the compiler instead of free-form codegen. `/forge route file=handler.ts method=GET path=/health` synthesizes the route, proves the candidate in memory, shows the diff and proof summary, and only writes after explicit approval through the same compiler veto that guards normal edits. Every accepted forge lands as a `verified_patch` in the session ledger.
+
 **Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead. Each module binding declares what runtime capabilities its implementation uses (clock, crypto, stderr, etc.); checked helpers enforce the declarations at call time, so implementation drift panics instead of silently misbehaving.
 
 ### Numbers
@@ -463,11 +465,29 @@ The interactive REPL accepts slash commands alongside natural language:
 /settings                      show compile-time defaults (model, token limits)
 /settings theme                list available TUI themes
 /settings theme <name>         switch the session's TUI theme
+/feature route file=<handler.ts> method=<VERB> path=</path>
+                                preview a compiler-native route plan
+/forge route file=<handler.ts> method=<VERB> path=</path>
+                                synthesize and prove a route candidate
 /hotkeys                       list keyboard shortcuts
 /changelog                     recent expert subsystem additions
 ```
 
 After each model turn the REPL prints cumulative token use for the session: `[tokens: in=N cache_r=N cache_w=N out=N]`. The totals reset when you start a new session or reload with `/new` or `/resume`.
+
+#### Route Forge
+
+Route Forge is the compiler-native path for adding handler routes with `zigts expert`.
+
+```bash
+# Preview only: typed plan, candidate source, diff, and verification summary
+/feature route file=handler.ts method=GET path=/health
+
+# Closed-loop forge: synthesize, prove, attempt a verifier repair if needed
+/forge route file=handler.ts method=POST path=/todos body=todo status=201
+```
+
+`/feature` never writes. `/forge` returns an inspectable candidate and marks it ready only when it introduces zero new compiler violations. In the TUI, press `A` on the selected forge result to apply it; the apply tool reruns the compiler veto against the current file and records the accepted change as a `verified_patch`.
 
 #### Property-goal autoloop
 

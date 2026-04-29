@@ -27,7 +27,8 @@ Functions, Cloudflare Workers), powered by Zig and zigts.
 18. [TypeScript SDK](#typescript-sdk)
 19. [Runtime Sandboxing](#runtime-sandboxing)
 20. [Declarative Handler Testing](#declarative-handler-testing)
-21. [Troubleshooting](#troubleshooting)
+21. [Route Forge with zigts expert](#route-forge-with-zigts-expert)
+22. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -2095,6 +2096,32 @@ zig build -Dhandler=handler.ts -Dreplay=traces.jsonl
 Tracing captures every virtual module call (with args and return values), `fetchSync` responses, `Date.now()` timestamps, and `Math.random()` values. Because virtual modules are the only I/O boundary, handlers become deterministic pure functions of (Request, VirtualModuleResponses). Replay substitutes recorded values for all I/O and compares actual vs expected Response.
 
 ---
+
+## Route Forge with zigts expert
+
+`zigts expert` can add routes through a compiler-native forge flow. The model
+does not write the route directly when this path is used; the forge tool
+synthesizes a candidate, runs the compiler analysis in memory, and exposes the
+diff for approval.
+
+```bash
+# Preview only: plan, candidate source, diff, and verification summary
+/feature route file=handler.ts method=GET path=/health
+
+# Forge: synthesize, prove, and attempt a verifier repair if needed
+/forge route file=handler.ts method=POST path=/todos body=todo status=201
+```
+
+`/feature` never writes files. `/forge` returns a candidate marked ready only
+when it introduces zero new compiler violations. In the TUI, press `A` on the
+selected forge result to apply it. The apply step reruns the compiler veto
+against the current file and records the accepted change as a `verified_patch`
+in the session ledger.
+
+V1 scope is intentionally narrow: route creation only. It can add router-based
+dispatch to a plain handler, extend an existing `routes` table, optionally wire
+schema-backed body validation, and return a JSON response with the requested
+status.
 
 ## Troubleshooting
 

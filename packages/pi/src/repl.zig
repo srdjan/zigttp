@@ -312,6 +312,8 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     try w.writeAll("Info commands: /model  /status  /settings  /hotkeys  /changelog\n");
     try w.writeAll("Session:       /compact  /resume  /continue  /new  /fork  /tree\n");
     try w.writeAll("Views:         /ledger  /chat  /ledger export <path>\n");
+    try w.writeAll("Route Forge:   /feature route file=<handler.ts> method=<VERB> path=</path>\n");
+    try w.writeAll("               /forge route file=<handler.ts> method=<VERB> path=</path>\n");
     try w.writeAll("Skills:        /skills  /skill:<name>\n");
     try w.writeAll("Templates:     /templates  /template:<name> [args...]\n");
 
@@ -413,7 +415,8 @@ fn renderHotkeys(allocator: std.mem.Allocator) !ToolResult {
             "  Delete         delete under cursor\n" ++
             "  Up/Down        history navigation or move the ledger rail\n" ++
             "  Tab/Shift-Tab  cycle panes in chat or ledger detail tabs\n" ++
-            "  c / l          switch between chat and ledger views\n",
+            "  c / l          switch between chat and ledger views\n" ++
+            "  A              apply selected verified patch or forge candidate\n",
     );
     defer allocator.free(msg);
     return ToolResult.withPlainText(allocator, true, msg);
@@ -455,6 +458,7 @@ fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
             "  Session branching: /fork, /tree, --fork, --continue\n" ++
             "  Session commands: /resume, /continue, /new, /compact, /fork, /tree\n" ++
             "  Proof ledger mode: /ledger, /chat, /ledger export, zigts ledger replay/export\n" ++
+            "  Route Forge: /feature previews route plans, /forge proves route candidates\n" ++
             "  Skills catalog (/skill:<name>)\n" ++
             "  Informational commands: /model, /status, /settings, /hotkeys, /changelog\n",
     );
@@ -798,9 +802,22 @@ test "help renders local command guidance" {
             try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.session_commands[1]) != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.view_commands[0]) != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.ledger_commands[0]) != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "/feature route") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "/forge route") != null);
         },
         else => return error.TestFailed,
     }
+}
+
+test "hotkeys and changelog mention Route Forge apply flow" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+
+    var hotkeys = try dispatchLine(testing.allocator, &reg, "/hotkeys");
+    try expectResult(&hotkeys, testing.allocator, "forge candidate", true);
+
+    var changelog = try dispatchLine(testing.allocator, &reg, "/changelog");
+    try expectResult(&changelog, testing.allocator, "Route Forge", true);
 }
 
 test "slash view commands route locally" {
