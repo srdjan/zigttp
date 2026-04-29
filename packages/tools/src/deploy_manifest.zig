@@ -48,6 +48,10 @@ pub const ProvenFacts = struct {
     injection_safe: bool = true,
     idempotent: bool = false,
     state_isolated: bool = true,
+    /// True when the handler has no `Date.now()` or `Math.random()` call
+    /// sites. Surfaced in the live HUD so authors see `+deterministic`
+    /// flip when they introduce a non-deterministic builtin.
+    deterministic: bool = true,
     max_io_depth: ?u32 = null,
 
     // Data flow provenance
@@ -177,6 +181,7 @@ pub fn extractProvenFacts(
             .injection_safe = if (contract.properties) |p| p.injection_safe else true,
             .idempotent = if (contract.properties) |p| p.idempotent else false,
             .state_isolated = if (contract.properties) |p| p.state_isolated else true,
+            .deterministic = if (contract.properties) |p| p.deterministic else true,
             .max_io_depth = if (contract.properties) |p| p.max_io_depth else null,
             .no_secret_leakage = if (contract.properties) |p| p.no_secret_leakage else true,
             .no_credential_leakage = if (contract.properties) |p| p.no_credential_leakage else true,

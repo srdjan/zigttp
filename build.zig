@@ -461,6 +461,7 @@ pub fn build(b: *std.Build) void {
     // Runtime-side tests (main.zig root) — covers runtime_cli, zruntime,
     // server, proof_adapter, cli_shared via the test block in main.zig.
     unit_tests.root_module.addImport("zigts", zigts_mod);
+    unit_tests.root_module.addImport("zigts_cli", zigts_cli_mod);
     unit_tests.root_module.addImport("project_config", project_config_mod);
     unit_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),

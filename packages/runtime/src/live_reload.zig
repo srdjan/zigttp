@@ -83,6 +83,9 @@ pub const LiveReloadState = struct {
     /// Run the watch-reload loop. Blocks until the server stops.
     pub fn run(self: *LiveReloadState, io: std.Io) !void {
         self.previous_stamp = try computeStamp(io, self.watch_paths);
+        if (self.config.prove) {
+            self.seedInitialProof();
+        }
 
         while (self.server.running) {
             try std.Io.sleep(io, .fromMilliseconds(self.config.poll_interval_ms), .awake);
@@ -127,7 +130,10 @@ pub const LiveReloadState = struct {
     };
 
     fn recompileAndSwap(self: *LiveReloadState) void {
+        if (self.server.studio) |*studio| studio.updateChecking();
+
         var new_code: ?[]const u8 = zigts.file_io.readFile(self.allocator, self.handler_path, 10 * 1024 * 1024) catch |err| {
+            if (self.server.studio) |*studio| studio.updateError("failed to read handler");
             printReload("Failed to read handler: {}. Keeping previous.\n", .{err});
             return;
         };
@@ -136,6 +142,7 @@ pub const LiveReloadState = struct {
         var timer = compat.Timer.start() catch null;
 
         var analysis = self.runAnalysisFromSource(new_code.?, !self.config.prove) orelse {
+            if (self.server.studio) |*studio| studio.updateError("recompilation failed");
             printReload("Recompilation failed. Keeping previous handler.\n", .{});
             return;
         };
@@ -144,6 +151,7 @@ pub const LiveReloadState = struct {
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
 
         if (analysis.errors > 0) {
+            if (self.server.studio) |*studio| studio.updateError("compilation failed");
             printReload("Compilation failed ({d} error(s), {d}ms). Keeping previous handler.\n", .{
                 analysis.errors,
                 elapsed_ms,
@@ -233,9 +241,66 @@ pub const LiveReloadState = struct {
         }
     }
 
+    fn seedInitialProof(self: *LiveReloadState) void {
+        if (self.server.studio) |*studio| studio.updateChecking();
+
+        const source = zigts.file_io.readFile(self.allocator, self.handler_path, 10 * 1024 * 1024) catch |err| {
+            if (self.server.studio) |*studio| studio.updateError("failed to read handler");
+            printProve("Initial proof skipped: failed to read handler: {}\n", .{err});
+            return;
+        };
+        defer self.allocator.free(source);
+
+        var timer = compat.Timer.start() catch null;
+        var analysis = self.runAnalysisFromSource(source, false) orelse {
+            if (self.server.studio) |*studio| studio.updateError("initial proof analysis failed");
+            printProve("Initial proof analysis failed.\n", .{});
+            return;
+        };
+        defer if (analysis.contract != null) analysis.deinitContract(self.allocator);
+
+        const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
+        if (analysis.errors > 0) {
+            if (self.server.studio) |*studio| studio.updateError("initial compilation failed");
+            printProve("Initial proof failed ({d} error(s), {d}ms).\n", .{ analysis.errors, elapsed_ms });
+            return;
+        }
+
+        var contract = analysis.contract orelse {
+            if (self.server.studio) |*studio| studio.updateError("no contract extracted");
+            printProve("Initial proof skipped: no contract extracted.\n", .{});
+            return;
+        };
+        analysis.contract = null;
+
+        var sha_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(source, &sha_digest, .{});
+        const sha_hex = std.fmt.bytesToHex(sha_digest, .lower);
+
+        self.renderHud(&contract, null, elapsed_ms, &sha_hex);
+        self.tryLogSwap(&contract, &sha_hex);
+        self.updateCurrentContract(contract);
+        self.installRuntimeContract();
+        printProve("Initial proof ready ({d}ms).\n", .{elapsed_ms});
+    }
+
     fn updateCurrentContract(self: *LiveReloadState, new_contract: HandlerContract) void {
         if (self.current_contract) |*c| c.deinit(self.allocator);
         self.current_contract = new_contract;
+    }
+
+    fn installRuntimeContract(self: *LiveReloadState) void {
+        if (self.current_contract) |*hc| {
+            const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
+                printReload("Failed to build runtime contract: {}.\n", .{err});
+                return;
+            };
+            const validated = contract_runtime.validate(raw, .{}) catch |err| {
+                printReload("Contract failed validation: {}.\n", .{err});
+                return;
+            };
+            self.server.updateContract(validated);
+        }
     }
 
     /// Dedupe against the last logged sha and append a `kind=swap` row when
@@ -300,6 +365,26 @@ pub const LiveReloadState = struct {
         var delta = try review_facts_mod.deriveDelta(self.allocator, &new_facts, baseline_ptr);
         defer delta.deinit(self.allocator);
 
+        if (self.server.studio) |*studio| {
+            studio.updateFacts(&new_facts, baseline_ptr, &delta, elapsed_ms);
+        }
+
+        // Translate the contract's per-property provenance into the renderer's
+        // PropertyCauseEntry slice. The slice borrows from the static
+        // `property_metas` field names and the contract's static snippets, so
+        // it lives only as long as new_contract on this stack frame.
+        var causes_buf: [4]review_facts_mod.PropertyCauseEntry = undefined;
+        var n_causes: usize = 0;
+        if (new_contract.property_provenance.deterministic) |c| {
+            causes_buf[n_causes] = .{
+                .field = "deterministic",
+                .line = c.line,
+                .column = c.column,
+                .snippet = c.snippet,
+            };
+            n_causes += 1;
+        }
+
         const card = review_facts_mod.ProofCard{
             .handler_path = self.handler_path,
             .service_name = "dev",
@@ -307,6 +392,7 @@ pub const LiveReloadState = struct {
             .current = &new_facts,
             .baseline = baseline_ptr,
             .delta = &delta,
+            .property_causes = causes_buf[0..n_causes],
         };
 
         var stderr_buf: [16 * 1024]u8 = undefined;
@@ -358,7 +444,6 @@ pub const LiveReloadState = struct {
             printReload("No handler pool available. Swap skipped.\n", .{});
         }
     }
-
 };
 
 // ---------------------------------------------------------------------------
@@ -368,7 +453,7 @@ pub const LiveReloadState = struct {
 /// Project a HandlerContract into the persisted-and-rendered ReviewFacts
 /// shape. Used by both the HUD render path and the proof-ledger append path
 /// so dev mode and the ledger never disagree on the proven surface.
-fn factsFromContract(
+pub fn factsFromContract(
     allocator: std.mem.Allocator,
     contract: *const HandlerContract,
     contract_sha: []const u8,

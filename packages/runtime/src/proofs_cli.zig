@@ -3,6 +3,7 @@
 //! reconstructs a `DeployReview` over a borrowed historical snapshot.
 
 const std = @import("std");
+const zigts = @import("zigts");
 const proof_ledger = @import("proof_ledger.zig");
 const review = @import("deploy/review.zig");
 const printer_mod = @import("deploy/printer.zig");
@@ -13,6 +14,7 @@ const Subcommand = enum {
     diff,
     watch,
     @"export",
+    badge,
     help,
 };
 
@@ -70,6 +72,7 @@ pub fn runWith(
         .diff => try diffCommand(allocator, argv[1..], stdout, stderr),
         .watch => try watchCommand(allocator, stdout),
         .@"export" => try exportCommand(allocator, argv[1..], stdout, stderr),
+        .badge => try badgeCommand(allocator, argv[1..], stdout, stderr),
     }
 }
 
@@ -82,6 +85,7 @@ fn parseSubcommand(argv: []const []const u8) !Subcommand {
     if (std.mem.eql(u8, first, "diff")) return .diff;
     if (std.mem.eql(u8, first, "watch")) return .watch;
     if (std.mem.eql(u8, first, "export")) return .@"export";
+    if (std.mem.eql(u8, first, "badge")) return .badge;
     return error.UnknownSubcommand;
 }
 
@@ -99,6 +103,11 @@ fn writeHelp(w: *std.Io.Writer) !void {
         \\  export           Render a single entry in a shareable format.
         \\                   Flags: [--format md|html|svg] [--ref REF].
         \\                   Defaults: --format md, --ref HEAD.
+        \\  badge            Write an SVG verdict badge for the latest entry
+        \\                   and print a markdown snippet for your README.
+        \\                   Flags: [--out PATH] [--inline] [--public-url URL]
+        \\                          [--ref REF].
+        \\                   Defaults: --out ./zigttp-proof.svg, --ref HEAD.
         \\
         \\Refs may be HEAD, HEAD~N, or a contract sha prefix.
         \\Ledger file: .zigttp/proofs.jsonl
@@ -317,6 +326,96 @@ fn exportCommand(
         .html => try renderHtml(stdout, ev, baseline, &delta, verdict),
         .svg => try renderSvg(stdout, &ev.facts, verdict),
     }
+}
+
+// ---------------------------------------------------------------------------
+// badge
+// ---------------------------------------------------------------------------
+
+/// `zigttp proofs badge` is the share artifact for first-time authors. It
+/// writes an SVG verdict badge for the latest ledger entry and prints the
+/// markdown snippet they can paste into their README. Composes the same
+/// renderSvg path as `proofs export --format svg`; the only new behavior is
+/// "write to a file by default and print a snippet."
+fn badgeCommand(
+    allocator: std.mem.Allocator,
+    rest: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    var out_path: []const u8 = "./zigttp-proof.svg";
+    var ref_text: []const u8 = "HEAD";
+    var inline_mode: bool = false;
+    var public_url: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const arg = rest[i];
+        if (std.mem.eql(u8, arg, "--out")) {
+            i += 1;
+            if (i >= rest.len) {
+                try stderr.writeAll("--out requires a path.\n");
+                return error.MissingArgValue;
+            }
+            out_path = rest[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--ref")) {
+            i += 1;
+            if (i >= rest.len) {
+                try stderr.writeAll("--ref requires a value (HEAD, HEAD~N, or a sha prefix).\n");
+                return error.MissingArgValue;
+            }
+            ref_text = rest[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--public-url")) {
+            i += 1;
+            if (i >= rest.len) {
+                try stderr.writeAll("--public-url requires a URL.\n");
+                return error.MissingArgValue;
+            }
+            public_url = rest[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--inline")) {
+            inline_mode = true;
+            continue;
+        }
+        try stderr.writeAll("zigttp proofs badge accepts --out, --inline, --public-url, --ref only.\n");
+        return error.UnknownArgument;
+    }
+
+    const events = try proof_ledger.readEvents(allocator);
+    defer proof_ledger.freeEvents(allocator, events);
+
+    const idx = try resolveRefOrExplain(events, ref_text, stderr);
+    const ev = &events[idx];
+    const baseline: ?*const review.ReviewFacts = if (idx == 0) null else &events[idx - 1].facts;
+
+    var delta = try review.deriveDelta(allocator, &ev.facts, baseline);
+    defer delta.deinit(allocator);
+    const verdict = review.classify(&delta);
+
+    if (inline_mode) {
+        // Inline: emit the SVG directly to stdout. No file write, no snippet.
+        try renderSvg(stdout, &ev.facts, verdict);
+        return;
+    }
+
+    // Render SVG into an in-memory buffer, persist to disk, then print the
+    // markdown snippet. The snippet's link target is the explicit
+    // `--public-url` if given, otherwise the contract sha (for traceability).
+    var svg_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer svg_buf.deinit();
+    try renderSvg(&svg_buf.writer, &ev.facts, verdict);
+
+    try zigts.file_io.writeFile(allocator, out_path, svg_buf.writer.buffered());
+
+    const link: []const u8 = public_url orelse ev.facts.contract_sha;
+    try stdout.print("Wrote {s} ({s}).\n", .{ out_path, verdict.toString() });
+    try stdout.print("Paste into your README:\n\n", .{});
+    try stdout.print("[![zigttp verified]({s})]({s})\n", .{ out_path, link });
 }
 
 fn renderMarkdown(
@@ -1241,6 +1340,7 @@ test "export svg: zero proven properties omits trailer" {
         .properties = .{
             .injection_safe = false,
             .state_isolated = false,
+            .deterministic = false,
             .no_secret_leakage = false,
             .no_credential_leakage = false,
             .input_validated = false,
@@ -1260,6 +1360,82 @@ test "export svg: zero proven properties omits trailer" {
     try testing.expect(std.mem.indexOf(u8, text, "proven · safe") != null);
     // No trailing " · " after the verdict word means no property list got concatenated.
     try testing.expect(std.mem.indexOf(u8, text, "proven · safe · ") == null);
+}
+
+test "badge: writes svg file and prints markdown snippet for HEAD" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var f1 = try buildFactsForTest(testing.allocator, "sha-only", false);
+    defer f1.deinit(testing.allocator);
+    try proof_ledger.appendEvent(testing.allocator, .{ .kind = .deploy, .facts = &f1, .handler_path = "h.ts", .now_unix_ms = 1 });
+
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(testing.allocator);
+    defer err.deinit();
+    try runWith(testing.allocator, &.{"badge"}, &out.writer, &err.writer);
+
+    const stdout_text = out.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, stdout_text, "Wrote ./zigttp-proof.svg") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_text, "(safe).") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_text, "[![zigttp verified](./zigttp-proof.svg)](sha-only)") != null);
+
+    // Verify the SVG file was written and contains the expected verdict header.
+    const svg = try zigts.file_io.readFile(testing.allocator, "./zigttp-proof.svg", 64 * 1024);
+    defer testing.allocator.free(svg);
+    try testing.expect(std.mem.indexOf(u8, svg, "<svg") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "#22c55e") != null); // safe = green
+    try testing.expect(std.mem.indexOf(u8, svg, "</svg>") != null);
+}
+
+test "badge: --inline emits SVG to stdout without writing a file" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var f1 = try buildFactsForTest(testing.allocator, "sha-only", false);
+    defer f1.deinit(testing.allocator);
+    try proof_ledger.appendEvent(testing.allocator, .{ .kind = .deploy, .facts = &f1, .handler_path = "h.ts", .now_unix_ms = 1 });
+
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(testing.allocator);
+    defer err.deinit();
+    try runWith(testing.allocator, &.{ "badge", "--inline" }, &out.writer, &err.writer);
+
+    const text = out.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "<svg") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "</svg>") != null);
+    // No snippet, no file path mention.
+    try testing.expect(std.mem.indexOf(u8, text, "Wrote") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "Paste into your README") == null);
+}
+
+test "badge: --public-url overrides the snippet link target" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var f1 = try buildFactsForTest(testing.allocator, "sha-only", false);
+    defer f1.deinit(testing.allocator);
+    try proof_ledger.appendEvent(testing.allocator, .{ .kind = .deploy, .facts = &f1, .handler_path = "h.ts", .now_unix_ms = 1 });
+
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(testing.allocator);
+    defer err.deinit();
+    try runWith(testing.allocator, &.{ "badge", "--public-url", "https://example.com/h" }, &out.writer, &err.writer);
+
+    const text = out.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "[![zigttp verified](./zigttp-proof.svg)](https://example.com/h)") != null);
 }
 
 test "export md: proof level change renders" {

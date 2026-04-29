@@ -116,13 +116,23 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
     var watch_enabled = false;
     var prove_enabled = false;
     var force_swap = false;
+    var studio_enabled = false;
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--watch")) watch_enabled = true;
         if (std.mem.eql(u8, arg, "--prove")) prove_enabled = true;
         if (std.mem.eql(u8, arg, "--force-swap")) force_swap = true;
+        if (std.mem.eql(u8, arg, "--studio")) studio_enabled = true;
+    }
+    if (studio_enabled) {
+        watch_enabled = true;
+        prove_enabled = true;
     }
 
-    const config = try parseServeArgs(allocator, argv);
+    var config = parseServeArgs(allocator, argv) catch |err| {
+        if (err == error.HelpRequested) return;
+        return err;
+    };
+    if (studio_enabled) config.studio = true;
 
     if (config.runtime_config.replay_file_path != null) {
         replay_runner.run(allocator, config) catch |err| {
@@ -372,7 +382,8 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             config.runtime_config.test_file_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--watch") or
             std.mem.eql(u8, arg, "--prove") or
-            std.mem.eql(u8, arg, "--force-swap"))
+            std.mem.eql(u8, arg, "--force-swap") or
+            std.mem.eql(u8, arg, "--studio"))
         {
             // Handled by serveCommand before parseServeArgs is called
             continue;
@@ -486,6 +497,7 @@ fn printServeHelp() void {
         \\  --watch               Auto-reload on source change
         \\  --prove               With --watch, gate swaps on upgrade verdict
         \\  --force-swap          With --watch, apply breaking swaps anyway
+        \\  --studio              Serve the local proof workbench
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

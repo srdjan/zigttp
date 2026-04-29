@@ -61,6 +61,13 @@ pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
     return null;
 }
 
+pub fn hasFlag(argv: []const []const u8, name: []const u8) bool {
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, name)) return true;
+    }
+    return false;
+}
+
 pub fn looksLikeHandlerFile(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".js") or
         std.mem.endsWith(u8, path, ".jsx") or

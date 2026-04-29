@@ -106,6 +106,10 @@ pub const Properties = struct {
     pii_contained: bool = true,
     results_safe: bool = false,
     fault_covered: bool = false,
+    /// True when the handler has no `Date.now()` or `Math.random()` calls.
+    /// First-class in the live-reload HUD so authors see the canonical
+    /// `+deterministic`/`-deterministic` flip while editing.
+    deterministic: bool = true,
 };
 
 pub const PropertyMeta = struct {
@@ -117,6 +121,7 @@ pub const PropertyMeta = struct {
 pub const property_metas = [_]PropertyMeta{
     .{ .field = "retry_safe", .json_key = "retrySafe", .label = "retry-safe" },
     .{ .field = "read_only", .json_key = "readOnly", .label = "read-only" },
+    .{ .field = "deterministic", .json_key = "deterministic", .label = "deterministic" },
     .{ .field = "injection_safe", .json_key = "injectionSafe", .label = "injection-safe" },
     .{ .field = "idempotent", .json_key = "idempotent", .label = "idempotent" },
     .{ .field = "state_isolated", .json_key = "stateIsolated", .label = "state-isolated" },
@@ -180,6 +185,7 @@ pub const ReviewFacts = struct {
                 .injection_safe = facts.injection_safe,
                 .idempotent = facts.idempotent,
                 .state_isolated = facts.state_isolated,
+                .deterministic = facts.deterministic,
                 .no_secret_leakage = facts.no_secret_leakage,
                 .no_credential_leakage = facts.no_credential_leakage,
                 .input_validated = facts.input_validated,
@@ -536,6 +542,19 @@ pub const RenderOptions = struct {
 /// callers without a DeployReview (proofs ledger replay, live HUD) can fill
 /// directly. `verdict` is computed from `delta` to avoid a third source of
 /// truth on top of `classify` and `DeployReview.verdict`.
+/// Why a property regressed: source location plus the construct that caused
+/// it (e.g. `Date.now()`). Only the live-reload path populates this; deploy
+/// reviews and ledger replays leave the slice empty because they have no
+/// access to the source file at render time. Borrowed entries; the caller
+/// (live_reload) keeps the underlying contract alive across the render call.
+pub const PropertyCauseEntry = struct {
+    /// Field name from `property_metas` (e.g. "deterministic"). Borrowed.
+    field: []const u8,
+    line: u32,
+    column: u16,
+    snippet: []const u8,
+};
+
 pub const ProofCard = struct {
     handler_path: []const u8,
     service_name: []const u8,
@@ -545,6 +564,10 @@ pub const ProofCard = struct {
     delta: *const ReviewDelta,
     drift: ?DriftStatus = null,
     plan_required: ?PlanRequiredSummary = null,
+    /// Optional per-property "Why" entries for the live HUD. The renderer
+    /// shows a Why row for every demoted_property whose field matches an
+    /// entry here. Empty (default) outside the live-reload path.
+    property_causes: []const PropertyCauseEntry = &.{},
 
     pub fn verdict(self: *const ProofCard) Verdict {
         return classify(self.delta);

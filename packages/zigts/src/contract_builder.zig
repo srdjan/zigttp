@@ -121,6 +121,9 @@ pub const ContractBuilder = struct {
 
     // Effect tracking
     has_nondeterministic_builtin: bool = false,
+    /// First call site that broke determinism. Captured for the live-reload
+    /// HUD's "Why" line. Borrowed snippet (static string).
+    nondeterministic_cause: ?contract_types.PropertyCause = null,
 
     const EffectSummary = struct {
         has_any_call: bool = false,
@@ -421,6 +424,9 @@ pub const ContractBuilder = struct {
             .aot = aot_info,
             .rate_limiting = rate_limiting,
             .properties = properties,
+            .property_provenance = .{
+                .deterministic = self.nondeterministic_cause,
+            },
         };
 
         contract.capabilities = computeCapabilityMatrix(contract.modules.items);
@@ -673,10 +679,20 @@ pub const ContractBuilder = struct {
                     if (binding.kind == .global or binding.kind == .undeclared_global) {
                         const obj_name = self.resolveAtomName(binding.slot) orelse continue;
                         const prop_name = self.resolveAtomName(member.property) orelse continue;
-                        if ((std.mem.eql(u8, obj_name, "Date") and std.mem.eql(u8, prop_name, "now")) or
-                            (std.mem.eql(u8, obj_name, "Math") and std.mem.eql(u8, prop_name, "random")))
-                        {
+                        const is_date_now = std.mem.eql(u8, obj_name, "Date") and std.mem.eql(u8, prop_name, "now");
+                        const is_math_random = std.mem.eql(u8, obj_name, "Math") and std.mem.eql(u8, prop_name, "random");
+                        if (is_date_now or is_math_random) {
                             self.has_nondeterministic_builtin = true;
+                            // Capture the first call site so the HUD can print
+                            // "-deterministic at handler.ts:N: Date.now()".
+                            const loc = self.ir_view.getLoc(call.callee) orelse self.ir_view.getLoc(member.object);
+                            if (loc) |l| {
+                                self.nondeterministic_cause = .{
+                                    .line = l.line,
+                                    .column = l.column,
+                                    .snippet = if (is_date_now) "Date.now()" else "Math.random()",
+                                };
+                            }
                         }
                     }
                 }

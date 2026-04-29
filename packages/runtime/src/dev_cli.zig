@@ -50,6 +50,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try devCommand(allocator, args[0], user_args[1..]);
         return;
     }
+    if (std.mem.eql(u8, command, "studio")) {
+        try studioCommand(allocator, args[0], user_args[1..]);
+        return;
+    }
     if (std.mem.eql(u8, command, "serve")) {
         // Convenience: dev CLI can also serve a handler locally for quick testing.
         try runtime_cli.serveCommand(allocator, user_args[1..]);
@@ -355,51 +359,158 @@ fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     std.debug.print("Initialized zigttp project in {s}\n", .{name});
     std.debug.print("Next steps:\n", .{});
     std.debug.print("  cd {s}\n", .{name});
-    std.debug.print("  zigttp dev\n", .{});
-    std.debug.print("  zigttp check\n", .{});
+    std.debug.print("  zigttp studio            # browser proof workbench\n", .{});
+    std.debug.print("  zigttp dev               # terminal proof HUD\n", .{});
+    std.debug.print("  zigttp proofs badge      # write a verdict badge for your README\n", .{});
+}
+
+/// Path of the marker file that records "first-run tour was shown."
+/// Once this file exists, `zigttp dev` skips the tour on subsequent runs.
+fn tourMarkerPath() []const u8 {
+    return ".zigttp/tour-shown";
+}
+
+/// First-run tour copy. One screen, no prompts, dismissed by writing the
+/// marker file the moment we render. Designed to land just before the HUD
+/// from `serve --watch --prove` starts streaming, so the author reads what
+/// the four properties mean and then sees them flip live.
+const tour_text =
+    \\
+    \\  zigttp dev   proof-aware live reload
+    \\  ----------------------------------------------------------------------
+    \\  every save is recompiled, then proven. the hud frame below shows your
+    \\  handler's proof surface in real time. four properties to watch:
+    \\
+    \\    pure              no virtual-module calls
+    \\    read_only         no state mutations
+    \\    deterministic     no Date.now() / Math.random()
+    \\    injection_safe    user input never reaches sensitive sinks
+    \\
+    \\  try it: drop a `Date.now()` into your handler and watch -deterministic
+    \\  light up. revert it and watch +deterministic come back. the proof card
+    \\  streams below.
+    \\
+    \\
+;
+
+fn stderrIsTty() bool {
+    return switch (builtin.os.tag) {
+        .windows => false,
+        else => std.posix.system.isatty(std.posix.STDERR_FILENO) != 0,
+    };
+}
+
+fn tourMarkerExistsAt(allocator: std.mem.Allocator, base_dir: []const u8) bool {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const path = std.fs.path.join(allocator, &.{ base_dir, tourMarkerPath() }) catch return false;
+    defer allocator.free(path);
+    std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{}) catch return false;
+    return true;
+}
+
+fn touchTourMarkerAt(allocator: std.mem.Allocator, base_dir: []const u8) void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const state_dir = std.fs.path.join(allocator, &.{ base_dir, ".zigttp" }) catch return;
+    defer allocator.free(state_dir);
+    std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, state_dir) catch return;
+    const path = std.fs.path.join(allocator, &.{ base_dir, tourMarkerPath() }) catch return;
+    defer allocator.free(path);
+    var file = std.Io.Dir.createFile(std.Io.Dir.cwd(), io, path, .{}) catch return;
+    file.close(io);
+}
+
+fn tourMarkerExists(allocator: std.mem.Allocator) bool {
+    return tourMarkerExistsAt(allocator, ".");
+}
+
+fn touchTourMarker(allocator: std.mem.Allocator) void {
+    touchTourMarkerAt(allocator, ".");
+}
+
+/// Render the first-run tour exactly once, the first time `zigttp dev` is
+/// invoked in a project. Dismissal is durable (marker file). Skipped when
+/// stderr is not a TTY (CI, redirected logs) or `--no-tour` is passed.
+fn maybeShowFirstRunTour(allocator: std.mem.Allocator, argv: []const []const u8) void {
+    if (shared.hasFlag(argv, "--no-tour")) return;
+    if (!stderrIsTty()) return;
+    if (tourMarkerExists(allocator)) return;
+    _ = std.c.write(std.c.STDERR_FILENO, tour_text.ptr, tour_text.len);
+    touchTourMarker(allocator);
 }
 
 fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
+    maybeShowFirstRunTour(allocator, argv);
     try runDevPreflight(allocator, argv);
 
     const runtime_binary = try resolveRuntimeBinary(allocator, program_path);
     defer allocator.free(runtime_binary);
 
+    // `zigttp dev` is the magnet surface: it implies `--watch --prove` so the
+    // proof HUD lights up on the first save. `--no-prove` opts out of proof
+    // verification but still watches; both flags can be passed explicitly to
+    // be a no-op (idempotent).
+    const user_no_prove = shared.hasFlag(argv, "--no-prove");
+    const user_has_watch = shared.hasFlag(argv, "--watch");
+    const user_has_prove = shared.hasFlag(argv, "--prove");
+
     var child_args = std.ArrayList([]const u8).empty;
     defer child_args.deinit(allocator);
     try child_args.append(allocator, runtime_binary);
     try child_args.append(allocator, "serve");
-    try child_args.appendSlice(allocator, argv);
-
-    var watch = try shared.buildWatchSet(allocator, argv);
-    defer watch.deinit(allocator);
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--no-prove")) continue;
+        if (std.mem.eql(u8, arg, "--no-tour")) continue;
+        try child_args.append(allocator, arg);
+    }
+    if (!user_has_watch) try child_args.append(allocator, "--watch");
+    if (!user_has_prove and !user_no_prove) try child_args.append(allocator, "--prove");
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
 
-    var previous_stamp = try watch.computeStamp(io);
+    var child = try std.process.spawn(io, .{
+        .argv = child_args.items,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    _ = child.wait(io) catch {};
+}
 
-    while (true) {
-        var child = try std.process.spawn(io, .{
-            .argv = child_args.items,
-            .stdin = .inherit,
-            .stdout = .inherit,
-            .stderr = .inherit,
-        });
+fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
+    try runDevPreflight(allocator, argv);
 
-        while (true) {
-            try std.Io.sleep(io, .fromMilliseconds(250), .awake);
-            const next_stamp = try watch.computeStamp(io);
-            if (next_stamp != previous_stamp) {
-                previous_stamp = next_stamp;
-                child.kill(io);
-                std.debug.print("\nChange detected. Restarting zigttp serve...\n", .{});
-                try runDevPreflight(allocator, argv);
-                break;
-            }
-        }
-    }
+    const runtime_binary = try resolveRuntimeBinary(allocator, program_path);
+    defer allocator.free(runtime_binary);
+
+    const user_has_watch = shared.hasFlag(argv, "--watch");
+    const user_has_prove = shared.hasFlag(argv, "--prove");
+
+    var child_args = std.ArrayList([]const u8).empty;
+    defer child_args.deinit(allocator);
+    try child_args.append(allocator, runtime_binary);
+    try child_args.append(allocator, "serve");
+    for (argv) |arg| try child_args.append(allocator, arg);
+    if (!shared.hasFlag(argv, "--studio")) try child_args.append(allocator, "--studio");
+    if (!user_has_watch) try child_args.append(allocator, "--watch");
+    if (!user_has_prove) try child_args.append(allocator, "--prove");
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var child = try std.process.spawn(io, .{
+        .argv = child_args.items,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    _ = child.wait(io) catch {};
 }
 
 /// Find the `zigttp` runtime binary.
@@ -762,7 +873,8 @@ fn printHelp() void {
         \\
         \\Usage:
         \\  zigttp init <name> [--template ...]    Create project
-        \\  zigttp dev [handler-or-project]         Watch-restart loop
+        \\  zigttp studio [handler-or-project]      Browser proof workbench
+        \\  zigttp dev [handler-or-project]         Watch + proven hot reload (HUD on)
         \\  zigttp serve [options] [handler.ts]    Run handler locally
         \\  zigttp expert                          Deprecated alias for `zigts expert`
         \\  zigttp check [handler.ts] [--contract]  Verify handler
@@ -922,3 +1034,21 @@ const basicReadme =
 
 const apiReadme = basicReadme;
 const htmxReadme = basicReadme;
+
+test "first-run tour marker is durable: absent then created then detected" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    try testing.expect(!tourMarkerExistsAt(allocator, base));
+    touchTourMarkerAt(allocator, base);
+    try testing.expect(tourMarkerExistsAt(allocator, base));
+    // Idempotent: a second touch is harmless.
+    touchTourMarkerAt(allocator, base);
+    try testing.expect(tourMarkerExistsAt(allocator, base));
+}

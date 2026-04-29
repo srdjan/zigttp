@@ -563,6 +563,27 @@ pub const RateLimitInfo = struct {
     dynamic: bool,
 };
 
+/// Why a handler property was demoted from its optimistic default. Captured
+/// at the classifier site that decided to clear a boolean in
+/// `HandlerProperties` so the live-reload HUD can name both the file:line
+/// and the construct that caused the regression. Snippet is borrowed
+/// (typically a static const string like "Date.now()"); the contract owns
+/// no extra allocation.
+pub const PropertyCause = struct {
+    line: u32,
+    column: u16,
+    snippet: []const u8, // borrowed; static literal or arena-tied
+};
+
+/// Per-property source provenance. All fields default to null; populated
+/// only at the clearing site for properties that were demoted from their
+/// optimistic default. Lives alongside `HandlerProperties` on the contract;
+/// not serialized into contract.json (purely a build-time artifact for the
+/// proof HUD's regression line).
+pub const PropertyProvenance = struct {
+    deterministic: ?PropertyCause = null,
+};
+
 // -------------------------------------------------------------------------
 // Behavioral contract types
 // -------------------------------------------------------------------------
@@ -832,6 +853,10 @@ pub const HandlerContract = struct {
     fault_coverage: ?FaultCoverageInfo = null,
     rate_limiting: ?RateLimitInfo = null,
     properties: ?HandlerProperties = null,
+    /// In-memory provenance for demoted properties. Not serialized; populated
+    /// during build for the live-reload HUD's "Why" line. Snippets are
+    /// borrowed static strings, so deinit is a no-op.
+    property_provenance: PropertyProvenance = .{},
     behaviors: std.ArrayList(BehaviorPath) = .empty,
     behaviors_exhaustive: bool = false,
     capabilities: CapabilityMatrix = .empty,
