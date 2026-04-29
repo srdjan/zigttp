@@ -28,15 +28,17 @@ export function handler(req) {
 
 ```ts
 fetch(url: string, init?: RequestInit): Response
-get(url: string, init?: RequestInit): Response
-post(url: string, init?: RequestInit): Response
-put(url: string, init?: RequestInit): Response
-patch(url: string, init?: RequestInit): Response
-delete(url: string, init?: RequestInit): Response
+get(url: string, init?: RequestInit, retries?: number): Response
+post(url: string, init?: RequestInit, retries?: number): Response
+put(url: string, init?: RequestInit, retries?: number): Response
+patch(url: string, init?: RequestInit, retries?: number): Response
+delete(url: string, init?: RequestInit, retries?: number): Response
 ```
 
 The method helpers are high-level aliases: they clone `init` and set
 `method` automatically, so handler code can stay focused on intent.
+They also accept `retries` (default `0`, max `8`) and retry on `5xx`
+responses.
 
 `RequestInit` extends the WHATWG shape:
 

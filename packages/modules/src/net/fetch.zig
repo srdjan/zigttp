@@ -41,10 +41,10 @@ pub const binding = sdk.ModuleBinding{
         .{
             .name = "get",
             .module_func = getImpl,
-            .arg_count = 2,
+            .arg_count = 3,
             .effect = .write,
             .returns = .object,
-            .param_types = &.{ .string, .object },
+            .param_types = &.{ .string, .object, .number },
             .return_labels = .{ .external = true },
             .contract_extractions = &.{
                 .{ .arg_position = 0, .category = .fetch_host, .transform = .extract_host },
@@ -53,10 +53,10 @@ pub const binding = sdk.ModuleBinding{
         .{
             .name = "post",
             .module_func = postImpl,
-            .arg_count = 2,
+            .arg_count = 3,
             .effect = .write,
             .returns = .object,
-            .param_types = &.{ .string, .object },
+            .param_types = &.{ .string, .object, .number },
             .return_labels = .{ .external = true },
             .contract_extractions = &.{
                 .{ .arg_position = 0, .category = .fetch_host, .transform = .extract_host },
@@ -65,10 +65,10 @@ pub const binding = sdk.ModuleBinding{
         .{
             .name = "put",
             .module_func = putImpl,
-            .arg_count = 2,
+            .arg_count = 3,
             .effect = .write,
             .returns = .object,
-            .param_types = &.{ .string, .object },
+            .param_types = &.{ .string, .object, .number },
             .return_labels = .{ .external = true },
             .contract_extractions = &.{
                 .{ .arg_position = 0, .category = .fetch_host, .transform = .extract_host },
@@ -77,10 +77,10 @@ pub const binding = sdk.ModuleBinding{
         .{
             .name = "patch",
             .module_func = patchImpl,
-            .arg_count = 2,
+            .arg_count = 3,
             .effect = .write,
             .returns = .object,
-            .param_types = &.{ .string, .object },
+            .param_types = &.{ .string, .object, .number },
             .return_labels = .{ .external = true },
             .contract_extractions = &.{
                 .{ .arg_position = 0, .category = .fetch_host, .transform = .extract_host },
@@ -89,10 +89,10 @@ pub const binding = sdk.ModuleBinding{
         .{
             .name = "delete",
             .module_func = deleteImpl,
-            .arg_count = 2,
+            .arg_count = 3,
             .effect = .write,
             .returns = .object,
-            .param_types = &.{ .string, .object },
+            .param_types = &.{ .string, .object, .number },
             .return_labels = .{ .external = true },
             .contract_extractions = &.{
                 .{ .arg_position = 0, .category = .fetch_host, .transform = .extract_host },
@@ -149,9 +149,10 @@ fn fetchWithMethod(handle: *sdk.ModuleHandle, args: []const sdk.JSValue, method:
         break :blk obj;
     };
 
+    const retries = try parseRetries(handle, args);
     const forwarded = [_]sdk.JSValue{ url, final_init };
     try sdk.requireCapability(handle, .runtime_callback);
-    return state.call_fn(state.runtime_ptr, handle, &forwarded);
+    return callWithRetries(state, handle, &forwarded, retries);
 }
 
 fn cloneWithMethod(handle: *sdk.ModuleHandle, init: sdk.JSValue, method: []const u8) !sdk.JSValue {
@@ -167,4 +168,28 @@ fn cloneWithMethod(handle: *sdk.ModuleHandle, init: sdk.JSValue, method: []const
     }
     try sdk.objectSet(handle, obj, "method", try sdk.createString(handle, method));
     return obj;
+}
+
+fn parseRetries(handle: *sdk.ModuleHandle, args: []const sdk.JSValue) anyerror!i32 {
+    if (args.len < 3 or args[2].isUndefined() or args[2].isNull()) return 0;
+    const retries = sdk.extractInt(args[2]) orelse return util.throwTypeError(handle, "fetch helper retries must be an integer");
+    if (retries < 0) {
+        return util.throwTypeError(handle, "fetch helper retries must be >= 0");
+    }
+    return @min(retries, 8);
+}
+
+fn callWithRetries(state: *const FetchState, handle: *sdk.ModuleHandle, forwarded: []const sdk.JSValue, retries: i32) anyerror!sdk.JSValue {
+    var attempts_left = retries;
+    while (true) {
+        const response = try state.call_fn(state.runtime_ptr, handle, forwarded);
+        const status = getResponseStatus(handle, response) orelse return response;
+        if (status < 500 or attempts_left <= 0) return response;
+        attempts_left -= 1;
+    }
+}
+
+fn getResponseStatus(handle: *sdk.ModuleHandle, response: sdk.JSValue) ?i32 {
+    const status_val = sdk.objectGet(handle, response, "status") orelse return null;
+    return sdk.extractInt(status_val);
 }
