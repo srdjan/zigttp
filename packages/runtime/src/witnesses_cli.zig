@@ -22,6 +22,7 @@ const Subcommand = enum {
     pin,
     unpin,
     prune,
+    synthesize,
     help,
 };
 
@@ -32,6 +33,8 @@ pub fn isExpectedUserError(err: anyerror) bool {
         error.UnknownSubcommand,
         error.MissingHandlerArgument,
         error.MissingKeyArgument,
+        error.MissingSpecArgument,
+        error.UnsupportedSpec,
         error.WitnessNotFound,
         error.WitnessAmbiguous,
         error.WitnessCorpusMissing,
@@ -76,6 +79,7 @@ pub fn runWith(
         .pin => try cmdPin(allocator, rest, stdout, stderr, true),
         .unpin => try cmdPin(allocator, rest, stdout, stderr, false),
         .prune => try cmdPrune(allocator, rest, stdout, stderr),
+        .synthesize => try cmdSynthesize(allocator, rest, stdout, stderr),
         .help => try printHelp(stdout),
     }
 }
@@ -85,6 +89,7 @@ fn parseSub(s: []const u8) ?Subcommand {
     if (std.mem.eql(u8, s, "pin")) return .pin;
     if (std.mem.eql(u8, s, "unpin")) return .unpin;
     if (std.mem.eql(u8, s, "prune")) return .prune;
+    if (std.mem.eql(u8, s, "synthesize")) return .synthesize;
     if (std.mem.eql(u8, s, "help") or std.mem.eql(u8, s, "--help") or std.mem.eql(u8, s, "-h")) return .help;
     return null;
 }
@@ -98,11 +103,18 @@ fn printHelp(stdout: *std.Io.Writer) !void {
         \\  zigttp witnesses pin <handler> <key|prefix>
         \\  zigttp witnesses unpin <handler> <key|prefix>
         \\  zigttp witnesses prune <handler> [--older-than <seconds>]
+        \\  zigttp witnesses synthesize <handler> <spec>
         \\
         \\Each handler accumulates a corpus of compiler-discovered falsifying
         \\inputs ("witnesses") under .zigttp/witnesses/<short_hash>/. Pinned
         \\witnesses are never pruned. With no <handler> argument, `list`
         \\summarises every corpus directory discovered.
+        \\
+        \\`synthesize` seeds a structural witness for a cause-only spec
+        \\(deterministic, read_only, retry_safe, idempotent, state_isolated,
+        \\fault_covered) using the per-property suggestion from spec_discharge.
+        \\Flow-rich specs populate the corpus automatically through the
+        \\analyzer; cause-only specs are seeded with this command.
         \\
     );
 }
@@ -309,6 +321,55 @@ fn resolveKey(
 
     try stderr.print("No witness found for key prefix {s}.\n", .{key_prefix});
     return error.WitnessNotFound;
+}
+
+fn cmdSynthesize(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    if (argv.len < 1) {
+        try stderr.writeAll("Missing handler argument.\n");
+        return error.MissingHandlerArgument;
+    }
+    if (argv.len < 2) {
+        try stderr.writeAll("Missing spec argument. Cause-only specs: ");
+        for (witness_corpus.cause_only_specs, 0..) |s, i| {
+            if (i > 0) try stderr.writeAll(", ");
+            try stderr.writeAll(s);
+        }
+        try stderr.writeAll(".\n");
+        return error.MissingSpecArgument;
+    }
+
+    const handler = argv[0];
+    const spec = argv[1];
+
+    if (!witness_corpus.isCauseOnlySpec(spec)) {
+        try stderr.print(
+            "{s} is not a cause-only spec. Flow-rich specs (no_secret_leakage, " ++
+                "no_credential_leakage, input_validated, pii_contained, injection_safe) " ++
+                "populate the corpus automatically through analysis.\n",
+            .{spec},
+        );
+        return error.UnsupportedSpec;
+    }
+
+    const summary = zigts.spec_discharge.suggestionFor(spec) orelse "structural failure";
+
+    const dir = try witness_corpus.corpusDir(allocator, handler);
+    defer allocator.free(dir);
+    try witness_corpus.ensureCorpusDir(allocator, dir, handler);
+
+    var result = try witness_corpus.synthesizeStructural(allocator, dir, spec, handler, summary);
+    defer result.deinit(allocator);
+
+    const verb: []const u8 = switch (result.outcome) {
+        .created => "Synthesized",
+        .refreshed => "Already present",
+    };
+    try stdout.print("{s} {s}  {s}  for {s}\n", .{ verb, shortKey(result.key), spec, handler });
 }
 
 fn shortKey(key: []const u8) []const u8 {

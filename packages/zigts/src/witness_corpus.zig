@@ -245,6 +245,115 @@ fn appendIndexEvent(
     }
 }
 
+/// The closed v1 vocabulary of cause-only specs that `synthesizeStructural`
+/// will accept. Mirrors `spec_discharge.v1_specs` filtered to entries
+/// whose failure has no flow-style witness (only a per-property cause
+/// suggestion). Flow-rich specs continue to populate the corpus through
+/// the analyzer-driven path; structural synthesis is a separate seed
+/// channel for properties whose violations are classifier-level rather
+/// than trace-level.
+pub const cause_only_specs = [_][]const u8{
+    "deterministic",
+    "read_only",
+    "retry_safe",
+    "idempotent",
+    "state_isolated",
+    "fault_covered",
+};
+
+pub fn isCauseOnlySpec(name: []const u8) bool {
+    for (cause_only_specs) |s| {
+        if (std.mem.eql(u8, s, name)) return true;
+    }
+    return false;
+}
+
+/// Synthesise a structural witness for a cause-only spec and persist it
+/// to the corpus. Unlike flow-witness solve+persist, this does not try
+/// to construct a falsifying request: the spec's failure is a structural
+/// classifier verdict, not a trace property. The witness records the
+/// spec name plus a human-readable cause summary, keyed by
+/// sha256(spec_name|handler_path) so repeat synthesis is idempotent.
+///
+/// Caller owns the returned `PersistResult` (call `deinit`).
+pub fn synthesizeStructural(
+    allocator: std.mem.Allocator,
+    corpus_dir: []const u8,
+    spec_name: []const u8,
+    handler_path: []const u8,
+    summary: []const u8,
+) !PersistResult {
+    if (!isCauseOnlySpec(spec_name)) return error.UnsupportedSpec;
+
+    const key = try structuralKey(allocator, spec_name, handler_path);
+    errdefer allocator.free(key);
+
+    const file_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/{s}.witness.jsonl",
+        .{ corpus_dir, key },
+    );
+    errdefer allocator.free(file_path);
+
+    if (file_io.fileExists(allocator, file_path)) {
+        return .{
+            .outcome = .refreshed,
+            .key = key,
+            .file_path = file_path,
+        };
+    }
+
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{file_path});
+    defer allocator.free(tmp_path);
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeStructuralJsonl(&aw.writer, spec_name, summary);
+    try file_io.writeFile(allocator, tmp_path, aw.writer.buffered());
+    try renameAtomic(allocator, tmp_path, file_path);
+
+    try appendIndexEvent(allocator, corpus_dir, .{
+        .property = spec_name,
+        .key = key,
+        .summary = summary,
+    });
+
+    return .{
+        .outcome = .created,
+        .key = key,
+        .file_path = file_path,
+    };
+}
+
+fn structuralKey(
+    allocator: std.mem.Allocator,
+    spec_name: []const u8,
+    handler_path: []const u8,
+) ![]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("structural\x00");
+    hasher.update(spec_name);
+    hasher.update("\x00");
+    hasher.update(handler_path);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    return allocator.dupe(u8, &hex);
+}
+
+fn writeStructuralJsonl(
+    writer: *std.Io.Writer,
+    spec_name: []const u8,
+    summary: []const u8,
+) !void {
+    try writer.writeAll("{\"type\":\"witness\",\"property\":");
+    try json_utils.writeJsonString(writer, spec_name);
+    try writer.writeAll(",\"origin\":{\"line\":1,\"column\":1},\"sink\":{\"line\":1,\"column\":1},\"kind\":\"structural\",\"summary\":");
+    try json_utils.writeJsonString(writer, summary);
+    try writer.writeAll("}\n");
+    try writer.writeAll("{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n");
+}
+
 /// Toggle the pinned marker for a witness. Pinned witnesses are protected
 /// from `prune`. Idempotent.
 pub fn pin(
@@ -788,6 +897,52 @@ test "writeProofEnvelopeBlock emits zero-total when corpus is missing" {
     defer aw.deinit();
     try writeProofEnvelopeBlock(allocator, &aw.writer, dir);
     try testing.expectEqualStrings("{\"total\":0,\"by_property\":{}}", aw.writer.buffered());
+}
+
+test "synthesizeStructural rejects non-cause-only specs" {
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmp(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const dir = try corpusDir(allocator, "h.ts");
+    defer allocator.free(dir);
+    try ensureCorpusDir(allocator, dir, "h.ts");
+
+    const result = synthesizeStructural(allocator, dir, "no_secret_leakage", "h.ts", "x");
+    try testing.expectError(error.UnsupportedSpec, result);
+}
+
+test "synthesizeStructural creates a structural witness for cause-only specs" {
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmp(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const dir = try corpusDir(allocator, "h.ts");
+    defer allocator.free(dir);
+    try ensureCorpusDir(allocator, dir, "h.ts");
+
+    var first = try synthesizeStructural(allocator, dir, "deterministic", "h.ts", "remove Date.now()");
+    defer first.deinit(allocator);
+    try testing.expectEqual(PersistOutcome.created, first.outcome);
+    try testing.expectEqual(@as(usize, 64), first.key.len);
+
+    // Idempotent on the same (spec, handler) pair.
+    var second = try synthesizeStructural(allocator, dir, "deterministic", "h.ts", "remove Date.now()");
+    defer second.deinit(allocator);
+    try testing.expectEqual(PersistOutcome.refreshed, second.outcome);
+    try testing.expectEqualStrings(first.key, second.key);
+
+    const entries = try loadEntries(allocator, dir);
+    defer freeEntries(allocator, entries);
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqualStrings("deterministic", entries[0].property);
+    try testing.expectEqualStrings("remove Date.now()", entries[0].summary);
 }
 
 test "prune removes only entries older than the cutoff and not pinned" {
