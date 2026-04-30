@@ -44,6 +44,7 @@ const std = @import("std");
 const counterexample = @import("counterexample.zig");
 const json_utils = @import("json_utils.zig");
 const file_io = @import("file_io.zig");
+const spec_discharge = @import("spec_discharge.zig");
 
 pub const corpus_root_relative = ".zigttp/witnesses";
 
@@ -245,29 +246,6 @@ fn appendIndexEvent(
     }
 }
 
-/// The closed v1 vocabulary of cause-only specs that `synthesizeStructural`
-/// will accept. Mirrors `spec_discharge.v1_specs` filtered to entries
-/// whose failure has no flow-style witness (only a per-property cause
-/// suggestion). Flow-rich specs continue to populate the corpus through
-/// the analyzer-driven path; structural synthesis is a separate seed
-/// channel for properties whose violations are classifier-level rather
-/// than trace-level.
-pub const cause_only_specs = [_][]const u8{
-    "deterministic",
-    "read_only",
-    "retry_safe",
-    "idempotent",
-    "state_isolated",
-    "fault_covered",
-};
-
-pub fn isCauseOnlySpec(name: []const u8) bool {
-    for (cause_only_specs) |s| {
-        if (std.mem.eql(u8, s, name)) return true;
-    }
-    return false;
-}
-
 /// Synthesise a structural witness for a cause-only spec and persist it
 /// to the corpus. Unlike flow-witness solve+persist, this does not try
 /// to construct a falsifying request: the spec's failure is a structural
@@ -283,7 +261,7 @@ pub fn synthesizeStructural(
     handler_path: []const u8,
     summary: []const u8,
 ) !PersistResult {
-    if (!isCauseOnlySpec(spec_name)) return error.UnsupportedSpec;
+    if (!spec_discharge.isCauseOnly(spec_name)) return error.UnsupportedSpec;
 
     const key = try structuralKey(allocator, spec_name, handler_path);
     errdefer allocator.free(key);
@@ -566,7 +544,16 @@ pub fn countByProperty(
         else => return err,
     };
     defer freeEntries(allocator, entries);
+    return countByPropertySlice(allocator, entries);
+}
 
+/// Aggregate counts directly from an already-loaded entries slice. Lets
+/// consumers that need both the full entries list and a count breakdown
+/// (e.g. the studio Witnesses tile) avoid a second `loadEntries` walk.
+pub fn countByPropertySlice(
+    allocator: std.mem.Allocator,
+    entries: []const Entry,
+) ![]PropertyCount {
     var counts: std.StringHashMapUnmanaged(usize) = .empty;
     defer counts.deinit(allocator);
 

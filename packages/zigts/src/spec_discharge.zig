@@ -70,6 +70,17 @@ pub const PropertyField = enum {
     }
 };
 
+/// True when `name` is a v1 spec whose failure has no flow-style witness -
+/// the verdict is a structural classifier output. Witness corpus seeding
+/// for these flows through `witness_corpus.synthesizeStructural`; the
+/// flow-rich half populates automatically through `flow_checker`.
+pub fn isCauseOnly(name: []const u8) bool {
+    for (v1_specs) |s| {
+        if (s.cause_only and std.mem.eql(u8, s.name, name)) return true;
+    }
+    return false;
+}
+
 /// Per-property HUD suggestion strings. Mandatory for cause-only specs so
 /// the proof card never renders an anemic single-line failure.
 pub fn suggestionFor(name: []const u8) ?[]const u8 {
