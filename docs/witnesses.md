@@ -51,10 +51,16 @@ A handler that has never been touched by either tool has no corpus.
 Once an agent runs them, the corpus begins populating immediately and
 stays in sync with the proof state.
 
-Build-time auto-population from `zigts check` and `zig build -Dhandler`
-is not yet wired. The `proof.witnesses` block in those JSON envelopes
-reports the current state of the on-disk corpus, not the witnesses
-materialised by the build itself. Direct integration is on the roadmap.
+Build-time auto-population is wired into `precompile.runCheckOnly`, so
+every `zigts check` and `zig build -Dhandler=...` populates the corpus
+from any flow-property witness the analyzer produces. The `proof.witnesses`
+block in the JSON envelope reflects the corpus state after that
+population pass.
+
+Cause-only specs (`deterministic`, `read_only`, `retry_safe`,
+`idempotent`, `state_isolated`, `fault_covered`) do not have flow-style
+falsifying inputs - their classification is structural. Seed those
+entries explicitly with `zigttp witnesses synthesize <handler> <spec>`.
 
 ## Surfaces
 
@@ -65,6 +71,7 @@ zigttp witnesses list [<handler>]
 zigttp witnesses pin <handler> <key|prefix>
 zigttp witnesses unpin <handler> <key|prefix>
 zigttp witnesses prune <handler> [--older-than <seconds>]
+zigttp witnesses synthesize <handler> <spec>
 ```
 
 `list` with no handler argument summarises every corpus directory found
@@ -77,6 +84,13 @@ protected from `prune`.
 
 `prune` removes unpinned witnesses whose first-seen timestamp is older
 than the cutoff. The default is 90 days.
+
+`synthesize` seeds a structural witness for one of the cause-only specs.
+Repeat invocations on the same `(handler, spec)` pair are idempotent;
+the underlying key is `sha256("structural" | spec | handler_path)`. The
+stored summary is the per-property `Try:` suggestion from
+`spec_discharge.suggestionFor`. Flow-rich specs are rejected because the
+analyzer-driven path already covers them.
 
 ### JSON envelope
 
