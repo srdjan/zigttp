@@ -135,8 +135,92 @@ fn factsJson(
     }
     try json.objectField("delta");
     try writeDeltaJson(&json, delta);
+    try json.objectField("witnesses");
+    try writeWitnessesJson(allocator, &json, handler_path);
     try json.endObject();
     return try allocator.dupe(u8, aw.writer.buffered());
+}
+
+fn writeWitnessesJson(
+    allocator: std.mem.Allocator,
+    json: *std.json.Stringify,
+    handler_path: []const u8,
+) !void {
+    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch {
+        try writeEmptyWitnesses(json);
+        return;
+    };
+    defer allocator.free(corpus_dir);
+
+    const entries = zigts.witness_corpus.loadEntries(allocator, corpus_dir) catch |err| switch (err) {
+        error.WitnessCorpusMissing => {
+            try writeEmptyWitnesses(json);
+            return;
+        },
+        else => return err,
+    };
+    defer zigts.witness_corpus.freeEntries(allocator, entries);
+
+    try json.beginObject();
+    try json.objectField("total");
+    try json.write(entries.len);
+
+    try json.objectField("byProperty");
+    try json.beginObject();
+    var i: usize = 0;
+    while (i < entries.len) : (i += 1) {
+        const prop = entries[i].property;
+        var seen = false;
+        var k: usize = 0;
+        while (k < i) : (k += 1) {
+            if (std.mem.eql(u8, entries[k].property, prop)) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+        var count: usize = 0;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.property, prop)) count += 1;
+        }
+        try json.objectField(prop);
+        try json.write(count);
+    }
+    try json.endObject();
+
+    // The HUD shows at most 20 entries; deeper inspection lives in the CLI
+    // and the pi_witnesses agent tool.
+    const max_entries: usize = 20;
+    const entry_count = @min(entries.len, max_entries);
+    try json.objectField("entries");
+    try json.beginArray();
+    for (entries[0..entry_count]) |e| {
+        try json.beginObject();
+        try json.objectField("key");
+        try json.write(e.key);
+        try json.objectField("property");
+        try json.write(e.property);
+        try json.objectField("summary");
+        try json.write(e.summary);
+        try json.objectField("pinned");
+        try json.write(e.pinned);
+        try json.endObject();
+    }
+    try json.endArray();
+    try json.endObject();
+}
+
+fn writeEmptyWitnesses(json: *std.json.Stringify) !void {
+    try json.beginObject();
+    try json.objectField("total");
+    try json.write(@as(usize, 0));
+    try json.objectField("byProperty");
+    try json.beginObject();
+    try json.endObject();
+    try json.objectField("entries");
+    try json.beginArray();
+    try json.endArray();
+    try json.endObject();
 }
 
 fn writeDeltaJson(json: *std.json.Stringify, delta: *const review.ReviewDelta) !void {
@@ -235,7 +319,7 @@ pub const index_html =
     \\</head>
     \\<body><main>
     \\<header><div><h1>zigttp studio</h1><div class="sub">The compiler-visible shape of your handler, live.</div></div><div class="status" id="status">connecting</div></header>
-    \\<section class="grid"><div class="pane"><h2>Verdict</h2><div class="big" id="verdict">...</div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div></div><div class="pane"><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px">Generated Tests</h2><p class="empty" id="tests">Download path-generated JSONL tests from <code>/_zigttp/studio/tests.jsonl</code>.</p></div></section>
+    \\<section class="grid"><div class="pane"><h2>Verdict</h2><div class="big" id="verdict">...</div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div></div><div class="pane"><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p class="empty" id="tests">Download path-generated JSONL tests from <code>/_zigttp/studio/tests.jsonl</code>.</p></div></section>
     \\<footer><select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select><input id="url" value="/" aria-label="URL"><button id="send">Send</button></footer>
     \\<pre id="response"></pre>
     \\</main><script>
@@ -245,7 +329,9 @@ pub const index_html =
     \\function pills(obj){return Object.entries(obj||{}).map(([k,v])=>`<span class="pill ${v?"on":"off"}">${v?"+":"-"}${esc(k)}</span>`).join("")}
     \\function specPills(items){return (items||[]).map(s=>`<span class="pill ${s.discharged?"on":"off"}">${s.discharged?"✓":"✗"} spec ${esc(s.name)}</span>`).join("")}
     \\function changes(label,items,cls){return items&&items.length?items.map(x=>`<span class="pill ${cls}">${label} ${esc(x.label||x.pattern||x)}</span>`).join(""):""}
-    \\async function refresh(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});const s=await r.json();$("status").textContent=`${s.status} · ${s.handlerPath||""}`;if(s.status!=="ready"){$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}const f=s.facts;$("verdict").textContent=s.verdict;$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`;$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;$("specs").innerHTML=ds.length?specPills(ds):"";$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";}catch(e){$("status").textContent=String(e)}}setInterval(refresh,750);refresh();
+    \\function witnessCounts(byProp){return Object.entries(byProp||{}).map(([k,v])=>`<span class="pill on">${esc(k)}: ${v}</span>`).join("")}
+    \\function witnessRows(entries){return (entries||[]).map(e=>`<li><code>${esc(e.key.slice(0,12))}</code>${e.pinned?' <span class="pill add">pinned</span>':""} <span class="pill off">${esc(e.property)}</span> ${esc(e.summary)}</li>`).join("")}
+    \\async function refresh(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});const s=await r.json();$("status").textContent=`${s.status} · ${s.handlerPath||""}`;if(s.status!=="ready"){$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}const f=s.facts;$("verdict").textContent=s.verdict;$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`;$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;$("specs").innerHTML=ds.length?specPills(ds):"";$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";}catch(e){$("status").textContent=String(e)}}setInterval(refresh,750);refresh();
     \\$("send").onclick=async()=>{const r=await fetch($("url").value,{method:$("method").value});$("response").textContent=`HTTP ${r.status}\n`+await r.text()}
     \\</script></body></html>
 ;
