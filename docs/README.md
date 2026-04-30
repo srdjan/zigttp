@@ -54,6 +54,8 @@ notes document design contracts, governance, and roadmap work.
   policy component proposal.
 - [Frontier](roadmap/frontier.md) - strategic direction.
 - [Autoloop](roadmap/autoloop.md) - property-goal repair loop.
+- [Agent Loop Extraction Feasibility](roadmap/aloop-zigttp-virtual-module.md) -
+  plan for extracting `zigts expert` into a reusable virtual-module library.
 - [TUI Roadmap](roadmap/roadmap-tui.md) - pi TUI product note.
 - [pi OpenAI Cassettes](roadmap/pi-cassettes.md) - provider cassette plan.
 
