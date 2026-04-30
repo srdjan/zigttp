@@ -131,6 +131,14 @@ pub fn processSubmit(
         return .{ .tool_result = try renderTree(allocator, if (session.session_id) |sid| sid else null) };
     }
 
+    if (std.mem.eql(u8, trimmed, "/studio") or std.mem.startsWith(u8, trimmed, "/studio ")) {
+        const rest = if (trimmed.len == "/studio".len)
+            ""
+        else
+            std.mem.trim(u8, trimmed["/studio ".len..], " \t");
+        return .{ .tool_result = try renderStudio(allocator, rest) };
+    }
+
     if (commands.isViewLedger(trimmed)) {
         return .view_ledger;
     }
@@ -196,6 +204,10 @@ pub fn dispatchLine(
     if (commands.isSettings(argv[0])) return .{ .result = try renderSettings(allocator) };
     if (commands.isHotkeys(argv[0])) return .{ .result = try renderHotkeys(allocator) };
     if (commands.isChangelog(argv[0])) return .{ .result = try renderChangelog(allocator) };
+    if (commands.isStudio(argv[0])) {
+        const handler = if (argv.len > 1) argv[1] else "";
+        return .{ .result = try renderStudio(allocator, handler) };
+    }
     if (std.mem.eql(u8, argv[0], "/skills")) return .{ .result = try renderSkills(allocator) };
     if (std.mem.eql(u8, argv[0], "/templates")) return .{ .result = try renderTemplates(allocator) };
 
@@ -312,6 +324,7 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     try w.writeAll("Info commands: /model  /status  /settings  /hotkeys  /changelog\n");
     try w.writeAll("Session:       /compact  /resume  /continue  /new  /fork  /tree\n");
     try w.writeAll("Views:         /ledger  /chat  /ledger export <path>\n");
+    try w.writeAll("Studio:        /studio <handler.ts>   show browser proof workbench command\n");
     try w.writeAll("Route Forge:   /feature route file=<handler.ts> method=<VERB> path=</path>\n");
     try w.writeAll("               /forge route file=<handler.ts> method=<VERB> path=</path>\n");
     try w.writeAll("Specs:         /specs <handler.ts>   show declared Spec<...> obligations\n");
@@ -338,6 +351,16 @@ fn renderModel(allocator: std.mem.Allocator, active: ?[]const u8) !ToolResult {
     try w.writeAll("\nSwitch with: /model <model-id>\n");
     buf = aw.toArrayList();
     return ToolResult.withPlainText(allocator, true, buf.items);
+}
+
+fn renderStudio(allocator: std.mem.Allocator, handler_path: []const u8) !ToolResult {
+    const path = if (handler_path.len == 0) "<handler.ts>" else handler_path;
+    const msg = try std.fmt.allocPrint(
+        allocator,
+        "Browser proof workbench:\n  zigttp studio {s}\n\nOpen after the server starts:\n  http://localhost:8080/_zigttp/studio\n\nStudio runs the handler with --watch --prove, shows release readiness, declared specs, witnesses, generated tests, and next actions.\n",
+        .{path},
+    );
+    return .{ .ok = handler_path.len != 0, .llm_text = msg };
 }
 
 fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
@@ -1217,4 +1240,13 @@ test "renderStatus: enumerates every token total" {
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.out:    22") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.cache_r:33") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.cache_w:44") != null);
+}
+
+test "renderStudio returns workbench command and URL" {
+    var result = try renderStudio(testing.allocator, "examples/handler/handler.ts");
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "zigttp studio examples/handler/handler.ts") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "http://localhost:8080/_zigttp/studio") != null);
 }

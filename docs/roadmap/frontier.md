@@ -82,7 +82,9 @@ manifest-first metadata for:
 - state model
 
 The compiler should reason over that manifest, and the runtime should enforce
-it. The proof metadata is the real extension contract.
+it. The proof metadata is the real extension contract. This is deferred until
+the next-release UX pass lands; the saved plan lives in
+[proofable-third-party-modules.md](proofable-third-party-modules.md).
 
 ### 2. Compiler-Enforced Capability Fencing
 
