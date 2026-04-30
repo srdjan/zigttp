@@ -183,12 +183,29 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         defer buf.deinit(allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
+        // Compute the witnesses summary for this handler from the on-disk
+        // corpus. The block is inserted under proof.witnesses when present.
+        // A missing corpus produces a {"total":0,"by_property":{}} block.
+        var witnesses_buf: std.ArrayList(u8) = .empty;
+        defer witnesses_buf.deinit(allocator);
+        const witnesses_block: ?[]const u8 = blk: {
+            const corpus_dir = zigts.witness_corpus.corpusDir(allocator, target) catch break :blk null;
+            defer allocator.free(corpus_dir);
+            var wbuf_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &witnesses_buf);
+            zigts.witness_corpus.writeProofEnvelopeBlock(allocator, &wbuf_aw.writer, corpus_dir) catch {
+                witnesses_buf = wbuf_aw.toArrayList();
+                break :blk null;
+            };
+            witnesses_buf = wbuf_aw.toArrayList();
+            break :blk if (witnesses_buf.items.len > 0) witnesses_buf.items else null;
+        };
+
         if (result.totalErrors() > 0) {
             const contract_ptr: ?*const zigts.handler_contract.HandlerContract = if (result.contract) |*c| c else null;
-            json_diag.writeErrorJson(&aw.writer, contract_ptr, result.json_diagnostics.items) catch {};
+            json_diag.writeErrorJson(&aw.writer, contract_ptr, result.json_diagnostics.items, witnesses_block) catch {};
         } else {
             const contract_ptr: ?*const zigts.handler_contract.HandlerContract = if (result.contract) |*c| c else null;
-            json_diag.writeSuccessJson(&aw.writer, contract_ptr, result.json_diagnostics.items) catch {};
+            json_diag.writeSuccessJson(&aw.writer, contract_ptr, result.json_diagnostics.items, witnesses_block) catch {};
         }
 
         buf = aw.toArrayList();

@@ -237,6 +237,12 @@ and the `pi_specs_status` agent tool. See
 [user-guide.md](user-guide.md#author-declared-specs) for the author-side
 view.
 
+Counterexample-rich specs additionally feed a persistent on-disk
+corpus. Each falsifying input the analyzer materialises is written
+under `.zigttp/witnesses/<short_hash>/` so the same logical leak does
+not need to be rediscovered next session. See [witnesses.md](witnesses.md)
+for layout, CLI (`zigttp witnesses`), and agent tool (`pi_witnesses`).
+
 ### Runtime Optimizations from Verification
 
 Verified properties also control runtime behavior:

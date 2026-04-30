@@ -258,10 +258,17 @@ fn writeDiagnosticsArray(writer: anytype, diagnostics: []const JsonDiagnostic) !
 }
 
 /// Emit success JSON with proof summary and optional warnings.
+///
+/// `witnesses_block_json`, when non-null, is a pre-formatted JSON object
+/// (e.g. `{"total":3,"by_property":{"injection_safe":2,"no_secret_leakage":1}}`)
+/// inserted under `proof.witnesses`. Pass null when the corpus is unavailable
+/// or the caller chooses not to surface it. The caller is responsible for
+/// ensuring the block is well-formed JSON.
 pub fn writeSuccessJson(
     writer: anytype,
     contract: ?*const handler_contract.HandlerContract,
     diagnostics: []const JsonDiagnostic,
+    witnesses_block_json: ?[]const u8,
 ) !void {
     try writer.writeAll("{\"success\":true");
 
@@ -350,6 +357,11 @@ pub fn writeSuccessJson(
         }
         try writer.writeByte(']');
 
+        if (witnesses_block_json) |wb| {
+            try writer.writeAll(",\"witnesses\":");
+            try writer.writeAll(wb);
+        }
+
         try writer.writeByte('}');
     }
 
@@ -363,10 +375,14 @@ pub fn writeSuccessJson(
 /// Emit error JSON with diagnostics array. When a contract exists, include the
 /// same proof object as the success envelope so clients can inspect declared
 /// specs that failed discharge while still treating the check as failed.
+///
+/// `witnesses_block_json` is the same as on `writeSuccessJson`: pre-formatted
+/// JSON inserted under `proof.witnesses`, or null to omit.
 pub fn writeErrorJson(
     writer: anytype,
     contract: ?*const handler_contract.HandlerContract,
     diagnostics: []const JsonDiagnostic,
+    witnesses_block_json: ?[]const u8,
 ) !void {
     try writer.writeAll("{\"success\":false");
     if (contract) |c| {
@@ -437,7 +453,12 @@ pub fn writeErrorJson(
             }
             try writer.writeByte('}');
         }
-        try writer.writeAll("]}");
+        try writer.writeAll("]");
+        if (witnesses_block_json) |wb| {
+            try writer.writeAll(",\"witnesses\":");
+            try writer.writeAll(wb);
+        }
+        try writer.writeByte('}');
     }
     try writer.writeAll(",\"diagnostics\":");
     try writeDiagnosticsArray(writer, diagnostics);
