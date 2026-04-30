@@ -1,7 +1,14 @@
-// Users service handler
+// Users service handler with author-declared proof obligations.
+import type { Spec } from "zigttp:types";
 import { cacheGet, cacheSet } from "zigttp:cache";
 import { routerMatch } from "zigttp:router";
 import { serviceCall } from "zigttp:service";
+
+type Guardrails = Spec<
+    | "injection_safe"
+    | "state_isolated"
+    | "no_secret_leakage"
+>;
 
 function getUserById(req) {
   const id = req.params.id;
@@ -38,7 +45,7 @@ const routes = {
   "GET /api/users": listUsers,
 };
 
-function handler(req) {
+function handler(req: Request): Response & Guardrails {
   const found = routerMatch(routes, req);
   if (found !== undefined) {
     req.params = found.params;
