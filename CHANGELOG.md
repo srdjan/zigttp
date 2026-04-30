@@ -8,6 +8,13 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Added
 
+- Witness corpus: every flow-property counterexample the compiler discovers persists to `.zigttp/witnesses/<short_hash>/<key>.witness.jsonl` so a falsifying input does not need to be rediscovered next session. Auto-population runs in `precompile.runCheckOnly` so `zigts check`, `zig build -Dhandler=...`, `--watch --prove`, and the agent tools (`pi_repair_plan`, `pi_goal_check`) all populate the corpus on every analysis pass. The format reuses `counterexample.writeJsonl` exactly so a persisted witness can be replayed via `zigttp mock --replay` without translation.
+- `zigttp witnesses` CLI: `list`, `pin`, `unpin`, `prune`, and `synthesize` subcommands manage the corpus. `list` with no handler argument summarises every corpus directory discovered under `.zigttp/witnesses/`. `synthesize <handler> <spec>` seeds a structural witness for one of the cause-only specs (`deterministic`, `read_only`, `retry_safe`, `idempotent`, `state_isolated`, `fault_covered`) using the per-property `Try:` suggestion from `spec_discharge.suggestionFor`.
+- `pi_witnesses` agent tool plus `/witnesses <path>` slash command: returns total + per-property counts + first 20 entries with property, summary, and pinned status. The expert persona's new "Witness corpus awareness" block steers the agent to consult coverage before drafting repair (Specs with zero witnesses are unprobed; pinned witnesses are load-bearing).
+- `zigts check --json` proof envelope grows a `proof.witnesses` block (total + by_property breakdown) read from the on-disk corpus per check.
+- Proof studio gains a Witnesses tile in the right pane: total, per-property counts, and the first 20 entries with key prefix, summary, and pinned status. Heading hides itself on empty corpora.
+- `--watch --prove` HUD toast: when a build re-fires a previously pinned witness, `live_reload` prints `[witnesses] N pinned witness(es) re-fired` so authors notice regressions of patterns they explicitly chose to defend.
+- Default `Spec<...>` declarations on `examples/handler/handler.ts` and `examples/system/users.ts` showing the proof-first authoring style. Both discharge cleanly against today's classifier.
 - `zigts expert`: full token accounting per session - input, cache-read, cache-write, and output tokens tracked cumulatively and displayed after each model turn as `[tokens: in=N cache_r=N cache_w=N out=N]`.
 - `zigts expert`: session compaction via `/compact` - collapses the current transcript into a single system note; the session continues from the summary.
 - `zigts expert`: session branching via `/fork` and `--fork <session-id>` - opens a new session that continues from the end of an existing session's transcript.

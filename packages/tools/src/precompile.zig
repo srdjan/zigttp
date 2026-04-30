@@ -1109,6 +1109,10 @@ pub const CheckResult = struct {
     contract: ?HandlerContract = null,
     /// Structured diagnostics for JSON output mode.
     json_diagnostics: std.ArrayList(json_diag.JsonDiagnostic) = .empty,
+    /// Count of pinned-witness regressions re-fired by this build. Surfaced
+    /// by `--watch --prove` as a HUD-adjacent toast so authors notice when
+    /// a defended-against pattern reappears.
+    pinned_witness_regressions: usize = 0,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
         return self.parse_errors + self.bool_errors + self.type_errors + self.verify_errors + self.flow_errors + self.specErrors();
@@ -1132,19 +1136,22 @@ pub const CheckResult = struct {
 /// Walk the flow_checker diagnostics, materialise a counterexample witness
 /// for each one that maps to a tracked PropertyTag, and persist it to
 /// `.zigttp/witnesses/<short_hash>/`. Failures here never block the
-/// analysis result; the corpus is best-effort persistence.
+/// analysis result; the corpus is best-effort persistence. Returns the
+/// number of pinned witnesses re-fired by this build, which the live
+/// reload HUD surfaces as a regression toast.
 fn persistFlowWitnesses(
     allocator: std.mem.Allocator,
     flow_diags: []const zigts.flow_checker.Diagnostic,
     ir_view: zigts.parser.IrView,
     handler_path: []const u8,
-) void {
-    if (flow_diags.len == 0) return;
+) usize {
+    if (flow_diags.len == 0) return 0;
 
-    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch return;
+    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch return 0;
     defer allocator.free(corpus_dir);
-    zigts.witness_corpus.ensureCorpusDir(allocator, corpus_dir, handler_path) catch return;
+    zigts.witness_corpus.ensureCorpusDir(allocator, corpus_dir, handler_path) catch return 0;
 
+    var pinned_regressions: usize = 0;
     for (flow_diags) |diag| {
         const tag = zigts.flow_checker.propertyTagForKind(diag.kind) orelse continue;
         const loc = ir_view.getLoc(diag.node) orelse continue;
@@ -1165,9 +1172,18 @@ fn persistFlowWitnesses(
 
         if (zigts.witness_corpus.persist(allocator, corpus_dir, witness)) |pres| {
             var owned = pres;
-            owned.deinit(allocator);
+            defer owned.deinit(allocator);
+            // .refreshed means the witness was already persisted on a prior
+            // build. If the author had pinned it, this build re-fires a
+            // regression they explicitly chose to defend against.
+            if (owned.outcome == .refreshed and
+                zigts.witness_corpus.isPinned(allocator, corpus_dir, owned.key))
+            {
+                pinned_regressions += 1;
+            }
         } else |_| {}
     }
+    return pinned_regressions;
 }
 
 fn syncCheckResultProperties(result: *CheckResult) void {
@@ -1461,7 +1477,7 @@ pub fn runCheckOnlyFromSource(
         // Persist any flow-property witnesses to the on-disk corpus so the
         // same falsifying input does not need to be rediscovered next session.
         // Runs in both JSON and human modes; failures are non-fatal.
-        persistFlowWitnesses(allocator, flow_diags, ir_view, handler_path);
+        result.pinned_witness_regressions = persistFlowWitnesses(allocator, flow_diags, ir_view, handler_path);
 
         checked_opt = checked;
     }

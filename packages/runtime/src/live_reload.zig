@@ -114,14 +114,16 @@ pub const LiveReloadState = struct {
         const contract = result.contract;
         result.contract = null;
         const errors = result.totalErrors();
+        const pinned_regressions = result.pinned_witness_regressions;
         result.deinit(self.allocator);
 
-        return .{ .contract = contract, .errors = errors };
+        return .{ .contract = contract, .errors = errors, .pinned_regressions = pinned_regressions };
     }
 
     const AnalysisResult = struct {
         contract: ?HandlerContract,
         errors: u32,
+        pinned_regressions: usize,
 
         fn deinitContract(self: *AnalysisResult, allocator: std.mem.Allocator) void {
             if (self.contract) |*c| c.deinit(allocator);
@@ -156,6 +158,9 @@ pub const LiveReloadState = struct {
                 analysis.errors,
                 elapsed_ms,
             });
+            if (analysis.pinned_regressions > 0) {
+                printReload("[witnesses] {d} pinned witness(es) re-fired - regression of a previously defended pattern.\n", .{analysis.pinned_regressions});
+            }
             return;
         }
 
@@ -163,6 +168,10 @@ pub const LiveReloadState = struct {
             std.fs.path.basename(self.handler_path),
             elapsed_ms,
         });
+
+        if (analysis.pinned_regressions > 0) {
+            printReload("[witnesses] {d} pinned witness(es) re-fired during analysis.\n", .{analysis.pinned_regressions});
+        }
 
         if (self.config.prove) {
             var new_contract = analysis.contract orelse {
