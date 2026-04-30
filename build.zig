@@ -516,6 +516,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     zruntime_tests.root_module.addImport("zigts", zigts_mod);
+    zruntime_tests.root_module.addImport("zigts_cli", zigts_cli_mod);
     zruntime_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{

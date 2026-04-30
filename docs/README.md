@@ -54,6 +54,8 @@ notes document design contracts, governance, and roadmap work.
   policy component proposal.
 - [Frontier](roadmap/frontier.md) - strategic direction.
 - [Autoloop](roadmap/autoloop.md) - property-goal repair loop.
+- [Proofable Third-Party Modules](roadmap/proofable-third-party-modules.md) -
+  deferred extension roadmap item.
 - [TUI Roadmap](roadmap/roadmap-tui.md) - pi TUI product note.
 - [pi OpenAI Cassettes](roadmap/pi-cassettes.md) - provider cassette plan.
 

@@ -415,6 +415,21 @@ Refs may be `HEAD`, `HEAD~N`, or a contract sha prefix. The exporter
 prints to stdout; redirect to commit a receipt or badge alongside the
 PR description.
 
+### `zigttp studio`
+
+Start the browser proof workbench for a handler:
+
+```bash
+zigttp studio examples/handler/handler.ts
+```
+
+Studio runs the handler with `--watch --prove` and serves
+`/_zigttp/studio`. The workbench shows release readiness, declared
+`Spec<...>` status, proven properties, surface deltas, witness corpus
+counts, generated-test export commands, and next actions that point back
+to compiler-backed CLI or `zigts expert` flows. In the expert REPL,
+`/studio <handler.ts>` prints the same startup command and URL.
+
 ### zigts CLI (compiler and analyzer)
 
 Standalone analysis and compilation without starting a server.
@@ -467,6 +482,7 @@ The interactive REPL accepts slash commands alongside natural language:
 /settings                      show compile-time defaults (model, token limits)
 /settings theme                list available TUI themes
 /settings theme <name>         switch the session's TUI theme
+/studio <handler.ts>           show the browser proof workbench command
 /feature route file=<handler.ts> method=<VERB> path=</path>
                                 preview a compiler-native route plan
 /forge route file=<handler.ts> method=<VERB> path=</path>

@@ -2185,7 +2185,9 @@ witness:
   block beneath the inferred properties shows `[*] spec NAME` when discharged
   and `[-] spec NAME` when not.
 - Proof studio at `/_zigttp/studio`: a `Specs (declared)` heading after
-  Properties renders each declared spec as a green ✓ or red ✗ pill.
+  Properties renders each declared spec as a green ✓ or red ✗ pill. The
+  same page includes a release checklist and next-action rail for failed
+  specs, witness inspection, generated-test export, and deploy readiness.
 - Proof ledger entries: `declaredSpecs: [{name, discharged}]` is recorded for
   every `swap` and `deploy` event so historical entries can be diffed without
   re-running the verifier.
