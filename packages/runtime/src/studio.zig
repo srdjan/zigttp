@@ -113,6 +113,11 @@ fn factsJson(
     delta: *const review.ReviewDelta,
     recompile_ms: ?u64,
 ) ![]u8 {
+    const witnesses = try loadWitnessEntries(allocator, handler_path);
+    defer if (witnesses) |entries| zigts.witness_corpus.freeEntries(allocator, entries);
+    const witness_total: usize = if (witnesses) |entries| entries.len else 0;
+    const verdict = review.classify(delta);
+
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     var json: std.json.Stringify = .{ .writer = &aw.writer };
@@ -122,7 +127,7 @@ fn factsJson(
     try json.objectField("handlerPath");
     try json.write(handler_path);
     try json.objectField("verdict");
-    try json.write(review.classify(delta).toString());
+    try json.write(verdict.toString());
     if (recompile_ms) |ms| {
         try json.objectField("recompileMs");
         try json.write(ms);
@@ -136,36 +141,38 @@ fn factsJson(
     try json.objectField("delta");
     try writeDeltaJson(&json, delta);
     try json.objectField("witnesses");
-    try writeWitnessesJson(allocator, &json, handler_path);
+    try writeWitnessesJson(allocator, &json, witnesses);
     try json.objectField("releaseReadiness");
-    try writeReleaseReadinessJson(allocator, &json, handler_path, facts, delta);
+    try writeReleaseReadinessJson(&json, facts, verdict);
     try json.objectField("nextActions");
-    try writeNextActionsJson(allocator, &json, handler_path, facts, delta);
+    try writeNextActionsJson(allocator, &json, handler_path, facts, verdict, witness_total);
     try json.endObject();
     return try allocator.dupe(u8, aw.writer.buffered());
 }
 
-fn writeReleaseReadinessJson(
+fn loadWitnessEntries(
     allocator: std.mem.Allocator,
-    json: *std.json.Stringify,
     handler_path: []const u8,
+) !?[]zigts.witness_corpus.Entry {
+    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch return null;
+    defer allocator.free(corpus_dir);
+    return zigts.witness_corpus.loadEntries(allocator, corpus_dir) catch |err| switch (err) {
+        error.WitnessCorpusMissing => null,
+        else => err,
+    };
+}
+
+fn writeReleaseReadinessJson(
+    json: *std.json.Stringify,
     facts: *const review.ReviewFacts,
-    delta: *const review.ReviewDelta,
+    verdict: review.Verdict,
 ) !void {
     const specs_ok = specsPass(facts);
-    const witness_total = try witnessCount(allocator, handler_path);
-    const verdict = review.classify(delta);
     const deploy_ready = specs_ok and verdict != .breaking;
 
     try json.beginObject();
-    try json.objectField("handlerVerifies");
-    try json.write(true);
     try json.objectField("declaredSpecsPass");
     try json.write(specs_ok);
-    try json.objectField("witnessCorpusTotal");
-    try json.write(witness_total);
-    try json.objectField("generatedTestsAvailable");
-    try json.write(true);
     try json.objectField("deployVerdict");
     try json.write(verdict.toString());
     try json.objectField("deployReady");
@@ -178,11 +185,9 @@ fn writeNextActionsJson(
     json: *std.json.Stringify,
     handler_path: []const u8,
     facts: *const review.ReviewFacts,
-    delta: *const review.ReviewDelta,
+    verdict: review.Verdict,
+    witness_total: usize,
 ) !void {
-    const witness_total = try witnessCount(allocator, handler_path);
-    const verdict = review.classify(delta);
-
     try json.beginArray();
     if (facts.declared_specs.len == 0) {
         try writeAction(json, .{
@@ -195,14 +200,14 @@ fn writeNextActionsJson(
     }
 
     if (!specsPass(facts)) {
-        const command = try std.fmt.allocPrint(allocator, "zigts expert then /specs {s}", .{handler_path});
+        const command = try std.fmt.allocPrint(allocator, "zigts check {s} --json", .{handler_path});
         defer allocator.free(command);
         try writeAction(json, .{
             .kind = "repair_specs",
             .severity = "error",
             .title = "Repair failed declared specs",
             .command = command,
-            .detail = "Read the active Spec<...> set and feed the failing obligations into the compiler-backed repair loop.",
+            .detail = "Surface failing Spec<...> obligations as compiler diagnostics, then drive the repair loop from zigts expert via /specs <handler>.",
         });
     }
 
@@ -219,7 +224,7 @@ fn writeNextActionsJson(
     }
 
     {
-        const command = try std.fmt.allocPrint(allocator, "curl -fsS http://localhost:8080/_zigttp/studio/tests.jsonl -o {s}.tests.jsonl", .{handler_path});
+        const command = try std.fmt.allocPrint(allocator, "curl -fsS /_zigttp/studio/tests.jsonl -o {s}.tests.jsonl", .{handler_path});
         defer allocator.free(command);
         try writeAction(json, .{
             .kind = "export_tests",
@@ -280,32 +285,11 @@ fn specsPass(facts: *const review.ReviewFacts) bool {
     return true;
 }
 
-fn witnessCount(allocator: std.mem.Allocator, handler_path: []const u8) !usize {
-    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch return 0;
-    defer allocator.free(corpus_dir);
-    const entries = zigts.witness_corpus.loadEntries(allocator, corpus_dir) catch |err| switch (err) {
-        error.WitnessCorpusMissing => return 0,
-        else => return err,
-    };
-    defer zigts.witness_corpus.freeEntries(allocator, entries);
-    return entries.len;
-}
-
 fn writeWitnessesJson(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
-    handler_path: []const u8,
+    entries: ?[]const zigts.witness_corpus.Entry,
 ) !void {
-    const entries = blk: {
-        const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch break :blk null;
-        defer allocator.free(corpus_dir);
-        break :blk zigts.witness_corpus.loadEntries(allocator, corpus_dir) catch |err| switch (err) {
-            error.WitnessCorpusMissing => null,
-            else => return err,
-        };
-    };
-    defer if (entries) |es| zigts.witness_corpus.freeEntries(allocator, es);
-
     const visible = entries orelse &[_]zigts.witness_corpus.Entry{};
 
     try json.beginObject();
@@ -454,7 +438,7 @@ pub const index_html =
     \\function changes(label,items,cls){return items&&items.length?items.map(x=>`<span class="pill ${cls}">${label} ${esc(x.label||x.pattern||x)}</span>`).join(""):""}
     \\function witnessCounts(byProp){return Object.entries(byProp||{}).map(([k,v])=>`<span class="pill on">${esc(k)}: ${v}</span>`).join("")}
     \\function witnessRows(entries){return (entries||[]).map(e=>`<li><code>${esc(e.key.slice(0,12))}</code>${e.pinned?' <span class="pill add">pinned</span>':""} <span class="pill off">${esc(e.property)}</span> ${esc(e.summary)}</li>`).join("")}
-    \\function readiness(r){if(!r)return"";return `<h2>Release Checklist</h2><ul><li>${r.handlerVerifies?"✓":"✗"} handler verifies</li><li>${r.declaredSpecsPass?"✓":"✗"} declared specs pass</li><li>✓ generated tests available</li><li>${r.deployReady?"✓":"✗"} deploy verdict: <code>${esc(r.deployVerdict)}</code></li></ul>`}
+    \\function readiness(r){if(!r)return"";return `<h2>Release Checklist</h2><ul><li>${r.declaredSpecsPass?"✓":"✗"} declared specs pass</li><li>${r.deployReady?"✓":"✗"} deploy verdict: <code>${esc(r.deployVerdict)}</code></li></ul>`}
     \\function actions(items){return (items||[]).map(a=>`<li><span class="pill ${a.severity==="success"?"on":a.severity==="error"?"off":"add"}">${esc(a.kind)}</span><strong>${esc(a.title)}</strong><p>${esc(a.detail)}</p><code>${esc(a.command)}</code></li>`).join("")||"<p class=empty>none</p>"}
     \\async function refresh(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});const s=await r.json();$("status").textContent=`${s.status} · ${s.handlerPath||""}`;if(s.status!=="ready"){$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}const f=s.facts;$("verdict").textContent=s.verdict;$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;$("specs").innerHTML=ds.length?specPills(ds):"";$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";$("tests").innerHTML=`<code>curl -fsS /_zigttp/studio/tests.jsonl -o ${esc((s.handlerPath||"handler")+".tests.jsonl")}</code>`;$("actions").innerHTML=actions(s.nextActions);}catch(e){$("status").textContent=String(e)}}setInterval(refresh,750);refresh();
     \\$("send").onclick=async()=>{const r=await fetch($("url").value,{method:$("method").value});$("response").textContent=`HTTP ${r.status}\n`+await r.text()}

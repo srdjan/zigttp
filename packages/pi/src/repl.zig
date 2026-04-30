@@ -131,14 +131,6 @@ pub fn processSubmit(
         return .{ .tool_result = try renderTree(allocator, if (session.session_id) |sid| sid else null) };
     }
 
-    if (std.mem.eql(u8, trimmed, "/studio") or std.mem.startsWith(u8, trimmed, "/studio ")) {
-        const rest = if (trimmed.len == "/studio".len)
-            ""
-        else
-            std.mem.trim(u8, trimmed["/studio ".len..], " \t");
-        return .{ .tool_result = try renderStudio(allocator, rest) };
-    }
-
     if (commands.isViewLedger(trimmed)) {
         return .view_ledger;
     }
@@ -357,10 +349,11 @@ fn renderStudio(allocator: std.mem.Allocator, handler_path: []const u8) !ToolRes
     const path = if (handler_path.len == 0) "<handler.ts>" else handler_path;
     const msg = try std.fmt.allocPrint(
         allocator,
-        "Browser proof workbench:\n  zigttp studio {s}\n\nOpen after the server starts:\n  http://localhost:8080/_zigttp/studio\n\nStudio runs the handler with --watch --prove, shows release readiness, declared specs, witnesses, generated tests, and next actions.\n",
+        "Browser proof workbench:\n  zigttp studio {s}\n\nOpen the studio page on the running server (default http://localhost:8080/_zigttp/studio).\n\nStudio runs the handler with --watch --prove, shows release readiness, declared specs, witnesses, generated tests, and next actions.\n",
         .{path},
     );
-    return .{ .ok = handler_path.len != 0, .llm_text = msg };
+    defer allocator.free(msg);
+    return ToolResult.withPlainText(allocator, handler_path.len != 0, msg);
 }
 
 fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
