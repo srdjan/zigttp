@@ -1129,6 +1129,47 @@ pub const CheckResult = struct {
     }
 };
 
+/// Walk the flow_checker diagnostics, materialise a counterexample witness
+/// for each one that maps to a tracked PropertyTag, and persist it to
+/// `.zigttp/witnesses/<short_hash>/`. Failures here never block the
+/// analysis result; the corpus is best-effort persistence.
+fn persistFlowWitnesses(
+    allocator: std.mem.Allocator,
+    flow_diags: []const zigts.flow_checker.Diagnostic,
+    ir_view: zigts.parser.IrView,
+    handler_path: []const u8,
+) void {
+    if (flow_diags.len == 0) return;
+
+    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch return;
+    defer allocator.free(corpus_dir);
+    zigts.witness_corpus.ensureCorpusDir(allocator, corpus_dir, handler_path) catch return;
+
+    for (flow_diags) |diag| {
+        const tag = zigts.flow_checker.propertyTagForKind(diag.kind) orelse continue;
+        const loc = ir_view.getLoc(diag.node) orelse continue;
+        const constraints: []const zigts.counterexample.WitnessConstraint =
+            if (diag.witness) |wit| wit.path_constraints else &.{};
+        const io_calls: []const zigts.counterexample.TrackedIoCall =
+            if (diag.witness) |wit| wit.io_calls else &.{};
+
+        var witness = zigts.counterexample.solve(allocator, .{
+            .property = tag,
+            .origin = .{ .line = loc.line, .column = loc.column },
+            .sink = .{ .line = loc.line, .column = loc.column },
+            .summary = diag.message,
+            .constraints = constraints,
+            .io_calls = io_calls,
+        }) catch continue;
+        defer witness.deinit(allocator);
+
+        if (zigts.witness_corpus.persist(allocator, corpus_dir, witness)) |pres| {
+            var owned = pres;
+            owned.deinit(allocator);
+        } else |_| {}
+    }
+}
+
 fn syncCheckResultProperties(result: *CheckResult) void {
     if (result.contract) |*contract| {
         result.properties = contract.properties;
@@ -1416,6 +1457,11 @@ pub fn runCheckOnlyFromSource(
         }
         // Non-JSON stderr output is emitted by buildContractWithPolicy from the
         // same FlowChecker instance; avoid printing twice.
+
+        // Persist any flow-property witnesses to the on-disk corpus so the
+        // same falsifying input does not need to be rediscovered next session.
+        // Runs in both JSON and human modes; failures are non-fatal.
+        persistFlowWitnesses(allocator, flow_diags, ir_view, handler_path);
 
         checked_opt = checked;
     }

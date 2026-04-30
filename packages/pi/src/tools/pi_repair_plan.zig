@@ -163,6 +163,17 @@ fn execute(
     }
     try w.writeAll("],\"witnesses\":[");
 
+    // Persist materialised witnesses into the on-disk corpus. The corpus
+    // is keyed by the workspace-relative handler path (args[0]) so the
+    // same handler maps to the same directory across tool invocations.
+    // Failures here are non-fatal: the repair plan still surfaces, just
+    // without persistence.
+    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, args[0]) catch null;
+    defer if (corpus_dir) |d| allocator.free(d);
+    if (corpus_dir) |d| {
+        zigts.witness_corpus.ensureCorpusDir(allocator, d, args[0]) catch {};
+    }
+
     var first_witness = true;
     var witness_index: usize = 0;
     for (checker.getDiagnostics()) |diag| {
@@ -180,6 +191,13 @@ fn execute(
             .io_calls = io_calls,
         }) catch continue;
         defer witness.deinit(allocator);
+
+        if (corpus_dir) |d| {
+            if (zigts.witness_corpus.persist(allocator, d, witness)) |pres| {
+                var owned = pres;
+                owned.deinit(allocator);
+            } else |_| {}
+        }
 
         if (!first_witness) try w.writeByte(',');
         first_witness = false;

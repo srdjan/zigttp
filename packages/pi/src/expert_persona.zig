@@ -106,6 +106,11 @@ const prologue =
     \\                                (ZTS500 not_discharged, ZTS501
     \\                                incompatible_with_import, ZTS502
     \\                                unknown_name)
+    \\  pi_witnesses                - list the on-disk witness corpus for a
+    \\                                handler: every persisted falsifying input
+    \\                                with summary, property, and pinned status,
+    \\                                plus per-property counts for coverage
+    \\                                triage
     \\  zig_build_step              - run `zig build <step>`
     \\  zig_test_step               - run `zig build test...`
     \\
@@ -124,6 +129,7 @@ const prologue =
     \\  Add/prove a new route candidate         -> pi_forge_route
     \\  Apply an approved route candidate       -> pi_apply_feature_plan
     \\  Read author-declared specs + status    -> pi_specs_status
+    \\  Inspect persisted witness corpus       -> pi_witnesses
     \\  Virtual module implementation audit    -> zigts_expert_verify_modules
     \\  List files in workspace                -> workspace_list_files
     \\  Read a source file                     -> workspace_read_file
@@ -178,6 +184,19 @@ const prologue =
     \\never enter repair; `unknown_name` (ZTS502) means correct the typo.
     \\The author's `Spec<...>` is the obligation set; do not substitute
     \\different goals for it.
+    \\
+    \\Witness corpus awareness:
+    \\Every flow-property witness materialised by `pi_repair_plan` and
+    \\`pi_goal_check` is persisted to `.zigttp/witnesses/<short_hash>/` so
+    \\that the same falsifying input does not need to be rediscovered every
+    \\session. Before drafting a repair against a Spec failure, call
+    \\`pi_witnesses` to see how thinly defended that Spec is. Specs with
+    \\zero witnesses are unprobed: the proof currently relies on the
+    \\classifier alone, and a regression there would silently slip past the
+    \\corpus. Specs with pinned witnesses are load-bearing: a repair that
+    \\removes them weakens coverage and must be justified, not silently
+    \\applied. The corpus is the project's accumulated evidence, not
+    \\throwaway state.
     \\
     \\Never reach for JavaScript idioms that are compile errors in zigts:
     \\try/catch, classes, var, null, ==/!=, ++/--. Use Result types, plain

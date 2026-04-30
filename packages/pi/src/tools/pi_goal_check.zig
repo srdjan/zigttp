@@ -207,6 +207,15 @@ fn execute(
     }
     try w.writeAll("],\"witnesses\":[");
 
+    // Persist materialised witnesses into the on-disk corpus so they
+    // accumulate across goal-check invocations. The corpus is keyed by
+    // the workspace-relative handler path. Failures are non-fatal.
+    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, args[0]) catch null;
+    defer if (corpus_dir) |d| allocator.free(d);
+    if (corpus_dir) |d| {
+        zigts.witness_corpus.ensureCorpusDir(allocator, d, args[0]) catch {};
+    }
+
     var witness_count: usize = 0;
     for (checker.getDiagnostics()) |diag| {
         const tag = flow_checker.propertyTagForKind(diag.kind) orelse continue;
@@ -234,6 +243,13 @@ fn execute(
             .io_calls = io_calls,
         }) catch continue;
         defer witness.deinit(allocator);
+
+        if (corpus_dir) |d| {
+            if (zigts.witness_corpus.persist(allocator, d, witness)) |pres| {
+                var owned = pres;
+                owned.deinit(allocator);
+            } else |_| {}
+        }
 
         if (witness_count > 0) try w.writeByte(',');
         witness_count += 1;

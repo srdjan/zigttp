@@ -7,6 +7,7 @@ const self_extract = @import("self_extract.zig");
 const zigts_cli = @import("zigts_cli");
 const deploy = @import("deploy.zig");
 const proofs_cli = @import("proofs_cli.zig");
+const witnesses_cli = @import("witnesses_cli.zig");
 const precompile = zigts_cli.precompile;
 const shared = @import("cli_shared.zig");
 const runtime_cli = @import("runtime_cli.zig");
@@ -269,6 +270,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // itself; only unexpected ones (allocator, etc.) bubble.
         proofs_cli.run(allocator, user_args[1..]) catch |err| {
             if (proofs_cli.isExpectedUserError(err)) return;
+            return err;
+        };
+        return;
+    }
+    if (std.mem.eql(u8, command, "witnesses")) {
+        witnesses_cli.run(allocator, user_args[1..]) catch |err| {
+            if (witnesses_cli.isExpectedUserError(err)) return;
             return err;
         };
         return;
