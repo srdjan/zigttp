@@ -14,6 +14,7 @@
 const std = @import("std");
 const zigts = @import("zigts");
 const witness_corpus = zigts.witness_corpus;
+const spec_discharge = zigts.spec_discharge;
 const printer_mod = @import("deploy/printer.zig");
 const io_util = @import("deploy/io_util.zig");
 
@@ -335,10 +336,7 @@ fn cmdSynthesize(
     }
     if (argv.len < 2) {
         try stderr.writeAll("Missing spec argument. Cause-only specs: ");
-        for (witness_corpus.cause_only_specs, 0..) |s, i| {
-            if (i > 0) try stderr.writeAll(", ");
-            try stderr.writeAll(s);
-        }
+        try writeSpecList(stderr, true);
         try stderr.writeAll(".\n");
         return error.MissingSpecArgument;
     }
@@ -346,13 +344,10 @@ fn cmdSynthesize(
     const handler = argv[0];
     const spec = argv[1];
 
-    if (!witness_corpus.isCauseOnlySpec(spec)) {
-        try stderr.print(
-            "{s} is not a cause-only spec. Flow-rich specs (no_secret_leakage, " ++
-                "no_credential_leakage, input_validated, pii_contained, injection_safe) " ++
-                "populate the corpus automatically through analysis.\n",
-            .{spec},
-        );
+    if (!spec_discharge.isCauseOnly(spec)) {
+        try stderr.print("{s} is not a cause-only spec. Flow-rich specs (", .{spec});
+        try writeSpecList(stderr, false);
+        try stderr.writeAll(") populate the corpus automatically through analysis.\n");
         return error.UnsupportedSpec;
     }
 
@@ -370,6 +365,16 @@ fn cmdSynthesize(
         .refreshed => "Already present",
     };
     try stdout.print("{s} {s}  {s}  for {s}\n", .{ verb, shortKey(result.key), spec, handler });
+}
+
+fn writeSpecList(writer: *std.Io.Writer, cause_only: bool) !void {
+    var first = true;
+    for (spec_discharge.v1_specs) |s| {
+        if (s.cause_only != cause_only) continue;
+        if (!first) try writer.writeAll(", ");
+        first = false;
+        try writer.writeAll(s.name);
+    }
 }
 
 fn shortKey(key: []const u8) []const u8 {

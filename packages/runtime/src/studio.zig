@@ -146,55 +146,41 @@ fn writeWitnessesJson(
     json: *std.json.Stringify,
     handler_path: []const u8,
 ) !void {
-    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch {
-        try writeEmptyWitnesses(json);
-        return;
+    const entries = blk: {
+        const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch break :blk null;
+        defer allocator.free(corpus_dir);
+        break :blk zigts.witness_corpus.loadEntries(allocator, corpus_dir) catch |err| switch (err) {
+            error.WitnessCorpusMissing => null,
+            else => return err,
+        };
     };
-    defer allocator.free(corpus_dir);
+    defer if (entries) |es| zigts.witness_corpus.freeEntries(allocator, es);
 
-    const entries = zigts.witness_corpus.loadEntries(allocator, corpus_dir) catch |err| switch (err) {
-        error.WitnessCorpusMissing => {
-            try writeEmptyWitnesses(json);
-            return;
-        },
-        else => return err,
-    };
-    defer zigts.witness_corpus.freeEntries(allocator, entries);
+    const visible = entries orelse &[_]zigts.witness_corpus.Entry{};
 
     try json.beginObject();
     try json.objectField("total");
-    try json.write(entries.len);
+    try json.write(visible.len);
 
     try json.objectField("byProperty");
     try json.beginObject();
-    var i: usize = 0;
-    while (i < entries.len) : (i += 1) {
-        const prop = entries[i].property;
-        var seen = false;
-        var k: usize = 0;
-        while (k < i) : (k += 1) {
-            if (std.mem.eql(u8, entries[k].property, prop)) {
-                seen = true;
-                break;
-            }
+    if (visible.len > 0) {
+        const counts = try zigts.witness_corpus.countByPropertySlice(allocator, visible);
+        defer zigts.witness_corpus.freeCounts(allocator, counts);
+        for (counts) |c| {
+            try json.objectField(c.property);
+            try json.write(c.count);
         }
-        if (seen) continue;
-        var count: usize = 0;
-        for (entries) |e| {
-            if (std.mem.eql(u8, e.property, prop)) count += 1;
-        }
-        try json.objectField(prop);
-        try json.write(count);
     }
     try json.endObject();
 
     // The HUD shows at most 20 entries; deeper inspection lives in the CLI
     // and the pi_witnesses agent tool.
     const max_entries: usize = 20;
-    const entry_count = @min(entries.len, max_entries);
+    const entry_count = @min(visible.len, max_entries);
     try json.objectField("entries");
     try json.beginArray();
-    for (entries[0..entry_count]) |e| {
+    for (visible[0..entry_count]) |e| {
         try json.beginObject();
         try json.objectField("key");
         try json.write(e.key);
@@ -206,19 +192,6 @@ fn writeWitnessesJson(
         try json.write(e.pinned);
         try json.endObject();
     }
-    try json.endArray();
-    try json.endObject();
-}
-
-fn writeEmptyWitnesses(json: *std.json.Stringify) !void {
-    try json.beginObject();
-    try json.objectField("total");
-    try json.write(@as(usize, 0));
-    try json.objectField("byProperty");
-    try json.beginObject();
-    try json.endObject();
-    try json.objectField("entries");
-    try json.beginArray();
     try json.endArray();
     try json.endObject();
 }
