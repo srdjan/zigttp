@@ -143,6 +143,8 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
             // so the user sees the proof context alongside the review reasons,
             // not a bare "Capability review required" warning.
             if (proven_extract) |*ex| {
+                const spec_states = try buildDeploySpecStates(allocator, &contract);
+                defer allocator.free(spec_states);
                 try renderProofReview(allocator, printer, .{
                     .handler_path = handler_path,
                     .service_name = service_name,
@@ -150,6 +152,7 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
                     .facts = &ex.facts,
                     .capability_names = capability_names,
                     .contract_sha = contract_sha256,
+                    .declared_specs = spec_states,
                     .baseline = priorFacts(previous),
                     .plan_required = .{
                         .plan_id = plan.plan_id,
@@ -208,6 +211,8 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
             null;
 
     if (proven_extract) |*ex| {
+        const spec_states = try buildDeploySpecStates(allocator, &contract);
+        defer allocator.free(spec_states);
         try renderProofReview(allocator, printer, .{
             .handler_path = handler_path,
             .service_name = service_name,
@@ -215,6 +220,7 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
             .facts = &ex.facts,
             .capability_names = capability_names,
             .contract_sha = contract_sha256,
+            .declared_specs = spec_states,
             .baseline = priorFacts(previous),
             .drift = drift_status,
         });
@@ -277,11 +283,14 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var review_facts_for_state: ?review_mod.ReviewFacts = null;
     errdefer if (review_facts_for_state) |*f| f.deinit(allocator);
     if (proven_extract) |*ex| {
+        const spec_states = try buildDeploySpecStates(allocator, &contract);
+        defer allocator.free(spec_states);
         review_facts_for_state = try review_mod.ReviewFacts.fromProvenFacts(
             allocator,
             &ex.facts,
             capability_names,
             contract_sha256,
+            spec_states,
         );
     }
 
@@ -1020,6 +1029,33 @@ fn renderProofReview(
 
     try review_mod.renderReviewCard(allocator, &review_view, printer.stdout, .{});
     printer.stdout.flush() catch {};
+}
+
+/// Project the contract's author-declared specs into the SpecState shape
+/// that ReviewFacts and DeployReview expect. Names borrow from the
+/// contract's owned strings; ReviewFacts dupes them. The returned slice
+/// owns its own allocation; the caller frees it with `allocator.free`.
+fn buildDeploySpecStates(
+    allocator: std.mem.Allocator,
+    contract: *const zigts.HandlerContract,
+) ![]review_mod.SpecState {
+    const decls = contract.declared_specs.items;
+    const out = try allocator.alloc(review_mod.SpecState, decls.len);
+    errdefer allocator.free(out);
+    for (decls, 0..) |name, i| {
+        out[i] = .{
+            .name = name,
+            .discharged = !specHasFailure(contract, name),
+        };
+    }
+    return out;
+}
+
+fn specHasFailure(contract: *const zigts.HandlerContract, name: []const u8) bool {
+    for (contract.spec_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.spec_name, name)) return true;
+    }
+    return false;
 }
 
 fn printCapabilityGrants(

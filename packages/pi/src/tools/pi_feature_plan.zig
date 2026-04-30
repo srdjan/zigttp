@@ -262,14 +262,37 @@ pub fn synthesizeRoute(
 
     const has_router = std.mem.indexOf(u8, source, "zigttp:router") != null;
     const has_routes = std.mem.indexOf(u8, source, "const routes = {") != null;
+    const has_spec_import = std.mem.indexOf(u8, source, "from \"zigttp:types\"") != null;
+    const has_guardrails_alias = std.mem.indexOf(u8, source, "type Guardrails =") != null;
 
     if (!has_router) {
+        // Forge-synthesized handlers ship with an author-declared spec set so
+        // the proof obligation lives in source from day one. The four names
+        // chosen are the ones a static `Response.json(...)` dispatcher
+        // satisfies by construction; if the user later adds Date.now() or
+        // egress they will see ZTS500 immediately and know which spec broke.
+        if (!has_spec_import) {
+            try out.appendSlice(allocator, "import type { Spec } from \"zigttp:types\";\n");
+        }
         try out.appendSlice(allocator, "import { routerMatch } from \"zigttp:router\";\n");
     }
     if (spec.body_schema != null and std.mem.indexOf(u8, source, "zigttp:validate") == null) {
         try out.appendSlice(allocator, "import { validateJson } from \"zigttp:validate\";\n");
     }
     if (out.items.len > 0 and source.len > 0) try out.append(allocator, '\n');
+
+    if (!has_router and !has_guardrails_alias) {
+        try out.appendSlice(allocator,
+            \\type Guardrails = Spec<
+            \\    | "deterministic"
+            \\    | "idempotent"
+            \\    | "no_secret_leakage"
+            \\    | "injection_safe"
+            \\>;
+            \\
+            \\
+        );
+    }
 
     const stripped_handler: ?[]u8 = if (!has_router) try stripFunctionHandlerAlloc(allocator, source) else null;
     defer if (stripped_handler) |bytes| allocator.free(bytes);
@@ -286,7 +309,7 @@ pub fn synthesizeRoute(
 
     if (!has_router) {
         try out.appendSlice(allocator,
-            \\function handler(req) {
+            \\function handler(req: Request): Response & Guardrails {
             \\    const found = routerMatch(routes, req);
             \\    if (found !== undefined) {
             \\        req.params = found.params;
@@ -424,6 +447,12 @@ test "synthesizeRoute replaces a plain handler with router dispatch" {
     try testing.expect(std.mem.indexOf(u8, proposed, "import { routerMatch }") != null);
     try testing.expect(std.mem.indexOf(u8, proposed, "\"POST /items\": handlePostItems") != null);
     try testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, proposed, "{ old: helper() }"));
+    // Forge-synthesized handlers carry the author-declared spec set from
+    // day one: Spec import, Guardrails alias, and the intersection on
+    // the dispatcher's return type.
+    try testing.expect(std.mem.indexOf(u8, proposed, "import type { Spec } from \"zigttp:types\"") != null);
+    try testing.expect(std.mem.indexOf(u8, proposed, "type Guardrails = Spec<") != null);
+    try testing.expect(std.mem.indexOf(u8, proposed, "Response & Guardrails") != null);
 
     var result = try @import("zigts_cli").edit_simulate.simulate(testing.allocator, .{
         .file = "handler.ts",

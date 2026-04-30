@@ -90,6 +90,19 @@ pub const Route = struct {
     }
 };
 
+/// One declared spec name plus its current discharge state. `name` is
+/// owned. The HUD renders failure state as `[FAIL]`; the ledger preserves
+/// the same so historical entries can be diffed without re-running the
+/// verifier.
+pub const SpecState = struct {
+    name: []const u8,
+    discharged: bool,
+
+    fn lessThan(_: void, a: SpecState, b: SpecState) bool {
+        return std.mem.order(u8, a.name, b.name) == .lt;
+    }
+};
+
 // Properties carries the property booleans that show up in the contract.
 // Defaults match what extractProvenFacts uses when contract.properties is null,
 // so a missing-field parse round-trips the same shape an absent properties
@@ -144,17 +157,26 @@ pub const ReviewFacts = struct {
     routes: []const Route,
     capabilities: []const []const u8,
     properties: Properties,
+    /// Author-declared specs from `Response & Spec<...>`. Each entry carries
+    /// the name plus its current discharge state. Empty when the handler
+    /// has no Spec<...> annotation; that is the back-compat path. The HUD
+    /// renders failed entries as `[FAIL]` with a per-property suggestion.
+    declared_specs: []const SpecState = &.{},
 
     /// Build owned facts from the same ProvenFacts the deploy already extracts
     /// (so we cannot drift from what `buildProofLabels` and `extractProvenFacts`
     /// have already canonicalised). Capability strings come from
     /// `contract.capabilities.slice()` in the caller; we accept them as a
     /// borrowed list to keep this module free of zigts contract types.
+    /// Declared specs come from `contract.declared_specs.items` and the
+    /// matching not-discharged set is derived by the caller (the contract
+    /// already classifies them via spec_discharge).
     pub fn fromProvenFacts(
         allocator: std.mem.Allocator,
         facts: *const ProvenFacts,
         capabilities: []const []const u8,
         contract_sha: []const u8,
+        declared_specs: []const SpecState,
     ) !ReviewFacts {
         const env_keys = try dupeSortedDedupedStrings(allocator, facts.env_vars);
         errdefer freeStringList(allocator, env_keys);
@@ -167,6 +189,9 @@ pub const ReviewFacts = struct {
 
         const routes = try dupeSortedDedupedRoutes(allocator, facts.routes);
         errdefer freeRouteList(allocator, routes);
+
+        const specs = try dupeSortedDedupedSpecs(allocator, declared_specs);
+        errdefer freeSpecList(allocator, specs);
 
         const sha = try allocator.dupe(u8, contract_sha);
         errdefer allocator.free(sha);
@@ -193,6 +218,7 @@ pub const ReviewFacts = struct {
                 .results_safe = facts.results_safe,
                 .fault_covered = facts.fault_covered,
             },
+            .declared_specs = specs,
         };
     }
 
@@ -203,6 +229,7 @@ pub const ReviewFacts = struct {
         freeStringList(allocator, self.cache_namespaces);
         freeStringList(allocator, self.capabilities);
         freeRouteList(allocator, self.routes);
+        freeSpecList(allocator, self.declared_specs);
     }
 
     pub fn writeJson(self: *const ReviewFacts, json: *std.json.Stringify) !void {
@@ -237,6 +264,17 @@ pub const ReviewFacts = struct {
             try json.write(@field(self.properties, meta.field));
         }
         try json.endObject();
+        try json.objectField("declaredSpecs");
+        try json.beginArray();
+        for (self.declared_specs) |s| {
+            try json.beginObject();
+            try json.objectField("name");
+            try json.write(s.name);
+            try json.objectField("discharged");
+            try json.write(s.discharged);
+            try json.endObject();
+        }
+        try json.endArray();
         try json.endObject();
     }
 
@@ -274,6 +312,9 @@ pub const ReviewFacts = struct {
             }
         }
 
+        const declared_specs = try parseSpecArray(allocator, obj);
+        errdefer freeSpecList(allocator, declared_specs);
+
         return .{
             .contract_sha = sha,
             .proof_level = level,
@@ -283,6 +324,7 @@ pub const ReviewFacts = struct {
             .routes = routes,
             .capabilities = capabilities,
             .properties = props,
+            .declared_specs = declared_specs,
         };
     }
 };
@@ -482,6 +524,11 @@ pub const DeployReview = struct {
         facts: *const ProvenFacts,
         capability_names: []const []const u8,
         contract_sha: []const u8,
+        /// Author-declared specs for the handler, paired with their current
+        /// discharge state. Defaults to empty for first-deploy callers and
+        /// for handlers without a `Spec<...>` annotation. ReviewFacts dupes
+        /// the names into its own ownership.
+        declared_specs: []const SpecState = &.{},
         baseline: ?*const ReviewFacts = null,
         drift: ?DriftStatus = null,
         plan_required: ?PlanRequiredSummary = null,
@@ -500,6 +547,7 @@ pub const DeployReview = struct {
                 params.facts,
                 params.capability_names,
                 params.contract_sha,
+                params.declared_specs,
             );
             errdefer current.deinit(allocator);
             const delta = try deriveDelta(allocator, &current, params.baseline);
@@ -807,6 +855,41 @@ fn freeRouteList(allocator: std.mem.Allocator, items: []const Route) void {
     allocator.free(items);
 }
 
+fn dupeSortedDedupedSpecs(
+    allocator: std.mem.Allocator,
+    items: []const SpecState,
+) ![]const SpecState {
+    if (items.len == 0) {
+        return try allocator.alloc(SpecState, 0);
+    }
+    const temp = try allocator.alloc(SpecState, items.len);
+    defer allocator.free(temp);
+    @memcpy(temp, items);
+    std.mem.sort(SpecState, temp, {}, SpecState.lessThan);
+
+    var out: std.ArrayList(SpecState) = .empty;
+    errdefer {
+        for (out.items) |s| allocator.free(s.name);
+        out.deinit(allocator);
+    }
+    var prev_name: ?[]const u8 = null;
+    for (temp) |s| {
+        if (prev_name) |p| {
+            if (std.mem.eql(u8, p, s.name)) continue;
+        }
+        const name = try allocator.dupe(u8, s.name);
+        errdefer allocator.free(name);
+        try out.append(allocator, .{ .name = name, .discharged = s.discharged });
+        prev_name = s.name;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn freeSpecList(allocator: std.mem.Allocator, items: []const SpecState) void {
+    for (items) |s| allocator.free(s.name);
+    allocator.free(items);
+}
+
 fn writeStringArray(json: *std.json.Stringify, items: []const []const u8) !void {
     try json.beginArray();
     for (items) |s| try json.write(s);
@@ -827,6 +910,30 @@ fn parseStringArray(
     for (value.array.items) |item| {
         if (item != .string) return error.InvalidReviewFacts;
         out[n] = try allocator.dupe(u8, item.string);
+        n += 1;
+    }
+    return out;
+}
+
+fn parseSpecArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]const SpecState {
+    const value = obj.get("declaredSpecs") orelse return try allocator.alloc(SpecState, 0);
+    if (value != .array) return error.InvalidReviewFacts;
+    const out = try allocator.alloc(SpecState, value.array.items.len);
+    errdefer allocator.free(out);
+    var n: usize = 0;
+    errdefer for (out[0..n]) |s| allocator.free(s.name);
+    for (value.array.items) |item| {
+        if (item != .object) return error.InvalidReviewFacts;
+        const name_str = json_util.getString(item.object, "name") orelse return error.InvalidReviewFacts;
+        const discharged = blk: {
+            const v = item.object.get("discharged") orelse break :blk false;
+            if (v != .bool) return error.InvalidReviewFacts;
+            break :blk v.bool;
+        };
+        out[n] = .{
+            .name = try allocator.dupe(u8, name_str),
+            .discharged = discharged,
+        };
         n += 1;
     }
     return out;
@@ -1046,7 +1153,7 @@ test "fromProvenFacts: projects every field from ProvenFacts" {
         .fault_covered = true,
     };
 
-    var review = try ReviewFacts.fromProvenFacts(allocator, &facts, &caps_in, "sha-xyz");
+    var review = try ReviewFacts.fromProvenFacts(allocator, &facts, &caps_in, "sha-xyz", &.{});
     defer review.deinit(allocator);
 
     try std.testing.expectEqualStrings("sha-xyz", review.contract_sha);
@@ -1106,7 +1213,7 @@ test "fromProvenFacts: dedupes duplicate env keys" {
         .checks_passed = &.{},
     };
 
-    var review = try ReviewFacts.fromProvenFacts(allocator, &facts, &.{}, "sha-1");
+    var review = try ReviewFacts.fromProvenFacts(allocator, &facts, &.{}, "sha-1", &.{});
     defer review.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 2), review.env_keys.len);

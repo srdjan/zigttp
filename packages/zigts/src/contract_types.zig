@@ -584,6 +584,46 @@ pub const PropertyProvenance = struct {
     deterministic: ?PropertyCause = null,
 };
 
+/// One discharge result per declared spec. Produced by
+/// `spec_discharge.dischargeSpecs` and stored on `HandlerContract`. Owned
+/// strings are tagged on the field. Lives in contract_types.zig (not
+/// spec_discharge.zig) to avoid an import cycle: spec_discharge needs
+/// HandlerProperties from this file.
+pub const SpecDiagnostic = struct {
+    kind: Kind,
+    /// Owned copy of the declared spec name.
+    spec_name: []const u8,
+    /// For .not_discharged with a known cause, the file:line:snippet captured
+    /// at the classifier site that demoted the property. Borrowed; must not
+    /// outlive the contract that owns the underlying snippet (which itself
+    /// is typically a static string literal).
+    cause: ?PropertyCause = null,
+    /// For .incompatible_with_import: the offending module specifier
+    /// (owned). null for the other kinds.
+    incompatible_module: ?[]const u8 = null,
+    /// For .not_discharged on a cause-only property: a per-property
+    /// suggestion string the HUD renders as `Try: <suggestion>`. Owned when
+    /// present.
+    suggestion: ?[]const u8 = null,
+
+    pub const Kind = enum {
+        /// ZTS401: the corresponding HandlerProperties field is false.
+        not_discharged,
+        /// ZTS402: the spec contradicts a virtual-module import the
+        /// handler declared.
+        incompatible_with_import,
+        /// ZTS403: the spec name is not in the v1 set.
+        unknown_name,
+    };
+
+    pub fn deinit(self: *SpecDiagnostic, allocator: std.mem.Allocator) void {
+        allocator.free(self.spec_name);
+        if (self.incompatible_module) |m| allocator.free(m);
+        if (self.suggestion) |s| allocator.free(s);
+        // cause snippet is borrowed; do not free.
+    }
+};
+
 // -------------------------------------------------------------------------
 // Behavioral contract types
 // -------------------------------------------------------------------------
@@ -857,6 +897,16 @@ pub const HandlerContract = struct {
     /// during build for the live-reload HUD's "Why" line. Snippets are
     /// borrowed static strings, so deinit is a no-op.
     property_provenance: PropertyProvenance = .{},
+    /// Specs the author declared via `Response & Spec<"name" | ...>` on the
+    /// handler return type. Each entry is an owned spec name string. Empty
+    /// when the handler has no `Spec<...>` annotation; the verifier treats
+    /// declared specs as the mandatory active set and emits ZTS500 for any
+    /// member whose corresponding `HandlerProperties` field is false.
+    declared_specs: std.ArrayList([]const u8) = .empty,
+    /// Per-spec discharge diagnostics produced by `spec_discharge.dischargeSpecs`.
+    /// Empty when every declared spec is satisfied. Owned by the contract;
+    /// each entry's deinit must run before the contract is freed.
+    spec_diagnostics: std.ArrayList(SpecDiagnostic) = .empty,
     behaviors: std.ArrayList(BehaviorPath) = .empty,
     behaviors_exhaustive: bool = false,
     capabilities: CapabilityMatrix = .empty,
@@ -924,5 +974,13 @@ pub const HandlerContract = struct {
             @constCast(b).deinit(allocator);
         }
         self.behaviors.deinit(allocator);
+        for (self.declared_specs.items) |s| {
+            allocator.free(s);
+        }
+        self.declared_specs.deinit(allocator);
+        for (self.spec_diagnostics.items) |*d| {
+            @constCast(d).deinit(allocator);
+        }
+        self.spec_diagnostics.deinit(allocator);
     }
 };

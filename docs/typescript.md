@@ -44,6 +44,36 @@ const pair: Pair<string, number> = { first: "a", second: 1 };
 
 Up to 8 type parameters per alias are supported.
 
+**Built-in `Spec<...>` for proof obligations:**
+
+`zigttp:types` exposes a built-in generic alias `Spec<S>` that lets the
+author declare which compiler-proven properties their handler must
+satisfy. It is structurally a phantom marker - stripped at runtime,
+read at type-check time - and rides the same alias-resolution machinery
+as `Result<T>`. Declare a named alias and intersect it on the handler's
+return type:
+
+```typescript
+import type { Spec } from "zigttp:types";
+
+type Guardrails = Spec<
+    | "idempotent"
+    | "deterministic"
+    | "no_secret_leakage"
+    | "injection_safe"
+>;
+
+function handler(req: Request): Response & Guardrails {
+    return Response.json({ ok: true });
+}
+```
+
+The verifier walks the return-type intersection, follows the alias to
+the `Spec<...>` body, and emits ZTS500 / ZTS501 / ZTS502 diagnostics if
+any declared spec is not discharged, contradicts an import, or names a
+property outside the v1 set. The proof HUD, proof ledger, and
+`pi_specs_status` agent tool all read from this annotation.
+
 ### Examples
 
 ```typescript

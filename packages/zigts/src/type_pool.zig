@@ -42,6 +42,7 @@ pub const TypeTag = enum(u8) {
     t_tuple, // [T, U]
     t_function, // (params) => ReturnType
     t_union, // T | U | V
+    t_intersection, // T & U & V
 
     // Literals
     t_literal_string, // "GET", "POST"
@@ -263,6 +264,39 @@ pub const TypePool = struct {
         });
     }
 
+    /// Create an intersection type from members. Single-member intersections
+    /// collapse to that member; consecutive duplicate TypeIndexes are dropped.
+    /// Empty input returns null_type_idx.
+    pub fn addIntersection(self: *TypePool, allocator: std.mem.Allocator, intersection_members: []const TypeIndex) TypeIndex {
+        if (intersection_members.len == 0) return null_type_idx;
+
+        var deduped: [16]TypeIndex = undefined;
+        var count: usize = 0;
+        for (intersection_members) |m| {
+            if (m == null_type_idx) continue;
+            var seen = false;
+            for (deduped[0..count]) |existing| {
+                if (existing == m) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen and count < deduped.len) {
+                deduped[count] = m;
+                count += 1;
+            }
+        }
+        if (count == 0) return null_type_idx;
+        if (count == 1) return deduped[0];
+
+        const start: u16 = @intCast(self.members.items.len);
+        self.members.appendSlice(allocator, deduped[0..count]) catch return null_type_idx;
+        return self.addNode(allocator, .{
+            .tag = .t_intersection,
+            .data = .{ .a = start, .b = @intCast(count) },
+        });
+    }
+
     /// Create a function type.
     pub fn addFunction(self: *TypePool, allocator: std.mem.Allocator, func_params: []const FuncParam, ret: TypeIndex) TypeIndex {
         return self.addFunctionWithReturn(allocator, func_params, ret);
@@ -392,6 +426,18 @@ pub const TypePool = struct {
                 if (!changed) return idx;
                 return self.addUnion(allocator, new_members[0..count]);
             },
+            .t_intersection => {
+                const members = self.getIntersectionMembers(idx);
+                var new_members: [16]TypeIndex = undefined;
+                const count = @min(members.len, 16);
+                var changed = false;
+                for (members[0..count], 0..) |m, i| {
+                    new_members[i] = self.instantiate(allocator, m, param_names, param_types, depth + 1);
+                    if (new_members[i] != m) changed = true;
+                }
+                if (!changed) return idx;
+                return self.addIntersection(allocator, new_members[0..count]);
+            },
             .t_nullable => {
                 const inner = self.getNullableInner(idx);
                 const new_inner = self.instantiate(allocator, inner, param_names, param_types, depth + 1);
@@ -431,6 +477,16 @@ pub const TypePool = struct {
     pub fn getUnionMembers(self: *const TypePool, idx: TypeIndex) []const TypeIndex {
         const data = self.getData(idx) orelse return &.{};
         if (self.getTag(idx) != .t_union) return &.{};
+        const start = data.a;
+        const count = data.b;
+        if (start + count > self.members.items.len) return &.{};
+        return self.members.items[start .. start + count];
+    }
+
+    /// Get intersection members.
+    pub fn getIntersectionMembers(self: *const TypePool, idx: TypeIndex) []const TypeIndex {
+        const data = self.getData(idx) orelse return &.{};
+        if (self.getTag(idx) != .t_intersection) return &.{};
         const start = data.a;
         const count = data.b;
         if (start + count > self.members.items.len) return &.{};
@@ -680,6 +736,7 @@ pub const TypePool = struct {
                 .t_array => self.isAssignableTo(self.getArrayElement(source), self.getArrayElement(target)),
                 .t_function => self.isFunctionAssignable(source, target),
                 .t_union => self.isUnionAssignableToUnion(source, target),
+                .t_intersection => self.isIntersectionAssignableToIntersection(source, target),
                 .t_nullable => self.isAssignableTo(self.getNullableInner(source), self.getNullableInner(target)),
                 .t_literal_string, .t_literal_number, .t_literal_bool => self.literalEquals(source, target),
                 .t_ref => std.mem.eql(u8, self.getRefName(source), self.getRefName(target)),
@@ -726,6 +783,27 @@ pub const TypePool = struct {
             return true;
         }
 
+        // Intersection target: source must be assignable to every member
+        if (tgt_tag == .t_intersection) {
+            for (self.getIntersectionMembers(target)) |member| {
+                if (!self.isAssignableTo(source, member)) return false;
+            }
+            return true;
+        }
+
+        // Intersection source: any single member may satisfy the target. For
+        // structural records, the intersection's members combine into one
+        // object shape, so fields may be satisfied across multiple members.
+        if (src_tag == .t_intersection) {
+            if (tgt_tag == .t_record) {
+                return self.isIntersectionAssignableToRecord(source, target);
+            }
+            for (self.getIntersectionMembers(source)) |member| {
+                if (self.isAssignableTo(member, target)) return true;
+            }
+            return false;
+        }
+
         // Unresolved refs are effectively unknown: the TypePool cannot
         // resolve ref names to their definitions (that requires the TypeEnv).
         // Accept records against refs rather than rejecting valid code.
@@ -753,6 +831,47 @@ pub const TypePool = struct {
             if (!found and !tgt_f.optional) return false;
         }
         return true;
+    }
+
+    fn isIntersectionAssignableToRecord(self: *const TypePool, source: TypeIndex, target: TypeIndex) bool {
+        const tgt_fields = self.getRecordFields(target);
+        const src_members = self.getIntersectionMembers(source);
+
+        for (tgt_fields) |tgt_f| {
+            const tgt_name = self.getName(tgt_f.name_start, tgt_f.name_len);
+            var found = false;
+            for (src_members) |member| {
+                if (self.findAssignableFieldInType(member, tgt_name, tgt_f.type_idx)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found and !tgt_f.optional) return false;
+        }
+        return true;
+    }
+
+    fn findAssignableFieldInType(
+        self: *const TypePool,
+        source: TypeIndex,
+        target_name: []const u8,
+        target_type: TypeIndex,
+    ) bool {
+        const tag = self.getTag(source) orelse return false;
+        if (tag == .t_intersection) {
+            for (self.getIntersectionMembers(source)) |member| {
+                if (self.findAssignableFieldInType(member, target_name, target_type)) return true;
+            }
+            return false;
+        }
+        if (tag != .t_record) return false;
+        for (self.getRecordFields(source)) |src_f| {
+            const src_name = self.getName(src_f.name_start, src_f.name_len);
+            if (std.mem.eql(u8, src_name, target_name)) {
+                return self.isAssignableTo(src_f.type_idx, target_type);
+            }
+        }
+        return false;
     }
 
     fn isFunctionAssignable(self: *const TypePool, source: TypeIndex, target: TypeIndex) bool {
@@ -788,6 +907,23 @@ pub const TypePool = struct {
                 }
             }
             if (!assignable) return false;
+        }
+        return true;
+    }
+
+    fn isIntersectionAssignableToIntersection(self: *const TypePool, source: TypeIndex, target: TypeIndex) bool {
+        // Source A & B is assignable to target X & Y iff for every target member X,
+        // at least one source member is assignable to X. This treats the source
+        // intersection as a structural witness that satisfies all target obligations.
+        for (self.getIntersectionMembers(target)) |tgt_member| {
+            var satisfied = false;
+            for (self.getIntersectionMembers(source)) |src_member| {
+                if (self.isAssignableTo(src_member, tgt_member)) {
+                    satisfied = true;
+                    break;
+                }
+            }
+            if (!satisfied) return false;
         }
         return true;
     }
@@ -866,6 +1002,12 @@ pub const TypePool = struct {
             .t_union => {
                 for (self.getUnionMembers(idx), 0..) |member, i| {
                     if (i > 0) try writer.writeAll(" | ");
+                    try self.writeType(member, writer);
+                }
+            },
+            .t_intersection => {
+                for (self.getIntersectionMembers(idx), 0..) |member, i| {
+                    if (i > 0) try writer.writeAll(" & ");
                     try self.writeType(member, writer);
                 }
             },
@@ -960,7 +1102,15 @@ const TypeExprParser = struct {
     pos: usize,
 
     fn parseUnion(self: *TypeExprParser) TypeIndex {
-        const first = self.parsePrimary();
+        self.skipWs();
+        // Tolerate a leading `|` for the multi-line union layout:
+        //     type T =
+        //         | "a"
+        //         | "b";
+        _ = self.match('|');
+        self.skipWs();
+
+        const first = self.parseIntersection();
         if (first == null_type_idx) return null_type_idx;
 
         self.skipWs();
@@ -973,7 +1123,7 @@ const TypeExprParser = struct {
 
         while (true) {
             self.skipWs();
-            const member = self.parsePrimary();
+            const member = self.parseIntersection();
             if (member == null_type_idx) break;
             if (count < members_buf.len) {
                 members_buf[count] = member;
@@ -996,6 +1146,44 @@ const TypeExprParser = struct {
         }
 
         return self.pool.addUnion(self.allocator, members_buf[0..count]);
+    }
+
+    /// Parse a TypeScript intersection: `A & B & C`. Binds tighter than `|`,
+    /// looser than primary types, so `A | B & C` parses as `A | (B & C)`.
+    /// A leading `|` or `&` is permitted before the first member to support
+    /// the multi-line union/intersection style:
+    ///     type T =
+    ///         | "a"
+    ///         | "b";
+    fn parseIntersection(self: *TypeExprParser) TypeIndex {
+        self.skipWs();
+        // Tolerate a leading `&` for multi-line intersection layouts.
+        _ = self.match('&');
+        self.skipWs();
+
+        const first = self.parsePrimary();
+        if (first == null_type_idx) return null_type_idx;
+
+        self.skipWs();
+        if (!self.match('&')) return first;
+
+        var members_buf: [16]TypeIndex = undefined;
+        members_buf[0] = first;
+        var count: usize = 1;
+
+        while (true) {
+            self.skipWs();
+            const member = self.parsePrimary();
+            if (member == null_type_idx) break;
+            if (count < members_buf.len) {
+                members_buf[count] = member;
+                count += 1;
+            }
+            self.skipWs();
+            if (!self.match('&')) break;
+        }
+
+        return self.pool.addIntersection(self.allocator, members_buf[0..count]);
     }
 
     fn parsePrimary(self: *TypeExprParser) TypeIndex {
@@ -1767,4 +1955,181 @@ test "template literal type assignability" {
 
     try std.testing.expect(pool.isAssignableTo(good, template));
     try std.testing.expect(!pool.isAssignableTo(bad, template));
+}
+
+test "addIntersection flattens single member" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const idx = pool.addIntersection(allocator, &.{pool.idx_string});
+    try std.testing.expectEqual(pool.idx_string, idx);
+}
+
+test "addIntersection drops duplicate members" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // string & string & number canonicalises to string & number
+    const idx = pool.addIntersection(allocator, &.{ pool.idx_string, pool.idx_string, pool.idx_number });
+    try std.testing.expectEqual(TypeTag.t_intersection, pool.getTag(idx).?);
+    const members = pool.getIntersectionMembers(idx);
+    try std.testing.expectEqual(@as(usize, 2), members.len);
+    try std.testing.expectEqual(pool.idx_string, members[0]);
+    try std.testing.expectEqual(pool.idx_number, members[1]);
+}
+
+test "parseTypeExpr intersection two members" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const idx = parseTypeExpr(&pool, allocator, "string & number");
+    try std.testing.expectEqual(TypeTag.t_intersection, pool.getTag(idx).?);
+    const members = pool.getIntersectionMembers(idx);
+    try std.testing.expectEqual(@as(usize, 2), members.len);
+    try std.testing.expectEqual(pool.idx_string, members[0]);
+    try std.testing.expectEqual(pool.idx_number, members[1]);
+}
+
+test "parseTypeExpr intersection three members" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const idx = parseTypeExpr(&pool, allocator, "string & number & boolean");
+    try std.testing.expectEqual(TypeTag.t_intersection, pool.getTag(idx).?);
+    try std.testing.expectEqual(@as(usize, 3), pool.getIntersectionMembers(idx).len);
+}
+
+test "parseTypeExpr intersection binds tighter than union" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // `string | number & boolean` parses as `string | (number & boolean)`
+    const idx = parseTypeExpr(&pool, allocator, "string | number & boolean");
+    try std.testing.expectEqual(TypeTag.t_union, pool.getTag(idx).?);
+    const members = pool.getUnionMembers(idx);
+    try std.testing.expectEqual(@as(usize, 2), members.len);
+    try std.testing.expectEqual(pool.idx_string, members[0]);
+    try std.testing.expectEqual(TypeTag.t_intersection, pool.getTag(members[1]).?);
+}
+
+test "parseTypeExpr leading-pipe union" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // Multi-line union style: leading `|` is permitted before the first member.
+    const idx = parseTypeExpr(&pool, allocator, "| \"a\" | \"b\" | \"c\"");
+    try std.testing.expectEqual(TypeTag.t_union, pool.getTag(idx).?);
+    try std.testing.expectEqual(@as(usize, 3), pool.getUnionMembers(idx).len);
+}
+
+test "parseTypeExpr leading-amp intersection" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // Multi-line intersection style: leading `&` is permitted before the first member.
+    const idx = parseTypeExpr(&pool, allocator, "& string & number");
+    try std.testing.expectEqual(TypeTag.t_intersection, pool.getTag(idx).?);
+    try std.testing.expectEqual(@as(usize, 2), pool.getIntersectionMembers(idx).len);
+}
+
+test "instantiate substitutes generic params inside intersection" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const t_param = pool.addGenericParam(allocator, "T");
+    const tagged_brand = pool.addRecord(allocator, &.{
+        .{
+            .name_start = pool.addName(allocator, "__tag").start,
+            .name_len = pool.addName(allocator, "__tag").len,
+            .type_idx = pool.addLiteralString(allocator, "x"),
+            .optional = false,
+        },
+    });
+    // body: T & { __tag: "x" }
+    const body = pool.addIntersection(allocator, &.{ t_param, tagged_brand });
+    const param_names: [1][]const u8 = .{"T"};
+    const param_types: [1]TypeIndex = .{pool.idx_string};
+
+    const instantiated = pool.instantiate(allocator, body, &param_names, &param_types, 0);
+    try std.testing.expectEqual(TypeTag.t_intersection, pool.getTag(instantiated).?);
+    const members = pool.getIntersectionMembers(instantiated);
+    try std.testing.expectEqual(@as(usize, 2), members.len);
+    try std.testing.expectEqual(pool.idx_string, members[0]);
+    try std.testing.expectEqual(TypeTag.t_record, pool.getTag(members[1]).?);
+}
+
+test "isAssignableTo target intersection requires every member" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // target: { a: number } & { b: string }
+    const a_name = pool.addName(allocator, "a");
+    const left = pool.addRecord(allocator, &.{
+        .{ .name_start = a_name.start, .name_len = a_name.len, .type_idx = pool.idx_number, .optional = false },
+    });
+    const b_name = pool.addName(allocator, "b");
+    const right = pool.addRecord(allocator, &.{
+        .{ .name_start = b_name.start, .name_len = b_name.len, .type_idx = pool.idx_string, .optional = false },
+    });
+    const target = pool.addIntersection(allocator, &.{ left, right });
+
+    // source has both fields - assignable
+    const both = pool.addRecord(allocator, &.{
+        .{ .name_start = a_name.start, .name_len = a_name.len, .type_idx = pool.idx_number, .optional = false },
+        .{ .name_start = b_name.start, .name_len = b_name.len, .type_idx = pool.idx_string, .optional = false },
+    });
+    try std.testing.expect(pool.isAssignableTo(both, target));
+
+    // source has only one - not assignable
+    try std.testing.expect(!pool.isAssignableTo(left, target));
+}
+
+test "isAssignableTo source intersection any member assignable" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // source: string & number; target: string. At least one member assignable.
+    const source = pool.addIntersection(allocator, &.{ pool.idx_string, pool.idx_number });
+    try std.testing.expect(pool.isAssignableTo(source, pool.idx_string));
+    try std.testing.expect(pool.isAssignableTo(source, pool.idx_number));
+    // Target not in source - not assignable.
+    try std.testing.expect(!pool.isAssignableTo(source, pool.idx_boolean));
+}
+
+test "isAssignableTo source intersection combines record fields" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const a_name = pool.addName(allocator, "a");
+    const left = pool.addRecord(allocator, &.{
+        .{ .name_start = a_name.start, .name_len = a_name.len, .type_idx = pool.idx_number, .optional = false },
+    });
+    const b_name = pool.addName(allocator, "b");
+    const right = pool.addRecord(allocator, &.{
+        .{ .name_start = b_name.start, .name_len = b_name.len, .type_idx = pool.idx_string, .optional = false },
+    });
+    const source = pool.addIntersection(allocator, &.{ left, right });
+    const target = pool.addRecord(allocator, &.{
+        .{ .name_start = a_name.start, .name_len = a_name.len, .type_idx = pool.idx_number, .optional = false },
+        .{ .name_start = b_name.start, .name_len = b_name.len, .type_idx = pool.idx_string, .optional = false },
+    });
+
+    try std.testing.expect(pool.isAssignableTo(source, target));
+
+    const wrong_target = pool.addRecord(allocator, &.{
+        .{ .name_start = a_name.start, .name_len = a_name.len, .type_idx = pool.idx_string, .optional = false },
+        .{ .name_start = b_name.start, .name_len = b_name.len, .type_idx = pool.idx_string, .optional = false },
+    });
+    try std.testing.expect(!pool.isAssignableTo(source, wrong_target));
 }

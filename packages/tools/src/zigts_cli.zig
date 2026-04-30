@@ -184,7 +184,8 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
         if (result.totalErrors() > 0) {
-            json_diag.writeErrorJson(&aw.writer, result.json_diagnostics.items) catch {};
+            const contract_ptr: ?*const zigts.handler_contract.HandlerContract = if (result.contract) |*c| c else null;
+            json_diag.writeErrorJson(&aw.writer, contract_ptr, result.json_diagnostics.items) catch {};
         } else {
             const contract_ptr: ?*const zigts.handler_contract.HandlerContract = if (result.contract) |*c| c else null;
             json_diag.writeSuccessJson(&aw.writer, contract_ptr, result.json_diagnostics.items) catch {};

@@ -22,6 +22,12 @@ const TypeMap = type_map_mod.TypeMap;
 const TypeMapKind = type_map_mod.TypeMapKind;
 const TypeMapEntry = type_map_mod.TypeMapEntry;
 
+/// The field name used to mark a record as the body of an instantiated
+/// `Spec<...>` generic alias. The verifier looks for records bearing this
+/// field when extracting declared spec sets from a handler return type.
+/// Sized to be unmistakable for any user-authored field.
+pub const spec_marker_field = "__zigttp_spec__";
+
 // ---------------------------------------------------------------------------
 // Generic scope
 // ---------------------------------------------------------------------------
@@ -102,7 +108,7 @@ pub const TypeEnv = struct {
     name_storage: std.ArrayListUnmanaged([]const u8),
 
     pub fn init(allocator: std.mem.Allocator, pool: *TypePool) TypeEnv {
-        return .{
+        var env: TypeEnv = .{
             .pool = pool,
             .allocator = allocator,
             .type_aliases = .empty,
@@ -115,6 +121,50 @@ pub const TypeEnv = struct {
             .generic_scopes = .empty,
             .name_storage = .empty,
         };
+        env.registerBuiltins();
+        return env;
+    }
+
+    /// Register built-in type aliases (`Spec<S>` and friends) so user code
+    /// can write `import type { Spec } from "zigttp:types"` and have the
+    /// type checker resolve it without a real source file. Idempotent;
+    /// user-declared aliases of the same name will overwrite the built-in
+    /// (last-write-wins matches the existing populateFromTypeMap pattern).
+    pub fn registerBuiltins(self: *TypeEnv) void {
+        self.registerSpecBuiltin();
+    }
+
+    /// Spec<S>: phantom marker carrying the declared spec name set as S.
+    /// Registered as a generic alias whose body is a record whose only
+    /// field is named `__zigttp_spec__` with type S. After instantiation
+    /// with a literal-string union, the field type carries the spec
+    /// names. The verifier walks return-type intersections to extract
+    /// them via extractSpecMembers.
+    fn registerSpecBuiltin(self: *TypeEnv) void {
+        self.pushGenericScope();
+        const s_param = self.addGenericParam("S");
+        const field_name = self.pool.addName(self.allocator, spec_marker_field);
+        const body = self.pool.addRecord(self.allocator, &.{
+            .{
+                .name_start = field_name.start,
+                .name_len = field_name.len,
+                .type_idx = s_param,
+                .optional = false,
+            },
+        });
+        self.popGenericScope();
+
+        if (body == null_type_idx) return;
+
+        const owned_name = self.internName("Spec");
+        if (owned_name.len == 0) return;
+        const owned_param = self.internName("S");
+
+        var alias = GenericAlias{};
+        alias.param_names[0] = owned_param;
+        alias.param_count = 1;
+        alias.body = body;
+        self.generic_aliases.put(self.allocator, owned_name, alias) catch {};
     }
 
     pub fn deinit(self: *TypeEnv) void {
@@ -336,27 +386,55 @@ pub const TypeEnv = struct {
 
     /// If idx is a t_generic_app whose base resolves to a generic alias,
     /// instantiate the alias body with the provided type arguments.
+    /// Recurses through intersection and union members so a generic
+    /// application nested inside `Response & Spec<...>` or
+    /// `Result<T> | Foo` is instantiated as well.
     fn tryInstantiateGenericApp(self: *TypeEnv, idx: TypeIndex) TypeIndex {
         if (idx == null_type_idx) return idx;
-        if (self.pool.getTag(idx) != .t_generic_app) return idx;
+        const tag = self.pool.getTag(idx) orelse return idx;
 
-        const info = self.pool.getGenericAppInfo(idx);
-        if (info.base == null_type_idx) return idx;
-
-        // The base should be a t_ref; get its name.
-        const base_name = self.pool.getRefName(info.base);
-        if (base_name.len == 0) return idx;
-
-        const alias = self.generic_aliases.get(base_name) orelse return idx;
-        if (info.args.len != alias.param_count) return idx;
-
-        return self.pool.instantiate(
-            self.allocator,
-            alias.body,
-            alias.param_names[0..alias.param_count],
-            info.args,
-            0,
-        );
+        switch (tag) {
+            .t_generic_app => {
+                const info = self.pool.getGenericAppInfo(idx);
+                if (info.base == null_type_idx) return idx;
+                const base_name = self.pool.getRefName(info.base);
+                if (base_name.len == 0) return idx;
+                const alias = self.generic_aliases.get(base_name) orelse return idx;
+                if (info.args.len != alias.param_count) return idx;
+                return self.pool.instantiate(
+                    self.allocator,
+                    alias.body,
+                    alias.param_names[0..alias.param_count],
+                    info.args,
+                    0,
+                );
+            },
+            .t_intersection => {
+                const members = self.pool.getIntersectionMembers(idx);
+                var new_members: [16]TypeIndex = undefined;
+                const count = @min(members.len, 16);
+                var changed = false;
+                for (members[0..count], 0..) |m, i| {
+                    new_members[i] = self.tryInstantiateGenericApp(m);
+                    if (new_members[i] != m) changed = true;
+                }
+                if (!changed) return idx;
+                return self.pool.addIntersection(self.allocator, new_members[0..count]);
+            },
+            .t_union => {
+                const members = self.pool.getUnionMembers(idx);
+                var new_members: [32]TypeIndex = undefined;
+                const count = @min(members.len, 32);
+                var changed = false;
+                for (members[0..count], 0..) |m, i| {
+                    new_members[i] = self.tryInstantiateGenericApp(m);
+                    if (new_members[i] != m) changed = true;
+                }
+                if (!changed) return idx;
+                return self.pool.addUnion(self.allocator, new_members[0..count]);
+            },
+            else => return idx,
+        }
     }
 
     /// Look up a variable's declared type by name.
@@ -387,6 +465,74 @@ pub const TypeEnv = struct {
     /// Look up a function signature by source location.
     pub fn getFnSigByLoc(self: *const TypeEnv, line: u32) ?FunctionSig {
         return self.fn_signatures.get(line);
+    }
+
+    /// Walk a TypeIndex (typically a function return-type annotation),
+    /// following intersections and resolving alias references, and append
+    /// every declared spec name string found inside a `Spec<...>` marker
+    /// to `out`. Strings live as long as the type pool's name storage;
+    /// the caller must not free them. Safe to call when no spec marker is
+    /// present (the slice stays empty).
+    pub fn extractSpecMembers(
+        self: *const TypeEnv,
+        idx: TypeIndex,
+        out: *std.ArrayListUnmanaged([]const u8),
+    ) void {
+        self.collectSpecMembers(idx, out, 0);
+    }
+
+    fn collectSpecMembers(
+        self: *const TypeEnv,
+        idx: TypeIndex,
+        out: *std.ArrayListUnmanaged([]const u8),
+        depth: u8,
+    ) void {
+        if (idx == null_type_idx or depth > 8) return;
+        const tag = self.pool.getTag(idx) orelse return;
+
+        switch (tag) {
+            .t_intersection => {
+                for (self.pool.getIntersectionMembers(idx)) |member| {
+                    self.collectSpecMembers(member, out, depth + 1);
+                }
+            },
+            .t_ref => {
+                const name = self.pool.getRefName(idx);
+                if (self.type_aliases.get(name)) |resolved| {
+                    self.collectSpecMembers(resolved, out, depth + 1);
+                }
+            },
+            .t_record => {
+                for (self.pool.getRecordFields(idx)) |field| {
+                    const fname = self.pool.getName(field.name_start, field.name_len);
+                    if (std.mem.eql(u8, fname, spec_marker_field)) {
+                        self.collectLiteralUnionStrings(field.type_idx, out);
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn collectLiteralUnionStrings(
+        self: *const TypeEnv,
+        idx: TypeIndex,
+        out: *std.ArrayListUnmanaged([]const u8),
+    ) void {
+        const tag = self.pool.getTag(idx) orelse return;
+        switch (tag) {
+            .t_union => {
+                for (self.pool.getUnionMembers(idx)) |member| {
+                    self.collectLiteralUnionStrings(member, out);
+                }
+            },
+            .t_literal_string => {
+                if (self.pool.getLiteralStringValue(idx)) |val| {
+                    out.append(self.allocator, val) catch {};
+                }
+            },
+            else => {},
+        }
     }
 
     // -------------------------------------------------------------------
@@ -774,4 +920,274 @@ test "TypeEnv resolveType instantiates generic alias inline" {
     const fields = pool.getRecordFields(resolved);
     try std.testing.expectEqual(@as(usize, 1), fields.len);
     try std.testing.expectEqual(pool.idx_number, fields[0].type_idx);
+}
+
+test "TypeEnv intersection alias type AB = A & B" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // Simulate: type AB = A & B;
+    // Names A and B stay as t_ref inside the intersection (resolveType only
+    // substitutes alias names when the entire annotation text matches; nested
+    // identifiers in compound expressions remain refs - same behaviour as union).
+    const source = "type AB = A & B;";
+    var tm = TypeMap.init(source);
+    defer tm.deinit(allocator);
+
+    try tm.addEntry(allocator, .{
+        .kind = .type_alias,
+        .source_start = 10, // "A & B"
+        .source_end = 15,
+        .context_line = 1,
+        .context_col = 1,
+        .name_start = 5, // "AB"
+        .name_end = 7,
+    });
+
+    env.populateFromTypeMap(&tm);
+
+    const ab_idx = env.getTypeAlias("AB");
+    try std.testing.expect(ab_idx != null);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_intersection, pool.getTag(ab_idx.?).?);
+    const members = pool.getIntersectionMembers(ab_idx.?);
+    try std.testing.expectEqual(@as(usize, 2), members.len);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, pool.getTag(members[0]).?);
+    try std.testing.expectEqualStrings("A", pool.getRefName(members[0]));
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, pool.getTag(members[1]).?);
+    try std.testing.expectEqualStrings("B", pool.getRefName(members[1]));
+}
+
+test "TypeEnv return-type intersection X & Y" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const owned_x = env.internName("X");
+    env.type_aliases.put(allocator, owned_x, pool.idx_string) catch {};
+    const owned_y = env.internName("Y");
+    env.type_aliases.put(allocator, owned_y, pool.idx_number) catch {};
+
+    // function f(): X & Y { ... }
+    const source = "function f(): X & Y { return null; }";
+    var tm = TypeMap.init(source);
+    defer tm.deinit(allocator);
+
+    try tm.addEntry(allocator, .{
+        .kind = .return_annotation,
+        .source_start = 14, // "X & Y"
+        .source_end = 19,
+        .context_line = 7,
+        .context_col = 1,
+        .name_start = 0,
+        .name_end = 0,
+    });
+
+    env.populateFromTypeMap(&tm);
+
+    const sig = env.getFnSigByLoc(7);
+    try std.testing.expect(sig != null);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_intersection, pool.getTag(sig.?.return_type).?);
+}
+
+test "TypeEnv registers Spec<S> built-in alias on init" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // Spec must live in generic_aliases (parametric), not type_aliases.
+    try std.testing.expect(env.getTypeAlias("Spec") == null);
+    try std.testing.expect(env.generic_aliases.get("Spec") != null);
+
+    // Body must be a record with the magic field name carrying S.
+    const alias = env.generic_aliases.get("Spec").?;
+    try std.testing.expectEqual(@as(u8, 1), alias.param_count);
+    try std.testing.expectEqualStrings("S", alias.param_names[0]);
+
+    const body_tag = pool.getTag(alias.body) orelse return error.MissingBody;
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, body_tag);
+
+    const fields = pool.getRecordFields(alias.body);
+    try std.testing.expectEqual(@as(usize, 1), fields.len);
+    try std.testing.expectEqualStrings(spec_marker_field, pool.getName(fields[0].name_start, fields[0].name_len));
+}
+
+test "TypeEnv resolveType Spec<\"a\" | \"b\"> instantiates marker" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const idx = env.resolveType("Spec<\"a\" | \"b\">");
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(idx).?);
+
+    const fields = pool.getRecordFields(idx);
+    try std.testing.expectEqual(@as(usize, 1), fields.len);
+    try std.testing.expectEqualStrings(spec_marker_field, pool.getName(fields[0].name_start, fields[0].name_len));
+
+    // Field type is the literal-string union "a" | "b".
+    const union_tag = pool.getTag(fields[0].type_idx) orelse return error.MissingBody;
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_union, union_tag);
+    try std.testing.expectEqual(@as(usize, 2), pool.getUnionMembers(fields[0].type_idx).len);
+}
+
+test "extractSpecMembers walks intersection through alias to literal union" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // Simulate:
+    //     type Guardrails = Spec<"idempotent" | "deterministic">;
+    //     function handler(): Response & Guardrails { ... }
+    const source =
+        "type Guardrails = Spec<\"idempotent\" | \"deterministic\">;" ++
+        "function handler(): Response & Guardrails { return null; }";
+    var tm = TypeMap.init(source);
+    defer tm.deinit(allocator);
+
+    // Guardrails alias body: Spec<"idempotent" | "deterministic">
+    try tm.addEntry(allocator, .{
+        .kind = .type_alias,
+        .source_start = 18,
+        .source_end = 54,
+        .context_line = 1,
+        .context_col = 1,
+        .name_start = 5,
+        .name_end = 15,
+    });
+    // Return annotation: Response & Guardrails
+    try tm.addEntry(allocator, .{
+        .kind = .return_annotation,
+        .source_start = 75,
+        .source_end = 96,
+        .context_line = 7,
+        .context_col = 1,
+        .name_start = 0,
+        .name_end = 0,
+    });
+
+    env.populateFromTypeMap(&tm);
+
+    const sig = env.getFnSigByLoc(7) orelse return error.MissingSig;
+
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer names.deinit(allocator);
+    env.extractSpecMembers(sig.return_type, &names);
+
+    try std.testing.expectEqual(@as(usize, 2), names.items.len);
+    try std.testing.expectEqualStrings("idempotent", names.items[0]);
+    try std.testing.expectEqualStrings("deterministic", names.items[1]);
+}
+
+test "extractSpecMembers handles inline Response & Spec<\"name\">" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // function handler(): Response & Spec<"idempotent"> { ... }
+    const source = "function handler(): Response & Spec<\"idempotent\"> { return null; }";
+    var tm = TypeMap.init(source);
+    defer tm.deinit(allocator);
+
+    try tm.addEntry(allocator, .{
+        .kind = .return_annotation,
+        .source_start = 20,
+        .source_end = 49,
+        .context_line = 3,
+        .context_col = 1,
+        .name_start = 0,
+        .name_end = 0,
+    });
+
+    env.populateFromTypeMap(&tm);
+
+    const sig = env.getFnSigByLoc(3) orelse return error.MissingSig;
+
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer names.deinit(allocator);
+    env.extractSpecMembers(sig.return_type, &names);
+
+    try std.testing.expectEqual(@as(usize, 1), names.items.len);
+    try std.testing.expectEqualStrings("idempotent", names.items[0]);
+}
+
+test "extractSpecMembers returns empty when no Spec marker" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const source = "function handler(): Response { return null; }";
+    var tm = TypeMap.init(source);
+    defer tm.deinit(allocator);
+
+    try tm.addEntry(allocator, .{
+        .kind = .return_annotation,
+        .source_start = 20,
+        .source_end = 28,
+        .context_line = 5,
+        .context_col = 1,
+        .name_start = 0,
+        .name_end = 0,
+    });
+
+    env.populateFromTypeMap(&tm);
+
+    const sig = env.getFnSigByLoc(5) orelse return error.MissingSig;
+
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer names.deinit(allocator);
+    env.extractSpecMembers(sig.return_type, &names);
+
+    try std.testing.expectEqual(@as(usize, 0), names.items.len);
+}
+
+test "TypeEnv leading-pipe union literal" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // type Names = | "a" | "b" | "c"
+    const source = "type Names = | \"a\" | \"b\" | \"c\";";
+    var tm = TypeMap.init(source);
+    defer tm.deinit(allocator);
+
+    try tm.addEntry(allocator, .{
+        .kind = .type_alias,
+        .source_start = 13, // "| \"a\" | \"b\" | \"c\""
+        .source_end = 30,
+        .context_line = 1,
+        .context_col = 1,
+        .name_start = 5, // "Names"
+        .name_end = 10,
+    });
+
+    env.populateFromTypeMap(&tm);
+
+    const names_idx = env.getTypeAlias("Names");
+    try std.testing.expect(names_idx != null);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_union, pool.getTag(names_idx.?).?);
+    try std.testing.expectEqual(@as(usize, 3), pool.getUnionMembers(names_idx.?).len);
 }

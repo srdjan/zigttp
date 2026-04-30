@@ -37,6 +37,7 @@ The parser supports ES6 `import`/`export` syntax for the virtual module system (
 | `import { decodeJson, decodeForm } from "zigttp:decode"` | Typed ingress module imports |
 | `import { cacheGet, cacheSet } from "zigttp:cache"` | Cache module imports |
 | `import { run, step } from "zigttp:durable"` | Durable execution imports |
+| `import type { Spec } from "zigttp:types"` | Type-only import for the built-in `Spec<...>` proof obligation alias (stripped at load time) |
 
 ### Supported Export Forms
 

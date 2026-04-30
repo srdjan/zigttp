@@ -28,6 +28,7 @@ pub const command_table = [_]CommandRow{
     .{ .slash = "/check", .explicit = "check", .tool = "zigts_check", .takes_trailing_args = true },
     .{ .slash = "/feature", .explicit = null, .tool = "pi_feature_plan", .takes_trailing_args = true },
     .{ .slash = "/forge", .explicit = null, .tool = "pi_forge_route", .takes_trailing_args = true },
+    .{ .slash = "/specs", .explicit = null, .tool = "pi_specs_status", .takes_trailing_args = true },
     .{ .slash = "/build", .explicit = null, .tool = "zig_build_step", .takes_trailing_args = true },
     .{ .slash = "/test", .explicit = null, .tool = "zig_test_step", .takes_trailing_args = true },
 };

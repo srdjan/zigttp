@@ -314,6 +314,7 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     try w.writeAll("Views:         /ledger  /chat  /ledger export <path>\n");
     try w.writeAll("Route Forge:   /feature route file=<handler.ts> method=<VERB> path=</path>\n");
     try w.writeAll("               /forge route file=<handler.ts> method=<VERB> path=</path>\n");
+    try w.writeAll("Specs:         /specs <handler.ts>   show declared Spec<...> obligations\n");
     try w.writeAll("Skills:        /skills  /skill:<name>\n");
     try w.writeAll("Templates:     /templates  /template:<name> [args...]\n");
 
@@ -459,6 +460,7 @@ fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
             "  Session commands: /resume, /continue, /new, /compact, /fork, /tree\n" ++
             "  Proof ledger mode: /ledger, /chat, /ledger export, zigts ledger replay/export\n" ++
             "  Route Forge: /feature previews route plans, /forge proves route candidates\n" ++
+            "  Author-declared specs: /specs reads Spec<...> obligations + discharge state\n" ++
             "  Skills catalog (/skill:<name>)\n" ++
             "  Informational commands: /model, /status, /settings, /hotkeys, /changelog\n",
     );
@@ -804,6 +806,7 @@ test "help renders local command guidance" {
             try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.ledger_commands[0]) != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "/feature route") != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "/forge route") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "/specs <handler.ts>") != null);
         },
         else => return error.TestFailed,
     }

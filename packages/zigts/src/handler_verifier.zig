@@ -87,6 +87,23 @@ pub const DiagnosticKind = enum {
     /// would be dispatched by the runtime but `send`/`close`/etc.
     /// are unreachable without the import.
     websocket_events_without_import,
+
+    // Author-declared spec discharge (Check 9)
+    /// The author declared `Spec<"name">` but the corresponding
+    /// `HandlerProperties` field is false. The compiler refuses to
+    /// build because the handler does not satisfy its own stated
+    /// obligation.
+    spec_not_discharged,
+    /// The author declared a spec that contradicts an import already
+    /// present in the contract (e.g. `Spec<"read_only">` while
+    /// importing a writing function from `zigttp:cache`). Failing
+    /// fast keeps the autoloop from burning turns trying to remove
+    /// the user's actual feature.
+    spec_incompatible_with_import,
+    /// The author declared a spec name not in the v1 set. Surfaced
+    /// with the list of valid names so the author can correct the
+    /// typo or pick a defined spec.
+    spec_unknown_name,
 };
 
 pub const Diagnostic = struct {

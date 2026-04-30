@@ -60,6 +60,19 @@ accepts goals the witness and repair tools can actually drive.
 - `pii_contained`
 - `injection_safe`
 
+## Author-declared goals via `Spec<...>`
+
+The `--goal` flag is the operator-driven entry point. The author-driven
+entry point is the `Spec<...>` annotation on the handler return type
+(see [user-guide.md](../user-guide.md#author-declared-specs)). When the
+agent encounters a handler with declared specs, it should call
+`pi_specs_status` first to read the active set straight from source,
+then drive `pi_repair_plan` against the unmet names. The autoloop's
+counterexample machinery handles the same five flow-oriented specs
+listed above; the other six v1 specs (`deterministic`, `read_only`,
+`retry_safe`, `idempotent`, `state_isolated`, `fault_covered`) fall
+back to a `PropertyCause` plus a per-property suggestion.
+
 ## Smoke example
 
 An intentionally insecure handler lives at `examples/autoloop/handler.ts`:

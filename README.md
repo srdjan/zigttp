@@ -51,6 +51,8 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 
 **Proof-first Route Forge.** `zigts expert` can author new routes through the compiler instead of free-form codegen. `/forge route file=handler.ts method=GET path=/health` synthesizes the route, proves the candidate in memory, shows the diff and proof summary, and only writes after explicit approval through the same compiler veto that guards normal edits. Every accepted forge lands as a `verified_patch` in the session ledger.
 
+**Author-declared specs (`Spec<...>`).** Declare which compiler-proven properties your handler must satisfy directly in the return type. `import type { Spec } from "zigttp:types"`, alias the obligations as `type Guardrails = Spec<"idempotent" | "deterministic" | "no_secret_leakage">`, and intersect them on the handler: `function handler(req: Request): Response & Guardrails`. The verifier discharges each spec against the inferred `HandlerProperties`; failures emit ZTS500 with a per-property suggestion, ZTS501 for spec-vs-import contradictions, and ZTS502 for unknown names. The proof HUD, proof ledger, and `zigts expert`'s `pi_specs_status` tool all read the active spec set straight from source - your handler is the obligation contract.
+
 **Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead. Each module binding declares what runtime capabilities its implementation uses (clock, crypto, stderr, etc.); checked helpers enforce the declarations at call time, so implementation drift panics instead of silently misbehaving.
 
 ### Numbers

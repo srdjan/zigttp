@@ -196,6 +196,47 @@ Fix: use `const` for module-level declarations, or move mutable state to `zigttp
 
 The result feeds into `HandlerProperties.state_isolated`. When no module-scope mutations are detected, `state_isolated` is proven true, enabling safe multi-tenant handler sharing.
 
+### 8. Author-Declared Spec Discharge
+
+The verifier reads any `Spec<...>` declared on the handler's return type
+and discharges each name against the classified `HandlerProperties`. The
+machinery lives in `spec_discharge.zig` and runs after the analyzer
+pipeline so it has access to the full property set plus the imported
+module list.
+
+```typescript
+import type { Spec } from "zigttp:types";
+
+type Guardrails = Spec<"idempotent" | "deterministic">;
+
+function handler(req: Request): Response & Guardrails {
+    return Response.json({ now: Date.now() });
+}
+```
+
+Three diagnostic codes:
+
+- **ZTS500 - spec_not_discharged**: the corresponding property field is
+  false. Cause-only specs (`deterministic`, `read_only`, `retry_safe`,
+  `idempotent`, `state_isolated`, `fault_covered`) include a
+  per-property `Try:` suggestion. Counterexample-rich specs
+  (`no_secret_leakage`, `no_credential_leakage`, `input_validated`,
+  `pii_contained`, `injection_safe`) include a falsifying request body.
+- **ZTS501 - spec_incompatible_with_import**: the spec contradicts an
+  imported module. v1 fires for `Spec<"read_only">` against
+  `zigttp:cache` or `zigttp:sql`. ZTS500 is suppressed for the same
+  name so the agent does not enter repair against a contradiction.
+- **ZTS502 - spec_unknown_name**: the declared name is not in the v1
+  set.
+
+Diagnostics are stored on `HandlerContract.spec_diagnostics`. Surfaces:
+the live HUD, the proof studio, the proof ledger
+(`declaredSpecs: [{name, discharged}]` per swap event),
+`zigts check --json` (`declared_specs` and `spec_diagnostics` arrays),
+and the `pi_specs_status` agent tool. See
+[user-guide.md](user-guide.md#author-declared-specs) for the author-side
+view.
+
 ### Runtime Optimizations from Verification
 
 Verified properties also control runtime behavior:

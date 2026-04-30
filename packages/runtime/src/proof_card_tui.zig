@@ -194,6 +194,21 @@ fn buildPropertiesPane(
         .{card.current.proof_level.toString()},
     );
     try lines.append(allocator, proof_line);
+
+    // Author-declared specs render directly under the inferred properties.
+    // Empty when the handler has no `Spec<...>` annotation - the back-compat
+    // path is invisible to keep the HUD quiet for handlers that haven't
+    // opted in. Failing specs use [-]; passing specs use [*] to distinguish
+    // them from the inferred property dots.
+    if (card.current.declared_specs.len > 0) {
+        try lines.append(allocator, try allocator.dupe(u8, ""));
+        try lines.append(allocator, try allocator.dupe(u8, "Specs (declared)"));
+        for (card.current.declared_specs) |s| {
+            const glyph: []const u8 = if (s.discharged) "[*]" else "[-]";
+            const line = try std.fmt.allocPrint(allocator, "{s} spec {s}", .{ glyph, s.name });
+            try lines.append(allocator, line);
+        }
+    }
     return lines;
 }
 

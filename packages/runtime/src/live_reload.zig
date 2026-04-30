@@ -469,12 +469,48 @@ pub fn factsFromContract(
     defer allocator.free(cap_names);
     for (caps_slice, 0..) |cap, i| cap_names[i] = @tagName(cap);
 
+    const spec_states = try buildSpecStates(allocator, contract);
+    defer allocator.free(spec_states);
+
     return review_facts_mod.ReviewFacts.fromProvenFacts(
         allocator,
         &extract.facts,
         cap_names,
         contract_sha,
+        spec_states,
     );
+}
+
+/// Build a transient SpecState slice from the contract's author-declared
+/// specs and the spec_discharge diagnostics. The slice is borrowed - names
+/// reference the contract's owned strings - and must be freed by the caller
+/// before the contract is freed. ReviewFacts.fromProvenFacts dupes the
+/// names into its own ownership.
+fn buildSpecStates(
+    allocator: std.mem.Allocator,
+    contract: *const HandlerContract,
+) ![]review_facts_mod.SpecState {
+    const decls = contract.declared_specs.items;
+    const out = try allocator.alloc(review_facts_mod.SpecState, decls.len);
+    errdefer allocator.free(out);
+    for (decls, 0..) |name, i| {
+        out[i] = .{
+            .name = name,
+            .discharged = !specHasNotDischarged(contract, name),
+        };
+    }
+    return out;
+}
+
+fn specHasNotDischarged(contract: *const HandlerContract, name: []const u8) bool {
+    for (contract.spec_diagnostics.items) |d| {
+        switch (d.kind) {
+            .not_discharged, .incompatible_with_import, .unknown_name => {
+                if (std.mem.eql(u8, d.spec_name, name)) return true;
+            },
+        }
+    }
+    return false;
 }
 
 /// Compute a hash over all watched paths (files and directory contents).

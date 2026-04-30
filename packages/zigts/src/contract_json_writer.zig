@@ -595,11 +595,56 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
             try writer.writeAll("    }");
         }
         try writer.writeAll("\n  ],\n");
-        try writer.print("  \"behaviorsExhaustive\": {s}\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
+        try writer.print("  \"behaviorsExhaustive\": {s},\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
     } else {
         try writer.writeAll("  \"behaviors\": [],\n");
-        try writer.print("  \"behaviorsExhaustive\": {s}\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
+        try writer.print("  \"behaviorsExhaustive\": {s},\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
     }
+
+    // declaredSpecs: author-declared spec names from `Spec<...>` on the
+    // handler return type. Empty when the handler has no annotation.
+    try writer.writeAll("  \"declaredSpecs\": [");
+    for (contract.declared_specs.items, 0..) |s, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeJsonString(writer, s);
+    }
+    try writer.writeAll("],\n");
+
+    // specDiagnostics: per-spec discharge results emitted by the
+    // verifier (ZTS500/501/502). Empty when every declared spec is
+    // satisfied.
+    try writer.writeAll("  \"specDiagnostics\": [");
+    for (contract.spec_diagnostics.items, 0..) |d, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.writeAll("\n    {");
+        try writer.writeAll("\n      \"kind\": ");
+        const kind_str: []const u8 = switch (d.kind) {
+            .not_discharged => "not_discharged",
+            .incompatible_with_import => "incompatible_with_import",
+            .unknown_name => "unknown_name",
+        };
+        try writeJsonString(writer, kind_str);
+        try writer.writeAll(",\n      \"code\": ");
+        const code_str: []const u8 = switch (d.kind) {
+            .not_discharged => "ZTS500",
+            .incompatible_with_import => "ZTS501",
+            .unknown_name => "ZTS502",
+        };
+        try writeJsonString(writer, code_str);
+        try writer.writeAll(",\n      \"specName\": ");
+        try writeJsonString(writer, d.spec_name);
+        if (d.incompatible_module) |module_name| {
+            try writer.writeAll(",\n      \"incompatibleModule\": ");
+            try writeJsonString(writer, module_name);
+        }
+        if (d.suggestion) |suggestion| {
+            try writer.writeAll(",\n      \"suggestion\": ");
+            try writeJsonString(writer, suggestion);
+        }
+        try writer.writeAll("\n    }");
+    }
+    if (contract.spec_diagnostics.items.len > 0) try writer.writeAll("\n  ");
+    try writer.writeAll("]\n");
 
     try writer.writeAll("}\n");
 }

@@ -39,6 +39,7 @@ const pi_apply_repair_plan_tool = @import("tools/pi_apply_repair_plan.zig");
 const pi_feature_plan_tool = @import("tools/pi_feature_plan.zig");
 const pi_apply_feature_plan_tool = @import("tools/pi_apply_feature_plan.zig");
 const pi_forge_route_tool = @import("tools/pi_forge_route.zig");
+const pi_specs_status_tool = @import("tools/pi_specs_status.zig");
 
 /// Re-exported so the runtime-side witness replay implementation can
 /// share the canonical `Verdict` type and function pointer signature.
@@ -85,6 +86,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, pi_feature_plan_tool.tool);
     try reg.register(allocator, pi_apply_feature_plan_tool.tool);
     try reg.register(allocator, pi_forge_route_tool.tool);
+    try reg.register(allocator, pi_specs_status_tool.tool);
 
     return reg;
 }
@@ -491,6 +493,7 @@ test "buildRegistry registers every first-party compiler primitive" {
         "pi_feature_plan",
         "pi_apply_feature_plan",
         "pi_forge_route",
+        "pi_specs_status",
     };
 
     for (expected_names) |expected| {

@@ -112,7 +112,7 @@ fn typeCheckerCode(kind: type_checker.DiagnosticKind) []const u8 {
     };
 }
 
-/// HandlerVerifier error codes: ZTS3xx
+/// HandlerVerifier error codes: ZTS3xx (structural checks), ZTS5xx (specs).
 fn verifierCode(kind: handler_verifier.DiagnosticKind) []const u8 {
     return switch (kind) {
         .missing_return_else => "ZTS300",
@@ -128,6 +128,9 @@ fn verifierCode(kind: handler_verifier.DiagnosticKind) []const u8 {
         .module_scope_mutation => "ZTS310",
         .websocket_import_without_events => "ZTS320",
         .websocket_events_without_import => "ZTS321",
+        .spec_not_discharged => "ZTS500",
+        .spec_incompatible_with_import => "ZTS501",
+        .spec_unknown_name => "ZTS502",
     };
 }
 
@@ -305,6 +308,48 @@ pub fn writeSuccessJson(
             try writer.writeByte('}');
         }
 
+        // declared_specs: surface the author's `Spec<...>` declaration so
+        // tools (pi_specs_status, the agent autoloop) can read intent
+        // straight from the proof JSON.
+        try writer.writeAll(",\"declared_specs\":[");
+        for (c.declared_specs.items, 0..) |s, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeJsonString(writer, s);
+        }
+        try writer.writeByte(']');
+
+        // spec_diagnostics: per-spec discharge results (ZTS500/501/502).
+        try writer.writeAll(",\"spec_diagnostics\":[");
+        for (c.spec_diagnostics.items, 0..) |d, i| {
+            if (i > 0) try writer.writeByte(',');
+            const code: []const u8 = switch (d.kind) {
+                .not_discharged => "ZTS500",
+                .incompatible_with_import => "ZTS501",
+                .unknown_name => "ZTS502",
+            };
+            const kind_str: []const u8 = switch (d.kind) {
+                .not_discharged => "not_discharged",
+                .incompatible_with_import => "incompatible_with_import",
+                .unknown_name => "unknown_name",
+            };
+            try writer.writeAll("{\"code\":");
+            try writeJsonString(writer, code);
+            try writer.writeAll(",\"kind\":");
+            try writeJsonString(writer, kind_str);
+            try writer.writeAll(",\"spec_name\":");
+            try writeJsonString(writer, d.spec_name);
+            if (d.incompatible_module) |module_name| {
+                try writer.writeAll(",\"incompatible_module\":");
+                try writeJsonString(writer, module_name);
+            }
+            if (d.suggestion) |suggestion| {
+                try writer.writeAll(",\"suggestion\":");
+                try writeJsonString(writer, suggestion);
+            }
+            try writer.writeByte('}');
+        }
+        try writer.writeByte(']');
+
         try writer.writeByte('}');
     }
 
@@ -315,9 +360,86 @@ pub fn writeSuccessJson(
     try writer.writeAll("}\n");
 }
 
-/// Emit error JSON with diagnostics array.
-pub fn writeErrorJson(writer: anytype, diagnostics: []const JsonDiagnostic) !void {
-    try writer.writeAll("{\"success\":false,\"diagnostics\":");
+/// Emit error JSON with diagnostics array. When a contract exists, include the
+/// same proof object as the success envelope so clients can inspect declared
+/// specs that failed discharge while still treating the check as failed.
+pub fn writeErrorJson(
+    writer: anytype,
+    contract: ?*const handler_contract.HandlerContract,
+    diagnostics: []const JsonDiagnostic,
+) !void {
+    try writer.writeAll("{\"success\":false");
+    if (contract) |c| {
+        try writer.writeAll(",\"proof\":{");
+
+        try writer.writeAll("\"env_vars\":[");
+        for (c.env.literal.items, 0..) |v, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeJsonString(writer, v);
+        }
+        try writer.writeAll("],\"outbound_hosts\":[");
+        for (c.egress.hosts.items, 0..) |h, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeJsonString(writer, h);
+        }
+        try writer.writeAll("],\"virtual_modules\":[");
+        for (c.modules.items, 0..) |m, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeJsonString(writer, m);
+        }
+        try writer.writeByte(']');
+
+        if (c.properties) |props| {
+            try writer.writeAll(",\"properties\":{");
+            try writer.print("\"retry_safe\":{},\"idempotent\":{},\"injection_safe\":{},\"deterministic\":{},\"read_only\":{},\"state_isolated\":{},\"fault_covered\":{}", .{
+                props.retry_safe,
+                props.idempotent,
+                props.injection_safe,
+                props.deterministic,
+                props.read_only,
+                props.state_isolated,
+                props.fault_covered,
+            });
+            try writer.writeByte('}');
+        }
+
+        try writer.writeAll(",\"declared_specs\":[");
+        for (c.declared_specs.items, 0..) |s, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeJsonString(writer, s);
+        }
+        try writer.writeAll("],\"spec_diagnostics\":[");
+        for (c.spec_diagnostics.items, 0..) |d, i| {
+            if (i > 0) try writer.writeByte(',');
+            const code: []const u8 = switch (d.kind) {
+                .not_discharged => "ZTS500",
+                .incompatible_with_import => "ZTS501",
+                .unknown_name => "ZTS502",
+            };
+            const kind_str: []const u8 = switch (d.kind) {
+                .not_discharged => "not_discharged",
+                .incompatible_with_import => "incompatible_with_import",
+                .unknown_name => "unknown_name",
+            };
+            try writer.writeAll("{\"code\":");
+            try writeJsonString(writer, code);
+            try writer.writeAll(",\"kind\":");
+            try writeJsonString(writer, kind_str);
+            try writer.writeAll(",\"spec_name\":");
+            try writeJsonString(writer, d.spec_name);
+            if (d.incompatible_module) |module_name| {
+                try writer.writeAll(",\"incompatible_module\":");
+                try writeJsonString(writer, module_name);
+            }
+            if (d.suggestion) |suggestion| {
+                try writer.writeAll(",\"suggestion\":");
+                try writeJsonString(writer, suggestion);
+            }
+            try writer.writeByte('}');
+        }
+        try writer.writeAll("]}");
+    }
+    try writer.writeAll(",\"diagnostics\":");
     try writeDiagnosticsArray(writer, diagnostics);
     try writer.writeAll("}\n");
 }
