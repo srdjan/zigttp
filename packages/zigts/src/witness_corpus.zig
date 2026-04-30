@@ -332,6 +332,23 @@ fn writeStructuralJsonl(
     try writer.writeAll("{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n");
 }
 
+/// True when a `<key>.pinned` marker exists in the corpus directory.
+/// Cheap: a single `access` syscall per check. Used by build-time tooling
+/// to flag regressions that re-fire a previously pinned witness.
+pub fn isPinned(
+    allocator: std.mem.Allocator,
+    corpus_dir: []const u8,
+    key: []const u8,
+) bool {
+    const marker = std.fmt.allocPrint(
+        allocator,
+        "{s}/{s}.pinned",
+        .{ corpus_dir, key },
+    ) catch return false;
+    defer allocator.free(marker);
+    return file_io.fileExists(allocator, marker);
+}
+
 /// Toggle the pinned marker for a witness. Pinned witnesses are protected
 /// from `prune`. Idempotent.
 pub fn pin(
