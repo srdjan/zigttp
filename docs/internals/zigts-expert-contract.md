@@ -64,6 +64,8 @@ Frozen in v1 (`packages/tools/src/json_diagnostics.zig:42-129`):
 - `ZTS100`–`ZTS1xx` — bool-checker diagnostics (non-boolean condition, nullish misuse, arithmetic on non-numeric).
 - `ZTS200`–`ZTS2xx` — type-checker diagnostics (type mismatch, arg count, return type, non-exhaustive match).
 - `ZTS300`–`ZTS3xx` — handler verifier (missing return path, unchecked result, unused imports, module-scope mutation, unchecked optional access).
+- `ZTS400`–`ZTS4xx` — flow checker (secret/credential reaching response/log/egress, unvalidated input at egress).
+- `ZTS500`–`ZTS5xx` — author-declared spec discharge (`spec_not_discharged`, `spec_incompatible_with_import`, `spec_unknown_name`). Surfaced in `zigts check --json` two ways: as structured entries in `proof.spec_diagnostics` (with `kind`, `spec_name`, optional `incompatible_module`, optional `suggestion`) and as standard error-severity entries in the top-level `diagnostics` array (with `file`/`line`/`column`/`suggestion`, the same shape every other ZTS code emits). The structured form is preferred for agent dispatch; the standard form is what gates exit code and what `verify-paths` / `edit-simulate` consume. See [verification.md](../verification.md) and [user-guide.md](../user-guide.md#author-declared-specs).
 - `ZVM001`+ — virtual-module audit diagnostics from `verify-modules` (direct effect usage, missing checked helpers, spec drift). See `packages/tools/src/module_audit.zig`.
 
 New codes may be added in v1. Existing codes cannot move ranges or change meaning.
@@ -336,7 +338,9 @@ Substring search across rule names, descriptions, and help text.
       "read_only": false,
       "state_isolated": true,
       "fault_covered": true
-    }
+    },
+    "declared_specs": ["idempotent", "deterministic"],
+    "spec_diagnostics": []
   },
   "diagnostics": [ /* warnings only */ ]
 }
@@ -350,6 +354,8 @@ Fields:
   - `outbound_hosts` (string array) — static egress destinations extracted from the contract.
   - `virtual_modules` (string array) — `zigttp:*` module specifiers the handler imports.
   - `properties` (object, closed set in v1) — seven boolean flags, all keys guaranteed: `retry_safe`, `idempotent`, `injection_safe`, `deterministic`, `read_only`, `state_isolated`, `fault_covered`. New property flags would be a v2 change.
+  - `declared_specs` (string array) — author-declared spec names extracted from the handler return type's `Spec<...>` annotation. Empty when no `Spec<...>` is declared. Always present on the success envelope.
+  - `spec_diagnostics` (array of objects) — per-spec discharge results in their structured form. Each entry has `code` (`ZTS500` / `ZTS501` / `ZTS502`), `kind` (`not_discharged` / `incompatible_with_import` / `unknown_name`), `spec_name`, optional `incompatible_module` (ZTS501 only), optional `suggestion` (cause-only ZTS500 only). Empty when every declared spec is satisfied. Note that any non-empty `spec_diagnostics` also produces matching error-severity entries in the top-level `diagnostics` array, which is what gates exit code and what `verify-paths` consumes; the structured form here exists so agent dispatch can branch on `kind` without parsing message strings.
 - `diagnostics` (array of `JsonDiagnostic`) — warning-severity diagnostics only. An empty array is normal.
 
 **Error envelope** (emitted when analysis produced one or more error-severity diagnostics):
@@ -357,11 +363,12 @@ Fields:
 ```json
 {
   "success": false,
+  "proof": { /* same shape as the success envelope, when a contract was produced */ },
   "diagnostics": [ /* errors and warnings */ ]
 }
 ```
 
-There is no `proof` key on the error envelope in v1. Clients must branch on `success` before reading proof.
+The `proof` key is present when analysis produced a `HandlerContract`, even on the error envelope. This lets clients inspect declared specs that failed discharge alongside the standard diagnostics. The key is omitted when no contract was produced (parse failures, missing handler, etc.). Clients must branch on `success` to know whether the check passed; they can read `proof` independently of `success` to inspect the surface the verifier saw.
 
 ## Virtual-module and feature catalogs
 

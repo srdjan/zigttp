@@ -43,6 +43,26 @@ one isolated trick:
 If zigttp keeps strengthening these connections, it remains hard to confuse
 with mainstream runtimes.
 
+## Recently Landed
+
+Items removed from the near-term list because they have shipped. Listed here
+so the strategic order below stays interpretable.
+
+### Author-Declared Spec Obligations
+
+Handlers can now declare which `HandlerProperties` they require directly in
+the return type, via the built-in `Spec<...>` generic alias from
+`zigttp:types`. The verifier discharges declared specs after the analyzer
+pipeline runs and emits ZTS500 (not_discharged), ZTS501
+(incompatible_with_import), or ZTS502 (unknown_name). The proof HUD, proof
+studio, proof ledger, `zigts check --json`, and the `pi_specs_status`
+agent tool all expose the declared set. Route Forge synthesizes new
+handlers with a default `Spec<...>` set so the obligation lives in source
+from day one. This directly addresses "letting AI tooling bypass compiler
+authority" (see [Things To Avoid](#things-to-avoid)): the agent cannot
+satisfy a declared `Spec<...>` without the compiler's discharge, and the
+declaration travels with the handler rather than living in a CLI flag.
+
 ## Near-Term Frontier
 
 These are the highest-leverage features to build next.

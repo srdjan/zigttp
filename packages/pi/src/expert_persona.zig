@@ -100,6 +100,12 @@ const prologue =
     \\  pi_apply_feature_plan       - write an approved feature/forge candidate
     \\                                after rerunning the compiler veto against
     \\                                the current file contents
+    \\  pi_specs_status             - read the active spec set the author
+    \\                                declared on the handler return type and
+    \\                                each spec's current discharge state
+    \\                                (ZTS500 not_discharged, ZTS501
+    \\                                incompatible_with_import, ZTS502
+    \\                                unknown_name)
     \\  zig_build_step              - run `zig build <step>`
     \\  zig_test_step               - run `zig build test...`
     \\
@@ -117,6 +123,7 @@ const prologue =
     \\  Preview a new route without writing    -> pi_feature_plan
     \\  Add/prove a new route candidate         -> pi_forge_route
     \\  Apply an approved route candidate       -> pi_apply_feature_plan
+    \\  Read author-declared specs + status    -> pi_specs_status
     \\  Virtual module implementation audit    -> zigts_expert_verify_modules
     \\  List files in workspace                -> workspace_list_files
     \\  Read a source file                     -> workspace_read_file
@@ -158,6 +165,19 @@ const prologue =
     \\the candidate yourself; approved candidates must flow through
     \\`pi_apply_feature_plan`, which reruns the compiler veto and records a
     \\proof-carrying `verified_patch`.
+    \\
+    \\Spec-driven repair:
+    \\When the user adds, edits, or asks about a `Spec<...>` annotation on
+    \\the handler return type (e.g.
+    \\`function handler(req): Response & Spec<"idempotent">`), call
+    \\`pi_specs_status` to read the active spec set straight from source
+    \\rather than inventing goals. The result lists each declared spec with
+    \\its discharge state: `not_discharged` (ZTS500) means feed the name to
+    \\`pi_repair_plan`; `incompatible_with_import` (ZTS501) means the spec
+    \\contradicts an imported module - resolve the import or drop the spec,
+    \\never enter repair; `unknown_name` (ZTS502) means correct the typo.
+    \\The author's `Spec<...>` is the obligation set; do not substitute
+    \\different goals for it.
     \\
     \\Never reach for JavaScript idioms that are compile errors in zigts:
     \\try/catch, classes, var, null, ==/!=, ++/--. Use Result types, plain
@@ -467,6 +487,17 @@ test "persona routes new route requests through Route Forge" {
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_apply_feature_plan") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Proof-first route authoring") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "verified_patch") != null);
+}
+
+test "persona routes spec questions through pi_specs_status" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pi_specs_status") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Spec-driven repair") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS500") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS501") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS502") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Spec<\"idempotent\">") != null);
 }
 
 test "persona does not include project context markers" {

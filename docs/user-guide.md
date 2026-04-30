@@ -28,7 +28,8 @@ Functions, Cloudflare Workers), powered by Zig and zigts.
 19. [Runtime Sandboxing](#runtime-sandboxing)
 20. [Declarative Handler Testing](#declarative-handler-testing)
 21. [Route Forge with zigts expert](#route-forge-with-zigts-expert)
-22. [Troubleshooting](#troubleshooting)
+22. [Author-Declared Specs](#author-declared-specs)
+23. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -2121,7 +2122,82 @@ in the session ledger.
 V1 scope is intentionally narrow: route creation only. It can add router-based
 dispatch to a plain handler, extend an existing `routes` table, optionally wire
 schema-backed body validation, and return a JSON response with the requested
-status.
+status. Forge-synthesized handlers ship with a default `Spec<...>` set declared
+on the dispatcher, so the proof obligation lives in source from day one (see
+the next section).
+
+## Author-Declared Specs
+
+`Spec<...>` is the source-level way to demand which compiler-proven properties
+a handler must satisfy. It rides the same TS generic-alias machinery as
+`Result<T>`, strips at runtime, and is read by the verifier after the analyzer
+pipeline runs. A handler that declares a spec the inferred `HandlerProperties`
+cannot satisfy fails the build with ZTS500.
+
+```typescript
+import type { Spec } from "zigttp:types";
+
+type Guardrails = Spec<
+    | "idempotent"
+    | "deterministic"
+    | "no_secret_leakage"
+    | "injection_safe"
+>;
+
+function handler(req: Request): Response & Guardrails {
+    return Response.json({ ok: true });
+}
+```
+
+The alias name (`Guardrails`) is your own; the type checker follows alias
+resolution to find the built-in `Spec<...>` marker and extracts the
+string-literal union as the active spec set. Inline use also works:
+`function handler(req: Request): Response & Spec<"idempotent">`.
+
+### v1 spec names
+
+Eleven names are recognized; six produce cause-only failures with a per-property
+suggestion, five produce counterexample-rich failures with a falsifying request
+witness:
+
+- *Cause-only*: `deterministic`, `read_only`, `retry_safe`, `idempotent`,
+  `state_isolated`, `fault_covered`.
+- *Counterexample-rich*: `no_secret_leakage`, `no_credential_leakage`,
+  `input_validated`, `pii_contained`, `injection_safe`.
+
+### Diagnostics
+
+- **ZTS500 - spec_not_discharged**: the corresponding `HandlerProperties` field
+  is false. Cause-only specs include a `Try:` suggestion in the HUD; data-flow
+  specs include a falsifying request body produced by the counterexample
+  solver.
+- **ZTS501 - spec_incompatible_with_import**: the spec contradicts an imported
+  virtual-module function. Today this fires for `Spec<"read_only">` against
+  imports of `zigttp:cache` or `zigttp:sql` writes. ZTS500 is suppressed for the
+  same name; resolve the import or drop the spec before the agent enters
+  repair.
+- **ZTS502 - spec_unknown_name**: the declared name is not in the v1 set.
+  Correct the typo or pick one of the eleven.
+
+### Where declared specs surface
+
+- Live HUD pane under `zigttp serve --watch --prove`: a `Specs (declared)`
+  block beneath the inferred properties shows `[*] spec NAME` when discharged
+  and `[-] spec NAME` when not.
+- Proof studio at `/_zigttp/studio`: a `Specs (declared)` heading after
+  Properties renders each declared spec as a green ✓ or red ✗ pill.
+- Proof ledger entries: `declaredSpecs: [{name, discharged}]` is recorded for
+  every `swap` and `deploy` event so historical entries can be diffed without
+  re-running the verifier.
+- `zigts check --json` adds a `declared_specs` array and a `spec_diagnostics`
+  array to the proof envelope.
+- `zigts expert`: the `pi_specs_status` tool returns the active set and
+  discharge state for a handler. Drive `pi_repair_plan` from this tool's
+  output rather than from the `--goal` CLI flag - the author's `Spec<...>` is
+  the obligation contract.
+
+The `/specs <handler.ts>` slash command is the REPL shortcut that calls
+`pi_specs_status` directly.
 
 ## Troubleshooting
 

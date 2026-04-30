@@ -38,6 +38,7 @@ const SqlQueryInfo = handler_contract.SqlQueryInfo;
 const VerificationInfo = handler_contract.VerificationInfo;
 const AotInfo = handler_contract.AotInfo;
 const CapabilityMatrix = handler_contract.CapabilityMatrix;
+const SpecDiagnostic = @import("contract_types.zig").SpecDiagnostic;
 const ModuleCapability = module_binding.ModuleCapability;
 const capabilityHash = module_binding.capabilityHash;
 const capability_count = module_binding.capability_count;
@@ -142,6 +143,10 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             }
         } else if (std.mem.eql(u8, key, "properties")) {
             contract.properties = try parseProperties(&parser);
+        } else if (std.mem.eql(u8, key, "declaredSpecs")) {
+            try parseStringArray(&parser, allocator, &contract.declared_specs);
+        } else if (std.mem.eql(u8, key, "specDiagnostics")) {
+            try parseSpecDiagnostics(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "sandbox")) {
             try parseSandbox(&parser, &contract);
         } else if (std.mem.eql(u8, key, "behaviors")) {
@@ -1559,6 +1564,93 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
     }
 
     return props;
+}
+
+fn parseSpecDiagnostics(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+) !void {
+    parser.skipWhitespace();
+    if (parser.readNull()) return;
+    if (!parser.consume('[')) return error.InvalidJson;
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var kind: ?SpecDiagnostic.Kind = null;
+        var spec_name: ?[]const u8 = null;
+        var incompatible_module: ?[]const u8 = null;
+        var suggestion: ?[]const u8 = null;
+        errdefer {
+            if (spec_name) |s| allocator.free(s);
+            if (incompatible_module) |s| allocator.free(s);
+            if (suggestion) |s| allocator.free(s);
+        }
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "kind")) {
+                const value = parser.readString() orelse return error.InvalidJson;
+                kind = specDiagnosticKindFromString(value) orelse return error.InvalidJson;
+            } else if (std.mem.eql(u8, key, "code")) {
+                const value = parser.readString() orelse return error.InvalidJson;
+                kind = specDiagnosticKindFromCode(value) orelse kind;
+            } else if (std.mem.eql(u8, key, "specName")) {
+                spec_name = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "incompatibleModule")) {
+                incompatible_module = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "suggestion")) {
+                suggestion = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        const owned_name = spec_name orelse return error.InvalidJson;
+        const owned_kind = kind orelse return error.InvalidJson;
+        try contract.spec_diagnostics.append(allocator, .{
+            .kind = owned_kind,
+            .spec_name = owned_name,
+            .incompatible_module = incompatible_module,
+            .suggestion = suggestion,
+        });
+        spec_name = null;
+        incompatible_module = null;
+        suggestion = null;
+    }
+}
+
+fn specDiagnosticKindFromString(value: []const u8) ?SpecDiagnostic.Kind {
+    if (std.mem.eql(u8, value, "not_discharged")) return .not_discharged;
+    if (std.mem.eql(u8, value, "incompatible_with_import")) return .incompatible_with_import;
+    if (std.mem.eql(u8, value, "unknown_name")) return .unknown_name;
+    return null;
+}
+
+fn specDiagnosticKindFromCode(value: []const u8) ?SpecDiagnostic.Kind {
+    if (std.mem.eql(u8, value, "ZTS500")) return .not_discharged;
+    if (std.mem.eql(u8, value, "ZTS501")) return .incompatible_with_import;
+    if (std.mem.eql(u8, value, "ZTS502")) return .unknown_name;
+    return null;
 }
 
 fn parseSandbox(parser: *JsonParser, contract: *HandlerContract) !void {

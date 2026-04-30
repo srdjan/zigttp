@@ -55,6 +55,7 @@ pub const AotInfo = contract_types.AotInfo;
 pub const FaultCoverageInfo = contract_types.FaultCoverageInfo;
 pub const HandlerProperties = contract_types.HandlerProperties;
 pub const RateLimitInfo = contract_types.RateLimitInfo;
+pub const SpecDiagnostic = contract_types.SpecDiagnostic;
 pub const PathCondition = contract_types.PathCondition;
 pub const PathIoCall = contract_types.PathIoCall;
 pub const BehaviorPath = contract_types.BehaviorPath;
@@ -87,7 +88,6 @@ pub fn extractHost(url: []const u8) []const u8 {
     if (end <= start) return "";
     return url[start..end];
 }
-
 
 // Re-exports from contract_json_parser.zig and contract_json_writer.zig
 pub const parseFromJson = contract_json_parser.parseFromJson;
@@ -273,6 +273,73 @@ test "parseFromJson roundtrip" {
     try std.testing.expect(parsed.verification.?.exhaustive_returns);
     try std.testing.expect(!parsed.verification.?.results_safe);
     try std.testing.expect(parsed.verification.?.bytecode_verified);
+}
+
+test "parseFromJson roundtrip preserves declared specs and diagnostics" {
+    const allocator = std.testing.allocator;
+
+    var declared_specs: std.ArrayList([]const u8) = .empty;
+    try declared_specs.append(allocator, try allocator.dupe(u8, "idempotent"));
+    try declared_specs.append(allocator, try allocator.dupe(u8, "read_only"));
+
+    var spec_diagnostics: std.ArrayList(SpecDiagnostic) = .empty;
+    try spec_diagnostics.append(allocator, .{
+        .kind = .not_discharged,
+        .spec_name = try allocator.dupe(u8, "idempotent"),
+        .suggestion = try allocator.dupe(u8, "remove Date.now()"),
+    });
+    try spec_diagnostics.append(allocator, .{
+        .kind = .incompatible_with_import,
+        .spec_name = try allocator.dupe(u8, "read_only"),
+        .incompatible_module = try allocator.dupe(u8, "zigttp:cache"),
+    });
+
+    var original = HandlerContract{
+        .handler = .{ .path = try allocator.dupe(u8, "spec.ts"), .line = 3, .column = 12 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
+        .api = emptyApiInfo(),
+        .verification = null,
+        .aot = null,
+        .declared_specs = declared_specs,
+        .spec_diagnostics = spec_diagnostics,
+    };
+    defer original.deinit(allocator);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try writeContractJson(&original, &aw.writer);
+    output = aw.toArrayList();
+
+    var parsed = try parseFromJson(allocator, output.items);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), parsed.declared_specs.items.len);
+    try std.testing.expectEqualStrings("idempotent", parsed.declared_specs.items[0]);
+    try std.testing.expectEqualStrings("read_only", parsed.declared_specs.items[1]);
+    try std.testing.expectEqual(@as(usize, 2), parsed.spec_diagnostics.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, parsed.spec_diagnostics.items[0].kind);
+    try std.testing.expectEqualStrings("idempotent", parsed.spec_diagnostics.items[0].spec_name);
+    try std.testing.expectEqualStrings("remove Date.now()", parsed.spec_diagnostics.items[0].suggestion.?);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.incompatible_with_import, parsed.spec_diagnostics.items[1].kind);
+    try std.testing.expectEqualStrings("zigttp:cache", parsed.spec_diagnostics.items[1].incompatible_module.?);
 }
 
 test "parseFromJson roundtrip preserves dynamic service call keys" {
@@ -783,7 +850,6 @@ test "behaviors serialization roundtrip" {
     try std.testing.expect(path1.is_failure_path);
     try std.testing.expectEqual(PathCondition.Kind.io_fail, path1.conditions.items[0].kind);
 }
-
 
 test "computeCapabilityMatrix unions crypto and auth into canonical set" {
     const specs = [_][]const u8{ "zigttp:crypto", "zigttp:auth" };

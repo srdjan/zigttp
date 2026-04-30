@@ -1766,6 +1766,16 @@ test "import type stripped" {
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
 }
 
+test "import type Spec from zigttp:types stripped" {
+    // Author-declared proof obligations live behind `import type { Spec }
+    // from "zigttp:types"`. Confirm the synthetic module path strips
+    // identically to any other type-only import.
+    const result = try strip(std.testing.allocator, "import type { Spec } from \"zigttp:types\";", .{});
+    defer @constCast(&result).deinit();
+    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
+    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
 test "export type stripped" {
     const result = try strip(std.testing.allocator, "export type { Foo };", .{});
     defer @constCast(&result).deinit();

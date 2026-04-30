@@ -1111,7 +1111,7 @@ pub const CheckResult = struct {
     json_diagnostics: std.ArrayList(json_diag.JsonDiagnostic) = .empty,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
-        return self.parse_errors + self.bool_errors + self.type_errors + self.verify_errors + self.flow_errors;
+        return self.parse_errors + self.bool_errors + self.type_errors + self.verify_errors + self.flow_errors + self.specErrors();
     }
 
     pub fn totalWarnings(self: *const CheckResult) u32 {
@@ -1122,6 +1122,11 @@ pub const CheckResult = struct {
         if (self.contract) |*c| c.deinit(allocator);
         self.json_diagnostics.deinit(allocator);
     }
+
+    fn specErrors(self: *const CheckResult) u32 {
+        if (self.contract) |*contract| return @intCast(contract.spec_diagnostics.items.len);
+        return 0;
+    }
 };
 
 fn syncCheckResultProperties(result: *CheckResult) void {
@@ -1130,6 +1135,50 @@ fn syncCheckResultProperties(result: *CheckResult) void {
     } else {
         result.properties = null;
     }
+}
+
+fn appendSpecDiagnosticsJson(
+    allocator: std.mem.Allocator,
+    result: *CheckResult,
+    handler_path: []const u8,
+) void {
+    const contract = if (result.contract) |*c| c else return;
+    for (contract.spec_diagnostics.items) |diag| {
+        const code: []const u8 = switch (diag.kind) {
+            .not_discharged => "ZTS500",
+            .incompatible_with_import => "ZTS501",
+            .unknown_name => "ZTS502",
+        };
+        const message: []const u8 = switch (diag.kind) {
+            .not_discharged => "declared Spec was not discharged by handler proof",
+            .incompatible_with_import => "declared Spec is incompatible with imported module",
+            .unknown_name => "declared Spec name is not recognized",
+        };
+        result.json_diagnostics.append(allocator, .{
+            .code = code,
+            .severity = "error",
+            .message = message,
+            .file = handler_path,
+            .line = contract.handler.line,
+            .column = @intCast(@min(contract.handler.column, std.math.maxInt(u16))),
+            .suggestion = diag.suggestion,
+        }) catch {};
+    }
+}
+
+fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult) !void {
+    const contract = if (result.contract) |*c| c else return;
+    if (contract.declared_specs.items.len == 0) return;
+    for (contract.spec_diagnostics.items) |*diag| {
+        diag.deinit(allocator);
+    }
+    contract.spec_diagnostics.deinit(allocator);
+    contract.spec_diagnostics = try zigts.spec_discharge.dischargeSpecs(
+        allocator,
+        contract.declared_specs.items,
+        contract.properties,
+        contract.modules.items,
+    );
 }
 
 /// Run the full analysis pipeline without generating bytecode.
@@ -1452,6 +1501,8 @@ pub fn runCheckOnlyFromSource(
     // Later analysis stages mutate contract.properties, so keep the flat
     // CheckResult mirror aligned with the finalized contract before returning.
     syncCheckResultProperties(&result);
+    try refreshSpecDiagnostics(allocator, &result);
+    if (json_mode) appendSpecDiagnosticsJson(allocator, &result, handler_path);
 
     return result;
 }

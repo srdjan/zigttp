@@ -136,6 +136,27 @@ const verifier_meta = [_]struct {
         .example = "export function onMessage(ws, data, room) { send(ws, data); } // send undefined",
         .help = "Add `import { send, close, ... } from 'zigttp:websocket';` so event handlers can reply.",
     },
+    .{
+        .kind = .spec_not_discharged,
+        .code = "ZTS500",
+        .description = "Handler declared a Spec<\"name\"> obligation but the inferred property is false.",
+        .example = "type Guardrails = Spec<\"idempotent\">; function handler(req): Response & Guardrails { return Response.json({ now: Date.now() }); }",
+        .help = "Either remove the spec name from the Spec<...> union or fix the handler so the property holds.",
+    },
+    .{
+        .kind = .spec_incompatible_with_import,
+        .code = "ZTS501",
+        .description = "Handler declared a spec that contradicts an imported virtual-module function.",
+        .example = "type G = Spec<\"read_only\">; import { cacheSet } from 'zigttp:cache'; // write violates read_only",
+        .help = "Drop the spec name, remove the import, or move the writing call outside the handler.",
+    },
+    .{
+        .kind = .spec_unknown_name,
+        .code = "ZTS502",
+        .description = "Handler declared Spec<\"NAME\"> with a name not in the v1 spec set.",
+        .example = "type G = Spec<\"made_up\">;",
+        .help = "Use one of: deterministic, read_only, retry_safe, idempotent, state_isolated, fault_covered, no_secret_leakage, no_credential_leakage, input_validated, pii_contained, injection_safe.",
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -434,10 +455,19 @@ test "policyHash is deterministic and 64 hex chars" {
     try std.testing.expectEqual(@as(usize, 64), hash1.len);
 }
 
-test "all verifier rules have ZTS3xx codes" {
+test "all verifier rules have ZTS3xx or ZTS5xx codes" {
+    // ZTS3xx covers the structural checks (return analysis, result/optional
+    // checking, dead code, state isolation, websocket consistency).
+    // ZTS4xx is reserved for FlowChecker (defined in tools/json_diagnostics
+    // alongside the runtime flow analysis pipeline). ZTS5xx covers
+    // author-declared spec discharge (ZTS500 not_discharged, ZTS501
+    // incompatible_with_import, ZTS502 unknown_name).
     for (&all_rules) |*rule| {
         if (rule.category == .verifier) {
-            try std.testing.expect(std.mem.startsWith(u8, rule.code, "ZTS3"));
+            try std.testing.expect(
+                std.mem.startsWith(u8, rule.code, "ZTS3") or
+                    std.mem.startsWith(u8, rule.code, "ZTS5"),
+            );
         }
     }
 }
