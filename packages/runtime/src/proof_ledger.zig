@@ -202,7 +202,7 @@ pub fn resolve(events: []const Event, ref: Ref) ResolveError!usize {
 // Wall clock in unix milliseconds. Mirrors `control_plane.defaultNowSec` but
 // includes ms precision so two events appended within the same second still
 // sort deterministically.
-fn defaultNowMs() i64 {
+pub fn defaultNowMs() i64 {
     var ts: std.posix.timespec = undefined;
     switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
         .SUCCESS => {

@@ -23,6 +23,7 @@ const upgrade_verifier = zigts_cli.upgrade_verifier;
 const HandlerContract = zigts.HandlerContract;
 const deploy_manifest = zigts_cli.deploy_manifest;
 const review_facts_mod = @import("deploy/review.zig");
+const spec_diagnostic = @import("deploy/spec_diagnostic.zig");
 const proof_ledger = @import("proof_ledger.zig");
 const proof_card_tui = @import("proof_card_tui.zig");
 const printer_mod = @import("deploy/printer.zig");
@@ -490,11 +491,6 @@ pub fn factsFromContract(
     );
 }
 
-/// Build a transient SpecState slice from the contract's author-declared
-/// specs and the spec_discharge diagnostics. The slice is borrowed - names
-/// reference the contract's owned strings - and must be freed by the caller
-/// before the contract is freed. ReviewFacts.fromProvenFacts dupes the
-/// names into its own ownership.
 fn buildSpecStates(
     allocator: std.mem.Allocator,
     contract: *const HandlerContract,
@@ -503,23 +499,9 @@ fn buildSpecStates(
     const out = try allocator.alloc(review_facts_mod.SpecState, decls.len);
     errdefer allocator.free(out);
     for (decls, 0..) |name, i| {
-        out[i] = .{
-            .name = name,
-            .discharged = !specHasNotDischarged(contract, name),
-        };
+        out[i] = spec_diagnostic.specStateFor(contract, name);
     }
     return out;
-}
-
-fn specHasNotDischarged(contract: *const HandlerContract, name: []const u8) bool {
-    for (contract.spec_diagnostics.items) |d| {
-        switch (d.kind) {
-            .not_discharged, .incompatible_with_import, .unknown_name => {
-                if (std.mem.eql(u8, d.spec_name, name)) return true;
-            },
-        }
-    }
-    return false;
 }
 
 /// Compute a hash over all watched paths (files and directory contents).

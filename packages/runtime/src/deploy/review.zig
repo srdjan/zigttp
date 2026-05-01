@@ -97,6 +97,21 @@ pub const Route = struct {
 pub const SpecState = struct {
     name: []const u8,
     discharged: bool,
+    /// Author-facing error code (ZTS500/501/502) when the spec failed to
+    /// discharge. Borrowed in transient builders, owned after
+    /// `dupeSortedDedupedSpecs`.
+    diagnostic_code: ?[]const u8 = null,
+    /// One-line explanation of why the spec failed (e.g. "property not
+    /// discharged", "contradicts import of zigttp:cache"). Owned when set.
+    diagnostic_message: ?[]const u8 = null,
+    /// Source line in the handler that caused the demotion. Only populated
+    /// for ZTS500 when the verifier captured a `PropertyCause`.
+    source_line: ?u32 = null,
+    /// Source column matching `source_line`.
+    source_column: ?u16 = null,
+    /// The construct that demoted the property (e.g. "Date.now()"). Owned
+    /// when set.
+    source_snippet: ?[]const u8 = null,
 
     fn lessThan(_: void, a: SpecState, b: SpecState) bool {
         return std.mem.order(u8, a.name, b.name) == .lt;
@@ -272,6 +287,26 @@ pub const ReviewFacts = struct {
             try json.write(s.name);
             try json.objectField("discharged");
             try json.write(s.discharged);
+            if (s.diagnostic_code) |c| {
+                try json.objectField("diagnosticCode");
+                try json.write(c);
+            }
+            if (s.diagnostic_message) |m| {
+                try json.objectField("diagnosticMessage");
+                try json.write(m);
+            }
+            if (s.source_line) |line| {
+                try json.objectField("sourceLine");
+                try json.write(line);
+            }
+            if (s.source_column) |col| {
+                try json.objectField("sourceColumn");
+                try json.write(col);
+            }
+            if (s.source_snippet) |sn| {
+                try json.objectField("sourceSnippet");
+                try json.write(sn);
+            }
             try json.endObject();
         }
         try json.endArray();
@@ -879,14 +914,33 @@ fn dupeSortedDedupedSpecs(
         }
         const name = try allocator.dupe(u8, s.name);
         errdefer allocator.free(name);
-        try out.append(allocator, .{ .name = name, .discharged = s.discharged });
+        const code = if (s.diagnostic_code) |c| try allocator.dupe(u8, c) else null;
+        errdefer if (code) |c| allocator.free(c);
+        const msg = if (s.diagnostic_message) |m| try allocator.dupe(u8, m) else null;
+        errdefer if (msg) |m| allocator.free(m);
+        const snippet = if (s.source_snippet) |sn| try allocator.dupe(u8, sn) else null;
+        errdefer if (snippet) |sn| allocator.free(sn);
+        try out.append(allocator, .{
+            .name = name,
+            .discharged = s.discharged,
+            .diagnostic_code = code,
+            .diagnostic_message = msg,
+            .source_line = s.source_line,
+            .source_column = s.source_column,
+            .source_snippet = snippet,
+        });
         prev_name = s.name;
     }
     return try out.toOwnedSlice(allocator);
 }
 
 fn freeSpecList(allocator: std.mem.Allocator, items: []const SpecState) void {
-    for (items) |s| allocator.free(s.name);
+    for (items) |s| {
+        allocator.free(s.name);
+        if (s.diagnostic_code) |c| allocator.free(c);
+        if (s.diagnostic_message) |m| allocator.free(m);
+        if (s.source_snippet) |sn| allocator.free(sn);
+    }
     allocator.free(items);
 }
 
@@ -921,7 +975,12 @@ fn parseSpecArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]cons
     const out = try allocator.alloc(SpecState, value.array.items.len);
     errdefer allocator.free(out);
     var n: usize = 0;
-    errdefer for (out[0..n]) |s| allocator.free(s.name);
+    errdefer for (out[0..n]) |s| {
+        allocator.free(s.name);
+        if (s.diagnostic_code) |c| allocator.free(c);
+        if (s.diagnostic_message) |m| allocator.free(m);
+        if (s.source_snippet) |sn| allocator.free(sn);
+    };
     for (value.array.items) |item| {
         if (item != .object) return error.InvalidReviewFacts;
         const name_str = json_util.getString(item.object, "name") orelse return error.InvalidReviewFacts;
@@ -930,9 +989,41 @@ fn parseSpecArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]cons
             if (v != .bool) return error.InvalidReviewFacts;
             break :blk v.bool;
         };
+        const code: ?[]const u8 = if (json_util.getString(item.object, "diagnosticCode")) |s|
+            try allocator.dupe(u8, s)
+        else
+            null;
+        errdefer if (code) |c| allocator.free(c);
+        const message: ?[]const u8 = if (json_util.getString(item.object, "diagnosticMessage")) |s|
+            try allocator.dupe(u8, s)
+        else
+            null;
+        errdefer if (message) |m| allocator.free(m);
+        const source_line: ?u32 = blk: {
+            const v = item.object.get("sourceLine") orelse break :blk null;
+            if (v != .integer) break :blk null;
+            if (v.integer < 0 or v.integer > std.math.maxInt(u32)) break :blk null;
+            break :blk @intCast(v.integer);
+        };
+        const source_column: ?u16 = blk: {
+            const v = item.object.get("sourceColumn") orelse break :blk null;
+            if (v != .integer) break :blk null;
+            if (v.integer < 0 or v.integer > std.math.maxInt(u16)) break :blk null;
+            break :blk @intCast(v.integer);
+        };
+        const snippet: ?[]const u8 = if (json_util.getString(item.object, "sourceSnippet")) |s|
+            try allocator.dupe(u8, s)
+        else
+            null;
+        errdefer if (snippet) |sn| allocator.free(sn);
         out[n] = .{
             .name = try allocator.dupe(u8, name_str),
             .discharged = discharged,
+            .diagnostic_code = code,
+            .diagnostic_message = message,
+            .source_line = source_line,
+            .source_column = source_column,
+            .source_snippet = snippet,
         };
         n += 1;
     }

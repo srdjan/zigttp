@@ -20,6 +20,9 @@ notes document design contracts, governance, and roadmap work.
   per-module API pages.
 - [Verification](verification.md) - compile-time handler checks and generated
   path tests.
+- [Witnesses](witnesses.md) - persisted counterexample corpus, the
+  `zigttp witnesses` CLI, the studio detail endpoint, and the
+  `pi_witnesses` agent tool.
 - [Sound Mode](sound-mode.md) - type-directed truthiness, arithmetic, and
   comparison diagnostics.
 - [Feature Detection](feature-detection.md) - supported and rejected language

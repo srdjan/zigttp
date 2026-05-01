@@ -425,9 +425,13 @@ zigttp studio examples/handler/handler.ts
 
 Studio runs the handler with `--watch --prove` and serves
 `/_zigttp/studio`. The workbench shows release readiness, declared
-`Spec<...>` status, proven properties, surface deltas, witness corpus
-counts, generated-test export commands, and next actions that point back
-to compiler-backed CLI or `zigts expert` flows. In the expert REPL,
+`Spec<...>` status, proven properties, surface deltas, the witness
+corpus, a verdict timeline of recent rebuilds, and next actions that
+link the compiler-backed CLI and `zigts expert` flows. Failing spec
+pills expand inline to the matching ZTS500/501/502 diagnostic with
+source line and snippet; witness rows expand to show the falsifying
+request, expected vs got, and IO stubs without a CLI hop. Generated
+path tests download with a one-click link. In the expert REPL,
 `/studio <handler.ts>` prints the same startup command and URL.
 
 ### zigts CLI (compiler and analyzer)

@@ -16,6 +16,7 @@ const first_run = @import("deploy/first_run.zig");
 const io_util = @import("deploy/io_util.zig");
 const printer_mod = @import("deploy/printer.zig");
 const review_mod = @import("deploy/review.zig");
+const spec_diagnostic = @import("deploy/spec_diagnostic.zig");
 const proof_ledger = @import("proof_ledger.zig");
 
 const Printer = printer_mod.Printer;
@@ -1031,10 +1032,6 @@ fn renderProofReview(
     printer.stdout.flush() catch {};
 }
 
-/// Project the contract's author-declared specs into the SpecState shape
-/// that ReviewFacts and DeployReview expect. Names borrow from the
-/// contract's owned strings; ReviewFacts dupes them. The returned slice
-/// owns its own allocation; the caller frees it with `allocator.free`.
 fn buildDeploySpecStates(
     allocator: std.mem.Allocator,
     contract: *const zigts.HandlerContract,
@@ -1043,19 +1040,9 @@ fn buildDeploySpecStates(
     const out = try allocator.alloc(review_mod.SpecState, decls.len);
     errdefer allocator.free(out);
     for (decls, 0..) |name, i| {
-        out[i] = .{
-            .name = name,
-            .discharged = !specHasFailure(contract, name),
-        };
+        out[i] = spec_diagnostic.specStateFor(contract, name);
     }
     return out;
-}
-
-fn specHasFailure(contract: *const zigts.HandlerContract, name: []const u8) bool {
-    for (contract.spec_diagnostics.items) |d| {
-        if (std.mem.eql(u8, d.spec_name, name)) return true;
-    }
-    return false;
 }
 
 fn printCapabilityGrants(

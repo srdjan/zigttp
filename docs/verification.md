@@ -230,8 +230,11 @@ Three diagnostic codes:
   set.
 
 Diagnostics are stored on `HandlerContract.spec_diagnostics`. Surfaces:
-the live HUD, the proof studio, the proof ledger
-(`declaredSpecs: [{name, discharged}]` per swap event),
+the live HUD, the proof studio (failing pills expand inline to the
+ZTS5xx code, source line, and snippet), the proof ledger
+(`declaredSpecs: [{name, discharged, diagnosticCode?,
+diagnosticMessage?, sourceLine?, sourceColumn?, sourceSnippet?}]` per
+swap event; the diagnostic fields appear only on failed specs),
 `zigts check --json` (`declared_specs` and `spec_diagnostics` arrays),
 and the `pi_specs_status` agent tool. See
 [user-guide.md](user-guide.md#author-declared-specs) for the author-side
