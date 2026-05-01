@@ -115,6 +115,28 @@ The block is read directly from `.zigttp/witnesses/<short_hash>/` for
 the handler under check. A missing or empty corpus reports
 `{"total":0,"by_property":{}}`.
 
+### Studio: `/_zigttp/studio/witness/<key>.json`
+
+While the studio is running (`zigttp studio <handler.ts>` or
+`zigttp serve --studio --watch --prove`), each row in the Witnesses
+tile is clickable. Clicking fetches the on-disk witness file and
+renders the falsifying request, IO stubs, summary, source location,
+and pinned status inline. The endpoint is read-only:
+
+```text
+GET /_zigttp/studio/witness/<key>.json
+=> {"key":"<hex>", "pinned":<bool>, "events":[<witness>, <request>, <io>...]}
+```
+
+`<key>` must be 1..64 hex chars (the same shape `witness_corpus.persist`
+produces). The events array is the on-disk JSONL re-emitted as a JSON
+array; each entry is an unmodified record from
+`counterexample.writeJsonl`. Studio caches nothing. It re-reads the
+file on every click, so a corpus refresh on disk is visible
+immediately. A fingerprint guard on the detail panel keeps an
+already-expanded witness expanded across the 750ms poll cycle when the
+underlying `(key, property, pinned)` set is unchanged.
+
 ### Agent tool: `pi_witnesses`
 
 Single op: given a handler path, return the corpus listing.

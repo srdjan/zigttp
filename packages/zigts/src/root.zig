@@ -150,6 +150,7 @@ pub const TypeChecker = type_checker.TypeChecker;
 pub const BytecodeVerifier = bytecode_verifier;
 pub const ContractBuilder = handler_contract.ContractBuilder;
 pub const HandlerContract = handler_contract.HandlerContract;
+pub const SpecDiagnostic = handler_contract.SpecDiagnostic;
 pub const writeContractJson = handler_contract.writeContractJson;
 pub const HandlerPolicy = handler_policy.HandlerPolicy;
 pub const RuntimePolicy = handler_policy.RuntimePolicy;

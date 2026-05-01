@@ -614,6 +614,14 @@ pub const SpecDiagnostic = struct {
         incompatible_with_import,
         /// ZTS403: the spec name is not in the v1 set.
         unknown_name,
+
+        pub fn code(self: Kind) []const u8 {
+            return switch (self) {
+                .not_discharged => "ZTS500",
+                .incompatible_with_import => "ZTS501",
+                .unknown_name => "ZTS502",
+            };
+        }
     };
 
     pub fn deinit(self: *SpecDiagnostic, allocator: std.mem.Allocator) void {

@@ -2185,12 +2185,19 @@ witness:
   block beneath the inferred properties shows `[*] spec NAME` when discharged
   and `[-] spec NAME` when not.
 - Proof studio at `/_zigttp/studio`: a `Specs (declared)` heading after
-  Properties renders each declared spec as a green ✓ or red ✗ pill. The
-  same page includes a release checklist and next-action rail for failed
-  specs, witness inspection, generated-test export, and deploy readiness.
-- Proof ledger entries: `declaredSpecs: [{name, discharged}]` is recorded for
-  every `swap` and `deploy` event so historical entries can be diffed without
-  re-running the verifier.
+  Properties renders each declared spec as a green ✓ or red ✗ pill. A
+  failed pill expands inline to its ZTS500/501/502 code, source line and
+  column, and the snippet that demoted the property. The right pane
+  shows the witness corpus with clickable rows that fetch
+  `/_zigttp/studio/witness/<key>.json` and render the falsifying
+  request, IO stubs, and pinned status without a CLI hop. Generated path
+  tests download with a one-click link. A verdict timeline above the
+  Verdict pane shows the last ten rebuilds with sha and recompile time.
+- Proof ledger: every `swap` and `deploy` event records
+  `declaredSpecs: [{name, discharged, diagnosticCode?,
+  diagnosticMessage?, sourceLine?, sourceColumn?, sourceSnippet?}]` so
+  historical entries diff without re-running the verifier. Only failed
+  specs carry the diagnostic fields.
 - `zigts check --json` adds a `declared_specs` array and a `spec_diagnostics`
   array to the proof envelope.
 - `zigts expert`: the `pi_specs_status` tool returns the active set and

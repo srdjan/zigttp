@@ -388,6 +388,24 @@ const ConnectionPool = struct {
             self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
             return;
         }
+
+        if (studio_mod.witnessDetailKey(path)) |key| {
+            if (studio.witnessDetailJson(allocator, key)) |body| {
+                response.setBodyOwned(body);
+                try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+                self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
+                return;
+            } else |err| switch (err) {
+                error.InvalidWitnessKey, error.WitnessNotFound => {
+                    response.status = 404;
+                    response.body = "Witness not found";
+                    try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+                    self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
+                    return;
+                },
+                else => return err,
+            }
+        }
     }
 
     fn readRequestData(self: *ConnectionPool, fd: std.posix.fd_t, allocator: std.mem.Allocator) ![]u8 {
@@ -1749,6 +1767,24 @@ pub const Server = struct {
             try response.putHeaderBorrowed("Content-Type", "application/x-ndjson; charset=utf-8");
             try self.sendResponse(stream, io, &response, keep_alive);
             return;
+        }
+
+        if (studio_mod.witnessDetailKey(path)) |key| {
+            if (studio.witnessDetailJson(allocator, key)) |body| {
+                response.setBodyOwned(body);
+                try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+                try self.sendResponse(stream, io, &response, keep_alive);
+                return;
+            } else |err| switch (err) {
+                error.InvalidWitnessKey, error.WitnessNotFound => {
+                    response.status = 404;
+                    response.body = "Witness not found";
+                    try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+                    try self.sendResponse(stream, io, &response, keep_alive);
+                    return;
+                },
+                else => return err,
+            }
         }
     }
 
