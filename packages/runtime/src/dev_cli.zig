@@ -528,19 +528,19 @@ fn resolveRuntimeBinary(allocator: std.mem.Allocator, program_path: []const u8) 
     defer io_backend.deinit();
     const io = io_backend.io();
 
-    const abs_self = try std.fs.path.resolve(allocator, &.{program_path});
-    defer allocator.free(abs_self);
-
-    const dir_name = std.fs.path.dirname(abs_self) orelse ".";
+    // program_path may be absolute or cwd-relative depending on how the user
+    // invoked us. Dir.access handles both, so we don't need to canonicalize.
+    const dir_name = std.fs.path.dirname(program_path) orelse ".";
+    const cwd = std.Io.Dir.cwd();
     const candidates = [_][]const u8{ "zigttp-runtime", "zigttp" };
     for (candidates) |name| {
         const candidate = try std.fs.path.join(allocator, &.{ dir_name, name });
         errdefer allocator.free(candidate);
-        if (std.mem.eql(u8, candidate, abs_self)) {
+        if (std.mem.eql(u8, candidate, program_path)) {
             allocator.free(candidate);
             continue;
         }
-        std.Io.Dir.accessAbsolute(io, candidate, .{}) catch {
+        cwd.access(io, candidate, .{}) catch {
             allocator.free(candidate);
             continue;
         };
