@@ -350,6 +350,13 @@ fn hasHelpFlag(argv: []const []const u8) bool {
     return false;
 }
 
+fn containsString(haystack: []const []const u8, needle: []const u8) bool {
+    for (haystack) |entry| {
+        if (std.mem.eql(u8, entry, needle)) return true;
+    }
+    return false;
+}
+
 fn deployArgsRequestLocal(argv: []const []const u8) bool {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -832,13 +839,15 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     , .{ artifact.output_path, artifact.output_path });
 }
 
+/// Cloud-only `zigttp deploy` flags. The local target rejects them with a
+/// pointer to the hosted control-plane help so users do not silently get
+/// the local artifact when they expected a cloud deploy.
+const cloud_only_deploy_flags = [_][]const u8{ "--region", "--confirm", "--wait", "--no-wait" };
+const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local" };
+
 fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--region") or
-            std.mem.eql(u8, arg, "--confirm") or
-            std.mem.eql(u8, arg, "--wait") or
-            std.mem.eql(u8, arg, "--no-wait"))
-        {
+        if (containsString(&cloud_only_deploy_flags, arg)) {
             std.debug.print(
                 \\zigttp deploy --local does not accept {s}.
                 \\Cloud-only flags (--region, --confirm, --wait, --no-wait) apply
@@ -847,13 +856,12 @@ fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
             , .{arg});
             return error.UnknownOption;
         }
-        if (std.mem.eql(u8, arg, "--local")) continue;
-        if (std.mem.eql(u8, arg, "--target")) continue;
-        if (std.mem.eql(u8, arg, "local")) continue;
         if (std.mem.eql(u8, arg, "--help")) {
             printLocalDeployHelp();
             return;
         }
+        if (containsString(&local_deploy_accepted_tokens, arg)) continue;
+
         std.debug.print("Unknown argument for `zigttp deploy --local`: {s}\n\n", .{arg});
         printLocalDeployHelp();
         return error.UnknownOption;
