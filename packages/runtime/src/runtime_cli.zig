@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 
 const Server = @import("server.zig").Server;
 const ServerConfig = @import("server.zig").ServerConfig;
+const edge_server = @import("edge_server.zig");
 const contract_runtime = @import("contract_runtime.zig");
 const replay_runner = @import("replay_runner.zig");
 const test_runner = @import("test_runner.zig");
@@ -55,6 +56,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try serveCommand(allocator, user_args[1..]);
         return;
     }
+    if (std.mem.eql(u8, command, "edge")) {
+        try edgeCommand(allocator, user_args[1..]);
+        return;
+    }
     if (std.mem.eql(u8, command, "attest")) {
         try attestCommand(allocator);
         return;
@@ -70,6 +75,54 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Backward-compatible default: treat bare `zigttp <handler>` usage as `serve`.
     try serveCommand(allocator, user_args);
+}
+
+pub fn edgeCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    const config_path = parseEdgeConfigPath(argv) catch |err| {
+        if (err == error.HelpRequested) return;
+        return err;
+    };
+
+    var config = try edge_server.loadConfig(allocator, config_path);
+    var edge = edge_server.EdgeServer.init(allocator, config) catch |err| {
+        config.deinit(allocator);
+        std.log.err("Failed to initialize edge runtime: {}", .{err});
+        return;
+    };
+    defer edge.deinit();
+
+    edge.run() catch |err| {
+        if (err == error.TlsTerminationNotImplemented) {
+            std.log.err("HTTPS listener config is parsed but TLS termination is not wired yet; use protocol \"http\" for this edge runtime milestone.", .{});
+            return;
+        }
+        std.log.err("Edge runtime error: {}", .{err});
+        return;
+    };
+}
+
+fn parseEdgeConfigPath(argv: []const []const u8) ![]const u8 {
+    var path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--help")) {
+            printEdgeHelp();
+            return error.HelpRequested;
+        }
+        if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--config")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingEdgeConfig;
+            path = argv[i];
+            continue;
+        }
+        if (!std.mem.startsWith(u8, arg, "-")) {
+            path = arg;
+            continue;
+        }
+        return error.UnknownOption;
+    }
+    return path orelse "zigttp.edge.json";
 }
 
 fn attestCommand(allocator: std.mem.Allocator) !void {
@@ -463,12 +516,31 @@ fn printHelp() void {
         \\
         \\Usage:
         \\  zigttp serve [options] [handler.ts]    Run handler
+        \\  zigttp edge [--config FILE]            Run in-process edge runtime
         \\  zigttp attest                           Inspect embedded proof artifact
         \\  zigttp version                          Show version
         \\  zigttp help                             Show this help
         \\
         \\For compile, prove, and expert commands, use `zigts`.
         \\For init, dev, and deploy commands, use `zigttp`.
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn printEdgeHelp() void {
+    const help =
+        \\zigttp edge [options]
+        \\
+        \\Options:
+        \\  -c, --config <FILE>  Edge config JSON (default: zigttp.edge.json)
+        \\
+        \\Config shape:
+        \\  {
+        \\    "listener": {"host":"127.0.0.1","port":8080,"protocol":"http"},
+        \\    "handlers": [{"name":"api","entry":"src/handler.ts","pool":8}],
+        \\    "routes": [{"host":"*","method":"*","pathPrefix":"/","target":"api"}]
+        \\  }
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

@@ -122,6 +122,26 @@ behavioral paths changed and which changes are compatible, additive, or risky.
 Once the near-term foundation is in place, the next layer should extend proof
 from single handlers to systems.
 
+### Post-v1.0.0 Edge TLS Termination
+
+TLS termination for the in-process edge runtime is deferred until after
+v1.0.0. The v1 edge shape should keep serving plain HTTP behind a trusted
+front proxy or platform load balancer.
+
+When this moves back onto the active roadmap, the work should include:
+
+- listener config for certificate chain and private key paths
+- a transport abstraction so request parsing and response writing do not depend
+  on raw TCP file descriptors
+- server-side TLS handshake, encrypted read/write, handshake timeout, and quiet
+  close for malformed handshakes
+- `X-Forwarded-Proto: https` injection before handler dispatch
+- HTTP-to-HTTPS redirect support on a separate listener
+- certificate reload and self-signed-cert smoke tests
+
+Prefer a small dependency-backed TLS backend for the first implementation. A
+pure-Zig TLS server can be revisited later, but it should not block v1.0.0.
+
 ### Whole-System Contract Proofs
 
 System linking should grow into a multi-service proof surface:

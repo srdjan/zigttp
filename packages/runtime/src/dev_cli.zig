@@ -68,6 +68,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try runtime_cli.serveCommand(allocator, user_args[1..]);
         return;
     }
+    if (std.mem.eql(u8, command, "edge")) {
+        try runtime_cli.edgeCommand(allocator, user_args[1..]);
+        return;
+    }
     if (std.mem.eql(u8, command, "doctor")) {
         doctorCommand(allocator, user_args[1..]) catch |err| {
             if (err == error.NoProjectConfig) {
@@ -1184,6 +1188,7 @@ fn printHelp() void {
         \\  zigttp studio [handler-or-project]      Browser proof workbench
         \\  zigttp dev [handler-or-project]         Watch + proven hot reload (HUD on)
         \\  zigttp serve [options] [handler.ts]    Run handler locally
+        \\  zigttp edge [--config FILE]            Run in-process edge runtime
         \\  zigttp expert                          Deprecated alias for `zigts expert`
         \\  zigttp check [handler.ts] [--contract]  Verify handler
         \\  zigttp build [-o <bin>]                 Verify and emit self-contained binary
@@ -1384,4 +1389,88 @@ test "first-run tour marker is durable: absent then created then detected" {
     // Idempotent: a second touch is harmless.
     touchTourMarkerAt(allocator, base);
     try testing.expect(tourMarkerExistsAt(allocator, base));
+}
+
+test "prepareProjectArtifact default path: <root>/.zigttp/<subdir>/<basename>" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "zigttp.json",
+        .data = "{\"entry\":\"src/handler.ts\",\"port\":3000}",
+    });
+    try std.Io.Dir.createDirPath(tmp.dir, io, "src");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "src/handler.ts",
+        .data = "function handler(r) { return Response.text('ok') }\n",
+    });
+
+    var artifact = try prepareProjectArtifact(testing.allocator, io, "build", null);
+    defer artifact.deinit(testing.allocator);
+
+    // Output path ends in `.zigttp/build/<basename(root)>`.
+    try testing.expect(std.mem.indexOf(u8, artifact.output_path, ".zigttp/build/") != null);
+    try testing.expectEqualStrings(artifact.project_name, std.fs.path.basename(artifact.output_path));
+
+    // Parent dir exists (createDirPath ran).
+    const parent = std.fs.path.dirname(artifact.output_path).?;
+    try std.Io.Dir.accessAbsolute(io, parent, .{});
+
+    // Handler path resolves to the manifest entry.
+    try testing.expectStringEndsWith(artifact.handler_path, "src/handler.ts");
+}
+
+test "prepareProjectArtifact override path: passes through unchanged, no parent created" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "zigttp.json",
+        .data = "{\"entry\":\"src/handler.ts\"}",
+    });
+    try std.Io.Dir.createDirPath(tmp.dir, io, "src");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "src/handler.ts",
+        .data = "function handler(r) { return Response.text('ok') }\n",
+    });
+
+    var artifact = try prepareProjectArtifact(testing.allocator, io, "deploy", "/tmp/explicit-name");
+    defer artifact.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("/tmp/explicit-name", artifact.output_path);
+}
+
+test "prepareProjectArtifact returns NoProjectConfig when no zigttp.json on or above CWD" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    // No zigttp.json present anywhere up the tree from this tmp dir.
+    try testing.expectError(error.NoProjectConfig, prepareProjectArtifact(testing.allocator, io, "build", null));
 }
