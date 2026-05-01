@@ -292,7 +292,11 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
 
     const explicit_path = shared.findPositionalPath(argv);
     var project = try project_config_mod.discover(allocator, io, explicit_path);
-    defer if (project) |*p| p.deinit(allocator);
+    // ServerConfig borrows strings (host, entry, static_dir, ...) directly
+    // from `project`. Those references must outlive parseServeArgs, so we
+    // only deinit on error - on success the project is intentionally leaked
+    // for the rest of the process. serveCommand runs until the process exits.
+    errdefer if (project) |*p| p.deinit(allocator);
 
     const has_embedded = embedded_handler.bytecode.len > 0;
 
