@@ -29,7 +29,7 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 
 **Structured concurrent I/O.** `parallel()` and `race()` from `zigttp:io` overlap outbound HTTP without async/await or Promises. Handler code stays synchronous and linear; concurrency happens in the I/O layer using OS threads. Three API calls at 50ms each complete in ~50ms total.
 
-**One-command deploy.** `zigttp deploy` cross-compiles the handler to a Linux musl binary, packages it as an OCI image with proven-fact labels (proof level, env vars, egress hosts, cache namespaces, routes, handler properties), pushes it through the zigttp control plane, and provisions the service. No flags, no config files, no registry to set up. First run prompts for a Zigttp access token in the terminal; browser-based device login remains available as fallback. Drift detection blocks accidental replaces; `--confirm` acknowledges and proceeds. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
+**One-command deploy.** `zigttp deploy --local` produces a self-contained binary at `.zigttp/deploy/<your-app>` and appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. No cloud credentials, Docker, or network. The hosted control-plane path is `zigttp deploy` (without `--local`): it cross-compiles to Linux musl, packages an OCI image with proven-fact labels (proof level, env vars, egress hosts, cache namespaces, routes, handler properties), and provisions the service through the Zigttp control plane. Hosted deploy is currently in preview and requires Zigttp account credentials. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
 
 **Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state. Handlers become deterministic pure functions of (Request, VirtualModuleResponses).
 
@@ -332,14 +332,31 @@ Options:
   --no-env-check        Skip startup env var validation (development use)
 ```
 
-### `zigttp deploy`
+### `zigttp deploy --local`
+
+The v1 deploy path. Verifies the handler in the current project, emits a
+self-contained binary at `.zigttp/deploy/<project-name>`, and appends a
+`kind=deploy` row to `.zigttp/proofs.jsonl`. No cloud credentials, no
+Docker, no registry, no network access.
+
+```bash
+zigttp deploy --local
+./.zigttp/deploy/<project-name>
+```
+
+`zigttp deploy --target local` is an alias. Cloud-only flags
+(`--region`, `--confirm`, `--wait`, `--no-wait`) are rejected with a
+pointer to the hosted path.
+
+### `zigttp deploy` (hosted, preview)
 
 Cross-compiles the handler to a Linux musl binary, packages it as an OCI
-image, pushes it through the zigttp control plane, and provisions the
+image, pushes it through the Zigttp control plane, and provisions the
 service. The control plane mints short-lived registry credentials per
 deploy and forwards the image to the upstream provider, so there is no
 account to create, no registry to configure, and no API token to manage
-on the client.
+on the client. This path requires a Zigttp account and is in preview for
+v1.0; the API surface may shift before general availability.
 
 ```bash
 zigttp deploy [options]
@@ -408,6 +425,34 @@ produce identical digests. Proof facts from the handler contract (proof level,
 env var names, egress hosts, cache namespaces, routes, handler
 properties) are encoded as JSON arrays in OCI image labels so
 provenance survives in the registry.
+
+### `zigttp edge`
+
+In-process edge runtime. Loads multiple handler pools and routes incoming
+requests by host, method, and path prefix to a named target. Useful when
+several handlers share one listener (multitenant edge, A/B routing, or
+internal request fan-out).
+
+```bash
+zigttp edge --config zigttp.edge.json
+zigttp edge -c custom.edge.json
+```
+
+Config is a JSON file with three sections - listener, handlers, routes:
+
+```json
+{
+    "listener": { "host": "127.0.0.1", "port": 8080, "protocol": "http" },
+    "handlers": [{ "name": "api", "entry": "src/handler.ts", "pool": 8 }],
+    "routes": [{ "host": "*", "method": "*", "pathPrefix": "/", "target": "api" }]
+}
+```
+
+Each handler entry is verified at load time. Routes match on host +
+method + path-prefix in declaration order; routes with multiple targets
+distribute via least-busy or weighted round-robin. TLS termination is
+post-v1 roadmap, so run behind a trusted front proxy for HTTPS today.
+See [docs/edge.md](docs/edge.md) for the full config reference.
 
 ### `zigttp proofs`
 
@@ -944,7 +989,7 @@ Omit a section to leave that capability unrestricted. If a section is present, d
 sandboxing and verification, then ships the handler through the zigttp
 control plane in one command. The full flow lives in
 [docs/deploy-tutorial.md](docs/deploy-tutorial.md); the short version is
-above under [`zigttp deploy`](#zigttp-deploy).
+above under [`zigttp deploy` (hosted, preview)](#zigttp-deploy-hosted-preview).
 
 Proof facts from the contract are encoded as JSON arrays in OCI image
 labels (`zigttp.proof-level`, `zigttp.env-vars`, `zigttp.egress-hosts`,

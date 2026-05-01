@@ -109,6 +109,16 @@ zigttp serve -e "function handler(req) { return Response.text('Hello World!') }"
 zigttp serve hello.js
 ```
 
+### Multi-handler edge
+
+`zigttp edge` runs an in-process edge that loads multiple handler pools behind one listener and routes incoming requests to a named target by host, method, and path prefix:
+
+```bash
+zigttp edge --config zigttp.edge.json
+```
+
+Useful for multitenant routing, internal request fan-out, or A/B routing during a migration. Each handler entry is verified at load time, so the edge only listens after every handler in the config is provably safe. See [docs/edge.md](edge.md) for the full config reference.
+
 ---
 
 ## Command Line Reference
