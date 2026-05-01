@@ -66,46 +66,47 @@ directly to FaaS platforms or container environments.
 
 ## Quick Start
 
-### Hello World (Inline)
+The v1 user flow is `init` → edit → `studio` → `build` → `deploy --local`. Each command auto-detects the project from `zigttp.json`, so most steps take no arguments.
+
+### Scaffold a project
 
 ```bash
-./zig-out/bin/zigttp serve -e "function handler(req) { return Response.text('Hello World!') }"
+zigttp init my-app && cd my-app
 ```
 
-Test it:
+This creates `src/handler.ts`, `tests/handler.test.jsonl`, `public/`, `zigttp.json`, a starter `README.md`, and a `.gitignore`.
+
+### Open the proof workbench
 
 ```bash
-curl http://localhost:8080/
-# Output: Hello World!
+zigttp studio
 ```
 
-### Hello World (File)
+The dashboard lives at `http://localhost:3000/_zigttp/studio`. Edit `src/handler.ts` in your editor; studio re-verifies on save and shows the verdict, proven surface (routes, env, egress, capabilities), witnesses, and any spec diagnostics.
 
-Create `hello.js`:
-
-```javascript
-function handler(request) {
-    return Response.text("Hello World!");
-}
-```
-
-Run:
+### Build a self-contained binary
 
 ```bash
-./zig-out/bin/zigttp serve hello.js
+zigttp build
+./.zigttp/build/my-app
 ```
 
-### JSON API
+### Verified local deploy
 
 ```bash
-./zig-out/bin/zigttp serve -e "function handler(req) { return Response.json({message: 'Hello', url: req.url}) }"
+zigttp deploy --local
+./.zigttp/deploy/my-app
 ```
 
-Test:
+`deploy --local` does everything `build` does, plus appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. No cloud credentials, no Docker, no network access. See [docs/deploy-tutorial.md](deploy-tutorial.md) for the hosted-control-plane preview path.
+
+### Quick one-off testing
+
+For inline experimentation outside a project:
 
 ```bash
-curl http://localhost:8080/api/test
-# Output: {"message":"Hello","url":"/api/test"}
+zigttp serve -e "function handler(req) { return Response.text('Hello World!') }"
+zigttp serve hello.js
 ```
 
 ---
