@@ -571,6 +571,15 @@ pub fn build(b: *std.Build) void {
     const bench_check_step = b.step("bench-check", "Compare benchmark output against the checked-in perf baseline");
     bench_check_step.dependOn(&bench_check_cmd.step);
 
+    // End-to-end smoke for the v1 user flow:
+    // init -> doctor -> check -> studio -> build -> deploy --local.
+    // The script builds the CLI itself; the step does not reference cli_exe so
+    // CI can invoke it as a single command without depending on install steps.
+    const smoke_v1_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/smoke-v1.sh" });
+    smoke_v1_cmd.has_side_effects = true;
+    const smoke_v1_step = b.step("smoke-v1", "Run the v1 user-flow smoke test in a temp dir");
+    smoke_v1_step.dependOn(&smoke_v1_cmd.step);
+
     // Compile-time microbench: parse + codegen ns/bytes/IR-nodes per compile
     // across a small synthesized corpus. Scaffolding for Phase 8 tuning of
     // reserveCapacity and intern_pool capacity hints.

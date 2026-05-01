@@ -1,12 +1,25 @@
 # Deploy
 
-Put a `handler.ts` in your project directory. Test it locally with `zigttp serve handler.ts`. When it works, ship it:
+`zigttp deploy --local` is the supported v1 deploy path. It produces a self-contained binary, records the proof in `.zigttp/proofs.jsonl`, and never touches the network.
+
+```
+zigttp deploy --local
+./.zigttp/deploy/<your-app-name>
+```
+
+That is the whole flow. No credentials, no Docker, no registry, no cloud account. Run the binary anywhere and it serves your handler with the same proven properties studio showed you in development.
+
+## Hosted control-plane deploy (preview)
+
+Without `--local`, `zigttp deploy` ships to the hosted Zigttp control plane (currently Northflank-backed). This path is in preview for v1.0: it works end-to-end but requires a Zigttp account, and the API surface may shift before general availability.
+
+If you want to try it:
 
 ```
 zigttp deploy
 ```
 
-That is the whole command. No flags, no positional arguments, no config files, no cloud account, no registry to set up. If you are not signed in yet, the CLI first prompts for a Zigttp access token directly in the terminal. The intended hosted flow is to create that token in the Zigttp web control plane, then paste it into the CLI. Press Enter on an empty token to fall back to browser-based device login. Future runs reuse the saved session, build the handler, push the image, and print the public URL.
+If you are not signed in yet, the CLI first prompts for a Zigttp access token directly in the terminal. The intended hosted flow is to create that token in the Zigttp web control plane, then paste it into the CLI. Press Enter on an empty token to fall back to browser-based device login. Future runs reuse the saved session, build the handler, push the image, and print the public URL.
 
 If you want to sign in before the first deploy, use:
 

@@ -78,20 +78,37 @@ zig build -Doptimize=ReleaseFast
 
 ## Quick Start
 
+The v1 user flow is `init` → edit → `studio` → `build` → `deploy --local`. Each command auto-detects the project from `zigttp.json` so most steps take no arguments.
+
 ```bash
+# 1. Scaffold a new project
+zigttp init my-app && cd my-app
 
-# Run with inline handler
-./zig-out/bin/zigttp serve -e "function handler(r) { return Response.json({hello:'world'}) }"
+# 2. Open the proof workbench in your browser
+zigttp studio
 
-# Or with a handler file
-./zig-out/bin/zigttp serve examples/handler/handler.ts
+# 3. Edit src/handler.ts in your editor.
+#    Studio re-verifies on save, shows the verdict, proven surface,
+#    witnesses, and any spec diagnostics.
+
+# 4. Build a self-contained binary
+zigttp build
+./.zigttp/build/my-app
+
+# 5. Or do a verified local deploy (also writes .zigttp/proofs.jsonl)
+zigttp deploy --local
+./.zigttp/deploy/my-app
 ```
 
 Test it:
 
 ```bash
-curl http://localhost:8080/
+curl http://localhost:3000/
 ```
+
+`zigttp serve [handler.ts]` and `zigttp serve -e "..."` still work for one-off testing without a project.
+
+The hosted control-plane deploy (`zigttp deploy` without `--local`) is in preview and requires Zigttp cloud credentials; see [docs/deploy-tutorial.md](docs/deploy-tutorial.md) for the current state.
 
 ## Handler Example
 

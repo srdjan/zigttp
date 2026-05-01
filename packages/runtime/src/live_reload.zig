@@ -326,7 +326,7 @@ pub const LiveReloadState = struct {
             if (std.mem.eql(u8, sha_hex, &prev)) return;
         }
 
-        appendSwapToLedger(self.allocator, contract, self.handler_path, sha_hex) catch |err| {
+        appendLedgerEntry(self.allocator, .swap, contract, self.handler_path, sha_hex, null) catch |err| {
             printProve("Proof ledger append failed: {}. Swap continues.\n", .{err});
             return;
         };
@@ -549,23 +549,25 @@ fn printProve(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("[prove]  " ++ fmt, args);
 }
 
-/// Project the new contract into ReviewFacts and append a `kind=swap` row to
-/// `.zigttp/proofs.jsonl`. `sha_hex` is the source-bytes sha256 hex (already
-/// computed by the caller for dedupe).
-fn appendSwapToLedger(
+/// Project the contract into ReviewFacts and append a row to
+/// `.zigttp/proofs.jsonl`. `sha_hex` is the source-bytes sha256 hex
+/// (callers that have already computed it for the HUD pass it in).
+pub fn appendLedgerEntry(
     allocator: std.mem.Allocator,
+    kind: proof_ledger.EventKind,
     contract: *const HandlerContract,
     handler_path: []const u8,
     sha_hex: []const u8,
+    service_name: ?[]const u8,
 ) !void {
     var facts = try factsFromContract(allocator, contract, sha_hex);
     defer facts.deinit(allocator);
 
     try proof_ledger.appendEvent(allocator, .{
-        .kind = .swap,
+        .kind = kind,
         .facts = &facts,
         .handler_path = handler_path,
-        .service_name = null,
+        .service_name = service_name,
     });
 }
 

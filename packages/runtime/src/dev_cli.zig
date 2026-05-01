@@ -12,6 +12,8 @@ const precompile = zigts_cli.precompile;
 const shared = @import("cli_shared.zig");
 const runtime_cli = @import("runtime_cli.zig");
 const embedded_handler = @import("embedded_handler");
+const proof_ledger = @import("proof_ledger.zig");
+const live_reload = @import("live_reload.zig");
 
 const deploy_exit_drift: u8 = 2;
 const deploy_exit_ready_timeout: u8 = 3;
@@ -48,11 +50,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "dev")) {
-        try devCommand(allocator, args[0], user_args[1..]);
+        devCommand(allocator, args[0], user_args[1..]) catch |err| {
+            if (handlePreflightError(err, command)) std.process.exit(1);
+            return err;
+        };
         return;
     }
     if (std.mem.eql(u8, command, "studio")) {
-        try studioCommand(allocator, args[0], user_args[1..]);
+        studioCommand(allocator, args[0], user_args[1..]) catch |err| {
+            if (handlePreflightError(err, command)) std.process.exit(1);
+            return err;
+        };
         return;
     }
     if (std.mem.eql(u8, command, "serve")) {
@@ -61,31 +69,54 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "doctor")) {
-        try doctorCommand(allocator, user_args[1..]);
+        doctorCommand(allocator, user_args[1..]) catch |err| {
+            if (err == error.NoProjectConfig) {
+                printNoProjectConfigDiagnostic(command);
+                std.process.exit(1);
+            }
+            return err;
+        };
         return;
     }
-    if (std.mem.eql(u8, command, "check")) {
-        try zigts_cli.run(allocator, user_args);
-        return;
-    }
-    if (std.mem.eql(u8, command, "prove")) {
-        try zigts_cli.run(allocator, user_args);
-        return;
-    }
-    if (std.mem.eql(u8, command, "mock")) {
-        try zigts_cli.run(allocator, user_args);
-        return;
-    }
-    if (std.mem.eql(u8, command, "link")) {
-        try zigts_cli.run(allocator, user_args);
-        return;
-    }
-    if (std.mem.eql(u8, command, "gen-tests")) {
-        try zigts_cli.run(allocator, user_args);
+    if (std.mem.eql(u8, command, "check") or
+        std.mem.eql(u8, command, "prove") or
+        std.mem.eql(u8, command, "mock") or
+        std.mem.eql(u8, command, "link") or
+        std.mem.eql(u8, command, "gen-tests"))
+    {
+        zigts_cli.run(allocator, user_args) catch |err| {
+            if (err == error.NoProjectConfig) {
+                printNoProjectConfigDiagnostic(command);
+                std.process.exit(1);
+            }
+            return err;
+        };
         return;
     }
     if (std.mem.eql(u8, command, "compile")) {
-        try compileCommand(allocator, user_args[1..]);
+        compileCommand(allocator, user_args[1..]) catch |err| {
+            if (err == error.NoProjectConfig) {
+                printNoProjectConfigDiagnostic(command);
+                std.process.exit(1);
+            }
+            if (err == error.MissingArgument) {
+                std.process.exit(1);
+            }
+            return err;
+        };
+        return;
+    }
+    if (std.mem.eql(u8, command, "build")) {
+        buildCommand(allocator, user_args[1..]) catch |err| {
+            if (err == error.NoProjectConfig) {
+                printNoProjectConfigDiagnostic(command);
+                std.process.exit(1);
+            }
+            if (err == error.MissingArgument or err == error.UnknownOption) {
+                std.process.exit(1);
+            }
+            return err;
+        };
         return;
     }
     if (std.mem.eql(u8, command, "expert")) {
@@ -139,6 +170,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "deploy")) {
+        if (deployArgsRequestLocal(user_args[1..])) {
+            localDeployCommand(allocator, user_args[1..]) catch |err| {
+                if (err == error.NoProjectConfig) {
+                    printNoProjectConfigDiagnostic(command);
+                    std.process.exit(1);
+                }
+                if (err == error.UnknownOption) {
+                    std.process.exit(1);
+                }
+                return err;
+            };
+            return;
+        }
         deploy.run(allocator, user_args[1..]) catch |err| {
             if (err == error.HelpRequested) {
                 printDeployHelp();
@@ -298,6 +342,51 @@ pub fn main(init: std.process.Init.Minimal) !void {
 fn hasHelpFlag(argv: []const []const u8) bool {
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help")) return true;
+    }
+    return false;
+}
+
+fn deployArgsRequestLocal(argv: []const []const u8) bool {
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        if (std.mem.eql(u8, argv[i], "--local")) return true;
+        if (std.mem.eql(u8, argv[i], "--target")) {
+            if (i + 1 < argv.len and std.mem.eql(u8, argv[i + 1], "local")) return true;
+        }
+    }
+    return false;
+}
+
+fn printNoProjectConfigDiagnostic(command: []const u8) void {
+    std.debug.print(
+        \\No zigttp.json found in the current directory or any parent.
+        \\
+        \\Run `zigttp init <name>` to scaffold a new project, then `cd <name>`
+        \\and re-run `zigttp {s}`. Or pass an explicit handler path as an argument.
+        \\
+    , .{command});
+}
+
+/// Convert preflight errors from `dev`/`studio` (which run `zigts check`
+/// before launching the runtime child) into clean exit-1 messages instead
+/// of panic-style stack-trace dumps. The readable line was already printed
+/// upstream by `zigts check` itself.
+///
+/// Returns `true` if the caller should `std.process.exit(1)`.
+fn handlePreflightError(err: anyerror, command: []const u8) bool {
+    if (err == error.NoProjectConfig) {
+        printNoProjectConfigDiagnostic(command);
+        return true;
+    }
+    if (err == error.FileNotFound) {
+        // zigts check has already printed `Error reading handler file 'X': error.FileNotFound`.
+        // Add a remediation hint and swallow the stack trace.
+        std.debug.print(
+            \\
+            \\Check the `entry` path in zigttp.json or pass --help for usage.
+            \\
+        , .{});
+        return true;
     }
     return false;
 }
@@ -642,18 +731,174 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
         return error.MissingArgument;
     }
 
-    const source = zigts.file_io.readFile(allocator, handler_path.?, 10 * 1024 * 1024) catch |err| {
-        std.log.err("Failed to read handler '{s}': {}", .{ handler_path.?, err });
+    try buildArtifact(allocator, handler_path.?, output_path.?, null);
+}
+
+const ProjectArtifact = struct {
+    project: project_config_mod.ProjectConfig,
+    handler_path: []u8,
+    output_path: []u8,
+    project_name: []const u8,
+
+    fn deinit(self: *ProjectArtifact, allocator: std.mem.Allocator) void {
+        allocator.free(self.handler_path);
+        allocator.free(self.output_path);
+        self.project.deinit(allocator);
+    }
+};
+
+/// Discover `zigttp.json`, resolve the handler entry, and compute the artifact
+/// output path under `<root>/.zigttp/<subdir>/<project-name>`. Creates the
+/// parent dir for the default path; for an explicit override, trusts the
+/// caller (avoids macOS symlink quirks like `/tmp` → `/private/tmp`).
+fn prepareProjectArtifact(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    subdir: []const u8,
+    output_override: ?[]const u8,
+) !ProjectArtifact {
+    var project_opt = try project_config_mod.discover(allocator, io, null);
+    errdefer if (project_opt) |*p| p.deinit(allocator);
+    var project = project_opt orelse return error.NoProjectConfig;
+    errdefer project.deinit(allocator);
+
+    const handler_path = try project.resolvedEntry(allocator);
+    errdefer allocator.free(handler_path);
+
+    const project_name = std.fs.path.basename(project.root_dir);
+
+    const output_path = if (output_override) |p|
+        try allocator.dupe(u8, p)
+    else blk: {
+        const path = try std.fs.path.resolve(allocator, &.{ project.root_dir, ".zigttp", subdir, project_name });
+        errdefer allocator.free(path);
+        if (std.fs.path.dirname(path)) |parent| {
+            std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, parent) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+        }
+        break :blk path;
+    };
+
+    return .{
+        .project = project,
+        .handler_path = handler_path,
+        .output_path = output_path,
+        .project_name = project_name,
+    };
+}
+
+fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var output_override: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            i += 1;
+            if (i >= argv.len) {
+                std.log.err("-o requires an output path", .{});
+                return error.MissingArgument;
+            }
+            output_override = argv[i];
+        } else if (std.mem.eql(u8, arg, "--help")) {
+            printBuildHelp();
+            return;
+        } else {
+            std.log.err("Unknown argument: {s}", .{arg});
+            printBuildHelp();
+            return error.UnknownOption;
+        }
+    }
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+
+    var artifact = try prepareProjectArtifact(allocator, io_backend.io(), "build", output_override);
+    defer artifact.deinit(allocator);
+
+    try buildArtifact(allocator, artifact.handler_path, artifact.output_path, null);
+
+    std.debug.print(
+        \\
+        \\Built: {s}
+        \\Run:   {s}
+        \\
+    , .{ artifact.output_path, artifact.output_path });
+}
+
+fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--region") or
+            std.mem.eql(u8, arg, "--confirm") or
+            std.mem.eql(u8, arg, "--wait") or
+            std.mem.eql(u8, arg, "--no-wait"))
+        {
+            std.debug.print(
+                \\zigttp deploy --local does not accept {s}.
+                \\Cloud-only flags (--region, --confirm, --wait, --no-wait) apply
+                \\only to the hosted control-plane deploy.
+                \\
+            , .{arg});
+            return error.UnknownOption;
+        }
+        if (std.mem.eql(u8, arg, "--local")) continue;
+        if (std.mem.eql(u8, arg, "--target")) continue;
+        if (std.mem.eql(u8, arg, "local")) continue;
+        if (std.mem.eql(u8, arg, "--help")) {
+            printLocalDeployHelp();
+            return;
+        }
+        std.debug.print("Unknown argument for `zigttp deploy --local`: {s}\n\n", .{arg});
+        printLocalDeployHelp();
+        return error.UnknownOption;
+    }
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+
+    var artifact = try prepareProjectArtifact(allocator, io_backend.io(), "deploy", null);
+    defer artifact.deinit(allocator);
+
+    // proof_ledger.appendEvent writes the relative path `.zigttp/proofs.jsonl`,
+    // so anchor CWD at the project root before buildArtifact emits the ledger
+    // row. The summary block below advertises the ledger; failure here must
+    // surface, not silently warn.
+    try std.Io.Threaded.chdir(artifact.project.root_dir);
+
+    try buildArtifact(allocator, artifact.handler_path, artifact.output_path, artifact.project_name);
+
+    std.debug.print(
+        \\
+        \\Local deploy ready.
+        \\
+        \\  Artifact: {s}
+        \\  Run:      {s} -p {d}
+        \\  Verify:   curl http://{s}:{d}/
+        \\  Ledger:   .zigttp/proofs.jsonl (kind=deploy)
+        \\
+    , .{ artifact.output_path, artifact.output_path, artifact.project.port, artifact.project.host, artifact.project.port });
+}
+
+fn buildArtifact(
+    allocator: std.mem.Allocator,
+    handler_path: []const u8,
+    output_path: []const u8,
+    ledger_service_name: ?[]const u8,
+) !void {
+    const source = zigts.file_io.readFile(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
+        std.log.err("Failed to read handler '{s}': {}", .{ handler_path, err });
         return err;
     };
     defer allocator.free(source);
 
-    std.log.info("Compiling {s}...", .{handler_path.?});
+    std.log.info("Compiling {s}...", .{handler_path});
 
     var compiled = precompile.compileHandler(
         allocator,
         source,
-        handler_path.?,
+        handler_path,
         false,
         true,
         true,
@@ -710,7 +955,7 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
     self_extract.create(
         allocator,
         runtime_binary,
-        output_path.?,
+        output_path,
         compiled.bytecode,
         dep_bytecodes,
         contract_json,
@@ -721,11 +966,20 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
     };
 
     if (builtin.os.tag == .macos) {
-        codesignAdHoc(allocator, output_path.?);
+        codesignAdHoc(allocator, output_path);
+    }
+
+    if (ledger_service_name) |service_name| {
+        if (compiled.contract) |*contract| {
+            var sha_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(source, &sha_digest, .{});
+            const sha_hex = std.fmt.bytesToHex(sha_digest, .lower);
+            try live_reload.appendLedgerEntry(allocator, .deploy, contract, handler_path, &sha_hex, service_name);
+        }
     }
 
     std.log.info("Compiled: {s} -> {s} (bytecode {d} bytes)", .{
-        handler_path.?, output_path.?, compiled.bytecode.len,
+        handler_path, output_path, compiled.bytecode.len,
     });
 }
 
@@ -768,20 +1022,66 @@ fn printCompileHelp() void {
         \\  -o, --output <PATH>   Output binary path (required)
         \\  --help                Show this help
         \\
+        \\For a no-args version that auto-detects from zigttp.json, use
+        \\`zigttp build` instead.
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn printBuildHelp() void {
+    const help =
+        \\zigttp build [-o <output>]
+        \\
+        \\Verify the handler in this project and emit a self-contained binary.
+        \\Reads zigttp.json from the current directory or any parent.
+        \\Default output path is `.zigttp/build/<project-name>`.
+        \\
+        \\Options:
+        \\  -o, --output <PATH>   Override the output binary path
+        \\  --help                Show this help
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn printLocalDeployHelp() void {
+    const help =
+        \\zigttp deploy --local
+        \\
+        \\Build a self-contained binary for the handler in this project and
+        \\record the deploy in the local proof ledger. No cloud credentials,
+        \\Docker, or network access required.
+        \\
+        \\Reads zigttp.json from the current directory or any parent.
+        \\Output: .zigttp/deploy/<project-name>
+        \\Ledger: .zigttp/proofs.jsonl (appends a kind=deploy row)
+        \\
+        \\Options:
+        \\  --local         Use the local target (this command)
+        \\  --target local  Same as --local
+        \\  --help          Show this help
+        \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 
 fn printDeployHelp() void {
     const help =
-        \\zigttp deploy
+        \\zigttp deploy [--local]
         \\
-        \\Deploy the handler in this directory to the zigttp runtime.
+        \\Deploy the handler in this directory.
         \\
-        \\If credentials are missing, Zigttp first prompts for an access token.
-        \\Submit an empty token to fall back to browser-based device login.
+        \\With --local: build a self-contained binary at .zigttp/deploy/<name>
+        \\and record the deploy in .zigttp/proofs.jsonl. No credentials needed.
+        \\
+        \\Without --local: deploy to the zigttp runtime via the hosted control
+        \\plane. If credentials are missing, Zigttp first prompts for an access
+        \\token. Submit an empty token to fall back to browser-based device
+        \\login.
         \\
         \\The command auto-detects everything by default. Optional flags:
+        \\  --local          Build a local artifact, no network, no credentials
         \\  --confirm        Allow replace-like updates after showing the drift warning
         \\  --region <name>  Override the deployment region for this run
         \\  --wait           Block until the service reports ready (default)
@@ -886,7 +1186,8 @@ fn printHelp() void {
         \\  zigttp serve [options] [handler.ts]    Run handler locally
         \\  zigttp expert                          Deprecated alias for `zigts expert`
         \\  zigttp check [handler.ts] [--contract]  Verify handler
-        \\  zigttp compile <handler.ts> -o <bin>    Build self-contained binary
+        \\  zigttp build [-o <bin>]                 Verify and emit self-contained binary
+        \\  zigttp compile <handler.ts> -o <bin>    Build self-contained binary (explicit args)
         \\  zigttp login                            Store deploy credentials
         \\  zigttp deploy                           Deploy the handler in this directory
         \\  zigttp review <plan-id>                 Inspect, approve, or reject a deploy plan
@@ -953,7 +1254,10 @@ const htmxManifest =
 ;
 
 const basicHandler =
+    \\import { logInfo } from "zigttp:log";
+    \\
     \\function handler(req) {
+    \\    logInfo("request received", { path: req.path });
     \\    if (req.method === "GET" && req.path === "/") {
     \\        return Response.text("hello from zigttp");
     \\    }
@@ -1034,10 +1338,31 @@ const gitignoreSource =
 const basicReadme =
     \\# zigttp app
     \\
-    \\## Commands
-    \\- `zigttp dev`
-    \\- `zigttp serve`
-    \\- `zigttp check`
+    \\## Quick start
+    \\
+    \\1. Open the proof workbench in your browser:
+    \\
+    \\       zigttp studio
+    \\
+    \\2. Edit `src/handler.ts` in your editor. Studio re-verifies on save and
+    \\   shows the verdict, proven surface, witnesses, and any spec diagnostics.
+    \\
+    \\3. When you are happy with the verdict, build a self-contained binary:
+    \\
+    \\       zigttp build
+    \\       ./.zigttp/build/<this-app-name>
+    \\
+    \\4. Or do a verified local deploy that also records the proof in the
+    \\   ledger at `.zigttp/proofs.jsonl`:
+    \\
+    \\       zigttp deploy --local
+    \\       ./.zigttp/deploy/<this-app-name>
+    \\
+    \\## Other useful commands
+    \\
+    \\- `zigttp check` - run the analyzer once and exit
+    \\- `zigttp doctor` - validate the project layout
+    \\- `zigttp proofs list` - browse the proof ledger
 ;
 
 const apiReadme = basicReadme;
