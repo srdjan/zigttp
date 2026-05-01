@@ -848,12 +848,13 @@ const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "loca
 fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     for (argv) |arg| {
         if (containsString(&cloud_only_deploy_flags, arg)) {
-            std.debug.print(
-                \\zigttp deploy --local does not accept {s}.
-                \\Cloud-only flags (--region, --confirm, --wait, --no-wait) apply
-                \\only to the hosted control-plane deploy.
-                \\
-            , .{arg});
+            std.debug.print("zigttp deploy --local does not accept {s}.\n", .{arg});
+            std.debug.print("Cloud-only flags (", .{});
+            for (cloud_only_deploy_flags, 0..) |flag, i| {
+                if (i > 0) std.debug.print(", ", .{});
+                std.debug.print("{s}", .{flag});
+            }
+            std.debug.print(") apply only to the hosted control-plane deploy.\n", .{});
             return error.UnknownOption;
         }
         if (std.mem.eql(u8, arg, "--help")) {

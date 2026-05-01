@@ -31,18 +31,21 @@ trap cleanup EXIT
 step() { printf '\n[smoke-v1] %s\n' "$*"; }
 fail() { printf '\n[smoke-v1] FAIL: %s\n' "$*" >&2; exit 1; }
 
-# Poll URL until reachable (HTTP 2xx) or attempts exhausted, then return its body.
-# Usage: body=$(wait_for_http URL ATTEMPTS FAIL_MSG)
+# Poll URL until reachable (HTTP 2xx) or attempts exhausted, printing the
+# response body to stdout. Returns non-zero on exhaustion so callers can
+# chain `|| fail "..."` - bash command substitution does not propagate
+# `set -e`, so we cannot rely on an inner `fail` to abort the parent.
+# Usage: body=$(wait_for_http URL ATTEMPTS) || fail "..."
 wait_for_http() {
-    local url="$1" attempts="$2" fail_msg="$3"
+    local url="$1" attempts="$2"
     for _ in $(seq 1 "$attempts"); do
-        if /usr/bin/curl -sf "$url" >/dev/null 2>&1; then
-            /usr/bin/curl -sf "$url"
+        if body=$(/usr/bin/curl -sf "$url" 2>/dev/null); then
+            printf '%s' "$body"
             return 0
         fi
         sleep 0.2
     done
-    fail "$fail_msg"
+    return 1
 }
 
 # Stop a backgrounded zigttp process: kill by PID, sweep stragglers by pattern, wait.
@@ -79,7 +82,7 @@ STUDIO_PID=$!
 # Studio spawns a child via zigttp-runtime; the dashboard becomes available
 # after pool prewarm completes (~10s budget at 0.2s/attempt).
 state_url="http://127.0.0.1:$STUDIO_PORT/_zigttp/studio/state.json"
-state_body=$(wait_for_http "$state_url" 50 "studio /_zigttp/studio/state.json never became reachable")
+state_body=$(wait_for_http "$state_url" 50) || fail "studio /_zigttp/studio/state.json never became reachable"
 echo "$state_body" | grep -q '"verdict"' || fail "studio state.json missing verdict field: $state_body"
 stop_bg "$STUDIO_PID" "zigttp.*--port $STUDIO_PORT"
 
@@ -90,7 +93,7 @@ step "build emits .zigttp/build/$APP_NAME"
 step "run build artifact on :$BUILD_PORT and curl /"
 "$APP_DIR/.zigttp/build/$APP_NAME" -p "$BUILD_PORT" >/dev/null 2>&1 &
 BUILD_PID=$!
-build_body=$(wait_for_http "http://127.0.0.1:$BUILD_PORT/" 25 "build artifact did not respond on /")
+build_body=$(wait_for_http "http://127.0.0.1:$BUILD_PORT/" 25) || fail "build artifact did not respond on /"
 [ -n "$build_body" ] || fail "build artifact returned empty body on /"
 stop_bg "$BUILD_PID" "$APP_DIR/.zigttp/build/$APP_NAME"
 
@@ -103,7 +106,7 @@ grep -q '"kind":"deploy"' "$APP_DIR/.zigttp/proofs.jsonl" || fail "no kind=deplo
 step "run deploy artifact on :$DEPLOY_PORT and curl /"
 "$APP_DIR/.zigttp/deploy/$APP_NAME" -p "$DEPLOY_PORT" >/dev/null 2>&1 &
 DEPLOY_PID=$!
-deploy_body=$(wait_for_http "http://127.0.0.1:$DEPLOY_PORT/" 25 "deploy artifact did not respond on /")
+deploy_body=$(wait_for_http "http://127.0.0.1:$DEPLOY_PORT/" 25) || fail "deploy artifact did not respond on /"
 [ -n "$deploy_body" ] || fail "deploy artifact returned empty body on /"
 stop_bg "$DEPLOY_PID" "$APP_DIR/.zigttp/deploy/$APP_NAME"
 
