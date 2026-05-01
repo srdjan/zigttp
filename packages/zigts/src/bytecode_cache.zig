@@ -577,6 +577,17 @@ pub const BytecodeCache = struct {
         return @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(total));
     }
 
+    /// Drop a single cache entry. Used to evict bytecode that round-trips
+    /// through the serializer but fails to deserialize, so a later request
+    /// can recompile from source instead of looping on the bad bytes.
+    pub fn invalidate(self: *BytecodeCache, key: CacheKey) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        if (self.cache.fetchRemove(key)) |old| {
+            self.allocator.free(old.value);
+        }
+    }
+
     /// Clear all cached entries
     pub fn clear(self: *BytecodeCache) void {
         self.lock.lock();

@@ -4942,6 +4942,11 @@ pub const HandlerPool = struct {
     pool: zq.LockFreePool,
     cache: bytecode_cache.BytecodeCache,
     cache_mutex: compat.Mutex,
+    /// Latches to true after a cache deserialize failure so subsequent
+    /// requests skip both reads and writes and always recompile from
+    /// source. Protects the runtime from looping on a serialize/deserialize
+    /// mismatch that is, by definition, only visible on cache hits.
+    cache_disabled: std.atomic.Value(bool),
     runtime_init_mutex: compat.Mutex,
     /// Pre-compiled bytecode embedded at build time (from -Dhandler option)
     embedded_bytecode: ?[]const u8,
@@ -5041,6 +5046,7 @@ pub const HandlerPool = struct {
             .pool = pool,
             .cache = bytecode_cache.BytecodeCache.init(allocator),
             .cache_mutex = .{},
+            .cache_disabled = std.atomic.Value(bool).init(false),
             .runtime_init_mutex = .{},
             .embedded_bytecode = embedded_bytecode,
             .runtime_dep_bytecodes = runtime_dep_bytecodes,
@@ -5628,11 +5634,22 @@ pub const HandlerPool = struct {
 
         // Fallback: runtime compilation (for development without -Dhandler)
         const key = bytecode_cache.BytecodeCache.cacheKey(self.handler_code);
+        const cache_ok = !self.cache_disabled.load(.monotonic);
 
         // Fast path: check cache without lock (read-only, safe for concurrent access)
-        if (self.cache.getRaw(key)) |cached_data| {
-            try rt.loadFromCachedBytecode(cached_data);
-            return;
+        if (cache_ok) {
+            if (self.cache.getRaw(key)) |cached_data| {
+                rt.loadFromCachedBytecode(cached_data) catch |err| {
+                    std.log.warn(
+                        "bytecode cache deserialize failed for {s}: {}; recompiling from source",
+                        .{ self.handler_filename, err },
+                    );
+                    self.cache_disabled.store(true, .monotonic);
+                    self.cache.clear();
+                    return self.loadHandlerCached(rt);
+                };
+                return;
+            }
         }
 
         // Slow path: acquire lock for parsing (double-checked locking pattern)
@@ -5641,21 +5658,35 @@ pub const HandlerPool = struct {
         defer self.cache_mutex.unlock();
 
         // Double-check: another thread may have populated cache while we waited
-        if (self.cache.getRaw(key)) |cached_data| {
-            try rt.loadFromCachedBytecode(cached_data);
-            return;
+        var slow_path_recovered = false;
+        if (!self.cache_disabled.load(.monotonic)) {
+            if (self.cache.getRaw(key)) |cached_data| {
+                rt.loadFromCachedBytecode(cached_data) catch |err| {
+                    std.log.warn(
+                        "bytecode cache deserialize failed for {s}: {}; recompiling from source",
+                        .{ self.handler_filename, err },
+                    );
+                    self.cache_disabled.store(true, .monotonic);
+                    self.cache.clear();
+                    slow_path_recovered = true;
+                };
+                if (!slow_path_recovered) return;
+            }
         }
 
         // Cache MISS confirmed: parse and compile (only one thread does this)
         var buffer: [65536]u8 = undefined;
         const serialized = try rt.loadCodeWithCaching(self.handler_code, self.handler_filename, &buffer);
 
-        // Store in cache for future hits
-        if (serialized) |data| {
-            if (!self.cache.contains(key)) {
-                self.cache.putRaw(key, data) catch |err| {
-                    std.log.warn("Bytecode cache insert failed: {}", .{err});
-                };
+        // Store in cache for future hits, but only while caching is healthy.
+        // Once cache_disabled latches, every request recompiles in-process.
+        if (!self.cache_disabled.load(.monotonic)) {
+            if (serialized) |data| {
+                if (!self.cache.contains(key)) {
+                    self.cache.putRaw(key, data) catch |err| {
+                        std.log.warn("Bytecode cache insert failed: {}", .{err});
+                    };
+                }
             }
         }
     }
