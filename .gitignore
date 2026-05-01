@@ -29,6 +29,10 @@ test_mprotect
 test_prot
 test_time
 build_link.log
+
+# Scratch projects scaffolded by `zigttp init` at repo root during ad-hoc
+# CLI testing. Real example apps live under examples/.
+/my-app/
 .codex/skills/
 proof-report.txt
 proof.json
