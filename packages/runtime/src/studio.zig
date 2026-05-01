@@ -591,7 +591,7 @@ pub const index_html =
     \\function actions(items){return (items||[]).map(a=>`<li><span class="pill ${a.severity==="success"?"on":a.severity==="error"?"off":"add"}">${esc(a.kind)}</span><strong>${esc(a.title)}</strong><p>${esc(a.detail)}</p><code>${esc(a.command)}</code></li>`).join("")||"<p class=empty>none</p>"}
     \\let lastWitnessFingerprint="";let lastSpecsFingerprint="";
     \\function witnessFingerprint(entries){return (entries||[]).map(e=>`${e.key}:${e.pinned?1:0}:${e.property}`).join("|")}
-    \\function specsFingerprint(items){return (items||[]).map(s=>`${s.name}:${s.discharged?1:0}:${s.diagnosticCode||""}:${s.sourceLine||""}`).join("|")}
+    \\function specsFingerprint(items){return (items||[]).map(s=>`${s.name}:${s.discharged?1:0}:${s.diagnosticCode||""}:${s.diagnosticMessage||""}:${s.sourceLine||""}:${s.sourceColumn||""}:${s.sourceSnippet||""}`).join("|")}
     \\function fmtClock(ms){const d=new Date(ms);return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}:${String(d.getSeconds()).padStart(2,"0")}`}
     \\function timeline(entries){if(!entries||!entries.length)return"";return entries.map((e,i)=>`<span class="tick ${esc(e.verdict)}${i===0?" first":""}" title="${esc(e.verdict)} · sha ${esc(e.sha8||"")} · ${e.recompileMs??0}ms · ${fmtClock(e.timestampMs)}">${fmtClock(e.timestampMs)} ${esc((e.sha8||"").slice(0,4))}${e.recompileMs!=null?" · "+e.recompileMs+"ms":""}</span>`).join("")}
     \\async function refresh(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});const s=await r.json();$("status").textContent=`${s.status} · ${s.handlerPath||""}`;if(s.status!=="ready"){$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions);}catch(e){$("status").textContent=String(e)}}setInterval(refresh,750);refresh();
@@ -663,6 +663,12 @@ test "factsJson includes release readiness and next actions" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"sourceSnippet\":\"Date.now()\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"recent\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"sha8\":\"abc123\"") != null);
+}
+
+test "studio spec fingerprint tracks rendered diagnostic details" {
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "diagnosticMessage||") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "sourceColumn||") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "sourceSnippet||") != null);
 }
 
 test "pushRecent keeps newest first and caps at recent_capacity" {
