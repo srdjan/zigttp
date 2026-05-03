@@ -1,10 +1,5 @@
 const std = @import("std");
 
-const RuntimeFeatureConfig = struct {
-    enable_live_reload: bool,
-    enable_studio: bool,
-};
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -34,6 +29,12 @@ pub fn build(b: *std.Build) void {
     const runtime_dep = b.dependency("zigttp_runtime", .{
         .target = target,
         .optimize = optimize,
+        .perf_histogram = perf_histogram_enabled,
+    });
+    const runtime_bench_dep = b.dependency("zigttp_runtime", .{
+        .target = target,
+        .optimize = bench_optimize,
+        .perf_histogram = perf_histogram_enabled,
     });
 
     const pi_dep = b.dependency("zigttp_pi", .{
@@ -205,19 +206,8 @@ pub fn build(b: *std.Build) void {
     // handler. No pi_app, no deploy, no zigts_cli.
     const runtime_exe = b.addExecutable(.{
         .name = "zigttp-runtime",
-        .root_module = b.createModule(.{
-            .root_source_file = runtime_dep.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
+        .root_module = runtime_dep.module("runtime_main"),
     });
-    runtime_exe.root_module.addImport("zigts", zigts_mod);
-    runtime_exe.root_module.addImport("project_config", project_config_mod);
-    runtime_exe.root_module.addOptions("runtime_feature_options", runtimeFeatureOptions(b, .{
-        .enable_live_reload = false,
-        .enable_studio = false,
-    }));
 
     var embedded_handler_step: ?*std.Build.Step = null;
 
@@ -326,13 +316,7 @@ pub fn build(b: *std.Build) void {
     // without taking a build dependency on the runtime stack. Both
     // `zigts` and `zigttp` binaries register the same implementation
     // before launching the agent loop.
-    const runtime_witness_replay_mod = b.createModule(.{
-        .root_source_file = runtime_dep.path("src/witness_replay_lib.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    runtime_witness_replay_mod.addImport("zigts", zigts_mod);
-    runtime_witness_replay_mod.addImport("pi_app", pi_app_mod);
+    const runtime_witness_replay_mod = runtime_dep.module("witness_replay");
     runtime_witness_replay_mod.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
@@ -346,21 +330,8 @@ pub fn build(b: *std.Build) void {
     // deploy subtree.
     const cli_exe = b.addExecutable(.{
         .name = "zigttp",
-        .root_module = b.createModule(.{
-            .root_source_file = runtime_dep.path("src/cli_main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
+        .root_module = runtime_dep.module("cli_main"),
     });
-    cli_exe.root_module.addImport("zigts", zigts_mod);
-    cli_exe.root_module.addImport("zigts_cli", zigts_cli_mod);
-    cli_exe.root_module.addImport("pi_app", pi_app_mod);
-    cli_exe.root_module.addImport("project_config", project_config_mod);
-    cli_exe.root_module.addOptions("runtime_feature_options", runtimeFeatureOptions(b, .{
-        .enable_live_reload = true,
-        .enable_studio = true,
-    }));
     if (embedded_handler_step) |step| {
         cli_exe.step.dependOn(step);
         cli_exe.root_module.addAnonymousImport("embedded_handler", .{
@@ -458,21 +429,11 @@ pub fn build(b: *std.Build) void {
 
     // Tests
     const unit_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = runtime_dep.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = runtime_dep.module("runtime_main_tests"),
     });
 
     // Runtime-side tests (main.zig root) — covers runtime_cli, zruntime,
     // server, proof_adapter, cli_shared via the test block in main.zig.
-    unit_tests.root_module.addImport("zigts", zigts_mod);
-    unit_tests.root_module.addImport("project_config", project_config_mod);
-    unit_tests.root_module.addOptions("runtime_feature_options", runtimeFeatureOptions(b, .{
-        .enable_live_reload = false,
-        .enable_studio = false,
-    }));
     unit_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
@@ -484,20 +445,8 @@ pub fn build(b: *std.Build) void {
     // Dev-CLI-side tests (cli_main.zig root) — covers dev_cli and its
     // dependencies (deploy, pi_app wiring, zigts_cli delegation).
     const cli_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = runtime_dep.path("src/cli_main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = runtime_dep.module("cli_main_tests"),
     });
-    cli_tests.root_module.addImport("zigts", zigts_mod);
-    cli_tests.root_module.addImport("zigts_cli", zigts_cli_mod);
-    cli_tests.root_module.addImport("pi_app", pi_app_mod);
-    cli_tests.root_module.addImport("project_config", project_config_mod);
-    cli_tests.root_module.addOptions("runtime_feature_options", runtimeFeatureOptions(b, .{
-        .enable_live_reload = true,
-        .enable_studio = true,
-    }));
     cli_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
@@ -523,17 +472,8 @@ pub fn build(b: *std.Build) void {
 
     // ZRuntime tests (native Zig runtime)
     const zruntime_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = runtime_dep.path("src/zruntime.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = runtime_dep.module("zruntime"),
     });
-    zruntime_tests.root_module.addImport("zigts", zigts_mod);
-    zruntime_tests.root_module.addOptions("runtime_feature_options", runtimeFeatureOptions(b, .{
-        .enable_live_reload = false,
-        .enable_studio = false,
-    }));
     zruntime_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
@@ -548,18 +488,8 @@ pub fn build(b: *std.Build) void {
     // Benchmark executable
     const bench_exe = b.addExecutable(.{
         .name = "zigttp-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = runtime_dep.path("src/benchmark.zig"),
-            .target = target,
-            .optimize = bench_optimize,
-            .link_libc = true,
-        }),
+        .root_module = runtime_bench_dep.module("benchmark"),
     });
-    bench_exe.root_module.addImport("zigts", zigts_mod);
-    bench_exe.root_module.addOptions("runtime_feature_options", runtimeFeatureOptions(b, .{
-        .enable_live_reload = false,
-        .enable_studio = false,
-    }));
     bench_exe.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
@@ -606,14 +536,8 @@ pub fn build(b: *std.Build) void {
     // reserveCapacity and intern_pool capacity hints.
     const compile_bench_exe = b.addExecutable(.{
         .name = "zigttp-compile-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = runtime_dep.path("src/compile_benchmark.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
+        .root_module = runtime_dep.module("compile_benchmark"),
     });
-    compile_bench_exe.root_module.addImport("zigts", zigts_mod);
 
     const compile_bench_cmd = b.addRunArtifact(compile_bench_exe);
     // Bench runs are measurements, not cacheable build products.
@@ -625,14 +549,8 @@ pub fn build(b: *std.Build) void {
     compile_bench_step.dependOn(&compile_bench_cmd.step);
 
     const compile_bench_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = runtime_dep.path("src/compile_benchmark.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
+        .root_module = runtime_dep.module("compile_benchmark"),
     });
-    compile_bench_tests.root_module.addImport("zigts", zigts_mod);
     const run_compile_bench_tests = b.addRunArtifact(compile_bench_tests);
     const compile_bench_test_step = b.step("test-compile-bench", "Run compile-time microbench harness tests");
     compile_bench_test_step.dependOn(&run_compile_bench_tests.step);
@@ -649,13 +567,6 @@ pub fn build(b: *std.Build) void {
         const system_step = b.step("system", "Cross-handler contract linking");
         system_step.dependOn(&run_system.step);
     }
-}
-
-fn runtimeFeatureOptions(b: *std.Build, config: RuntimeFeatureConfig) *std.Build.Step.Options {
-    const options = b.addOptions();
-    options.addOption(bool, "enable_live_reload", config.enable_live_reload);
-    options.addOption(bool, "enable_studio", config.enable_studio);
-    return options;
 }
 
 fn addExpertGolden(

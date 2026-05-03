@@ -3,6 +3,17 @@
     .version = "0.16.0",
     .fingerprint = 0xb979b001f3d33260,
     .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zigts = .{
+            .path = "../zigts",
+        },
+        .zigttp_tools = .{
+            .path = "../tools",
+        },
+        .zigttp_pi = .{
+            .path = "../pi",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
