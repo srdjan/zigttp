@@ -7,15 +7,13 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zq = @import("zigts");
-const compat = @import("zigts").compat;
+const engine = @import("engine_adapter.zig");
 const Io = std.Io;
 const net = std.Io.net;
 const Dir = std.Io.Dir;
-const zruntime = @import("zruntime.zig");
-const Runtime = zruntime.Runtime;
-const HandlerPool = zruntime.HandlerPool;
-const RuntimeConfig = zruntime.RuntimeConfig;
+const Runtime = engine.Runtime;
+const HandlerPool = engine.HandlerPool;
+const RuntimeConfig = engine.RuntimeConfig;
 const http_parser = @import("http_parser.zig");
 const http_types = @import("http_types.zig");
 const HttpRequestView = http_types.HttpRequestView;
@@ -48,7 +46,7 @@ const parseQueryString = http_parser.parseQueryString;
 const splitHeaderLine = http_parser.splitHeaderLine;
 const parseContentLength = http_parser.parseContentLength;
 
-const readFilePosix = zq.file_io.readFile;
+const readFilePosix = engine.readFile;
 
 fn formatETag(mtime: Io.Timestamp, size: u64, out: *[34]u8) []const u8 {
     const ns_bytes = std.mem.asBytes(&mtime.nanoseconds);
@@ -172,7 +170,7 @@ const ConnectionPool = struct {
         head: usize,
         tail: usize,
         count: std.atomic.Value(usize), // Atomic for lock-free count check
-        mutex: compat.Mutex,
+        mutex: engine.Mutex,
         ready: std.Io.Semaphore,
 
         fn init() BoundedQueue {
@@ -408,7 +406,7 @@ const ConnectionPool = struct {
 
         // Invoke handler
         if (self.server.pool) |*pool| {
-            var handle = pool.executeHandlerBorrowed(HttpRequestView{
+            var handle = engine.executeHandlerBorrowed(pool, HttpRequestView{
                 .url = request.url,
                 .method = request.method,
                 .path = request.path,
@@ -851,7 +849,7 @@ fn requestIsWebSocketUpgrade(headers: []const HttpHeader) bool {
 }
 
 fn unixMillisNow() i64 {
-    return zq.trace.unixMillis();
+    return engine.unixMillis();
 }
 
 fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
@@ -1141,7 +1139,7 @@ pub const Server = struct {
         if (self.contract) |*c| c.deinit();
         if (self.security_logger) |logger| logger.deinit();
         if (self.studio) |*studio| studio.deinit();
-        zq.security_events.deinitGlobal();
+        engine.deinitSecurityEvents();
         self.static_cache.deinit();
         if (self.evented_ready) {
             const io = self.io_backend.io();
@@ -1185,7 +1183,7 @@ pub const Server = struct {
 
         // Process-wide security event stream. Emits to an uninitialized
         // stream are silent no-ops, so this just sizes the ring once.
-        try zq.security_events.initGlobal(self.allocator, 128);
+        try engine.initSecurityEvents(self.allocator, 128);
 
         if (self.config.studio) {
             switch (self.config.handler) {
@@ -1210,8 +1208,8 @@ pub const Server = struct {
         }
 
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
-        var pool_timer = compat.Timer.start() catch null;
-        self.pool = try HandlerPool.initWithEmbeddedAndDeps(
+        var pool_timer = engine.Timer.start() catch null;
+        self.pool = try engine.initHandlerPool(
             self.allocator,
             self.config.runtime_config,
             self.handler_code,
@@ -1470,7 +1468,7 @@ pub const Server = struct {
         request_num: u32,
         req_allocator: std.mem.Allocator,
     ) !bool {
-        const start_instant = compat.Instant.now() catch null;
+        const start_instant = engine.Instant.now() catch null;
 
         var request_started = false;
         // Parse HTTP request
@@ -1556,7 +1554,7 @@ pub const Server = struct {
 
         // Invoke JS handler via pool
         if (self.pool) |*pool| {
-            var handle = pool.executeHandlerBorrowed(HttpRequestView{
+            var handle = engine.executeHandlerBorrowed(pool, HttpRequestView{
                 .url = request.url,
                 .method = request.method,
                 .path = request.path,
@@ -1573,7 +1571,7 @@ pub const Server = struct {
                     "Internal Server Error";
                 std.log.err(
                     "Handler error: {} (responding with {}, in_use={d}/{d})",
-                    .{ err, status, pool.getInUse(), pool.max_size },
+                    .{ err, status, engine.poolInUse(pool), engine.poolCapacity(pool) },
                 );
                 try self.sendErrorResponse(stream, io, status, message);
                 return false; // Close connection on error
@@ -1601,7 +1599,7 @@ pub const Server = struct {
             // Log request
             if (self.config.log_requests) {
                 const elapsed_ms: i64 = if (start_instant) |start_time| blk: {
-                    const now = compat.Instant.now() catch break :blk 0;
+                    const now = engine.Instant.now() catch break :blk 0;
                     break :blk @intCast(now.since(start_time) / std.time.ns_per_ms);
                 } else 0;
                 const count = self.request_count.fetchAdd(1, .monotonic) + 1;
@@ -1620,8 +1618,8 @@ pub const Server = struct {
                     std.log.info(
                         "Pool metrics: in_use={d}/{d} exhausted={d} avg_wait_us={d} max_wait_us={d} avg_exec_us={d} max_exec_us={d}",
                         .{
-                            pool.getInUse(),
-                            pool.max_size,
+                            engine.poolInUse(pool),
+                            engine.poolCapacity(pool),
                             metrics.exhausted,
                             metrics.avg_wait_ns / std.time.ns_per_us,
                             metrics.max_wait_ns / std.time.ns_per_us,
@@ -2144,7 +2142,7 @@ const StaticFileCache = struct {
     total_bytes: usize,
     max_bytes: usize,
     max_file_size: usize,
-    mutex: compat.Mutex,
+    mutex: engine.Mutex,
 
     pub const Handle = struct {
         entry: CacheEntry,
