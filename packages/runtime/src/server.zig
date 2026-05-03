@@ -143,6 +143,58 @@ fn formatStaticOkHeader(
     );
 }
 
+/// Populate `response` for a `/_zigttp/studio*` path. Returns true if the
+/// caller should send `response`, false if the path didn't match any
+/// studio route. Studio-disabled and witness-not-found are populated as
+/// 404 responses (return true). Shared by the threaded and event-loop
+/// I/O paths so dispatch logic stays in one place.
+fn populateStudioResponse(
+    studio_opt: ?*studio_mod.State,
+    path: []const u8,
+    response: *HttpResponse,
+    allocator: std.mem.Allocator,
+) !bool {
+    if (std.mem.eql(u8, path, "/_zigttp/studio") or std.mem.eql(u8, path, "/_zigttp/studio/")) {
+        try response.putHeaderBorrowed("Content-Type", "text/html; charset=utf-8");
+        response.body = studio_mod.index_html;
+        return true;
+    }
+    const studio = studio_opt orelse {
+        response.status = 404;
+        response.body = "Studio disabled";
+        try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+        return true;
+    };
+    if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) {
+        const body = try studio.stateJsonCopy(allocator);
+        response.setBodyOwned(body);
+        try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) {
+        const body = try studio.generatedTests(allocator);
+        response.setBodyOwned(body);
+        try response.putHeaderBorrowed("Content-Type", "application/x-ndjson; charset=utf-8");
+        return true;
+    }
+    if (studio_mod.witnessDetailKey(path)) |key| {
+        if (studio.witnessDetailJson(allocator, key)) |body| {
+            response.setBodyOwned(body);
+            try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+            return true;
+        } else |err| switch (err) {
+            error.InvalidWitnessKey, error.WitnessNotFound => {
+                response.status = 404;
+                response.body = "Witness not found";
+                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+                return true;
+            },
+            else => return err,
+        }
+    }
+    return false;
+}
+
 // ============================================================================
 // Connection Thread Pool (for macOS threaded backend)
 // ============================================================================
@@ -450,54 +502,9 @@ const ConnectionPool = struct {
         var response = HttpResponse.init(allocator);
         defer response.deinit();
 
-        if (std.mem.eql(u8, path, "/_zigttp/studio") or std.mem.eql(u8, path, "/_zigttp/studio/")) {
-            try response.putHeaderBorrowed("Content-Type", "text/html; charset=utf-8");
-            response.body = studio_mod.index_html;
+        const studio_opt: ?*studio_mod.State = if (self.server.studio) |*s| s else null;
+        if (try populateStudioResponse(studio_opt, path, &response, allocator)) {
             self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
-            return;
-        }
-
-        if (self.server.studio == null) {
-            response.status = 404;
-            response.body = "Studio disabled";
-            try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-            self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
-            return;
-        }
-        const studio = &self.server.studio.?;
-
-        if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) {
-            const body = try studio.stateJsonCopy(allocator);
-            response.setBodyOwned(body);
-            try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
-            self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
-            return;
-        }
-
-        if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) {
-            const body = try studio.generatedTests(allocator);
-            response.setBodyOwned(body);
-            try response.putHeaderBorrowed("Content-Type", "application/x-ndjson; charset=utf-8");
-            self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
-            return;
-        }
-
-        if (studio_mod.witnessDetailKey(path)) |key| {
-            if (studio.witnessDetailJson(allocator, key)) |body| {
-                response.setBodyOwned(body);
-                try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
-                self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
-                return;
-            } else |err| switch (err) {
-                error.InvalidWitnessKey, error.WitnessNotFound => {
-                    response.status = 404;
-                    response.body = "Witness not found";
-                    try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-                    self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
-                    return;
-                },
-                else => return err,
-            }
         }
     }
 
@@ -1792,54 +1799,9 @@ pub const Server = struct {
         var response = HttpResponse.init(allocator);
         defer response.deinit();
 
-        if (std.mem.eql(u8, path, "/_zigttp/studio") or std.mem.eql(u8, path, "/_zigttp/studio/")) {
-            try response.putHeaderBorrowed("Content-Type", "text/html; charset=utf-8");
-            response.body = studio_mod.index_html;
+        const studio_opt: ?*studio_mod.State = if (self.studio) |*s| s else null;
+        if (try populateStudioResponse(studio_opt, path, &response, allocator)) {
             try self.sendResponse(stream, io, &response, keep_alive);
-            return;
-        }
-
-        if (self.studio == null) {
-            response.status = 404;
-            response.body = "Studio disabled";
-            try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-            try self.sendResponse(stream, io, &response, keep_alive);
-            return;
-        }
-        const studio = &self.studio.?;
-
-        if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) {
-            const body = try studio.stateJsonCopy(allocator);
-            response.setBodyOwned(body);
-            try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
-            try self.sendResponse(stream, io, &response, keep_alive);
-            return;
-        }
-
-        if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) {
-            const body = try studio.generatedTests(allocator);
-            response.setBodyOwned(body);
-            try response.putHeaderBorrowed("Content-Type", "application/x-ndjson; charset=utf-8");
-            try self.sendResponse(stream, io, &response, keep_alive);
-            return;
-        }
-
-        if (studio_mod.witnessDetailKey(path)) |key| {
-            if (studio.witnessDetailJson(allocator, key)) |body| {
-                response.setBodyOwned(body);
-                try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
-                try self.sendResponse(stream, io, &response, keep_alive);
-                return;
-            } else |err| switch (err) {
-                error.InvalidWitnessKey, error.WitnessNotFound => {
-                    response.status = 404;
-                    response.body = "Witness not found";
-                    try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-                    try self.sendResponse(stream, io, &response, keep_alive);
-                    return;
-                },
-                else => return err,
-            }
         }
     }
 
