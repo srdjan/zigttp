@@ -9,9 +9,10 @@ const replay_runner = @import("replay_runner.zig");
 const test_runner = @import("test_runner.zig");
 const durable_recovery = @import("durable_recovery.zig");
 const durable_scheduler = @import("durable_scheduler.zig");
+const feature_options = @import("runtime_feature_options");
 const project_config_mod = @import("project_config");
 const self_extract = @import("self_extract.zig");
-const live_reload_mod = @import("live_reload.zig");
+const live_reload_mod = @import("runtime_features.zig").live_reload;
 const shared = @import("cli_shared.zig");
 
 const embedded_handler = @import("embedded_handler");
@@ -177,8 +178,16 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         if (std.mem.eql(u8, arg, "--studio")) studio_enabled = true;
     }
     if (studio_enabled) {
+        if (!feature_options.enable_studio) {
+            std.log.err("--studio is not available in zigttp-runtime; use the zigttp developer CLI", .{});
+            return;
+        }
         watch_enabled = true;
         prove_enabled = true;
+    }
+    if (watch_enabled and !feature_options.enable_live_reload) {
+        std.log.err("--watch is not available in zigttp-runtime; use the zigttp developer CLI", .{});
+        return;
     }
 
     var config = parseServeArgs(allocator, argv) catch |err| {

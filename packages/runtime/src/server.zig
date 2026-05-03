@@ -32,7 +32,7 @@ const websocket_pool = @import("websocket_pool.zig");
 const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const proof_audit_ring = @import("proof_audit_ring.zig");
-const studio_mod = @import("studio.zig");
+const studio_mod = @import("runtime_features.zig").studio;
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
 
@@ -49,6 +49,101 @@ const splitHeaderLine = http_parser.splitHeaderLine;
 const parseContentLength = http_parser.parseContentLength;
 
 const readFilePosix = zq.file_io.readFile;
+
+fn formatETag(mtime: Io.Timestamp, size: u64, out: *[34]u8) []const u8 {
+    const ns_bytes = std.mem.asBytes(&mtime.nanoseconds);
+    const size_bytes = std.mem.asBytes(&size);
+    var bytes: [16]u8 = undefined;
+    @memcpy(bytes[0..8], ns_bytes[0..8]);
+    @memcpy(bytes[8..16], size_bytes[0..8]);
+
+    const hex_chars = "0123456789abcdef";
+    out[0] = '"';
+    for (bytes, 0..) |byte, i| {
+        out[1 + i * 2] = hex_chars[byte >> 4];
+        out[1 + i * 2 + 1] = hex_chars[byte & 0x0f];
+    }
+    out[33] = '"';
+    return out[0..34];
+}
+
+const StaticFileLookup = union(enum) {
+    forbidden,
+    not_found,
+    ok: StaticFile,
+};
+
+const StaticFile = struct {
+    file: Io.File,
+    full_path: []const u8,
+    size: usize,
+    mtime: Io.Timestamp,
+    content_type: []const u8,
+    etag: []const u8,
+};
+
+fn resolveStaticFile(
+    allocator: std.mem.Allocator,
+    io: Io,
+    static_dir: []const u8,
+    path: []const u8,
+    path_buf: *[std.fs.max_path_bytes]u8,
+    etag_buf: *[34]u8,
+) !StaticFileLookup {
+    if (!isPathSafe(path)) return .forbidden;
+
+    const full_path = std.fmt.bufPrint(path_buf, "{s}/{s}", .{ static_dir, path }) catch return error.PathTooLong;
+    if (!isCanonicalPathInsideRoot(allocator, io, static_dir, full_path)) return .forbidden;
+
+    const file = Dir.openFile(Dir.cwd(), io, full_path, .{ .follow_symlinks = false }) catch return .not_found;
+    errdefer file.close(io);
+
+    const stat = try file.stat(io);
+    const size: usize = std.math.cast(usize, stat.size) orelse return error.FileTooLarge;
+
+    return .{ .ok = .{
+        .file = file,
+        .full_path = full_path,
+        .size = size,
+        .mtime = stat.mtime,
+        .content_type = getContentType(path),
+        .etag = formatETag(stat.mtime, stat.size, etag_buf),
+    } };
+}
+
+fn connectionValue(keep_alive: bool) []const u8 {
+    return if (keep_alive) "keep-alive" else "close";
+}
+
+fn formatStaticError(buf: []u8, status: u16, body: []const u8, keep_alive: bool) ![]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n{s}",
+        .{ status, getStatusText(status), body.len, connectionValue(keep_alive), body },
+    );
+}
+
+fn formatStaticNotModified(buf: []u8, etag: []const u8, keep_alive: bool) ![]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "HTTP/1.1 304 Not Modified\r\nETag: {s}\r\nConnection: {s}\r\n\r\n",
+        .{ etag, connectionValue(keep_alive) },
+    );
+}
+
+fn formatStaticOkHeader(
+    buf: []u8,
+    size: usize,
+    content_type: []const u8,
+    etag: []const u8,
+    keep_alive: bool,
+) ![]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nETag: {s}\r\nConnection: {s}\r\n\r\n",
+        .{ size, content_type, etag, connectionValue(keep_alive) },
+    );
+}
 
 // ============================================================================
 // Connection Thread Pool (for macOS threaded backend)
@@ -682,94 +777,56 @@ const ConnectionPool = struct {
         keep_alive: bool,
         headers: []const HttpHeader,
     ) !void {
-        if (!isPathSafe(path)) {
-            const connection = if (keep_alive) "keep-alive" else "close";
-            var out_buf: [256]u8 = undefined;
-            const response = std.fmt.bufPrint(
-                &out_buf,
-                "HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\nConnection: {s}\r\n\r\nForbidden",
-                .{connection},
-            ) catch return;
-            try writeAllFd(fd, response);
-            return;
-        }
-
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ static_dir, path }) catch return error.PathTooLong;
-
-        const io = self.server.io_backend.io();
-
-        if (!isCanonicalPathInsideRoot(self.server.allocator, io, static_dir, full_path)) {
-            const connection = if (keep_alive) "keep-alive" else "close";
-            var out_buf: [256]u8 = undefined;
-            const response = std.fmt.bufPrint(
-                &out_buf,
-                "HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\nConnection: {s}\r\n\r\nForbidden",
-                .{connection},
-            ) catch return;
-            try writeAllFd(fd, response);
-            return;
-        }
-
-        const file = Dir.openFile(Dir.cwd(), io, full_path, .{ .follow_symlinks = false }) catch {
-            const connection = if (keep_alive) "keep-alive" else "close";
-            var out_buf: [256]u8 = undefined;
-            const response = std.fmt.bufPrint(
-                &out_buf,
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: {s}\r\n\r\nNot Found",
-                .{connection},
-            ) catch return;
-            try writeAllFd(fd, response);
-            return;
-        };
-        defer file.close(io);
-
-        const stat = try file.stat(io);
-        const size: usize = std.math.cast(usize, stat.size) orelse return error.FileTooLarge;
-        const content_type = getContentType(path);
-        const connection = if (keep_alive) "keep-alive" else "close";
-
-        // Compute a simple ETag from mtime + size for conditional requests.
-        const mtime_ns = stat.mtime.nanoseconds;
-        const etag_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&mtime_ns)) ^
-            std.hash.Wyhash.hash(0, std.mem.asBytes(&stat.size));
-        var etag_buf: [18]u8 = undefined; // 16 hex chars + quotes
-        etag_buf[0] = '"';
-        _ = std.fmt.bufPrint(etag_buf[1..17], "{x:0>16}", .{etag_hash}) catch unreachable;
-        etag_buf[17] = '"';
-        const etag = etag_buf[0..18];
-
-        if (findHeaderValue(headers, "if-none-match")) |client_etag| {
-            if (std.mem.eql(u8, client_etag, etag)) {
+        var etag_buf: [34]u8 = undefined;
+        var resolved = try resolveStaticFile(self.server.allocator, self.server.io_backend.io(), static_dir, path, &path_buf, &etag_buf);
+        switch (resolved) {
+            .forbidden => {
                 var out_buf: [256]u8 = undefined;
-                const response = std.fmt.bufPrint(
-                    &out_buf,
-                    "HTTP/1.1 304 Not Modified\r\nETag: {s}\r\nConnection: {s}\r\n\r\n",
-                    .{ etag, connection },
-                ) catch return;
+                const response = formatStaticError(&out_buf, 403, "Forbidden", keep_alive) catch return;
                 try writeAllFd(fd, response);
                 return;
-            }
-        }
+            },
+            .not_found => {
+                var out_buf: [256]u8 = undefined;
+                const response = formatStaticError(&out_buf, 404, "Not Found", keep_alive) catch return;
+                try writeAllFd(fd, response);
+                return;
+            },
+            .ok => |*file_info| {
+                defer file_info.file.close(self.server.io_backend.io());
 
-        var header_buf: [1024]u8 = undefined;
-        const header = std.fmt.bufPrint(
-            &header_buf,
-            "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nETag: {s}\r\nConnection: {s}\r\n\r\n",
-            .{ size, content_type, etag, connection },
-        ) catch return error.BufferOverflow;
-        try writeAllFd(fd, header);
+                if (findHeaderValue(headers, "if-none-match")) |client_etag| {
+                    if (std.mem.eql(u8, client_etag, file_info.etag)) {
+                        var out_buf: [256]u8 = undefined;
+                        const response = formatStaticNotModified(&out_buf, file_info.etag, keep_alive) catch return;
+                        try writeAllFd(fd, response);
+                        return;
+                    }
+                }
 
-        if (size == 0) return;
+                var header_buf: [1024]u8 = undefined;
+                const header = formatStaticOkHeader(
+                    &header_buf,
+                    file_info.size,
+                    file_info.content_type,
+                    file_info.etag,
+                    keep_alive,
+                ) catch return error.BufferOverflow;
+                try writeAllFd(fd, header);
 
-        var file_reader = file.reader(io, &.{});
-        var file_buf: [16 * 1024]u8 = undefined;
-        while (true) {
-            const n = file_reader.interface.readSliceShort(file_buf[0..]) catch |err| switch (err) {
-                error.ReadFailed => return file_reader.err.?,
-            };
-            if (n == 0) break;
-            try writeAllFd(fd, file_buf[0..n]);
+                if (file_info.size == 0) return;
+
+                var file_reader = file_info.file.reader(self.server.io_backend.io(), &.{});
+                var file_buf: [16 * 1024]u8 = undefined;
+                while (true) {
+                    const n = file_reader.interface.readSliceShort(file_buf[0..]) catch |err| switch (err) {
+                        error.ReadFailed => return file_reader.err.?,
+                    };
+                    if (n == 0) break;
+                    try writeAllFd(fd, file_buf[0..n]);
+                }
+            },
         }
     }
 };
@@ -1894,146 +1951,100 @@ pub const Server = struct {
         try writer.interface.flush();
     }
 
-    /// Generate ETag from file modification time and size
-    fn computeETag(mtime: Io.Timestamp, size: u64) [16]u8 {
-        var result: [16]u8 = undefined;
-        // Simple hash: combine mtime nanoseconds and size
-        const ns_bytes = std.mem.asBytes(&mtime.nanoseconds);
-        const size_bytes = std.mem.asBytes(&size);
-        // XOR-fold into 16 bytes: [0..8] from ns, [8..16] from size
-        for (result[0..8], ns_bytes[0..8]) |*r, m| r.* = m;
-        for (result[8..16], size_bytes[0..8]) |*r, s| r.* = s;
-        return result;
-    }
-
     fn serveStaticFile(self: *Self, stream: *net.Stream, io: Io, static_dir: []const u8, path: []const u8, keep_alive: bool, headers: []const HttpHeader) !void {
-        // Security: comprehensive path validation
-        if (!isPathSafe(path)) {
-            var out_buf: [256]u8 = undefined;
-            var writer = stream.writer(io, &out_buf);
-            try writer.interface.writeAll("HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\nConnection: close\r\n\r\nForbidden");
-            try writer.interface.flush();
-            return;
-        }
-
-        var path_buf: [Dir.max_path_bytes]u8 = undefined;
-        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ static_dir, path }) catch {
-            return error.PathTooLong;
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var etag_buf: [34]u8 = undefined;
+        const resolved = try resolveStaticFile(self.allocator, io, static_dir, path, &path_buf, &etag_buf);
+        var file_info = switch (resolved) {
+            .forbidden => {
+                var writer_buf: [256]u8 = undefined;
+                var header_buf: [256]u8 = undefined;
+                var writer = stream.writer(io, &writer_buf);
+                const response = formatStaticError(&header_buf, 403, "Forbidden", keep_alive) catch return;
+                try writer.interface.writeAll(response);
+                try writer.interface.flush();
+                return;
+            },
+            .not_found => {
+                var writer_buf: [256]u8 = undefined;
+                var header_buf: [256]u8 = undefined;
+                var writer = stream.writer(io, &writer_buf);
+                const response = formatStaticError(&header_buf, 404, "Not Found", keep_alive) catch return;
+                try writer.interface.writeAll(response);
+                try writer.interface.flush();
+                return;
+            },
+            .ok => |info| info,
         };
-
-        if (!isCanonicalPathInsideRoot(self.allocator, io, static_dir, full_path)) {
-            var out_buf: [256]u8 = undefined;
-            var writer = stream.writer(io, &out_buf);
-            try writer.interface.writeAll("HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\nConnection: close\r\n\r\nForbidden");
-            try writer.interface.flush();
-            return;
-        }
-
-        const file = Dir.openFile(Dir.cwd(), io, full_path, .{ .follow_symlinks = false }) catch {
-            var out_buf: [256]u8 = undefined;
-            var writer = stream.writer(io, &out_buf);
-            try writer.interface.writeAll("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found");
-            try writer.interface.flush();
-            return;
-        };
-        defer file.close(io);
-
-        const stat = try file.stat(io);
-        const content_type = getContentType(path);
-        const connection = if (keep_alive) "keep-alive" else "close";
-        const size = std.math.cast(usize, stat.size) orelse return error.FileTooLarge;
-
-        // Compute ETag from mtime and size
-        const etag_bytes = computeETag(stat.mtime, stat.size);
-        var etag_str: [34]u8 = undefined; // "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" (32 hex chars + quotes)
-        etag_str[0] = '"';
-        // Format as lowercase hex
-        const hex_chars = "0123456789abcdef";
-        for (etag_bytes, 0..) |byte, i| {
-            etag_str[1 + i * 2] = hex_chars[byte >> 4];
-            etag_str[1 + i * 2 + 1] = hex_chars[byte & 0x0f];
-        }
-        etag_str[33] = '"';
-        const etag = etag_str[0..34];
+        defer file_info.file.close(io);
 
         // Check If-None-Match header for conditional request
         if (findHeaderValue(headers, "if-none-match")) |client_etag| {
-            if (std.mem.eql(u8, client_etag, etag)) {
+            if (std.mem.eql(u8, client_etag, file_info.etag)) {
                 // 304 Not Modified - client has current version
-                var out_buf: [256]u8 = undefined;
-                var writer = stream.writer(io, &out_buf);
-                const out = &writer.interface;
-                try out.print("HTTP/1.1 304 Not Modified\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{ etag, connection });
+                var writer_buf: [256]u8 = undefined;
+                var header_buf: [256]u8 = undefined;
+                var writer = stream.writer(io, &writer_buf);
+                const response = formatStaticNotModified(&header_buf, file_info.etag, keep_alive) catch return;
+                try writer.interface.writeAll(response);
                 try writer.interface.flush();
                 return;
             }
         }
 
         // Serve from cache if available
-        if (self.static_cache.get(full_path, size, stat.mtime)) |handle| {
+        if (self.static_cache.get(file_info.full_path, file_info.size, file_info.mtime)) |handle| {
             defer handle.release();
             const entry = handle.entry;
-            var out_buf: [4096]u8 = undefined;
-            var writer = stream.writer(io, &out_buf);
-            const out = &writer.interface;
-            try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{
-                entry.data.len,
-                entry.content_type,
-                etag,
-                connection,
-            });
+            var writer_buf: [4096]u8 = undefined;
+            var header_buf: [1024]u8 = undefined;
+            var writer = stream.writer(io, &writer_buf);
+            const header = formatStaticOkHeader(&header_buf, entry.data.len, entry.content_type, file_info.etag, keep_alive) catch return error.BufferOverflow;
+            try writer.interface.writeAll(header);
             if (entry.data.len > 0) {
-                try out.writeAll(entry.data);
+                try writer.interface.writeAll(entry.data);
             }
             try writer.interface.flush();
             return;
         }
 
         // Cache small files
-        if (self.static_cache.enabled() and size <= self.static_cache.max_file_size) {
-            const data = try self.allocator.alloc(u8, size);
+        if (self.static_cache.enabled() and file_info.size <= self.static_cache.max_file_size) {
+            const data = try self.allocator.alloc(u8, file_info.size);
             errdefer self.allocator.free(data);
             var read_buf: [4096]u8 = undefined;
-            var file_reader = file.reader(io, &read_buf);
+            var file_reader = file_info.file.reader(io, &read_buf);
             try file_reader.interface.readSliceAll(data);
 
-            try self.static_cache.put(full_path, .{
+            try self.static_cache.put(file_info.full_path, .{
                 .data = data,
-                .size = size,
-                .mtime = stat.mtime,
-                .content_type = content_type,
+                .size = file_info.size,
+                .mtime = file_info.mtime,
+                .content_type = file_info.content_type,
             });
 
-            var out_buf: [4096]u8 = undefined;
-            var writer = stream.writer(io, &out_buf);
-            const out = &writer.interface;
-            try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{
-                size,
-                content_type,
-                etag,
-                connection,
-            });
-            if (size > 0) {
-                try out.writeAll(data);
+            var writer_buf: [4096]u8 = undefined;
+            var header_buf: [1024]u8 = undefined;
+            var writer = stream.writer(io, &writer_buf);
+            const header = formatStaticOkHeader(&header_buf, file_info.size, file_info.content_type, file_info.etag, keep_alive) catch return error.BufferOverflow;
+            try writer.interface.writeAll(header);
+            if (file_info.size > 0) {
+                try writer.interface.writeAll(data);
             }
             try writer.interface.flush();
             return;
         }
 
-        var out_buf: [4096]u8 = undefined;
-        var writer = stream.writer(io, &out_buf);
-        const out = &writer.interface;
-        try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{
-            size,
-            content_type,
-            etag,
-            connection,
-        });
+        var writer_buf: [4096]u8 = undefined;
+        var header_buf: [1024]u8 = undefined;
+        var writer = stream.writer(io, &writer_buf);
+        const header = formatStaticOkHeader(&header_buf, file_info.size, file_info.content_type, file_info.etag, keep_alive) catch return error.BufferOverflow;
+        try writer.interface.writeAll(header);
 
-        if (size > 0) {
+        if (file_info.size > 0) {
             var file_buf: [16 * 1024]u8 = undefined;
-            var file_reader = file.reader(io, &file_buf);
-            _ = try out.sendFileAll(&file_reader, .limited(size));
+            var file_reader = file_info.file.reader(io, &file_buf);
+            _ = try writer.interface.sendFileAll(&file_reader, .limited(file_info.size));
         }
         try writer.interface.flush();
     }

@@ -1,0 +1,51 @@
+const std = @import("std");
+
+pub const index_html = "";
+
+pub const State = struct {
+    pub fn init(allocator: std.mem.Allocator, handler_path: []const u8) !State {
+        _ = allocator;
+        _ = handler_path;
+        return .{};
+    }
+
+    pub fn deinit(self: *State) void {
+        _ = self;
+    }
+
+    pub fn updateChecking(self: *State) void {
+        _ = self;
+    }
+
+    pub fn updateError(self: *State, message: []const u8) void {
+        _ = self;
+        _ = message;
+    }
+
+    pub fn stateJsonCopy(self: *State, allocator: std.mem.Allocator) ![]u8 {
+        _ = self;
+        return try allocator.dupe(u8, "{\"status\":\"disabled\"}\n");
+    }
+
+    pub fn generatedTests(self: *State, allocator: std.mem.Allocator) ![]u8 {
+        _ = self;
+        return try allocator.dupe(u8, "");
+    }
+
+    pub fn witnessDetailJson(self: *State, allocator: std.mem.Allocator, key: []const u8) anyerror![]u8 {
+        _ = self;
+        _ = allocator;
+        _ = key;
+        return error.WitnessNotFound;
+    }
+};
+
+pub fn isStudioPath(path: []const u8) bool {
+    _ = path;
+    return false;
+}
+
+pub fn witnessDetailKey(path: []const u8) ?[]const u8 {
+    _ = path;
+    return null;
+}

@@ -11,6 +11,6 @@ test {
     _ = @import("zruntime.zig");
     _ = @import("server.zig");
     _ = @import("edge_server.zig");
-    _ = @import("studio.zig");
+    _ = @import("runtime_features.zig").studio;
     _ = @import("proof_adapter.zig");
 }
