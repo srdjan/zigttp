@@ -74,18 +74,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 
     const source = try zigts.file_io.readFile(allocator, handler_path, 10 * 1024 * 1024);
     defer allocator.free(source);
-    var compiled = try precompile.compileHandler(
-        allocator,
-        source,
-        handler_path,
-        false,
-        true,
-        true,
-        null,
-        null,
-        false,
-        null,
-    );
+    var compiled = try precompile.compileHandler(allocator, source, handler_path, .{
+        .emit_verify = true,
+        .emit_contract = true,
+    });
     defer compiled.deinit(allocator);
     if (compiled.verify_failed) {
         if (compiled.violations_summary) |summary| {

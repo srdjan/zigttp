@@ -908,18 +908,10 @@ fn buildArtifact(
 
     std.log.info("Compiling {s}...", .{handler_path});
 
-    var compiled = precompile.compileHandler(
-        allocator,
-        source,
-        handler_path,
-        false,
-        true,
-        true,
-        null,
-        null,
-        false,
-        null,
-    ) catch |err| {
+    var compiled = precompile.compileHandler(allocator, source, handler_path, .{
+        .emit_verify = true,
+        .emit_contract = true,
+    }) catch |err| {
         std.log.err("Compilation failed: {}", .{err});
         return err;
     };

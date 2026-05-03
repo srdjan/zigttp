@@ -683,18 +683,15 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     // Compile the handler to bytecode (+ optional AOT analysis + optional verification + optional contract)
     const generate_tests = opts.generate_tests;
 
-    var compiled = compileHandler(
-        allocator,
-        source,
-        handler_path_final,
-        emit_aot,
-        emit_verify,
-        emit_contract,
-        policy,
-        sql_schema_path,
-        generate_tests,
-        system_path,
-    ) catch |err| {
+    var compiled = compileHandler(allocator, source, handler_path_final, .{
+        .emit_aot = emit_aot,
+        .emit_verify = emit_verify,
+        .emit_contract = emit_contract,
+        .policy = policy,
+        .sql_schema_path = sql_schema_path,
+        .generate_tests = generate_tests,
+        .system_path = system_path,
+    }) catch |err| {
         std.debug.print("Compilation failed: {}\n", .{err});
         return err;
     };
@@ -2136,18 +2133,30 @@ fn parseBuildTestFile(allocator: std.mem.Allocator, source: []const u8) ![]Build
     return try tests.toOwnedSlice(allocator);
 }
 
+pub const CompileOptions = struct {
+    emit_aot: bool = false,
+    emit_verify: bool = false,
+    emit_contract: bool = false,
+    policy: ?HandlerPolicy = null,
+    sql_schema_path: ?[]const u8 = null,
+    generate_tests: bool = false,
+    system_path: ?[]const u8 = null,
+};
+
 pub fn compileHandler(
     allocator: std.mem.Allocator,
     source: []const u8,
     filename: []const u8,
-    emit_aot: bool,
-    emit_verify: bool,
-    emit_contract: bool,
-    policy: ?HandlerPolicy,
-    sql_schema_path: ?[]const u8,
-    generate_tests: bool,
-    system_path: ?[]const u8,
+    opts: CompileOptions,
 ) !CompiledHandler {
+    const emit_aot = opts.emit_aot;
+    const emit_verify = opts.emit_verify;
+    const emit_contract = opts.emit_contract;
+    const policy = opts.policy;
+    const sql_schema_path = opts.sql_schema_path;
+    const generate_tests = opts.generate_tests;
+    const system_path = opts.system_path;
+
     var source_to_parse: []const u8 = source;
     var strip_result: ?zigts.StripResult = null;
     defer if (strip_result) |*sr| sr.deinit();
@@ -3790,20 +3799,7 @@ fn writeZigFile(
                                 try writer.writeAll(");\n");
                             },
                             .request_json_parse => {
-                                try writer.writeAll("        var body_val: zq.JSValue = zq.JSValue.undefined_val;\n");
-                                try writer.writeAll("        if (ctx.http_shapes) |shapes| {\n");
-                                try writer.writeAll("            if (req_obj.hidden_class_idx == shapes.request.class_idx) {\n");
-                                try writer.writeAll("                body_val = req_obj.getSlot(shapes.request.body_slot);\n");
-                                try writer.writeAll("            } else if (req_obj.getOwnProperty(pool, zq.Atom.body)) |val| {\n");
-                                try writer.writeAll("                body_val = val;\n");
-                                try writer.writeAll("            } else {\n");
-                                try writer.writeAll("                return error.AotBail;\n");
-                                try writer.writeAll("            }\n");
-                                try writer.writeAll("        } else if (req_obj.getOwnProperty(pool, zq.Atom.body)) |val| {\n");
-                                try writer.writeAll("            body_val = val;\n");
-                                try writer.writeAll("        } else {\n");
-                                try writer.writeAll("            return error.AotBail;\n");
-                                try writer.writeAll("        }\n");
+                                try emitAotBodyValExtraction(writer);
                                 try writer.writeAll("        if (!body_val.isString()) return error.AotBail;\n");
                                 try writer.writeAll("        const parse_args = [_]zq.JSValue{body_val};\n");
                                 try writer.writeAll("        const parsed = zq.builtins.jsonParse(ctx, zq.JSValue.undefined_val, &parse_args);\n");
@@ -4018,6 +4014,23 @@ fn writeBytecodeArray(writer: anytype, bytecode_data: []const u8) !void {
     }
 }
 
+fn emitAotBodyValExtraction(writer: anytype) !void {
+    try writer.writeAll("        var body_val: zq.JSValue = zq.JSValue.undefined_val;\n");
+    try writer.writeAll("        if (ctx.http_shapes) |shapes| {\n");
+    try writer.writeAll("            if (req_obj.hidden_class_idx == shapes.request.class_idx) {\n");
+    try writer.writeAll("                body_val = req_obj.getSlot(shapes.request.body_slot);\n");
+    try writer.writeAll("            } else if (req_obj.getOwnProperty(pool, zq.Atom.body)) |val| {\n");
+    try writer.writeAll("                body_val = val;\n");
+    try writer.writeAll("            } else {\n");
+    try writer.writeAll("                return error.AotBail;\n");
+    try writer.writeAll("            }\n");
+    try writer.writeAll("        } else if (req_obj.getOwnProperty(pool, zq.Atom.body)) |val| {\n");
+    try writer.writeAll("            body_val = val;\n");
+    try writer.writeAll("        } else {\n");
+    try writer.writeAll("            return error.AotBail;\n");
+    try writer.writeAll("        }\n");
+}
+
 fn writeZigStringLiteral(writer: anytype, value: []const u8) !void {
     try writer.writeAll("\"");
     for (value) |c| {
@@ -4081,18 +4094,10 @@ test "compileHandler aggregates contract across file imports" {
     var policy = try handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"JWT_SECRET\"]}}");
     defer policy.deinit(allocator);
 
-    var compiled = try compileHandler(
-        allocator,
-        entry_source,
-        entry_path,
-        false,
-        false,
-        true,
-        policy,
-        null,
-        false,
-        null,
-    );
+    var compiled = try compileHandler(allocator, entry_source, entry_path, .{
+        .emit_contract = true,
+        .policy = policy,
+    });
     defer compiled.deinit(allocator);
 
     try std.testing.expect(compiled.dep_bytecodes != null);
@@ -4130,18 +4135,7 @@ test "compileHandler rejects disallowed policy from imported module" {
 
     try std.testing.expectError(
         error.PolicyViolation,
-        compileHandler(
-            allocator,
-            entry_source,
-            entry_path,
-            false,
-            false,
-            false,
-            policy,
-            null,
-            false,
-            null,
-        ),
+        compileHandler(allocator, entry_source, entry_path, .{ .policy = policy }),
     );
 }
 
@@ -4464,18 +4458,7 @@ test "compileHandler rejects invalid virtual-module imports" {
 
     try std.testing.expectError(
         error.InvalidImportSpecifier,
-        compileHandler(
-            allocator,
-            source,
-            "handler.js",
-            false,
-            false,
-            false,
-            null,
-            null,
-            false,
-            null,
-        ),
+        compileHandler(allocator, source, "handler.js", .{}),
     );
 }
 
@@ -4597,18 +4580,9 @@ test "compileHandler emits result_unsafe counterexample when jwtVerify result is
         \\}
     ;
 
-    var compiled = try compileHandler(
-        allocator,
-        source,
-        "handler.ts",
-        false, // emit_aot
-        true, // emit_verify
-        false, // emit_contract
-        null, // policy
-        null, // sql_schema_path
-        false, // generate_tests
-        null, // system_path
-    );
+    var compiled = try compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+    });
     defer compiled.deinit(allocator);
 
     try std.testing.expect(compiled.verify_failed);
@@ -4640,18 +4614,10 @@ test "compileHandler sets result_safe and optional_safe when verification passes
         \\}
     ;
 
-    var compiled = try compileHandler(
-        allocator,
-        source,
-        "handler.ts",
-        false, // emit_aot
-        true, // emit_verify
-        true, // emit_contract
-        null, // policy
-        null, // sql_schema_path
-        false, // generate_tests
-        null, // system_path
-    );
+    var compiled = try compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+    });
     defer compiled.deinit(allocator);
 
     try std.testing.expect(!compiled.verify_failed);
