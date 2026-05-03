@@ -25,7 +25,6 @@ const std = @import("std");
 const http_types = @import("http_types.zig");
 const websocket_codec = @import("websocket_codec.zig");
 const websocket_pool = @import("websocket_pool.zig");
-const trace = @import("zigts").trace;
 
 const HttpHeader = http_types.HttpHeader;
 pub const Pool = websocket_pool.Pool;

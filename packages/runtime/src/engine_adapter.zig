@@ -12,6 +12,7 @@ pub const Runtime = zruntime.Runtime;
 pub const HandlerPool = zruntime.HandlerPool;
 pub const RuntimeConfig = zruntime.RuntimeConfig;
 pub const ResponseHandle = HandlerPool.ResponseHandle;
+pub const JSValue = zq.JSValue;
 pub const Instant = zq.compat.Instant;
 pub const Timer = zq.compat.Timer;
 pub const Mutex = zq.compat.Mutex;
@@ -30,6 +31,18 @@ pub fn deinitSecurityEvents() void {
 
 pub fn unixMillis() i64 {
     return zq.trace.unixMillis();
+}
+
+pub fn jsInt(value: i32) JSValue {
+    return JSValue.fromInt(value);
+}
+
+pub fn activeWebSocketConnection() ?u64 {
+    return zruntime.active_ws_connection;
+}
+
+pub fn setActiveWebSocketConnection(id: ?u64) void {
+    zruntime.active_ws_connection = id;
 }
 
 pub fn initHandlerPool(

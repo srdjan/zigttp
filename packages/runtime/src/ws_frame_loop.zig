@@ -24,16 +24,14 @@
 
 const std = @import("std");
 const Io = std.Io;
+const engine = @import("engine_adapter.zig");
 const websocket_codec = @import("websocket_codec.zig");
 const websocket_pool = @import("websocket_pool.zig");
-const zruntime = @import("zruntime.zig");
-const zq = @import("zigts");
-const trace = zq.trace;
 
 const Pool = websocket_pool.Pool;
 const ConnectionId = websocket_pool.ConnectionId;
 const Opcode = websocket_codec.Opcode;
-const HandlerPool = zruntime.HandlerPool;
+const HandlerPool = engine.HandlerPool;
 
 /// Maximum incoming frame payload we will accept. RFC 6455 allows up to
 /// 2^63 - 1, but real applications don't need anything like that. 64 KiB
@@ -120,7 +118,7 @@ pub fn run(cfg: Config) void {
             error.ReadFailed => return,
         };
 
-        _ = cfg.pool.touch(cfg.id, .parked, trace.unixMillis());
+        _ = cfg.pool.touch(cfg.id, .parked, engine.unixMillis());
 
         switch (msg.opcode) {
             .ping => {
@@ -207,16 +205,16 @@ fn dispatchOnMessage(
 
     try lease.runtime.installWebSocketModuleState(ws_pool);
 
-    const prev_connection = zruntime.active_ws_connection;
-    zruntime.active_ws_connection = id;
-    defer zruntime.active_ws_connection = prev_connection;
+    const prev_connection = engine.activeWebSocketConnection();
+    engine.setActiveWebSocketConnection(id);
+    defer engine.setActiveWebSocketConnection(prev_connection);
 
     // Connection ids larger than i32 max would truncate; W2 widens the
     // proxy to a full object so the id range stops mattering. For W1 we
     // accept the limit (~2 billion live connections per process, which
     // is far past any other bottleneck).
     const id_i32: i32 = std.math.cast(i32, id) orelse return error.ConnectionIdOverflow;
-    const ws_val = zq.JSValue.fromInt(id_i32);
+    const ws_val = engine.jsInt(id_i32);
     const data_val = try lease.runtime.ctx.createString(data);
     const room_val = if (ws_pool.snapshot(id)) |snap|
         try lease.runtime.ctx.createString(snap.room)
@@ -246,12 +244,12 @@ fn dispatchOnOpen(
 
     try lease.runtime.installWebSocketModuleState(ws_pool);
 
-    const prev_connection = zruntime.active_ws_connection;
-    zruntime.active_ws_connection = id;
-    defer zruntime.active_ws_connection = prev_connection;
+    const prev_connection = engine.activeWebSocketConnection();
+    engine.setActiveWebSocketConnection(id);
+    defer engine.setActiveWebSocketConnection(prev_connection);
 
     const id_i32: i32 = std.math.cast(i32, id) orelse return error.ConnectionIdOverflow;
-    const ws_val = zq.JSValue.fromInt(id_i32);
+    const ws_val = engine.jsInt(id_i32);
     const url_val = try lease.runtime.ctx.createString(url);
 
     _ = lease.runtime.callGlobalFunction("onOpen", &.{ ws_val, url_val }) catch |err| switch (err) {
@@ -280,13 +278,13 @@ fn dispatchOnClose(
 
     try lease.runtime.installWebSocketModuleState(ws_pool);
 
-    const prev_connection = zruntime.active_ws_connection;
-    zruntime.active_ws_connection = id;
-    defer zruntime.active_ws_connection = prev_connection;
+    const prev_connection = engine.activeWebSocketConnection();
+    engine.setActiveWebSocketConnection(id);
+    defer engine.setActiveWebSocketConnection(prev_connection);
 
     const id_i32: i32 = std.math.cast(i32, id) orelse return error.ConnectionIdOverflow;
-    const ws_val = zq.JSValue.fromInt(id_i32);
-    const code_val = zq.JSValue.fromInt(@as(i32, code));
+    const ws_val = engine.jsInt(id_i32);
+    const code_val = engine.jsInt(@as(i32, code));
     const reason_val = try lease.runtime.ctx.createString("");
 
     _ = lease.runtime.callGlobalFunction("onClose", &.{ ws_val, code_val, reason_val }) catch |err| switch (err) {
