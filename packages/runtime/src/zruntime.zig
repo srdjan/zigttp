@@ -15,6 +15,7 @@ const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
 const http_parser = @import("http_parser.zig");
 const contract_runtime = @import("contract_runtime.zig");
+const runtime_builtins = @import("runtime_builtins.zig");
 pub const websocket_codec = @import("websocket_codec.zig");
 
 // Bytecode caching for faster cold starts
@@ -531,13 +532,13 @@ pub const Runtime = struct {
         const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
         const request_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
-        try self.addDynamicMethod(request_proto, "text", bodyTextNative, 0);
-        try self.addDynamicMethod(request_proto, "json", bodyJsonNative, 0);
+        try self.addDynamicMethod(request_proto, "text", runtime_builtins.bodyTextNative, 0);
+        try self.addDynamicMethod(request_proto, "json", runtime_builtins.bodyJsonNative, 0);
         try self.ctx.builtin_objects.append(self.allocator, request_proto);
 
         const response_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
-        try self.addDynamicMethod(response_proto, "text", bodyTextNative, 0);
-        try self.addDynamicMethod(response_proto, "json", bodyJsonNative, 0);
+        try self.addDynamicMethod(response_proto, "text", runtime_builtins.bodyTextNative, 0);
+        try self.addDynamicMethod(response_proto, "json", runtime_builtins.bodyJsonNative, 0);
         try self.ctx.builtin_objects.append(self.allocator, response_proto);
 
         const headers_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
@@ -2463,7 +2464,7 @@ const appendEscapedJson = durable_store_mod.appendEscaped;
 
 const unixMillis = zq.trace.unixMillis;
 
-fn getStringData(val: zq.JSValue) ?[]const u8 {
+pub fn getStringData(val: zq.JSValue) ?[]const u8 {
     if (val.isString()) {
         return val.toPtr(zq.JSString).data();
     }
@@ -2560,7 +2561,7 @@ fn throwTypeError(ctx: *zq.Context, message: []const u8) zq.JSValue {
     return zq.JSValue.exception_val;
 }
 
-fn beginBodyRead(ctx: *zq.Context, this: zq.JSValue) zq.JSValue {
+pub fn beginBodyRead(ctx: *zq.Context, this: zq.JSValue) zq.JSValue {
     if (!this.isObject()) {
         return throwTypeError(ctx, "Body reader target must be an object");
     }
@@ -2821,30 +2822,6 @@ fn getBodyValue(ctx: *zq.Context, this: zq.JSValue) ?zq.JSValue {
     const pool = ctx.hidden_class_pool orelse return null;
     const obj = this.toPtr(zq.JSObject);
     return obj.getProperty(pool, zq.Atom.body);
-}
-
-fn bodyTextNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const body_val = beginBodyRead(ctx, this);
-    if (ctx.hasException()) return zq.JSValue.exception_val;
-    if (body_val.isNull() or body_val.isUndefined()) {
-        return ctx.createString("");
-    }
-    if (body_val.isAnyString()) {
-        return body_val;
-    }
-    return ctx.createString("");
-}
-
-fn bodyJsonNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const body_val = beginBodyRead(ctx, this);
-    if (ctx.hasException()) return zq.JSValue.exception_val;
-    if (body_val.isNull() or body_val.isUndefined()) {
-        return zq.JSValue.undefined_val;
-    }
-    const body = getStringData(body_val) orelse return zq.JSValue.undefined_val;
-    return zq.builtins.parseJsonValue(ctx, body) catch zq.JSValue.undefined_val;
 }
 
 fn headersGetNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
