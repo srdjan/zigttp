@@ -29,32 +29,6 @@ pub fn forWitness(
     return buf.toOwnedSlice(allocator);
 }
 
-/// Compute the set difference `a - b` keyed by stable witness key. Each
-/// returned slice element is an owned copy of a key from `a` that has no
-/// match in `b`. Caller owns the outer slice and every element.
-pub fn difference(
-    allocator: std.mem.Allocator,
-    a: []const []const u8,
-    b: []const []const u8,
-) ![][]u8 {
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    defer seen.deinit(allocator);
-    for (b) |key| try seen.put(allocator, key, {});
-
-    var out: std.ArrayList([]u8) = .empty;
-    errdefer {
-        for (out.items) |item| allocator.free(item);
-        out.deinit(allocator);
-    }
-    for (a) |key| {
-        if (seen.contains(key)) continue;
-        const copy = try allocator.dupe(u8, key);
-        errdefer allocator.free(copy);
-        try out.append(allocator, copy);
-    }
-    return out.toOwnedSlice(allocator);
-}
-
 test "forWitness produces a 64-char hex digest" {
     const allocator = std.testing.allocator;
     var witness = try counterexample.solve(allocator, .{
@@ -73,29 +47,4 @@ test "forWitness produces a 64-char hex digest" {
     defer allocator.free(key);
 
     try std.testing.expectEqual(@as(usize, 64), key.len);
-}
-
-test "difference returns keys present in a but absent in b" {
-    const allocator = std.testing.allocator;
-    const a = [_][]const u8{ "k1", "k2", "k3" };
-    const b = [_][]const u8{"k2"};
-
-    const diff = try difference(allocator, &a, &b);
-    defer {
-        for (diff) |item| allocator.free(item);
-        allocator.free(diff);
-    }
-
-    try std.testing.expectEqual(@as(usize, 2), diff.len);
-}
-
-test "difference returns empty slice when a is subset of b" {
-    const allocator = std.testing.allocator;
-    const a = [_][]const u8{ "k1", "k2" };
-    const b = [_][]const u8{ "k1", "k2", "k3" };
-
-    const diff = try difference(allocator, &a, &b);
-    defer allocator.free(diff);
-
-    try std.testing.expectEqual(@as(usize, 0), diff.len);
 }

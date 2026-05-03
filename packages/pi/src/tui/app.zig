@@ -1165,11 +1165,11 @@ fn handlePaneEvent(
             },
             'A' => {
                 if (state.autoloop_in_flight) return .no_op;
-                if (selectedFeaturePlan(state)) |plan| {
+                if (selectedPayload(state, .feature_plan)) |plan| {
                     if (plan.verification_ok) return .apply_feature_plan;
                     return .redraw;
                 }
-                if (selectedForgeRun(state)) |forge| {
+                if (selectedPayload(state, .forge_run)) |forge| {
                     if (forge.success) return .apply_feature_plan;
                     return .redraw;
                 }
@@ -1185,40 +1185,28 @@ fn handlePaneEvent(
     }
 }
 
-fn selectedFeaturePlan(state: *const AppState) ?*const ui_payload_mod.FeaturePlanPayload {
+fn selectedPayload(
+    state: *const AppState,
+    comptime tag: std.meta.Tag(UiPayload),
+) ?*const @FieldType(UiPayload, @tagName(tag)) {
     const item = state.selectedFeedItem() orelse return null;
     const local_index = switch (item.source) {
         .local_result => |index| index,
         else => return null,
     };
     if (local_index >= state.local_results.items.len) return null;
-    const payload = state.local_results.items[local_index].ui_payload orelse return null;
-    return switch (payload) {
-        .feature_plan => |*plan| plan,
-        else => null,
-    };
-}
-
-fn selectedForgeRun(state: *const AppState) ?*const ui_payload_mod.ForgeRunPayload {
-    const item = state.selectedFeedItem() orelse return null;
-    const local_index = switch (item.source) {
-        .local_result => |index| index,
-        else => return null,
-    };
-    if (local_index >= state.local_results.items.len) return null;
-    const payload = state.local_results.items[local_index].ui_payload orelse return null;
-    return switch (payload) {
-        .forge_run => |*forge| forge,
-        else => null,
-    };
+    if (state.local_results.items[local_index].ui_payload == null) return null;
+    const payload_ptr: *const UiPayload = &state.local_results.items[local_index].ui_payload.?;
+    if (std.meta.activeTag(payload_ptr.*) != tag) return null;
+    return &@field(payload_ptr.*, @tagName(tag));
 }
 
 fn applySelectedFeaturePlan(runtime: *TuiRuntime, registry: *const Registry) !void {
-    if (selectedFeaturePlan(runtime.state)) |plan| {
+    if (selectedPayload(runtime.state, .feature_plan)) |plan| {
         try applyFeatureCandidate(runtime, registry, plan.file, plan.proposed_content);
         return;
     }
-    if (selectedForgeRun(runtime.state)) |forge| {
+    if (selectedPayload(runtime.state, .forge_run)) |forge| {
         try applyFeatureCandidate(runtime, registry, forge.file, forge.final_content);
     }
 }

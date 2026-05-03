@@ -914,18 +914,6 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const offset = util.readI16(self.pc);
                 self.pc += 2;
-                if (offset < 0) {
-                    if (false) {
-                        if (self.current_func) |func| {
-                            const func_mut = @constCast(func);
-                            if (func_mut.tier == .interpreted) {
-                                func_mut.tier = .baseline_candidate;
-                            }
-                            func_mut.backedge_count = self.backedge_count;
-                        }
-                        self.backedge_count = 0;
-                    }
-                }
                 self.offsetPc(offset);
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -933,16 +921,6 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const offset = util.readI16(self.pc);
                 self.pc += 2;
-                if (false) {
-                    if (self.current_func) |func| {
-                        const func_mut = @constCast(func);
-                        if (func_mut.tier == .interpreted) {
-                            func_mut.tier = .baseline_candidate;
-                        }
-                        func_mut.backedge_count = self.backedge_count;
-                    }
-                    self.backedge_count = 0;
-                }
                 self.offsetPc(-offset);
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -1631,16 +1609,6 @@ pub const Interpreter = struct {
                             const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
                             if (idx_u < len) {
                                 @branchHint(.likely);
-                                if (false) {
-                                    if (self.current_func) |func| {
-                                        const func_mut = @constCast(func);
-                                        if (func_mut.tier == .interpreted) {
-                                            func_mut.tier = .baseline_candidate;
-                                        }
-                                        func_mut.backedge_count = self.backedge_count;
-                                    }
-                                    self.backedge_count = 0;
-                                }
                                 try self.ctx.push(obj.getIndexUnchecked(idx_u));
                                 self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
                                 continue :sw @enumFromInt(self.pc[0]);
@@ -1649,16 +1617,6 @@ pub const Interpreter = struct {
                             const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
                             if (idx_u < len) {
                                 @branchHint(.likely);
-                                if (false) {
-                                    if (self.current_func) |func| {
-                                        const func_mut = @constCast(func);
-                                        if (func_mut.tier == .interpreted) {
-                                            func_mut.tier = .baseline_candidate;
-                                        }
-                                        func_mut.backedge_count = self.backedge_count;
-                                    }
-                                    self.backedge_count = 0;
-                                }
                                 const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
                                 const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
                                 try self.ctx.push(value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
@@ -1695,16 +1653,6 @@ pub const Interpreter = struct {
                             const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
                             if (idx_u < len) {
                                 @branchHint(.likely);
-                                if (false) {
-                                    if (self.current_func) |func| {
-                                        const func_mut = @constCast(func);
-                                        if (func_mut.tier == .interpreted) {
-                                            func_mut.tier = .baseline_candidate;
-                                        }
-                                        func_mut.backedge_count = self.backedge_count;
-                                    }
-                                    self.backedge_count = 0;
-                                }
                                 self.ctx.setLocal(local_idx, obj.getIndexUnchecked(idx_u));
                                 self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
                                 continue :sw @enumFromInt(self.pc[0]);
@@ -1713,16 +1661,6 @@ pub const Interpreter = struct {
                             const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
                             if (idx_u < len) {
                                 @branchHint(.likely);
-                                if (false) {
-                                    if (self.current_func) |func| {
-                                        const func_mut = @constCast(func);
-                                        if (func_mut.tier == .interpreted) {
-                                            func_mut.tier = .baseline_candidate;
-                                        }
-                                        func_mut.backedge_count = self.backedge_count;
-                                    }
-                                    self.backedge_count = 0;
-                                }
                                 const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
                                 const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
                                 self.ctx.setLocal(local_idx, value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
