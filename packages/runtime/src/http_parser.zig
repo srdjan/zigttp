@@ -388,3 +388,211 @@ pub fn hasTransferEncodingChunked(header_section: []const u8) bool {
     }
     return false;
 }
+
+const testing = std.testing;
+
+test "findHeaderEnd: terminator at start of small buffer" {
+    try testing.expectEqual(@as(?usize, 0), findHeaderEnd("\r\n\r\n"));
+    try testing.expectEqual(@as(?usize, 0), findHeaderEnd("\r\n\r\nbody"));
+}
+
+test "findHeaderEnd: scalar tail path (buffer too small for SIMD)" {
+    // Buffer < 19 bytes goes through the scalar-only loop.
+    try testing.expectEqual(@as(?usize, 3), findHeaderEnd("GET\r\n\r\n"));
+    try testing.expectEqual(@as(?usize, null), findHeaderEnd("no terminator"));
+    try testing.expectEqual(@as(?usize, null), findHeaderEnd(""));
+    try testing.expectEqual(@as(?usize, null), findHeaderEnd("abc")); // <4 early null
+}
+
+test "findHeaderEnd: SIMD path locates terminator" {
+    // 32+ bytes forces at least one SIMD iteration.
+    const buf = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\nbody after";
+    // Compute expected offset: position of \r\n\r\n.
+    const expected = std.mem.indexOf(u8, buf, "\r\n\r\n").?;
+    try testing.expectEqual(@as(?usize, expected), findHeaderEnd(buf));
+}
+
+test "findHeaderEnd: terminator straddling SIMD/scalar boundary" {
+    // Build a buffer where \r\n\r\n starts in the last few bytes of the SIMD
+    // window (i.e. between 16 and 19 of remaining), forcing the scalar tail.
+    var buf: [40]u8 = undefined;
+    @memset(&buf, 'X');
+    // Place terminator at offset 14 - inside first SIMD chunk's tail span.
+    @memcpy(buf[14..18], "\r\n\r\n");
+    try testing.expectEqual(@as(?usize, 14), findHeaderEnd(&buf));
+}
+
+test "parseRequestLine: GET with query string" {
+    var storage: [256]u8 = undefined;
+    var offset: usize = 0;
+    const line = try parseRequestLine(&storage, &offset, "GET /api/v1/users?id=42 HTTP/1.1");
+    try testing.expectEqualStrings("GET", line.method);
+    try testing.expectEqualStrings("/api/v1/users?id=42", line.url);
+    try testing.expectEqualStrings("/api/v1/users", line.path);
+    try testing.expectEqualStrings("id=42", line.query_string);
+}
+
+test "parseRequestLine: no query string yields empty query" {
+    var storage: [256]u8 = undefined;
+    var offset: usize = 0;
+    const line = try parseRequestLine(&storage, &offset, "POST /submit HTTP/1.1");
+    try testing.expectEqualStrings("POST", line.method);
+    try testing.expectEqualStrings("/submit", line.path);
+    try testing.expectEqualStrings("", line.query_string);
+}
+
+test "parseRequestLine: storage exhaustion errors" {
+    var storage: [4]u8 = undefined; // too small for "GET" + "/"
+    var offset: usize = 0;
+    try testing.expectError(error.HeaderStorageExhausted, parseRequestLine(&storage, &offset, "GET /path HTTP/1.1"));
+}
+
+test "parseRequestLine: malformed line missing url" {
+    var storage: [128]u8 = undefined;
+    var offset: usize = 0;
+    try testing.expectError(error.InvalidRequest, parseRequestLine(&storage, &offset, "GET"));
+}
+
+test "parseRequestLineBorrowed: path and query slices point into input" {
+    const input = "DELETE /resource?force=true HTTP/1.1";
+    const line = try parseRequestLineBorrowed(input);
+    try testing.expectEqualStrings("DELETE", line.method);
+    try testing.expectEqualStrings("/resource?force=true", line.url);
+    try testing.expectEqualStrings("/resource", line.path);
+    try testing.expectEqualStrings("force=true", line.query_string);
+    // Borrowed slices alias the input buffer.
+    try testing.expect(line.method.ptr == input.ptr);
+}
+
+test "parseQueryString: empty input returns empty params, no storage" {
+    const result = try parseQueryString(testing.allocator, "");
+    defer if (result.storage) |s| testing.allocator.free(s);
+    defer if (result.decoded_storage) |s| testing.allocator.free(s);
+    try testing.expectEqual(@as(usize, 0), result.params.len);
+    try testing.expect(result.storage == null);
+}
+
+test "parseQueryString: simple key=value pairs" {
+    const result = try parseQueryString(testing.allocator, "a=1&b=2&c=3");
+    defer if (result.storage) |s| testing.allocator.free(s);
+    defer if (result.decoded_storage) |s| testing.allocator.free(s);
+    try testing.expectEqual(@as(usize, 3), result.params.len);
+    try testing.expectEqualStrings("a", result.params[0].key);
+    try testing.expectEqualStrings("1", result.params[0].value);
+    try testing.expectEqualStrings("c", result.params[2].key);
+    try testing.expectEqualStrings("3", result.params[2].value);
+}
+
+test "parseQueryString: percent-decoding" {
+    const result = try parseQueryString(testing.allocator, "name=John%20Doe&email=a%40b.com");
+    defer if (result.storage) |s| testing.allocator.free(s);
+    defer if (result.decoded_storage) |s| testing.allocator.free(s);
+    try testing.expectEqual(@as(usize, 2), result.params.len);
+    try testing.expectEqualStrings("John Doe", result.params[0].value);
+    try testing.expectEqualStrings("a@b.com", result.params[1].value);
+}
+
+test "parseQueryString: plus is decoded as space" {
+    const result = try parseQueryString(testing.allocator, "q=hello+world");
+    defer if (result.storage) |s| testing.allocator.free(s);
+    defer if (result.decoded_storage) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("hello world", result.params[0].value);
+}
+
+test "parseQueryString: malformed percent-escape passes through" {
+    // %XY is not valid hex; per the implementation, the literal '%' is kept.
+    const result = try parseQueryString(testing.allocator, "k=%XY");
+    defer if (result.storage) |s| testing.allocator.free(s);
+    defer if (result.decoded_storage) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("%XY", result.params[0].value);
+}
+
+test "parseQueryString: pairs without '=' are skipped" {
+    const result = try parseQueryString(testing.allocator, "a=1&orphan&b=2");
+    defer if (result.storage) |s| testing.allocator.free(s);
+    defer if (result.decoded_storage) |s| testing.allocator.free(s);
+    try testing.expectEqual(@as(usize, 2), result.params.len);
+    try testing.expectEqualStrings("a", result.params[0].key);
+    try testing.expectEqualStrings("b", result.params[1].key);
+}
+
+test "splitHeaderLine: key-value with single space" {
+    const h = splitHeaderLine("Content-Type: application/json").?;
+    try testing.expectEqualStrings("Content-Type", h.key);
+    try testing.expectEqualStrings("application/json", h.value);
+}
+
+test "splitHeaderLine: trims leading whitespace from value" {
+    const h = splitHeaderLine("X-Pad:\t  value").?;
+    try testing.expectEqualStrings("X-Pad", h.key);
+    try testing.expectEqualStrings("value", h.value);
+}
+
+test "splitHeaderLine: no colon returns null" {
+    try testing.expect(splitHeaderLine("not a header") == null);
+}
+
+test "splitHeaderLine: empty value after colon" {
+    const h = splitHeaderLine("X-Empty:").?;
+    try testing.expectEqualStrings("X-Empty", h.key);
+    try testing.expectEqualStrings("", h.value);
+}
+
+test "parseContentLengthValue: valid digits" {
+    try testing.expectEqual(@as(usize, 0), try parseContentLengthValue("0"));
+    try testing.expectEqual(@as(usize, 1024), try parseContentLengthValue("1024"));
+    try testing.expectEqual(@as(usize, 42), try parseContentLengthValue("  42  "));
+}
+
+test "parseContentLengthValue: rejects non-digits, empty, signed" {
+    try testing.expectError(error.InvalidContentLength, parseContentLengthValue(""));
+    try testing.expectError(error.InvalidContentLength, parseContentLengthValue("   "));
+    try testing.expectError(error.InvalidContentLength, parseContentLengthValue("12a"));
+    try testing.expectError(error.InvalidContentLength, parseContentLengthValue("-5"));
+    try testing.expectError(error.InvalidContentLength, parseContentLengthValue("+5"));
+}
+
+test "parseContentLength: extracts from header section" {
+    const headers = "POST / HTTP/1.1\r\nContent-Length: 17\r\nHost: x\r\n\r\n";
+    try testing.expectEqual(@as(?usize, 17), try parseContentLength(headers));
+}
+
+test "parseContentLength: missing returns null" {
+    const headers = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+    try testing.expectEqual(@as(?usize, null), try parseContentLength(headers));
+}
+
+test "parseContentLength: case-insensitive header key" {
+    const headers = "POST / HTTP/1.1\r\ncontent-length: 9\r\n\r\n";
+    try testing.expectEqual(@as(?usize, 9), try parseContentLength(headers));
+}
+
+test "parseContentLength: duplicate same value is allowed" {
+    const headers = "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n";
+    try testing.expectEqual(@as(?usize, 5), try parseContentLength(headers));
+}
+
+test "parseContentLength: duplicate different values errors" {
+    const headers = "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 7\r\n\r\n";
+    try testing.expectError(error.DuplicateContentLength, parseContentLength(headers));
+}
+
+test "hasTransferEncodingChunked: chunked detected" {
+    const headers = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+    try testing.expect(hasTransferEncodingChunked(headers));
+}
+
+test "hasTransferEncodingChunked: case-insensitive value" {
+    const headers = "POST / HTTP/1.1\r\nTransfer-Encoding: Chunked\r\n\r\n";
+    try testing.expect(hasTransferEncodingChunked(headers));
+}
+
+test "hasTransferEncodingChunked: comma-list containing chunked" {
+    const headers = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+    try testing.expect(hasTransferEncodingChunked(headers));
+}
+
+test "hasTransferEncodingChunked: absent or other encoding returns false" {
+    try testing.expect(!hasTransferEncodingChunked("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try testing.expect(!hasTransferEncodingChunked("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"));
+}
