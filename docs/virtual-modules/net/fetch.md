@@ -5,14 +5,14 @@ Web-standard outbound HTTP client with optional durable replay.
 ## Summary
 
 ```ts
-import { fetch } from "zigttp:fetch";
+import { get, post, fetch } from "zigttp:fetch";
 
 export function handler(req) {
   // Non-durable: ordinary outbound call.
-  const pong = fetch("https://example.com/ping");
+  const pong = get("https://example.com/ping");
 
   // Durable: replayable across crashes, keyed by idempotency header.
-  const receipt = fetch("https://billing.example/charge", {
+  const receipt = post("https://billing.example/charge", {
     method: "POST",
     headers: { "Idempotency-Key": req.headers.get("idempotency-key") },
     body: req.text(),
@@ -28,7 +28,17 @@ export function handler(req) {
 
 ```ts
 fetch(url: string, init?: RequestInit): Response
+get(url: string, init?: RequestInit, retries?: number): Response
+post(url: string, init?: RequestInit, retries?: number): Response
+put(url: string, init?: RequestInit, retries?: number): Response
+patch(url: string, init?: RequestInit, retries?: number): Response
+delete(url: string, init?: RequestInit, retries?: number): Response
 ```
+
+The method helpers are high-level aliases: they clone `init` and set
+`method` automatically, so handler code can stay focused on intent.
+They also accept `retries` (default `0`, max `8`) and retry on `5xx`
+responses.
 
 `RequestInit` extends the WHATWG shape:
 
