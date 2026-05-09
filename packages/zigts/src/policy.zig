@@ -130,7 +130,24 @@ pub const LocalPolicyChecker = struct {
 /// expose `check(input: PolicyInput) PolicyResult`. The runtime picks one at
 /// startup based on whether a Wasm artifact is present on disk. Call sites
 /// do not change between the two modes.
+///
+/// Startup flow (Phase 2): if a Wasm artifact path is configured, the runtime
+/// loads it via `wasm.loadWasmArtifact`, pre-warms a `wasm.WasmPool`, and
+/// calls `WasmPolicyChecker.init(pool_ptr)` once; all request-path calls then
+/// go through `check` which acquires from the pool. `pool_ptr` is kept as
+/// `*anyopaque` here to avoid a circular import; the Phase 2 implementation PR
+/// will introduce a proper module boundary.
 pub const WasmPolicyChecker = struct {
+    /// Pre-warmed pool of Wasm interpreter instances. Nil until Phase 2 wires
+    /// the startup path; `check` panics before it is ever non-nil.
+    pool_ptr: ?*anyopaque = null,
+
+    /// Select the Wasm checker at startup. `pool_ptr` must point to a live
+    /// `wasm.WasmPool` that outlives this checker.
+    pub fn init(pool_ptr: *anyopaque) WasmPolicyChecker {
+        return .{ .pool_ptr = pool_ptr };
+    }
+
     pub fn check(self: WasmPolicyChecker, input: PolicyInput) PolicyResult {
         _ = self;
         _ = input;
