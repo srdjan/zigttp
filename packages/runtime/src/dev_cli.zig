@@ -46,7 +46,33 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     if (std.mem.eql(u8, command, "init")) {
-        try initCommand(allocator, user_args[1..]);
+        initCommand(allocator, user_args[1..]) catch |err| {
+            if (err == error.HelpRequested) {
+                printInitHelp();
+                return;
+            }
+            if (err == error.MissingProjectName) {
+                std.debug.print("zigttp init requires a project name.\n\n", .{});
+                printInitHelp();
+                std.process.exit(1);
+            }
+            if (err == error.MissingTemplate) {
+                std.debug.print("--template requires one of: basic, api, htmx.\n\n", .{});
+                printInitHelp();
+                std.process.exit(1);
+            }
+            if (err == error.InvalidTemplate) {
+                std.debug.print("Unknown template. Choose one of: basic, api, htmx.\n\n", .{});
+                printInitHelp();
+                std.process.exit(1);
+            }
+            if (err == error.InvalidArgument or err == error.UnknownOption) {
+                std.debug.print("Invalid init arguments.\n\n", .{});
+                printInitHelp();
+                std.process.exit(1);
+            }
+            return err;
+        };
         return;
     }
     if (std.mem.eql(u8, command, "dev")) {
@@ -411,11 +437,17 @@ fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return error.HelpRequested;
+        }
         if (std.mem.eql(u8, arg, "--template")) {
             i += 1;
             if (i >= argv.len) return error.MissingTemplate;
             template_name = argv[i];
             continue;
+        }
+        if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownOption;
         }
         if (project_name == null) {
             project_name = arg;
@@ -427,9 +459,26 @@ fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const name = project_name orelse return error.MissingProjectName;
     const template = parseTemplate(template_name) orelse return error.InvalidTemplate;
 
+    try scaffoldProject(allocator, name, template);
+    printInitNextSteps(name);
+}
+
+fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template: Template) !void {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
+
+    // Refuse to scaffold over an existing project. `zigttp.json` is the
+    // marker; any other contents in the directory are left alone.
+    const manifest_path = try std.fmt.allocPrint(allocator, "{s}/zigttp.json", .{name});
+    defer allocator.free(manifest_path);
+    if (std.Io.Dir.access(std.Io.Dir.cwd(), io, manifest_path, .{})) {
+        std.debug.print(
+            "error: '{s}/zigttp.json' already exists. Pick a different name or remove the existing project.\n",
+            .{name},
+        );
+        std.process.exit(1);
+    } else |_| {}
 
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, name);
     const src_dir = try std.fmt.allocPrint(allocator, "{s}/src", .{name});
@@ -463,13 +512,16 @@ fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         .htmx => htmxReadme,
     });
     try writeProjectFile(allocator, name, "public/.keep", "");
+}
 
+fn printInitNextSteps(name: []const u8) void {
     std.debug.print("Initialized zigttp project in {s}\n", .{name});
     std.debug.print("Next steps:\n", .{});
     std.debug.print("  cd {s}\n", .{name});
-    std.debug.print("  zigttp studio            # browser proof workbench\n", .{});
-    std.debug.print("  zigttp dev               # terminal proof HUD\n", .{});
-    std.debug.print("  zigttp proofs badge      # write a verdict badge for your README\n", .{});
+    std.debug.print("  zigttp studio       # opens http://localhost:3000/_zigttp/studio\n", .{});
+    std.debug.print("  zigttp check        # verify once in the terminal\n", .{});
+    std.debug.print("  zigttp build        # emit .zigttp/build/{s}\n", .{name});
+    std.debug.print("  zigttp deploy --local  # emit .zigttp/deploy/{s} and ledger row\n", .{name});
 }
 
 /// Path of the marker file that records "first-run tour was shown."
@@ -554,8 +606,8 @@ fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []co
     maybeShowFirstRunTour(allocator, argv);
     try runDevPreflight(allocator, argv);
 
-    const runtime_binary = try resolveRuntimeBinary(allocator, program_path);
-    defer allocator.free(runtime_binary);
+    const serve_binary = try resolveDeveloperServeBinary(allocator, program_path);
+    defer allocator.free(serve_binary);
 
     // `zigttp dev` is the magnet surface: it implies `--watch --prove` so the
     // proof HUD lights up on the first save. `--no-prove` opts out of proof
@@ -567,7 +619,7 @@ fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []co
 
     var child_args = std.ArrayList([]const u8).empty;
     defer child_args.deinit(allocator);
-    try child_args.append(allocator, runtime_binary);
+    try child_args.append(allocator, serve_binary);
     try child_args.append(allocator, "serve");
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--no-prove")) continue;
@@ -593,15 +645,15 @@ fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []co
 fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
     try runDevPreflight(allocator, argv);
 
-    const runtime_binary = try resolveRuntimeBinary(allocator, program_path);
-    defer allocator.free(runtime_binary);
+    const serve_binary = try resolveDeveloperServeBinary(allocator, program_path);
+    defer allocator.free(serve_binary);
 
     const user_has_watch = shared.hasFlag(argv, "--watch");
     const user_has_prove = shared.hasFlag(argv, "--prove");
 
     var child_args = std.ArrayList([]const u8).empty;
     defer child_args.deinit(allocator);
-    try child_args.append(allocator, runtime_binary);
+    try child_args.append(allocator, serve_binary);
     try child_args.append(allocator, "serve");
     for (argv) |arg| try child_args.append(allocator, arg);
     if (!shared.hasFlag(argv, "--studio")) try child_args.append(allocator, "--studio");
@@ -619,6 +671,14 @@ fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: [
         .stderr = .inherit,
     });
     _ = child.wait(io) catch {};
+}
+
+/// `dev` and `studio` need the developer CLI because live reload and Studio
+/// are intentionally not linked into `zigttp-runtime`. Re-entering the same
+/// binary with `serve` is safe: `serve` dispatches directly to runtime_cli.
+fn resolveDeveloperServeBinary(allocator: std.mem.Allocator, program_path: []const u8) ![]const u8 {
+    if (program_path.len > 0) return try allocator.dupe(u8, program_path);
+    return try allocator.dupe(u8, "zigttp");
 }
 
 /// Find the `zigttp` runtime binary.
@@ -1014,6 +1074,34 @@ fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
     }
 }
 
+fn printInitHelp() void {
+    const help =
+        \\zigttp init <name> [--template basic|api|htmx]
+        \\
+        \\Create a new zigttp project directory.
+        \\
+        \\Generated files:
+        \\  zigttp.json
+        \\  src/handler.ts
+        \\  tests/handler.test.jsonl
+        \\  public/
+        \\  .gitignore
+        \\  README.md
+        \\
+        \\Templates:
+        \\  basic   Small text handler (default)
+        \\  api     Health and echo JSON API
+        \\  htmx    TSX/HTMX page and fragment
+        \\
+        \\Example:
+        \\  zigttp init my-app
+        \\  cd my-app
+        \\  zigttp studio
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
 fn printCompileHelp() void {
     const help =
         \\zigttp compile <handler.ts> -o <output>
@@ -1185,7 +1273,7 @@ fn printHelp() void {
         \\zigttp - developer tool for zigttp projects
         \\
         \\Usage:
-        \\  zigttp init <name> [--template ...]    Create project
+        \\  zigttp init <name> [--template basic|api|htmx]  Create project
         \\  zigttp studio [handler-or-project]      Browser proof workbench
         \\  zigttp dev [handler-or-project]         Watch + proven hot reload (HUD on)
         \\  zigttp serve [options] [handler.ts]    Run handler locally
@@ -1236,6 +1324,67 @@ fn parseTemplate(name: []const u8) ?Template {
     if (std.mem.eql(u8, name, "api")) return .api;
     if (std.mem.eql(u8, name, "htmx")) return .htmx;
     return null;
+}
+
+test "parseTemplate accepts v1 templates only" {
+    try std.testing.expectEqual(Template.basic, parseTemplate("basic").?);
+    try std.testing.expectEqual(Template.api, parseTemplate("api").?);
+    try std.testing.expectEqual(Template.htmx, parseTemplate("htmx").?);
+    try std.testing.expect(parseTemplate("react") == null);
+}
+
+test "deployArgsRequestLocal recognizes only explicit local targets" {
+    try std.testing.expect(deployArgsRequestLocal(&.{"--local"}));
+    try std.testing.expect(deployArgsRequestLocal(&.{ "--target", "local" }));
+    try std.testing.expect(!deployArgsRequestLocal(&.{}));
+    try std.testing.expect(!deployArgsRequestLocal(&.{ "--region", "us-east" }));
+    try std.testing.expect(!deployArgsRequestLocal(&.{ "--target", "cloud" }));
+}
+
+test "resolveDeveloperServeBinary re-enters developer CLI for studio and dev" {
+    const path = try resolveDeveloperServeBinary(std.testing.allocator, "/tmp/bin/zigttp");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("/tmp/bin/zigttp", path);
+
+    const fallback = try resolveDeveloperServeBinary(std.testing.allocator, "");
+    defer std.testing.allocator.free(fallback);
+    try std.testing.expectEqualStrings("zigttp", fallback);
+}
+
+test "initCommand validates arguments before writing files" {
+    try std.testing.expectError(error.MissingProjectName, initCommand(std.testing.allocator, &.{}));
+    try std.testing.expectError(error.HelpRequested, initCommand(std.testing.allocator, &.{"--help"}));
+    try std.testing.expectError(error.MissingTemplate, initCommand(std.testing.allocator, &.{ "demo", "--template" }));
+    try std.testing.expectError(error.InvalidTemplate, initCommand(std.testing.allocator, &.{ "demo", "--template", "react" }));
+    try std.testing.expectError(error.UnknownOption, initCommand(std.testing.allocator, &.{ "demo", "--bad" }));
+}
+
+test "initCommand scaffolds the v1 project layout" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try scaffoldProject(testing.allocator, "demo", .api);
+
+    const expected = [_][]const u8{
+        "demo/zigttp.json",
+        "demo/src/handler.ts",
+        "demo/tests/handler.test.jsonl",
+        "demo/public/.keep",
+        "demo/.gitignore",
+        "demo/README.md",
+    };
+    for (expected) |path| {
+        try std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{});
+    }
 }
 
 fn writeProjectFile(allocator: std.mem.Allocator, project_name: []const u8, relative_path: []const u8, data: []const u8) !void {
@@ -1337,8 +1486,10 @@ const htmxTests =
 
 const gitignoreSource =
     \\.zig-cache/
+    \\zig-cache/
     \\zig-out/
     \\.zigttp/
+    \\.DS_Store
 ;
 
 const basicReadme =

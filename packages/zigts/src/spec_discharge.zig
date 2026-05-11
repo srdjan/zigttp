@@ -105,6 +105,76 @@ pub fn suggestionFor(name: []const u8) ?[]const u8 {
     return null;
 }
 
+/// ZTS501 suggestion: actionable copy for `read_only` colliding with a
+/// stateful module import. The current check is import-level, so keeping the
+/// same module specifier will continue to fail even if only read functions are
+/// used.
+pub fn suggestionForIncompatible(spec_name: []const u8, module: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, spec_name, "read_only")) {
+        if (std.mem.eql(u8, module, "zigttp:cache")) {
+            return "drop `read_only` from your Spec set, or remove the zigttp:cache import from this handler.";
+        }
+        if (std.mem.eql(u8, module, "zigttp:sql")) {
+            return "drop `read_only` from your Spec set, or remove the zigttp:sql import from this handler.";
+        }
+    }
+    return null;
+}
+
+/// ZTS502 suggestion: when an unknown spec name is close enough to a
+/// v1 spec name (Levenshtein <= 2), point at the nearest match. Returns
+/// an owned slice when a candidate is found, else null. The caller is
+/// responsible for freeing.
+pub fn suggestionForUnknown(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
+    var best_name: ?[]const u8 = null;
+    var best_dist: usize = std.math.maxInt(usize);
+    for (v1_specs) |spec| {
+        const d = levenshtein(name, spec.name);
+        if (d < best_dist) {
+            best_dist = d;
+            best_name = spec.name;
+        }
+    }
+    // Cap the suggestion at distance 2: further than that and the
+    // suggestion is more noise than signal.
+    if (best_name == null or best_dist > 2) return null;
+    return try std.fmt.allocPrint(allocator, "did you mean `{s}`?", .{best_name.?});
+}
+
+/// Iterative Levenshtein distance with a single row buffer. Bounded
+/// O(len(a) * len(b)) time and O(min(len(a), len(b))) auxiliary stack.
+fn levenshtein(a: []const u8, b: []const u8) usize {
+    if (a.len == 0) return b.len;
+    if (b.len == 0) return a.len;
+    // Keep the shorter on the columns to bound the stack buffer.
+    const short = if (a.len <= b.len) a else b;
+    const long = if (a.len <= b.len) b else a;
+
+    var prev: [64]usize = undefined;
+    if (short.len + 1 > prev.len) {
+        // For pathologically long spec names fall back to len; the caller
+        // caps at distance 2 anyway, so a saturated value just suppresses
+        // the suggestion.
+        return std.math.maxInt(usize);
+    }
+    for (0..short.len + 1) |i| prev[i] = i;
+
+    for (long, 1..) |lc, i| {
+        var prev_diag = prev[0];
+        prev[0] = i;
+        for (short, 1..) |sc, j| {
+            const tmp = prev[j];
+            const cost: usize = if (lc == sc) 0 else 1;
+            prev[j] = @min(
+                @min(prev[j] + 1, prev[j - 1] + 1),
+                prev_diag + cost,
+            );
+            prev_diag = tmp;
+        }
+    }
+    return prev[short.len];
+}
+
 const incompatible_modules_for_read_only = [_][]const u8{
     "zigttp:cache",
     "zigttp:sql",
@@ -130,9 +200,14 @@ pub fn dischargeSpecs(
         const spec = lookupV1(name);
 
         if (spec == null) {
+            const spec_name = try allocator.dupe(u8, name);
+            errdefer allocator.free(spec_name);
+            const suggestion = try suggestionForUnknown(allocator, name);
+            errdefer if (suggestion) |s| allocator.free(s);
             try out.append(allocator, .{
                 .kind = .unknown_name,
-                .spec_name = try allocator.dupe(u8, name),
+                .spec_name = spec_name,
+                .suggestion = suggestion,
             });
             continue;
         }
@@ -147,10 +222,20 @@ pub fn dischargeSpecs(
         if (spec.?.field == .read_only) {
             for (incompatible_modules_for_read_only) |module_name| {
                 if (containsString(modules, module_name)) {
+                    const spec_name = try allocator.dupe(u8, name);
+                    errdefer allocator.free(spec_name);
+                    const owned_module = try allocator.dupe(u8, module_name);
+                    errdefer allocator.free(owned_module);
+                    const suggestion = if (suggestionForIncompatible(name, module_name)) |s|
+                        try allocator.dupe(u8, s)
+                    else
+                        null;
+                    errdefer if (suggestion) |s| allocator.free(s);
                     try out.append(allocator, .{
                         .kind = .incompatible_with_import,
-                        .spec_name = try allocator.dupe(u8, name),
-                        .incompatible_module = try allocator.dupe(u8, module_name),
+                        .spec_name = spec_name,
+                        .incompatible_module = owned_module,
+                        .suggestion = suggestion,
                     });
                     emitted_incompat = true;
                     break;
@@ -352,4 +437,88 @@ test "suggestionFor covers all cause-only specs" {
             try std.testing.expect(suggestionFor(spec.name) != null);
         }
     }
+}
+
+test "dischargeSpecs ZTS502 unknown name carries a nearest-match suggestion" {
+    const allocator = std.testing.allocator;
+
+    const props = HandlerProperties{
+        .pure = true,
+        .read_only = true,
+        .stateless = true,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = false,
+    };
+    // Typo of `idempotent`. Levenshtein distance 2 (transposed o-t).
+    const declared: [1][]const u8 = .{"idemptoent"};
+    const modules: [0][]const u8 = .{};
+
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules);
+    defer {
+        for (diags.items) |*d| @constCast(d).deinit(allocator);
+        diags.deinit(allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.unknown_name, diags.items[0].kind);
+    try std.testing.expect(diags.items[0].suggestion != null);
+    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "idempotent") != null);
+}
+
+test "dischargeSpecs ZTS502 with far-off name yields no suggestion" {
+    const allocator = std.testing.allocator;
+
+    const props = HandlerProperties{
+        .pure = true,
+        .read_only = true,
+        .stateless = true,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = false,
+    };
+    const declared: [1][]const u8 = .{"completely_unrelated_name"};
+    const modules: [0][]const u8 = .{};
+
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules);
+    defer {
+        for (diags.items) |*d| @constCast(d).deinit(allocator);
+        diags.deinit(allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expect(diags.items[0].suggestion == null);
+}
+
+test "dischargeSpecs ZTS501 incompatible carries an actionable suggestion" {
+    const allocator = std.testing.allocator;
+
+    const props = HandlerProperties{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = true,
+        .has_egress = false,
+    };
+    const declared: [1][]const u8 = .{"read_only"};
+    const modules: [1][]const u8 = .{"zigttp:sql"};
+
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules);
+    defer {
+        for (diags.items) |*d| @constCast(d).deinit(allocator);
+        diags.deinit(allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.incompatible_with_import, diags.items[0].kind);
+    try std.testing.expect(diags.items[0].suggestion != null);
+    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "zigttp:sql") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "remove") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "reads") == null);
+}
+
+test "levenshtein distance basics" {
+    try std.testing.expectEqual(@as(usize, 0), levenshtein("abc", "abc"));
+    try std.testing.expectEqual(@as(usize, 1), levenshtein("abc", "abd"));
+    try std.testing.expectEqual(@as(usize, 1), levenshtein("abc", "ab"));
+    try std.testing.expectEqual(@as(usize, 3), levenshtein("", "abc"));
+    try std.testing.expectEqual(@as(usize, 2), levenshtein("idemptoent", "idempotent"));
 }

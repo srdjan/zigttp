@@ -16,6 +16,7 @@ Run every gate on macOS (native) before tagging. All must pass.
 - [ ] `zig build test` -- all unit tests (src/ + zigts/ + tools/)
 - [ ] `zig build test-zigts` -- engine tests only
 - [ ] `zig build test-zruntime` -- runtime tests only
+- [ ] `zig build smoke-v1` -- public v1 flow: init, studio, build, deploy --local
 - [ ] `bash scripts/test-examples.sh` -- 14 example handler suites (exit 0)
 - [ ] `zig build -Doptimize=ReleaseFast` -- release binary compiles cleanly
 
