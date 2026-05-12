@@ -200,7 +200,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "deploy")) {
-        if (deployArgsRequestLocal(user_args[1..])) {
+        if (!deployArgsRequestCloud(user_args[1..])) {
             localDeployCommand(allocator, user_args[1..]) catch |err| {
                 if (err == error.NoProjectConfig) {
                     printNoProjectConfigDiagnostic(command);
@@ -213,13 +213,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
             };
             return;
         }
-        deploy.run(allocator, user_args[1..]) catch |err| {
+        const cloud_args = try stripFlag(allocator, user_args[1..], "--cloud");
+        defer allocator.free(cloud_args);
+        deploy.run(allocator, cloud_args) catch |err| {
             if (err == error.HelpRequested) {
                 printDeployHelp();
                 return;
             }
             if (err == error.UnknownOption) {
-                std.debug.print("zigttp deploy only accepts --confirm, --region <name>, --wait, and --no-wait.\n\n", .{});
+                std.debug.print("zigttp deploy --cloud only accepts --confirm, --region <name>, --wait, and --no-wait.\n\n", .{});
                 printDeployHelp();
                 return;
             }
@@ -383,15 +385,30 @@ fn containsString(haystack: []const []const u8, needle: []const u8) bool {
     return false;
 }
 
-fn deployArgsRequestLocal(argv: []const []const u8) bool {
-    var i: usize = 0;
-    while (i < argv.len) : (i += 1) {
-        if (std.mem.eql(u8, argv[i], "--local")) return true;
-        if (std.mem.eql(u8, argv[i], "--target")) {
-            if (i + 1 < argv.len and std.mem.eql(u8, argv[i + 1], "local")) return true;
-        }
+/// Returns true when the user explicitly opts into the hosted control-plane
+/// deploy. Bare `zigttp deploy` (no flags) returns false and produces a local
+/// artifact. Cloud-only flags (`--region`, `--confirm`, `--wait`, `--no-wait`)
+/// imply `--cloud` so existing scripts keep working through v1.x.
+fn deployArgsRequestCloud(argv: []const []const u8) bool {
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--cloud")) return true;
+        if (containsString(&cloud_only_deploy_flags, arg)) return true;
     }
     return false;
+}
+
+/// Allocate a copy of `argv` with every occurrence of `flag` removed. Used
+/// to strip `--cloud` before forwarding to `deploy.run`, whose arg parser
+/// does not recognise the new opt-in flag.
+fn stripFlag(allocator: std.mem.Allocator, argv: []const []const u8, flag: []const u8) ![][]const u8 {
+    var kept = try allocator.alloc([]const u8, argv.len);
+    var n: usize = 0;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, flag)) continue;
+        kept[n] = arg;
+        n += 1;
+    }
+    return try allocator.realloc(kept, n);
 }
 
 fn printNoProjectConfigDiagnostic(command: []const u8) void {
@@ -903,7 +920,7 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 /// pointer to the hosted control-plane help so users do not silently get
 /// the local artifact when they expected a cloud deploy.
 const cloud_only_deploy_flags = [_][]const u8{ "--region", "--confirm", "--wait", "--no-wait" };
-const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local" };
+const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local", "--cloud" };
 
 fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     for (argv) |arg| {
@@ -944,14 +961,14 @@ fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
 
     std.debug.print(
         \\
-        \\Local deploy ready.
+        \\Deployed: {s}
+        \\Run:      ./{s}
+        \\Try:      curl http://{s}:{d}/
+        \\Ledger:   .zigttp/proofs.jsonl (kind=deploy)
         \\
-        \\  Artifact: {s}
-        \\  Run:      {s} -p {d}
-        \\  Verify:   curl http://{s}:{d}/
-        \\  Ledger:   .zigttp/proofs.jsonl (kind=deploy)
+        \\Tip: pass --cloud to deploy to the zigttp hosted runtime instead.
         \\
-    , .{ artifact.output_path, artifact.output_path, artifact.project.port, artifact.project.host, artifact.project.port });
+    , .{ artifact.output_path, artifact.output_path, artifact.project.host, artifact.project.port });
 }
 
 fn buildArtifact(
@@ -1161,20 +1178,20 @@ fn printLocalDeployHelp() void {
 
 fn printDeployHelp() void {
     const help =
-        \\zigttp deploy [--local]
+        \\zigttp deploy [--cloud]
         \\
-        \\Deploy the handler in this directory.
+        \\Deploy the handler in this directory. Defaults to building a
+        \\self-contained binary at .zigttp/deploy/<name> and recording the
+        \\deploy in .zigttp/proofs.jsonl. No credentials, network, or Docker
+        \\required.
         \\
-        \\With --local: build a self-contained binary at .zigttp/deploy/<name>
-        \\and record the deploy in .zigttp/proofs.jsonl. No credentials needed.
-        \\
-        \\Without --local: deploy to the zigttp runtime via the hosted control
-        \\plane. If credentials are missing, Zigttp first prompts for an access
-        \\token. Submit an empty token to fall back to browser-based device
-        \\login.
+        \\With --cloud: deploy to the zigttp hosted runtime instead. If
+        \\credentials are missing, Zigttp first prompts for an access token.
+        \\Submit an empty token to fall back to browser-based device login.
         \\
         \\The command auto-detects everything by default. Optional flags:
-        \\  --local          Build a local artifact, no network, no credentials
+        \\  --cloud          Deploy to the hosted runtime (otherwise: local)
+        \\  --local          Explicit alias for the local default (deprecated)
         \\  --confirm        Allow replace-like updates after showing the drift warning
         \\  --region <name>  Override the deployment region for this run
         \\  --wait           Block until the service reports ready (default)
@@ -1333,12 +1350,25 @@ test "parseTemplate accepts v1 templates only" {
     try std.testing.expect(parseTemplate("react") == null);
 }
 
-test "deployArgsRequestLocal recognizes only explicit local targets" {
-    try std.testing.expect(deployArgsRequestLocal(&.{"--local"}));
-    try std.testing.expect(deployArgsRequestLocal(&.{ "--target", "local" }));
-    try std.testing.expect(!deployArgsRequestLocal(&.{}));
-    try std.testing.expect(!deployArgsRequestLocal(&.{ "--region", "us-east" }));
-    try std.testing.expect(!deployArgsRequestLocal(&.{ "--target", "cloud" }));
+test "deployArgsRequestCloud requires explicit opt-in" {
+    try std.testing.expect(!deployArgsRequestCloud(&.{}));
+    try std.testing.expect(!deployArgsRequestCloud(&.{"--local"}));
+    try std.testing.expect(!deployArgsRequestCloud(&.{ "--target", "local" }));
+
+    try std.testing.expect(deployArgsRequestCloud(&.{"--cloud"}));
+    try std.testing.expect(deployArgsRequestCloud(&.{ "--region", "us-east" }));
+    try std.testing.expect(deployArgsRequestCloud(&.{"--confirm"}));
+    try std.testing.expect(deployArgsRequestCloud(&.{"--wait"}));
+    try std.testing.expect(deployArgsRequestCloud(&.{"--no-wait"}));
+}
+
+test "stripFlag removes only the named flag" {
+    const argv = [_][]const u8{ "--cloud", "--region", "us-east", "--cloud" };
+    const out = try stripFlag(std.testing.allocator, &argv, "--cloud");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(@as(usize, 2), out.len);
+    try std.testing.expectEqualStrings("--region", out[0]);
+    try std.testing.expectEqualStrings("us-east", out[1]);
 }
 
 test "resolveDeveloperServeBinary re-enters developer CLI for studio and dev" {

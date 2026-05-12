@@ -487,12 +487,14 @@ fn parseLifecycle(str: []const u8) ?contract_runtime.PoolingPolicy {
 }
 
 fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payload, argv: []const []const u8) !void {
+    // Matches the curl hint printed by `zigttp deploy`; -p PORT still overrides.
     var config = ServerConfig{
         .handler = .{ .appended_payload = .{
             .bytecode = payload.bytecode,
             .dep_bytecodes = payload.dep_bytecodes,
         } },
         .contract_json = payload.contract_json,
+        .port = 3000,
     };
 
     var i: usize = 0;
