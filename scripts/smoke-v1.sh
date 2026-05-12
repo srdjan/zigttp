@@ -1,6 +1,6 @@
 #!/bin/bash
 # End-to-end smoke test for the v1 user flow:
-#   init -> doctor -> check -> studio -> build -> run -> deploy --local -> run.
+#   init -> doctor -> check -> studio -> build -> run -> deploy -> run.
 # Exits non-zero on first failure, with a one-line diagnostic.
 #
 # Usage: bash scripts/smoke-v1.sh
@@ -19,6 +19,7 @@ DEPLOY_PORT=$((STUDIO_PORT + 2))
 TMP_DIR=$(mktemp -d -t zigttp-smoke-XXXXXX)
 APP_NAME="smoke-app"
 APP_DIR="$TMP_DIR/$APP_NAME"
+BROKEN_APP_DIR="$TMP_DIR/broken-app"
 
 cleanup() {
     pkill -f "$APP_DIR/.zigttp/build/$APP_NAME" 2>/dev/null || true
@@ -81,6 +82,28 @@ step "build $ZIGTTP and zigttp-runtime"
 (cd "$REPO_ROOT" && $ZIG build) || fail "zig build"
 [ -x "$ZIGTTP" ] || fail "missing $ZIGTTP after build"
 
+step "negative: init rejects path-like project names"
+if invalid_out=$(cd "$TMP_DIR" && "$ZIGTTP" init "../bad-app" 2>&1); then
+    fail "init accepted path-like project name"
+fi
+printf '%s' "$invalid_out" | grep -q "Invalid project name" || fail "init rejection did not explain invalid project name: $invalid_out"
+
+step "negative: build outside a project prints a project diagnostic"
+mkdir -p "$TMP_DIR/no-project"
+if missing_out=$(cd "$TMP_DIR/no-project" && "$ZIGTTP" build 2>&1); then
+    fail "build succeeded without zigttp.json"
+fi
+printf '%s' "$missing_out" | grep -q "No zigttp.json found" || fail "missing-project diagnostic did not mention zigttp.json: $missing_out"
+
+step "negative: broken handler build fails without emitting an artifact"
+(cd "$TMP_DIR" && "$ZIGTTP" init "broken-app" >/dev/null 2>&1) || fail "init broken-app"
+printf 'function handler(req) {\n' > "$BROKEN_APP_DIR/src/handler.ts"
+if broken_out=$(cd "$BROKEN_APP_DIR" && "$ZIGTTP" build 2>&1); then
+    fail "build succeeded for syntactically broken handler"
+fi
+[ ! -e "$BROKEN_APP_DIR/.zigttp/build/broken-app" ] || fail "broken handler emitted a build artifact"
+printf '%s' "$broken_out" | grep -Eq "Compilation failed|Parse|error" || fail "broken-handler diagnostic was not actionable: $broken_out"
+
 step "init $APP_NAME under $TMP_DIR"
 (cd "$TMP_DIR" && "$ZIGTTP" init "$APP_NAME" >/dev/null) || fail "init"
 [ -f "$APP_DIR/zigttp.json" ] || fail "no zigttp.json after init"
@@ -116,10 +139,10 @@ build_body=$(wait_for_http "http://127.0.0.1:$BUILD_PORT/" 25) || fail "build ar
 [ -n "$build_body" ] || fail "build artifact returned empty body on /"
 stop_bg "$BUILD_PID" "$APP_DIR/.zigttp/build/$APP_NAME"
 
-step "deploy --local emits .zigttp/deploy/$APP_NAME and appends ledger row"
-"$ZIGTTP" deploy --local >/dev/null 2>&1 || fail "deploy --local exited non-zero"
+step "deploy emits .zigttp/deploy/$APP_NAME and appends ledger row"
+"$ZIGTTP" deploy >/dev/null 2>&1 || fail "deploy exited non-zero"
 [ -x "$APP_DIR/.zigttp/deploy/$APP_NAME" ] || fail "deploy artifact missing or not executable"
-[ -s "$APP_DIR/.zigttp/proofs.jsonl" ] || fail "proofs.jsonl missing or empty after deploy --local"
+[ -s "$APP_DIR/.zigttp/proofs.jsonl" ] || fail "proofs.jsonl missing or empty after deploy"
 grep -q '"kind":"deploy"' "$APP_DIR/.zigttp/proofs.jsonl" || fail "no kind=deploy row in proofs.jsonl"
 
 step "run deploy artifact on :$DEPLOY_PORT and curl /"
@@ -129,5 +152,5 @@ deploy_body=$(wait_for_http "http://127.0.0.1:$DEPLOY_PORT/" 25) || fail "deploy
 [ -n "$deploy_body" ] || fail "deploy artifact returned empty body on /"
 stop_bg "$DEPLOY_PID" "$APP_DIR/.zigttp/deploy/$APP_NAME"
 
-step "PASS: init -> doctor -> check -> studio -> build -> deploy --local"
+step "PASS: init -> doctor -> check -> studio -> build -> deploy"
 exit 0

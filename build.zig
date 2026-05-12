@@ -523,7 +523,7 @@ pub fn build(b: *std.Build) void {
     bench_check_step.dependOn(&bench_check_cmd.step);
 
     // End-to-end smoke for the v1 user flow:
-    // init -> doctor -> check -> studio -> build -> deploy --local.
+    // init -> doctor -> check -> studio -> build -> deploy.
     // The script builds the CLI itself; the step does not reference cli_exe so
     // CI can invoke it as a single command without depending on install steps.
     const smoke_v1_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/smoke-v1.sh" });

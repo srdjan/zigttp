@@ -66,6 +66,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 printInitHelp();
                 std.process.exit(1);
             }
+            if (err == error.InvalidProjectName) {
+                std.debug.print("Invalid project name. Use letters, numbers, '-' or '_', starting with a letter or number.\n\n", .{});
+                printInitHelp();
+                std.process.exit(1);
+            }
             if (err == error.InvalidArgument or err == error.UnknownOption) {
                 std.debug.print("Invalid init arguments.\n\n", .{});
                 printInitHelp();
@@ -226,7 +231,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             }
             if (err == error.MissingOptionValue) {
-                std.debug.print("--region requires a value, for example: zigttp deploy --region us-east\n\n", .{});
+                std.debug.print("--region requires a value, for example: zigttp deploy --cloud --region us-east\n\n", .{});
                 printDeployHelp();
                 return;
             }
@@ -474,10 +479,25 @@ fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
 
     const name = project_name orelse return error.MissingProjectName;
+    try validateProjectName(name);
     const template = parseTemplate(template_name) orelse return error.InvalidTemplate;
 
     try scaffoldProject(allocator, name, template);
     printInitNextSteps(name);
+}
+
+fn validateProjectName(name: []const u8) !void {
+    if (name.len == 0) return error.InvalidProjectName;
+    if (std.fs.path.isAbsolute(name)) return error.InvalidProjectName;
+
+    for (name, 0..) |c, i| {
+        const is_letter = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
+        const is_digit = c >= '0' and c <= '9';
+        const is_separator = c == '-' or c == '_';
+
+        if (i == 0 and !is_letter and !is_digit) return error.InvalidProjectName;
+        if (!is_letter and !is_digit and !is_separator) return error.InvalidProjectName;
+    }
 }
 
 fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template: Template) !void {
@@ -538,7 +558,7 @@ fn printInitNextSteps(name: []const u8) void {
     std.debug.print("  zigttp studio       # opens http://localhost:3000/_zigttp/studio\n", .{});
     std.debug.print("  zigttp check        # verify once in the terminal\n", .{});
     std.debug.print("  zigttp build        # emit .zigttp/build/{s}\n", .{name});
-    std.debug.print("  zigttp deploy --local  # emit .zigttp/deploy/{s} and ledger row\n", .{name});
+    std.debug.print("  zigttp deploy       # emit .zigttp/deploy/{s} and ledger row\n", .{name});
 }
 
 /// Path of the marker file that records "first-run tour was shown."
@@ -1096,6 +1116,8 @@ fn printInitHelp() void {
         \\zigttp init <name> [--template basic|api|htmx]
         \\
         \\Create a new zigttp project directory.
+        \\Project names may contain letters, numbers, '-' and '_', and must
+        \\start with a letter or number.
         \\
         \\Generated files:
         \\  zigttp.json
@@ -1191,7 +1213,7 @@ fn printDeployHelp() void {
         \\
         \\The command auto-detects everything by default. Optional flags:
         \\  --cloud          Deploy to the hosted runtime (otherwise: local)
-        \\  --local          Explicit alias for the local default (deprecated)
+        \\  --local          Explicit alias for the local default
         \\  --confirm        Allow replace-like updates after showing the drift warning
         \\  --region <name>  Override the deployment region for this run
         \\  --wait           Block until the service reports ready (default)
@@ -1389,6 +1411,31 @@ test "initCommand validates arguments before writing files" {
     try std.testing.expectError(error.UnknownOption, initCommand(std.testing.allocator, &.{ "demo", "--bad" }));
 }
 
+test "validateProjectName accepts simple safe names" {
+    try validateProjectName("demo");
+    try validateProjectName("demo-app");
+    try validateProjectName("demo_app_1");
+    try validateProjectName("123-demo");
+}
+
+test "validateProjectName rejects paths and shell-confusing names" {
+    const invalid = [_][]const u8{
+        "",
+        ".",
+        "..",
+        "../demo",
+        "demo/app",
+        "demo\\app",
+        "-demo",
+        "_demo",
+        "demo app",
+        "demo.app",
+    };
+    for (invalid) |name| {
+        try std.testing.expectError(error.InvalidProjectName, validateProjectName(name));
+    }
+}
+
 test "initCommand scaffolds the v1 project layout" {
     const testing = std.testing;
 
@@ -1542,7 +1589,7 @@ const basicReadme =
     \\4. Or do a verified local deploy that also records the proof in the
     \\   ledger at `.zigttp/proofs.jsonl`:
     \\
-    \\       zigttp deploy --local
+    \\       zigttp deploy
     \\       ./.zigttp/deploy/<this-app-name>
     \\
     \\## Other useful commands

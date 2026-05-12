@@ -66,7 +66,7 @@ directly to FaaS platforms or container environments.
 
 ## Quick Start
 
-The v1 user flow is `init` → edit → `studio` → `build` → `deploy --local`. Each command auto-detects the project from `zigttp.json`, so most steps take no arguments.
+The v1 user flow is `init` → edit → `studio` → `build` → `deploy`. Each command auto-detects the project from `zigttp.json`, so most steps take no arguments. Local deploy is the default; `--local` is accepted when you want the target to be explicit.
 
 ### Scaffold a project
 
@@ -94,11 +94,11 @@ zigttp build
 ### Verified local deploy
 
 ```bash
-zigttp deploy --local
+zigttp deploy
 ./.zigttp/deploy/my-app
 ```
 
-`deploy --local` does everything `build` does, plus appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. No cloud credentials, no Docker, no network access. See [docs/deploy-tutorial.md](deploy-tutorial.md) for the hosted-control-plane preview path.
+`deploy` does everything `build` does, plus appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. No cloud credentials, no Docker, no network access. See [docs/deploy-tutorial.md](deploy-tutorial.md) for the hosted-control-plane preview path.
 
 ### Quick one-off testing
 
@@ -1584,9 +1584,9 @@ const config = ServerConfig{
 ./zig-out/bin/zigttp serve -q -h 0.0.0.0 -p 8080 handler.js
 ```
 
-#### Native Deploy CLI
+#### Hosted Native Deploy CLI
 
-`zigttp deploy` cross-compiles the handler to a Linux musl binary,
+`zigttp deploy --cloud` cross-compiles the handler to a Linux musl binary,
 packages it as an OCI image, pushes it through the zigttp control plane,
 and provisions the service. The control plane mints short-lived registry
 credentials per deploy and forwards the image to the upstream provider,
@@ -1595,10 +1595,10 @@ token to manage on the client. The only external tool invoked is `zig`,
 for cross-compilation.
 
 ```bash
-zigttp deploy
-zigttp deploy --region eu-west
-zigttp deploy --no-wait
-zigttp deploy --confirm   # acknowledge drift after a warning
+zigttp deploy --cloud
+zigttp deploy --cloud --region eu-west
+zigttp deploy --cloud --no-wait
+zigttp deploy --cloud --confirm   # acknowledge drift after a warning
 ```
 
 Flags (all optional):

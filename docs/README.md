@@ -56,6 +56,8 @@ notes document design contracts, governance, and roadmap work.
 - [Policy Wasm Capability Gating](design/zigttp_zigts_policy_wasm_spec.md) -
   policy component proposal.
 - [Frontier](roadmap/frontier.md) - strategic direction.
+- [v1 Public Release](roadmap/v1-public-release.md) - release flow,
+  milestones, and gates for the first public Zigttp demo.
 - [Autoloop](roadmap/autoloop.md) - property-goal repair loop.
 - [Proofable Third-Party Modules](roadmap/proofable-third-party-modules.md) -
   deferred extension roadmap item.
