@@ -20,11 +20,15 @@ TMP_DIR=$(mktemp -d -t zigttp-smoke-XXXXXX)
 APP_NAME="smoke-app"
 APP_DIR="$TMP_DIR/$APP_NAME"
 BROKEN_APP_DIR="$TMP_DIR/broken-app"
+RUNTIME_BIN="$REPO_ROOT/zig-out/bin/zigttp-runtime"
+RUNTIME_BAK="$RUNTIME_BIN.smoke-bak"
 
 cleanup() {
     pkill -f "$APP_DIR/.zigttp/build/$APP_NAME" 2>/dev/null || true
     pkill -f "$APP_DIR/.zigttp/deploy/$APP_NAME" 2>/dev/null || true
     pkill -f "zigttp.*--port $STUDIO_PORT" 2>/dev/null || true
+    # Restore runtime if the missing-runtime negative test was interrupted.
+    [ -e "$RUNTIME_BAK" ] && mv "$RUNTIME_BAK" "$RUNTIME_BIN" 2>/dev/null
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -138,6 +142,15 @@ BUILD_PID=$!
 build_body=$(wait_for_http "http://127.0.0.1:$BUILD_PORT/" 25) || fail "build artifact did not respond on /"
 [ -n "$build_body" ] || fail "build artifact returned empty body on /"
 stop_bg "$BUILD_PID" "$APP_DIR/.zigttp/build/$APP_NAME"
+
+step "negative: deploy without zigttp-runtime emits an install hint"
+mv "$RUNTIME_BIN" "$RUNTIME_BAK"
+missing_runtime_status=0
+missing_runtime_out=$("$ZIGTTP" deploy 2>&1) || missing_runtime_status=$?
+mv "$RUNTIME_BAK" "$RUNTIME_BIN"
+[ "$missing_runtime_status" -ne 0 ] || fail "deploy succeeded with zigttp-runtime missing"
+printf '%s' "$missing_runtime_out" | grep -q "zigttp-runtime template not found" || fail "missing-runtime diagnostic was not actionable: $missing_runtime_out"
+[ ! -e "$APP_DIR/.zigttp/deploy/$APP_NAME" ] || fail "deploy artifact was created despite missing runtime"
 
 step "deploy emits .zigttp/deploy/$APP_NAME and appends ledger row"
 "$ZIGTTP" deploy >/dev/null 2>&1 || fail "deploy exited non-zero"

@@ -214,7 +214,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 if (err == error.UnknownOption) {
                     std.process.exit(1);
                 }
-                return err;
+                // buildArtifact already printed a remediation line for each
+                // of these; exit cleanly so the user does not also see a
+                // Zig panic-style stack trace.
+                switch (err) {
+                    error.ParseError,
+                    error.VerificationFailed,
+                    error.NoBytecode,
+                    error.FileNotFound,
+                    error.AccessDenied,
+                    => std.process.exit(1),
+                    else => return err,
+                }
             };
             return;
         }
@@ -965,6 +976,15 @@ fn prepareProjectArtifact(
         if (std.fs.path.dirname(path)) |parent| {
             std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, parent) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
+                error.AccessDenied => {
+                    std.debug.print(
+                        \\
+                        \\Aborted: cannot create '{s}': permission denied.
+                        \\Check write permissions on the project root.
+                        \\
+                    , .{parent});
+                    return err;
+                },
                 else => return err,
             };
         }
@@ -1091,7 +1111,13 @@ fn buildArtifact(
         .emit_verify = true,
         .emit_contract = true,
     }) catch |err| {
-        std.log.err("Compilation failed: {}", .{err});
+        // precompile already prints per-error lines to stderr; only surface
+        // the remediation hint so the dev knows where to look.
+        std.debug.print(
+            \\
+            \\Aborted: handler did not compile. Run `zigttp check` to inspect.
+            \\
+        , .{});
         return err;
     };
     defer compiled.deinit(allocator);
@@ -1145,7 +1171,20 @@ fn buildArtifact(
         contract_json,
         &policy,
     ) catch |err| {
-        std.log.err("Failed to create output binary: {}", .{err});
+        if (err == error.FileNotFound) {
+            // self_extract opens both the runtime template and the output
+            // path; the output parent was created by prepareProjectArtifact,
+            // so FileNotFound here almost always means the runtime template
+            // is missing alongside the dev CLI.
+            std.debug.print(
+                \\
+                \\Aborted: zigttp-runtime template not found at '{s}'.
+                \\Install zigttp-runtime alongside zigttp, or rebuild via `zig build`.
+                \\
+            , .{runtime_binary});
+        } else {
+            std.log.err("Failed to create output binary: {}", .{err});
+        }
         return err;
     };
 
