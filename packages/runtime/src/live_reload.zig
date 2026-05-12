@@ -377,6 +377,7 @@ pub const LiveReloadState = struct {
 
         if (self.server.studio) |*studio| {
             studio.updateFacts(&new_facts, baseline_ptr, &delta, elapsed_ms);
+            studio.broadcast();
         }
 
         // Translate the contract's per-property provenance into the renderer's

@@ -391,11 +391,11 @@ const ConnectionPool = struct {
         const outcome_if_alive: RequestOutcome = if (keep_alive) .keep_alive else .close;
 
         if (self.server.config.studio and studio_mod.isStudioPath(request.path)) {
-            self.handleStudioRequestSync(fd, request.path, keep_alive, req_allocator) catch |err| {
+            return self.handleStudioRequestSync(fd, request.path, keep_alive, req_allocator) catch |err| {
                 std.log.warn("studio request failed for {s}: {}", .{ request.path, err });
                 self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
+                return .close;
             };
-            return outcome_if_alive;
         }
 
         // WebSocket upgrade: if the handler contract advertises an
@@ -498,14 +498,28 @@ const ConnectionPool = struct {
         path: []const u8,
         keep_alive: bool,
         allocator: std.mem.Allocator,
-    ) !void {
+    ) !RequestOutcome {
+        const studio_opt: ?*studio_mod.State = if (self.server.studio) |*s| s else null;
+
+        if (std.mem.eql(u8, path, studio_mod.sse_path)) {
+            const studio = studio_opt orelse {
+                self.sendErrorSync(fd, 404, "Studio disabled") catch {};
+                return .close;
+            };
+            studio_mod.upgradeToSse(studio, fd, allocator) catch |err| {
+                std.log.warn("studio SSE upgrade failed: {}", .{err});
+                return .close;
+            };
+            return .transferred;
+        }
+
         var response = HttpResponse.init(allocator);
         defer response.deinit();
 
-        const studio_opt: ?*studio_mod.State = if (self.server.studio) |*s| s else null;
         if (try populateStudioResponse(studio_opt, path, &response, allocator)) {
             self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
         }
+        return if (keep_alive) .keep_alive else .close;
     }
 
     fn readRequestData(self: *ConnectionPool, fd: std.posix.fd_t, allocator: std.mem.Allocator) ![]u8 {
@@ -1796,6 +1810,13 @@ pub const Server = struct {
         keep_alive: bool,
         allocator: std.mem.Allocator,
     ) !void {
+        if (std.mem.eql(u8, path, studio_mod.sse_path)) {
+            // SSE push is only wired through the threaded ConnectionPool;
+            // 503 sends the EventSource client to its polling fallback.
+            try self.sendErrorResponse(stream, io, 503, "SSE unavailable on event-loop backend");
+            return;
+        }
+
         var response = HttpResponse.init(allocator);
         defer response.deinit();
 

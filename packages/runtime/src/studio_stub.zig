@@ -49,3 +49,12 @@ pub fn witnessDetailKey(path: []const u8) ?[]const u8 {
     _ = path;
     return null;
 }
+
+pub const sse_path = "/_zigttp/studio/events";
+
+pub fn upgradeToSse(state: *State, fd: std.posix.fd_t, allocator: std.mem.Allocator) !void {
+    _ = state;
+    _ = fd;
+    _ = allocator;
+    return error.StudioDisabled;
+}

@@ -25,6 +25,12 @@ pub const State = struct {
     json: []u8,
     recent: [recent_capacity]RecentEntry = undefined,
     recent_count: u8 = 0,
+    /// Server-Sent Events subscribers. Each fd belongs to a long-lived HTTP
+    /// connection that the threaded request loop has handed off via
+    /// `RequestOutcome.transferred`. broadcast() iterates this list whenever
+    /// the json buffer is refreshed.
+    subscribers: std.ArrayList(std.posix.fd_t) = .empty,
+    subscribers_mutex: compat.Mutex = .{},
 
     pub fn init(allocator: std.mem.Allocator, handler_path: []const u8) !State {
         return .{
@@ -35,9 +41,51 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State) void {
+        self.subscribers_mutex.lock();
+        for (self.subscribers.items) |fd| _ = std.c.close(fd);
+        self.subscribers.deinit(self.allocator);
+        self.subscribers_mutex.unlock();
         self.allocator.free(self.handler_path);
         self.allocator.free(self.json);
         self.* = undefined;
+    }
+
+    pub fn subscribe(self: *State, fd: std.posix.fd_t) !void {
+        self.subscribers_mutex.lock();
+        defer self.subscribers_mutex.unlock();
+        try self.subscribers.append(self.allocator, fd);
+    }
+
+    /// Push the current json payload to every SSE subscriber as a single
+    /// `data: ...\n\n` event. Subscribers whose write fails are closed and
+    /// dropped from the list. Safe to call from any thread.
+    pub fn broadcast(self: *State) void {
+        var payload: []u8 = undefined;
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            payload = self.allocator.dupe(u8, self.json) catch return;
+        }
+        defer self.allocator.free(payload);
+
+        var frame: std.ArrayList(u8) = .empty;
+        defer frame.deinit(self.allocator);
+        frame.appendSlice(self.allocator, "data: ") catch return;
+        frame.appendSlice(self.allocator, payload) catch return;
+        frame.appendSlice(self.allocator, "\n\n") catch return;
+
+        self.subscribers_mutex.lock();
+        defer self.subscribers_mutex.unlock();
+        var i: usize = 0;
+        while (i < self.subscribers.items.len) {
+            const fd = self.subscribers.items[i];
+            if (writeAllFd(fd, frame.items)) {
+                i += 1;
+            } else |_| {
+                _ = std.c.close(fd);
+                _ = self.subscribers.swapRemove(i);
+            }
+        }
     }
 
     pub fn updateChecking(self: *State) void {
@@ -177,13 +225,54 @@ pub const State = struct {
     }
 };
 
+fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const result = std.c.write(fd, remaining.ptr, remaining.len);
+        if (result <= 0) return error.WriteFailed;
+        const n: usize = @intCast(result);
+        remaining = remaining[n..];
+    }
+}
+
 pub fn isStudioPath(path: []const u8) bool {
     if (std.mem.eql(u8, path, "/_zigttp/studio")) return true;
     if (std.mem.eql(u8, path, "/_zigttp/studio/")) return true;
     if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) return true;
     if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) return true;
+    if (std.mem.eql(u8, path, sse_path)) return true;
     if (witnessDetailKey(path) != null) return true;
     return false;
+}
+
+pub const sse_path = "/_zigttp/studio/events";
+
+pub const sse_response_headers =
+    "HTTP/1.1 200 OK\r\n" ++
+    "Content-Type: text/event-stream\r\n" ++
+    "Cache-Control: no-cache\r\n" ++
+    "Connection: keep-alive\r\n" ++
+    "X-Accel-Buffering: no\r\n" ++
+    "\r\n";
+
+/// Write the SSE handshake plus the current state snapshot to `fd` and
+/// register the fd as a broadcast subscriber. The fd is owned by the studio
+/// state from here on - callers must hand off ownership (the threaded
+/// dispatch returns `RequestOutcome.transferred`).
+pub fn upgradeToSse(state: *State, fd: std.posix.fd_t, allocator: std.mem.Allocator) !void {
+    try writeAllFd(fd, sse_response_headers);
+
+    const snap = try state.stateJsonCopy(allocator);
+    defer allocator.free(snap);
+
+    var frame: std.ArrayList(u8) = .empty;
+    defer frame.deinit(allocator);
+    try frame.appendSlice(allocator, "data: ");
+    try frame.appendSlice(allocator, snap);
+    try frame.appendSlice(allocator, "\n\n");
+    try writeAllFd(fd, frame.items);
+
+    try state.subscribe(fd);
 }
 
 /// If `path` is `/_zigttp/studio/witness/<key>.json` and `<key>` is a valid
@@ -594,7 +683,11 @@ pub const index_html =
     \\function specsFingerprint(items){return (items||[]).map(s=>`${s.name}:${s.discharged?1:0}:${s.diagnosticCode||""}:${s.diagnosticMessage||""}:${s.sourceLine||""}:${s.sourceColumn||""}:${s.sourceSnippet||""}`).join("|")}
     \\function fmtClock(ms){const d=new Date(ms);return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}:${String(d.getSeconds()).padStart(2,"0")}`}
     \\function timeline(entries){if(!entries||!entries.length)return"";return entries.map((e,i)=>`<span class="tick ${esc(e.verdict)}${i===0?" first":""}" title="${esc(e.verdict)} · sha ${esc(e.sha8||"")} · ${e.recompileMs??0}ms · ${fmtClock(e.timestampMs)}">${fmtClock(e.timestampMs)} ${esc((e.sha8||"").slice(0,4))}${e.recompileMs!=null?" · "+e.recompileMs+"ms":""}</span>`).join("")}
-    \\async function refresh(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});const s=await r.json();$("status").textContent=`${s.status} · ${s.handlerPath||""}`;if(s.status!=="ready"){$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions);}catch(e){$("status").textContent=String(e)}}setInterval(refresh,750);refresh();
+    \\function render(s){$("status").textContent=`${s.status} · ${s.handlerPath||""}`;if(s.status!=="ready"){$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions)}
+    \\async function pull(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});render(await r.json())}catch(e){$("status").textContent=String(e)}}
+    \\let pollTimer=null;function startPolling(){if(!pollTimer)pollTimer=setInterval(pull,750)}function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
+    \\function startEvents(){let es;try{es=new EventSource("/_zigttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{render(JSON.parse(ev.data))}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
+    \\startEvents();pull();
     \\$("send").onclick=async()=>{const r=await fetch($("url").value,{method:$("method").value});$("response").textContent=`HTTP ${r.status}\n`+await r.text()}
     \\</script></body></html>
 ;
@@ -602,7 +695,21 @@ pub const index_html =
 test "studio path matcher is scoped to studio endpoints" {
     try std.testing.expect(isStudioPath("/_zigttp/studio"));
     try std.testing.expect(isStudioPath("/_zigttp/studio/state.json"));
+    try std.testing.expect(isStudioPath(sse_path));
     try std.testing.expect(!isStudioPath("/_zigttp/durable/contract"));
+}
+
+test "broadcast on a State with no subscribers does not allocate or leak" {
+    var s = try State.init(std.testing.allocator, "h.ts");
+    defer s.deinit();
+    s.broadcast();
+    s.broadcast();
+}
+
+test "studio HTML client wires EventSource with polling fallback" {
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "new EventSource(\"/_zigttp/studio/events\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "startPolling") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "setInterval(pull,750)") != null);
 }
 
 test "witnessDetailKey accepts hex keys and rejects bad shapes" {
