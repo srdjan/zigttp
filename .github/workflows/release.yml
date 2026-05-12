@@ -33,6 +33,9 @@ jobs:
       - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast
 
+      - name: Run v1 user-flow smoke
+        run: zig build smoke-v1
+
       - name: Replay proof ledger
         if: ${{ vars.PROOF_LEDGER_PATH != '' }}
         run: |
