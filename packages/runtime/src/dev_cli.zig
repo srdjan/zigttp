@@ -57,12 +57,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 std.process.exit(1);
             }
             if (err == error.MissingTemplate) {
-                std.debug.print("--template requires one of: basic, api, htmx.\n\n", .{});
+                std.debug.print("--template requires one of: " ++ template_choices ++ ".\n\n", .{});
                 printInitHelp();
                 std.process.exit(1);
             }
             if (err == error.InvalidTemplate) {
-                std.debug.print("Unknown template. Choose one of: basic, api, htmx.\n\n", .{});
+                std.debug.print("Unknown template. Choose one of: " ++ template_choices ++ ".\n\n", .{});
                 printInitHelp();
                 std.process.exit(1);
             }
@@ -437,6 +437,14 @@ fn handlePreflightError(err: anyerror, command: []const u8) bool {
         printNoProjectConfigDiagnostic(command);
         return true;
     }
+    if (err == error.MissingTemplate) {
+        std.debug.print("--template requires one of: " ++ template_choices ++ ".\n", .{});
+        return true;
+    }
+    if (err == error.InvalidTemplate) {
+        std.debug.print("Unknown template. Choose one of: " ++ template_choices ++ ".\n", .{});
+        return true;
+    }
     if (err == error.FileNotFound) {
         // zigts check has already printed `Error reading handler file 'X': error.FileNotFound`.
         // Add a remediation hint and swallow the stack trace.
@@ -680,20 +688,24 @@ fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []co
 }
 
 fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
-    try runDevPreflight(allocator, argv);
+    const parsed = try extractTemplateFlag(allocator, argv);
+    defer allocator.free(parsed.filtered);
+
+    try studioPreflight(allocator, parsed.template);
+    try runDevPreflight(allocator, parsed.filtered);
 
     const serve_binary = try resolveDeveloperServeBinary(allocator, program_path);
     defer allocator.free(serve_binary);
 
-    const user_has_watch = shared.hasFlag(argv, "--watch");
-    const user_has_prove = shared.hasFlag(argv, "--prove");
+    const user_has_watch = shared.hasFlag(parsed.filtered, "--watch");
+    const user_has_prove = shared.hasFlag(parsed.filtered, "--prove");
 
     var child_args = std.ArrayList([]const u8).empty;
     defer child_args.deinit(allocator);
     try child_args.append(allocator, serve_binary);
     try child_args.append(allocator, "serve");
-    for (argv) |arg| try child_args.append(allocator, arg);
-    if (!shared.hasFlag(argv, "--studio")) try child_args.append(allocator, "--studio");
+    for (parsed.filtered) |arg| try child_args.append(allocator, arg);
+    if (!shared.hasFlag(parsed.filtered, "--studio")) try child_args.append(allocator, "--studio");
     if (!user_has_watch) try child_args.append(allocator, "--watch");
     if (!user_has_prove) try child_args.append(allocator, "--prove");
 
@@ -708,6 +720,76 @@ fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: [
         .stderr = .inherit,
     });
     _ = child.wait(io) catch {};
+}
+
+/// Lets `mkdir myapp && cd myapp && zigttp studio` work as a single demo
+/// gesture. If the cwd (or any ancestor) already has a `zigttp.json`, this
+/// is a no-op and the existing project loads. If the cwd is empty (only
+/// dotfiles like `.git` allowed), we scaffold the selected template
+/// in-place. If the cwd has user files but no manifest, we leave the
+/// existing `error.NoProjectConfig` path to print the standard hint.
+fn studioPreflight(allocator: std.mem.Allocator, template: Template) !void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var project_opt = try project_config_mod.discover(allocator, io, null);
+    if (project_opt) |*p| {
+        p.deinit(allocator);
+        return;
+    }
+
+    if (!directoryIsEffectivelyEmpty(io)) return;
+
+    try scaffoldProject(allocator, ".", template);
+    std.debug.print("Scaffolded {s} template in current directory. Opening studio.\n\n", .{@tagName(template)});
+}
+
+/// Empty enough to scaffold over: no non-dotfile entries. `.git`,
+/// `.DS_Store`, IDE configs are all tolerated. A pre-existing
+/// `zigttp.json` would have been caught by `discover` upstream, so this
+/// only inspects the surface of the cwd.
+fn directoryIsEffectivelyEmpty(io: std.Io) bool {
+    var dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, ".", .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+
+    var iter = dir.iterate();
+    while (iter.next(io) catch return false) |entry| {
+        if (entry.name.len == 0) continue;
+        if (entry.name[0] == '.') continue;
+        return false;
+    }
+    return true;
+}
+
+const StudioArgs = struct {
+    template: Template,
+    /// Owned allocation; caller frees once.
+    filtered: [][]const u8,
+};
+
+/// Parse and consume `--template <name>` from `argv`. Everything else is
+/// forwarded to `serve`, which would reject `--template` as
+/// `error.UnknownOption`. Default template is `basic`.
+fn extractTemplateFlag(allocator: std.mem.Allocator, argv: []const []const u8) !StudioArgs {
+    var template: Template = .basic;
+    var filtered = try allocator.alloc([]const u8, argv.len);
+    errdefer allocator.free(filtered);
+
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        if (std.mem.eql(u8, argv[i], "--template")) {
+            if (i + 1 >= argv.len) return error.MissingTemplate;
+            template = parseTemplate(argv[i + 1]) orelse return error.InvalidTemplate;
+            i += 1;
+            continue;
+        }
+        filtered[n] = argv[i];
+        n += 1;
+    }
+    const resized = try allocator.realloc(filtered, n);
+    return .{ .template = template, .filtered = resized };
 }
 
 /// `dev` and `studio` need the developer CLI because live reload and Studio
@@ -1313,7 +1395,7 @@ fn printHelp() void {
         \\
         \\Usage:
         \\  zigttp init <name> [--template basic|api|htmx]  Create project
-        \\  zigttp studio [handler-or-project]      Browser proof workbench
+        \\  zigttp studio [--template basic|api|htmx]  Browser proof workbench (scaffolds in empty dir)
         \\  zigttp dev [handler-or-project]         Watch + proven hot reload (HUD on)
         \\  zigttp serve [options] [handler.ts]    Run handler locally
         \\  zigttp edge [--config FILE]            Run in-process edge runtime
@@ -1357,6 +1439,7 @@ fn printExpertAliasHelp() void {
 }
 
 const Template = enum { basic, api, htmx };
+const template_choices = "basic, api, htmx";
 
 fn parseTemplate(name: []const u8) ?Template {
     if (std.mem.eql(u8, name, "basic")) return .basic;
@@ -1434,6 +1517,111 @@ test "validateProjectName rejects paths and shell-confusing names" {
     for (invalid) |name| {
         try std.testing.expectError(error.InvalidProjectName, validateProjectName(name));
     }
+}
+
+test "extractTemplateFlag defaults to basic and strips the flag pair" {
+    const out = try extractTemplateFlag(std.testing.allocator, &.{ "--watch", "--studio" });
+    defer std.testing.allocator.free(out.filtered);
+    try std.testing.expectEqual(Template.basic, out.template);
+    try std.testing.expectEqual(@as(usize, 2), out.filtered.len);
+    try std.testing.expectEqualStrings("--watch", out.filtered[0]);
+    try std.testing.expectEqualStrings("--studio", out.filtered[1]);
+}
+
+test "extractTemplateFlag consumes --template <name> and forwards the rest" {
+    const out = try extractTemplateFlag(std.testing.allocator, &.{ "--template", "htmx", "--watch" });
+    defer std.testing.allocator.free(out.filtered);
+    try std.testing.expectEqual(Template.htmx, out.template);
+    try std.testing.expectEqual(@as(usize, 1), out.filtered.len);
+    try std.testing.expectEqualStrings("--watch", out.filtered[0]);
+}
+
+test "extractTemplateFlag rejects missing or unknown templates" {
+    try std.testing.expectError(error.MissingTemplate, extractTemplateFlag(std.testing.allocator, &.{"--template"}));
+    try std.testing.expectError(error.InvalidTemplate, extractTemplateFlag(std.testing.allocator, &.{ "--template", "react" }));
+}
+
+test "studioPreflight scaffolds in an empty cwd" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try studioPreflight(testing.allocator, .basic);
+
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zigttp.json", .{});
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "src/handler.ts", .{});
+}
+
+test "studioPreflight is a no-op when zigttp.json already exists" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    // Seed an existing project marker. Body content is intentionally bogus;
+    // discover() only cares that the file exists.
+    try zigts.file_io.writeFile(testing.allocator, "zigttp.json", "{}");
+
+    try studioPreflight(testing.allocator, .basic);
+
+    // No `src/handler.ts` should have been scaffolded over the existing project.
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "src/handler.ts", .{}));
+}
+
+test "studioPreflight refuses to scaffold over user files" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try zigts.file_io.writeFile(testing.allocator, "notes.txt", "not a zigttp project");
+
+    try studioPreflight(testing.allocator, .basic);
+
+    // No scaffold happened: zigttp.json must not exist.
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "zigttp.json", .{}));
+}
+
+test "studioPreflight tolerates dotfile-only cwd (e.g. .git)" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, ".git");
+
+    try studioPreflight(testing.allocator, .basic);
+
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zigttp.json", .{});
 }
 
 test "initCommand scaffolds the v1 project layout" {
