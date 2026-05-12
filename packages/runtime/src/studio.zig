@@ -18,6 +18,28 @@ pub const RecentEntry = struct {
 
 pub const recent_capacity: usize = 10;
 
+/// A single ZTS diagnostic carried into studio for browser-side display.
+/// All slices are owned by the producer so the diagnostic stays valid past
+/// the transient `CheckResult` lifetime upstream.
+pub const Diagnostic = struct {
+    code: []u8,
+    severity: []u8,
+    file: []u8,
+    line: u32,
+    column: u16,
+    message: []u8,
+    suggestion: ?[]u8,
+
+    pub fn deinit(self: *Diagnostic, allocator: std.mem.Allocator) void {
+        allocator.free(self.code);
+        allocator.free(self.severity);
+        allocator.free(self.file);
+        allocator.free(self.message);
+        if (self.suggestion) |s| allocator.free(s);
+        self.* = undefined;
+    }
+};
+
 pub const State = struct {
     allocator: std.mem.Allocator,
     handler_path: []u8,
@@ -94,7 +116,15 @@ pub const State = struct {
     }
 
     pub fn updateError(self: *State, message: []const u8) void {
-        const next = errorJson(self.allocator, self.handler_path, message) catch return;
+        const next = errorJson(self.allocator, self.handler_path, message, null) catch return;
+        self.replaceJson(next);
+    }
+
+    /// Replace state with `status: error` plus a structured diagnostics array.
+    /// Callers own the diagnostic slice; this method renders synchronously and
+    /// does not retain it.
+    pub fn updateDiagnostics(self: *State, message: []const u8, diagnostics: []const Diagnostic) void {
+        const next = errorJson(self.allocator, self.handler_path, message, diagnostics) catch return;
         self.replaceJson(next);
     }
 
@@ -310,7 +340,12 @@ fn initialJson(allocator: std.mem.Allocator, handler_path: []const u8) ![]u8 {
     return try allocator.dupe(u8, aw.writer.buffered());
 }
 
-fn errorJson(allocator: std.mem.Allocator, handler_path: []const u8, message: []const u8) ![]u8 {
+fn errorJson(
+    allocator: std.mem.Allocator,
+    handler_path: []const u8,
+    message: []const u8,
+    diagnostics: ?[]const Diagnostic,
+) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     var json: std.json.Stringify = .{ .writer = &aw.writer };
@@ -321,8 +356,37 @@ fn errorJson(allocator: std.mem.Allocator, handler_path: []const u8, message: []
     try json.write(handler_path);
     try json.objectField("message");
     try json.write(message);
+    if (diagnostics) |list| if (list.len > 0) {
+        try json.objectField("diagnostics");
+        try writeDiagnosticsJson(&json, list);
+    };
     try json.endObject();
     return try allocator.dupe(u8, aw.writer.buffered());
+}
+
+fn writeDiagnosticsJson(json: *std.json.Stringify, diagnostics: []const Diagnostic) !void {
+    try json.beginArray();
+    for (diagnostics) |d| {
+        try json.beginObject();
+        try json.objectField("code");
+        try json.write(d.code);
+        try json.objectField("severity");
+        try json.write(d.severity);
+        try json.objectField("file");
+        try json.write(d.file);
+        try json.objectField("line");
+        try json.write(d.line);
+        try json.objectField("column");
+        try json.write(d.column);
+        try json.objectField("message");
+        try json.write(d.message);
+        if (d.suggestion) |s| {
+            try json.objectField("suggestion");
+            try json.write(s);
+        }
+        try json.endObject();
+    }
+    try json.endArray();
 }
 
 fn factsJson(
@@ -654,12 +718,13 @@ pub const index_html =
     \\dl{display:grid;grid-template-columns:90px 1fr;gap:8px 14px;margin:0}dt{color:var(--muted)}dd{margin:0;min-width:0;overflow-wrap:anywhere}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#cfe6ff}
     \\ul{list-style:none;margin:0;padding:0}li{padding:7px 0;border-bottom:1px solid rgba(255,255,255,.06);overflow-wrap:anywhere}.empty{color:var(--muted)}
     \\footer{padding:14px 20px;border-top:1px solid var(--line);display:flex;gap:10px;background:#0d1016}input,select,textarea,button{font:inherit}select,input,textarea{background:#07090d;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px}input{flex:1}button{border:1px solid #38658f;background:#10243a;color:#dceeff;border-radius:6px;padding:9px 13px;cursor:pointer}pre{white-space:pre-wrap;margin:12px 0 0;color:#cbd7e3;max-height:180px;overflow:auto}
+    \\#diagnosticsList li{padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06)}#diagnosticsList .code{color:var(--bad);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}#diagnosticsList .loc{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;margin-left:8px}#diagnosticsList .msg{margin-top:4px;color:#dceeff}#diagnosticsList .hint{margin-top:4px;color:var(--muted);font-style:italic}
     \\@media(max-width:900px){.grid{grid-template-columns:1fr}.status{text-align:left}header{align-items:start;flex-direction:column}.big{font-size:32px}}
     \\</style>
     \\</head>
     \\<body><main>
     \\<header><div><h1>zigttp studio</h1><div class="sub">The compiler-visible shape of your handler, live.</div></div><div class="status" id="status">connecting</div></header>
-    \\<section class="grid"><div class="pane"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
+    \\<section class="grid"><div class="pane"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
     \\<footer><select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select><input id="url" value="/" aria-label="URL"><button id="send">Send</button></footer>
     \\<pre id="response"></pre>
     \\</main><script>
@@ -683,7 +748,9 @@ pub const index_html =
     \\function specsFingerprint(items){return (items||[]).map(s=>`${s.name}:${s.discharged?1:0}:${s.diagnosticCode||""}:${s.diagnosticMessage||""}:${s.sourceLine||""}:${s.sourceColumn||""}:${s.sourceSnippet||""}`).join("|")}
     \\function fmtClock(ms){const d=new Date(ms);return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}:${String(d.getSeconds()).padStart(2,"0")}`}
     \\function timeline(entries){if(!entries||!entries.length)return"";return entries.map((e,i)=>`<span class="tick ${esc(e.verdict)}${i===0?" first":""}" title="${esc(e.verdict)} · sha ${esc(e.sha8||"")} · ${e.recompileMs??0}ms · ${fmtClock(e.timestampMs)}">${fmtClock(e.timestampMs)} ${esc((e.sha8||"").slice(0,4))}${e.recompileMs!=null?" · "+e.recompileMs+"ms":""}</span>`).join("")}
-    \\function render(s){$("status").textContent=`${s.status} · ${s.handlerPath||""}`;if(s.status!=="ready"){$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions)}
+    \\function diagnostics(items){return (items||[]).map(d=>`<li><code class="code">${esc(d.code)}</code><span class="loc">${esc(d.file)}:${d.line}:${d.column}</span><div class="msg">${esc(d.message)}</div>${d.suggestion?`<div class="hint">hint: ${esc(d.suggestion)}</div>`:""}</li>`).join("")}
+    \\function renderDiagnostics(s){const diags=s.diagnostics||[];$("diagnosticsBlock").hidden=diags.length===0;$("diagnosticsList").innerHTML=diagnostics(diags)}
+    \\function render(s){$("status").textContent=`${s.status} · ${s.handlerPath||""}`;renderDiagnostics(s);if(s.status!=="ready"){$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions)}
     \\async function pull(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});render(await r.json())}catch(e){$("status").textContent=String(e)}}
     \\let pollTimer=null;function startPolling(){if(!pollTimer)pollTimer=setInterval(pull,750)}function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
     \\function startEvents(){let es;try{es=new EventSource("/_zigttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{render(JSON.parse(ev.data))}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
@@ -710,6 +777,57 @@ test "studio HTML client wires EventSource with polling fallback" {
     try std.testing.expect(std.mem.indexOf(u8, index_html, "new EventSource(\"/_zigttp/studio/events\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "startPolling") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "setInterval(pull,750)") != null);
+}
+
+test "studio HTML wires the diagnostics card" {
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"diagnosticsBlock\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"diagnosticsList\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "function renderDiagnostics") != null);
+}
+
+test "updateDiagnostics produces JSON with a diagnostics array" {
+    var s = try State.init(std.testing.allocator, "h.ts");
+    defer s.deinit();
+
+    const d_code = try std.testing.allocator.dupe(u8, "ZTS001");
+    const d_sev = try std.testing.allocator.dupe(u8, "error");
+    const d_file = try std.testing.allocator.dupe(u8, "src/handler.ts");
+    const d_msg = try std.testing.allocator.dupe(u8, "unsupported feature: var");
+    const d_hint = try std.testing.allocator.dupe(u8, "use let or const");
+
+    var diags = [_]Diagnostic{.{
+        .code = d_code,
+        .severity = d_sev,
+        .file = d_file,
+        .line = 5,
+        .column = 3,
+        .message = d_msg,
+        .suggestion = d_hint,
+    }};
+    defer for (&diags) |*d| d.deinit(std.testing.allocator);
+
+    s.updateDiagnostics("compilation failed", &diags);
+
+    const snap = try s.stateJsonCopy(std.testing.allocator);
+    defer std.testing.allocator.free(snap);
+
+    try std.testing.expect(std.mem.indexOf(u8, snap, "\"status\":\"error\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snap, "\"diagnostics\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snap, "\"code\":\"ZTS001\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snap, "\"line\":5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snap, "\"suggestion\":\"use let or const\"") != null);
+}
+
+test "errorJson omits diagnostics field when slice is empty or null" {
+    const allocator = std.testing.allocator;
+    const plain = try errorJson(allocator, "h.ts", "boom", null);
+    defer allocator.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "\"diagnostics\"") == null);
+
+    const empty_diags: []const Diagnostic = &.{};
+    const also_plain = try errorJson(allocator, "h.ts", "boom", empty_diags);
+    defer allocator.free(also_plain);
+    try std.testing.expect(std.mem.indexOf(u8, also_plain, "\"diagnostics\"") == null);
 }
 
 test "witnessDetailKey accepts hex keys and rejects bad shapes" {

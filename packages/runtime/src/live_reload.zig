@@ -27,6 +27,8 @@ const spec_diagnostic = @import("deploy/spec_diagnostic.zig");
 const proof_ledger = @import("proof_ledger.zig");
 const proof_card_tui = @import("proof_card_tui.zig");
 const printer_mod = @import("deploy/printer.zig");
+const studio_mod = @import("runtime_features.zig").studio;
+const json_diag = precompile.json_diag;
 
 pub const LiveReloadConfig = struct {
     /// Enable contract diffing (--prove)
@@ -99,36 +101,56 @@ pub const LiveReloadState = struct {
         }
     }
 
-    /// Run analysis on pre-read source, cleaning up CheckResult.
+    /// Run analysis on pre-read source, cleaning up CheckResult. Runs with
+    /// `json_mode = true` so structured diagnostics flow into studio; the
+    /// terminal HUD reformats them itself via `printDiagnosticLines`.
     fn runAnalysisFromSource(self: *LiveReloadState, source: []const u8, skip_contract: bool) ?AnalysisResult {
         var result = precompile.runCheckOnlyFromSource(
             self.allocator,
             source,
             self.handler_path,
             self.config.sql_schema_path,
-            false,
+            true,
             self.config.system_path,
             skip_contract,
         ) catch return null;
 
-        // Steal contract ownership before deinit frees it
+        // Deep-copy diagnostics first so that on failure here, `result.deinit`
+        // still frees the contract (we have not stolen it yet).
+        const diagnostics = ownDiagnostics(self.allocator, result.json_diagnostics.items) catch {
+            result.deinit(self.allocator);
+            return null;
+        };
+
         const contract = result.contract;
         result.contract = null;
         const errors = result.totalErrors();
         const pinned_regressions = result.pinned_witness_regressions;
         result.deinit(self.allocator);
 
-        return .{ .contract = contract, .errors = errors, .pinned_regressions = pinned_regressions };
+        return .{
+            .contract = contract,
+            .errors = errors,
+            .pinned_regressions = pinned_regressions,
+            .diagnostics = diagnostics,
+        };
     }
 
     const AnalysisResult = struct {
         contract: ?HandlerContract,
         errors: u32,
         pinned_regressions: usize,
+        diagnostics: []studio_mod.Diagnostic,
 
         fn deinitContract(self: *AnalysisResult, allocator: std.mem.Allocator) void {
             if (self.contract) |*c| c.deinit(allocator);
             self.contract = null;
+        }
+
+        fn deinitDiagnostics(self: *AnalysisResult, allocator: std.mem.Allocator) void {
+            for (self.diagnostics) |*d| d.deinit(allocator);
+            allocator.free(self.diagnostics);
+            self.diagnostics = &.{};
         }
     };
 
@@ -150,15 +172,17 @@ pub const LiveReloadState = struct {
             return;
         };
         defer if (analysis.contract != null) analysis.deinitContract(self.allocator);
+        defer analysis.deinitDiagnostics(self.allocator);
 
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
 
         if (analysis.errors > 0) {
-            if (self.server.studio) |*studio| studio.updateError("compilation failed");
+            if (self.server.studio) |*studio| studio.updateDiagnostics("compilation failed", analysis.diagnostics);
             printReload("Compilation failed ({d} error(s), {d}ms). Keeping previous handler.\n", .{
                 analysis.errors,
                 elapsed_ms,
             });
+            printDiagnosticLines(analysis.diagnostics);
             if (analysis.pinned_regressions > 0) {
                 printReload("[witnesses] {d} pinned witness(es) re-fired - regression of a previously defended pattern.\n", .{analysis.pinned_regressions});
             }
@@ -268,11 +292,13 @@ pub const LiveReloadState = struct {
             return;
         };
         defer if (analysis.contract != null) analysis.deinitContract(self.allocator);
+        defer analysis.deinitDiagnostics(self.allocator);
 
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
         if (analysis.errors > 0) {
-            if (self.server.studio) |*studio| studio.updateError("initial compilation failed");
+            if (self.server.studio) |*studio| studio.updateDiagnostics("initial compilation failed", analysis.diagnostics);
             printProve("Initial proof failed ({d} error(s), {d}ms).\n", .{ analysis.errors, elapsed_ms });
+            printDiagnosticLines(analysis.diagnostics);
             return;
         }
 
@@ -548,6 +574,42 @@ fn printReload(comptime fmt: []const u8, args: anytype) void {
 
 fn printProve(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("[prove]  " ++ fmt, args);
+}
+
+/// Render compile errors to stderr in a uniform format. Previously each
+/// stage in precompile.zig printed its own ad-hoc lines; with json_mode
+/// turned on upstream, the live-reload loop owns the terminal output.
+fn printDiagnosticLines(diagnostics: []const studio_mod.Diagnostic) void {
+    for (diagnostics) |d| {
+        std.debug.print("  {s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.column, d.code, d.message });
+        if (d.suggestion) |s| std.debug.print("      hint: {s}\n", .{s});
+    }
+}
+
+/// Dupe each parser/checker JsonDiagnostic into an owned studio.Diagnostic
+/// so the slice survives `CheckResult.deinit`. On allocation failure mid-
+/// loop, frees what has already been duped and propagates `error.OutOfMemory`.
+fn ownDiagnostics(allocator: std.mem.Allocator, source: []const json_diag.JsonDiagnostic) ![]studio_mod.Diagnostic {
+    var owned = try allocator.alloc(studio_mod.Diagnostic, source.len);
+    var filled: usize = 0;
+    errdefer {
+        var i: usize = 0;
+        while (i < filled) : (i += 1) owned[i].deinit(allocator);
+        allocator.free(owned);
+    }
+    while (filled < source.len) : (filled += 1) {
+        const src = source[filled];
+        owned[filled] = .{
+            .code = try allocator.dupe(u8, src.code),
+            .severity = try allocator.dupe(u8, src.severity),
+            .file = try allocator.dupe(u8, src.file),
+            .line = src.line,
+            .column = src.column,
+            .message = try allocator.dupe(u8, src.message),
+            .suggestion = if (src.suggestion) |s| try allocator.dupe(u8, s) else null,
+        };
+    }
+    return owned;
 }
 
 /// Project the contract into ReviewFacts and append a row to
