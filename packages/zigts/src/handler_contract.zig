@@ -23,6 +23,8 @@ const contract_builder = @import("contract_builder.zig");
 
 // Re-exports from contract_types.zig
 pub const HandlerLoc = contract_types.HandlerLoc;
+pub const PropertyCause = contract_types.PropertyCause;
+pub const PropertyProvenance = contract_types.PropertyProvenance;
 pub const RouteInfo = contract_types.RouteInfo;
 pub const EnvInfo = contract_types.EnvInfo;
 pub const EgressInfo = contract_types.EgressInfo;

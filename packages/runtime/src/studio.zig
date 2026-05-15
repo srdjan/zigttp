@@ -18,6 +18,17 @@ pub const RecentEntry = struct {
 
 pub const recent_capacity: usize = 10;
 
+/// One prove cycle's worth of inputs into the studio state. Grouping these
+/// keeps the call site readable as fields grow and makes the optional
+/// counterexample obvious at the call site.
+pub const FactsUpdate = struct {
+    facts: *const review.ReviewFacts,
+    baseline: ?*const review.ReviewFacts,
+    delta: *const review.ReviewDelta,
+    recompile_ms: ?u64,
+    counterexample: ?review.CounterexamplePreview = null,
+};
+
 /// A single ZTS diagnostic carried into studio for browser-side display.
 /// All slices are owned by the producer so the diagnostic stays valid past
 /// the transient `CheckResult` lifetime upstream.
@@ -128,21 +139,12 @@ pub const State = struct {
         self.replaceJson(next);
     }
 
-    pub fn updateFacts(
-        self: *State,
-        facts: *const review.ReviewFacts,
-        baseline: ?*const review.ReviewFacts,
-        delta: *const review.ReviewDelta,
-        recompile_ms: ?u64,
-    ) void {
-        self.pushRecent(facts, delta, recompile_ms);
+    pub fn updateFacts(self: *State, update: FactsUpdate) void {
+        self.pushRecent(update.facts, update.delta, update.recompile_ms);
         const next = factsJson(
             self.allocator,
             self.handler_path,
-            facts,
-            baseline,
-            delta,
-            recompile_ms,
+            update,
             self.recent[0..self.recent_count],
         ) catch return;
         self.replaceJson(next);
@@ -392,16 +394,13 @@ fn writeDiagnosticsJson(json: *std.json.Stringify, diagnostics: []const Diagnost
 fn factsJson(
     allocator: std.mem.Allocator,
     handler_path: []const u8,
-    facts: *const review.ReviewFacts,
-    baseline: ?*const review.ReviewFacts,
-    delta: *const review.ReviewDelta,
-    recompile_ms: ?u64,
+    update: FactsUpdate,
     recent: []const RecentEntry,
 ) ![]u8 {
     const witnesses = try loadWitnessEntries(allocator, handler_path);
     defer if (witnesses) |entries| zigts.witness_corpus.freeEntries(allocator, entries);
     const witness_total: usize = if (witnesses) |entries| entries.len else 0;
-    const verdict = review.classify(delta);
+    const verdict = review.classify(update.delta);
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -413,28 +412,97 @@ fn factsJson(
     try json.write(handler_path);
     try json.objectField("verdict");
     try json.write(verdict.toString());
-    if (recompile_ms) |ms| {
+    if (update.recompile_ms) |ms| {
         try json.objectField("recompileMs");
         try json.write(ms);
     }
     try json.objectField("facts");
-    try facts.writeJson(&json);
-    if (baseline) |b| {
+    try update.facts.writeJson(&json);
+    if (update.baseline) |b| {
         try json.objectField("baseline");
         try b.writeJson(&json);
     }
     try json.objectField("delta");
-    try writeDeltaJson(&json, delta);
+    try writeDeltaJson(&json, update.delta);
     try json.objectField("witnesses");
     try writeWitnessesJson(allocator, &json, witnesses);
+    if (update.counterexample) |cx| {
+        try json.objectField("counterexample");
+        try writeCounterexampleJson(&json, &cx);
+    }
     try json.objectField("releaseReadiness");
-    try writeReleaseReadinessJson(&json, facts, verdict);
+    try writeReleaseReadinessJson(&json, update.facts, verdict);
     try json.objectField("nextActions");
-    try writeNextActionsJson(allocator, &json, handler_path, facts, verdict, witness_total);
+    try writeNextActionsJson(allocator, &json, handler_path, update.facts, verdict, witness_total);
     try json.objectField("recent");
     try writeRecentJson(&json, recent);
     try json.endObject();
     return try allocator.dupe(u8, aw.writer.buffered());
+}
+
+/// Mirrors `review.CounterexamplePreview` field-for-field so the browser
+/// renderer reads it without a translation layer.
+fn writeCounterexampleJson(
+    json: *std.json.Stringify,
+    cx: *const review.CounterexamplePreview,
+) !void {
+    try json.beginObject();
+    try json.objectField("field");
+    try json.write(cx.field);
+    try json.objectField("label");
+    try json.write(cx.label);
+    try json.objectField("line");
+    try json.write(cx.line);
+    try json.objectField("column");
+    try json.write(cx.column);
+    try json.objectField("snippet");
+    try json.write(cx.snippet);
+    try json.objectField("handlerPath");
+    try json.write(cx.handler_path);
+    if (cx.suggestion) |hint| {
+        try json.objectField("suggestion");
+        try json.write(hint);
+    }
+    if (cx.failing_request) |req| {
+        try json.objectField("failingRequest");
+        try json.beginObject();
+        try json.objectField("method");
+        try json.write(req.method);
+        try json.objectField("url");
+        try json.write(req.url);
+        try json.objectField("hasAuthHeader");
+        try json.write(req.has_auth_header);
+        if (req.body) |body| {
+            try json.objectField("body");
+            try json.write(body);
+        }
+        try json.endObject();
+    }
+    if (cx.previous_response) |prev| {
+        try json.objectField("previousResponse");
+        try writeReplayResponseJson(json, prev);
+    }
+    if (cx.current_response) |curr| {
+        try json.objectField("currentResponse");
+        try writeReplayResponseJson(json, curr);
+    }
+    try json.endObject();
+}
+
+fn writeReplayResponseJson(
+    json: *std.json.Stringify,
+    r: review.CounterexamplePreview.ReplayResponse,
+) !void {
+    try json.beginObject();
+    try json.objectField("status");
+    try json.write(r.status);
+    try json.objectField("body");
+    try json.write(r.body);
+    if (r.error_text) |err| {
+        try json.objectField("error");
+        try json.write(err);
+    }
+    try json.endObject();
 }
 
 fn writeRecentJson(json: *std.json.Stringify, recent: []const RecentEntry) !void {
@@ -874,7 +942,12 @@ test "factsJson includes release readiness and next actions" {
     const recent = [_]RecentEntry{
         .{ .timestamp_ms = 1714579200000, .verdict = .safe, .recompile_ms = 4, .sha8 = "abc12300".*, .sha8_len = 6 },
     };
-    const body = try factsJson(allocator, "handler.ts", &facts, null, &delta, 4, recent[0..]);
+    const body = try factsJson(allocator, "handler.ts", .{
+        .facts = &facts,
+        .baseline = null,
+        .delta = &delta,
+        .recompile_ms = 4,
+    }, recent[0..]);
     defer allocator.free(body);
 
     try std.testing.expect(std.mem.indexOf(u8, body, "\"releaseReadiness\"") != null);

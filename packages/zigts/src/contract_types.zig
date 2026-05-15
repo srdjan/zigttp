@@ -582,7 +582,35 @@ pub const PropertyCause = struct {
 /// proof HUD's regression line).
 pub const PropertyProvenance = struct {
     deterministic: ?PropertyCause = null,
+
+    /// Single dispatch over the field set so the live HUD and the
+    /// counterexample pipeline never drift on which provenance fields exist.
+    /// Returns null for fields the verifier does not yet record causes for.
+    pub fn causeFor(self: *const PropertyProvenance, field: []const u8) ?PropertyCause {
+        if (std.mem.eql(u8, field, "deterministic")) return self.deterministic;
+        return null;
+    }
 };
+
+test "PropertyProvenance.causeFor round-trips deterministic" {
+    const p = PropertyProvenance{
+        .deterministic = .{ .line = 14, .column = 9, .snippet = "Date.now()" },
+    };
+    const got = p.causeFor("deterministic").?;
+    try std.testing.expectEqual(@as(u32, 14), got.line);
+    try std.testing.expectEqualStrings("Date.now()", got.snippet);
+}
+
+test "PropertyProvenance.causeFor returns null for unset and unknown" {
+    const empty = PropertyProvenance{};
+    try std.testing.expect(empty.causeFor("deterministic") == null);
+
+    const p = PropertyProvenance{
+        .deterministic = .{ .line = 1, .column = 1, .snippet = "x" },
+    };
+    try std.testing.expect(p.causeFor("read_only") == null);
+    try std.testing.expect(p.causeFor("") == null);
+}
 
 /// One discharge result per declared spec. Produced by
 /// `spec_discharge.dischargeSpecs` and stored on `HandlerContract`. Owned

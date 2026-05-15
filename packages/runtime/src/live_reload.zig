@@ -28,6 +28,7 @@ const proof_ledger = @import("proof_ledger.zig");
 const proof_card_tui = @import("proof_card_tui.zig");
 const printer_mod = @import("deploy/printer.zig");
 const studio_mod = @import("runtime_features.zig").studio;
+const counterexample_pipeline = @import("counterexample_pipeline.zig");
 const json_diag = precompile.json_diag;
 
 pub const LiveReloadConfig = struct {
@@ -401,18 +402,12 @@ pub const LiveReloadState = struct {
         var delta = try review_facts_mod.deriveDelta(self.allocator, &new_facts, baseline_ptr);
         defer delta.deinit(self.allocator);
 
-        if (self.server.studio) |*studio| {
-            studio.updateFacts(&new_facts, baseline_ptr, &delta, elapsed_ms);
-            studio.broadcast();
-        }
-
-        // Translate the contract's per-property provenance into the renderer's
-        // PropertyCauseEntry slice. The slice borrows from the static
-        // `property_metas` field names and the contract's static snippets, so
-        // it lives only as long as new_contract on this stack frame.
+        // PropertyCauseEntry borrows from the static `property_metas` field
+        // names and the contract's static snippets, so the slice lives only
+        // as long as new_contract on this stack frame.
         var causes_buf: [4]review_facts_mod.PropertyCauseEntry = undefined;
         var n_causes: usize = 0;
-        if (new_contract.property_provenance.deterministic) |c| {
+        if (new_contract.property_provenance.causeFor("deterministic")) |c| {
             causes_buf[n_causes] = .{
                 .field = "deterministic",
                 .line = c.line,
@@ -420,6 +415,23 @@ pub const LiveReloadState = struct {
                 .snippet = c.snippet,
             };
             n_causes += 1;
+        }
+
+        const cx_preview = counterexample_pipeline.buildFromDelta(
+            self.handler_path,
+            &new_contract.property_provenance,
+            &delta,
+        );
+
+        if (self.server.studio) |*studio| {
+            studio.updateFacts(.{
+                .facts = &new_facts,
+                .baseline = baseline_ptr,
+                .delta = &delta,
+                .recompile_ms = elapsed_ms,
+                .counterexample = cx_preview,
+            });
+            studio.broadcast();
         }
 
         const card = review_facts_mod.ProofCard{
@@ -430,6 +442,7 @@ pub const LiveReloadState = struct {
             .baseline = baseline_ptr,
             .delta = &delta,
             .property_causes = causes_buf[0..n_causes],
+            .counterexample = cx_preview,
         };
 
         var stderr_buf: [16 * 1024]u8 = undefined;

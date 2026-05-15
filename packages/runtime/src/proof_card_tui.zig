@@ -85,8 +85,92 @@ pub fn writeProofCardFrame(
         try writeFullRow(writer, widths, why_line);
         try writeBorder(writer, widths);
     }
+    if (card.counterexample) |cx| {
+        try writeCounterexampleBlock(allocator, writer, widths, &cx);
+        try writeBorder(writer, widths);
+    }
     try writeStatusBar(writer, widths, card);
     try writeBorder(writer, widths);
+}
+
+fn writeCounterexampleBlock(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    widths: ColumnWidths,
+    cx: *const review.CounterexamplePreview,
+) !void {
+    try writeCounterexampleHeadline(allocator, writer, widths, cx);
+    if (cx.suggestion) |hint| try writeWhyRow(allocator, writer, widths, hint);
+    if (cx.failing_request) |req| try writeReplaySection(allocator, writer, widths, req, cx);
+    try writeFullRow(
+        writer,
+        widths,
+        "  [r] replay live   [s] pin as regression test   [a] ask expert to fix",
+    );
+}
+
+fn writeCounterexampleHeadline(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    widths: ColumnWidths,
+    cx: *const review.CounterexamplePreview,
+) !void {
+    const line = try std.fmt.allocPrint(
+        allocator,
+        "Counterexample: -{s} at {s}:{d}: {s}",
+        .{ cx.label, cx.handler_path, cx.line, cx.snippet },
+    );
+    defer allocator.free(line);
+    try writeFullRow(writer, widths, line);
+}
+
+fn writeWhyRow(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    widths: ColumnWidths,
+    hint: []const u8,
+) !void {
+    const line = try std.fmt.allocPrint(allocator, "  why: {s}", .{hint});
+    defer allocator.free(line);
+    try writeFullRow(writer, widths, line);
+}
+
+fn writeReplaySection(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    widths: ColumnWidths,
+    req: review.CounterexamplePreview.FailingRequest,
+    cx: *const review.CounterexamplePreview,
+) !void {
+    const req_line = try std.fmt.allocPrint(
+        allocator,
+        "  request: {s} {s}",
+        .{ req.method, req.url },
+    );
+    defer allocator.free(req_line);
+    try writeFullRow(writer, widths, req_line);
+
+    if (cx.previous_response) |prev| {
+        const line = try formatReplayLine(allocator, "  previous build", prev);
+        defer allocator.free(line);
+        try writeFullRow(writer, widths, line);
+    }
+    if (cx.current_response) |curr| {
+        const line = try formatReplayLine(allocator, "  this build    ", curr);
+        defer allocator.free(line);
+        try writeFullRow(writer, widths, line);
+    }
+}
+
+fn formatReplayLine(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    r: review.CounterexamplePreview.ReplayResponse,
+) ![]u8 {
+    if (r.error_text) |err| {
+        return std.fmt.allocPrint(allocator, "{s}: crashed - {s}", .{ prefix, err });
+    }
+    return std.fmt.allocPrint(allocator, "{s}: {d}  {s}", .{ prefix, r.status, r.body });
 }
 
 /// Build the Why-on-regression row content for the live HUD: when a property
@@ -632,4 +716,109 @@ test "writeProofCardFrame: demotion without a matching cause renders no Why row"
     const out = aw.writer.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, out, "Why:") == null);
+}
+
+const TestDemote = enum { none, deterministic, input_validated };
+
+/// Build a ProofCard around a freshly-derived demotion delta and render it,
+/// returning the buffered TUI output for substring assertions. Passing
+/// `.none` produces a clean first-deploy frame with no baseline.
+fn renderForTest(
+    allocator: std.mem.Allocator,
+    demote: TestDemote,
+    cx: ?review.CounterexamplePreview,
+    out_aw: *std.Io.Writer.Allocating,
+) !void {
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+    var baseline = try buildTestFacts(allocator);
+    defer baseline.deinit(allocator);
+
+    switch (demote) {
+        .none => {},
+        .deterministic => {
+            current.properties.deterministic = false;
+            baseline.properties.deterministic = true;
+        },
+        .input_validated => {
+            current.properties.input_validated = false;
+            baseline.properties.input_validated = true;
+        },
+    }
+
+    const baseline_ptr: ?*const review.ReviewFacts =
+        if (demote == .none) null else &baseline;
+
+    var delta = try review.deriveDelta(allocator, &current, baseline_ptr);
+    defer delta.deinit(allocator);
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "local",
+        .current = &current,
+        .baseline = baseline_ptr,
+        .delta = &delta,
+        .counterexample = cx,
+    };
+
+    audit_ring.clear();
+    try writeProofCardFrame(allocator, &card, &out_aw.writer, .{});
+}
+
+test "writeProofCardFrame: renders Counterexample block with suggestion and key hints" {
+    const allocator = std.testing.allocator;
+    const cx = review.CounterexamplePreview{
+        .field = "deterministic",
+        .label = "deterministic",
+        .line = 14,
+        .column = 9,
+        .snippet = "Date.now()",
+        .handler_path = "src/handler.ts",
+        .suggestion = "remove Date.now() / Math.random() or move the call inside a `durable.step`.",
+    };
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try renderForTest(allocator, .deterministic, cx, &aw);
+    const out = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Counterexample: -deterministic at src/handler.ts:14: Date.now()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "why: remove Date.now()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "[r] replay live") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "[s] pin as regression test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "[a] ask expert to fix") != null);
+}
+
+test "writeProofCardFrame: omits Counterexample block when card has none" {
+    const allocator = std.testing.allocator;
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try renderForTest(allocator, .none, null, &aw);
+    try std.testing.expect(std.mem.indexOf(u8, aw.writer.buffered(), "Counterexample:") == null);
+}
+
+test "writeProofCardFrame: Counterexample block includes failing request and replay diff when present" {
+    const allocator = std.testing.allocator;
+    const cx = review.CounterexamplePreview{
+        .field = "input_validated",
+        .label = "input-validated",
+        .line = 18,
+        .column = 12,
+        .snippet = ".length",
+        .handler_path = "src/handler.ts",
+        .suggestion = "guard with `?.` or validate the input shape with zigttp:validate.",
+        .failing_request = .{ .method = "POST", .url = "/api/users", .body = "{\"name\":null}" },
+        .previous_response = .{ .status = 201, .body = "{\"id\":\"u_abc\"}" },
+        .current_response = .{ .status = 500, .body = "", .error_text = "cannot read length of undefined" },
+    };
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try renderForTest(allocator, .input_validated, cx, &aw);
+    const out = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "request: POST /api/users") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "previous build: 201  {\"id\":\"u_abc\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "this build    : crashed - cannot read length of undefined") != null);
 }

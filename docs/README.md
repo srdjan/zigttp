@@ -23,6 +23,9 @@ notes document design contracts, governance, and roadmap work.
 - [Witnesses](witnesses.md) - persisted counterexample corpus, the
   `zigttp witnesses` CLI, the studio detail endpoint, and the
   `pi_witnesses` agent tool.
+- [Counterexamples](counterexamples.md) - the live HUD Counterexample
+  block that fires on a regressed property: where the regression lives,
+  what to do about it, and how the same payload reaches studio.
 - [Sound Mode](sound-mode.md) - type-directed truthiness, arithmetic, and
   comparison diagnostics.
 - [Feature Detection](feature-detection.md) - supported and rejected language

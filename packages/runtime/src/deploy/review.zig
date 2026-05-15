@@ -638,6 +638,37 @@ pub const PropertyCauseEntry = struct {
     snippet: []const u8,
 };
 
+/// All `[]const u8` fields are borrowed: the live-reload session that builds
+/// the preview keeps the contract, `property_metas`, and the suggestion
+/// catalog alive across the render call.
+pub const CounterexamplePreview = struct {
+    field: []const u8,
+    label: []const u8,
+    line: u32,
+    column: u16,
+    snippet: []const u8,
+    handler_path: []const u8,
+    suggestion: ?[]const u8 = null,
+    failing_request: ?FailingRequest = null,
+    previous_response: ?ReplayResponse = null,
+    current_response: ?ReplayResponse = null,
+
+    pub const FailingRequest = struct {
+        method: []const u8,
+        url: []const u8,
+        has_auth_header: bool = false,
+        body: ?[]const u8 = null,
+    };
+
+    pub const ReplayResponse = struct {
+        status: u16,
+        body: []const u8,
+        /// Mutually exclusive with a populated `body` carrying a successful
+        /// response payload.
+        error_text: ?[]const u8 = null,
+    };
+};
+
 pub const ProofCard = struct {
     handler_path: []const u8,
     service_name: []const u8,
@@ -651,6 +682,7 @@ pub const ProofCard = struct {
     /// shows a Why row for every demoted_property whose field matches an
     /// entry here. Empty (default) outside the live-reload path.
     property_causes: []const PropertyCauseEntry = &.{},
+    counterexample: ?CounterexamplePreview = null,
 
     pub fn verdict(self: *const ProofCard) Verdict {
         return classify(self.delta);
