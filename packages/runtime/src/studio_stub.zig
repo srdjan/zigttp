@@ -1,6 +1,14 @@
 const std = @import("std");
 
 pub const index_html = "";
+pub const demo_state_path = "/_zigttp/studio/demo/state.json";
+pub const demo_action_path = "/_zigttp/studio/demo/action";
+
+pub const DemoAction = enum { introduce_bug, repair_bug, deploy, reset };
+
+pub const DemoConfig = struct {
+    workspace_root: []const u8,
+};
 
 pub const Diagnostic = struct {
     code: []u8,
@@ -21,6 +29,13 @@ pub const State = struct {
     pub fn init(allocator: std.mem.Allocator, handler_path: []const u8) !State {
         _ = allocator;
         _ = handler_path;
+        return .{};
+    }
+
+    pub fn initDemo(allocator: std.mem.Allocator, handler_path: []const u8, config: DemoConfig) !State {
+        _ = allocator;
+        _ = handler_path;
+        _ = config;
         return .{};
     }
 
@@ -59,7 +74,26 @@ pub const State = struct {
         _ = key;
         return error.WitnessNotFound;
     }
+
+    pub fn demoStateJsonCopy(self: *State, allocator: std.mem.Allocator) ![]u8 {
+        _ = self;
+        _ = allocator;
+        return error.DemoDisabled;
+    }
+
+    pub fn applyDemoAction(self: *State, allocator: std.mem.Allocator, action: DemoAction) ![]u8 {
+        _ = self;
+        _ = allocator;
+        _ = action;
+        return error.DemoDisabled;
+    }
 };
+
+pub fn parseDemoAction(allocator: std.mem.Allocator, body: ?[]const u8) !DemoAction {
+    _ = allocator;
+    _ = body;
+    return error.DemoDisabled;
+}
 
 pub fn isStudioPath(path: []const u8) bool {
     _ = path;

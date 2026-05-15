@@ -4,6 +4,7 @@ const zigts_cli = @import("zigts_cli");
 const review = @import("deploy/review.zig");
 const proof_ledger = @import("proof_ledger.zig");
 const compat = zigts.compat;
+const demo = @import("demo.zig");
 
 /// Mutated and read only on the live-reload thread, so no extra sync beyond
 /// the existing `replaceJson` swap is required.
@@ -54,6 +55,7 @@ pub const Diagnostic = struct {
 pub const State = struct {
     allocator: std.mem.Allocator,
     handler_path: []u8,
+    demo_config: ?DemoConfig = null,
     mutex: compat.Mutex = .{},
     json: []u8,
     recent: [recent_capacity]RecentEntry = undefined,
@@ -73,11 +75,23 @@ pub const State = struct {
         };
     }
 
+    pub fn initDemo(allocator: std.mem.Allocator, handler_path: []const u8, config: DemoConfig) !State {
+        return .{
+            .allocator = allocator,
+            .handler_path = try allocator.dupe(u8, handler_path),
+            .demo_config = .{
+                .workspace_root = try allocator.dupe(u8, config.workspace_root),
+            },
+            .json = try initialJson(allocator, handler_path),
+        };
+    }
+
     pub fn deinit(self: *State) void {
         self.subscribers_mutex.lock();
         for (self.subscribers.items) |fd| _ = std.c.close(fd);
         self.subscribers.deinit(self.allocator);
         self.subscribers_mutex.unlock();
+        if (self.demo_config) |*cfg| cfg.deinit(self.allocator);
         self.allocator.free(self.handler_path);
         self.allocator.free(self.json);
         self.* = undefined;
@@ -184,6 +198,38 @@ pub const State = struct {
         return try allocator.dupe(u8, self.json);
     }
 
+    pub fn demoStateJsonCopy(self: *State, allocator: std.mem.Allocator) ![]u8 {
+        const cfg = self.demo_config orelse return error.DemoDisabled;
+        const proof_json = try self.stateJsonCopy(allocator);
+        defer allocator.free(proof_json);
+        return try demo.writeStateJson(allocator, .{
+            .workspace_root = cfg.workspace_root,
+            .handler_path = self.handler_path,
+        }, proof_json);
+    }
+
+    pub fn applyDemoAction(self: *State, allocator: std.mem.Allocator, action: demo.Action) ![]u8 {
+        const cfg = self.demo_config orelse return error.DemoDisabled;
+        const step = try demo.applyAction(allocator, .{
+            .workspace_root = cfg.workspace_root,
+            .handler_path = self.handler_path,
+        }, action);
+        self.broadcast();
+
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        var json: std.json.Stringify = .{ .writer = &aw.writer };
+        try json.beginObject();
+        try json.objectField("ok");
+        try json.write(true);
+        try json.objectField("action");
+        try json.write(action.toString());
+        try json.objectField("step");
+        try json.write(step.toString());
+        try json.endObject();
+        return try allocator.dupe(u8, aw.writer.buffered());
+    }
+
     pub fn generatedTests(self: *State, allocator: std.mem.Allocator) ![]u8 {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
@@ -257,6 +303,15 @@ pub const State = struct {
     }
 };
 
+pub const DemoConfig = struct {
+    workspace_root: []const u8,
+
+    fn deinit(self: *DemoConfig, allocator: std.mem.Allocator) void {
+        allocator.free(self.workspace_root);
+        self.* = undefined;
+    }
+};
+
 fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
     var remaining = data;
     while (remaining.len > 0) {
@@ -272,12 +327,20 @@ pub fn isStudioPath(path: []const u8) bool {
     if (std.mem.eql(u8, path, "/_zigttp/studio/")) return true;
     if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) return true;
     if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) return true;
+    if (std.mem.eql(u8, path, demo.state_path)) return true;
+    if (std.mem.eql(u8, path, demo.action_path)) return true;
     if (std.mem.eql(u8, path, sse_path)) return true;
     if (witnessDetailKey(path) != null) return true;
     return false;
 }
 
 pub const sse_path = "/_zigttp/studio/events";
+pub const demo_state_path = demo.state_path;
+pub const demo_action_path = demo.action_path;
+
+pub fn parseDemoAction(allocator: std.mem.Allocator, body: ?[]const u8) !demo.Action {
+    return demo.parseActionBody(allocator, body);
+}
 
 pub const sse_response_headers =
     "HTTP/1.1 200 OK\r\n" ++
@@ -787,11 +850,13 @@ pub const index_html =
     \\ul{list-style:none;margin:0;padding:0}li{padding:7px 0;border-bottom:1px solid rgba(255,255,255,.06);overflow-wrap:anywhere}.empty{color:var(--muted)}
     \\footer{padding:14px 20px;border-top:1px solid var(--line);display:flex;gap:10px;background:#0d1016}input,select,textarea,button{font:inherit}select,input,textarea{background:#07090d;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px}input{flex:1}button{border:1px solid #38658f;background:#10243a;color:#dceeff;border-radius:6px;padding:9px 13px;cursor:pointer}pre{white-space:pre-wrap;margin:12px 0 0;color:#cbd7e3;max-height:180px;overflow:auto}
     \\#diagnosticsList li{padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06)}#diagnosticsList .code{color:var(--bad);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}#diagnosticsList .loc{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;margin-left:8px}#diagnosticsList .msg{margin-top:4px;color:#dceeff}#diagnosticsList .hint{margin-top:4px;color:var(--muted);font-style:italic}
+    \\#demoPanel{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;padding:14px 28px;border-bottom:1px solid var(--line);background:#0c1118}#demoPanel[hidden]{display:none}#demoPanel h2{margin:0 0 6px}#demoPanel p{margin:0;color:#cbd7e3}#demoActions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}#demoWitness{grid-column:1/-1;margin-top:2px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:#07090d;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd7e3}
     \\@media(max-width:900px){.grid{grid-template-columns:1fr}.status{text-align:left}header{align-items:start;flex-direction:column}.big{font-size:32px}}
     \\</style>
     \\</head>
     \\<body><main>
     \\<header><div><h1>zigttp studio</h1><div class="sub">The compiler-visible shape of your handler, live.</div></div><div class="status" id="status">connecting</div></header>
+    \\<section id="demoPanel" hidden><div><h2>Proof Theater</h2><p id="demoTitle"></p><p class="empty" id="demoWorkspace"></p></div><div id="demoActions"></div><div id="demoWitness" hidden></div></section>
     \\<section class="grid"><div class="pane"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
     \\<footer><select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select><input id="url" value="/" aria-label="URL"><button id="send">Send</button></footer>
     \\<pre id="response"></pre>
@@ -818,11 +883,16 @@ pub const index_html =
     \\function timeline(entries){if(!entries||!entries.length)return"";return entries.map((e,i)=>`<span class="tick ${esc(e.verdict)}${i===0?" first":""}" title="${esc(e.verdict)} · sha ${esc(e.sha8||"")} · ${e.recompileMs??0}ms · ${fmtClock(e.timestampMs)}">${fmtClock(e.timestampMs)} ${esc((e.sha8||"").slice(0,4))}${e.recompileMs!=null?" · "+e.recompileMs+"ms":""}</span>`).join("")}
     \\function diagnostics(items){return (items||[]).map(d=>`<li><code class="code">${esc(d.code)}</code><span class="loc">${esc(d.file)}:${d.line}:${d.column}</span><div class="msg">${esc(d.message)}</div>${d.suggestion?`<div class="hint">hint: ${esc(d.suggestion)}</div>`:""}</li>`).join("")}
     \\function renderDiagnostics(s){const diags=s.diagnostics||[];$("diagnosticsBlock").hidden=diags.length===0;$("diagnosticsList").innerHTML=diagnostics(diags)}
+    \\function demoButton(a){const label={introduce_bug:"Introduce unsafe edit",repair_bug:"Repair",deploy:"Deploy local",reset:"Reset"}[a]||a;return `<button data-demo-action="${esc(a)}">${esc(label)}</button>`}
+    \\function renderDemo(d){$("demoPanel").hidden=false;$("demoTitle").textContent=d.title||d.step||"";$("demoWorkspace").textContent=d.workspace?`workspace: ${d.workspace}`:"";$("demoActions").innerHTML=(d.availableActions||[]).map(demoButton).join("");const w=d.witness;if(w){$("demoWitness").hidden=false;$("demoWitness").innerHTML=`property: ${esc(w.property)}<br>request: ${esc(w.request)}<br>span: ${esc(w.span)}<br>path: ${esc(w.failingPath)}`}else if(d.receipt){$("demoWitness").hidden=false;$("demoWitness").innerHTML=`receipt: ${esc(d.receipt.ledger)} · service ${esc(d.receipt.service)}`}else{$("demoWitness").hidden=true;$("demoWitness").innerHTML=""}}
+    \\async function pullDemo(){try{const r=await fetch("/_zigttp/studio/demo/state.json",{cache:"no-store"});if(r.status===404){$("demoPanel").hidden=true;return}if(r.ok)renderDemo(await r.json())}catch(e){}}
+    \\async function runDemoAction(action){const r=await fetch("/_zigttp/studio/demo/action",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action})});if(!r.ok){$("demoWitness").hidden=false;$("demoWitness").textContent=`action failed: HTTP ${r.status} ${await r.text()}`;return}await pull();await pullDemo()}
+    \\document.addEventListener("click",ev=>{const b=ev.target.closest("[data-demo-action]");if(b)runDemoAction(b.dataset.demoAction)})
     \\function render(s){$("status").textContent=`${s.status} · ${s.handlerPath||""}`;renderDiagnostics(s);if(s.status!=="ready"){$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions)}
     \\async function pull(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});render(await r.json())}catch(e){$("status").textContent=String(e)}}
     \\let pollTimer=null;function startPolling(){if(!pollTimer)pollTimer=setInterval(pull,750)}function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
     \\function startEvents(){let es;try{es=new EventSource("/_zigttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{render(JSON.parse(ev.data))}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
-    \\startEvents();pull();
+    \\startEvents();pull();pullDemo();setInterval(pullDemo,1200);
     \\$("send").onclick=async()=>{const r=await fetch($("url").value,{method:$("method").value});$("response").textContent=`HTTP ${r.status}\n`+await r.text()}
     \\</script></body></html>
 ;

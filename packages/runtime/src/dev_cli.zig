@@ -14,6 +14,7 @@ const runtime_cli = @import("runtime_cli.zig");
 const embedded_handler = @import("embedded_handler");
 const proof_ledger = @import("proof_ledger.zig");
 const live_reload = @import("live_reload.zig");
+const demo = @import("demo.zig");
 
 const deploy_exit_drift: u8 = 2;
 const deploy_exit_ready_timeout: u8 = 3;
@@ -90,6 +91,39 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (std.mem.eql(u8, command, "studio")) {
         studioCommand(allocator, args[0], user_args[1..]) catch |err| {
             if (handlePreflightError(err, command)) std.process.exit(1);
+            return err;
+        };
+        return;
+    }
+    if (std.mem.eql(u8, command, "demo")) {
+        demoCommand(allocator, args[0], user_args[1..]) catch |err| {
+            if (err == error.HelpRequested) {
+                printDemoHelp();
+                return;
+            }
+            if (err == error.MissingOptionValue) {
+                std.debug.print("demo option requires a value.\n\n", .{});
+                printDemoHelp();
+                std.process.exit(1);
+            }
+            if (err == error.InvalidPort) {
+                std.debug.print("--port requires a number from 1 to 65535.\n\n", .{});
+                printDemoHelp();
+                std.process.exit(1);
+            }
+            if (err == error.OutputExists) {
+                std.debug.print("--out target already exists. Pick a new directory; zigttp demo will not overwrite files.\n", .{});
+                std.process.exit(1);
+            }
+            if (err == error.InvalidOutputPath) {
+                std.debug.print("--out must end in a simple directory name using letters, numbers, '-' or '_'.\n", .{});
+                std.process.exit(1);
+            }
+            if (err == error.UnknownOption) {
+                std.debug.print("Unknown demo option.\n\n", .{});
+                printDemoHelp();
+                std.process.exit(1);
+            }
             return err;
         };
         return;
@@ -733,6 +767,120 @@ fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: [
     _ = child.wait(io) catch {};
 }
 
+const DemoArgs = struct {
+    no_open: bool = false,
+    port: u16 = 3000,
+    out_dir: ?[]const u8 = null,
+};
+
+fn parseDemoArgs(argv: []const []const u8) !DemoArgs {
+    var parsed = DemoArgs{};
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return error.HelpRequested;
+        if (std.mem.eql(u8, arg, "--no-open")) {
+            parsed.no_open = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--port")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingOptionValue;
+            parsed.port = std.fmt.parseInt(u16, argv[i], 10) catch return error.InvalidPort;
+            if (parsed.port == 0) return error.InvalidPort;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--out")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingOptionValue;
+            parsed.out_dir = argv[i];
+            continue;
+        }
+        return error.UnknownOption;
+    }
+    return parsed;
+}
+
+fn demoCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
+    const parsed = try parseDemoArgs(argv);
+
+    var workspace = try demo.createWorkspace(allocator, parsed.out_dir, parsed.port);
+    defer workspace.deinit(allocator);
+    defer workspace.cleanup(allocator);
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const serve_binary = try resolveDeveloperServeBinary(allocator, program_path);
+    defer allocator.free(serve_binary);
+    const serve_binary_for_workspace = try resolveReentryBinaryAfterChdir(allocator, serve_binary, old_cwd);
+    defer allocator.free(serve_binary_for_workspace);
+
+    const url = try std.fmt.allocPrint(
+        allocator,
+        "http://127.0.0.1:{d}/_zigttp/studio",
+        .{parsed.port},
+    );
+    defer allocator.free(url);
+
+    std.debug.print(
+        \\
+        \\zigttp proof theater
+        \\Workspace: {s}
+        \\Studio:    {s}
+        \\
+        \\Flow: baseline -> unsafe edit -> witness -> repair -> local deploy receipt
+        \\
+    , .{ workspace.root, url });
+
+    if (!parsed.no_open) openBrowser(allocator, url);
+
+    var child_args: std.ArrayList([]const u8) = .empty;
+    defer child_args.deinit(allocator);
+    try child_args.append(allocator, serve_binary_for_workspace);
+    try child_args.append(allocator, "serve");
+    try child_args.append(allocator, "--studio");
+    try child_args.append(allocator, "--watch");
+    try child_args.append(allocator, "--prove");
+    try child_args.append(allocator, "--demo");
+    try child_args.append(allocator, "--port");
+    const port_text = try std.fmt.allocPrint(allocator, "{d}", .{parsed.port});
+    defer allocator.free(port_text);
+    try child_args.append(allocator, port_text);
+
+    try std.Io.Threaded.chdir(workspace.root);
+
+    var child = try std.process.spawn(io, .{
+        .argv = child_args.items,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    _ = child.wait(io) catch {};
+}
+
+fn openBrowser(allocator: std.mem.Allocator, url: []const u8) void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const argv: []const []const u8 = switch (builtin.os.tag) {
+        .macos => &.{ "/usr/bin/open", url },
+        .linux => &.{ "xdg-open", url },
+        else => return,
+    };
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return;
+    _ = child.wait(io) catch {};
+}
+
 /// Lets `mkdir myapp && cd myapp && zigttp studio` work as a single demo
 /// gesture. If the cwd (or any ancestor) already has a `zigttp.json`, this
 /// is a no-op and the existing project loads. If the cwd is empty (only
@@ -809,6 +957,19 @@ fn extractTemplateFlag(allocator: std.mem.Allocator, argv: []const []const u8) !
 fn resolveDeveloperServeBinary(allocator: std.mem.Allocator, program_path: []const u8) ![]const u8 {
     if (program_path.len > 0) return try allocator.dupe(u8, program_path);
     return try allocator.dupe(u8, "zigttp");
+}
+
+/// `zigttp demo` changes into the generated workspace before re-entering the
+/// CLI. Keep bare names bare so PATH lookup still works, but resolve
+/// cwd-relative executable paths while the original cwd is still known.
+fn resolveReentryBinaryAfterChdir(
+    allocator: std.mem.Allocator,
+    program_path: []const u8,
+    original_cwd: []const u8,
+) ![]const u8 {
+    if (std.fs.path.isAbsolute(program_path)) return try allocator.dupe(u8, program_path);
+    if (std.fs.path.dirname(program_path) == null) return try allocator.dupe(u8, program_path);
+    return try std.fs.path.resolve(allocator, &.{ original_cwd, program_path });
 }
 
 /// Find the `zigttp` runtime binary.
@@ -1319,6 +1480,24 @@ fn printLocalDeployHelp() void {
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 
+fn printDemoHelp() void {
+    const help =
+        \\zigttp demo [--no-open] [--port N] [--out DIR]
+        \\
+        \\Create a self-contained Proof Theater workspace and launch Studio.
+        \\The demo runs fully local: no cloud credentials, API keys, or
+        \\network services are required.
+        \\
+        \\Options:
+        \\  --no-open       Do not try to open the browser
+        \\  --port <PORT>   Studio port (default: 3000)
+        \\  --out <DIR>     Write the demo project to DIR. Refuses to overwrite.
+        \\  --help          Show this help
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
 fn printDeployHelp() void {
     const help =
         \\zigttp deploy [--cloud]
@@ -1434,6 +1613,7 @@ fn printHelp() void {
         \\
         \\Usage:
         \\  zigttp init <name> [--template basic|api|htmx]  Create project
+        \\  zigttp demo [--no-open] [--port N] [--out DIR]  Guided local proof theater
         \\  zigttp studio [--template basic|api|htmx]  Browser proof workbench (scaffolds in empty dir)
         \\  zigttp dev [handler-or-project]         Watch + proven hot reload (HUD on)
         \\  zigttp serve [options] [handler.ts]    Run handler locally
@@ -1523,6 +1703,20 @@ test "resolveDeveloperServeBinary re-enters developer CLI for studio and dev" {
     const fallback = try resolveDeveloperServeBinary(std.testing.allocator, "");
     defer std.testing.allocator.free(fallback);
     try std.testing.expectEqualStrings("zigttp", fallback);
+}
+
+test "resolveReentryBinaryAfterChdir preserves PATH lookup for bare names" {
+    const bare = try resolveReentryBinaryAfterChdir(std.testing.allocator, "zigttp", "/repo");
+    defer std.testing.allocator.free(bare);
+    try std.testing.expectEqualStrings("zigttp", bare);
+
+    const relative = try resolveReentryBinaryAfterChdir(std.testing.allocator, "./zig-out/bin/zigttp", "/repo");
+    defer std.testing.allocator.free(relative);
+    try std.testing.expect(std.mem.endsWith(u8, relative, "/repo/zig-out/bin/zigttp"));
+
+    const absolute = try resolveReentryBinaryAfterChdir(std.testing.allocator, "/usr/local/bin/zigttp", "/repo");
+    defer std.testing.allocator.free(absolute);
+    try std.testing.expectEqualStrings("/usr/local/bin/zigttp", absolute);
 }
 
 test "initCommand validates arguments before writing files" {

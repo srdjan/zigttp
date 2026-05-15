@@ -150,7 +150,9 @@ fn formatStaticOkHeader(
 /// I/O paths so dispatch logic stays in one place.
 fn populateStudioResponse(
     studio_opt: ?*studio_mod.State,
+    method: []const u8,
     path: []const u8,
+    body: ?[]const u8,
     response: *HttpResponse,
     allocator: std.mem.Allocator,
 ) !bool {
@@ -166,20 +168,75 @@ fn populateStudioResponse(
         return true;
     };
     if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) {
-        const body = try studio.stateJsonCopy(allocator);
-        response.setBodyOwned(body);
+        const state_body = try studio.stateJsonCopy(allocator);
+        response.setBodyOwned(state_body);
+        try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+        return true;
+    }
+    if (std.mem.eql(u8, path, studio_mod.demo_state_path)) {
+        const response_body = studio.demoStateJsonCopy(allocator) catch |err| {
+            if (err == error.DemoDisabled) {
+                response.status = 404;
+                response.body = "Demo disabled";
+                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+                return true;
+            }
+            return err;
+        };
+        response.setBodyOwned(response_body);
+        try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+        return true;
+    }
+    if (std.mem.eql(u8, path, studio_mod.demo_action_path)) {
+        if (!std.mem.eql(u8, method, "POST")) {
+            response.status = 405;
+            response.body = "Method Not Allowed";
+            try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+            return true;
+        }
+        const action = studio_mod.parseDemoAction(allocator, body) catch |err| {
+            if (err == error.MissingDemoAction or err == error.InvalidDemoAction or err == error.UnknownDemoAction) {
+                response.status = 400;
+                response.body = "Invalid demo action";
+                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+                return true;
+            }
+            return err;
+        };
+        const response_body = studio.applyDemoAction(allocator, action) catch |err| {
+            if (err == error.DemoDisabled) {
+                response.status = 404;
+                response.body = "Demo disabled";
+                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+                return true;
+            }
+            if (err == error.DemoNeedsRepair) {
+                response.status = 409;
+                response.body = "Repair the demo before deploy";
+                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+                return true;
+            }
+            if (err == error.DemoDeployFailed) {
+                response.status = 500;
+                response.body = "Demo local deploy failed";
+                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+                return true;
+            }
+            return err;
+        };
+        response.setBodyOwned(response_body);
         try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
         return true;
     }
     if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) {
-        const body = try studio.generatedTests(allocator);
-        response.setBodyOwned(body);
+        const tests_body = try studio.generatedTests(allocator);
+        response.setBodyOwned(tests_body);
         try response.putHeaderBorrowed("Content-Type", "application/x-ndjson; charset=utf-8");
         return true;
     }
     if (studio_mod.witnessDetailKey(path)) |key| {
-        if (studio.witnessDetailJson(allocator, key)) |body| {
-            response.setBodyOwned(body);
+        if (studio.witnessDetailJson(allocator, key)) |witness_body| {
+            response.setBodyOwned(witness_body);
             try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
             return true;
         } else |err| switch (err) {
@@ -391,7 +448,7 @@ const ConnectionPool = struct {
         const outcome_if_alive: RequestOutcome = if (keep_alive) .keep_alive else .close;
 
         if (self.server.config.studio and studio_mod.isStudioPath(request.path)) {
-            return self.handleStudioRequestSync(fd, request.path, keep_alive, req_allocator) catch |err| {
+            return self.handleStudioRequestSync(fd, request.method, request.path, request.body, keep_alive, req_allocator) catch |err| {
                 std.log.warn("studio request failed for {s}: {}", .{ request.path, err });
                 self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
                 return .close;
@@ -495,7 +552,9 @@ const ConnectionPool = struct {
     fn handleStudioRequestSync(
         self: *ConnectionPool,
         fd: std.posix.fd_t,
+        method: []const u8,
         path: []const u8,
+        body: ?[]const u8,
         keep_alive: bool,
         allocator: std.mem.Allocator,
     ) !RequestOutcome {
@@ -516,7 +575,7 @@ const ConnectionPool = struct {
         var response = HttpResponse.init(allocator);
         defer response.deinit();
 
-        if (try populateStudioResponse(studio_opt, path, &response, allocator)) {
+        if (try populateStudioResponse(studio_opt, method, path, body, &response, allocator)) {
             self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
         }
         return if (keep_alive) .keep_alive else .close;
@@ -1039,6 +1098,11 @@ pub const ServerConfig = struct {
 
     /// Local author workbench at /_zigttp/studio.
     studio: bool = false,
+
+    /// Guided first-run proof theater layered on top of Studio. Only enabled
+    /// for `zigttp demo`, and all mutation is scoped to the generated
+    /// workspace.
+    studio_demo_root: ?[]const u8 = null,
 };
 
 pub const HandlerSource = union(enum) {
@@ -1209,10 +1273,16 @@ pub const Server = struct {
         if (self.config.studio) {
             switch (self.config.handler) {
                 .file_path => |path| {
-                    self.studio = studio_mod.State.init(self.allocator, path) catch |err| blk: {
-                        std.log.warn("Studio disabled: {}", .{err});
-                        break :blk null;
-                    };
+                    self.studio = if (self.config.studio_demo_root) |root|
+                        studio_mod.State.initDemo(self.allocator, path, .{ .workspace_root = root }) catch |err| blk: {
+                            std.log.warn("Studio disabled: {}", .{err});
+                            break :blk null;
+                        }
+                    else
+                        studio_mod.State.init(self.allocator, path) catch |err| blk: {
+                            std.log.warn("Studio disabled: {}", .{err});
+                            break :blk null;
+                        };
                 },
                 else => std.log.warn("Studio requires a file-based handler; continuing without studio.", .{}),
             }
@@ -1523,7 +1593,7 @@ pub const Server = struct {
         const keep_alive = self.config.keep_alive and client_wants_keep_alive;
 
         if (self.config.studio and studio_mod.isStudioPath(request.path)) {
-            try self.handleStudioRequest(stream, io, request.path, keep_alive, req_allocator);
+            try self.handleStudioRequest(stream, io, request.method, request.path, request.body, keep_alive, req_allocator);
             return keep_alive;
         }
 
@@ -1806,7 +1876,9 @@ pub const Server = struct {
         self: *Self,
         stream: *net.Stream,
         io: Io,
+        method: []const u8,
         path: []const u8,
+        body: ?[]const u8,
         keep_alive: bool,
         allocator: std.mem.Allocator,
     ) !void {
@@ -1821,7 +1893,7 @@ pub const Server = struct {
         defer response.deinit();
 
         const studio_opt: ?*studio_mod.State = if (self.studio) |*s| s else null;
-        if (try populateStudioResponse(studio_opt, path, &response, allocator)) {
+        if (try populateStudioResponse(studio_opt, method, path, body, &response, allocator)) {
             try self.sendResponse(stream, io, &response, keep_alive);
         }
     }

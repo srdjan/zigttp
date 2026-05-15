@@ -171,12 +171,15 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
     var prove_enabled = false;
     var force_swap = false;
     var studio_enabled = false;
+    var demo_enabled = false;
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--watch")) watch_enabled = true;
         if (std.mem.eql(u8, arg, "--prove")) prove_enabled = true;
         if (std.mem.eql(u8, arg, "--force-swap")) force_swap = true;
         if (std.mem.eql(u8, arg, "--studio")) studio_enabled = true;
+        if (std.mem.eql(u8, arg, "--demo")) demo_enabled = true;
     }
+    if (demo_enabled) studio_enabled = true;
     if (studio_enabled) {
         if (!feature_options.enable_studio) {
             std.log.err("--studio is not available in zigttp-runtime; use the zigttp developer CLI", .{});
@@ -195,6 +198,10 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         return err;
     };
     if (studio_enabled) config.studio = true;
+    if (demo_enabled) {
+        config.studio = true;
+        config.studio_demo_root = ".";
+    }
 
     if (config.runtime_config.replay_file_path != null) {
         replay_runner.run(allocator, config) catch |err| {
@@ -449,7 +456,8 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
         } else if (std.mem.eql(u8, arg, "--watch") or
             std.mem.eql(u8, arg, "--prove") or
             std.mem.eql(u8, arg, "--force-swap") or
-            std.mem.eql(u8, arg, "--studio"))
+            std.mem.eql(u8, arg, "--studio") or
+            std.mem.eql(u8, arg, "--demo"))
         {
             // Handled by serveCommand before parseServeArgs is called
             continue;
