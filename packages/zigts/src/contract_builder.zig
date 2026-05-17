@@ -885,7 +885,19 @@ pub const ContractBuilder = struct {
         self: *ContractBuilder,
         specifier: []const u8,
     ) !*contract_types.ExtensionContract {
-        return getOrPutDuped(contract_types.ExtensionContract, &self.extensions, self.allocator, specifier);
+        const entry = try getOrPutDuped(contract_types.ExtensionContract, &self.extensions, self.allocator, specifier);
+        // Mirror the manifest's top-level section declaration onto the
+        // contract entry the first time we touch this specifier. Subsequent
+        // calls are idempotent. The manifest may live longer than this
+        // builder so we own the copy.
+        if (entry.contract_section == null) {
+            const registry = self.manifest_registry orelse return entry;
+            const manifest = registry.fromSpecifier(specifier) orelse return entry;
+            if (manifest.contract_section) |name| {
+                entry.contract_section = try self.allocator.dupe(u8, name);
+            }
+        }
+        return entry;
     }
 
     fn getOrCreateCategoryBucket(

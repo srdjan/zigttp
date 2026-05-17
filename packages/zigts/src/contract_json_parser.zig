@@ -516,6 +516,9 @@ fn parseExtensionContractBody(
             ext.egress_dynamic = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "categories")) {
             try parseExtensionCategoriesMap(parser, allocator, ext);
+        } else if (std.mem.eql(u8, key, "contractSection")) {
+            const raw = parser.readString() orelse return error.InvalidJson;
+            ext.contract_section = try allocator.dupe(u8, raw);
         } else {
             parser.skipValue();
         }

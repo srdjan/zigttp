@@ -201,6 +201,41 @@ This is a sketch, not a final schema.
 
 The runtime should reject manifests that declare unsupported categories, labels, or capabilities.
 
+### Partner-Declared Top-Level Section
+
+Partners can opt their proof facts into a top-level `contract.json` section, giving them parity with built-ins like `cache`, `durable`, and `sql`. The manifest declares one optional name:
+
+```json
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp-ext:stripe",
+  "contractSection": "stripe",
+  "exports": [...]
+}
+```
+
+When present, the writer mirrors that extension's category buckets into a top-level `<name>` block: `{ "sourceSpecifier": "zigttp-ext:stripe", "categories": { ... } }`. The same facts continue to land under `extensions.<specifier>`, so per-extension audit tools keep working. The `contractSection` name must be a fresh identifier - the parser rejects names that collide with the closed set of built-in top-level keys (`cache`, `durable`, `sql`, `env`, `egress`, etc.). Two extensions cannot declare the same `contractSection` in the same session; the registry rejects the second registration with `DuplicateContractSection`.
+
+Partners that do not need top-level parity should leave `contractSection` unset. The `extensions.<specifier>.categories` namespace remains the default partner extensibility surface.
+
+### Partner-Declared Capability Names
+
+The capability fence is structural: it can only enforce capabilities the runtime knows how to gate, which today is the closed `ModuleCapability` enum (`env`, `clock`, `random`, `crypto`, `stderr`, `runtime_callback`, `sqlite`, `filesystem`, `network`, `policy_check`, `websocket`).
+
+Partners that want a more specific semantic label (for example an LLM provider that thinks of its outbound calls as `llm_egress`, or a payments module that calls its network use `payment_egress`) can declare it in the manifest by using the object form in `requiredCapabilities`:
+
+```json
+{
+  "requiredCapabilities": [
+    { "name": "llm_egress", "inherits": "network" },
+    "clock"
+  ]
+}
+```
+
+`inherits` must name an existing `ModuleCapability` enum tag; that is the capability the runtime fence will actually enforce. `name` is the partner-declared semantic label, preserved for tooling (it appears in `zigts extension-status` and `extensions.<specifier>` contract output) but not used for enforcement. Partner names must not collide with existing enum tags - use the bare-string form for those.
+
+
 ## Canonical Value Model
 
 The extension ABI should not expose raw VM values.

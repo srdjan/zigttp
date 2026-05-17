@@ -412,6 +412,72 @@ test "parseFromJson roundtrip preserves partner extensions section" {
     try std.testing.expectEqualStrings("refund", parsed_bucket.literals.items[1]);
 }
 
+test "parseFromJson roundtrip preserves partner contract_section field" {
+    const allocator = std.testing.allocator;
+
+    var stripe_ext = contract_types.ExtensionContract{
+        .contract_section = try allocator.dupe(u8, "stripe"),
+    };
+    try stripe_ext.egress_hosts.append(allocator, try allocator.dupe(u8, "api.stripe.com"));
+
+    var payment_bucket = contract_types.ExtensionCategoryBucket{};
+    try payment_bucket.literals.append(allocator, try allocator.dupe(u8, "card_charge"));
+
+    const tag_key = try allocator.dupe(u8, "payment_gateway");
+    try stripe_ext.categories.put(allocator, tag_key, payment_bucket);
+
+    const spec_key = try allocator.dupe(u8, "zigttp-ext:stripe");
+    var extensions: std.StringHashMapUnmanaged(contract_types.ExtensionContract) = .empty;
+    try extensions.put(allocator, spec_key, stripe_ext);
+
+    var original = HandlerContract{
+        .handler = .{ .path = try allocator.dupe(u8, "handler.ts"), .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
+        .api = emptyApiInfo(),
+        .verification = null,
+        .aot = null,
+        .extensions = extensions,
+    };
+    defer original.deinit(allocator);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try writeContractJson(&original, &aw.writer);
+    output = aw.toArrayList();
+
+    // The writer mirrors the extension's categories into a top-level
+    // partner section keyed by the declared `contractSection` name.
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"stripe\": {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"sourceSpecifier\": \"zigttp-ext:stripe\"") != null);
+
+    var parsed = try parseFromJson(allocator, output.items);
+    defer parsed.deinit(allocator);
+
+    const parsed_stripe = parsed.extensions.getPtr("zigttp-ext:stripe") orelse return error.MissingExtension;
+    try std.testing.expectEqualStrings(
+        "stripe",
+        parsed_stripe.contract_section orelse return error.MissingContractSection,
+    );
+}
+
 test "parseFromJson roundtrip preserves dynamic service call keys" {
     const allocator = std.testing.allocator;
 

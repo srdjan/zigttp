@@ -192,6 +192,52 @@ The validator checks schema version, specifier prefix, backend/state model, capa
 
 **Exit code:** `0` if no errors, `1` otherwise.
 
+## `zigts extension-status`
+
+Reports the partner virtual-module manifests that have been registered for this session, plus a per-manifest summary of specifier, backend, state model, capabilities, exports, and any validation issues. Mirrors the validator used by `verify-module-manifest`, so a manifest that fails validation reports the same diagnostics.
+
+**Invocation:**
+
+```text
+zigts extension-status --module-manifest <path> [--module-manifest <path>...] --json
+zigts extension-status <path> [<path>...] --json
+```
+
+**Output shape:**
+
+```json
+{
+  "ok": true,
+  "manifests": [
+    {
+      "path": "packages/zigttp-ext-demo/zigttp-module.json",
+      "valid": true,
+      "specifier": "zigttp-ext:math",
+      "backend": "native_zig",
+      "stateModel": "none",
+      "requiredCapabilities": ["clock"],
+      "contractSection": "math",
+      "exports": [
+        {
+          "name": "double",
+          "effect": "read",
+          "returns": "number",
+          "failureSeverity": "none",
+          "traceable": true,
+          "returnLabels": [],
+          "contractExtractions": []
+        }
+      ],
+      "issues": []
+    }
+  ]
+}
+```
+
+`requiredCapabilities` entries are either plain strings (a built-in `ModuleCapability` enum tag) or `{ "name": "...", "inherits": "..." }` objects for partner-declared semantic labels. `contractSection` is present only when the partner manifest declares one. The `issues` array carries the same `JsonDiagnostic` shape as `verify-module-manifest`.
+
+**Exit code:** `0` if every manifest validates cleanly, `1` if any manifest fails validation.
+
 ## `zigts edit-simulate`
 
 Simulates running the analysis pipeline on a candidate file and, optionally, diffs the result against a baseline so the client can tell which violations are *new* vs. *pre-existing*. This is the call the TUI's compiler veto will hang from.
@@ -415,7 +461,7 @@ Two tripwires guard this contract and run under `zig build test`: the in-tree te
 
 ## `zigts expert --print --mode json` event stream
 
-`zigts expert` calls the Anthropic API directly using `ANTHROPIC_API_KEY`. Its system prompt comes entirely from the binary: the shipped persona and bundled references are embedded at compile time via `@embedFile`, and compiler metadata is rendered from the running binary's in-process registries. Startup does not read `AGENTS.md`, `CLAUDE.md`, external skill files, or any other workspace prompt files.
+`zigts expert` picks its model backend from the environment: `ANTHROPIC_API_KEY` selects the Anthropic provider (streaming Messages API), `OPENAI_API_KEY` selects the OpenAI provider (non-streaming Chat Completions), and an unset environment runs against a fixed-reply stub. The system prompt comes entirely from the binary: the shipped persona and bundled references are embedded at compile time via `@embedFile`, and compiler metadata is rendered from the running binary's in-process registries. Startup does not read `AGENTS.md`, `CLAUDE.md`, external skill files, or any other workspace prompt files.
 
 `--print <prompt>` runs one turn and exits. `--mode json` switches output to an NDJSON event stream, one event per line. This surface falls outside the v1 tool contract above but appears here because CI scripts commonly use both together.
 

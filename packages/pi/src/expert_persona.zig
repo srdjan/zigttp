@@ -67,6 +67,12 @@ const prologue =
     \\  zigts_expert_prove_patch    - classify a before/after contract pair
     \\  zigts_expert_system_proof   - run cross-handler system linking proof
     \\  zigts_expert_verify_modules - audit a virtual module file
+    \\  pi_extension_catalog        - check whether a `zigttp-ext:*` specifier
+    \\                                (and optionally an export) is registered
+    \\                                in this session. Call before suggesting
+    \\                                a partner import; warn the user instead
+    \\                                of drafting an import the veto would
+    \\                                later reject.
     \\  workspace_list_files        - list workspace files
     \\  workspace_read_file         - read a file or line range
     \\  workspace_search_text       - search across the workspace

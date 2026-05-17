@@ -56,6 +56,35 @@ pub const ContractExtractionRule = struct {
     }
 };
 
+/// One entry in a manifest's `requiredCapabilities` list.
+///
+/// Partners that need a capability outside the closed `ModuleCapability`
+/// enum can still declare it in the manifest by writing an object form:
+///
+/// ```json
+/// "requiredCapabilities": [
+///   { "name": "llm_egress", "inherits": "network" },
+///   "clock"
+/// ]
+/// ```
+///
+/// `inherits` resolves to the existing enum tag that the manifest validator
+/// and audit fence enforce against. `name` is the partner-declared semantic
+/// label; it is preserved for tooling (extension-status) but not used for
+/// enforcement, since the runtime capability fence is structural and only
+/// understands the closed enum. Bare-string entries (the original form)
+/// have `partner_name == null`.
+pub const CapabilityDeclaration = struct {
+    effective: mb.ModuleCapability,
+    /// Owned. Non-null when the manifest used the object form.
+    partner_name: ?[]u8 = null,
+
+    pub fn deinit(self: *CapabilityDeclaration, allocator: std.mem.Allocator) void {
+        if (self.partner_name) |slice| allocator.free(slice);
+        self.partner_name = null;
+    }
+};
+
 pub const Export = struct {
     name: []const u8,
     effect: mb.EffectClass,
@@ -77,14 +106,23 @@ pub const Manifest = struct {
     specifier: []const u8,
     backend: ?Backend,
     state_model: ?StateModel,
-    required_capabilities: std.ArrayList(mb.ModuleCapability),
+    required_capabilities: std.ArrayList(CapabilityDeclaration),
     exports: std.ArrayList(Export),
+    /// Optional partner-declared top-level section name. When set, the
+    /// contract writer mirrors this extension's category buckets into a
+    /// `<name>` block at the top of contract.json, giving partners parity
+    /// with built-ins like `cache` and `durable`. Owned by the manifest;
+    /// null when the partner is content with the per-specifier namespace
+    /// under `extensions.<specifier>`.
+    contract_section: ?[]u8 = null,
 
     pub fn deinit(self: *Manifest, allocator: std.mem.Allocator) void {
         allocator.free(self.specifier);
+        for (self.required_capabilities.items) |*decl| decl.deinit(allocator);
         self.required_capabilities.deinit(allocator);
         for (self.exports.items) |*exp| exp.deinit(allocator);
         self.exports.deinit(allocator);
+        if (self.contract_section) |slice| allocator.free(slice);
     }
 };
 
@@ -108,8 +146,15 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ManifestError!Mani
         .state_model = null,
         .required_capabilities = .empty,
         .exports = .empty,
+        .contract_section = null,
     };
     errdefer manifest.deinit(allocator);
+
+    if (optionalStringField(root, "contractSection") orelse optionalStringField(root, "contract_section")) |raw| {
+        if (!validContractSectionName(raw)) return error.InvalidContractFlag;
+        if (reservedContractSectionName(raw)) return error.InvalidContractFlag;
+        manifest.contract_section = try allocator.dupe(u8, raw);
+    }
 
     if (optionalStringField(root, "backend")) |backend_raw| {
         manifest.backend = parseBackend(backend_raw) orelse return error.InvalidBackend;
@@ -121,10 +166,17 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ManifestError!Mani
     if (root.get("requiredCapabilities") orelse root.get("required_capabilities")) |caps_value| {
         if (caps_value != .array) return error.InvalidCapability;
         for (caps_value.array.items) |item| {
-            if (item != .string) return error.InvalidCapability;
-            const cap = std.meta.stringToEnum(mb.ModuleCapability, item.string) orelse return error.InvalidCapability;
-            if (containsCapability(manifest.required_capabilities.items, cap)) return error.InvalidCapability;
-            try manifest.required_capabilities.append(allocator, cap);
+            const decl = try parseCapabilityDeclaration(allocator, item);
+            if (containsCapability(manifest.required_capabilities.items, decl.effective)) {
+                var owned = decl;
+                owned.deinit(allocator);
+                return error.InvalidCapability;
+            }
+            manifest.required_capabilities.append(allocator, decl) catch |err| {
+                var owned = decl;
+                owned.deinit(allocator);
+                return err;
+            };
         }
     }
 
@@ -392,11 +444,90 @@ fn validateLaws(value: std.json.Value) ManifestError!void {
     }
 }
 
-fn containsCapability(items: []const mb.ModuleCapability, needle: mb.ModuleCapability) bool {
+fn containsCapability(items: []const CapabilityDeclaration, needle: mb.ModuleCapability) bool {
     for (items) |item| {
-        if (item == needle) return true;
+        if (item.effective == needle) return true;
     }
     return false;
+}
+
+fn parseCapabilityDeclaration(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) ManifestError!CapabilityDeclaration {
+    switch (value) {
+        .string => |raw| {
+            const cap = std.meta.stringToEnum(mb.ModuleCapability, raw) orelse return error.InvalidCapability;
+            return .{ .effective = cap };
+        },
+        .object => |obj| {
+            const partner_raw = stringField(obj, "name") catch return error.InvalidCapability;
+            if (!validPartnerCapabilityName(partner_raw)) return error.InvalidCapability;
+            // The closed enum tag (the structurally-enforced capability) lives
+            // under `inherits`. We accept `inheritsCapability` as a more
+            // explicit alias for partners who already use camelCase.
+            const inherits_raw = (optionalStringField(obj, "inherits") orelse optionalStringField(obj, "inheritsCapability")) orelse return error.InvalidCapability;
+            const inherits = std.meta.stringToEnum(mb.ModuleCapability, inherits_raw) orelse return error.InvalidCapability;
+            // Reject partners that re-declare a name already shipped as a
+            // built-in enum tag; the bare-string form is the right surface
+            // for those.
+            if (std.meta.stringToEnum(mb.ModuleCapability, partner_raw) != null) return error.InvalidCapability;
+            const owned = try allocator.dupe(u8, partner_raw);
+            return .{ .effective = inherits, .partner_name = owned };
+        },
+        else => return error.InvalidCapability,
+    }
+}
+
+/// Reserved built-in section names. Partners cannot pick these for their
+/// `contractSection`; the writer would emit duplicate top-level keys
+/// otherwise. The list is intentionally inclusive of every key the JSON
+/// writer emits at the top level, not just the existing module bindings,
+/// so partners cannot collide with `egress`, `properties`, etc.
+const reserved_contract_sections = [_][]const u8{
+    "handler",             "version",       "routes",
+    "modules",             "sandbox",       "functions",
+    "env",                 "egress",        "serviceCalls",
+    "cache",               "sql",           "durable",
+    "scope",               "api",           "verification",
+    "websocket",           "aot",           "faultCoverage",
+    "rateLimiting",        "properties",    "behaviors",
+    "behaviorsExhaustive", "declaredSpecs", "specDiagnostics",
+    "extensions",
+};
+
+fn reservedContractSectionName(raw: []const u8) bool {
+    for (reserved_contract_sections) |reserved| {
+        if (std.mem.eql(u8, reserved, raw)) return true;
+    }
+    return false;
+}
+
+fn validContractSectionName(raw: []const u8) bool {
+    if (raw.len == 0 or raw.len > 64) return false;
+    for (raw, 0..) |c, i| {
+        const is_lower = c >= 'a' and c <= 'z';
+        const is_upper = c >= 'A' and c <= 'Z';
+        const is_digit = c >= '0' and c <= '9';
+        if (i == 0 and !(is_lower or is_upper)) return false;
+        if (!(is_lower or is_upper or is_digit or c == '_' or c == '-')) return false;
+    }
+    return true;
+}
+
+/// Partner capability names use the same syntactic rules as
+/// `validExtensionCategory`: 1..64 chars from `[A-Za-z0-9_-]`. This keeps
+/// the namespace audit-friendly (greppable, line-stable) and matches the
+/// shape partners already use elsewhere in the manifest.
+fn validPartnerCapabilityName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    for (name) |c| {
+        const is_lower = c >= 'a' and c <= 'z';
+        const is_upper = c >= 'A' and c <= 'Z';
+        const is_digit = c >= '0' and c <= '9';
+        if (!(is_lower or is_upper or is_digit or c == '_' or c == '-')) return false;
+    }
+    return true;
 }
 
 fn containsExport(items: []const Export, needle: []const u8) bool {
@@ -426,8 +557,89 @@ test "parse manifest accepts demo extension metadata" {
     try std.testing.expectEqual(Backend.native_zig, manifest.backend.?);
     try std.testing.expectEqual(StateModel.none, manifest.state_model.?);
     try std.testing.expectEqual(@as(usize, 1), manifest.required_capabilities.items.len);
-    try std.testing.expectEqual(mb.ModuleCapability.clock, manifest.required_capabilities.items[0]);
+    try std.testing.expectEqual(mb.ModuleCapability.clock, manifest.required_capabilities.items[0].effective);
+    try std.testing.expect(manifest.required_capabilities.items[0].partner_name == null);
     try std.testing.expectEqualStrings("double", manifest.exports.items[0].name);
+}
+
+test "parse manifest accepts partner-declared capability that inherits an enum tag" {
+    const json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zigttp-ext:llm",
+        \\  "requiredCapabilities": [
+        \\    { "name": "llm_egress", "inherits": "network" },
+        \\    "clock"
+        \\  ],
+        \\  "exports": [{ "name": "complete" }]
+        \\}
+    ;
+    var manifest = try parse(std.testing.allocator, json);
+    defer manifest.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), manifest.required_capabilities.items.len);
+    try std.testing.expectEqual(mb.ModuleCapability.network, manifest.required_capabilities.items[0].effective);
+    try std.testing.expectEqualStrings("llm_egress", manifest.required_capabilities.items[0].partner_name orelse return error.TestExpectedName);
+    try std.testing.expectEqual(mb.ModuleCapability.clock, manifest.required_capabilities.items[1].effective);
+    try std.testing.expect(manifest.required_capabilities.items[1].partner_name == null);
+}
+
+test "parse manifest rejects partner capability missing inherits" {
+    const json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zigttp-ext:llm",
+        \\  "requiredCapabilities": [{ "name": "llm_egress" }],
+        \\  "exports": [{ "name": "complete" }]
+        \\}
+    ;
+    try std.testing.expectError(error.InvalidCapability, parse(std.testing.allocator, json));
+}
+
+test "parse manifest rejects partner capability whose name collides with a built-in" {
+    const json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zigttp-ext:llm",
+        \\  "requiredCapabilities": [{ "name": "network", "inherits": "network" }],
+        \\  "exports": [{ "name": "complete" }]
+        \\}
+    ;
+    try std.testing.expectError(error.InvalidCapability, parse(std.testing.allocator, json));
+}
+
+test "parse manifest captures contractSection when set" {
+    const json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zigttp-ext:stripe",
+        \\  "contractSection": "stripe",
+        \\  "exports": [{ "name": "chargeCard" }]
+        \\}
+    ;
+    var manifest = try parse(std.testing.allocator, json);
+    defer manifest.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("stripe", manifest.contract_section orelse return error.TestExpectedSection);
+}
+
+test "parse manifest rejects contractSection that collides with a built-in" {
+    const reserved = [_][]const u8{ "cache", "functions", "modules", "websocket", "aot" };
+    for (reserved) |section| {
+        const json = try std.fmt.allocPrint(
+            std.testing.allocator,
+            \\{{
+            \\  "schemaVersion": 1,
+            \\  "specifier": "zigttp-ext:bad",
+            \\  "contractSection": "{s}",
+            \\  "exports": [{{ "name": "x" }}]
+            \\}}
+        ,
+            .{section},
+        );
+        defer std.testing.allocator.free(json);
+        try std.testing.expectError(error.InvalidContractFlag, parse(std.testing.allocator, json));
+    }
 }
 
 test "parse manifest rejects duplicate exports within module" {

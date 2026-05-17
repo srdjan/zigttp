@@ -7,14 +7,20 @@ deterministically in CI so the test suite never burns tokens.
 
 ## Scope
 
-Everything in this document is deferred work. The `loop.ModelClient`
-vtable in `packages/pi/src/loop.zig` is already provider-neutral; the
-work below slots a second backend alongside `providers/anthropic/`
-without reshaping the loop.
+The OpenAI provider drop-in shipped as a single non-streaming file at
+`packages/pi/src/providers/openai/client.zig` (Backend union variant +
+`AgentSession.initOpenAI` + env-detection in `agent.zig`). It exercises
+`POST /v1/chat/completions` against canned response JSON in its
+in-tree tests; no network is required for `zig build test`.
 
-The single external dependency is one live `POST` per cassette
-scenario. Three scenarios cover the full feature matrix; a first pass
-can ship with one.
+What this document still covers is the cassette harness on top of that
+provider: a recorded-replay layer so a future streaming variant
+(Responses API, SSE, tool-use) can be tested deterministically against
+live-call fixtures. Everything below this line is still deferred.
+
+The single external dependency for the harness is one live `POST` per
+cassette scenario. Three scenarios cover the full feature matrix; a
+first pass can ship with one.
 
 ## The live call
 

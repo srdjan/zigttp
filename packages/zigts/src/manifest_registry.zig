@@ -18,6 +18,7 @@ pub const ContractExtractionRule = module_manifest.ContractExtractionRule;
 
 pub const RegistryError = error{
     DuplicateSpecifier,
+    DuplicateContractSection,
 } || std.mem.Allocator.Error;
 
 pub const Registry = struct {
@@ -42,6 +43,13 @@ pub const Registry = struct {
         for (self.manifests.items) |existing| {
             if (std.mem.eql(u8, existing.specifier, manifest.specifier)) {
                 return error.DuplicateSpecifier;
+            }
+            if (manifest.contract_section) |incoming| {
+                if (existing.contract_section) |prior| {
+                    if (std.mem.eql(u8, incoming, prior)) {
+                        return error.DuplicateContractSection;
+                    }
+                }
             }
         }
         try self.manifests.append(self.allocator, manifest);
@@ -113,6 +121,37 @@ test "registry register and lookup round-trip" {
     try std.testing.expectEqual(@as(u8, 0), rule.arg_position);
     try std.testing.expect(rule.category == .extension_specific);
     try std.testing.expectEqualStrings("payment_gateway", rule.extension_category orelse return error.TestExpectedTag);
+}
+
+test "registry rejects duplicate contract sections" {
+    const allocator = std.testing.allocator;
+
+    var registry = Registry.init(allocator);
+    defer registry.deinit();
+
+    const json_a =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zigttp-ext:a",
+        \\  "contractSection": "shared",
+        \\  "exports": [{ "name": "x" }]
+        \\}
+    ;
+    const json_b =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zigttp-ext:b",
+        \\  "contractSection": "shared",
+        \\  "exports": [{ "name": "x" }]
+        \\}
+    ;
+    var first = try module_manifest.parse(allocator, json_a);
+    errdefer first.deinit(allocator);
+    try registry.register(first);
+
+    var second = try module_manifest.parse(allocator, json_b);
+    defer second.deinit(allocator);
+    try std.testing.expectError(error.DuplicateContractSection, registry.register(second));
 }
 
 test "registry rejects duplicate specifiers" {

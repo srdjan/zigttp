@@ -608,13 +608,16 @@ fn sameStringSet(a: []const []const u8, b: []const []const u8) bool {
     return true;
 }
 
-fn sameCapabilities(a: []const []const u8, b: []const zigts.module_binding.ModuleCapability) bool {
-    if (a.len != b.len) return false;
-    for (a) |item| {
+fn sameCapabilities(
+    binding_caps: []const []const u8,
+    manifest_caps: []const zigts.module_manifest.CapabilityDeclaration,
+) bool {
+    if (binding_caps.len != manifest_caps.len) return false;
+    for (binding_caps) |item| {
         const cap = std.meta.stringToEnum(zigts.module_binding.ModuleCapability, item) orelse return false;
         var found = false;
-        for (b) |candidate| {
-            if (candidate == cap) {
+        for (manifest_caps) |decl| {
+            if (decl.effective == cap) {
                 found = true;
                 break;
             }

@@ -19,6 +19,7 @@ const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
 const anthropic_client = @import("providers/anthropic/client.zig");
 const tools_schema = @import("providers/anthropic/tools_schema.zig");
+const openai_client = @import("providers/openai/client.zig");
 const expert_persona = @import("expert_persona.zig");
 const zigts_cli = @import("zigts_cli");
 const expert_meta = zigts_cli.expert_meta;
@@ -36,6 +37,7 @@ const Transcript = transcript_mod.Transcript;
 pub const AuthKind = enum {
     stub,
     anthropic_api_key,
+    openai_api_key,
 };
 
 pub const BackendDescriptor = struct {
@@ -93,6 +95,7 @@ const StubClient = struct {
 const Backend = union(enum) {
     stub: StubClient,
     anthropic: anthropic_client.Client,
+    openai: openai_client.Client,
 };
 
 pub const AgentSession = struct {
@@ -153,6 +156,37 @@ pub const AgentSession = struct {
         };
     }
 
+    /// Constructs a session whose backend is a real OpenAI Chat Completions
+    /// client. Same ownership contract as `initAnthropic`: api_key, system
+    /// prompt, and tools_json are all duped so the caller's buffers can be
+    /// freed independently. `tools_json` is the OpenAI-shaped tools array
+    /// produced by `openai_client.writeToolsArray`.
+    pub fn initOpenAI(
+        allocator: std.mem.Allocator,
+        api_key: []const u8,
+        system_prompt: []const u8,
+        tools_json: ?[]const u8,
+    ) !AgentSession {
+        const prompt_owned = try allocator.dupe(u8, system_prompt);
+        errdefer allocator.free(prompt_owned);
+        const key_owned = try allocator.dupe(u8, api_key);
+        errdefer allocator.free(key_owned);
+        const tools_owned = if (tools_json) |json|
+            try allocator.dupe(u8, json)
+        else
+            null;
+        errdefer if (tools_owned) |json| allocator.free(json);
+        return .{
+            .backend = .{ .openai = openai_client.Client.init(.{
+                .api_key = key_owned,
+                .system_prompt = prompt_owned,
+                .tools_json = tools_owned,
+            }) },
+            .system_prompt_owned = prompt_owned,
+            .tools_json_owned = tools_owned,
+        };
+    }
+
     pub fn deinit(self: *AgentSession, allocator: std.mem.Allocator) void {
         self.transcript.deinit(allocator);
         if (self.system_prompt_owned) |s| allocator.free(s);
@@ -164,6 +198,7 @@ pub const AgentSession = struct {
         switch (self.backend) {
             .stub => {},
             .anthropic => |*c| allocator.free(c.config.api_key),
+            .openai => |*c| allocator.free(c.config.api_key),
         }
     }
 
@@ -171,6 +206,7 @@ pub const AgentSession = struct {
         return switch (self.backend) {
             .stub => (&self.backend.stub).asClient(),
             .anthropic => (&self.backend.anthropic).asModelClient(),
+            .openai => (&self.backend.openai).asModelClient(),
         };
     }
 
@@ -179,6 +215,7 @@ pub const AgentSession = struct {
         return switch (self.backend) {
             .stub => null,
             .anthropic => |c| c.config.model,
+            .openai => |c| c.config.model,
         };
     }
 
@@ -186,6 +223,7 @@ pub const AgentSession = struct {
         return switch (self.backend) {
             .stub => .stub,
             .anthropic => .anthropic_api_key,
+            .openai => .openai_api_key,
         };
     }
 
@@ -196,15 +234,17 @@ pub const AgentSession = struct {
         return switch (self.backend) {
             .stub => .{ .auth_label = "stub", .provider_label = "stub" },
             .anthropic => .{ .auth_label = "api-key", .provider_label = "anthropic" },
+            .openai => .{ .auth_label = "api-key", .provider_label = "openai" },
         };
     }
 
-    /// Switches the Anthropic backend's model. `model_id` must outlive the
+    /// Switches the live backend's model. `model_id` must outlive the
     /// session (use a compile-time const or an allocator-owned dupe). No-op
     /// for the stub backend.
     pub fn setModel(self: *AgentSession, model_id: []const u8) void {
         switch (self.backend) {
             .anthropic => |*c| c.config.model = model_id,
+            .openai => |*c| c.config.model = model_id,
             .stub => {},
         }
     }
@@ -237,15 +277,27 @@ pub fn initFromEnvWithSessionConfig(
     defer if (project_ctx) |p| allocator.free(p);
 
     var session = blk: {
-        const api_key = envVar("ANTHROPIC_API_KEY") orelse break :blk AgentSession.initStub();
-        const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
-        defer allocator.free(system_prompt);
-        const tools_json = if (registry) |reg|
-            try buildToolsJson(allocator, reg)
-        else
-            null;
-        defer if (tools_json) |json| allocator.free(json);
-        break :blk try AgentSession.initAnthropic(allocator, api_key, system_prompt, tools_json);
+        if (envVar("ANTHROPIC_API_KEY")) |api_key| {
+            const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
+            defer allocator.free(system_prompt);
+            const tools_json = if (registry) |reg|
+                try buildToolsJson(allocator, reg)
+            else
+                null;
+            defer if (tools_json) |json| allocator.free(json);
+            break :blk try AgentSession.initAnthropic(allocator, api_key, system_prompt, tools_json);
+        }
+        if (envVar("OPENAI_API_KEY")) |api_key| {
+            const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
+            defer allocator.free(system_prompt);
+            const tools_json = if (registry) |reg|
+                try buildOpenAIToolsJson(allocator, reg)
+            else
+                null;
+            defer if (tools_json) |json| allocator.free(json);
+            break :blk try AgentSession.initOpenAI(allocator, api_key, system_prompt, tools_json);
+        }
+        break :blk AgentSession.initStub();
     };
     errdefer session.deinit(allocator);
 
@@ -401,6 +453,15 @@ fn buildToolsJson(allocator: std.mem.Allocator, registry: *const Registry) ![]u8
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     try tools_schema.writeToolsArray(&aw.writer, registry);
+    buf = aw.toArrayList();
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn buildOpenAIToolsJson(allocator: std.mem.Allocator, registry: *const Registry) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try openai_client.writeToolsArray(&aw.writer, registry);
     buf = aw.toArrayList();
     return try buf.toOwnedSlice(allocator);
 }
@@ -661,6 +722,22 @@ test "initAnthropic dupes api_key and system_prompt, deinit releases both" {
     try testing.expectEqualStrings("you are a zigts expert", session.backend.anthropic.config.system_prompt);
     try testing.expect(session.backend.anthropic.config.tools_json != null);
     try testing.expect(session.system_prompt_owned != null);
+}
+
+test "initOpenAI dupes api_key and system_prompt and routes through openai backend" {
+    var session = try AgentSession.initOpenAI(
+        testing.allocator,
+        "openai-fixture-key",
+        "you are a zigts expert",
+        "[{\"type\":\"function\",\"function\":{\"name\":\"x\"}}]",
+    );
+    defer session.deinit(testing.allocator);
+
+    try testing.expect(session.backend == .openai);
+    try testing.expectEqualStrings("openai-fixture-key", session.backend.openai.config.api_key);
+    try testing.expectEqualStrings("you are a zigts expert", session.backend.openai.config.system_prompt);
+    try testing.expectEqual(AuthKind.openai_api_key, session.authKind());
+    try testing.expectEqualStrings("openai", session.backendDescriptor().provider_label);
 }
 
 test "modelClient returns an anthropic client vtable when backend is anthropic" {

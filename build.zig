@@ -158,6 +158,19 @@ pub fn build(b: *std.Build) void {
     const expert_test_step = b.step("test-expert", "Run zigts expert v1 contract tripwires");
     expert_test_step.dependOn(&run_expert_tests.step);
 
+    const deploy_manifest_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = tools_dep.path("src/deploy_manifest.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    deploy_manifest_tests.root_module.addImport("zigts", zigts_host_mod);
+    const run_deploy_manifest_tests = b.addRunArtifact(deploy_manifest_tests);
+    const deploy_manifest_test_step = b.step("test-deploy-manifest", "Run deploy manifest renderer tests");
+    deploy_manifest_test_step.dependOn(&run_deploy_manifest_tests.step);
+
     // Pi in-process tool registry tests. The pi package owns its own module
     // graph; shared tool cores (expert_meta, verify_paths_core, etc.) are
     // consumed through the `zigts_cli` named module rather than relatively
@@ -465,6 +478,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_rollout_tests.step);
     test_step.dependOn(&run_expert_tests.step);
     test_step.dependOn(&run_pi_tests.step);
+    test_step.dependOn(&run_deploy_manifest_tests.step);
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&run_module_governance.step);
     test_step.dependOn(&run_zigts_tests.step);

@@ -647,8 +647,9 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll("],\n");
 
     try writeExtensionsJson(writer, contract);
+    try writePartnerContractSections(writer, contract);
 
-    try writer.writeAll("}\n");
+    try writer.writeAll("\n}\n");
 }
 
 /// Emit the `extensions` section: per-specifier facts produced by partner
@@ -661,7 +662,7 @@ fn writeExtensionsJson(
 ) !void {
     try writer.writeAll("  \"extensions\": {");
     if (contract.extensions.count() == 0) {
-        try writer.writeAll("}\n");
+        try writer.writeAll("}");
         return;
     }
 
@@ -699,9 +700,61 @@ fn writeExtensionsJson(
         }
 
         if (tag_keys.len > 0) try writer.writeAll("\n      ");
-        try writer.writeAll("}\n    }");
+        try writer.writeAll("}");
+
+        if (ext.contract_section) |section| {
+            try writer.writeAll(",\n      \"contractSection\": ");
+            try writeJsonString(writer, section);
+        }
+
+        try writer.writeAll("\n    }");
     }
-    try writer.writeAll("\n  }\n");
+    try writer.writeAll("\n  }");
+}
+
+/// Emit each partner-declared top-level section (one per extension with a
+/// non-null `contract_section`). Each section is keyed by the partner's
+/// chosen name and mirrors the source extension's category buckets, giving
+/// partner audit tools parity with built-in sections like `cache` and
+/// `durable` without forcing them to crawl the `extensions` namespace.
+fn writePartnerContractSections(
+    writer: anytype,
+    contract: *const HandlerContract,
+) !void {
+    if (contract.extensions.count() == 0) return;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const spec_keys = try sortedHashMapKeys(a, &contract.extensions);
+    for (spec_keys) |spec| {
+        const ext = contract.extensions.getPtr(spec).?;
+        const section = ext.contract_section orelse continue;
+
+        try writer.writeAll(",\n  ");
+        try writeJsonString(writer, section);
+        try writer.writeAll(": {\n    \"sourceSpecifier\": ");
+        try writeJsonString(writer, spec);
+        try writer.writeAll(",\n    \"categories\": {");
+
+        const tag_keys = try sortedHashMapKeys(a, &ext.categories);
+        for (tag_keys, 0..) |tag, j| {
+            const bucket = ext.categories.getPtr(tag).?;
+            if (j > 0) try writer.writeAll(",");
+            try writer.writeAll("\n      ");
+            try writeJsonString(writer, tag);
+            try writer.writeAll(": { \"literals\": [");
+            for (bucket.literals.items, 0..) |lit, k| {
+                if (k > 0) try writer.writeAll(", ");
+                try writeJsonString(writer, lit);
+            }
+            try writer.print("], \"dynamic\": {s} }}", .{if (bucket.dynamic) "true" else "false"});
+        }
+
+        if (tag_keys.len > 0) try writer.writeAll("\n    ");
+        try writer.writeAll("}\n  }");
+    }
 }
 
 /// Snapshot the keys of a string-keyed StringHashMapUnmanaged into a sorted

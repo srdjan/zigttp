@@ -64,6 +64,11 @@ pub const ExtensionContract = struct {
     /// Partner-declared category tag -> bucket of extracted literals. Keys
     /// are owned; lookup is structural.
     categories: std.StringHashMapUnmanaged(ExtensionCategoryBucket) = .empty,
+    /// Optional partner-declared top-level contract section name. When non-
+    /// null, the writer mirrors this extension's category buckets under a
+    /// top-level `<name>` block, giving partners parity with built-ins like
+    /// `cache` and `durable`. Owned by the contract.
+    contract_section: ?[]u8 = null,
 
     pub fn deinit(self: *ExtensionContract, allocator: std.mem.Allocator) void {
         for (self.egress_hosts.items) |s| allocator.free(s);
@@ -74,6 +79,7 @@ pub const ExtensionContract = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.categories.deinit(allocator);
+        if (self.contract_section) |slice| allocator.free(slice);
     }
 };
 

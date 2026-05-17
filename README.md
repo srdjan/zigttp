@@ -501,7 +501,7 @@ path tests download with a one-click link. In the expert REPL,
 
 Standalone analysis and compilation without starting a server.
 
-`zigts expert` calls the Anthropic API directly (`ANTHROPIC_API_KEY`). The persona, reference material, skill catalog, prompt templates, themes, and compiler metadata are all baked into the binary; there is no runtime plugin surface. The one external input that reaches the system prompt is `AGENTS.md` / `CLAUDE.md`, walked up from cwd to the enclosing `.git/` directory and appended as a labelled read-only project-context section with a 128 KiB cap. Disable with `--no-context-files`. Full pi architecture: [packages/pi/README.md](packages/pi/README.md).
+`zigts expert` picks its model backend from the environment: `ANTHROPIC_API_KEY` selects the Anthropic provider, `OPENAI_API_KEY` selects the OpenAI provider (non-streaming `chat/completions`), and an unset environment falls back to a fixed-reply stub. The persona, reference material, skill catalog, prompt templates, themes, and compiler metadata are all baked into the binary; there is no runtime plugin surface. The one external input that reaches the system prompt is `AGENTS.md` / `CLAUDE.md`, walked up from cwd to the enclosing `.git/` directory and appended as a labelled read-only project-context section with a 128 KiB cap. Disable with `--no-context-files`. Full pi architecture: [packages/pi/README.md](packages/pi/README.md).
 
 ```bash
 # Interactive REPL
@@ -605,6 +605,8 @@ zigts edit-simulate [handler.ts] [--before old.ts]  # Report violations an edit 
 zigts describe-rule [name|code] [--json] [--hash]   # Inspect diagnostic rules
 zigts search <keyword> [--json]       # Find rules by keyword
 zigts review-patch <file> [--before <old>] [--diff-only]  # Surface only new violations
+zigts verify-module-manifest <manifest.json> [--json]  # Validate a partner zigttp-module.json
+zigts extension-status --module-manifest <path>... [--json]  # Report registered partner manifests
 zigts ledger export --session <id> --out <path>  # Export proof-carrying patches from an expert session
 zigts ledger replay --input <path> --onto <git-ref>  # Re-apply a ledger onto a base revision
 ```
