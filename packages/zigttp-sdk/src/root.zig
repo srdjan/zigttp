@@ -683,6 +683,10 @@ pub const ContractCategory = enum {
     rate_limit_key,
     service_call,
     fetch_host,
+    // Partner-declared category. The actual tag string lives on
+    // ContractExtraction.extension_category and is keyed under
+    // contract.json's extensions.<specifier>.categories.
+    extension_specific,
 };
 
 pub const ContractTransform = enum {
@@ -695,6 +699,7 @@ pub const ContractExtraction = struct {
     category: ContractCategory,
     transform: ?ContractTransform = null,
     flag_only: bool = false,
+    extension_category: ?[]const u8 = null,
 };
 
 pub const ContractFlags = struct {

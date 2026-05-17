@@ -274,6 +274,7 @@ fn buildContractForServiceContext(
         null,
         null,
         null,
+        null,
     );
 }
 
@@ -494,6 +495,14 @@ fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             };
             continue;
         }
+        if (std.mem.eql(u8, arg, "--module-manifest")) {
+            index += 1;
+            if (index >= argv.len) {
+                std.debug.print("Missing path after --module-manifest\n", .{});
+                return error.MissingArgument;
+            }
+            continue;
+        }
         if (handler_path == null) {
             handler_path = arg;
             continue;
@@ -506,7 +515,7 @@ fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         return error.InvalidArgument;
     }
 
-    const usage = "Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--system path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n";
+    const usage = "Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--system path] [--prove spec] [--policy policy.json] [--module-manifest path] <handler.ts> <output.zig>\n";
     opts.handler_path = handler_path orelse {
         std.debug.print(usage, .{});
         std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
@@ -519,6 +528,81 @@ fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
     };
 
     return opts;
+}
+
+/// Scan argv for occurrences of `--module-manifest <path>`. Returns a
+/// newly-allocated slice of borrowed argv slices. The caller owns the outer
+/// slice (free with allocator.free) but the inner strings stay alive as long
+/// as argv does.
+fn collectModuleManifestPaths(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        if (std.mem.eql(u8, argv[i], "--module-manifest")) {
+            i += 1;
+            if (i >= argv.len) {
+                std.debug.print("Missing path after --module-manifest\n", .{});
+                return error.MissingArgument;
+            }
+            try out.append(allocator, argv[i]);
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Build a manifest registry from a list of file paths. Each path is read,
+/// validated via the existing parser (fail-loud on schema errors), and
+/// registered. Paths resolve relative to cwd, matching every other
+/// path-taking flag in the precompile CLI.
+fn buildManifestRegistryFromPaths(
+    allocator: std.mem.Allocator,
+    paths: []const []const u8,
+) !zigts.manifest_registry.Registry {
+    var registry = zigts.manifest_registry.Registry.init(allocator);
+    errdefer registry.deinit();
+
+    for (paths) |path| {
+        const bytes = readFilePosix(allocator, path, 1024 * 1024) catch |err| {
+            std.debug.print("Error reading module manifest '{s}': {}\n", .{ path, err });
+            return err;
+        };
+        defer allocator.free(bytes);
+
+        var manifest = zigts.module_manifest.parse(allocator, bytes) catch |err| {
+            std.debug.print("Error parsing module manifest '{s}': {}\n", .{ path, err });
+            return err;
+        };
+        errdefer manifest.deinit(allocator);
+
+        registry.register(manifest) catch |err| {
+            std.debug.print("Error registering module manifest '{s}': {}\n", .{ path, err });
+            return err;
+        };
+    }
+
+    return registry;
+}
+
+test "parsePrecompileArgSlice consumes module manifest flags" {
+    const argv = [_][]const u8{
+        "--module-manifest",
+        "zigttp-module.json",
+        "handler.ts",
+        "embedded_handler.zig",
+    };
+    const opts = try parsePrecompileArgSlice(&argv);
+    try std.testing.expectEqualStrings("handler.ts", opts.handler_path);
+    try std.testing.expectEqualStrings("embedded_handler.zig", opts.output_path);
+}
+
+test "parsePrecompileArgSlice rejects missing module manifest path" {
+    const argv = [_][]const u8{ "--module-manifest", "handler.ts", "embedded_handler.zig", "--module-manifest" };
+    try std.testing.expectError(error.MissingArgument, parsePrecompileArgSlice(&argv));
 }
 
 fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
@@ -626,6 +710,24 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         return err;
     };
 
+    // Partner virtual-module manifests (--module-manifest <path>, repeatable).
+    // Read, parse, validate, and register before compilation. Failures here
+    // fail loud: a malformed manifest must not silently compile to nothing.
+    const manifest_paths = collectModuleManifestPaths(allocator, argv) catch |err| {
+        if (err == error.MissingArgument) return;
+        return err;
+    };
+    defer allocator.free(manifest_paths);
+
+    var manifest_registry = if (manifest_paths.len > 0)
+        try buildManifestRegistryFromPaths(allocator, manifest_paths)
+    else
+        zigts.manifest_registry.Registry.init(allocator);
+    defer manifest_registry.deinit();
+
+    const registry_ptr: ?*const zigts.manifest_registry.Registry =
+        if (manifest_paths.len > 0) &manifest_registry else null;
+
     var generator_pack: ?ResolvedGeneratorPack = null;
     defer if (generator_pack) |*pack| pack.deinit(allocator);
     if (opts.generator_pack_path) |pack_path| {
@@ -691,6 +793,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         .sql_schema_path = sql_schema_path,
         .generate_tests = generate_tests,
         .system_path = system_path,
+        .manifest_registry = registry_ptr,
     }) catch |err| {
         std.debug.print("Compilation failed: {}\n", .{err});
         return err;
@@ -1362,6 +1465,7 @@ pub fn runCheckOnlyFromSource(
         null,
         stc_ptr,
         flow_in,
+        null,
     );
 
     if (result.contract) |*c| {
@@ -2180,6 +2284,9 @@ pub const CompileOptions = struct {
     sql_schema_path: ?[]const u8 = null,
     generate_tests: bool = false,
     system_path: ?[]const u8 = null,
+    /// Partner virtual-module manifests registered for this compile.
+    /// The registry must outlive the call.
+    manifest_registry: ?*const zigts.manifest_registry.Registry = null,
 };
 
 pub fn compileHandler(
@@ -2195,6 +2302,7 @@ pub fn compileHandler(
     const sql_schema_path = opts.sql_schema_path;
     const generate_tests = opts.generate_tests;
     const system_path = opts.system_path;
+    const manifest_registry = opts.manifest_registry;
 
     var source_to_parse: []const u8 = source;
     var strip_result: ?zigts.StripResult = null;
@@ -2286,6 +2394,7 @@ pub fn compileHandler(
             policy,
             sql_schema_path,
             stc_ptr,
+            manifest_registry,
         );
     }
 
@@ -2553,6 +2662,7 @@ pub fn compileHandler(
                     null,
                     stc_ptr,
                     null,
+                    manifest_registry,
                 )
             else
                 null;
@@ -2602,6 +2712,7 @@ pub fn compileHandler(
             &all_violations,
             stc_ptr,
             null,
+            manifest_registry,
         );
 
         // Inject verification-derived properties (Checks 2, 6, 7)
@@ -2845,6 +2956,7 @@ fn compileMultiModule(
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
     service_type_context: ?*const ServiceTypeContext,
+    manifest_registry: ?*const zigts.manifest_registry.Registry,
 ) !CompiledHandler {
     // Build module graph
     var graph = zigts.modules.ModuleGraph.init(allocator);
@@ -2931,6 +3043,7 @@ fn compileMultiModule(
             policy,
             sql_schema_path,
             service_type_context,
+            manifest_registry,
         );
     }
 
@@ -3012,6 +3125,7 @@ fn buildContract(
     verify_info: ?VerificationInfo,
     type_map: ?*const zigts.TypeMap,
     service_type_context: ?*const ServiceTypeContext,
+    manifest_registry: ?*const zigts.manifest_registry.Registry,
 ) !HandlerContract {
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
@@ -3039,6 +3153,7 @@ fn buildContract(
     _ = type_checker.check(root) catch 0;
 
     var builder = ContractBuilder.init(allocator, ir_view, atoms, &type_env, &type_checker);
+    builder.manifest_registry = manifest_registry;
     defer builder.deinit();
 
     const dispatch = if (aot) |a| a.dispatch else null;
@@ -3072,6 +3187,7 @@ fn buildContractWithPolicy(
     /// then skips the IR walk but still performs contract property
     /// injection and stderr output.
     precomputed_flow: ?*const zigts.FlowChecker,
+    manifest_registry: ?*const zigts.manifest_registry.Registry,
 ) !HandlerContract {
     var contract = try buildContract(
         allocator,
@@ -3083,6 +3199,7 @@ fn buildContractWithPolicy(
         verify_info,
         type_map,
         service_type_context,
+        manifest_registry,
     );
     errdefer contract.deinit(allocator);
 
@@ -3163,6 +3280,7 @@ fn buildMultiModuleContract(
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
     service_type_context: ?*const ServiceTypeContext,
+    manifest_registry: ?*const zigts.manifest_registry.Registry,
 ) !HandlerContract {
     var merged = try initMergedContract(allocator, entry_filename);
     errdefer merged.deinit(allocator);
@@ -3191,6 +3309,7 @@ fn buildMultiModuleContract(
             null,
             null,
             service_type_context,
+            manifest_registry,
         );
         defer module_contract.deinit(allocator);
 
@@ -4209,6 +4328,7 @@ fn buildTestContractForSource(
         null,
         null,
         null,
+        null,
     );
 }
 
@@ -4397,6 +4517,52 @@ test "runCheckOnly keeps mirrored properties aligned with finalized fault covera
 
     try std.testing.expect(finalized.fault_covered);
     try std.testing.expectEqual(finalized.fault_covered, mirrored.fault_covered);
+}
+
+test "compileHandler honors a registered partner manifest" {
+    const allocator = std.testing.allocator;
+
+    const manifest_json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zigttp-ext:partner",
+        \\  "backend": "native-zig",
+        \\  "requiredCapabilities": ["network"],
+        \\  "exports": [
+        \\    { "name": "writeRow", "effect": "write", "returns": "result" }
+        \\  ]
+        \\}
+    ;
+    var manifest = try zigts.module_manifest.parse(allocator, manifest_json);
+    errdefer manifest.deinit(allocator);
+
+    var registry = zigts.manifest_registry.Registry.init(allocator);
+    defer registry.deinit();
+    try registry.register(manifest);
+
+    const source =
+        \\import { writeRow } from "zigttp-ext:partner";
+        \\function handler(req) {
+        \\  _ = req;
+        \\  const r = writeRow("k", "v");
+        \\  _ = r;
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    var compiled = try compileHandler(allocator, source, "handler.ts", .{
+        .emit_contract = true,
+        .manifest_registry = &registry,
+    });
+    defer compiled.deinit(allocator);
+
+    const contract = compiled.contract orelse return error.MissingContract;
+    try std.testing.expect(handler_contract.containsString(contract.modules.items, "zigttp-ext:partner"));
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.pure);
+    try std.testing.expect(!props.idempotent);
 }
 
 test "buildTestContractForSource rejects scope and durable together" {

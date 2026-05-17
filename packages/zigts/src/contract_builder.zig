@@ -18,6 +18,8 @@ const object = @import("object.zig");
 const context = @import("context.zig");
 const module_binding = @import("module_binding.zig");
 const builtin_modules = @import("builtin_modules.zig");
+const manifest_registry_mod = @import("manifest_registry.zig");
+const module_manifest = @import("module_manifest.zig");
 const bytecode = @import("bytecode.zig");
 const handler_analyzer = @import("handler_analyzer.zig");
 const type_checker_mod = @import("type_checker.zig");
@@ -76,6 +78,9 @@ pub const ContractBuilder = struct {
     atoms: ?*context.AtomTable,
     type_env: ?*const TypeEnv,
     type_checker: ?*const TypeChecker,
+    /// Partner virtual-module manifests registered for this compile session.
+    /// Borrowed; the registry must outlive the builder.
+    manifest_registry: ?*const manifest_registry_mod.Registry = null,
 
     // Binding tracking: maps local slot -> function binding metadata for call-site analysis.
     // Populated during scanImports from the module binding registry.
@@ -119,6 +124,11 @@ pub const ContractBuilder = struct {
     api_jwt_auth: bool,
     api_schemas_dynamic: bool,
     api_routes_dynamic: bool,
+
+    // Partner extension tracking: bindings discovered in scanImports for
+    // partner-registered modules, and the per-specifier extracted facts.
+    extension_bindings: std.ArrayList(ExtensionBinding) = .empty,
+    extensions: std.StringHashMapUnmanaged(contract_types.ExtensionContract) = .empty,
 
     // Effect tracking
     has_nondeterministic_builtin: bool = false,
@@ -164,6 +174,16 @@ pub const ContractBuilder = struct {
         binding_name: []const u8,
         extractions: []const module_binding.ContractExtraction,
         flags: module_binding.ContractFlags,
+    };
+
+    /// Like GenericBinding but for partner-registered modules. The extraction
+    /// rules borrow from the live ManifestRegistry (which outlives the
+    /// builder), so no extra storage is allocated here.
+    const ExtensionBinding = struct {
+        slot: u16,
+        module_specifier: []const u8,
+        binding_name: []const u8,
+        extractions: []const module_manifest.ContractExtractionRule,
     };
 
     pub fn init(
@@ -215,6 +235,13 @@ pub const ContractBuilder = struct {
     /// items slices are empty and these loops are no-ops.
     pub fn deinit(self: *ContractBuilder) void {
         self.generic_bindings.deinit(self.allocator);
+        self.extension_bindings.deinit(self.allocator);
+        var ext_it = self.extensions.iterator();
+        while (ext_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.extensions.deinit(self.allocator);
         for (self.env_literals.items) |s| self.allocator.free(s);
         self.env_literals.deinit(self.allocator);
         for (self.egress_hosts.items) |s| self.allocator.free(s);
@@ -428,6 +455,7 @@ pub const ContractBuilder = struct {
             .property_provenance = .{
                 .deterministic = self.nondeterministic_cause,
             },
+            .extensions = self.extensions,
         };
 
         contract.capabilities = computeCapabilityMatrix(contract.modules.items);
@@ -457,6 +485,7 @@ pub const ContractBuilder = struct {
         self.api_schemas = .empty;
         self.api_request_schema_refs = .empty;
         self.api_routes = .empty;
+        self.extensions = .empty;
 
         return contract;
     }
@@ -598,8 +627,10 @@ pub const ContractBuilder = struct {
             const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
             const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
 
-            // Only track virtual modules
-            if (builtin_modules.fromSpecifier(module_str) == null) continue;
+            // Only track virtual modules: either built-in or partner-registered.
+            if (builtin_modules.fromSpecifier(module_str) == null) {
+                if (self.manifest_registry == null or self.manifest_registry.?.fromSpecifier(module_str) == null) continue;
+            }
 
             // Add module to list (deduplicated, duped)
             if (!containsString(self.modules_list.items, module_str)) {
@@ -640,6 +671,17 @@ pub const ContractBuilder = struct {
                             .extractions = entry.func.contract_extractions,
                             .flags = entry.func.contract_flags,
                         });
+                    }
+                } else if (self.manifest_registry) |registry| {
+                    if (registry.findExport(module_str, imported_name)) |partner_exp| {
+                        if (partner_exp.contract_extractions.items.len > 0) {
+                            try self.extension_bindings.append(self.allocator, .{
+                                .slot = spec.local_binding.slot,
+                                .module_specifier = registry.fromSpecifier(module_str).?.specifier,
+                                .binding_name = imported_name,
+                                .extractions = partner_exp.contract_extractions.items,
+                            });
+                        }
                     }
                 }
             }
@@ -738,6 +780,18 @@ pub const ContractBuilder = struct {
                     }
                     break;
                 }
+
+                // Partner extractions route literals into the per-specifier
+                // extensions map. `fetch_host` rules also mirror into the
+                // top-level egress.hosts so runtime egress policy enforcement
+                // sees one uniform list.
+                for (self.extension_bindings.items) |eb| {
+                    if (eb.slot != binding.slot) continue;
+                    for (eb.extractions) |rule| {
+                        try self.applyExtensionExtraction(call, eb.module_specifier, rule);
+                    }
+                    break;
+                }
             }
 
             // Detect nondeterministic builtins: Date.now(), Math.random()
@@ -782,6 +836,86 @@ pub const ContractBuilder = struct {
         transform: ?*const fn ([]const u8) []const u8,
     ) !void {
         try self.extractLiteralArgAt(call, 0, target, dynamic_flag, transform);
+    }
+
+    /// Apply one partner-declared extraction rule to a partner-module call
+    /// site. Routes a literal argument into the per-specifier extensions
+    /// store. `fetch_host` rules additionally mirror the host into the
+    /// top-level `egress_hosts` so runtime egress policy sees one uniform
+    /// list of allowed hosts.
+    fn applyExtensionExtraction(
+        self: *ContractBuilder,
+        call: Node.CallExpr,
+        specifier: []const u8,
+        rule: module_manifest.ContractExtractionRule,
+    ) !void {
+        const transform: ?*const fn ([]const u8) []const u8 =
+            if (rule.transform) |t| switch (t) {
+                .extract_host => &extractHost,
+                .identity => null,
+            } else null;
+
+        const bucket = try self.getOrCreateExtensionEntry(specifier);
+
+        switch (rule.category) {
+            .fetch_host => {
+                // Per-extension copy AND top-level mirror.
+                try self.extractLiteralArgAt(call, rule.arg_position, &bucket.egress_hosts, &bucket.egress_dynamic, transform);
+                try self.extractLiteralArgAt(call, rule.arg_position, &self.egress_hosts, &self.egress_dynamic, transform);
+            },
+            .extension_specific => {
+                const tag = rule.extension_category orelse return;
+                const cat_bucket = try self.getOrCreateCategoryBucket(bucket, tag);
+                try self.extractLiteralArgAt(call, rule.arg_position, &cat_bucket.literals, &cat_bucket.dynamic, transform);
+            },
+            else => {
+                // Other built-in categories from partners route under a
+                // category key matching the variant tag name. This keeps the
+                // section uniform and lets partners reuse names like
+                // `cache_namespace` for proof of cache use without rerouting
+                // through built-in policy.
+                const tag = @tagName(rule.category);
+                const cat_bucket = try self.getOrCreateCategoryBucket(bucket, tag);
+                try self.extractLiteralArgAt(call, rule.arg_position, &cat_bucket.literals, &cat_bucket.dynamic, transform);
+            },
+        }
+    }
+
+    fn getOrCreateExtensionEntry(
+        self: *ContractBuilder,
+        specifier: []const u8,
+    ) !*contract_types.ExtensionContract {
+        return getOrPutDuped(contract_types.ExtensionContract, &self.extensions, self.allocator, specifier);
+    }
+
+    fn getOrCreateCategoryBucket(
+        self: *ContractBuilder,
+        bucket: *contract_types.ExtensionContract,
+        tag: []const u8,
+    ) !*contract_types.ExtensionCategoryBucket {
+        return getOrPutDuped(contract_types.ExtensionCategoryBucket, &bucket.categories, self.allocator, tag);
+    }
+
+    /// Insert-or-find on a string-keyed map where the key must be owned by
+    /// the map. On miss, duplicates the key with the allocator and
+    /// default-initializes the value; on duplicate-alloc failure rolls back
+    /// the entry so the map stays consistent.
+    fn getOrPutDuped(
+        comptime V: type,
+        map: *std.StringHashMapUnmanaged(V),
+        allocator: std.mem.Allocator,
+        key: []const u8,
+    ) !*V {
+        const gop = try map.getOrPut(allocator, key);
+        if (!gop.found_existing) {
+            const owned_key = allocator.dupe(u8, key) catch |err| {
+                _ = map.remove(key);
+                return err;
+            };
+            gop.key_ptr.* = owned_key;
+            gop.value_ptr.* = .{};
+        }
+        return gop.value_ptr;
     }
 
     fn extractLiteralArgAt(
@@ -849,6 +983,8 @@ pub const ContractBuilder = struct {
             .fetch_host => .{ .list = &self.egress_hosts, .dynamic = &self.egress_dynamic },
             // Custom categories are dispatched directly, not via generic target
             .sql_registration, .schema_compile, .route_pattern, .service_call, .cookie_name, .cors_origin, .rate_limit_key => null,
+            // Partner-declared categories route through the extensions store, not the built-in target table.
+            .extension_specific => null,
         };
     }
 
@@ -2630,22 +2766,38 @@ pub const ContractBuilder = struct {
         var summary = EffectSummary{};
 
         for (self.functions_map.items) |entry| {
-            const binding = builtin_modules.fromSpecifier(entry.module) orelse continue;
-            const is_durable = std.mem.eql(u8, binding.specifier, "zigttp:durable");
-            const is_cache = std.mem.eql(u8, binding.specifier, "zigttp:cache");
+            if (builtin_modules.fromSpecifier(entry.module)) |binding| {
+                const is_durable = std.mem.eql(u8, binding.specifier, "zigttp:durable");
+                const is_cache = std.mem.eql(u8, binding.specifier, "zigttp:cache");
 
-            for (entry.names.items) |func_name| {
-                summary.has_any_call = true;
+                for (entry.names.items) |func_name| {
+                    summary.has_any_call = true;
 
-                for (binding.exports) |exp| {
-                    if (std.mem.eql(u8, exp.name, func_name)) {
-                        summary.includeCall(exp.effect, is_durable);
-                        break;
+                    for (binding.exports) |exp| {
+                        if (std.mem.eql(u8, exp.name, func_name)) {
+                            summary.includeCall(exp.effect, is_durable);
+                            break;
+                        }
+                    }
+
+                    if (is_cache and std.mem.eql(u8, func_name, "cacheGet")) {
+                        summary.has_cache_read = true;
                     }
                 }
-
-                if (is_cache and std.mem.eql(u8, func_name, "cacheGet")) {
-                    summary.has_cache_read = true;
+            } else if (self.manifest_registry) |registry| {
+                // Partner-registered module: read effect class from the manifest.
+                // Treat extension-declared writes as bare writes (no durable
+                // sequencing assumed); deterministic-by-default applies via
+                // the verifier's existing logic.
+                const manifest = registry.fromSpecifier(entry.module) orelse continue;
+                for (entry.names.items) |func_name| {
+                    summary.has_any_call = true;
+                    for (manifest.exports.items) |exp| {
+                        if (std.mem.eql(u8, exp.name, func_name)) {
+                            summary.includeCall(exp.effect, false);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -2931,4 +3083,147 @@ test "scanImports includes zigttp-ext modules in contract function map" {
     try std.testing.expectEqual(@as(usize, 1), builder.functions_map.items.len);
     try std.testing.expectEqualStrings("zigttp-ext:math", builder.functions_map.items[0].module);
     try std.testing.expect(containsString(builder.functions_map.items[0].names.items, "double"));
+}
+
+test "registered partner manifest contributes effect class to handler properties" {
+    const allocator = std.testing.allocator;
+
+    // Partner manifest declares a write-effect export. The handler imports it
+    // and calls it; the builder should reflect non-read-only properties.
+    const manifest_json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zigttp-ext:stripe",
+        \\  "backend": "native-zig",
+        \\  "requiredCapabilities": ["network"],
+        \\  "exports": [
+        \\    { "name": "chargeCard", "effect": "write", "returns": "result" }
+        \\  ]
+        \\}
+    ;
+    var manifest = try module_manifest.parse(allocator, manifest_json);
+    errdefer manifest.deinit(allocator);
+
+    var registry = manifest_registry_mod.Registry.init(allocator);
+    defer registry.deinit();
+    try registry.register(manifest);
+
+    const source =
+        \\import { chargeCard } from "zigttp-ext:stripe";
+        \\const r = chargeCard("tok");
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
+    builder.manifest_registry = &registry;
+    defer builder.deinit();
+
+    try builder.scanImports();
+
+    try std.testing.expect(containsString(builder.modules_list.items, "zigttp-ext:stripe"));
+    try std.testing.expectEqual(@as(usize, 1), builder.functions_map.items.len);
+    try std.testing.expectEqualStrings("zigttp-ext:stripe", builder.functions_map.items[0].module);
+    try std.testing.expect(containsString(builder.functions_map.items[0].names.items, "chargeCard"));
+
+    const props = builder.computeProperties();
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.idempotent);
+    try std.testing.expect(!props.pure);
+}
+
+test "partner manifest contractExtractions populate extensions section" {
+    const allocator = std.testing.allocator;
+
+    // Partner declares a fetch_host rule on arg 0 and an extension_specific
+    // rule (category = payment_gateway) on arg 1.
+    const manifest_json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zigttp-ext:stripe",
+        \\  "exports": [
+        \\    {
+        \\      "name": "charge",
+        \\      "effect": "write",
+        \\      "returns": "result",
+        \\      "contractExtractions": [
+        \\        { "category": "fetch_host", "argPosition": 0 },
+        \\        { "category": "extension_specific", "extensionCategory": "payment_gateway", "argPosition": 1 }
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+    var manifest = try module_manifest.parse(allocator, manifest_json);
+    errdefer manifest.deinit(allocator);
+
+    var registry = manifest_registry_mod.Registry.init(allocator);
+    defer registry.deinit();
+    try registry.register(manifest);
+
+    const source =
+        \\import { charge } from "zigttp-ext:stripe";
+        \\const r = charge("api.stripe.com", "card_charge");
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
+    builder.manifest_registry = &registry;
+    defer builder.deinit();
+
+    try builder.scanImports();
+    try builder.scanCallSites();
+
+    // Top-level egress mirrors the partner-declared fetch_host (shared-section
+    // product decision: write to both).
+    try std.testing.expect(containsString(builder.egress_hosts.items, "api.stripe.com"));
+
+    // Per-extension copy lives under extensions["zigttp-ext:stripe"].
+    const ext = builder.extensions.get("zigttp-ext:stripe") orelse return error.TestExpectedExtension;
+    try std.testing.expect(containsString(ext.egress_hosts.items, "api.stripe.com"));
+
+    // The payment_gateway category bucket holds the second arg's literal.
+    const bucket = ext.categories.get("payment_gateway") orelse return error.TestExpectedCategory;
+    try std.testing.expect(containsString(bucket.literals.items, "card_charge"));
+}
+
+test "missing manifest registry skips partner imports" {
+    const allocator = std.testing.allocator;
+
+    const source =
+        \\import { unknownFn } from "zigttp-ext:unknown";
+        \\const r = unknownFn();
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
+    defer builder.deinit();
+
+    try builder.scanImports();
+
+    try std.testing.expect(!containsString(builder.modules_list.items, "zigttp-ext:unknown"));
+    try std.testing.expectEqual(@as(usize, 0), builder.functions_map.items.len);
 }

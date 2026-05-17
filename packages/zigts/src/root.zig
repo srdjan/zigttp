@@ -87,6 +87,7 @@ pub const ws_consistency = @import("ws_consistency.zig");
 pub const spec_discharge = @import("spec_discharge.zig");
 pub const module_binding = @import("module_binding.zig");
 pub const module_manifest = @import("module_manifest.zig");
+pub const manifest_registry = @import("manifest_registry.zig");
 pub const builtin_modules = @import("builtin_modules.zig");
 pub const security_events = @import("security_events.zig");
 pub const wasm = @import("wasm/root.zig");

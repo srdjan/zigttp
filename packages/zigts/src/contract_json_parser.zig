@@ -38,7 +38,8 @@ const SqlQueryInfo = handler_contract.SqlQueryInfo;
 const VerificationInfo = handler_contract.VerificationInfo;
 const AotInfo = handler_contract.AotInfo;
 const CapabilityMatrix = handler_contract.CapabilityMatrix;
-const SpecDiagnostic = @import("contract_types.zig").SpecDiagnostic;
+const contract_types = @import("contract_types.zig");
+const SpecDiagnostic = contract_types.SpecDiagnostic;
 const ModuleCapability = module_binding.ModuleCapability;
 const capabilityHash = module_binding.capabilityHash;
 const capability_count = module_binding.capability_count;
@@ -153,6 +154,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseBehaviors(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "behaviorsExhaustive")) {
             contract.behaviors_exhaustive = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "extensions")) {
+            try parseExtensions(&parser, allocator, &contract);
         } else {
             // Skip unknown fields
             parser.skipValue();
@@ -446,6 +449,132 @@ fn parseDynamicSection(
         } else {
             parser.skipValue();
         }
+    }
+}
+
+/// Parse the `extensions` object: a map of specifier -> ExtensionContract.
+/// Tolerates malformed entries by skipping them (best-effort recovery; the
+/// writer is the source of truth).
+fn parseExtensions(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+) !void {
+    parser.skipWhitespace();
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const specifier = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+        parser.skipWhitespace();
+
+        var ext = contract_types.ExtensionContract{};
+        errdefer ext.deinit(allocator);
+        try parseExtensionContractBody(parser, allocator, &ext);
+
+        const key_dup = try allocator.dupe(u8, specifier);
+        errdefer allocator.free(key_dup);
+        const gop = try contract.extensions.getOrPut(allocator, key_dup);
+        if (gop.found_existing) {
+            allocator.free(key_dup);
+            gop.value_ptr.deinit(allocator);
+        }
+        gop.value_ptr.* = ext;
+    }
+}
+
+fn parseExtensionContractBody(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    ext: *contract_types.ExtensionContract,
+) !void {
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "egressHosts")) {
+            try parseStringArray(parser, allocator, &ext.egress_hosts);
+        } else if (std.mem.eql(u8, key, "egressDynamic")) {
+            ext.egress_dynamic = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "categories")) {
+            try parseExtensionCategoriesMap(parser, allocator, ext);
+        } else {
+            parser.skipValue();
+        }
+    }
+}
+
+fn parseExtensionCategoriesMap(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    ext: *contract_types.ExtensionContract,
+) !void {
+    parser.skipWhitespace();
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const tag = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+        parser.skipWhitespace();
+
+        var bucket = contract_types.ExtensionCategoryBucket{};
+        errdefer bucket.deinit(allocator);
+        if (!parser.consume('{')) return error.InvalidJson;
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const bucket_key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+            if (std.mem.eql(u8, bucket_key, "literals")) {
+                try parseStringArray(parser, allocator, &bucket.literals);
+            } else if (std.mem.eql(u8, bucket_key, "dynamic")) {
+                bucket.dynamic = parser.readBool() orelse false;
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        const tag_dup = try allocator.dupe(u8, tag);
+        errdefer allocator.free(tag_dup);
+        const gop = try ext.categories.getOrPut(allocator, tag_dup);
+        if (gop.found_existing) {
+            allocator.free(tag_dup);
+            gop.value_ptr.deinit(allocator);
+        }
+        gop.value_ptr.* = bucket;
     }
 }
 

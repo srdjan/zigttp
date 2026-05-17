@@ -40,6 +40,43 @@ pub const EgressInfo = struct {
     dynamic: bool,
 };
 
+/// Bucket of partner-extracted literals for one declared category.
+pub const ExtensionCategoryBucket = struct {
+    literals: std.ArrayList([]const u8) = .empty, // each entry owned
+    dynamic: bool = false,
+
+    pub fn deinit(self: *ExtensionCategoryBucket, allocator: std.mem.Allocator) void {
+        for (self.literals.items) |s| allocator.free(s);
+        self.literals.deinit(allocator);
+    }
+};
+
+/// Per-specifier proof facts derived from a partner virtual-module
+/// manifest's `contractExtractions`. Lands under `contract.json` at
+/// `extensions.<specifier>`. The keys of `categories` are the partner-declared
+/// `extension_category` tags (e.g. "payment_gateway", "llm_egress").
+pub const ExtensionContract = struct {
+    /// Per-extension copy of egress hosts. The same hosts also land in the
+    /// top-level `egress.hosts` list so runtime policy enforcement stays
+    /// uniform; this duplicate preserves provenance.
+    egress_hosts: std.ArrayList([]const u8) = .empty, // each entry owned
+    egress_dynamic: bool = false,
+    /// Partner-declared category tag -> bucket of extracted literals. Keys
+    /// are owned; lookup is structural.
+    categories: std.StringHashMapUnmanaged(ExtensionCategoryBucket) = .empty,
+
+    pub fn deinit(self: *ExtensionContract, allocator: std.mem.Allocator) void {
+        for (self.egress_hosts.items) |s| allocator.free(s);
+        self.egress_hosts.deinit(allocator);
+        var it = self.categories.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        self.categories.deinit(allocator);
+    }
+};
+
 pub const CacheInfo = struct {
     namespaces: std.ArrayList([]const u8), // each entry owned
     dynamic: bool,
@@ -939,6 +976,11 @@ pub const HandlerContract = struct {
     /// declared specs as the mandatory active set and emits ZTS500 for any
     /// member whose corresponding `HandlerProperties` field is false.
     declared_specs: std.ArrayList([]const u8) = .empty,
+    /// Per-specifier proof facts produced by partner virtual-module manifest
+    /// `contractExtractions`. Keys are owned specifier strings (e.g.
+    /// `"zigttp-ext:stripe"`); values own all nested data. Emitted under
+    /// `extensions` in contract.json.
+    extensions: std.StringHashMapUnmanaged(ExtensionContract) = .empty,
     /// Per-spec discharge diagnostics produced by `spec_discharge.dischargeSpecs`.
     /// Empty when every declared spec is satisfied. Owned by the contract;
     /// each entry's deinit must run before the contract is freed.
@@ -1018,5 +1060,11 @@ pub const HandlerContract = struct {
             @constCast(d).deinit(allocator);
         }
         self.spec_diagnostics.deinit(allocator);
+        var ext_it = self.extensions.iterator();
+        while (ext_it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        self.extensions.deinit(allocator);
     }
 };

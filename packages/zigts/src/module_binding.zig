@@ -1186,6 +1186,10 @@ pub const ContractCategory = enum {
     rate_limit_key,
     service_call,
     fetch_host,
+    /// Partner-declared category. The actual tag string lives on
+    /// `ContractExtraction.extension_category` and is emitted under
+    /// `contract.json` at `extensions.<specifier>.categories`.
+    extension_specific,
 };
 
 /// Transform applied to extracted literal before storing.
@@ -1206,6 +1210,11 @@ pub const ContractExtraction = struct {
     transform: ?ContractTransform = null,
     /// When true, the call sets a boolean flag rather than extracting a literal.
     flag_only: bool = false,
+    /// Partner-declared category tag. Only meaningful when
+    /// `category == .extension_specific`. Borrowed reference for
+    /// comptime built-in declarations; owned for manifest-derived rules
+    /// (the owning store frees it).
+    extension_category: ?[]const u8 = null,
 };
 
 /// Boolean flags set on the contract when a function is imported or called.

@@ -19,7 +19,7 @@ comptime {
     assertOrdinal(sdk.ReturnKind.result, internal.ReturnKind.result, "ReturnKind");
     assertOrdinal(sdk.FailureSeverity.none, internal.FailureSeverity.none, "FailureSeverity");
     assertOrdinal(sdk.ModuleCapability.websocket, internal.ModuleCapability.websocket, "ModuleCapability");
-    assertOrdinal(sdk.ContractCategory.fetch_host, internal.ContractCategory.fetch_host, "ContractCategory");
+    assertOrdinal(sdk.ContractCategory.extension_specific, internal.ContractCategory.extension_specific, "ContractCategory");
     assertOrdinal(sdk.LawKind.absorbing, internal.LawKind.absorbing, "LawKind");
 }
 
@@ -139,6 +139,7 @@ fn adaptContractExtractions(comptime extractions: []const sdk.ContractExtraction
             else
                 null,
             .flag_only = extraction.flag_only,
+            .extension_category = extraction.extension_category,
         };
     }
     return out;

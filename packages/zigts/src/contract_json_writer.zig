@@ -644,9 +644,85 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("\n    }");
     }
     if (contract.spec_diagnostics.items.len > 0) try writer.writeAll("\n  ");
-    try writer.writeAll("]\n");
+    try writer.writeAll("],\n");
+
+    try writeExtensionsJson(writer, contract);
 
     try writer.writeAll("}\n");
+}
+
+/// Emit the `extensions` section: per-specifier facts produced by partner
+/// virtual-module manifests. Keys are stable (sorted) so contract diff stays
+/// deterministic. Always emitted, even when empty, so downstream readers
+/// don't need a presence check.
+fn writeExtensionsJson(
+    writer: anytype,
+    contract: *const HandlerContract,
+) !void {
+    try writer.writeAll("  \"extensions\": {");
+    if (contract.extensions.count() == 0) {
+        try writer.writeAll("}\n");
+        return;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const spec_keys = try sortedHashMapKeys(a, &contract.extensions);
+    for (spec_keys, 0..) |spec, i| {
+        const ext = contract.extensions.getPtr(spec).?;
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n    ");
+        try writeJsonString(writer, spec);
+        try writer.writeAll(": {\n      \"egressHosts\": [");
+        for (ext.egress_hosts.items, 0..) |host, j| {
+            if (j > 0) try writer.writeAll(", ");
+            try writeJsonString(writer, host);
+        }
+        try writer.writeAll("],\n");
+        try writer.print("      \"egressDynamic\": {s},\n", .{if (ext.egress_dynamic) "true" else "false"});
+        try writer.writeAll("      \"categories\": {");
+
+        const tag_keys = try sortedHashMapKeys(a, &ext.categories);
+        for (tag_keys, 0..) |tag, j| {
+            const bucket = ext.categories.getPtr(tag).?;
+            if (j > 0) try writer.writeAll(",");
+            try writer.writeAll("\n        ");
+            try writeJsonString(writer, tag);
+            try writer.writeAll(": { \"literals\": [");
+            for (bucket.literals.items, 0..) |lit, k| {
+                if (k > 0) try writer.writeAll(", ");
+                try writeJsonString(writer, lit);
+            }
+            try writer.print("], \"dynamic\": {s} }}", .{if (bucket.dynamic) "true" else "false"});
+        }
+
+        if (tag_keys.len > 0) try writer.writeAll("\n      ");
+        try writer.writeAll("}\n    }");
+    }
+    try writer.writeAll("\n  }\n");
+}
+
+/// Snapshot the keys of a string-keyed StringHashMapUnmanaged into a sorted
+/// slice. The slice borrows the map's key strings; callers must not mutate
+/// the map while iterating.
+fn sortedHashMapKeys(
+    allocator: std.mem.Allocator,
+    map: anytype,
+) ![]const []const u8 {
+    var keys = try allocator.alloc([]const u8, map.count());
+    var it = map.iterator();
+    var i: usize = 0;
+    while (it.next()) |entry| : (i += 1) {
+        keys[i] = entry.key_ptr.*;
+    }
+    std.mem.sort([]const u8, keys, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return keys;
 }
 
 fn writeApiParamJson(writer: anytype, param: *const ApiParamInfo) !void {

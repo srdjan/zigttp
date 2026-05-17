@@ -39,6 +39,23 @@ pub const StateModel = enum {
     shared,
 };
 
+/// Manifest-derived contract extraction rule. Mirrors
+/// `module_binding.ContractExtraction` but owns its `extension_category`
+/// string instead of borrowing a comptime constant.
+pub const ContractExtractionRule = struct {
+    arg_position: u8 = 0,
+    category: mb.ContractCategory,
+    transform: ?mb.ContractTransform = null,
+    flag_only: bool = false,
+    /// Owned. Non-null only when `category == .extension_specific`.
+    extension_category: ?[]u8 = null,
+
+    pub fn deinit(self: *ContractExtractionRule, allocator: std.mem.Allocator) void {
+        if (self.extension_category) |slice| allocator.free(slice);
+        self.extension_category = null;
+    }
+};
+
 pub const Export = struct {
     name: []const u8,
     effect: mb.EffectClass,
@@ -46,9 +63,12 @@ pub const Export = struct {
     failure_severity: mb.FailureSeverity,
     traceable: bool,
     return_labels: mb.LabelSet,
+    contract_extractions: std.ArrayList(ContractExtractionRule),
 
     pub fn deinit(self: *Export, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
+        for (self.contract_extractions.items) |*rule| rule.deinit(allocator);
+        self.contract_extractions.deinit(allocator);
     }
 };
 
@@ -178,6 +198,7 @@ fn parseExport(allocator: std.mem.Allocator, value: std.json.Value) ManifestErro
         .failure_severity = std.meta.stringToEnum(mb.FailureSeverity, failure_raw) orelse return error.InvalidFailureSeverity,
         .traceable = boolField(obj, "traceable") orelse true,
         .return_labels = .{},
+        .contract_extractions = .empty,
     };
     errdefer exp.deinit(allocator);
 
@@ -188,7 +209,7 @@ fn parseExport(allocator: std.mem.Allocator, value: std.json.Value) ManifestErro
         try validateReturnKindArray(params_value);
     }
     if (obj.get("contractExtractions") orelse obj.get("contract_extractions")) |extractions_value| {
-        try validateContractExtractions(extractions_value);
+        try parseContractExtractions(allocator, extractions_value, &exp.contract_extractions);
     }
     if (obj.get("contractFlags") orelse obj.get("contract_flags")) |flags_value| {
         try validateContractFlags(flags_value);
@@ -258,23 +279,58 @@ fn validateReturnKindArray(value: std.json.Value) ManifestError!void {
     }
 }
 
-fn validateContractExtractions(value: std.json.Value) ManifestError!void {
+fn parseContractExtractions(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    out: *std.ArrayList(ContractExtractionRule),
+) ManifestError!void {
     if (value != .array) return error.InvalidContractCategory;
     for (value.array.items) |item| {
         if (item != .object) return error.InvalidContractCategory;
         const obj = item.object;
+
         const category_raw = try stringField(obj, "category");
-        _ = std.meta.stringToEnum(mb.ContractCategory, category_raw) orelse return error.InvalidContractCategory;
+        const category = std.meta.stringToEnum(mb.ContractCategory, category_raw) orelse return error.InvalidContractCategory;
+
+        var rule = ContractExtractionRule{ .category = category };
+        errdefer rule.deinit(allocator);
+
         if (obj.get("argPosition") orelse obj.get("arg_position")) |arg| {
             if (arg != .integer or arg.integer < 0 or arg.integer > std.math.maxInt(u8)) return error.InvalidContractCategory;
+            rule.arg_position = @intCast(arg.integer);
         }
         if (optionalStringField(obj, "transform")) |transform_raw| {
-            _ = std.meta.stringToEnum(mb.ContractTransform, transform_raw) orelse return error.InvalidContractTransform;
+            rule.transform = std.meta.stringToEnum(mb.ContractTransform, transform_raw) orelse return error.InvalidContractTransform;
         }
         if (obj.get("flagOnly") orelse obj.get("flag_only")) |flag| {
             if (flag != .bool) return error.InvalidContractCategory;
+            rule.flag_only = flag.bool;
         }
+
+        if (category == .extension_specific) {
+            const tag = optionalStringField(obj, "extensionCategory") orelse optionalStringField(obj, "extension_category") orelse return error.InvalidContractCategory;
+            if (tag.len == 0) return error.InvalidContractCategory;
+            if (!validExtensionCategory(tag)) return error.InvalidContractCategory;
+            rule.extension_category = try allocator.dupe(u8, tag);
+        } else {
+            if (obj.get("extensionCategory") != null or obj.get("extension_category") != null) {
+                return error.InvalidContractCategory;
+            }
+        }
+
+        try out.append(allocator, rule);
     }
+}
+
+fn validExtensionCategory(tag: []const u8) bool {
+    if (tag.len > 64) return false;
+    for (tag) |c| {
+        const is_lower = c >= 'a' and c <= 'z';
+        const is_upper = c >= 'A' and c <= 'Z';
+        const is_digit = c >= '0' and c <= '9';
+        if (!(is_lower or is_upper or is_digit or c == '_' or c == '-')) return false;
+    }
+    return true;
 }
 
 fn validateContractFlags(value: std.json.Value) ManifestError!void {
