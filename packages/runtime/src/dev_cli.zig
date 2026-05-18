@@ -401,14 +401,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // Expected user-input errors are explained on stderr by proofs_cli
         // itself; only unexpected ones (allocator, etc.) bubble.
         proofs_cli.run(allocator, user_args[1..]) catch |err| {
-            if (proofs_cli.isExpectedUserError(err)) return;
+            if (proofs_cli.isExpectedUserError(err)) std.process.exit(1);
             return err;
         };
         return;
     }
     if (std.mem.eql(u8, command, "witnesses")) {
         witnesses_cli.run(allocator, user_args[1..]) catch |err| {
-            if (witnesses_cli.isExpectedUserError(err)) return;
+            if (witnesses_cli.isExpectedUserError(err)) std.process.exit(1);
             return err;
         };
         return;
@@ -648,27 +648,27 @@ fn scaffoldExtension(allocator: std.mem.Allocator, name: []const u8) !void {
     defer allocator.free(src_dir);
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, src_dir);
 
-    const manifest = try renderExtensionTemplate(allocator, extension_manifest_template, name);
+    const manifest = try renderExtensionTemplate(allocator, io, extension_manifest_template, name);
     defer allocator.free(manifest);
     try writeProjectFile(allocator, name, "zigttp-module.json", manifest);
 
-    const root_zig = try renderExtensionTemplate(allocator, extension_root_zig_template, name);
+    const root_zig = try renderExtensionTemplate(allocator, io, extension_root_zig_template, name);
     defer allocator.free(root_zig);
     try writeProjectFile(allocator, name, "src/root.zig", root_zig);
 
-    const build_zig = try renderExtensionTemplate(allocator, extension_build_zig_template, name);
+    const build_zig = try renderExtensionTemplate(allocator, io, extension_build_zig_template, name);
     defer allocator.free(build_zig);
     try writeProjectFile(allocator, name, "build.zig", build_zig);
 
-    const build_zon = try renderExtensionTemplate(allocator, extension_build_zon_template, name);
+    const build_zon = try renderExtensionTemplate(allocator, io, extension_build_zon_template, name);
     defer allocator.free(build_zon);
     try writeProjectFile(allocator, name, "build.zig.zon", build_zon);
 
-    const handler_ts = try renderExtensionTemplate(allocator, extension_handler_ts_template, name);
+    const handler_ts = try renderExtensionTemplate(allocator, io, extension_handler_ts_template, name);
     defer allocator.free(handler_ts);
     try writeProjectFile(allocator, name, "handler.ts", handler_ts);
 
-    const readme = try renderExtensionTemplate(allocator, extension_readme_template, name);
+    const readme = try renderExtensionTemplate(allocator, io, extension_readme_template, name);
     defer allocator.free(readme);
     try writeProjectFile(allocator, name, "README.md", readme);
 
@@ -679,10 +679,68 @@ fn scaffoldExtension(allocator: std.mem.Allocator, name: []const u8) !void {
 /// Caller owns the returned slice.
 fn renderExtensionTemplate(
     allocator: std.mem.Allocator,
+    io: std.Io,
     template: []const u8,
     name: []const u8,
 ) ![]u8 {
-    return std.mem.replaceOwned(u8, allocator, template, "{{name}}", name);
+    const package_name = try extensionPackageName(allocator, name);
+    defer allocator.free(package_name);
+    const fingerprint = extensionPackageFingerprint(io, package_name);
+    const fingerprint_text = try std.fmt.allocPrint(allocator, "0x{x}", .{fingerprint});
+    defer allocator.free(fingerprint_text);
+
+    const named = try std.mem.replaceOwned(u8, allocator, template, "{{name}}", name);
+    defer allocator.free(named);
+    const packaged = try std.mem.replaceOwned(u8, allocator, named, "{{package_name}}", package_name);
+    defer allocator.free(packaged);
+    return std.mem.replaceOwned(u8, allocator, packaged, "{{fingerprint}}", fingerprint_text);
+}
+
+fn extensionPackageName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    const prefix = "zigttp_ext_";
+    const max_package_name_len = 32;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, prefix);
+    for (name) |c| {
+        try out.append(allocator, normalizeExtensionPackageChar(c));
+    }
+    if (out.items.len <= max_package_name_len) return out.toOwnedSlice(allocator);
+
+    out.clearRetainingCapacity();
+    try out.appendSlice(allocator, prefix);
+
+    const suffix_len = 9; // "_" plus eight lowercase CRC32 hex digits.
+    const base_budget = max_package_name_len - prefix.len - suffix_len;
+    for (name[0..@min(name.len, base_budget)]) |c| {
+        try out.append(allocator, normalizeExtensionPackageChar(c));
+    }
+
+    var checksum_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &checksum_bytes, std.hash.Crc32.hash(name), .big);
+    const checksum_hex = std.fmt.bytesToHex(checksum_bytes, .lower);
+    try out.append(allocator, '_');
+    try out.appendSlice(allocator, &checksum_hex);
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn normalizeExtensionPackageChar(c: u8) u8 {
+    return switch (c) {
+        '-' => '_',
+        'A'...'Z' => std.ascii.toLower(c),
+        else => c,
+    };
+}
+
+fn extensionPackageFingerprint(io: std.Io, package_name: []const u8) u64 {
+    var id: u32 = undefined;
+    io.randomSecure(std.mem.asBytes(&id)) catch io.random(std.mem.asBytes(&id));
+    id = 1 + (id % (std.math.maxInt(u32) - 1));
+    const checksum = std.hash.Crc32.hash(package_name);
+    return (@as(u64, checksum) << 32) | id;
 }
 
 fn printInitExtensionNextSteps(name: []const u8) void {
@@ -695,13 +753,12 @@ fn printInitExtensionNextSteps(name: []const u8) void {
     std.debug.print("  # then `zig build` to compile the native binding.\n", .{});
 }
 
-/// Print the post-init welcome panel and then the first-run proof tour so the
-/// author reads what the proof chips mean before opening the editor. Writing
-/// the tour marker inline makes the dev-side `maybeShowFirstRunTour` a no-op
-/// on the next `zigttp dev`.
+/// Print the post-init welcome panel. `zigttp dev` owns the first-run tour so
+/// the tour marker is written inside the project on the first real dev run.
 fn printInitNextSteps(allocator: std.mem.Allocator, name: []const u8) void {
     const tty = shared.stderrIsTty();
     const c = shared.palette(tty);
+    _ = allocator;
 
     std.debug.print("\n", .{});
     std.debug.print("  {s}+{s} initialized zigttp project in {s}{s}{s}\n", .{ c.green, c.reset, c.bold, name, c.reset });
@@ -718,16 +775,8 @@ fn printInitNextSteps(allocator: std.mem.Allocator, name: []const u8) void {
     std.debug.print("    zigttp check        {s}# verify once and exit{s}\n", .{ c.dim, c.reset });
     std.debug.print("    zigttp build        {s}# self-contained binary at .zigttp/build/{s}{s}\n", .{ c.dim, name, c.reset });
     std.debug.print("    zigttp deploy       {s}# local deploy + ledger entry at .zigttp/deploy/{s}{s}\n", .{ c.dim, name, c.reset });
+    std.debug.print("    zigttp proofs badge {s}# write ./zigttp-proof.svg after deploy{s}\n", .{ c.dim, c.reset });
     std.debug.print("\n", .{});
-
-    showInitTour(allocator);
-}
-
-fn showInitTour(allocator: std.mem.Allocator) void {
-    if (!shared.stderrIsTty()) return;
-    if (tourMarkerExists(allocator)) return;
-    _ = std.c.write(std.c.STDERR_FILENO, tour_text.ptr, tour_text.len);
-    touchTourMarker(allocator);
 }
 
 /// Path of the marker file that records "first-run tour was shown."
@@ -2018,7 +2067,7 @@ test "init --extension scaffolds a manifest the parser accepts" {
     try testing.expectEqualStrings("greet", manifest.exports.items[0].name);
 }
 
-test "init --extension quotes build zon package name for hyphenated names" {
+test "init --extension sanitizes build zon package name for hyphenated names" {
     const testing = std.testing;
 
     var tmp = testing.tmpDir(.{});
@@ -2031,7 +2080,34 @@ test "init --extension quotes build zon package name for hyphenated names" {
 
     const build_zon = try zigts.file_io.readFile(testing.allocator, "demo-ext/build.zig.zon", 256 * 1024);
     defer testing.allocator.free(build_zon);
-    try testing.expect(std.mem.indexOf(u8, build_zon, ".name = .@\"demo-ext\"") != null);
+    try testing.expect(std.mem.indexOf(u8, build_zon, ".name = .zigttp_ext_demo_ext") != null);
+    try testing.expect(std.mem.indexOf(u8, build_zon, ".fingerprint = 0x") != null);
+}
+
+test "init --extension package fingerprint uses package name checksum" {
+    const testing = std.testing;
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    const package_name = try extensionPackageName(testing.allocator, "Demo-Ext");
+    defer testing.allocator.free(package_name);
+
+    try testing.expectEqualStrings("zigttp_ext_demo_ext", package_name);
+    const fingerprint = extensionPackageFingerprint(io, package_name);
+    try testing.expectEqual(std.hash.Crc32.hash(package_name), @as(u32, @truncate(fingerprint >> 32)));
+    try testing.expect(@as(u32, @truncate(fingerprint)) != 0);
+}
+
+test "init --extension package name stays within Zig manifest limit" {
+    const testing = std.testing;
+    const name = "Very-Long-Extension-Name-That-Still-Scaffolds";
+    const package_name = try extensionPackageName(testing.allocator, name);
+    defer testing.allocator.free(package_name);
+
+    try testing.expect(package_name.len <= 32);
+    try testing.expect(std.mem.startsWith(u8, package_name, "zigttp_ext_very"));
+    try testing.expect(std.mem.indexOfScalar(u8, package_name, '-') == null);
 }
 
 test "init --extension refuses to overwrite an existing extension" {
@@ -2105,9 +2181,8 @@ const htmxManifest =
 ;
 
 const basicHandler =
-    \\// Magnet starter: native JSX, a virtual-module import, and an
-    \\// author-declared Spec<...>. Save this file and watch the proof
-    \\// chips light up green in the dev HUD.
+    \\// Magnet starter: a tiny handler with an author-declared Spec<...>.
+    \\// Save this file and watch the proof chips light up green in the dev HUD.
     \\//
     \\// Try the magnet demo: drop `Date.now()` into the handler body and
     \\// watch -deterministic flip red. Wrap it in
@@ -2115,23 +2190,17 @@ const basicHandler =
     \\// flips back green.
     \\
     \\import type { Spec } from "zigttp:types";
-    \\import { env } from "zigttp:env";
     \\
-    \\type Guardrails = Spec<"deterministic" | "no_secret_leakage">;
-    \\
-    \\function HomePage(props: { name: string }): JSX.Element {
-    \\    return (
-    \\        <main>
-    \\            <h1>Hello, {props.name}!</h1>
-    \\            <p>Proven at compile time.</p>
-    \\        </main>
-    \\    );
-    \\}
+    \\type Guardrails = Spec<
+    \\    | "deterministic"
+    \\    | "no_secret_leakage"
+    \\    | "injection_safe"
+    \\>;
     \\
     \\function handler(req: Request): Response & Guardrails {
     \\    if (req.method === "GET" && req.path === "/") {
     \\        return Response.html(
-    \\            renderToString(<HomePage name={env("USER_NAME") ?? "world"} />)
+    \\            "<main><h1>Hello, world!</h1><p>Proven at compile time.</p></main>"
     \\        );
     \\    }
     \\    return Response.json({ error: "not found" }, { status: 404 });
@@ -2185,19 +2254,19 @@ const htmxHandler =
 
 const basicTests =
     \\{"type":"test","name":"root renders greeting html"}
-    \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+    \\{"type":"request","method":"GET","url":"/?probe=1","headers":{},"body":null}
     \\{"type":"expect","status":200,"bodyContains":"Hello,"}
 ;
 
 const apiTests =
     \\{"type":"test","name":"health returns ok"}
-    \\{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
+    \\{"type":"request","method":"GET","url":"/health?probe=1","headers":{},"body":null}
     \\{"type":"expect","status":200,"body":"{\"ok\":true}"}
 ;
 
 const htmxTests =
     \\{"type":"test","name":"root renders html"}
-    \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+    \\{"type":"request","method":"GET","url":"/?probe=1","headers":{},"body":null}
     \\{"type":"expect","status":200,"bodyContains":"zigttp"}
 ;
 
@@ -2287,9 +2356,14 @@ const extension_root_zig_template =
     \\    sdk.validateBindings(&.{binding});
     \\}
     \\
-    \\fn greetNative(_: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    \\    const subject = if (args.len > 0) args[0].toString() orelse "world" else "world";
-    \\    return sdk.JSValue.fromStringConcat(&.{ "hello, ", subject });
+    \\fn greetNative(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
+    \\    const subject = if (args.len > 0) sdk.extractString(args[0]) orelse "world" else "world";
+    \\    const prefix = "hello, ";
+    \\    var buf: [256]u8 = undefined;
+    \\    const subject_len = @min(subject.len, buf.len - prefix.len);
+    \\    @memcpy(buf[0..prefix.len], prefix);
+    \\    @memcpy(buf[prefix.len..][0..subject_len], subject[0..subject_len]);
+    \\    return sdk.createString(handle, buf[0 .. prefix.len + subject_len]);
     \\}
     \\
 ;
@@ -2319,8 +2393,9 @@ const extension_build_zig_template =
 
 const extension_build_zon_template =
     \\.{
-    \\    .name = .@"{{name}}",
+    \\    .name = .{{package_name}},
     \\    .version = "0.0.0",
+    \\    .fingerprint = {{fingerprint}}, // Changing this has security and trust implications.
     \\    .minimum_zig_version = "0.16.0",
     \\    .dependencies = .{
     \\        // Replace this placeholder with the version of zigttp-sdk you depend on.

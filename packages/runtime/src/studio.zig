@@ -660,6 +660,8 @@ fn writeNextActionsJson(
         });
     }
 
+    const declared_specs_pass = specsPass(facts);
+
     if (verdict == .breaking) {
         try writeAction(json, .{
             .kind = "review_breaking_delta",
@@ -668,13 +670,20 @@ fn writeNextActionsJson(
             .command = "zigttp proofs diff HEAD~1 HEAD",
             .detail = "The current proof delta removes surface or demotes a property. Review before deploy.",
         });
-    } else {
+    } else if (declared_specs_pass) {
         try writeAction(json, .{
             .kind = "deploy_ready",
             .severity = "success",
             .title = "Proof state is deploy-ready",
             .command = "zigttp deploy",
             .detail = "The handler verifies, declared specs pass, and the proof delta is not breaking.",
+        });
+        try writeAction(json, .{
+            .kind = "share_badge",
+            .severity = "success",
+            .title = "Write a proof badge",
+            .command = "zigttp deploy && zigttp proofs badge",
+            .detail = "After the local deploy writes a ledger row, export ./zigttp-proof.svg and the README markdown snippet.",
         });
     }
     try json.endArray();
@@ -850,6 +859,7 @@ pub const index_html =
     \\ul{list-style:none;margin:0;padding:0}li{padding:7px 0;border-bottom:1px solid rgba(255,255,255,.06);overflow-wrap:anywhere}.empty{color:var(--muted)}
     \\footer{padding:14px 20px;border-top:1px solid var(--line);display:flex;gap:10px;background:#0d1016}input,select,textarea,button{font:inherit}select,input,textarea{background:#07090d;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px}input{flex:1}button{border:1px solid #38658f;background:#10243a;color:#dceeff;border-radius:6px;padding:9px 13px;cursor:pointer}pre{white-space:pre-wrap;margin:12px 0 0;color:#cbd7e3;max-height:180px;overflow:auto}
     \\#diagnosticsList li{padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06)}#diagnosticsList .code{color:var(--bad);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}#diagnosticsList .loc{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;margin-left:8px}#diagnosticsList .msg{margin-top:4px;color:#dceeff}#diagnosticsList .hint{margin-top:4px;color:var(--muted);font-style:italic}
+    \\#counterexampleBlock{margin-bottom:22px;padding:12px;border:1px solid #73333a;background:#251217;border-radius:6px}#counterexampleBlock[hidden]{display:none}#counterexampleBody{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#dceeff}#counterexampleBody .row{display:grid;grid-template-columns:92px 1fr;gap:6px 12px;margin-bottom:6px}#counterexampleBody dt{color:var(--muted)}#counterexampleBody dd{margin:0}#counterexampleBody .bad{color:var(--bad)}#counterexampleBody .hint{color:#ffd0d0}
     \\#demoPanel{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;padding:14px 28px;border-bottom:1px solid var(--line);background:#0c1118}#demoPanel[hidden]{display:none}#demoPanel h2{margin:0 0 6px}#demoPanel p{margin:0;color:#cbd7e3}#demoActions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}#demoWitness{grid-column:1/-1;margin-top:2px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:#07090d;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd7e3}
     \\@media(max-width:900px){.grid{grid-template-columns:1fr}.status{text-align:left}header{align-items:start;flex-direction:column}.big{font-size:32px}}
     \\#onboarding{border:1px solid var(--line);background:var(--panel);color:var(--text);padding:24px 28px;max-width:560px;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.55)}#onboarding::backdrop{background:rgba(9,11,15,.78)}#onboarding h2{font-size:12px;margin:0 0 14px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}#onboarding ol{margin:0 0 18px;padding-left:22px;line-height:1.55}#onboarding ol strong{color:var(--text)}#onboarding ol code,#onboarding p code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);background:#07090d;border:1px solid var(--line);border-radius:4px;padding:1px 5px}#onboarding .hint{color:var(--muted);font-size:13px;margin:0 0 16px}#onboarding .actions{display:flex;justify-content:flex-end;gap:8px}
@@ -859,7 +869,7 @@ pub const index_html =
     \\<dialog id="onboarding"><h2>welcome to studio</h2><ol><li><strong>Proven Surface</strong> lists the routes, env vars, and egress hosts the compiler extracted from your handler.</li><li><strong>Property pills</strong> are the proofs the compiler discharged. Watch them flip when you save.</li><li><strong>Witnesses</strong> capture the request that would break a proof. Click one to see the failing path.</li><li>Press <code>.</code> to reopen this overlay any time.</li></ol><p class="hint">Edit your handler. Watch the proof flip live.</p><div class="actions"><button id="onboardingDismiss">Got it</button></div></dialog>
     \\<header><div><h1>zigttp studio</h1><div class="sub">The compiler-visible shape of your handler, live.</div></div><div class="status" id="status">connecting</div></header>
     \\<section id="demoPanel" hidden><div><h2>Proof Theater</h2><p id="demoTitle"></p><p class="empty" id="demoWorkspace"></p></div><div id="demoActions"></div><div id="demoWitness" hidden></div></section>
-    \\<section class="grid"><div class="pane"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
+    \\<section class="grid"><div class="pane"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><section id="counterexampleBlock" hidden><h2 style="color:var(--bad)">Counterexample</h2><div id="counterexampleBody"></div></section><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
     \\<footer><select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select><input id="url" value="/" aria-label="URL"><button id="send">Send</button></footer>
     \\<pre id="response"></pre>
     \\</main><script>
@@ -885,12 +895,14 @@ pub const index_html =
     \\function timeline(entries){if(!entries||!entries.length)return"";return entries.map((e,i)=>`<span class="tick ${esc(e.verdict)}${i===0?" first":""}" title="${esc(e.verdict)} · sha ${esc(e.sha8||"")} · ${e.recompileMs??0}ms · ${fmtClock(e.timestampMs)}">${fmtClock(e.timestampMs)} ${esc((e.sha8||"").slice(0,4))}${e.recompileMs!=null?" · "+e.recompileMs+"ms":""}</span>`).join("")}
     \\function diagnostics(items){return (items||[]).map(d=>`<li><code class="code">${esc(d.code)}</code><span class="loc">${esc(d.file)}:${d.line}:${d.column}</span><div class="msg">${esc(d.message)}</div>${d.suggestion?`<div class="hint">hint: ${esc(d.suggestion)}</div>`:""}</li>`).join("")}
     \\function renderDiagnostics(s){const diags=s.diagnostics||[];$("diagnosticsBlock").hidden=diags.length===0;$("diagnosticsList").innerHTML=diagnostics(diags)}
+    \\function replayRow(label,r){if(!r)return"";const body=r.error?`crashed - ${r.error}`:`${r.status} ${r.body||""}`;return `<dt>${esc(label)}</dt><dd>${esc(body)}</dd>`}
+    \\function renderCounterexample(cx){const block=$("counterexampleBlock");const body=$("counterexampleBody");if(!cx){block.hidden=true;body.innerHTML="";return}block.hidden=false;const req=cx.failingRequest?`${cx.failingRequest.method} ${cx.failingRequest.url}${cx.failingRequest.body?" body="+cx.failingRequest.body:""}`:"structural proof cause";body.innerHTML=`<dl class="row"><dt>property</dt><dd><span class="bad">-${esc(cx.label||cx.field||"property")}</span></dd><dt>source</dt><dd><code>${esc(cx.handlerPath||"")}:${cx.line||0}:${cx.column||0}</code></dd><dt>snippet</dt><dd><code>${esc(cx.snippet||"")}</code></dd><dt>why</dt><dd class="hint">${esc(cx.suggestion||"inspect the demoted property and repair the source")}</dd><dt>request</dt><dd>${esc(req)}</dd>${replayRow("previous",cx.previousResponse)}${replayRow("current",cx.currentResponse)}<dt>next</dt><dd>[r] replay live · [s] pin regression · [a] ask expert</dd></dl>`}
     \\function demoButton(a){const label={introduce_bug:"Introduce unsafe edit",repair_bug:"Repair",deploy:"Deploy local",reset:"Reset"}[a]||a;return `<button data-demo-action="${esc(a)}">${esc(label)}</button>`}
     \\function renderDemo(d){$("demoPanel").hidden=false;$("demoTitle").textContent=d.title||d.step||"";$("demoWorkspace").textContent=d.workspace?`workspace: ${d.workspace}`:"";$("demoActions").innerHTML=(d.availableActions||[]).map(demoButton).join("");const w=d.witness;if(w){$("demoWitness").hidden=false;$("demoWitness").innerHTML=`property: ${esc(w.property)}<br>request: ${esc(w.request)}<br>span: ${esc(w.span)}<br>path: ${esc(w.failingPath)}`}else if(d.receipt){$("demoWitness").hidden=false;$("demoWitness").innerHTML=`receipt: ${esc(d.receipt.ledger)} · service ${esc(d.receipt.service)}`}else{$("demoWitness").hidden=true;$("demoWitness").innerHTML=""}}
     \\async function pullDemo(){try{const r=await fetch("/_zigttp/studio/demo/state.json",{cache:"no-store"});if(r.status===404){$("demoPanel").hidden=true;return}if(r.ok)renderDemo(await r.json())}catch(e){}}
     \\async function runDemoAction(action){const r=await fetch("/_zigttp/studio/demo/action",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action})});if(!r.ok){$("demoWitness").hidden=false;$("demoWitness").textContent=`action failed: HTTP ${r.status} ${await r.text()}`;return}await pull();await pullDemo()}
     \\document.addEventListener("click",ev=>{const b=ev.target.closest("[data-demo-action]");if(b)runDemoAction(b.dataset.demoAction)})
-    \\function render(s){$("status").textContent=`${s.status} · ${s.handlerPath||""}`;renderDiagnostics(s);if(s.status!=="ready"){$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions)}
+    \\function render(s){$("status").textContent=`${s.status} · ${s.handlerPath||""}`;renderDiagnostics(s);if(s.status!=="ready"){renderCounterexample(null);$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}renderCounterexample(s.counterexample);const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions)}
     \\async function pull(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});render(await r.json())}catch(e){$("status").textContent=String(e)}}
     \\let pollTimer=null;function startPolling(){if(!pollTimer)pollTimer=setInterval(pull,750)}function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
     \\function startEvents(){let es;try{es=new EventSource("/_zigttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{render(JSON.parse(ev.data))}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
@@ -1038,6 +1050,7 @@ test "factsJson includes release readiness and next actions" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"declaredSpecsPass\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"nextActions\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"kind\":\"repair_specs\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"kind\":\"share_badge\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"kind\":\"export_tests\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"diagnosticCode\":\"ZTS500\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"diagnosticMessage\":\"remove Date.now()\"") != null);
@@ -1047,10 +1060,54 @@ test "factsJson includes release readiness and next actions" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"sha8\":\"abc123\"") != null);
 }
 
+test "factsJson carries counterexample preview for studio rendering" {
+    const allocator = std.testing.allocator;
+    const facts = review.ReviewFacts{
+        .contract_sha = "abc123",
+        .proof_level = .complete,
+        .env_keys = &.{},
+        .egress_hosts = &.{},
+        .cache_namespaces = &.{},
+        .routes = &.{},
+        .capabilities = &.{},
+        .properties = .{},
+        .declared_specs = &.{},
+    };
+    const delta = review.ReviewDelta{};
+    const cx = review.CounterexamplePreview{
+        .field = "deterministic",
+        .label = "deterministic",
+        .line = 14,
+        .column = 9,
+        .snippet = "Date.now()",
+        .handler_path = "src/handler.ts",
+        .suggestion = "remove Date.now() or move it into a durable step",
+    };
+    const body = try factsJson(allocator, "src/handler.ts", .{
+        .facts = &facts,
+        .baseline = null,
+        .delta = &delta,
+        .recompile_ms = 4,
+        .counterexample = cx,
+    }, &.{});
+    defer allocator.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"counterexample\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"snippet\":\"Date.now()\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"suggestion\":\"remove Date.now()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"kind\":\"share_badge\"") != null);
+}
+
 test "studio spec fingerprint tracks rendered diagnostic details" {
     try std.testing.expect(std.mem.indexOf(u8, index_html, "diagnosticMessage||") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "sourceColumn||") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "sourceSnippet||") != null);
+}
+
+test "studio HTML renders counterexample payload" {
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "counterexampleBlock") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "renderCounterexample") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "s.counterexample") != null);
 }
 
 test "pushRecent keeps newest first and caps at recent_capacity" {

@@ -87,18 +87,17 @@ zig build -Doptimize=ReleaseFast
 
 ## Quick Start
 
-The v1 user flow is `init` → edit → `studio` → `build` → `deploy`. Each command auto-detects the project from `zigttp.json` so most steps take no arguments. Local deploy is the default; `--local` is accepted when you want the target to be explicit.
+The v1 user flow is `init` → `dev` → edit → `build` → `deploy` → `proofs badge`. Each command auto-detects the project from `zigttp.json` so most steps take no arguments. Local deploy is the default; `--local` is accepted when you want the target to be explicit.
 
 ```bash
 # 1. Scaffold a new project
 zigttp init my-app && cd my-app
 
-# 2. Open the proof workbench in your browser
-zigttp studio
+# 2. Start proof-aware live reload
+zigttp dev
 
 # 3. Edit src/handler.ts in your editor.
-#    Studio re-verifies on save, shows the verdict, proven surface,
-#    witnesses, and any spec diagnostics.
+#    The HUD re-verifies on save and shows proof deltas/counterexamples.
 
 # 4. Build a self-contained binary
 zigttp build
@@ -107,6 +106,9 @@ zigttp build
 # 5. Or do a verified local deploy (also writes .zigttp/proofs.jsonl)
 zigttp deploy
 ./.zigttp/deploy/my-app
+
+# 6. Write a shareable proof badge from the latest ledger row
+zigttp proofs badge
 ```
 
 Test it:

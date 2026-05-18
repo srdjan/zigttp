@@ -66,7 +66,7 @@ directly to FaaS platforms or container environments.
 
 ## Quick Start
 
-The v1 user flow is `init` → edit → `studio` → `build` → `deploy`. Each command auto-detects the project from `zigttp.json`, so most steps take no arguments. Local deploy is the default; `--local` is accepted when you want the target to be explicit.
+The v1 user flow is `init` → `dev` → edit → `build` → `deploy` → `proofs badge`. Each command auto-detects the project from `zigttp.json`, so most steps take no arguments. Local deploy is the default; `--local` is accepted when you want the target to be explicit.
 
 ### Scaffold a project
 
@@ -76,13 +76,13 @@ zigttp init my-app && cd my-app
 
 This creates `src/handler.ts`, `tests/handler.test.jsonl`, `public/`, `zigttp.json`, a starter `README.md`, and a `.gitignore`.
 
-### Open the proof workbench
+### Start proof-aware live reload
 
 ```bash
-zigttp studio
+zigttp dev
 ```
 
-The dashboard lives at `http://localhost:3000/_zigttp/studio`. Edit `src/handler.ts` in your editor; studio re-verifies on save and shows the verdict, proven surface (routes, env, egress, capabilities), witnesses, and any spec diagnostics.
+Edit `src/handler.ts` in your editor; the terminal HUD re-verifies on save and shows the verdict, proven surface, proof deltas, and counterexamples. For the browser workbench, run `zigttp studio`; the dashboard lives at `http://localhost:3000/_zigttp/studio`.
 
 ### Build a self-contained binary
 
@@ -99,6 +99,14 @@ zigttp deploy
 ```
 
 `deploy` does everything `build` does, plus appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. No cloud credentials, no Docker, no network access. See [docs/deploy-tutorial.md](deploy-tutorial.md) for the hosted-control-plane preview path.
+
+### Proof badge
+
+```bash
+zigttp proofs badge
+```
+
+This writes `./zigttp-proof.svg` from the latest proof-ledger row and prints the README markdown snippet.
 
 ### Quick one-off testing
 

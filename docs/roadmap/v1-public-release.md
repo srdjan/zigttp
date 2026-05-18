@@ -5,11 +5,12 @@ This roadmap defines the first public Zigttp release around one showcase flow:
 ```bash
 zigttp init my-app
 cd my-app
-zigttp studio
+zigttp dev
 # edit src/handler.ts
 zigttp check
 zigttp build
 zigttp deploy
+zigttp proofs badge
 ```
 
 `zigttp deploy` is local by default for v1. It emits `.zigttp/deploy/<app>`
@@ -20,10 +21,11 @@ Hosted deploy remains preview-only behind `zigttp deploy --cloud`.
 
 - `zigttp init <name>` creates a safe project folder and refuses path-like or
   shell-confusing names.
-- `zigttp studio` starts the proof workbench for the project entry in
+- `zigttp dev` starts proof-aware live reload for the project entry in
   `zigttp.json`.
-- Handler authoring happens in the user's editor while Studio watches and
-  re-verifies on save.
+- Handler authoring happens in the user's editor while the terminal HUD watches
+  and re-verifies on save.
+- `zigttp studio` remains the browser proof workbench for the same live state.
 - `zigttp check` is the fast terminal verifier.
 - `zigttp build` verifies the handler and emits `.zigttp/build/<app>`.
 - `zigttp deploy` verifies the handler, emits `.zigttp/deploy/<app>`, and
@@ -41,7 +43,8 @@ Required:
   `public/`, `.gitignore`, and `README.md`.
 - Reject unsafe project names before writing files.
 - Keep starter handlers small, readable, and verifiable.
-- Print next steps that match the public release flow.
+- Print next steps that match the public release flow, including `dev` and the
+  proof badge artifact.
 
 Acceptance:
 
@@ -148,8 +151,8 @@ required.
 Required:
 
 - Keep `zig build smoke-v1` wired to `scripts/smoke-v1.sh`.
-- Exercise the exact public path: init, doctor, check, studio, build, run,
-  deploy, run.
+- Exercise the exact public path: init, doctor, check, dev/studio, build, run,
+  deploy, run, badge.
 - Keep negative-path smoke cases for invalid project names, missing project
   diagnostics, and broken handler build refusal.
 

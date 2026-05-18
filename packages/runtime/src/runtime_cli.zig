@@ -88,17 +88,17 @@ pub fn edgeCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var edge = edge_server.EdgeServer.init(allocator, config) catch |err| {
         config.deinit(allocator);
         std.log.err("Failed to initialize edge runtime: {}", .{err});
-        return;
+        std.process.exit(1);
     };
     defer edge.deinit();
 
     edge.run() catch |err| {
         if (err == error.TlsTerminationNotImplemented) {
             std.log.err("HTTPS listener config is parsed but TLS termination is not wired yet; use protocol \"http\" for this edge runtime milestone.", .{});
-            return;
+            std.process.exit(1);
         }
         std.log.err("Edge runtime error: {}", .{err});
-        return;
+        std.process.exit(1);
     };
 }
 
@@ -183,14 +183,14 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
     if (studio_enabled) {
         if (!feature_options.enable_studio) {
             std.log.err("--studio is not available in zigttp-runtime; use the zigttp developer CLI", .{});
-            return;
+            std.process.exit(1);
         }
         watch_enabled = true;
         prove_enabled = true;
     }
     if (watch_enabled and !feature_options.enable_live_reload) {
         std.log.err("--watch is not available in zigttp-runtime; use the zigttp developer CLI", .{});
-        return;
+        std.process.exit(1);
     }
 
     var config = parseServeArgs(allocator, argv) catch |err| {
