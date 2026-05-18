@@ -30,6 +30,9 @@ notes document design contracts, governance, and roadmap work.
   comparison diagnostics.
 - [Feature Detection](feature-detection.md) - supported and rejected language
   features.
+- [Restrictions to Proofs](restrictions-to-proofs.md) - every rejected
+  feature mapped to the failure class it eliminates and the proof it
+  unlocks. Generated from the same source as `zigts restrictions`.
 - [Performance](performance.md) - benchmarks, cold starts, memory, and
   deployment tuning.
 - [Blog: URL Shortener](blog/url-shortener-in-133-lines.md) - worked example

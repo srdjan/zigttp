@@ -885,7 +885,7 @@ For examples that combine modules in a handler, see
 
 ## JavaScript Subset Reference
 
-zigts implements a restricted JavaScript subset optimized for FaaS workloads. The restrictions enable compile-time verification, deterministic replay, and contract extraction.
+zigts implements a restricted JavaScript subset optimized for FaaS workloads. The restrictions enable compile-time verification, deterministic replay, and contract extraction. See [restrictions-to-proofs.md](restrictions-to-proofs.md) for each cut mapped to the failure class it eliminates and the proof it unlocks (also available as `zigts restrictions [--by proof|class]`).
 
 ### Supported Features
 
