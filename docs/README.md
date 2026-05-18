@@ -56,6 +56,8 @@ notes document design contracts, governance, and roadmap work.
   module extraction design note.
 - [Virtual-Module SDK API](design/virtual-modules-sdk-api.md) - SDK inventory
   and phase-0 design.
+- [Gil-Inspired Virtual Module Patterns](design/virtual-modules-gil-inspired-patterns.md) -
+  ergonomic API recommendations for handler-first module design.
 - [Policy Wasm Capability Gating](design/zigttp_zigts_policy_wasm_spec.md) -
   policy component proposal.
 - [Frontier](roadmap/frontier.md) - strategic direction.
