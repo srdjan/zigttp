@@ -106,6 +106,44 @@ pub fn build(b: *std.Build) void {
     const zigts_test_step = b.step("test-zigts", "Run zigts unit tests");
     zigts_test_step.dependOn(&run_zigts_tests.step);
 
+    const sdk_test_shim_mod = b.createModule(.{
+        .root_source_file = zigttp_sdk_dep.path("src/test_shim.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zigttp-sdk", .module = zigttp_sdk_dep.module("zigttp-sdk") },
+        },
+    });
+    const sdk_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = zigttp_sdk_dep.path("src/test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigttp-sdk", .module = zigttp_sdk_dep.module("zigttp-sdk") },
+                .{ .name = "zigttp-sdk-test-shim", .module = sdk_test_shim_mod },
+            },
+        }),
+    });
+    const run_sdk_tests = b.addRunArtifact(sdk_tests);
+    const sdk_test_step = b.step("test-sdk", "Run zigttp-sdk tests");
+    sdk_test_step.dependOn(&run_sdk_tests.step);
+
+    const modules_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = zigttp_modules_dep.path("src/test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigttp-sdk", .module = zigttp_sdk_dep.module("zigttp-sdk") },
+                .{ .name = "zigttp-sdk-test-shim", .module = sdk_test_shim_mod },
+            },
+        }),
+    });
+    const run_modules_tests = b.addRunArtifact(modules_tests);
+    const modules_test_step = b.step("test-modules", "Run zigttp-modules tests");
+    modules_test_step.dependOn(&run_modules_tests.step);
+
     const precompile_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = tools_dep.path("src/precompile.zig"),
@@ -482,6 +520,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&run_module_governance.step);
     test_step.dependOn(&run_zigts_tests.step);
+    test_step.dependOn(&run_sdk_tests.step);
+    test_step.dependOn(&run_modules_tests.step);
     test_step.dependOn(expert_golden_step);
 
     // ZRuntime tests (native Zig runtime)

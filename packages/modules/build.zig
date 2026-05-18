@@ -8,8 +8,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const sdk_mod = sdk_dep.module("zigttp-sdk");
+    const test_shim_mod = b.createModule(.{
+        .root_source_file = sdk_dep.path("src/test_shim.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zigttp-sdk", .module = sdk_mod },
+        },
+    });
 
-    const modules_mod = b.addModule("zigttp-modules", .{
+    _ = b.addModule("zigttp-modules", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -17,15 +25,15 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zigttp-sdk", .module = sdk_mod },
         },
     });
-    _ = modules_mod;
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
+            .root_source_file = b.path("src/test_root.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zigttp-sdk", .module = sdk_mod },
+                .{ .name = "zigttp-sdk-test-shim", .module = test_shim_mod },
             },
         }),
     });

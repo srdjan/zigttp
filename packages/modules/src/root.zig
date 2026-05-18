@@ -44,28 +44,30 @@ pub const workflow = struct {
     pub const compose = @import("workflow/compose.zig");
 };
 
+pub const all_bindings = [_]sdk.ModuleBinding{
+    security.crypto.binding,
+    security.auth.binding,
+    security.validate.binding,
+    security.decode.binding,
+    platform.env.binding,
+    platform.id.binding,
+    platform.text.binding,
+    platform.time.binding,
+    platform.log.binding,
+    http.router.binding,
+    http.url.binding,
+    http.http_mod.binding,
+    data.ratelimit.binding,
+    data.cache.binding,
+    data.sql.binding,
+    net.fetch.binding,
+    net.service.binding,
+    net.websocket.binding,
+    workflow.compose.binding,
+};
+
 comptime {
-    sdk.validateBindings(&.{
-        security.crypto.binding,
-        security.auth.binding,
-        security.validate.binding,
-        security.decode.binding,
-        platform.env.binding,
-        platform.id.binding,
-        platform.text.binding,
-        platform.time.binding,
-        platform.log.binding,
-        http.router.binding,
-        http.url.binding,
-        http.http_mod.binding,
-        data.ratelimit.binding,
-        data.cache.binding,
-        data.sql.binding,
-        net.fetch.binding,
-        net.service.binding,
-        net.websocket.binding,
-        workflow.compose.binding,
-    });
+    sdk.validateBindings(&all_bindings);
 }
 
 test {
