@@ -17,21 +17,21 @@ const modules = @import("zigttp-modules");
 // Namespaced to avoid shadowing the `<name>_binding` locals used in the
 // governance-assertion tests at the bottom of this file.
 const ported = struct {
-    const env = adapter.adaptModuleBinding(modules.platform.env.binding);
-    const crypto = adapter.adaptModuleBinding(modules.security.crypto.binding);
-    const router = adapter.adaptModuleBinding(modules.http.router.binding);
-    const auth = adapter.adaptModuleBinding(modules.security.auth.binding);
-    const validate = adapter.adaptModuleBinding(modules.security.validate.binding);
-    const decode = adapter.adaptModuleBinding(modules.security.decode.binding);
-    const cache = adapter.adaptModuleBinding(modules.data.cache.binding);
-    const ratelimit = adapter.adaptModuleBinding(modules.data.ratelimit.binding);
-    const url = adapter.adaptModuleBinding(modules.http.url.binding);
-    const id = adapter.adaptModuleBinding(modules.platform.id.binding);
-    const http = adapter.adaptModuleBinding(modules.http.http_mod.binding);
-    const log = adapter.adaptModuleBinding(modules.platform.log.binding);
-    const text = adapter.adaptModuleBinding(modules.platform.text.binding);
-    const time = adapter.adaptModuleBinding(modules.platform.time.binding);
-    const compose = adapter.adaptModuleBinding(modules.workflow.compose.binding);
+    const env = adapter.adaptModuleBinding(modules.catalog.env);
+    const crypto = adapter.adaptModuleBinding(modules.catalog.crypto);
+    const router = adapter.adaptModuleBinding(modules.catalog.router);
+    const auth = adapter.adaptModuleBinding(modules.catalog.auth);
+    const validate = adapter.adaptModuleBinding(modules.catalog.validate);
+    const decode = adapter.adaptModuleBinding(modules.catalog.decode);
+    const cache = adapter.adaptModuleBinding(modules.catalog.cache);
+    const ratelimit = adapter.adaptModuleBinding(modules.catalog.ratelimit);
+    const url = adapter.adaptModuleBinding(modules.catalog.url);
+    const id = adapter.adaptModuleBinding(modules.catalog.id);
+    const http = adapter.adaptModuleBinding(modules.catalog.http_mod);
+    const log = adapter.adaptModuleBinding(modules.catalog.log);
+    const text = adapter.adaptModuleBinding(modules.catalog.text);
+    const time = adapter.adaptModuleBinding(modules.catalog.time);
+    const compose = adapter.adaptModuleBinding(modules.catalog.compose);
 };
 
 // installState helpers run during runtime bootstrap, outside any
@@ -120,10 +120,22 @@ comptime {
             @compileError("builtin_governance_entries specifier drift: " ++ entry.specifier ++ " vs " ++ binding.specifier);
         }
     }
+    for (modules.all_bindings) |module_binding| {
+        if (!hasBuiltinSpecifier(module_binding.specifier)) {
+            @compileError("zigttp-modules binding missing from builtin registry: " ++ module_binding.specifier);
+        }
+    }
 }
 
 pub fn governanceEntries() []const BuiltinGovernanceEntry {
     return &builtin_governance_entries;
+}
+
+fn hasBuiltinSpecifier(comptime specifier: []const u8) bool {
+    for (builtins) |binding| {
+        if (std.mem.eql(u8, binding.specifier, specifier)) return true;
+    }
+    return false;
 }
 
 // Validate all bindings at compile time. Produces compile errors for

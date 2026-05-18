@@ -87,3 +87,29 @@ pub const JSValue = packed struct(u64) {
         return if (self.isRawDouble()) @bitCast(self.raw) else null;
     }
 };
+
+/// Extract an i32 from a JSValue, handling both int and whole-number float
+/// representations.
+pub fn extractInt(val: JSValue) ?i32 {
+    if (val.toInt()) |i| return i;
+    if (val.toFloat()) |f| {
+        const i: i32 = @intFromFloat(f);
+        if (@as(f64, @floatFromInt(i)) == f) return i;
+    }
+    return null;
+}
+
+/// Extract an f64 from a JSValue, widening int values.
+pub fn extractFloat(val: JSValue) ?f64 {
+    if (val.toInt()) |i| return @floatFromInt(i);
+    return val.toFloat();
+}
+
+/// Box a Zig f64 as a JS number, folding safe-integer values into the
+/// int32 tagged representation. Matches the runtime's allocFloat hot path.
+pub fn numberFromF64(v: f64) JSValue {
+    if (!std.math.isNan(v) and !std.math.isInf(v) and @floor(v) == v and v >= -2147483648 and v <= 2147483647) {
+        return JSValue.fromInt(@intFromFloat(v));
+    }
+    return JSValue.fromFloat(v);
+}

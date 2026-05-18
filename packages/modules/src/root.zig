@@ -44,26 +44,53 @@ pub const workflow = struct {
     pub const compose = @import("workflow/compose.zig");
 };
 
+pub const catalog = struct {
+    pub const crypto = security.crypto.binding;
+    pub const auth = security.auth.binding;
+    pub const validate = security.validate.binding;
+    pub const decode = security.decode.binding;
+
+    pub const env = platform.env.binding;
+    pub const id = platform.id.binding;
+    pub const text = platform.text.binding;
+    pub const time = platform.time.binding;
+    pub const log = platform.log.binding;
+
+    pub const router = http.router.binding;
+    pub const url = http.url.binding;
+    pub const http_mod = http.http_mod.binding;
+
+    pub const ratelimit = data.ratelimit.binding;
+    pub const cache = data.cache.binding;
+    pub const sql = data.sql.binding;
+
+    pub const fetch = net.fetch.binding;
+    pub const service = net.service.binding;
+    pub const websocket = net.websocket.binding;
+
+    pub const compose = workflow.compose.binding;
+};
+
 pub const all_bindings = [_]sdk.ModuleBinding{
-    security.crypto.binding,
-    security.auth.binding,
-    security.validate.binding,
-    security.decode.binding,
-    platform.env.binding,
-    platform.id.binding,
-    platform.text.binding,
-    platform.time.binding,
-    platform.log.binding,
-    http.router.binding,
-    http.url.binding,
-    http.http_mod.binding,
-    data.ratelimit.binding,
-    data.cache.binding,
-    data.sql.binding,
-    net.fetch.binding,
-    net.service.binding,
-    net.websocket.binding,
-    workflow.compose.binding,
+    catalog.crypto,
+    catalog.auth,
+    catalog.validate,
+    catalog.decode,
+    catalog.env,
+    catalog.id,
+    catalog.text,
+    catalog.time,
+    catalog.log,
+    catalog.router,
+    catalog.url,
+    catalog.http_mod,
+    catalog.ratelimit,
+    catalog.cache,
+    catalog.sql,
+    catalog.fetch,
+    catalog.service,
+    catalog.websocket,
+    catalog.compose,
 };
 
 comptime {
@@ -72,6 +99,7 @@ comptime {
 
 test {
     _ = internal.util;
+    _ = catalog;
     _ = security.crypto;
     _ = security.auth;
     _ = security.validate;
