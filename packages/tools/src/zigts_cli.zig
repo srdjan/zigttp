@@ -74,6 +74,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         try runModulesCommand(argv[1..]);
         return;
     }
+    if (std.mem.eql(u8, command, "restrictions")) {
+        try runRestrictionsCommand(argv[1..]);
+        return;
+    }
     if (std.mem.eql(u8, command, "meta")) {
         try expert.runMeta(allocator, argv[1..]);
         return;
@@ -290,6 +294,64 @@ fn runFeaturesCommand(argv: []const []const u8) !void {
     }
 }
 
+fn runRestrictionsCommand(argv: []const []const u8) !void {
+    var json_mode = false;
+    var group_by: json_diag.RestrictionGrouping = .none;
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--json")) {
+            json_mode = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--by")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgument;
+            const value = argv[i];
+            if (std.mem.eql(u8, value, "proof")) {
+                group_by = .proof;
+            } else if (std.mem.eql(u8, value, "class") or std.mem.eql(u8, value, "failure_class")) {
+                group_by = .failure_class;
+            } else {
+                return error.InvalidArgument;
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--help")) {
+            const help =
+                \\zigts restrictions - language cuts mapped to the proofs they unlock
+                \\
+                \\Usage: zigts restrictions [--json] [--by proof|class]
+                \\
+                \\Options:
+                \\  --json            Emit structured JSON
+                \\  --by proof        Group entries by the proof they unlock
+                \\  --by class        Group entries by the failure class they prevent
+                \\
+            ;
+            _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+            return;
+        }
+        return error.InvalidArgument;
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    const allocator = std.heap.smp_allocator;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    if (json_mode) {
+        json_diag.writeRestrictionsJson(&aw.writer) catch return;
+    } else {
+        json_diag.writeRestrictionsText(&aw.writer, group_by) catch return;
+    }
+
+    buf = aw.toArrayList();
+    if (buf.items.len > 0) {
+        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+    }
+}
+
 fn runModulesCommand(argv: []const []const u8) !void {
     var json_mode = false;
     for (argv) |arg| {
@@ -366,6 +428,7 @@ fn printHelp() void {
         \\  zigts rollout <old-system.json> <new-system.json> [--output-dir <dir>]
         \\  zigts features [--json]
         \\  zigts modules [--json]
+        \\  zigts restrictions [--json] [--by proof|class]
         \\  zigts meta [--json]
         \\  zigts verify-paths <file>... [--json]
         \\  zigts verify-modules <file>... [--strict] [--json]

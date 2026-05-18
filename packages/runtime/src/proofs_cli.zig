@@ -7,6 +7,7 @@ const zigts = @import("zigts");
 const proof_ledger = @import("proof_ledger.zig");
 const review = @import("deploy/review.zig");
 const printer_mod = @import("deploy/printer.zig");
+const bundle_mod = @import("proofs/bundle.zig");
 
 const Subcommand = enum {
     list,
@@ -15,6 +16,8 @@ const Subcommand = enum {
     watch,
     @"export",
     badge,
+    bundle,
+    verify,
     help,
 };
 
@@ -33,6 +36,12 @@ pub fn isExpectedUserError(err: anyerror) bool {
         error.MissingArgValue,
         error.InvalidFormat,
         error.UnknownArgument,
+        error.MissingContractArg,
+        error.MissingOutArg,
+        error.SuspiciousPath,
+        error.NoBundleJson,
+        error.Sha256Mismatch,
+        error.MissingComponent,
         => true,
         else => false,
     };
@@ -73,7 +82,77 @@ pub fn runWith(
         .watch => try watchCommand(allocator, stdout),
         .@"export" => try exportCommand(allocator, argv[1..], stdout, stderr),
         .badge => try badgeCommand(allocator, argv[1..], stdout, stderr),
+        .bundle => try bundleCommand(allocator, argv[1..], stdout, stderr),
+        .verify => try verifyCommand(allocator, argv[1..], stdout, stderr),
     }
+}
+
+fn bundleCommand(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    var contract_path: ?[]const u8 = null;
+    var binary_path: ?[]const u8 = null;
+    var replay_path: ?[]const u8 = null;
+    var out_dir: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--contract")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgValue;
+            contract_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--binary")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgValue;
+            binary_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--replay")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgValue;
+            replay_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--out")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgValue;
+            out_dir = argv[i];
+        } else {
+            try stderr.print("zigttp proofs bundle: unknown argument '{s}'\n", .{arg});
+            return error.UnknownArgument;
+        }
+    }
+
+    try bundle_mod.writeBundle(allocator, .{
+        .contract_path = contract_path orelse "",
+        .binary_path = binary_path,
+        .replay_path = replay_path,
+        .out_dir = out_dir orelse "",
+    }, stdout, stderr);
+}
+
+fn verifyCommand(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    if (argv.len != 1) {
+        try stderr.writeAll("zigttp proofs verify: usage is `verify <bundle-dir>`\n");
+        return error.MissingArgValue;
+    }
+    bundle_mod.verify(allocator, argv[0], stdout, stderr) catch |err| {
+        // Mismatch and missing-component are diagnostic failures that
+        // already wrote a per-component line; exit non-zero so CI fails.
+        switch (err) {
+            error.Sha256Mismatch, error.MissingComponent => {
+                stdout.flush() catch {};
+                stderr.flush() catch {};
+                std.process.exit(1);
+            },
+            else => return err,
+        }
+    };
 }
 
 fn parseSubcommand(argv: []const []const u8) !Subcommand {
@@ -86,6 +165,8 @@ fn parseSubcommand(argv: []const []const u8) !Subcommand {
     if (std.mem.eql(u8, first, "watch")) return .watch;
     if (std.mem.eql(u8, first, "export")) return .@"export";
     if (std.mem.eql(u8, first, "badge")) return .badge;
+    if (std.mem.eql(u8, first, "bundle")) return .bundle;
+    if (std.mem.eql(u8, first, "verify")) return .verify;
     return error.UnknownSubcommand;
 }
 
@@ -108,6 +189,13 @@ fn writeHelp(w: *std.Io.Writer) !void {
         \\                   Flags: [--out PATH] [--inline] [--public-url URL]
         \\                          [--ref REF].
         \\                   Defaults: --out ./zigttp-proof.svg, --ref HEAD.
+        \\  bundle           Package a contract (and optionally binary and
+        \\                   replay artifacts) into a verifiable audit bundle.
+        \\                   Flags: --contract PATH --out DIR [--binary PATH]
+        \\                          [--replay PATH]
+        \\  verify <dir>     Re-check every component sha256 in <dir>/bundle.json
+        \\                   against the actual file bytes. Exits non-zero on
+        \\                   any mismatch.
         \\
         \\Refs may be HEAD, HEAD~N, or a contract sha prefix.
         \\Ledger file: .zigttp/proofs.jsonl

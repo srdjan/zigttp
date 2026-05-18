@@ -57,6 +57,9 @@ pub const AotInfo = contract_types.AotInfo;
 pub const FaultCoverageInfo = contract_types.FaultCoverageInfo;
 pub const HandlerProperties = contract_types.HandlerProperties;
 pub const RateLimitInfo = contract_types.RateLimitInfo;
+pub const IntentInfo = contract_types.IntentInfo;
+pub const IntentAssertion = contract_types.IntentAssertion;
+pub const IntentExpectedHeader = contract_types.IntentExpectedHeader;
 pub const SpecDiagnostic = contract_types.SpecDiagnostic;
 pub const PathCondition = contract_types.PathCondition;
 pub const PathIoCall = contract_types.PathIoCall;
@@ -985,6 +988,182 @@ test "behaviors serialization roundtrip" {
     try std.testing.expectEqual(@as(u16, 401), path1.response_status);
     try std.testing.expect(path1.is_failure_path);
     try std.testing.expectEqual(PathCondition.Kind.io_fail, path1.conditions.items[0].kind);
+}
+
+test "intent assertions roundtrip through writer and parser" {
+    const allocator = std.testing.allocator;
+
+    const path = try allocator.dupe(u8, "handler.ts");
+
+    var assertions: std.ArrayList(IntentAssertion) = .empty;
+    var headers: std.ArrayList(IntentExpectedHeader) = .empty;
+    try headers.append(allocator, .{
+        .name = try allocator.dupe(u8, "content-type"),
+        .value = try allocator.dupe(u8, "application/json"),
+    });
+    try assertions.append(allocator, .{
+        .name = try allocator.dupe(u8, "health returns ok"),
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/health"),
+        .request_body_json = null,
+        .expected_status = 200,
+        .expected_body_json = try allocator.dupe(u8, "{\"ok\":true}"),
+        .expected_headers = headers,
+        .source_line = 14,
+        .source_column = 8,
+    });
+    try assertions.append(allocator, .{
+        .name = try allocator.dupe(u8, "post creates resource"),
+        .method = try allocator.dupe(u8, "POST"),
+        .path = try allocator.dupe(u8, "/items"),
+        .request_body_json = try allocator.dupe(u8, "{\"name\":\"x\"}"),
+        .expected_status = 201,
+        .expected_body_json = null,
+        .expected_headers = .empty,
+        .source_line = 20,
+        .source_column = 8,
+    });
+
+    var contract = HandlerContract{
+        .handler = .{ .path = path, .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
+        .api = emptyApiInfo(),
+        .verification = null,
+        .aot = null,
+        .intent = .{
+            .assertions = assertions,
+            .dynamic = false,
+        },
+    };
+    defer contract.deinit(allocator);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try writeContractJson(&contract, &aw.writer);
+    output = aw.toArrayList();
+
+    // Sanity: section is present in the serialized form.
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"intent\": {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"health returns ok\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"sourceLine\": 14") != null);
+
+    var parsed = try parseFromJson(allocator, output.items);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expect(parsed.intent != null);
+    const intent = parsed.intent.?;
+    try std.testing.expect(!intent.dynamic);
+    try std.testing.expectEqual(@as(usize, 2), intent.assertions.items.len);
+
+    const a0 = intent.assertions.items[0];
+    try std.testing.expectEqualStrings("health returns ok", a0.name);
+    try std.testing.expectEqualStrings("GET", a0.method);
+    try std.testing.expectEqualStrings("/health", a0.path);
+    try std.testing.expect(a0.request_body_json == null);
+    try std.testing.expectEqual(@as(?u16, 200), a0.expected_status);
+    try std.testing.expectEqualStrings("{\"ok\":true}", a0.expected_body_json.?);
+    try std.testing.expectEqual(@as(usize, 1), a0.expected_headers.items.len);
+    try std.testing.expectEqualStrings("content-type", a0.expected_headers.items[0].name);
+    try std.testing.expectEqualStrings("application/json", a0.expected_headers.items[0].value);
+    try std.testing.expectEqual(@as(u32, 14), a0.source_line);
+    try std.testing.expectEqual(@as(u32, 8), a0.source_column);
+
+    const a1 = intent.assertions.items[1];
+    try std.testing.expectEqualStrings("post creates resource", a1.name);
+    try std.testing.expectEqualStrings("POST", a1.method);
+    try std.testing.expectEqualStrings("{\"name\":\"x\"}", a1.request_body_json.?);
+    try std.testing.expectEqual(@as(?u16, 201), a1.expected_status);
+    try std.testing.expect(a1.expected_body_json == null);
+    try std.testing.expectEqual(@as(usize, 0), a1.expected_headers.items.len);
+}
+
+test "intent dynamic flag roundtrips and assertions empty" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{
+        \\  "version": 14,
+        \\  "handler": { "path": "handler.ts", "line": 1, "column": 0 },
+        \\  "routes": [],
+        \\  "modules": [],
+        \\  "functions": {},
+        \\  "env": { "literal": [], "dynamic": false },
+        \\  "egress": { "hosts": [], "dynamic": false },
+        \\  "cache": { "namespaces": [], "dynamic": false },
+        \\  "api": {},
+        \\  "verification": null,
+        \\  "aot": null,
+        \\  "intent": { "dynamic": true, "assertions": [] }
+        \\}
+    ;
+
+    var contract = try parseFromJson(allocator, json);
+    defer contract.deinit(allocator);
+
+    try std.testing.expect(contract.intent != null);
+    try std.testing.expect(contract.intent.?.dynamic);
+    try std.testing.expectEqual(@as(usize, 0), contract.intent.?.assertions.items.len);
+}
+
+test "intent absent roundtrips as null" {
+    const allocator = std.testing.allocator;
+    const path = try allocator.dupe(u8, "handler.ts");
+
+    var contract = HandlerContract{
+        .handler = .{ .path = path, .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
+        .api = emptyApiInfo(),
+        .verification = null,
+        .aot = null,
+    };
+    defer contract.deinit(allocator);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try writeContractJson(&contract, &aw.writer);
+    output = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"intent\": null") != null);
+
+    var parsed = try parseFromJson(allocator, output.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expect(parsed.intent == null);
 }
 
 test "computeCapabilityMatrix unions crypto and auth into canonical set" {

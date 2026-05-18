@@ -516,6 +516,14 @@ const Feature = struct {
     name: []const u8,
     status: FeatureStatus,
     alternative: ?[]const u8,
+    /// Why the construct is forbidden. Required for `.blocked`, null for `.allowed`.
+    blocked_reason: ?[]const u8 = null,
+    /// Class of failure the cut prevents (e.g. "hidden exceptional control flow").
+    /// Required for `.blocked`, null for `.allowed`.
+    failure_class: ?[]const u8 = null,
+    /// Proof the cut unlocks (e.g. "Result narrowing and exhaustive path enumeration").
+    /// Required for `.blocked`, null for `.allowed`.
+    proof_unlocked: ?[]const u8 = null,
 };
 
 const features = [_]Feature{
@@ -543,27 +551,189 @@ const features = [_]Feature{
     .{ .name = "template literal types", .status = .allowed, .alternative = null },
     .{ .name = "comptime()", .status = .allowed, .alternative = null },
     // Blocked
-    .{ .name = "switch/case", .status = .blocked, .alternative = "use 'match' expression" },
-    .{ .name = "var", .status = .blocked, .alternative = "use 'let' or 'const'" },
-    .{ .name = "class", .status = .blocked, .alternative = "use plain objects and functions" },
-    .{ .name = "while", .status = .blocked, .alternative = "use 'for...of' with a finite collection" },
-    .{ .name = "do...while", .status = .blocked, .alternative = "use 'for...of' with a finite collection" },
-    .{ .name = "for(;;)", .status = .blocked, .alternative = "use 'for (const i of range(n))'" },
-    .{ .name = "for...in", .status = .blocked, .alternative = "use 'for (const k of Object.keys(obj))'" },
-    .{ .name = "try/catch", .status = .blocked, .alternative = "use Result types and check .ok" },
-    .{ .name = "throw", .status = .blocked, .alternative = "return an error Response" },
-    .{ .name = "async/await", .status = .blocked, .alternative = "use fetchSync(), parallel(), race()" },
-    .{ .name = "new", .status = .blocked, .alternative = "use factory functions or object literals" },
-    .{ .name = "this", .status = .blocked, .alternative = "use explicit parameter passing" },
-    .{ .name = "null", .status = .blocked, .alternative = "use undefined" },
-    .{ .name = "== / !=", .status = .blocked, .alternative = "use === / !==" },
-    .{ .name = "++ / --", .status = .blocked, .alternative = "use x = x + 1" },
-    .{ .name = "regex", .status = .blocked, .alternative = "use string methods (includes, startsWith, etc.)" },
-    .{ .name = "delete", .status = .blocked, .alternative = "use destructuring: const { key, ...rest } = obj" },
-    .{ .name = "enum", .status = .blocked, .alternative = "use object literals or discriminated unions" },
-    .{ .name = "decorator (@)", .status = .blocked, .alternative = "use function composition" },
-    .{ .name = "namespace", .status = .blocked, .alternative = "use ES6 modules" },
+    .{
+        .name = "switch/case",
+        .status = .blocked,
+        .alternative = "use 'match' expression",
+        .blocked_reason = "fallthrough makes coverage ambiguous and lets cases share state through implicit fallthrough.",
+        .failure_class = "non-exhaustive control flow and implicit fallthrough",
+        .proof_unlocked = "match coverage and exhaustive return analysis",
+    },
+    .{
+        .name = "var",
+        .status = .blocked,
+        .alternative = "use 'let' or 'const'",
+        .blocked_reason = "hoisting and function-scoping create temporal dead zones the verifier cannot reason about.",
+        .failure_class = "scope hoisting and temporal dead zones",
+        .proof_unlocked = "block-scoped data flow and reachability analysis",
+    },
+    .{
+        .name = "class",
+        .status = .blocked,
+        .alternative = "use plain objects and functions",
+        .blocked_reason = "implicit mutable receivers hide data flow from the contract extractor.",
+        .failure_class = "implicit mutable receivers and hidden state",
+        .proof_unlocked = "explicit data flow and effect analysis",
+    },
+    .{
+        .name = "while",
+        .status = .blocked,
+        .alternative = "use 'for...of' with a finite collection",
+        .blocked_reason = "unbounded back-edges defeat finite path enumeration.",
+        .failure_class = "unbounded back-edges and non-termination",
+        .proof_unlocked = "finite path enumeration and termination",
+    },
+    .{
+        .name = "do...while",
+        .status = .blocked,
+        .alternative = "use 'for...of' with a finite collection",
+        .blocked_reason = "unbounded back-edges defeat finite path enumeration.",
+        .failure_class = "unbounded back-edges and non-termination",
+        .proof_unlocked = "finite path enumeration and termination",
+    },
+    .{
+        .name = "for(;;)",
+        .status = .blocked,
+        .alternative = "use 'for (const i of range(n))'",
+        .blocked_reason = "C-style loops carry no bound; gen-tests cannot enumerate every iteration.",
+        .failure_class = "unbounded back-edges and non-termination",
+        .proof_unlocked = "finite path enumeration and termination",
+    },
+    .{
+        .name = "for...in",
+        .status = .blocked,
+        .alternative = "use 'for (const k of Object.keys(obj))'",
+        .blocked_reason = "for...in walks the prototype chain; iteration order is implementation-defined.",
+        .failure_class = "prototype-chain iteration and non-deterministic order",
+        .proof_unlocked = "deterministic iteration and shape-stable access",
+    },
+    .{
+        .name = "try/catch",
+        .status = .blocked,
+        .alternative = "use Result types and check .ok",
+        .blocked_reason = "exceptions are an invisible second return channel that bypasses the type system.",
+        .failure_class = "hidden exceptional control flow",
+        .proof_unlocked = "Result narrowing and exhaustive path enumeration",
+    },
+    .{
+        .name = "throw",
+        .status = .blocked,
+        .alternative = "return an error Response",
+        .blocked_reason = "throw is the producer side of the hidden exception channel.",
+        .failure_class = "hidden exceptional control flow",
+        .proof_unlocked = "Result narrowing and exhaustive return analysis",
+    },
+    .{
+        .name = "async/await",
+        .status = .blocked,
+        .alternative = "use fetchSync(), parallel(), race()",
+        .blocked_reason = "ambient scheduling produces interleavings the replay log cannot reproduce.",
+        .failure_class = "ambient scheduling and non-deterministic interleavings",
+        .proof_unlocked = "deterministic effect boundary and replayable I/O",
+    },
+    .{
+        .name = "new",
+        .status = .blocked,
+        .alternative = "use factory functions or object literals",
+        .blocked_reason = "constructor dispatch combined with prototypes hides effects from the IR.",
+        .failure_class = "constructor dispatch and hidden initialization effects",
+        .proof_unlocked = "explicit factory call sites and visible effects",
+    },
+    .{
+        .name = "this",
+        .status = .blocked,
+        .alternative = "use explicit parameter passing",
+        .blocked_reason = "the binding of `this` is dynamic and unreadable from the IR.",
+        .failure_class = "dynamic receiver binding",
+        .proof_unlocked = "static call-graph and visible data flow",
+    },
+    .{
+        .name = "null",
+        .status = .blocked,
+        .alternative = "use undefined",
+        .blocked_reason = "two absent-value sentinels split optional narrowing into two incompatible lattices.",
+        .failure_class = "dual absent-value sentinels",
+        .proof_unlocked = "optional-narrowing proof totality",
+    },
+    .{
+        .name = "== / !=",
+        .status = .blocked,
+        .alternative = "use === / !==",
+        .blocked_reason = "loose equality coerces operands, creating control-flow paths the type checker cannot see.",
+        .failure_class = "implicit coercion paths",
+        .proof_unlocked = "sound type-directed comparison",
+    },
+    .{
+        .name = "++ / --",
+        .status = .blocked,
+        .alternative = "use x = x + 1",
+        .blocked_reason = "in-place mutation hides write effects in expression positions.",
+        .failure_class = "hidden in-place mutation in expressions",
+        .proof_unlocked = "explicit assignment effects and state isolation",
+    },
+    .{
+        .name = "regex",
+        .status = .blocked,
+        .alternative = "use string methods (includes, startsWith, etc.)",
+        .blocked_reason = "regex literals describe an opaque accept set the validator cannot reason about.",
+        .failure_class = "opaque accept set and catastrophic backtracking",
+        .proof_unlocked = "shape-checkable validation via zigttp:validate schemas",
+    },
+    .{
+        .name = "delete",
+        .status = .blocked,
+        .alternative = "use destructuring: const { key, ...rest } = obj",
+        .blocked_reason = "delete mutates hidden-class shape, defeating shape-stable property access.",
+        .failure_class = "hidden-class shape mutation",
+        .proof_unlocked = "shape-stable property access",
+    },
+    .{
+        .name = "enum",
+        .status = .blocked,
+        .alternative = "use object literals or discriminated unions",
+        .blocked_reason = "TS enums emit dual numeric/string lookups that bypass exhaustive match checking.",
+        .failure_class = "dual numeric/string lookup and non-exhaustive cases",
+        .proof_unlocked = "exhaustive match coverage on discriminated unions",
+    },
+    .{
+        .name = "decorator (@)",
+        .status = .blocked,
+        .alternative = "use function composition",
+        .blocked_reason = "decorators rewrite their target at runtime in ways the contract extractor cannot trace.",
+        .failure_class = "implicit metaprogramming and target rewriting",
+        .proof_unlocked = "static call-graph and visible effect composition",
+    },
+    .{
+        .name = "namespace",
+        .status = .blocked,
+        .alternative = "use ES6 modules",
+        .blocked_reason = "TS namespaces compile to closures with mutable internals invisible to the module graph.",
+        .failure_class = "module-graph blind spots",
+        .proof_unlocked = "AST-driven contract extraction",
+    },
 };
+
+// Comptime assertion: every blocked feature must populate `alternative`,
+// `blocked_reason`, `failure_class`, and `proof_unlocked`. Allowed features
+// must leave all four null. Drift causes a compile-time error.
+comptime {
+    for (features) |f| {
+        switch (f.status) {
+            .blocked => {
+                if (f.alternative == null) @compileError("blocked feature missing alternative: " ++ f.name);
+                if (f.blocked_reason == null) @compileError("blocked feature missing blocked_reason: " ++ f.name);
+                if (f.failure_class == null) @compileError("blocked feature missing failure_class: " ++ f.name);
+                if (f.proof_unlocked == null) @compileError("blocked feature missing proof_unlocked: " ++ f.name);
+            },
+            .allowed => {
+                if (f.alternative != null) @compileError("allowed feature has alternative: " ++ f.name);
+                if (f.blocked_reason != null) @compileError("allowed feature has blocked_reason: " ++ f.name);
+                if (f.failure_class != null) @compileError("allowed feature has failure_class: " ++ f.name);
+                if (f.proof_unlocked != null) @compileError("allowed feature has proof_unlocked: " ++ f.name);
+            },
+        }
+    }
+}
 
 pub fn writeFeaturesJson(writer: anytype) !void {
     try writer.writeByte('[');
@@ -573,12 +743,14 @@ pub fn writeFeaturesJson(writer: anytype) !void {
         try writeJsonString(writer, f.name);
         try writer.writeAll(",\"status\":");
         try writeJsonString(writer, f.status.label());
-        if (f.alternative) |alt| {
-            try writer.writeAll(",\"alternative\":");
-            try writeJsonString(writer, alt);
-        } else {
-            try writer.writeAll(",\"alternative\":null");
-        }
+        try writer.writeAll(",\"alternative\":");
+        try writeOptionalString(writer, f.alternative);
+        try writer.writeAll(",\"blocked_reason\":");
+        try writeOptionalString(writer, f.blocked_reason);
+        try writer.writeAll(",\"failure_class\":");
+        try writeOptionalString(writer, f.failure_class);
+        try writer.writeAll(",\"proof_unlocked\":");
+        try writeOptionalString(writer, f.proof_unlocked);
         try writer.writeByte('}');
     }
     try writer.writeAll("]\n");
@@ -600,6 +772,150 @@ pub fn writeFeaturesText(writer: anytype) !void {
                 try writer.print("  {s}\n", .{f.name});
             }
         }
+    }
+}
+
+fn writeOptionalString(writer: anytype, value: ?[]const u8) !void {
+    if (value) |s| {
+        try writeJsonString(writer, s);
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+// -------------------------------------------------------------------------
+// Restriction-to-proof table
+//
+// Same source-of-truth as the features list. The restrictions surface
+// projects each blocked feature into a (failure_class, proof_unlocked,
+// alternative) row, grouped either by proof or by failure class.
+// -------------------------------------------------------------------------
+
+pub const RestrictionGrouping = enum { proof, failure_class, none };
+
+pub fn writeRestrictionsJson(writer: anytype) !void {
+    try writer.writeByte('[');
+    var first = true;
+    for (features) |f| {
+        if (f.status != .blocked) continue;
+        if (!first) try writer.writeByte(',');
+        first = false;
+        try writer.writeAll("{\"name\":");
+        try writeJsonString(writer, f.name);
+        try writer.writeAll(",\"alternative\":");
+        try writeOptionalString(writer, f.alternative);
+        try writer.writeAll(",\"blocked_reason\":");
+        try writeOptionalString(writer, f.blocked_reason);
+        try writer.writeAll(",\"failure_class\":");
+        try writeOptionalString(writer, f.failure_class);
+        try writer.writeAll(",\"proof_unlocked\":");
+        try writeOptionalString(writer, f.proof_unlocked);
+        try writer.writeByte('}');
+    }
+    try writer.writeAll("]\n");
+}
+
+pub fn writeRestrictionsText(writer: anytype, group_by: RestrictionGrouping) !void {
+    switch (group_by) {
+        .none => {
+            try writer.writeAll("Restriction -> Failure class -> Proof unlocked\n\n");
+            for (features) |f| {
+                if (f.status != .blocked) continue;
+                try writer.print("{s}\n", .{f.name});
+                try writer.print("  reason:    {s}\n", .{f.blocked_reason.?});
+                try writer.print("  failure:   {s}\n", .{f.failure_class.?});
+                try writer.print("  proof:     {s}\n", .{f.proof_unlocked.?});
+                try writer.print("  alternative: {s}\n\n", .{f.alternative.?});
+            }
+        },
+        .proof => try writeGroupedBy(writer, .proof),
+        .failure_class => try writeGroupedBy(writer, .failure_class),
+    }
+}
+
+fn writeGroupedBy(writer: anytype, group_by: RestrictionGrouping) !void {
+    const header = switch (group_by) {
+        .proof => "Grouped by proof unlocked",
+        .failure_class => "Grouped by failure class",
+        .none => unreachable,
+    };
+    try writer.print("{s}\n\n", .{header});
+
+    var seen_buf: [features.len][]const u8 = undefined;
+    var seen_len: usize = 0;
+
+    for (features) |f| {
+        if (f.status != .blocked) continue;
+        const key = switch (group_by) {
+            .proof => f.proof_unlocked.?,
+            .failure_class => f.failure_class.?,
+            .none => unreachable,
+        };
+        if (containsKey(seen_buf[0..seen_len], key)) continue;
+        seen_buf[seen_len] = key;
+        seen_len += 1;
+
+        try writer.print("{s}\n", .{key});
+        for (features) |g| {
+            if (g.status != .blocked) continue;
+            const g_key = switch (group_by) {
+                .proof => g.proof_unlocked.?,
+                .failure_class => g.failure_class.?,
+                .none => unreachable,
+            };
+            if (!std.mem.eql(u8, g_key, key)) continue;
+            try writer.print("  - {s} (alternative: {s})\n", .{ g.name, g.alternative.? });
+        }
+        try writer.writeByte('\n');
+    }
+}
+
+fn containsKey(keys: []const []const u8, key: []const u8) bool {
+    for (keys) |k| {
+        if (std.mem.eql(u8, k, key)) return true;
+    }
+    return false;
+}
+
+/// Emit the canonical `docs/restrictions-to-proofs.md` derived from the
+/// `features` table. The on-disk doc is asserted to match this output by a
+/// test so the doc cannot drift from the registry.
+pub fn writeRestrictionsMarkdown(writer: anytype) !void {
+    try writer.writeAll(
+        \\# Restrictions to Proofs
+        \\
+        \\This document is generated from `packages/tools/src/json_diagnostics.zig`.
+        \\It maps each zigts language restriction to the failure class it eliminates
+        \\and the proof it unlocks. Run `zigts restrictions` for the live table.
+        \\
+        \\Every entry is a deliberate cut from JavaScript or TypeScript that buys
+        \\a specific soundness guarantee. The intent oracle (`zigts assert-intent`)
+        \\and the contract diff (`zigttp proofs show`) live above these cuts; the
+        \\cuts themselves are what make those higher-level claims possible.
+        \\
+        \\| Restriction | Failure class prevented | Proof unlocked | Alternative |
+        \\|-------------|-------------------------|----------------|-------------|
+        \\
+    );
+    for (features) |f| {
+        if (f.status != .blocked) continue;
+        try writer.print(
+            "| `{s}` | {s} | {s} | {s} |\n",
+            .{ f.name, f.failure_class.?, f.proof_unlocked.?, f.alternative.? },
+        );
+    }
+    try writer.writeAll(
+        \\
+        \\## Why
+        \\
+        \\Per-restriction rationale. Each line answers "why is this cut worth
+        \\making?" in one sentence.
+        \\
+        \\
+    );
+    for (features) |f| {
+        if (f.status != .blocked) continue;
+        try writer.print("- **`{s}`** - {s}\n", .{ f.name, f.blocked_reason.? });
     }
 }
 
@@ -672,4 +988,45 @@ test "fromParseError: expected token uses expected field" {
     const diag = fromParseError(err, "handler.ts");
     try std.testing.expectEqualStrings("ZTS003", diag.code);
     try std.testing.expectEqualStrings("';'", diag.suggestion.?);
+}
+
+test "writeRestrictionsJson includes canonical entries" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try writeRestrictionsJson(&aw.writer);
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"try/catch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Result narrowing") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "async/await") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "deterministic effect boundary") != null);
+}
+
+test "writeRestrictionsText grouped by proof clusters entries" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try writeRestrictionsText(&aw.writer, .proof);
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Grouped by proof unlocked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "finite path enumeration and termination") != null);
+}
+
+test "writeRestrictionsMarkdown mentions every blocked feature" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try writeRestrictionsMarkdown(&aw.writer);
+    buf = aw.toArrayList();
+
+    for (features) |f| {
+        if (f.status != .blocked) continue;
+        const found = std.mem.indexOf(u8, buf.items, f.name) != null;
+        try std.testing.expect(found);
+    }
 }

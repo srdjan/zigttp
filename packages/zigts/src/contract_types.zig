@@ -952,6 +952,74 @@ pub fn computeCapabilityMatrix(specifiers: []const []const u8) CapabilityMatrix 
     return matrix;
 }
 
+/// Author-declared intent assertions. Extracted from a static-literal
+/// `export const intent = { assertions: [...] }` in the handler module.
+/// Lives **outside** the proof boundary: assertions are runnable examples,
+/// not new compiler obligations. The runner (`zigts assert-intent`)
+/// executes each entry through the handler test path.
+///
+/// Dynamic forms (function, spread, computed) must fail extraction rather
+/// than degrading to "unknown", to preserve the deterministic-extraction
+/// guardrail.
+pub const IntentExpectedHeader = struct {
+    name: []const u8, // owned
+    value: []const u8, // owned
+
+    pub fn deinit(self: *IntentExpectedHeader, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.value);
+    }
+};
+
+pub const IntentAssertion = struct {
+    /// Author-supplied label, used in the runner's pass/fail report.
+    name: []const u8, // owned
+    /// HTTP method, e.g. "GET". Uppercased at extraction.
+    method: []const u8, // owned
+    /// Request path including any query string.
+    path: []const u8, // owned
+    /// Optional raw JSON body (as written in the literal). Owned; the
+    /// runner parses this when constructing the synthetic request.
+    request_body_json: ?[]const u8 = null,
+    /// Optional expected response status; null means no status assertion.
+    expected_status: ?u16 = null,
+    /// Optional raw JSON body fragment expected in the response. Subset
+    /// matching at runtime (every key in expected_body_json must appear
+    /// with the same value in the actual response).
+    expected_body_json: ?[]const u8 = null,
+    /// Optional headers expected on the response, each compared
+    /// case-insensitively by name.
+    expected_headers: std.ArrayList(IntentExpectedHeader) = .empty,
+    /// One-based source span pointing at the assertion literal, used by
+    /// the runner's failure messages and by the contract diff viewer.
+    source_line: u32 = 0,
+    source_column: u32 = 0,
+
+    pub fn deinit(self: *IntentAssertion, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.method);
+        allocator.free(self.path);
+        if (self.request_body_json) |b| allocator.free(b);
+        if (self.expected_body_json) |b| allocator.free(b);
+        for (self.expected_headers.items) |*h| h.deinit(allocator);
+        self.expected_headers.deinit(allocator);
+    }
+};
+
+pub const IntentInfo = struct {
+    assertions: std.ArrayList(IntentAssertion) = .empty,
+    /// True when the author declared `intent` but the value was dynamic.
+    /// Set by the extractor; surfaces as a hard error from
+    /// `zigts assert-intent` and a per-section verdict on the contract
+    /// diff (Stream B).
+    dynamic: bool = false,
+
+    pub fn deinit(self: *IntentInfo, allocator: std.mem.Allocator) void {
+        for (self.assertions.items) |*a| a.deinit(allocator);
+        self.assertions.deinit(allocator);
+    }
+};
+
 pub const HandlerContract = struct {
     version: u32 = 14,
     handler: HandlerLoc,
@@ -972,6 +1040,9 @@ pub const HandlerContract = struct {
     fault_coverage: ?FaultCoverageInfo = null,
     rate_limiting: ?RateLimitInfo = null,
     properties: ?HandlerProperties = null,
+    /// Author-declared intent assertions. Null when the handler module
+    /// has no `export const intent` literal. See `IntentInfo` for shape.
+    intent: ?IntentInfo = null,
     /// In-memory provenance for demoted properties. Not serialized; populated
     /// during build for the live-reload HUD's "Why" line. Snippets are
     /// borrowed static strings, so deinit is a no-op.
@@ -1072,5 +1143,6 @@ pub const HandlerContract = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.extensions.deinit(allocator);
+        if (self.intent) |*i| i.deinit(allocator);
     }
 };

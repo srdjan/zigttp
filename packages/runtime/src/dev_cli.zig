@@ -8,6 +8,7 @@ const zigts_cli = @import("zigts_cli");
 const deploy = @import("deploy.zig");
 const proofs_cli = @import("proofs_cli.zig");
 const witnesses_cli = @import("witnesses_cli.zig");
+const intent_runner = @import("intent_runner.zig");
 const precompile = zigts_cli.precompile;
 const shared = @import("cli_shared.zig");
 const runtime_cli = @import("runtime_cli.zig");
@@ -410,6 +411,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             if (witnesses_cli.isExpectedUserError(err)) return;
             return err;
         };
+        return;
+    }
+    if (std.mem.eql(u8, command, "assert-intent")) {
+        try intent_runner.runWithArgs(allocator, user_args[1..]);
         return;
     }
     if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version")) {

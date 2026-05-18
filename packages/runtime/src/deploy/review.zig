@@ -177,6 +177,14 @@ pub const ReviewFacts = struct {
     /// has no Spec<...> annotation; that is the back-compat path. The HUD
     /// renders failed entries as `[FAIL]` with a per-property suggestion.
     declared_specs: []const SpecState = &.{},
+    /// Flattened intent + behavior summary, denormalised from the
+    /// contract so the diff and review card can call out "intent added"
+    /// or "path count changed" without re-walking the contract.
+    intent_assertion_count: usize = 0,
+    intent_dynamic: bool = false,
+    behavior_path_count: usize = 0,
+    /// Subset of `behavior_path_count`; invariant: `<= behavior_path_count`.
+    failure_path_count: usize = 0,
 
     /// Build owned facts from the same ProvenFacts the deploy already extracts
     /// (so we cannot drift from what `buildProofLabels` and `extractProvenFacts`
@@ -247,6 +255,25 @@ pub const ReviewFacts = struct {
         freeSpecList(allocator, self.declared_specs);
     }
 
+    pub const IntentSummary = struct {
+        assertion_count: usize = 0,
+        dynamic: bool = false,
+        behavior_paths: usize = 0,
+        failure_paths: usize = 0,
+    };
+
+    /// Enrich a freshly-built `ReviewFacts` with the intent and behavior
+    /// summary fields. Call after `fromProvenFacts` from a site that has
+    /// the `HandlerContract`; callers without it can skip - the defaults
+    /// preserve existing rendering.
+    pub fn setIntentSummary(self: *ReviewFacts, s: IntentSummary) void {
+        std.debug.assert(s.failure_paths <= s.behavior_paths);
+        self.intent_assertion_count = s.assertion_count;
+        self.intent_dynamic = s.dynamic;
+        self.behavior_path_count = s.behavior_paths;
+        self.failure_path_count = s.failure_paths;
+    }
+
     pub fn writeJson(self: *const ReviewFacts, json: *std.json.Stringify) !void {
         try json.beginObject();
         try json.objectField("contractSha");
@@ -310,6 +337,14 @@ pub const ReviewFacts = struct {
             try json.endObject();
         }
         try json.endArray();
+        try json.objectField("intentAssertionCount");
+        try json.write(self.intent_assertion_count);
+        try json.objectField("intentDynamic");
+        try json.write(self.intent_dynamic);
+        try json.objectField("behaviorPathCount");
+        try json.write(self.behavior_path_count);
+        try json.objectField("failurePathCount");
+        try json.write(self.failure_path_count);
         try json.endObject();
     }
 
@@ -1403,6 +1438,57 @@ test "ReviewFacts: writeJson then parseJson round trips" {
     try std.testing.expect(round.properties.results_safe);
     try std.testing.expect(round.properties.read_only);
     try std.testing.expect(!round.properties.retry_safe);
+}
+
+test "ReviewFacts.setIntentSummary surfaces intent fields in JSON" {
+    const allocator = std.testing.allocator;
+    var facts = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-intent"),
+        .proof_level = .complete,
+        .env_keys = try allocator.alloc([]const u8, 0),
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{},
+    };
+    defer facts.deinit(allocator);
+    facts.setIntentSummary(.{ .assertion_count = 3, .dynamic = false, .behavior_paths = 7, .failure_paths = 2 });
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    var json: std.json.Stringify = .{ .writer = &aw.writer };
+    try facts.writeJson(&json);
+    const bytes = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"intentAssertionCount\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"intentDynamic\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"behaviorPathCount\":7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"failurePathCount\":2") != null);
+}
+
+test "ReviewFacts intent fields default to zero in JSON" {
+    const allocator = std.testing.allocator;
+    var facts = ReviewFacts{
+        .contract_sha = try allocator.dupe(u8, "sha-default"),
+        .proof_level = .none,
+        .env_keys = try allocator.alloc([]const u8, 0),
+        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .cache_namespaces = try allocator.alloc([]const u8, 0),
+        .routes = try allocator.alloc(Route, 0),
+        .capabilities = try allocator.alloc([]const u8, 0),
+        .properties = .{},
+    };
+    defer facts.deinit(allocator);
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    var json: std.json.Stringify = .{ .writer = &aw.writer };
+    try facts.writeJson(&json);
+    const bytes = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"intentAssertionCount\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"intentDynamic\":false") != null);
 }
 
 test "ReviewFacts.parseJson tolerates missing optional fields" {

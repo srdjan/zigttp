@@ -539,6 +539,53 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("  \"properties\": null,\n");
     }
 
+    // intent (optional) - author-declared assertions outside the proof boundary
+    if (contract.intent) |intent| {
+        try writer.writeAll("  \"intent\": {\n");
+        try writer.print("    \"dynamic\": {s},\n", .{if (intent.dynamic) "true" else "false"});
+        try writer.writeAll("    \"assertions\": [");
+        for (intent.assertions.items, 0..) |assertion, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.writeAll("\n      {");
+            try writer.writeAll("\n        \"name\": ");
+            try writeJsonString(writer, assertion.name);
+            try writer.writeAll(",\n        \"method\": ");
+            try writeJsonString(writer, assertion.method);
+            try writer.writeAll(",\n        \"path\": ");
+            try writeJsonString(writer, assertion.path);
+            try writer.writeAll(",\n        \"requestBodyJson\": ");
+            if (assertion.request_body_json) |b| {
+                try writeJsonString(writer, b);
+            } else try writer.writeAll("null");
+            try writer.writeAll(",\n        \"expectedStatus\": ");
+            if (assertion.expected_status) |s| {
+                try writer.print("{d}", .{s});
+            } else try writer.writeAll("null");
+            try writer.writeAll(",\n        \"expectedBodyJson\": ");
+            if (assertion.expected_body_json) |b| {
+                try writeJsonString(writer, b);
+            } else try writer.writeAll("null");
+            try writer.writeAll(",\n        \"expectedHeaders\": [");
+            for (assertion.expected_headers.items, 0..) |h, j| {
+                if (j > 0) try writer.writeAll(", ");
+                try writer.writeAll("{\"name\": ");
+                try writeJsonString(writer, h.name);
+                try writer.writeAll(", \"value\": ");
+                try writeJsonString(writer, h.value);
+                try writer.writeByte('}');
+            }
+            try writer.writeAll("],");
+            try writer.print("\n        \"sourceLine\": {d},", .{assertion.source_line});
+            try writer.print("\n        \"sourceColumn\": {d}", .{assertion.source_column});
+            try writer.writeAll("\n      }");
+        }
+        if (intent.assertions.items.len > 0) try writer.writeByte('\n');
+        try writer.writeAll("    ]\n");
+        try writer.writeAll("  },\n");
+    } else {
+        try writer.writeAll("  \"intent\": null,\n");
+    }
+
     // behaviors (optional)
     if (contract.behaviors.items.len > 0) {
         try writer.writeAll("  \"behaviors\": [\n");

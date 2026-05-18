@@ -10,6 +10,7 @@
 const std = @import("std");
 const handler_contract = @import("handler_contract.zig");
 const module_binding = @import("module_binding.zig");
+const trace = @import("trace.zig");
 
 const HandlerContract = handler_contract.HandlerContract;
 const HandlerProperties = handler_contract.HandlerProperties;
@@ -25,6 +26,9 @@ const ApiRequestInfo = handler_contract.ApiRequestInfo;
 const SchemaSpec = handler_contract.SchemaSpec;
 const FaultCoverageInfo = handler_contract.FaultCoverageInfo;
 const RateLimitInfo = handler_contract.RateLimitInfo;
+const IntentInfo = handler_contract.IntentInfo;
+const IntentAssertion = handler_contract.IntentAssertion;
+const IntentExpectedHeader = handler_contract.IntentExpectedHeader;
 const PathCondition = handler_contract.PathCondition;
 const PathIoCall = handler_contract.PathIoCall;
 const BehaviorPath = handler_contract.BehaviorPath;
@@ -150,6 +154,13 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseSpecDiagnostics(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "sandbox")) {
             try parseSandbox(&parser, &contract);
+        } else if (std.mem.eql(u8, key, "intent")) {
+            parser.skipWhitespace();
+            if (parser.readNull()) {
+                contract.intent = null;
+            } else {
+                contract.intent = try parseIntent(&parser, allocator);
+            }
         } else if (std.mem.eql(u8, key, "behaviors")) {
             try parseBehaviors(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "behaviorsExhaustive")) {
@@ -2073,6 +2084,155 @@ fn parseFaultCoverage(parser: *JsonParser) !?FaultCoverageInfo {
     }
 
     return info;
+}
+
+fn parseIntent(parser: *JsonParser, allocator: std.mem.Allocator) !IntentInfo {
+    if (!parser.consume('{')) return error.InvalidJson;
+    var info = IntentInfo{};
+    errdefer info.deinit(allocator);
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "dynamic")) {
+            info.dynamic = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "assertions")) {
+            try parseIntentAssertions(parser, allocator, &info);
+        } else {
+            parser.skipValue();
+        }
+    }
+    return info;
+}
+
+fn parseIntentAssertions(parser: *JsonParser, allocator: std.mem.Allocator, info: *IntentInfo) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        var assertion = IntentAssertion{
+            .name = try allocator.dupe(u8, ""),
+            .method = try allocator.dupe(u8, ""),
+            .path = try allocator.dupe(u8, ""),
+        };
+        errdefer assertion.deinit(allocator);
+
+        if (!parser.consume('{')) return error.InvalidJson;
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "name")) {
+                allocator.free(assertion.name);
+                assertion.name = try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "method")) {
+                allocator.free(assertion.method);
+                assertion.method = try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "path")) {
+                allocator.free(assertion.path);
+                assertion.path = try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "requestBodyJson")) {
+                parser.skipWhitespace();
+                if (parser.readNull()) {
+                    assertion.request_body_json = null;
+                } else {
+                    assertion.request_body_json = try trace.unescapeJson(allocator, parser.readString() orelse "");
+                }
+            } else if (std.mem.eql(u8, key, "expectedStatus")) {
+                parser.skipWhitespace();
+                if (parser.readNull()) {
+                    assertion.expected_status = null;
+                } else {
+                    assertion.expected_status = parser.readU16() orelse null;
+                }
+            } else if (std.mem.eql(u8, key, "expectedBodyJson")) {
+                parser.skipWhitespace();
+                if (parser.readNull()) {
+                    assertion.expected_body_json = null;
+                } else {
+                    assertion.expected_body_json = try trace.unescapeJson(allocator, parser.readString() orelse "");
+                }
+            } else if (std.mem.eql(u8, key, "expectedHeaders")) {
+                try parseIntentHeaders(parser, allocator, &assertion);
+            } else if (std.mem.eql(u8, key, "sourceLine")) {
+                assertion.source_line = parser.readU32() orelse 0;
+            } else if (std.mem.eql(u8, key, "sourceColumn")) {
+                assertion.source_column = parser.readU32() orelse 0;
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try info.assertions.append(allocator, assertion);
+    }
+}
+
+fn parseIntentHeaders(parser: *JsonParser, allocator: std.mem.Allocator, assertion: *IntentAssertion) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        if (!parser.consume('{')) return error.InvalidJson;
+        var name_buf: []const u8 = "";
+        var value_buf: []const u8 = "";
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+            if (std.mem.eql(u8, key, "name")) {
+                name_buf = parser.readString() orelse "";
+            } else if (std.mem.eql(u8, key, "value")) {
+                value_buf = parser.readString() orelse "";
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        var header = IntentExpectedHeader{
+            .name = try allocator.dupe(u8, name_buf),
+            .value = try allocator.dupe(u8, value_buf),
+        };
+        errdefer header.deinit(allocator);
+        try assertion.expected_headers.append(allocator, header);
+    }
 }
 
 fn parseRateLimiting(parser: *JsonParser) !RateLimitInfo {

@@ -27,6 +27,7 @@ const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const rule_registry = @import("rule_registry.zig");
 const spec_discharge = @import("spec_discharge.zig");
+const intent_extractor = @import("intent_extractor.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -315,6 +316,11 @@ pub const ContractBuilder = struct {
         // build — the downstream verifier owns the hard-fail policy.
         try self.emitWebSocketConsistencyDiagnostics();
 
+        // Author-declared intent assertions. Extraction is strict and
+        // fails to `intent.dynamic = true` on any non-literal form rather
+        // than degrading, preserving the deterministic-extraction line.
+        const intent_value = try self.extractIntentAssertions();
+
         if (handler_fn) |hf| {
             try self.extractScopeUsage(hf);
             try self.extractDurableWorkflow(handler_path, hf);
@@ -452,6 +458,7 @@ pub const ContractBuilder = struct {
             .aot = aot_info,
             .rate_limiting = rate_limiting,
             .properties = properties,
+            .intent = intent_value,
             .property_provenance = .{
                 .deterministic = self.nondeterministic_cause,
             },
@@ -1548,6 +1555,20 @@ pub const ContractBuilder = struct {
 
     fn markWorkflowPartial(self: *ContractBuilder) void {
         self.durable_workflow.proof_level = .partial;
+    }
+
+    fn extractIntentAssertions(self: *ContractBuilder) !?contract_types.IntentInfo {
+        return intent_extractor.extract(.{
+            .allocator = self.allocator,
+            .ir_view = self.ir_view,
+            .resolver = intentAtomResolver,
+            .resolver_ctx = @ptrCast(self),
+        });
+    }
+
+    fn intentAtomResolver(atom_idx: u16, ctx: *const anyopaque) ?[]const u8 {
+        const self: *const ContractBuilder = @ptrCast(@alignCast(ctx));
+        return self.resolveAtomName(atom_idx);
     }
 
     fn resolveAtomName(self: *const ContractBuilder, atom_idx: u16) ?[]const u8 {
