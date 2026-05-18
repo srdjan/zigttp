@@ -1389,13 +1389,18 @@ const Stripper = struct {
 
             // Check identifiers for banned types (catches nested 'any' in Record<string, any> etc.)
             if (isIdentifierStart(c)) {
-                try self.checkForAnyType();
+                if (!(brace_depth > 0 and self.isObjectTypeMemberKey(self.pos))) {
+                    try self.checkForAnyType();
+                }
             }
 
             // Check delimiters at depth 0 FIRST (before tracking)
             if (paren_depth == 0 and bracket_depth == 0 and angle_depth == 0 and brace_depth == 0) {
                 for (delimiters) |d| {
-                    if (c == d) return;
+                    if (c == d) {
+                        if (c == '{' and self.isObjectTypeBraceStart(self.pos)) break;
+                        return;
+                    }
                 }
                 // Check for arrow
                 if (stop_before_arrow and c == '=' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>') {
@@ -1430,6 +1435,51 @@ const Stripper = struct {
             }
             self.pos += 1;
         }
+    }
+
+    fn isObjectTypeBraceStart(self: *const Self, pos: usize) bool {
+        const prev = self.previousSignificantChar(pos) orelse return true;
+        return switch (prev) {
+            ':', '|', '&', '(', '[', '<', ',', '=' => true,
+            else => false,
+        };
+    }
+
+    fn isObjectTypeMemberKey(self: *const Self, pos: usize) bool {
+        var i = pos;
+        if (i >= self.source.len or !isIdentifierStart(self.source[i])) return false;
+
+        while (i < self.source.len and isIdentifierContinue(self.source[i])) {
+            i += 1;
+        }
+        i = self.skipInlineWhitespaceFrom(i);
+
+        if (i < self.source.len and self.source[i] == '?') {
+            i += 1;
+            i = self.skipInlineWhitespaceFrom(i);
+        }
+
+        return i < self.source.len and (self.source[i] == ':' or self.source[i] == '(');
+    }
+
+    fn skipInlineWhitespaceFrom(self: *const Self, pos: usize) usize {
+        var i = pos;
+        while (i < self.source.len and (self.source[i] == ' ' or self.source[i] == '\t')) {
+            i += 1;
+        }
+        return i;
+    }
+
+    fn previousSignificantChar(self: *const Self, pos: usize) ?u8 {
+        var i = pos;
+        while (i > 0) {
+            i -= 1;
+            return switch (self.source[i]) {
+                ' ', '\t', '\n', '\r' => continue,
+                else => self.source[i],
+            };
+        }
+        return null;
     }
 
     fn skipBalancedAngles(self: *Self) bool {
@@ -1871,6 +1921,20 @@ test "any return type errors" {
     try std.testing.expectError(StripError.UnsupportedAnyType, result);
 }
 
+test "any in object return type errors" {
+    const result = strip(std.testing.allocator, "function f(): { ok: any } { return { ok: true }; }", .{});
+    try std.testing.expectError(StripError.UnsupportedAnyType, result);
+}
+
+test "any object return type member key allowed" {
+    const source = "function f(): { any: string; optional?: number } { return { any: \"x\", optional: 1 }; }";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "any: string") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "optional?: number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "return { any: \"x\", optional: 1 }") != null);
+}
+
 test "any as assertion errors" {
     // 'as' is now always rejected, so UnsupportedAsAssertion fires before any check
     const result = strip(std.testing.allocator, "const x = value as any;", .{});
@@ -1990,12 +2054,48 @@ test "function return type stripped" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, "function add(a, b)") != null);
 }
 
+test "function object return type stripped" {
+    const source = "function make(): { ok: boolean } { return { ok: true }; }";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "boolean") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "return { ok: true }") != null);
+}
+
+test "function nested object return type stripped" {
+    const source = "function make(): { ok: boolean; meta: { count: number } } { return { ok: true, meta: { count: 1 } }; }";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "boolean") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "return { ok: true, meta: { count: 1 } }") != null);
+}
+
+test "function union and intersection object return types stripped" {
+    const source =
+        \\function fromUnion(): Response | { ok: boolean } { return { ok: true }; }
+        \\function fromIntersection(): Response & { ok: boolean } { return { ok: true }; }
+    ;
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "boolean") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "return { ok: true }") != null);
+}
+
 test "arrow function annotation stripped" {
     const result = try strip(std.testing.allocator, "const f = (x: string): string => x.trim();", .{});
     defer @constCast(&result).deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.code, ": string") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "const f = (x") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "=> x.trim()") != null);
+}
+
+test "arrow function object return type stripped" {
+    const source = "const make = (): { ok: boolean } => ({ ok: true });";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "boolean") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "=> ({ ok: true })") != null);
 }
 
 // ============================================================================
@@ -2321,6 +2421,23 @@ test "TypeMap records arrow function return type" {
             found_return = true;
             const type_text = tm.getTypeText(entry);
             try std.testing.expect(std.mem.indexOf(u8, type_text, "string") != null);
+        }
+    }
+    try std.testing.expect(found_return);
+}
+
+test "TypeMap records object return type" {
+    const source = "function make(): { ok: boolean } { return { ok: true }; }";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+
+    const tm = result.type_map;
+    var found_return = false;
+    for (tm.entries.items) |entry| {
+        if (entry.kind == .return_annotation) {
+            found_return = true;
+            const type_text = std.mem.trim(u8, tm.getTypeText(entry), " \n\r\t");
+            try std.testing.expectEqualStrings("{ ok: boolean }", type_text);
         }
     }
     try std.testing.expect(found_return);
