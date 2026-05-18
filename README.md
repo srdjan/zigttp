@@ -472,11 +472,18 @@ zigttp proofs export                       # markdown receipt to stdout (default
 zigttp proofs export --format html         # self-contained HTML doc
 zigttp proofs export --format svg          # verdict badge for a README
 zigttp proofs export --ref HEAD~2 --format md
+zigttp proofs bundle --contract PATH --out DIR [--binary PATH] [--replay PATH]
+zigttp proofs verify <bundle-dir>          # re-check every component sha256
 ```
 
 Refs may be `HEAD`, `HEAD~N`, or a contract sha prefix. The exporter
 prints to stdout; redirect to commit a receipt or badge alongside the
-PR description.
+PR description. `bundle` packages a contract (and optional binary plus
+replay artifacts) into a directory layout with a reproducible
+`bundle.json` manifest; `verify` re-checks every sha256 in the manifest
+against the actual file bytes. The bundle carries no env values,
+secrets, or tokens; only contract-derived identifiers and explicitly
+supplied replay artifacts.
 
 ### `zigttp studio`
 
@@ -595,8 +602,9 @@ zigts prove <old.json> <new.json>     # Compare contracts (exit 0=safe, 1=breaki
 zigts mock <tests.jsonl> [--port N]   # Mock server from test cases
 zigts link <system.json>              # Cross-handler contract linking
 zigts rollout <old-system.json> <new-system.json>  # Plan safe multi-handler rollout
-zigts features [--json]               # List allowed/blocked language features
+zigts features [--json]               # List allowed/blocked language features (with reason and proof unlocked)
 zigts modules [--json]                # List virtual modules and exports
+zigts restrictions [--json] [--by proof|class]  # Language cuts mapped to the proofs they unlock
 zigts meta [--json]                   # Policy metadata (version, hash, rule count)
 zigts gen-tests [handler.ts] [-o output.jsonl]  # Generate tests from proven paths
 zigts verify-paths <f>... [--json]    # Full analysis on files (includes flow-checker)

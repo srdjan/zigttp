@@ -10,7 +10,7 @@ Validated on Zig 0.16.0-dev.3073+28ae5d415. Newer nightlies are best-effort unti
 
 The build produces three binaries:
 
-- `zigttp` — the primary developer CLI and local runtime entrypoint. Subcommands: `init`, `dev`, `serve`, `check`, `compile`, `prove`, `mock`, `link`, `expert` (deprecated alias), `deploy`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`.
+- `zigttp` — the primary developer CLI and local runtime entrypoint. Subcommands: `init`, `dev`, `serve`, `check`, `compile`, `prove`, `mock`, `link`, `expert` (deprecated alias), `deploy`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`, `assert-intent`, `proofs` (with `list | show | diff | watch | export | badge | bundle | verify` subcommands), `witnesses`.
 - `zigttp-runtime` — the internal runtime template used for self-contained outputs and direct runtime tests.
 - `zigts` — the engine/compiler CLI plus the interactive `zigts expert` coding-agent entrypoint.
 
@@ -99,7 +99,7 @@ Response helpers: `Response.json()`, `Response.text()`, `Response.html()`, `Resp
 All documented in detail in their source files and in `docs/`:
 
 - **Verification** (`-Dverify`): Proves Response returns, Result checking, state isolation. See [docs/verification.md](docs/verification.md).
-- **Contracts** (`-Dcontract`): Extracts imports, env vars, routes, egress hosts, handler properties. See `packages/zigts/src/handler_contract.zig`.
+- **Contracts** (`-Dcontract`): Extracts imports, env vars, routes, egress hosts, handler properties, and author-declared intent assertions. See `packages/zigts/src/handler_contract.zig`. Intent extraction is strict-literal: a top-level `export const intent = { assertions: [...] }` populates `contract.intent.assertions[]`; any non-literal form sets `intent.dynamic = true`. See `packages/zigts/src/intent_extractor.zig`.
 - **Sound mode**: Type-directed analysis across operators. See [docs/sound-mode.md](docs/sound-mode.md).
 - **Type checking**: Full TS annotation checking. See `packages/zigts/src/type_checker.zig`, `packages/zigts/src/type_map.zig`.
 - **Flow analysis**: Data label tracking (secret, credential, user_input). See `packages/zigts/src/flow_checker.zig`.
@@ -132,6 +132,7 @@ zigts mock <tests.jsonl> [--port PORT]
 zigts link <system.json> [--output-dir <dir>]
 zigts features [--json]
 zigts modules [--json]
+zigts restrictions [--json] [--by proof|class]
 zigts meta [--json]
 zigts verify-paths <file>... [--json]
 zigts verify-modules <file>... [--strict] [--json]
@@ -143,7 +144,7 @@ zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
 zigts expert
 ```
 
-`--json` emits structured diagnostics to stdout with error codes (ZTS0xx-ZTS3xx), source locations, and suggestion fields. `zigts features` and `zigts modules` list language rules and virtual module exports. `zigts expert` is the canonical interactive compiler-in-the-loop workflow.
+`--json` emits structured diagnostics to stdout with error codes (ZTS0xx-ZTS3xx), source locations, and suggestion fields. `zigts features` and `zigts modules` list language rules and virtual module exports. `zigts restrictions` projects every blocked feature into the failure class it eliminates and the proof it unlocks (see [docs/restrictions-to-proofs.md](docs/restrictions-to-proofs.md) for the table). `zigts expert` is the canonical interactive compiler-in-the-loop workflow.
 
 `zigts edit-simulate` runs the analysis pipeline on a handler file and reports violations as JSON. With `--before`, it marks violations introduced by the edit vs pre-existing. `zigts describe-rule` lists all diagnostic rules; `--hash` outputs the policy hash for CI assertions. `zigts search` finds rules by keyword. `zigts review-patch` combines edit-simulate with `--diff-only` filtering to show only new violations.
 
