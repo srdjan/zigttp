@@ -51,19 +51,11 @@ const getPicMegaRecoveryWindow = ic.getPicMegaRecoveryWindow;
 pub threadlocal var current_interpreter: ?*Interpreter = null;
 
 /// Interpreter state
+const saved_state_mod = @import("interpreter/saved_state.zig");
+
 pub const Interpreter = struct {
-    pub const MAX_STATE_DEPTH = 1024;
-    pub const SavedState = struct {
-        pc: [*]const u8,
-        code_end: [*]const u8,
-        constants: []const value.JSValue,
-        current_func: ?*const bytecode.FunctionBytecode,
-        sp: usize,
-        fp: usize,
-        call_depth: usize,
-        catch_depth: usize,
-        exception: value.JSValue,
-    };
+    pub const MAX_STATE_DEPTH = saved_state_mod.MAX_STATE_DEPTH;
+    pub const SavedState = saved_state_mod.SavedState;
 
     ctx: *context.Context,
     pc: [*]const u8, // Program counter

@@ -47,48 +47,35 @@ extern fn jitForOfNext(ctx: *Context) u64;
 extern fn jitForOfNextPutLoc(ctx: *Context, local_idx: u8) u64;
 const jitDeoptimize = deopt.jitDeoptimize;
 
-// Context field offsets for JIT code generation
-// These are computed at compile time using @offsetOf
-const CTX_STACK_PTR_OFF: i32 = @intCast(@offsetOf(Context, "stack"));
-const CTX_STACK_LEN_OFF: i32 = @intCast(@offsetOf(Context, "stack") + @sizeOf(*value_mod.JSValue));
-const CTX_SP_OFF: i32 = @intCast(@offsetOf(Context, "sp"));
-const CTX_FP_OFF: i32 = @intCast(@offsetOf(Context, "fp"));
-const CTX_JIT_INTERP_OFF: i32 = @intCast(@offsetOf(Context, "jit_interpreter"));
-const CTX_HYBRID_OFF: i32 = @intCast(@offsetOf(Context, "hybrid"));
-
-// Arena offsets for inline bump allocation
-const HYBRID_ARENA_OFF: i32 = @intCast(@offsetOf(arena_mod.HybridAllocator, "arena"));
-const ARENA_PTR_OFF: i32 = @intCast(@offsetOf(arena_mod.Arena, "ptr"));
-const ARENA_LIMIT_OFF: i32 = @intCast(@offsetOf(arena_mod.Arena, "limit"));
-const JSOBJECT_SIZE: u32 = @sizeOf(JSObject);
-const JSOBJECT_SIZE_ALIGNED: u32 = (JSOBJECT_SIZE + 7) & ~@as(u32, 7); // 8-byte aligned
-
-const PTR_EXTRACT_MASK: u64 = value_mod.JSValue.PAYLOAD_MASK;
-
-// JSObject field offsets for inline cache fast path
-const OBJ_HIDDEN_CLASS_OFF: i32 = @intCast(@offsetOf(JSObject, "hidden_class_idx"));
-const OBJ_INLINE_SLOTS_OFF: i32 = @intCast(@offsetOf(JSObject, "inline_slots"));
-const OBJ_FUNC_DATA_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.FUNC_DATA)) * 8;
-const OBJ_FUNC_IS_BYTECODE_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.FUNC_IS_BYTECODE)) * 8;
-const OBJ_FUNC_GUARD_ID_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.FUNC_GUARD_ID)) * 8;
-const OBJ_CLASS_ID_OFF: i32 = @intCast(@offsetOf(JSObject, "class_id"));
-// Range iterator inline slot offsets (each slot is 8 bytes = sizeof(JSValue))
-const OBJ_RANGE_START_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_START)) * 8;
-const OBJ_RANGE_STEP_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_STEP)) * 8;
-const OBJ_RANGE_LENGTH_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_LENGTH)) * 8;
-const NATIVE_ARGCOUNT_OFF: i32 = @intCast(@offsetOf(object.NativeFunctionData, "arg_count"));
-
-// Interpreter field offsets for inline cache fast path
-const INTERP_PIC_CACHE_OFF: i32 = @intCast(@offsetOf(Interpreter, "pic_cache"));
-
-// PIC structure sizes and offsets
-const PIC_SIZE: i32 = @intCast(@sizeOf(PolymorphicInlineCache));
-const PIC_ENTRY_SIZE: i32 = @intCast(@sizeOf(PICEntry));
-// PICEntry layout: hidden_class_idx (u32) + slot_offset (u16)
-const PIC_ENTRY_HIDDEN_CLASS_OFF: i32 = 0;
-const PIC_ENTRY_SLOT_OFF: i32 = @intCast(@sizeOf(object.HiddenClassIndex));
-// Number of PIC entries to check in generated code (balance code size vs hit rate)
-const PIC_CHECK_COUNT: i32 = 4;
+const offsets = @import("baseline_offsets.zig");
+const CTX_STACK_PTR_OFF = offsets.CTX_STACK_PTR_OFF;
+const CTX_STACK_LEN_OFF = offsets.CTX_STACK_LEN_OFF;
+const CTX_SP_OFF = offsets.CTX_SP_OFF;
+const CTX_FP_OFF = offsets.CTX_FP_OFF;
+const CTX_JIT_INTERP_OFF = offsets.CTX_JIT_INTERP_OFF;
+const CTX_HYBRID_OFF = offsets.CTX_HYBRID_OFF;
+const HYBRID_ARENA_OFF = offsets.HYBRID_ARENA_OFF;
+const ARENA_PTR_OFF = offsets.ARENA_PTR_OFF;
+const ARENA_LIMIT_OFF = offsets.ARENA_LIMIT_OFF;
+const JSOBJECT_SIZE = offsets.JSOBJECT_SIZE;
+const JSOBJECT_SIZE_ALIGNED = offsets.JSOBJECT_SIZE_ALIGNED;
+const PTR_EXTRACT_MASK = offsets.PTR_EXTRACT_MASK;
+const OBJ_HIDDEN_CLASS_OFF = offsets.OBJ_HIDDEN_CLASS_OFF;
+const OBJ_INLINE_SLOTS_OFF = offsets.OBJ_INLINE_SLOTS_OFF;
+const OBJ_FUNC_DATA_OFF = offsets.OBJ_FUNC_DATA_OFF;
+const OBJ_FUNC_IS_BYTECODE_OFF = offsets.OBJ_FUNC_IS_BYTECODE_OFF;
+const OBJ_FUNC_GUARD_ID_OFF = offsets.OBJ_FUNC_GUARD_ID_OFF;
+const OBJ_CLASS_ID_OFF = offsets.OBJ_CLASS_ID_OFF;
+const OBJ_RANGE_START_OFF = offsets.OBJ_RANGE_START_OFF;
+const OBJ_RANGE_STEP_OFF = offsets.OBJ_RANGE_STEP_OFF;
+const OBJ_RANGE_LENGTH_OFF = offsets.OBJ_RANGE_LENGTH_OFF;
+const NATIVE_ARGCOUNT_OFF = offsets.NATIVE_ARGCOUNT_OFF;
+const INTERP_PIC_CACHE_OFF = offsets.INTERP_PIC_CACHE_OFF;
+const PIC_SIZE = offsets.PIC_SIZE;
+const PIC_ENTRY_SIZE = offsets.PIC_ENTRY_SIZE;
+const PIC_ENTRY_HIDDEN_CLASS_OFF = offsets.PIC_ENTRY_HIDDEN_CLASS_OFF;
+const PIC_ENTRY_SLOT_OFF = offsets.PIC_ENTRY_SLOT_OFF;
+const PIC_CHECK_COUNT = offsets.PIC_CHECK_COUNT;
 
 // Architecture-specific types selected at compile time
 pub const Arch = builtin.cpu.arch;
@@ -99,35 +86,11 @@ pub const Emitter = if (is_x86_64) x86.X86Emitter else if (is_aarch64) arm64.Arm
 pub const Register = if (is_x86_64) x86.Register else if (is_aarch64) arm64.Register else void;
 pub const Regs = if (is_x86_64) x86.Regs else if (is_aarch64) arm64.Regs else void;
 
-/// Error types for compilation
-pub const CompileError = error{
-    UnsupportedOpcode,
-    CodeTooLarge,
-    AllocationFailed,
-    OutOfMemory,
-    OffsetTooLarge,
-    UnalignedBranch,
-};
-
-/// Compiled function entry point signature
-/// Takes context pointer, returns JS value (u64)
-pub const CompiledFn = *const fn (ctx: *anyopaque) callconv(.c) u64;
-
-/// Deoptimization reason for type guards
-pub const DeoptReason = enum(u8) {
-    type_mismatch,
-    hidden_class_mismatch,
-    overflow,
-    callee_changed,
-    bool_expected,
-};
-
-/// Deoptimization point recorded during compilation
-pub const DeoptPoint = struct {
-    native_offset: u32, // Where to jump for deopt
-    bytecode_offset: u32, // Where to resume in interpreter
-    reason: DeoptReason,
-};
+const baseline_deopt = @import("baseline_deopt.zig");
+pub const CompileError = baseline_deopt.CompileError;
+pub const CompiledFn = baseline_deopt.CompiledFn;
+pub const DeoptReason = baseline_deopt.DeoptReason;
+pub const DeoptPoint = baseline_deopt.DeoptPoint;
 
 // ========================================================================
 // Register Allocation for Hot Locals (ARM64 only)

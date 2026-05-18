@@ -128,7 +128,7 @@ fn utf8SequenceEnd(text: []const u8, start: usize) usize {
     return @min(text.len, start + len);
 }
 
-fn writeSpaces(w: *std.Io.Writer, count: usize) !void {
+pub fn writeSpaces(w: *std.Io.Writer, count: usize) !void {
     var remaining = count;
     while (remaining > 0) : (remaining -= 1) {
         try w.writeByte(' ');

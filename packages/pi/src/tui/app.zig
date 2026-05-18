@@ -7,6 +7,9 @@ const zigts = @import("zigts");
 const term = @import("term.zig");
 const ansi = @import("ansi.zig");
 const line_editor = @import("line_editor.zig");
+const layout_mod = @import("layout.zig");
+const keymap = @import("keymap.zig");
+const render_io = @import("render_io.zig");
 const repl = @import("../repl.zig");
 const agent = @import("../agent.zig");
 const loop = @import("../loop.zig");
@@ -32,509 +35,34 @@ const ExpertFlags = app.ExpertFlags;
 const UiPayload = ui_payload_mod.UiPayload;
 const ToolResult = registry_tool.ToolResult;
 
-const prompt_label = "expert> ";
+const prompt_label = layout_mod.prompt_label;
 const alternate_screen_enter = "\x1b[?1049h";
 const alternate_screen_exit = "\x1b[?1049l";
 const clear_screen = "\x1b[2J\x1b[H";
 const hide_cursor = "\x1b[?25l";
 const show_cursor = "\x1b[?25h";
 
-pub const FocusMode = enum {
-    composer,
-    feed,
-    inspector,
-};
+const state_mod = @import("state.zig");
 
-pub const ViewMode = enum {
-    ledger,
-    chat,
-};
+pub const FocusMode = state_mod.FocusMode;
+pub const ViewMode = state_mod.ViewMode;
+const StatusNotice = state_mod.StatusNotice;
+pub const FeedItemKind = state_mod.FeedItemKind;
+pub const FeedItem = state_mod.FeedItem;
+pub const PendingWitnessFocus = state_mod.PendingWitnessFocus;
+pub const WitnessVerdictRecord = state_mod.WitnessVerdictRecord;
+const LedgerTab = state_mod.LedgerTab;
+pub const ComposerState = state_mod.ComposerState;
+pub const InspectorState = state_mod.InspectorState;
+const ApprovalChoice = state_mod.ApprovalChoice;
+const ApprovalModal = state_mod.ApprovalModal;
+pub const ModalState = state_mod.ModalState;
+const LocalResult = state_mod.LocalResult;
+pub const AppState = state_mod.AppState;
 
-const StatusNotice = union(enum) {
-    none,
-    structural_property,
-    invalid_property,
-    /// `g` was just pressed on a goal-driveable chip; the autoloop is in
-    /// flight. The slice is the property name and is owned by the comptime
-    /// PropertiesSnapshot field set, so no allocation is required.
-    goal_driving: []const u8,
-    /// `g` was just pressed on a witness in the witnesses tab; the
-    /// autoloop is converging on that specific counterexample. Both
-    /// fields borrow from `pending_witness_focus` and the comptime
-    /// property table, so the variant itself owns nothing.
-    witness_driving: WitnessDriving,
-    /// The autoloop returned. Carries the verdict so the user can see
-    /// whether the chip went green or which budget tripped.
-    goal_completed: GoalCompleted,
-    /// The autoloop dispatch itself failed (workspace lookup, tool error,
-    /// allocation). Distinct from a non-`achieved` verdict.
-    goal_dispatch_error: []const u8,
-    /// `r` was pressed on a witness but no replay implementation is
-    /// registered. Surfaced inline in the status row so the user knows
-    /// the keystroke was recognised but cannot run.
-    replay_unavailable,
-    /// Witness replay finished. The TUI uses this to surface `replayed
-    /// PASS/FIXED <key>` in the status row alongside the inline verdict
-    /// rendered in the witness pane.
-    replay_done: ReplayDone,
-    /// Witness replay errored before the engine could finish (file
-    /// missing, parse error, tool unwired). The error name surfaces in
-    /// the status row.
-    replay_error: []const u8,
-    /// `m` minted the selected witness as a regression test case.
-    /// `short_key` borrows from the witness body in the transcript.
-    /// The full path lands as a system_note for durability; this
-    /// notice just acknowledges the action in the status row.
-    mint_done: []const u8,
-    /// `m` was pressed but minting could not proceed: missing verdict,
-    /// witness selection out of range, or filesystem failure.
-    mint_error: []const u8,
-    /// User pressed Ctrl-C while a worker was in flight; the cancel
-    /// flag has been set and the worker is bailing at the next phase
-    /// boundary. Stays painted until the worker actually returns.
-    cancelling,
-    /// The autoloop returned because cancel was observed. Property
-    /// name borrowed from the comptime table.
-    goal_cancelled: []const u8,
-    /// The replay worker returned but the user had requested cancel,
-    /// so the verdict is dropped on the floor.
-    replay_cancelled,
-};
-
-const ReplayDone = struct {
-    reproduced: bool,
-    /// First 12 hex chars of the witness key. Borrowed from the witness
-    /// body; the verdict record itself owns the full key.
-    short_key: []const u8,
-};
-
-const WitnessDriving = struct {
-    property: []const u8,
-    short_key: []const u8,
-};
-
-const GoalCompleted = struct {
-    name: []const u8,
-    verdict: autoloop.AutoloopVerdict,
-};
-
-const LayoutMode = enum {
-    split,
-    stacked,
-};
-
-pub const FeedItemKind = enum {
-    user_text,
-    model_text,
-    tool_use,
-    tool_result,
-    proof_card,
-    diagnostic_box,
-    verified_patch,
-    system_note,
-    local_result,
-};
-
-const FeedSource = union(enum) {
-    transcript: usize,
-    local_result: usize,
-};
-
-pub const FeedItem = struct {
-    source: FeedSource,
-    kind: FeedItemKind,
-};
-
-/// Pending dispatch carrier for `g` pressed on a witness. Owns its key
-/// copy so the keystroke handler does not have to keep the source
-/// witness body alive while the autoloop runs.
-pub const PendingWitnessFocus = struct {
-    key: []u8,
-    /// Property tag (e.g. `no_secret_leakage`). Borrowed from the
-    /// `boolPropertyNameAt` table; free `key` only.
-    property: []const u8,
-
-    pub fn deinit(self: *PendingWitnessFocus, allocator: std.mem.Allocator) void {
-        allocator.free(self.key);
-        self.* = .{ .key = &.{}, .property = &.{} };
-    }
-};
-
-/// Owned record of a witness replay verdict held in AppState. Pairs the
-/// stable witness key with the runtime's `Verdict` so the renderer can
-/// confirm the verdict still belongs to the currently-selected witness
-/// after the patch or selection changes.
-pub const WitnessVerdictRecord = struct {
-    /// Stable witness key the verdict applies to. Owned.
-    key: []u8,
-    verdict: witness_replay.Verdict,
-    /// Cached classification of `verdict` against the original witness
-    /// body (was the violation reproduced?). The renderer surfaces this
-    /// as PASS / FIXED so the user does not have to interpret status
-    /// codes themselves.
-    reproduced: bool,
-
-    pub fn deinit(self: *WitnessVerdictRecord, allocator: std.mem.Allocator) void {
-        allocator.free(self.key);
-        self.verdict.deinit(allocator);
-        self.* = .{ .key = &.{}, .verdict = .{ .ran = false, .actual_status = 0, .actual_body = &.{}, .error_text = null }, .reproduced = false };
-    }
-};
-
-const LedgerTab = enum {
-    /// Proof-first summary: property delta, violations before/after, witness
-    /// status, chain metadata. The default tab - callers trust the badges
-    /// and expand the diff only when a change needs line-level inspection.
-    delta,
-    diff,
-    properties,
-    violations,
-    prove,
-    system,
-    citations,
-    /// Counterexample bodies (request + IO stub script) for each witness
-    /// the patch closed or introduced. Step 1 of the Witness Theater.
-    witnesses,
-};
-
-pub const ComposerState = struct {
-    line: []const u8 = "",
-    cursor: usize = 0,
-};
-
-pub const InspectorState = struct {
-    scroll_offset: usize = 0,
-};
-
-const ApprovalChoice = enum {
-    reject,
-    approve,
-};
-
-const ApprovalModal = struct {
-    file: []const u8,
-    choice: ApprovalChoice = .reject,
-};
-
-/// One optional modal overlay. Extend to a tagged union if a second
-/// kind ever appears; for now the approval prompt is the only modal.
-pub const ModalState = ?ApprovalModal;
-
-const LocalResult = struct {
-    title: []u8,
-    ok: bool,
-    llm_text: []u8,
-    ui_payload: ?UiPayload = null,
-
-    fn initFromToolResult(
-        allocator: std.mem.Allocator,
-        title: []const u8,
-        result: *const ToolResult,
-    ) !LocalResult {
-        return .{
-            .title = try allocator.dupe(u8, title),
-            .ok = result.ok,
-            .llm_text = try allocator.dupe(u8, result.llm_text),
-            .ui_payload = if (result.ui_payload) |payload|
-                try payload.clone(allocator)
-            else
-                null,
-        };
-    }
-
-    fn initPlainText(
-        allocator: std.mem.Allocator,
-        title: []const u8,
-        ok: bool,
-        body: []const u8,
-    ) !LocalResult {
-        return .{
-            .title = try allocator.dupe(u8, title),
-            .ok = ok,
-            .llm_text = try allocator.dupe(u8, body),
-            .ui_payload = .{ .plain_text = try allocator.dupe(u8, body) },
-        };
-    }
-
-    fn deinit(self: *LocalResult, allocator: std.mem.Allocator) void {
-        allocator.free(self.title);
-        allocator.free(self.llm_text);
-        if (self.ui_payload) |*payload| payload.deinit(allocator);
-        self.* = .{
-            .title = &.{},
-            .ok = false,
-            .llm_text = &.{},
-            .ui_payload = null,
-        };
-    }
-};
-
-pub const AppState = struct {
-    feed_items: std.ArrayListUnmanaged(FeedItem) = .empty,
-    ledger_items: std.ArrayListUnmanaged(usize) = .empty,
-    local_results: std.ArrayListUnmanaged(LocalResult) = .empty,
-    selected_feed_index: usize = 0,
-    selected_ledger_index: usize = 0,
-    feed_scroll: usize = 0,
-    ledger_scroll: usize = 0,
-    selected_property_index: usize = 0,
-    focus_mode: FocusMode = .composer,
-    view_mode: ViewMode = .ledger,
-    ledger_tab: LedgerTab = .delta,
-    diff_expanded: bool = false,
-    composer: ComposerState = .{},
-    inspector: InspectorState = .{},
-    modal: ModalState = null,
-    status_notice: StatusNotice = .none,
-    observed_transcript_len: usize = 0,
-    layout_mode: LayoutMode = .split,
-    /// True while a property-goal autoloop or witness replay is running
-    /// on the worker thread. Single-flight guard (a second `g`/`r` press
-    /// is dropped until the run returns) and renderer gate
-    /// (`state.sync` skips transcript walks while it is true so the
-    /// worker's appends stay invisible to the main thread).
-    autoloop_in_flight: bool = false,
-    /// Cursor in the witnesses tab. Indexes (defeated ++ new) for the
-    /// currently selected ledger patch. Reset to 0 whenever the patch
-    /// selection changes.
-    selected_witness_index: usize = 0,
-    /// Verdict from the most recent `r` (replay) on the selected witness.
-    /// Owned. Cleared when the patch selection or witness selection
-    /// changes, or when the user explicitly clears it. The TUI renders
-    /// it inline below the selected witness in the witnesses tab.
-    witness_verdict: ?WitnessVerdictRecord = null,
-    /// Pending witness-scoped goal drive: stable key copy stashed by the
-    /// `g` keystroke handler in the witnesses tab, read by
-    /// `prepareDriveJob` to populate the worker's focus key, and freed
-    /// in `applyDriveResult` when the worker returns. Non-null between
-    /// the keystroke and that apply step.
-    pending_witness_focus: ?PendingWitnessFocus = null,
-
-    pub fn deinit(self: *AppState, allocator: std.mem.Allocator) void {
-        self.feed_items.deinit(allocator);
-        self.ledger_items.deinit(allocator);
-        self.clearLocalResults(allocator);
-        self.clearWitnessVerdict(allocator);
-        self.clearPendingWitnessFocus(allocator);
-    }
-
-    pub fn clearWitnessVerdict(self: *AppState, allocator: std.mem.Allocator) void {
-        if (self.witness_verdict) |*record| {
-            record.deinit(allocator);
-            self.witness_verdict = null;
-        }
-    }
-
-    pub fn clearPendingWitnessFocus(self: *AppState, allocator: std.mem.Allocator) void {
-        if (self.pending_witness_focus) |*focus| {
-            focus.deinit(allocator);
-            self.pending_witness_focus = null;
-        }
-    }
-
-    pub fn clearLocalResults(self: *AppState, allocator: std.mem.Allocator) void {
-        for (self.local_results.items) |*result| result.deinit(allocator);
-        self.local_results.clearAndFree(allocator);
-    }
-
-    pub fn sync(
-        self: *AppState,
-        allocator: std.mem.Allocator,
-        session: *const agent.AgentSession,
-        editor: *const LineEditor,
-    ) !void {
-        self.composer = .{
-            .line = editor.line(),
-            .cursor = editor.cursor(),
-        };
-        // While a worker holds the transcript, do not walk new entries.
-        // Pre-grown capacity at dispatch keeps existing indices stable
-        // for the renderer; new appends are absorbed on worker
-        // completion when `applyWorkerResult` clears this flag.
-        if (self.autoloop_in_flight) return;
-        if (self.observed_transcript_len > session.transcript.len()) {
-            self.clearLocalResults(allocator);
-            self.clearWitnessVerdict(allocator);
-            try self.rebuildTranscriptFeed(allocator, session, editor);
-            return;
-        }
-
-        const follow_tail = self.shouldFollowTail();
-        while (self.observed_transcript_len < session.transcript.len()) : (self.observed_transcript_len += 1) {
-            const entry = session.transcript.at(self.observed_transcript_len);
-            try self.feed_items.append(allocator, .{
-                .source = .{ .transcript = self.observed_transcript_len },
-                .kind = kindForTranscriptEntry(entry),
-            });
-            switch (entry.*) {
-                .verified_patch => try self.ledger_items.append(allocator, self.observed_transcript_len),
-                else => {},
-            }
-        }
-        if (follow_tail and self.feed_items.items.len > 0) {
-            self.selected_feed_index = self.feed_items.items.len - 1;
-        }
-        self.clampSelection();
-        self.clampLedgerSelection();
-        self.clampPropertySelection();
-    }
-
-    pub fn resetToTranscript(
-        self: *AppState,
-        allocator: std.mem.Allocator,
-        session: *const agent.AgentSession,
-        editor: *const LineEditor,
-    ) !void {
-        try self.rebuildTranscriptFeed(allocator, session, editor);
-    }
-
-    fn rebuildTranscriptFeed(
-        self: *AppState,
-        allocator: std.mem.Allocator,
-        session: *const agent.AgentSession,
-        editor: *const LineEditor,
-    ) !void {
-        self.feed_items.clearRetainingCapacity();
-        self.observed_transcript_len = 0;
-        self.feed_scroll = 0;
-        self.ledger_scroll = 0;
-        self.inspector.scroll_offset = 0;
-        self.selected_feed_index = 0;
-        self.selected_ledger_index = 0;
-        self.selected_property_index = 0;
-        self.diff_expanded = false;
-        self.ledger_items.clearRetainingCapacity();
-        self.composer = .{
-            .line = editor.line(),
-            .cursor = editor.cursor(),
-        };
-        self.status_notice = .none;
-        while (self.observed_transcript_len < session.transcript.len()) : (self.observed_transcript_len += 1) {
-            const entry = session.transcript.at(self.observed_transcript_len);
-            try self.feed_items.append(allocator, .{
-                .source = .{ .transcript = self.observed_transcript_len },
-                .kind = kindForTranscriptEntry(entry),
-            });
-            switch (entry.*) {
-                .verified_patch => try self.ledger_items.append(allocator, self.observed_transcript_len),
-                else => {},
-            }
-        }
-        if (self.feed_items.items.len > 0) {
-            self.selected_feed_index = self.feed_items.items.len - 1;
-        }
-        if (self.ledger_items.items.len > 0) {
-            self.selected_ledger_index = self.ledger_items.items.len - 1;
-        }
-        self.clampSelection();
-        self.clampLedgerSelection();
-        self.clampPropertySelection();
-    }
-
-    pub fn appendLocalToolResult(
-        self: *AppState,
-        allocator: std.mem.Allocator,
-        title: []const u8,
-        result: *const ToolResult,
-    ) !void {
-        try self.local_results.append(allocator, try LocalResult.initFromToolResult(allocator, title, result));
-        try self.feed_items.append(allocator, .{
-            .source = .{ .local_result = self.local_results.items.len - 1 },
-            .kind = .local_result,
-        });
-        self.selected_feed_index = self.feed_items.items.len - 1;
-        self.focus_mode = .inspector;
-        self.inspector.scroll_offset = 0;
-    }
-
-    pub fn appendLocalText(
-        self: *AppState,
-        allocator: std.mem.Allocator,
-        title: []const u8,
-        ok: bool,
-        body: []const u8,
-    ) !void {
-        try self.local_results.append(allocator, try LocalResult.initPlainText(allocator, title, ok, body));
-        try self.feed_items.append(allocator, .{
-            .source = .{ .local_result = self.local_results.items.len - 1 },
-            .kind = .local_result,
-        });
-        self.selected_feed_index = self.feed_items.items.len - 1;
-        self.focus_mode = .inspector;
-        self.inspector.scroll_offset = 0;
-    }
-
-    fn shouldFollowTail(self: *const AppState) bool {
-        return self.feed_items.items.len == 0 or self.selected_feed_index + 1 >= self.feed_items.items.len;
-    }
-
-    fn clampSelection(self: *AppState) void {
-        if (self.feed_items.items.len == 0) {
-            self.selected_feed_index = 0;
-            self.feed_scroll = 0;
-            return;
-        }
-        if (self.selected_feed_index >= self.feed_items.items.len) {
-            self.selected_feed_index = self.feed_items.items.len - 1;
-        }
-    }
-
-    fn selectedFeedItem(self: *const AppState) ?FeedItem {
-        if (self.feed_items.items.len == 0) return null;
-        return self.feed_items.items[self.selected_feed_index];
-    }
-
-    fn selectedLedgerIndex(self: *const AppState) ?usize {
-        if (self.ledger_items.items.len == 0) return null;
-        return self.ledger_items.items[self.selected_ledger_index];
-    }
-
-    fn clampLedgerSelection(self: *AppState) void {
-        if (self.ledger_items.items.len == 0) {
-            self.selected_ledger_index = 0;
-            self.ledger_scroll = 0;
-            return;
-        }
-        if (self.selected_ledger_index >= self.ledger_items.items.len) {
-            self.selected_ledger_index = self.ledger_items.items.len - 1;
-        }
-    }
-
-    fn clampPropertySelection(self: *AppState) void {
-        if (property_goals.bool_property_count == 0) {
-            self.selected_property_index = 0;
-            return;
-        }
-        if (self.selected_property_index >= property_goals.bool_property_count) {
-            self.selected_property_index = property_goals.bool_property_count - 1;
-        }
-    }
-
-    fn clearStatusNotice(self: *AppState) void {
-        self.status_notice = .none;
-    }
-};
-
-const TerminalSize = struct {
-    width: usize,
-    height: usize,
-};
-
-const Layout = struct {
-    mode: LayoutMode,
-    body_height: usize,
-    feed_width: usize,
-    inspector_width: usize,
-    feed_height: usize,
-    inspector_height: usize,
-
-    fn totalBodyRows(self: Layout) usize {
-        return switch (self.mode) {
-            .split => self.body_height,
-            .stacked => self.feed_height + self.inspector_height,
-        };
-    }
-};
+const LayoutMode = layout_mod.LayoutMode;
+const TerminalSize = layout_mod.TerminalSize;
+const Layout = layout_mod.Layout;
 
 const OwnedLines = struct {
     storage: []u8,
@@ -547,10 +75,7 @@ const OwnedLines = struct {
     }
 };
 
-const ComposerView = struct {
-    visible: []const u8,
-    cursor_col: usize,
-};
+const ComposerView = layout_mod.ComposerView;
 
 const ModalAction = union(enum) {
     none,
@@ -558,65 +83,15 @@ const ModalAction = union(enum) {
     decided: bool,
 };
 
-/// Inputs to the autoloop worker. All slices owned by the dispatch
-/// allocator; `name` is borrowed from the comptime property table.
-const DriveJob = struct {
-    workspace_root: []u8,
-    file: []u8,
-    name: []const u8,
-    focus_key: ?[]u8,
-    events_path: ?[]u8,
-};
-
-/// Inputs to the replay worker. The witness body is cloned at dispatch
-/// so the worker never reads the live transcript.
-const ReplayJob = struct {
-    workspace_root: []u8,
-    handler_path: []u8,
-    witness: ui_payload_mod.WitnessBody,
-};
-
-const DriveSuccess = struct {
-    name: []const u8,
-    verdict: autoloop.AutoloopVerdict,
-};
-
-const DriveOutcome = union(enum) {
-    success: DriveSuccess,
-    /// Property name (borrowed). Surfaced as `goal_dispatch_error` in
-    /// the status row when the autoloop tool plumbing failed.
-    dispatch_error: []const u8,
-    /// Property name (borrowed). The autoloop returned because the
-    /// cancel token was observed at a phase boundary.
-    cancelled: []const u8,
-};
-
-const ReplaySuccess = struct {
-    verdict: witness_replay.Verdict,
-    /// Owned key copy that becomes `state.witness_verdict.key` on apply.
-    key: []u8,
-    reproduced: bool,
-};
-
-const ReplayOutcome = union(enum) {
-    success: ReplaySuccess,
-    /// `@errorName(...)` slice (static memory) when the replay engine
-    /// failed before producing a verdict.
-    err: []const u8,
-    /// User pressed Ctrl-C; the replay finished but its verdict is
-    /// dropped on the floor.
-    cancelled,
-};
-
-const WorkerJob = union(enum) {
-    drive: DriveJob,
-    replay: ReplayJob,
-};
-
-const WorkerResult = union(enum) {
-    drive: DriveOutcome,
-    replay: ReplayOutcome,
-};
+const worker_types = @import("worker_types.zig");
+const DriveJob = worker_types.DriveJob;
+const ReplayJob = worker_types.ReplayJob;
+const DriveSuccess = worker_types.DriveSuccess;
+const DriveOutcome = worker_types.DriveOutcome;
+const ReplaySuccess = worker_types.ReplaySuccess;
+const ReplayOutcome = worker_types.ReplayOutcome;
+const WorkerJob = worker_types.WorkerJob;
+const WorkerResult = worker_types.WorkerResult;
 
 /// Heap-allocated handoff between the main thread and the worker. The
 /// main thread owns it before spawn; the worker reads it during the
@@ -3394,79 +2869,13 @@ fn writeTextBlock(w: *std.Io.Writer, text: []const u8) !void {
     if (text.len == 0 or text[text.len - 1] != '\n') try w.writeAll("\n");
 }
 
-fn terminalSize() TerminalSize {
-    var winsize: std.posix.winsize = .{
-        .row = 0,
-        .col = 0,
-        .xpixel = 0,
-        .ypixel = 0,
-    };
-    if (std.c.ioctl(std.c.STDOUT_FILENO, std.c.T.IOCGWINSZ, &winsize) == 0 and winsize.col > 0 and winsize.row > 0) {
-        return .{
-            .width = @intCast(winsize.col),
-            .height = @intCast(winsize.row),
-        };
-    }
-    return .{ .width = 80, .height = 25 };
-}
+const terminalSize = layout_mod.terminalSize;
+const computeLayout = layout_mod.computeLayout;
+const visiblePrimaryRows = layout_mod.visiblePrimaryRows;
+const visibleComposer = layout_mod.visibleComposer;
 
-fn computeLayout(size: TerminalSize) Layout {
-    const composer_height: usize = 3;
-    const status_height: usize = 1;
-    const body_height = @max(@as(usize, 1), size.height -| (status_height + composer_height));
-
-    if (size.width >= 100 and body_height >= 8) {
-        const inspector_width = @min(@max(@as(usize, 32), size.width / 3), size.width -| 24);
-        return .{
-            .mode = .split,
-            .body_height = body_height,
-            .feed_width = size.width -| (inspector_width + 3),
-            .inspector_width = inspector_width,
-            .feed_height = body_height,
-            .inspector_height = body_height,
-        };
-    }
-
-    if (body_height <= 2) {
-        return .{
-            .mode = .stacked,
-            .body_height = body_height,
-            .feed_width = size.width,
-            .inspector_width = size.width,
-            .feed_height = body_height,
-            .inspector_height = 0,
-        };
-    }
-
-    if (body_height <= 2) {
-        return .{
-            .mode = .stacked,
-            .body_height = body_height,
-            .feed_width = size.width,
-            .inspector_width = size.width,
-            .feed_height = body_height,
-            .inspector_height = 0,
-        };
-    }
-
-    var inspector_height = @max(@as(usize, 3), body_height / 3);
-    if (inspector_height >= body_height) inspector_height = body_height -| 1;
-    const feed_height = @max(@as(usize, 1), body_height -| inspector_height);
-    return .{
-        .mode = .stacked,
-        .body_height = body_height,
-        .feed_width = size.width,
-        .inspector_width = size.width,
-        .feed_height = feed_height,
-        .inspector_height = @max(@as(usize, 1), body_height -| feed_height),
-    };
-}
-
-fn visiblePrimaryRows(layout: Layout) usize {
-    return switch (layout.mode) {
-        .split => layout.body_height -| 1,
-        .stacked => layout.feed_height -| 1,
-    };
+fn composerCursorPosition(layout: Layout, width: usize, composer: ComposerState) struct { usize, usize } {
+    return layout_mod.composerCursorPosition(layout, width, composer.line, composer.cursor);
 }
 
 fn clampFeedViewport(state: *AppState, visible_rows: usize) void {
@@ -3497,35 +2906,6 @@ fn clampLedgerViewport(state: *AppState, visible_rows: usize) void {
     }
     const max_scroll = state.ledger_items.items.len -| visible_rows;
     if (state.ledger_scroll > max_scroll) state.ledger_scroll = max_scroll;
-}
-
-fn composerCursorPosition(layout: Layout, width: usize, composer: ComposerState) struct { usize, usize } {
-    const available = width -| prompt_label.len;
-    const view = visibleComposer(composer.line, composer.cursor, available);
-    const row = 1 + layout.totalBodyRows() + 2;
-    const col = @min(width, prompt_label.len + view.cursor_col + 1);
-    return .{ row, if (col == 0) 1 else col };
-}
-
-fn visibleComposer(line: []const u8, cursor: usize, max_width: usize) ComposerView {
-    if (max_width == 0) return .{ .visible = "", .cursor_col = 0 };
-    if (line.len <= max_width) return .{
-        .visible = line,
-        .cursor_col = @min(cursor, line.len),
-    };
-
-    const safe_cursor = @min(cursor, line.len);
-    var start: usize = 0;
-    if (safe_cursor >= max_width) {
-        start = safe_cursor + 1 - max_width;
-    }
-    if (start + max_width > line.len) {
-        start = line.len - max_width;
-    }
-    return .{
-        .visible = line[start .. start + max_width],
-        .cursor_col = safe_cursor - start,
-    };
 }
 
 fn nextFocus(current: FocusMode) FocusMode {
@@ -3626,18 +3006,7 @@ fn witnessCountForSelectedPatch(
     return payload.witnesses_defeated.len + payload.witnesses_new.len;
 }
 
-fn kindForTranscriptEntry(entry: *const transcript_mod.OwnedEntry) FeedItemKind {
-    return switch (entry.*) {
-        .user_text => .user_text,
-        .model_text => .model_text,
-        .assistant_tool_use => .tool_use,
-        .tool_result => .tool_result,
-        .proof_card => .proof_card,
-        .diagnostic_box => .diagnostic_box,
-        .verified_patch => .verified_patch,
-        .system_note => .system_note,
-    };
-}
+const kindForTranscriptEntry = state_mod.kindForTranscriptEntry;
 
 fn summaryText(llm_text: []const u8, payload: ?UiPayload) []const u8 {
     if (payload) |value| {
@@ -3746,94 +3115,14 @@ fn writeTabBar(w: *std.Io.Writer, current: LedgerTab, theme: *const theme_mod.Th
     try w.writeByte('\n');
 }
 
-fn parseKeyEvent(bytes: []const u8, start: usize) struct { KeyEvent, usize } {
-    const b = bytes[start];
-    if (b != 0x1b) return .{ classifySingleByte(b), 1 };
-    if (start + 1 >= bytes.len) return .{ .{ .kind = .esc }, 1 };
+const parseKeyEvent = keymap.parseKeyEvent;
+const parseTildeTerminated = keymap.parseTildeTerminated;
+const classifySingleByte = keymap.classifySingleByte;
 
-    const second = bytes[start + 1];
-    if (second == '[') {
-        if (start + 2 >= bytes.len) return .{ .{ .kind = .ignore }, 2 };
-        const third = bytes[start + 2];
-        return switch (third) {
-            'A' => .{ .{ .kind = .up }, 3 },
-            'B' => .{ .{ .kind = .down }, 3 },
-            'C' => .{ .{ .kind = .right }, 3 },
-            'D' => .{ .{ .kind = .left }, 3 },
-            'H' => .{ .{ .kind = .home }, 3 },
-            'F' => .{ .{ .kind = .end }, 3 },
-            'Z' => .{ .{ .kind = .shift_tab }, 3 },
-            '1', '7', '4', '8', '3' => parseTildeTerminated(bytes, start, third),
-            else => .{ .{ .kind = .ignore }, 3 },
-        };
-    }
-
-    if (second == 'O') {
-        if (start + 2 >= bytes.len) return .{ .{ .kind = .ignore }, 2 };
-        return switch (bytes[start + 2]) {
-            'H' => .{ .{ .kind = .home }, 3 },
-            'F' => .{ .{ .kind = .end }, 3 },
-            else => .{ .{ .kind = .ignore }, 3 },
-        };
-    }
-
-    return .{ .{ .kind = .esc }, 1 };
-}
-
-fn parseTildeTerminated(bytes: []const u8, start: usize, code: u8) struct { KeyEvent, usize } {
-    if (start + 3 >= bytes.len or bytes[start + 3] != '~') {
-        return .{ .{ .kind = .ignore }, 3 };
-    }
-    const kind: KeyKind = switch (code) {
-        '1', '7' => .home,
-        '4', '8' => .end,
-        '3' => .delete,
-        else => .ignore,
-    };
-    return .{ .{ .kind = kind }, 4 };
-}
-
-fn classifySingleByte(b: u8) KeyEvent {
-    return switch (b) {
-        3 => .{ .kind = .ctrl_c },
-        4 => .{ .kind = .eof },
-        9 => .{ .kind = .tab },
-        13, 10 => .{ .kind = .enter },
-        127, 8 => .{ .kind = .backspace },
-        32...126, 128...255 => .{ .kind = .char, .byte = b },
-        else => .{ .kind = .ignore },
-    };
-}
-
-fn writeFitted(w: *std.Io.Writer, text: []const u8, width: usize) !void {
-    if (width == 0) return;
-    if (text.len <= width) {
-        try w.writeAll(text);
-        try writeSpaces(w, width - text.len);
-        return;
-    }
-    if (width <= 3) {
-        try w.writeAll(text[0..width]);
-        return;
-    }
-    try w.writeAll(text[0 .. width - 3]);
-    try w.writeAll("...");
-}
-
-fn writeSpaces(w: *std.Io.Writer, count: usize) !void {
-    var remaining = count;
-    while (remaining > 0) : (remaining -= 1) {
-        try w.writeByte(' ');
-    }
-}
-
-fn writeCrlf(w: *std.Io.Writer) !void {
-    try w.writeAll("\r\n");
-}
-
-fn moveCursor(w: *std.Io.Writer, row: usize, col: usize) !void {
-    try w.print("\x1b[{d};{d}H", .{ row, col });
-}
+const writeFitted = render_io.writeFitted;
+const writeSpaces = render_io.writeSpaces;
+const writeCrlf = render_io.writeCrlf;
+const moveCursor = render_io.moveCursor;
 
 fn writeAll(bytes: []const u8) void {
     if (bytes.len == 0) return;
