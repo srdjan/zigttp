@@ -560,7 +560,7 @@ fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const template = parseTemplate(template_name) orelse return error.InvalidTemplate;
 
     try scaffoldProject(allocator, name, template);
-    printInitNextSteps(name);
+    printInitNextSteps(allocator, name);
 }
 
 fn validateProjectName(name: []const u8) !void {
@@ -695,14 +695,39 @@ fn printInitExtensionNextSteps(name: []const u8) void {
     std.debug.print("  # then `zig build` to compile the native binding.\n", .{});
 }
 
-fn printInitNextSteps(name: []const u8) void {
-    std.debug.print("Initialized zigttp project in {s}\n", .{name});
-    std.debug.print("Next steps:\n", .{});
-    std.debug.print("  cd {s}\n", .{name});
-    std.debug.print("  zigttp studio       # opens http://localhost:3000/_zigttp/studio\n", .{});
-    std.debug.print("  zigttp check        # verify once in the terminal\n", .{});
-    std.debug.print("  zigttp build        # emit .zigttp/build/{s}\n", .{name});
-    std.debug.print("  zigttp deploy       # emit .zigttp/deploy/{s} and ledger row\n", .{name});
+/// Print the post-init welcome panel and then the first-run proof tour so the
+/// author reads what the proof chips mean before opening the editor. Writing
+/// the tour marker inline makes the dev-side `maybeShowFirstRunTour` a no-op
+/// on the next `zigttp dev`.
+fn printInitNextSteps(allocator: std.mem.Allocator, name: []const u8) void {
+    const tty = shared.stderrIsTty();
+    const c = shared.palette(tty);
+
+    std.debug.print("\n", .{});
+    std.debug.print("  {s}+{s} initialized zigttp project in {s}{s}{s}\n", .{ c.green, c.reset, c.bold, name, c.reset });
+    std.debug.print("  {s}----------------------------------------------------------------------{s}\n", .{ c.dim, c.reset });
+    std.debug.print("\n", .{});
+    std.debug.print("  {s}edit your handler. watch the proof flip live.{s}\n", .{ c.bold, c.reset });
+    std.debug.print("\n", .{});
+    std.debug.print("  try it:\n", .{});
+    std.debug.print("\n", .{});
+    std.debug.print("    cd {s}\n", .{name});
+    std.debug.print("    {s}zigttp dev{s}          {s}# watch, prove, and stream the proof HUD{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
+    std.debug.print("\n", .{});
+    std.debug.print("  also useful:\n", .{});
+    std.debug.print("    zigttp check        {s}# verify once and exit{s}\n", .{ c.dim, c.reset });
+    std.debug.print("    zigttp build        {s}# self-contained binary at .zigttp/build/{s}{s}\n", .{ c.dim, name, c.reset });
+    std.debug.print("    zigttp deploy       {s}# local deploy + ledger entry at .zigttp/deploy/{s}{s}\n", .{ c.dim, name, c.reset });
+    std.debug.print("\n", .{});
+
+    showInitTour(allocator);
+}
+
+fn showInitTour(allocator: std.mem.Allocator) void {
+    if (!shared.stderrIsTty()) return;
+    if (tourMarkerExists(allocator)) return;
+    _ = std.c.write(std.c.STDERR_FILENO, tour_text.ptr, tour_text.len);
+    touchTourMarker(allocator);
 }
 
 /// Path of the marker file that records "first-run tour was shown."
@@ -727,19 +752,16 @@ const tour_text =
     \\    deterministic     no Date.now() / Math.random()
     \\    injection_safe    user input never reaches sensitive sinks
     \\
-    \\  try it: drop a `Date.now()` into your handler and watch -deterministic
-    \\  light up. revert it and watch +deterministic come back. the proof card
-    \\  streams below.
+    \\  the starter declares `Spec<"deterministic" | "no_secret_leakage">` on
+    \\  its return type. that is the author-declared proof obligation the
+    \\  compiler discharges on every save.
+    \\
+    \\  try it: drop a `Date.now()` into the handler body and watch
+    \\  -deterministic light up. revert it and watch +deterministic come back.
+    \\  the proof card streams below.
     \\
     \\
 ;
-
-fn stderrIsTty() bool {
-    return switch (builtin.os.tag) {
-        .windows => false,
-        else => std.posix.system.isatty(std.posix.STDERR_FILENO) != 0,
-    };
-}
 
 fn tourMarkerExistsAt(allocator: std.mem.Allocator, base_dir: []const u8) bool {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
@@ -777,7 +799,7 @@ fn touchTourMarker(allocator: std.mem.Allocator) void {
 /// stderr is not a TTY (CI, redirected logs) or `--no-tour` is passed.
 fn maybeShowFirstRunTour(allocator: std.mem.Allocator, argv: []const []const u8) void {
     if (shared.hasFlag(argv, "--no-tour")) return;
-    if (!stderrIsTty()) return;
+    if (!shared.stderrIsTty()) return;
     if (tourMarkerExists(allocator)) return;
     _ = std.c.write(std.c.STDERR_FILENO, tour_text.ptr, tour_text.len);
     touchTourMarker(allocator);
@@ -2083,15 +2105,36 @@ const htmxManifest =
 ;
 
 const basicHandler =
-    \\import { logInfo } from "zigttp:log";
+    \\// Magnet starter: native JSX, a virtual-module import, and an
+    \\// author-declared Spec<...>. Save this file and watch the proof
+    \\// chips light up green in the dev HUD.
+    \\//
+    \\// Try the magnet demo: drop `Date.now()` into the handler body and
+    \\// watch -deterministic flip red. Wrap it in
+    \\// `step("ts", () => Date.now())` from "zigttp:durable" and the chip
+    \\// flips back green.
     \\
-    \\function handler(req) {
-    \\    logInfo("request received", { path: req.path });
+    \\import type { Spec } from "zigttp:types";
+    \\import { env } from "zigttp:env";
+    \\
+    \\type Guardrails = Spec<"deterministic" | "no_secret_leakage">;
+    \\
+    \\function HomePage(props: { name: string }): JSX.Element {
+    \\    return (
+    \\        <main>
+    \\            <h1>Hello, {props.name}!</h1>
+    \\            <p>Proven at compile time.</p>
+    \\        </main>
+    \\    );
+    \\}
+    \\
+    \\function handler(req: Request): Response & Guardrails {
     \\    if (req.method === "GET" && req.path === "/") {
-    \\        return Response.text("hello from zigttp");
+    \\        return Response.html(
+    \\            renderToString(<HomePage name={env("USER_NAME") ?? "world"} />)
+    \\        );
     \\    }
-    \\
-    \\    return Response.text("Not Found", { status: 404 });
+    \\    return Response.json({ error: "not found" }, { status: 404 });
     \\}
 ;
 
@@ -2141,9 +2184,9 @@ const htmxHandler =
 ;
 
 const basicTests =
-    \\{"type":"test","name":"root returns hello"}
+    \\{"type":"test","name":"root renders greeting html"}
     \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
-    \\{"type":"expect","status":200,"body":"hello from zigttp"}
+    \\{"type":"expect","status":200,"bodyContains":"Hello,"}
 ;
 
 const apiTests =

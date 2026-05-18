@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const Server = @import("server.zig").Server;
+const shared = @import("cli_shared.zig");
 const contract_runtime = @import("contract_runtime.zig");
 const zigts = @import("zigts");
 const compat = zigts.compat;
@@ -183,7 +184,7 @@ pub const LiveReloadState = struct {
                 analysis.errors,
                 elapsed_ms,
             });
-            printDiagnosticLines(analysis.diagnostics);
+            printDiagnosticLines(analysis.diagnostics, new_code);
             if (analysis.pinned_regressions > 0) {
                 printReload("[witnesses] {d} pinned witness(es) re-fired - regression of a previously defended pattern.\n", .{analysis.pinned_regressions});
             }
@@ -299,7 +300,7 @@ pub const LiveReloadState = struct {
         if (analysis.errors > 0) {
             if (self.server.studio) |*studio| studio.updateDiagnostics("initial compilation failed", analysis.diagnostics);
             printProve("Initial proof failed ({d} error(s), {d}ms).\n", .{ analysis.errors, elapsed_ms });
-            printDiagnosticLines(analysis.diagnostics);
+            printDiagnosticLines(analysis.diagnostics, source);
             return;
         }
 
@@ -589,14 +590,48 @@ fn printProve(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("[prove]  " ++ fmt, args);
 }
 
-/// Render compile errors to stderr in a uniform format. Previously each
-/// stage in precompile.zig printed its own ad-hoc lines; with json_mode
-/// turned on upstream, the live-reload loop owns the terminal output.
-fn printDiagnosticLines(diagnostics: []const studio_mod.Diagnostic) void {
+/// Render compile errors to stderr. Restriction-class diagnostics (ZTS001) get
+/// a framed why/buys/try block so first-time authors read the cut as deliberate
+/// design rather than a linter rule. `source`, when non-null, gates the
+/// in-frame code excerpt; pass the same buffer that was just analyzed.
+fn printDiagnosticLines(diagnostics: []const studio_mod.Diagnostic, source: ?[]const u8) void {
+    const tty = shared.stderrIsTty();
     for (diagnostics) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS001")) {
+            printRestrictionFrame(d, source, tty);
+            continue;
+        }
         std.debug.print("  {s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.column, d.code, d.message });
         if (d.suggestion) |s| std.debug.print("      hint: {s}\n", .{s});
     }
+}
+
+fn printRestrictionFrame(d: studio_mod.Diagnostic, source: ?[]const u8, tty: bool) void {
+    const c = shared.palette(tty);
+
+    const feature = json_diag.extractFeatureFromMessage(d.message);
+    const info: ?json_diag.RestrictionInfo = if (feature) |name| json_diag.lookupRestriction(name) else null;
+    const display_name = if (info) |i| i.name else feature orelse "";
+
+    std.debug.print("\n", .{});
+    std.debug.print("  {s}restriction{s} {s}{s}{s}\n", .{ c.red, c.reset, c.bold, display_name, c.reset });
+    std.debug.print("  {s}----------------------------------------------------------------------{s}\n", .{ c.dim, c.reset });
+    std.debug.print("  {s}{s}:{d}:{d}{s}\n", .{ c.dim, d.file, d.line, d.column, c.reset });
+
+    if (source) |src| {
+        if (zigts.bool_checker.getSourceLine(src, d.line)) |line_text| {
+            std.debug.print("    {d} | {s}\n", .{ d.line, line_text });
+        }
+    }
+
+    if (info) |i| {
+        std.debug.print("  {s}why{s}    {s}\n", .{ c.bold, c.reset, i.blocked_reason });
+        std.debug.print("  {s}buys{s}   removing this unlocks: {s}\n", .{ c.green, c.reset, i.proof_unlocked });
+        std.debug.print("  {s}try{s}    {s}\n", .{ c.yellow, c.reset, i.alternative });
+    } else if (d.suggestion) |s| {
+        std.debug.print("  {s}try{s}    {s}\n", .{ c.yellow, c.reset, s });
+    }
+    std.debug.print("\n", .{});
 }
 
 /// Dupe each parser/checker JsonDiagnostic into an owned studio.Diagnostic

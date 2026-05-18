@@ -1,6 +1,49 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const project_config_mod = @import("project_config");
 const zigts = @import("zigts");
+
+/// True when stderr is attached to a real terminal. Used to gate ANSI escape
+/// codes so piped output and CI logs stay clean.
+pub fn stderrIsTty() bool {
+    return switch (builtin.os.tag) {
+        .windows => false,
+        else => std.posix.system.isatty(std.posix.STDERR_FILENO) != 0,
+    };
+}
+
+/// ANSI escape codes resolved at call time from a tty flag. Pass `false` for
+/// non-TTY destinations and every field becomes an empty string, so the same
+/// format strings produce clean output in both modes.
+pub const Palette = struct {
+    reset: []const u8,
+    bold: []const u8,
+    dim: []const u8,
+    red: []const u8,
+    green: []const u8,
+    yellow: []const u8,
+    cyan: []const u8,
+};
+
+pub fn palette(tty: bool) Palette {
+    return if (tty) .{
+        .reset = "\x1b[0m",
+        .bold = "\x1b[1m",
+        .dim = "\x1b[2m",
+        .red = "\x1b[31m",
+        .green = "\x1b[32m",
+        .yellow = "\x1b[33m",
+        .cyan = "\x1b[36m",
+    } else .{
+        .reset = "",
+        .bold = "",
+        .dim = "",
+        .red = "",
+        .green = "",
+        .yellow = "",
+        .cyan = "",
+    };
+}
 
 pub fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
     var args_iter = std.process.Args.Iterator.init(args_vector);

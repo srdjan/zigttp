@@ -3,11 +3,20 @@
   <p align="center"><a href="https://zigttp.timok.deno.net/">🌐 Web Site</a></p>
 </p>
 
-A JavaScript runtime built from scratch in Zig for serverless workloads. One binary, no dependencies, instant cold starts.
+# Compile-time proof you can see.
 
-Where Node.js and Deno optimize for generality, zigttp optimizes for a single use case: running a request handler as fast as possible, then getting out of the way. It ships a pure-Zig JS engine (zigts) with a JIT compiler, NaN-boxed values, and hidden classes - but skips everything a FaaS handler doesn't need (event loop, Promises, `require`).
+**Edit your handler. Watch the proof flip live.** Every save is recompiled and proven. The terminal HUD shows your handler's declared `Spec<...>` obligations - `deterministic`, `no_secret_leakage`, `injection_safe`, `idempotent` - discharged in real time. Drop a `Date.now()` into the body and `-deterministic` lights up red. Wrap it in `step("ts", () => Date.now())` from `zigttp:durable` and the chip flips back green.
 
-Validated release target: Zig `0.16.0`. The build produces three binaries: `zigttp` (the primary developer CLI and local runtime entrypoint), `zigttp-runtime` (the internal runtime template used for self-contained outputs), and `zigts` (the compiler/analyzer plus interactive coding-agent CLI).
+<!-- Screencast lives at docs/proof-hud-demo.mov once recorded; same asset embeds in the website hero. -->
+<p align="center"><em>Screencast: <code>zigttp init</code> → save → red chip → wrap → green chip. Coming with the next release; the loop is reproducible today against <a href="examples/handler/spec-guardrails.ts">examples/handler/spec-guardrails.ts</a>.</em></p>
+
+zigttp is a pure-Zig JS engine plus a serverless runtime. One binary, no dependencies, instant cold starts. The compiler is the whole product: every JavaScript restriction (no `var`, no `while`, no `class`, no `try/catch`) buys a specific compile-time proof. **Your handler code is the spec.** See [`zigts restrictions`](docs/restrictions-to-proofs.md) for the cut-to-proof map and [`examples/README.md`](examples/README.md) for the curated reading order.
+
+```bash
+zigttp init my-app && cd my-app && zigttp dev
+```
+
+Validated release target: Zig `0.16.0`. The build produces three binaries: `zigttp` (the developer CLI and local runtime entrypoint), `zigttp-runtime` (the internal runtime template used for self-contained outputs), and `zigts` (the compiler/analyzer plus interactive coding-agent CLI).
 
 ### What makes it different
 

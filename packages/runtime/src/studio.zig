@@ -852,9 +852,11 @@ pub const index_html =
     \\#diagnosticsList li{padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06)}#diagnosticsList .code{color:var(--bad);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}#diagnosticsList .loc{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;margin-left:8px}#diagnosticsList .msg{margin-top:4px;color:#dceeff}#diagnosticsList .hint{margin-top:4px;color:var(--muted);font-style:italic}
     \\#demoPanel{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;padding:14px 28px;border-bottom:1px solid var(--line);background:#0c1118}#demoPanel[hidden]{display:none}#demoPanel h2{margin:0 0 6px}#demoPanel p{margin:0;color:#cbd7e3}#demoActions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}#demoWitness{grid-column:1/-1;margin-top:2px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:#07090d;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd7e3}
     \\@media(max-width:900px){.grid{grid-template-columns:1fr}.status{text-align:left}header{align-items:start;flex-direction:column}.big{font-size:32px}}
+    \\#onboarding{border:1px solid var(--line);background:var(--panel);color:var(--text);padding:24px 28px;max-width:560px;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.55)}#onboarding::backdrop{background:rgba(9,11,15,.78)}#onboarding h2{font-size:12px;margin:0 0 14px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}#onboarding ol{margin:0 0 18px;padding-left:22px;line-height:1.55}#onboarding ol strong{color:var(--text)}#onboarding ol code,#onboarding p code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);background:#07090d;border:1px solid var(--line);border-radius:4px;padding:1px 5px}#onboarding .hint{color:var(--muted);font-size:13px;margin:0 0 16px}#onboarding .actions{display:flex;justify-content:flex-end;gap:8px}
     \\</style>
     \\</head>
     \\<body><main>
+    \\<dialog id="onboarding"><h2>welcome to studio</h2><ol><li><strong>Proven Surface</strong> lists the routes, env vars, and egress hosts the compiler extracted from your handler.</li><li><strong>Property pills</strong> are the proofs the compiler discharged. Watch them flip when you save.</li><li><strong>Witnesses</strong> capture the request that would break a proof. Click one to see the failing path.</li><li>Press <code>.</code> to reopen this overlay any time.</li></ol><p class="hint">Edit your handler. Watch the proof flip live.</p><div class="actions"><button id="onboardingDismiss">Got it</button></div></dialog>
     \\<header><div><h1>zigttp studio</h1><div class="sub">The compiler-visible shape of your handler, live.</div></div><div class="status" id="status">connecting</div></header>
     \\<section id="demoPanel" hidden><div><h2>Proof Theater</h2><p id="demoTitle"></p><p class="empty" id="demoWorkspace"></p></div><div id="demoActions"></div><div id="demoWitness" hidden></div></section>
     \\<section class="grid"><div class="pane"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
@@ -894,6 +896,11 @@ pub const index_html =
     \\function startEvents(){let es;try{es=new EventSource("/_zigttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{render(JSON.parse(ev.data))}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
     \\startEvents();pull();pullDemo();setInterval(pullDemo,1200);
     \\$("send").onclick=async()=>{const r=await fetch($("url").value,{method:$("method").value});$("response").textContent=`HTTP ${r.status}\n`+await r.text()}
+    \\function openOnboarding(){const d=$("onboarding");if(d&&!d.open&&typeof d.showModal==="function")d.showModal()}
+    \\function closeOnboarding(){const d=$("onboarding");if(d&&d.open)d.close();try{localStorage.setItem("zigttp.onboarding.seen","1")}catch(e){}}
+    \\{const b=$("onboardingDismiss");if(b)b.onclick=closeOnboarding}
+    \\document.addEventListener("keydown",ev=>{if(ev.key!==".")return;const t=ev.target;if(t&&/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))return;ev.preventDefault();const d=$("onboarding");if(d&&d.open)closeOnboarding();else openOnboarding()})
+    \\{let seen="0";try{seen=localStorage.getItem("zigttp.onboarding.seen")||"0"}catch(e){}if(seen!=="1")openOnboarding()}
     \\</script></body></html>
 ;
 
@@ -921,6 +928,13 @@ test "studio HTML wires the diagnostics card" {
     try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"diagnosticsBlock\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"diagnosticsList\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "function renderDiagnostics") != null);
+}
+
+test "studio HTML wires the on-boarding overlay" {
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"onboarding\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "welcome to studio") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "zigttp.onboarding.seen") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "openOnboarding") != null);
 }
 
 test "updateDiagnostics produces JSON with a diagnostics array" {

@@ -791,6 +791,52 @@ fn writeOptionalString(writer: anytype, value: ?[]const u8) !void {
 // alternative) row, grouped either by proof or by failure class.
 // -------------------------------------------------------------------------
 
+/// View of a blocked feature for human-facing renderers (terminal diagnostic
+/// frame, Studio overlay). All fields are guaranteed non-null because they are
+/// asserted at compile time on `.blocked` entries.
+pub const RestrictionInfo = struct {
+    name: []const u8,
+    blocked_reason: []const u8,
+    failure_class: []const u8,
+    proof_unlocked: []const u8,
+    alternative: []const u8,
+};
+
+/// Look up a blocked feature by the keyword the parser reports. Exact match
+/// wins; on miss, falls back to substring match so `"switch"` finds
+/// `"switch/case"` and `"do"` finds `"do...while"`. Returns null for allowed
+/// features or unknown tokens.
+pub fn lookupRestriction(name: []const u8) ?RestrictionInfo {
+    for (features) |f| {
+        if (f.status != .blocked) continue;
+        if (std.mem.eql(u8, f.name, name)) return restrictionInfoFrom(f);
+    }
+    for (features) |f| {
+        if (f.status != .blocked) continue;
+        if (std.mem.indexOf(u8, f.name, name) != null) return restrictionInfoFrom(f);
+    }
+    return null;
+}
+
+fn restrictionInfoFrom(f: Feature) RestrictionInfo {
+    return .{
+        .name = f.name,
+        .blocked_reason = f.blocked_reason.?,
+        .failure_class = f.failure_class.?,
+        .proof_unlocked = f.proof_unlocked.?,
+        .alternative = f.alternative.?,
+    };
+}
+
+/// Extract the quoted feature keyword from a parser diagnostic message like
+/// `"'var' is not supported; use 'let' or 'const' instead"`. Returns null when
+/// the message does not start with a single-quoted token.
+pub fn extractFeatureFromMessage(message: []const u8) ?[]const u8 {
+    if (message.len < 2 or message[0] != '\'') return null;
+    const end = std.mem.indexOfScalarPos(u8, message, 1, '\'') orelse return null;
+    return message[1..end];
+}
+
 pub const RestrictionGrouping = enum { proof, failure_class, none };
 
 pub fn writeRestrictionsJson(writer: anytype) !void {
