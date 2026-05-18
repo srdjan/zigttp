@@ -32,6 +32,13 @@ pub const json_diag = @import("json_diagnostics.zig");
 const sqlite = zigts.sqlite;
 const sql_analysis = zigts.sql_analysis;
 
+/// stderr printer that no-ops under `zig build test` so unit tests for
+/// arg-parse error paths do not pollute the test-runner IPC stream.
+fn errPrint(comptime fmt: []const u8, args: anytype) void {
+    if (builtin.is_test) return;
+    std.debug.print(fmt, args);
+}
+
 const AotAnalysis = struct {
     dispatch: ?*zigts.PatternDispatchTable = null,
     default_response: ?zigts.HandlerAnalyzer.StaticResponseInfo = null,
@@ -498,7 +505,7 @@ fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--module-manifest")) {
             index += 1;
             if (index >= argv.len) {
-                std.debug.print("Missing path after --module-manifest\n", .{});
+                errPrint("Missing path after --module-manifest\n", .{});
                 return error.MissingArgument;
             }
             continue;
@@ -546,7 +553,7 @@ fn collectModuleManifestPaths(
         if (std.mem.eql(u8, argv[i], "--module-manifest")) {
             i += 1;
             if (i >= argv.len) {
-                std.debug.print("Missing path after --module-manifest\n", .{});
+                errPrint("Missing path after --module-manifest\n", .{});
                 return error.MissingArgument;
             }
             try out.append(allocator, argv[i]);

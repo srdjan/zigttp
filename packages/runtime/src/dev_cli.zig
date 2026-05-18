@@ -992,7 +992,9 @@ fn studioPreflight(allocator: std.mem.Allocator, template: Template) !void {
     if (!directoryIsEffectivelyEmpty(io)) return;
 
     try scaffoldProject(allocator, ".", template);
-    std.debug.print("Scaffolded {s} template in current directory. Opening studio.\n\n", .{@tagName(template)});
+    if (!builtin.is_test) {
+        std.debug.print("Scaffolded {s} template in current directory. Opening studio.\n\n", .{@tagName(template)});
+    }
 }
 
 /// Empty enough to scaffold over: no non-dotfile entries. `.git`,
