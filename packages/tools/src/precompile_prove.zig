@@ -1,12 +1,9 @@
-//! Prove pipeline + manifest alignment + property expectations + build
-//! report writer. Carved out of precompile.zig as part of the Phase-3
-//! monolith split. Relies on precompile.zig back-references for the
-//! `deriveSiblingPath` and `writeFilePosix` helpers; that file-level
-//! cycle is resolved lazily by Zig.
+//! Prove pipeline: contract upgrade verification, manifest alignment,
+//! property expectations, and the build-report writer.
 
 const std = @import("std");
 const zigts = @import("zigts");
-const precompile = @import("precompile.zig");
+const util = @import("precompile_util.zig");
 const buildtime = @import("precompile_buildtime.zig");
 const manifest_alignment = @import("manifest_alignment.zig");
 const property_expectations = @import("property_expectations.zig");
@@ -86,7 +83,7 @@ pub fn runProvePipeline(
     };
     defer result.deinit(allocator);
 
-    const prove_dir = precompile.deriveSiblingPath(allocator, output_path, "") catch |err| {
+    const prove_dir = util.deriveSiblingPath(allocator, output_path, "") catch |err| {
         std.debug.print("Error deriving prove output dir: {}\n", .{err});
         return err;
     };
@@ -166,7 +163,7 @@ pub fn writeBuildReport(
         if (handler_report.manifest_alignment) |ma| allocator.free(ma.sections);
     }
 
-    const report_path = precompile.deriveSiblingPath(allocator, output_path, "report.json") catch |err| {
+    const report_path = util.deriveSiblingPath(allocator, output_path, "report.json") catch |err| {
         std.debug.print("Error deriving report path: {}\n", .{err});
         return err;
     };
@@ -182,7 +179,7 @@ pub fn writeBuildReport(
     };
     report_output = report_aw.toArrayList();
 
-    precompile.writeFilePosix(report_path, report_output.items, allocator) catch |err| {
+    util.writeFilePosix(report_path, report_output.items, allocator) catch |err| {
         std.debug.print("Error writing report '{s}': {}\n", .{ report_path, err });
         return err;
     };

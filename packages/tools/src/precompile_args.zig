@@ -1,8 +1,4 @@
 //! Precompile CLI argument parsing.
-//!
-//! Carved out of precompile.zig as part of the Phase-3 monolith split. No
-//! behaviour changes; only `pub` markers were added so the sibling module
-//! can call back in.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -81,7 +77,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--sdk")) {
             index += 1;
             opts.sdk_target = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing target after --sdk (values: ts)\n", .{});
+                errPrint("Missing target after --sdk (values: ts)\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -89,7 +85,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--sql-schema")) {
             index += 1;
             opts.sql_schema_path = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing path after --sql-schema\n", .{});
+                errPrint("Missing path after --sql-schema\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -97,7 +93,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--system")) {
             index += 1;
             opts.system_path = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing path after --system\n", .{});
+                errPrint("Missing path after --system\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -105,7 +101,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--policy")) {
             index += 1;
             opts.policy_path = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing path after --policy\n", .{});
+                errPrint("Missing path after --policy\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -113,7 +109,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--replay")) {
             index += 1;
             opts.replay_trace_path = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing path after --replay\n", .{});
+                errPrint("Missing path after --replay\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -121,7 +117,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--test-file")) {
             index += 1;
             opts.test_file_path = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing path after --test-file\n", .{});
+                errPrint("Missing path after --test-file\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -129,7 +125,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--prove")) {
             index += 1;
             opts.prove_spec = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing spec after --prove (format: contract.json or contract.json:traces.jsonl)\n", .{});
+                errPrint("Missing spec after --prove (format: contract.json or contract.json:traces.jsonl)\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -137,7 +133,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--manifest")) {
             index += 1;
             opts.manifest_path = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing path after --manifest\n", .{});
+                errPrint("Missing path after --manifest\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -145,7 +141,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--expect-properties")) {
             index += 1;
             opts.expect_properties_path = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing path after --expect-properties\n", .{});
+                errPrint("Missing path after --expect-properties\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -153,7 +149,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--data-labels")) {
             index += 1;
             opts.data_labels_path = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing path after --data-labels\n", .{});
+                errPrint("Missing path after --data-labels\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -161,7 +157,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--fault-severity")) {
             index += 1;
             opts.fault_severity_path = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing path after --fault-severity\n", .{});
+                errPrint("Missing path after --fault-severity\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -169,7 +165,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--generator-pack")) {
             index += 1;
             opts.generator_pack_path = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing path after --generator-pack\n", .{});
+                errPrint("Missing path after --generator-pack\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -177,7 +173,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--report")) {
             index += 1;
             opts.report_format = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing format after --report (values: json)\n", .{});
+                errPrint("Missing format after --report (values: json)\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -198,19 +194,19 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             output_path = arg;
             continue;
         }
-        std.debug.print("Unexpected argument: {s}\n", .{arg});
+        errPrint("Unexpected argument: {s}\n", .{arg});
         return error.InvalidArgument;
     }
 
     const usage = "Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--system path] [--prove spec] [--policy policy.json] [--module-manifest path] <handler.ts> <output.zig>\n";
     opts.handler_path = handler_path orelse {
-        std.debug.print(usage, .{});
-        std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
+        errPrint(usage, .{});
+        errPrint("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
         return error.MissingArgument;
     };
     opts.output_path = output_path orelse {
-        std.debug.print(usage, .{});
-        std.debug.print("\nMissing output path.\n", .{});
+        errPrint(usage, .{});
+        errPrint("\nMissing output path.\n", .{});
         return error.MissingArgument;
     };
 
@@ -255,19 +251,19 @@ pub fn buildManifestRegistryFromPaths(
 
     for (paths) |path| {
         const bytes = readFilePosix(allocator, path, 1024 * 1024) catch |err| {
-            std.debug.print("Error reading module manifest '{s}': {}\n", .{ path, err });
+            errPrint("Error reading module manifest '{s}': {}\n", .{ path, err });
             return err;
         };
         defer allocator.free(bytes);
 
         var manifest = zigts.module_manifest.parse(allocator, bytes) catch |err| {
-            std.debug.print("Error parsing module manifest '{s}': {}\n", .{ path, err });
+            errPrint("Error parsing module manifest '{s}': {}\n", .{ path, err });
             return err;
         };
         errdefer manifest.deinit(allocator);
 
         registry.register(manifest) catch |err| {
-            std.debug.print("Error registering module manifest '{s}': {}\n", .{ path, err });
+            errPrint("Error registering module manifest '{s}': {}\n", .{ path, err });
             return err;
         };
     }

@@ -1,7 +1,6 @@
-//! CheckResult data type plus presentation/codegen helpers carved out of
-//! precompile.zig as part of the Phase-3 monolith split. The orchestrators
-//! (`runCheckOnly`, `runCheckOnlyFromSource`, `runGenTests`) stay in
-//! precompile.zig and call back into these helpers.
+//! CheckResult data type plus presentation/codegen helpers
+//! (formatProofCard, generateTypeDefs). The orchestrators that produce
+//! CheckResult values live in precompile.zig.
 
 const std = @import("std");
 const zigts = @import("zigts");

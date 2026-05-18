@@ -1,6 +1,4 @@
-//! Build-time replay verification + handler-test execution. Carved out of
-//! precompile.zig as part of the Phase-3 monolith split. Pure zigts-API
-//! consumer; no back-references into precompile.zig.
+//! Build-time replay verification + handler-test execution.
 
 const std = @import("std");
 const zigts = @import("zigts");
