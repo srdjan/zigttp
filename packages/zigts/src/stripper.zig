@@ -80,6 +80,7 @@ pub const StripOptions = struct {
 pub fn strip(allocator: std.mem.Allocator, source: []const u8, options: StripOptions) StripError!StripResult {
     var stripper = Stripper.init(allocator, source, options);
     errdefer stripper.output.deinit(allocator);
+    defer stripper.brace_stack.deinit(allocator);
     return stripper.strip();
 }
 
@@ -109,6 +110,12 @@ const Stripper = struct {
     // True when inside an import declaration (import { ... } from "...";)
     // Prevents 'as' from being treated as a type assertion (it's import aliasing)
     in_import: bool,
+    // Stack of `in_expression` values captured at each `{`; popped on the
+    // matching `}`. Without this, the closing `}` of a property-value
+    // object literal would clobber the parent context's `in_expression`
+    // to false, causing the next sibling property colon to be mis-treated
+    // as a type annotation.
+    brace_stack: std.ArrayListUnmanaged(bool),
 
     // TypeMap: records type annotations for downstream type checking
     type_map: TypeMap,
@@ -129,6 +136,7 @@ const Stripper = struct {
             .col = 1,
             .in_expression = false,
             .in_import = false,
+            .brace_stack = .empty,
             .type_map = TypeMap.init(source),
         };
     }
@@ -317,8 +325,24 @@ const Stripper = struct {
                 self.in_expression = false; // Statement end
                 self.in_import = false; // Import statement ended
             },
-            '{' => {}, // Keep current context (could be block or object literal)
-            '}' => self.in_expression = false, // End of block/object
+            '{' => {
+                // Remember the expression context the brace was opened in;
+                // the matching `}` restores it.
+                self.brace_stack.append(self.allocator, self.in_expression) catch return StripError.OutOfMemory;
+                // Inside the brace, keep current context: a `{` after `=`, `(`, `,`,
+                // `[`, or `:` is a value-position object literal where property
+                // colons stay expressions; a `{` after `)` or a statement is a
+                // block where labels and `let`/`const` again drive the flag.
+            },
+            '}' => {
+                if (self.brace_stack.pop()) |prev| {
+                    self.in_expression = prev;
+                } else {
+                    // Unbalanced `}` - keep prior behaviour so error paths
+                    // still flow through the parser.
+                    self.in_expression = false;
+                }
+            },
             '(' => self.in_expression = true, // Contents of parens is expression
             ')' => {}, // Keep context
             '[' => self.in_expression = true, // Array literal
@@ -2338,6 +2362,45 @@ test "distinct type declaration stripped" {
         }
     }
     try std.testing.expect(found_distinct);
+}
+
+test "sibling object-literal properties survive after nested object value" {
+    // Regression: the closing `}` of `a: { b: 1 }` used to clobber the
+    // expression flag, causing the next sibling colon (`c:`) to be
+    // mis-stripped as a type annotation. With the brace stack the flag
+    // is restored to its pre-`{` value on every `}`.
+    const source =
+        \\export const x = {
+        \\  a: { b: 1 },
+        \\  c: { d: 1, e: { f: 2 } }
+        \\};
+    ;
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "array of objects preserves sibling property colons" {
+    const source =
+        \\const arr = [
+        \\  { method: "GET", path: "/aaa" },
+        \\  { method: "POST", path: "/bbb" }
+        \\];
+    ;
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "type annotation with object-typed value still strips" {
+    // Must NOT regress: `: { foo: string }` on a declaration is a real
+    // type annotation and the whole `: {...}` span must be blanked.
+    const source = "const x: { foo: string } = { foo: \"y\" };";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    // The annotation is gone; the value object literal survives.
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": {") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "= { foo:") != null);
 }
 
 test "export distinct type stripped" {
