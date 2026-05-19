@@ -809,6 +809,14 @@ const tour_text =
     \\  -deterministic light up. revert it and watch +deterministic come back.
     \\  the proof card streams below.
     \\
+    \\  press `tab` in the hud to rotate the proof lens:
+    \\    Properties   the proven `[+]` / `[-]` pills (default)
+    \\    Trade        each proof paired with what the substrate gave up
+    \\    Handover     a copy-pasteable proof certificate for ai agents
+    \\
+    \\  this is also why ai coding agents work well with zigttp: every
+    \\  restriction is a guarantee the agent can rely on while it refactors.
+    \\
     \\
 ;
 

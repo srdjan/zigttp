@@ -27,6 +27,7 @@ const review_facts_mod = @import("deploy/review.zig");
 const spec_diagnostic = @import("deploy/spec_diagnostic.zig");
 const proof_ledger = @import("proof_ledger.zig");
 const proof_card_tui = @import("proof_card_tui.zig");
+const keystroke_input = @import("keystroke_input.zig");
 const printer_mod = @import("deploy/printer.zig");
 const studio_mod = @import("runtime_features.zig").studio;
 const counterexample_pipeline = @import("counterexample_pipeline.zig");
@@ -63,6 +64,13 @@ pub const LiveReloadState = struct {
     /// one-shot bold emphasis on the Studio mirror footer so the URL stands
     /// out the first time the HUD lights up, then settles into neutral.
     studio_footer_first_render: bool,
+    /// Active proof-card lens (stored as enum tag; atomic for cross-thread reads).
+    lens: std.atomic.Value(u8),
+    /// Pre-rendered frames per lens so the keystroke thread can repaint
+    /// from cache without re-running analysis. Indexed by `@intFromEnum`.
+    lens_cache_mu: compat.Mutex,
+    lens_cache: [3]?[]u8,
+    keystroke_handle: ?*keystroke_input.Handle,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -82,17 +90,40 @@ pub const LiveReloadState = struct {
             .watch_paths = watch_paths,
             .last_ledger_sha = null,
             .studio_footer_first_render = true,
+            .lens = std.atomic.Value(u8).init(@intFromEnum(proof_card_tui.Lens.properties)),
+            .lens_cache_mu = .{},
+            .lens_cache = .{ null, null, null },
+            .keystroke_handle = null,
         };
     }
 
     pub fn deinit(self: *LiveReloadState) void {
+        if (self.keystroke_handle) |h| keystroke_input.uninstall(h);
+        self.lens_cache_mu.lock();
+        defer self.lens_cache_mu.unlock();
+        for (&self.lens_cache) |*slot| {
+            if (slot.*) |bytes| self.allocator.free(bytes);
+            slot.* = null;
+        }
         if (self.current_contract) |*c| c.deinit(self.allocator);
         if (self.previous_code) |code| self.allocator.free(code);
+    }
+
+    /// Read the active lens. Clamped against the enum tag range so adding
+    /// a fourth variant later cannot panic on out-of-range stores.
+    pub fn currentLens(self: *const LiveReloadState) proof_card_tui.Lens {
+        const raw = self.lens.load(.acquire);
+        const max = @typeInfo(proof_card_tui.Lens).@"enum".fields.len;
+        const clamped: u8 = if (raw >= max) 0 else raw;
+        return @enumFromInt(clamped);
     }
 
     /// Run the watch-reload loop. Blocks until the server stops.
     pub fn run(self: *LiveReloadState, io: std.Io) !void {
         self.previous_stamp = try computeStamp(io, self.watch_paths);
+        // Install the keystroke listener before the first render so the very
+        // first proof card already advertises Tab. No-op on non-TTY.
+        self.keystroke_handle = keystroke_input.install(self.allocator, self, onKeystroke);
         if (self.config.prove) {
             self.seedInitialProof();
         }
@@ -452,12 +483,14 @@ pub const LiveReloadState = struct {
             .counterexample = cx_preview,
         };
 
+        const recompile_ms: u32 = @intCast(@min(elapsed_ms, std.math.maxInt(u32)));
+        try self.refreshLensCache(&card, recompile_ms);
+
+        const active = self.currentLens();
         var stderr_buf: [16 * 1024]u8 = undefined;
         var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
-        const recompile_ms: u32 = @intCast(@min(elapsed_ms, std.math.maxInt(u32)));
-        try proof_card_tui.writeProofCardFrame(self.allocator, &card, &stderr_writer.interface, .{
-            .recompile_ms = recompile_ms,
-        });
+        try self.writeCachedFrame(active, &stderr_writer.interface);
+        try writeLensHint(&stderr_writer.interface, active, shared.stderrIsTty());
         if (self.server.config.studio) {
             const first = self.studio_footer_first_render;
             proof_card_tui.writeStudioFooter(&stderr_writer.interface, .{
@@ -468,6 +501,70 @@ pub const LiveReloadState = struct {
             }) catch {};
             self.studio_footer_first_render = false;
         }
+        stderr_writer.interface.flush() catch {};
+    }
+
+    /// Render all three lenses against the same card and swap the cache
+    /// under the mutex so the keystroke thread sees a consistent set.
+    fn refreshLensCache(
+        self: *LiveReloadState,
+        card: *const review_facts_mod.ProofCard,
+        recompile_ms: u32,
+    ) !void {
+        var rendered: [3]?[]u8 = .{ null, null, null };
+        errdefer for (&rendered) |*slot| if (slot.*) |b| self.allocator.free(b);
+
+        const lenses = [_]proof_card_tui.Lens{ .properties, .trade, .handover };
+        for (lenses, 0..) |lens, idx| {
+            var aw: std.Io.Writer.Allocating = .init(self.allocator);
+            defer aw.deinit();
+            try proof_card_tui.writeProofCardFrame(self.allocator, card, &aw.writer, .{
+                .recompile_ms = recompile_ms,
+                .lens = lens,
+            });
+            rendered[idx] = try self.allocator.dupe(u8, aw.writer.buffered());
+        }
+
+        self.lens_cache_mu.lock();
+        defer self.lens_cache_mu.unlock();
+        for (&self.lens_cache, 0..) |*slot, idx| {
+            if (slot.*) |old| self.allocator.free(old);
+            slot.* = rendered[idx];
+            rendered[idx] = null;
+        }
+    }
+
+    /// Silent no-op when the cache is empty (no prove cycle has landed yet).
+    fn writeCachedFrame(
+        self: *LiveReloadState,
+        lens: proof_card_tui.Lens,
+        writer: *std.Io.Writer,
+    ) !void {
+        self.lens_cache_mu.lock();
+        defer self.lens_cache_mu.unlock();
+        const slot = self.lens_cache[@intFromEnum(lens)] orelse return;
+        try writer.writeAll(slot);
+    }
+
+    /// Tab (0x09) and `l`/`L` (fallback when a terminal intercepts Tab)
+    /// rotate the lens; other bytes are ignored.
+    fn onKeystroke(ctx: *anyopaque, byte: u8) void {
+        const self: *LiveReloadState = @ptrCast(@alignCast(ctx));
+        switch (byte) {
+            0x09, 'l', 'L' => self.rotateLens(),
+            else => {},
+        }
+    }
+
+    pub fn rotateLens(self: *LiveReloadState) void {
+        const current = self.currentLens();
+        const next = current.next();
+        self.lens.store(@intFromEnum(next), .release);
+
+        var stderr_buf: [16 * 1024]u8 = undefined;
+        var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
+        self.writeCachedFrame(next, &stderr_writer.interface) catch return;
+        writeLensHint(&stderr_writer.interface, next, shared.stderrIsTty()) catch {};
         stderr_writer.interface.flush() catch {};
     }
 
@@ -606,6 +703,21 @@ fn printProve(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("[prove]  " ++ fmt, args);
 }
 
+fn mentionsAiRelevantProof(proof_unlocked: []const u8) bool {
+    return std.mem.indexOf(u8, proof_unlocked, "deterministic") != null or
+        std.mem.indexOf(u8, proof_unlocked, "Result") != null or
+        std.mem.indexOf(u8, proof_unlocked, "replayable") != null;
+}
+
+fn writeLensHint(
+    writer: *std.Io.Writer,
+    lens: proof_card_tui.Lens,
+    tty: bool,
+) !void {
+    const c = shared.palette(tty);
+    try writer.print("{s}  Lens: {s}   (tab to rotate){s}\n", .{ c.dim, lens.label(), c.reset });
+}
+
 /// Render compile errors to stderr. Restriction-class diagnostics (ZTS001) get
 /// a framed why/buys/try block so first-time authors read the cut as deliberate
 /// design rather than a linter rule. `source`, when non-null, gates the
@@ -659,7 +771,15 @@ fn writeRestrictionFrame(
 
     if (info) |i| {
         try writer.print("  {s}why{s}    {s}\n", .{ c.bold, c.reset, i.blocked_reason });
-        try writer.print("  {s}buys{s}   removing this unlocks: {s}\n", .{ c.green, c.reset, i.proof_unlocked });
+        // Restrictions that buy determinism, Result narrowing, or replayable
+        // behavior get a quiet AI-substrate tail. These are exactly the
+        // properties an AI coding agent needs in order to safely refactor
+        // around the handler without re-verifying every effect.
+        const ai_tail: []const u8 = if (mentionsAiRelevantProof(i.proof_unlocked))
+            " (also: an AI assistant can refactor against this)"
+        else
+            "";
+        try writer.print("  {s}buys{s}   removing this unlocks: {s}{s}\n", .{ c.green, c.reset, i.proof_unlocked, ai_tail });
         try writer.print("  {s}try{s}    {s}\n", .{ c.yellow, c.reset, i.alternative });
     } else if (d.suggestion) |s| {
         try writer.print("  {s}try{s}    {s}\n", .{ c.yellow, c.reset, s });

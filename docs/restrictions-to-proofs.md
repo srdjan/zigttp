@@ -9,6 +9,11 @@ a specific soundness guarantee. The intent oracle (`zigts assert-intent`)
 and the contract diff (`zigttp proofs show`) live above these cuts; the
 cuts themselves are what make those higher-level claims possible.
 
+The proof card's `Trade` lens in `zigttp dev` (press `Tab` to rotate)
+and the matching tab in Studio render a per-property view of this table
+against the current handler, so you can see exactly which restrictions
+earned each `[+]` chip.
+
 | Restriction | Failure class prevented | Proof unlocked | Alternative |
 |-------------|-------------------------|----------------|-------------|
 | `switch/case` | non-exhaustive control flow and implicit fallthrough | match coverage and exhaustive return analysis | use 'match' expression |

@@ -161,6 +161,80 @@ pub const property_metas = [_]PropertyMeta{
     .{ .field = "fault_covered", .json_key = "faultCovered", .label = "fault-covered" },
 };
 
+/// Maps each proof property to the substrate restrictions that earn it,
+/// plus a short tagline. Mirrored by the JS `TRADE_TABLE` in
+/// `packages/runtime/src/studio.zig` for the browser lens; keep both in
+/// sync when adding properties or changing labels. Restriction names are
+/// the human strings from `packages/tools/src/json_diagnostics.zig`.
+pub const TradeRow = struct {
+    property_field: []const u8,
+    restrictions: []const []const u8,
+    earned: []const u8,
+};
+
+pub const proof_to_restrictions = [_]TradeRow{
+    .{
+        .property_field = "deterministic",
+        .restrictions = &.{ "async/await", "while", "do...while", "for(;;)" },
+        .earned = "deterministic, replayable, AI-refactorable",
+    },
+    .{
+        .property_field = "retry_safe",
+        .restrictions = &.{ "try/catch", "throw" },
+        .earned = "Result-narrowed, exhaustive paths, no hidden control flow",
+    },
+    .{
+        .property_field = "state_isolated",
+        .restrictions = &.{ "class", "this", "++", "--" },
+        .earned = "explicit data flow, no shared mutable receivers",
+    },
+    .{
+        .property_field = "read_only",
+        .restrictions = &.{ "delete", "++", "--" },
+        .earned = "shape-stable property access, no hidden writes",
+    },
+    .{
+        .property_field = "input_validated",
+        .restrictions = &.{"regex"},
+        .earned = "schema-checkable validation, no opaque accept sets",
+    },
+    .{
+        .property_field = "injection_safe",
+        .restrictions = &.{},
+        .earned = "flow analysis tracks user-input into sinks",
+    },
+    .{
+        .property_field = "idempotent",
+        .restrictions = &.{},
+        .earned = "earned by analysis; retries are safe",
+    },
+    .{
+        .property_field = "no_secret_leakage",
+        .restrictions = &.{},
+        .earned = "flow analysis tracks secret labels to sinks",
+    },
+    .{
+        .property_field = "no_credential_leakage",
+        .restrictions = &.{},
+        .earned = "flow analysis tracks credential labels to sinks",
+    },
+    .{
+        .property_field = "pii_contained",
+        .restrictions = &.{},
+        .earned = "PII never reaches egress without an explicit boundary",
+    },
+    .{
+        .property_field = "results_safe",
+        .restrictions = &.{},
+        .earned = "all paths return a Response or Result.err",
+    },
+    .{
+        .property_field = "fault_covered",
+        .restrictions = &.{},
+        .earned = "every failure path has a witness or test",
+    },
+};
+
 // ReviewFacts is the persisted-and-rendered projection of a contract. Strings
 // are owned and freed in deinit. Routes are owned (pattern bytes duped).
 pub const ReviewFacts = struct {

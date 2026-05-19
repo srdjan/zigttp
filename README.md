@@ -5,7 +5,7 @@
 
 # Compile-time proof you can see.
 
-**Edit your handler. Watch the proof flip live.** Every save is recompiled and proven. The terminal proof card shows your handler's declared `Spec<...>` obligations - `deterministic`, `no_secret_leakage`, `injection_safe`, `idempotent` - discharged in real time. Drop a `Date.now()` into the body and `-deterministic` lights up red with a `Why:` row pointing at the source line. Wrap it in `step("ts", () => Date.now())` from `zigttp:durable` and the chip flips back green.
+**Edit your handler. Watch the proof flip live.** Every save is recompiled and proven. The terminal proof card shows your handler's declared `Spec<...>` obligations - `deterministic`, `no_secret_leakage`, `injection_safe`, `idempotent` - discharged in real time. Drop a `Date.now()` into the body and `-deterministic` lights up red with a `Why:` row pointing at the source line. Wrap it in `step("ts", () => Date.now())` from `zigttp:durable` and the chip flips back green. Press `Tab` in the HUD to rotate the proof card through three lenses: `Properties` (the default), `Trade` (each proof paired with the substrate restrictions that earned it), and `Handover` (an AI proof certificate suitable for copy-pasting into a coding agent).
 
 <!-- Screencast lives at docs/proof-hud-demo.mov once recorded; same asset embeds in the website hero. -->
 <p align="center"><em>First-touch loop: <code>zigttp init</code> -> <code>zigttp dev</code> -> save -> red chip -> wrap -> green chip. The same proof card can be mirrored in Studio at <code>/_zigttp/studio</code>.</em></p>
@@ -510,7 +510,12 @@ same ASCII proof card frame the HUD writes to stderr, rendered
 byte-for-byte in the browser. Below it sit release readiness, declared
 `Spec<...>` status, proven properties, surface deltas, the witness
 corpus, a verdict timeline of recent rebuilds, and next actions that
-link the compiler-backed CLI and `zigts expert` flows. Failing spec
+link the compiler-backed CLI and `zigts expert` flows. A `Properties /
+Trade / Handover` tab bar above the verdict pane mirrors the TUI's
+`Tab`-rotated lens: `Properties` is the default pill grid, `Trade`
+pairs each proven property with the substrate restrictions that earned
+it, and `Handover` shows the full AI proof certificate with a one-click
+Copy button. The active lens persists across reloads. Failing spec
 pills expand inline to the matching ZTS500/501/502 diagnostic with
 source line and snippet; witness rows expand to show the falsifying
 request, expected vs got, and IO stubs without a CLI hop. Generated

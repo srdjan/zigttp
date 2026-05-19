@@ -19,12 +19,41 @@ const std = @import("std");
 const review = @import("deploy/review.zig");
 const audit_ring = @import("proof_audit_ring.zig");
 
+/// Which view the left pane of the proof card renders. Only the left
+/// pane and its header swap between lenses; the Surface and Requests
+/// panes plus the status bar stay identical so frame geometry (and the
+/// Studio SSE frame mirror) is stable across all three.
+pub const Lens = enum {
+    properties,
+    trade,
+    handover,
+
+    pub fn label(self: Lens) []const u8 {
+        return switch (self) {
+            .properties => "Properties",
+            .trade => "Trade",
+            .handover => "Handover",
+        };
+    }
+
+    pub fn next(self: Lens) Lens {
+        return switch (self) {
+            .properties => .trade,
+            .trade => .handover,
+            .handover => .properties,
+        };
+    }
+};
+
 pub const FrameOptions = struct {
     /// Total visible width in columns. Min 60, max 200.
     width: u16 = 100,
     /// Recompile elapsed time in ms, shown as a sub-line in the properties
     /// pane header. `null` means dev hasn't reported a recompile yet.
     recompile_ms: ?u32 = null,
+    /// Which lens to render in the left pane. Defaults to `.properties`
+    /// so existing callers and tests are unaffected.
+    lens: Lens = .properties,
 };
 
 const ColumnWidths = struct {
@@ -112,15 +141,15 @@ pub fn writeProofCardFrame(
 ) !void {
     const widths = ColumnWidths.from(opts.width);
 
-    var props = try buildPropertiesPane(allocator, card);
-    defer freeLines(allocator, &props);
+    var left = try buildLeftPane(allocator, card, opts.lens);
+    defer freeLines(allocator, &left);
     var surface = try buildSurfacePane(allocator, card);
     defer freeLines(allocator, &surface);
     var requests = try buildRequestsPane(allocator);
     defer freeLines(allocator, &requests);
 
     try writeBorder(writer, widths);
-    try writeRow(writer, widths, "Properties", "Surface", "Requests");
+    try writeRow(writer, widths, opts.lens.label(), "Surface", "Requests");
     if (opts.recompile_ms) |ms| {
         var buf: [32]u8 = undefined;
         const stamp = try std.fmt.bufPrint(&buf, "  {d}ms recompile", .{ms});
@@ -128,10 +157,10 @@ pub fn writeProofCardFrame(
     }
     try writeBorder(writer, widths);
 
-    const tall: usize = @max(@max(props.items.len, surface.items.len), requests.items.len);
+    const tall: usize = @max(@max(left.items.len, surface.items.len), requests.items.len);
     var i: usize = 0;
     while (i < tall) : (i += 1) {
-        const p = if (i < props.items.len) props.items[i] else "";
+        const p = if (i < left.items.len) left.items[i] else "";
         const s = if (i < surface.items.len) surface.items[i] else "";
         const r = if (i < requests.items.len) requests.items[i] else "";
         try writeRow(writer, widths, p, s, r);
@@ -316,6 +345,18 @@ fn writeStatusBar(
 
 const LineList = std.ArrayList([]u8);
 
+fn buildLeftPane(
+    allocator: std.mem.Allocator,
+    card: *const review.ProofCard,
+    lens: Lens,
+) !LineList {
+    return switch (lens) {
+        .properties => buildPropertiesPane(allocator, card),
+        .trade => buildTradePane(allocator, card),
+        .handover => buildHandoverPane(allocator, card),
+    };
+}
+
 fn buildPropertiesPane(
     allocator: std.mem.Allocator,
     card: *const review.ProofCard,
@@ -352,6 +393,170 @@ fn buildPropertiesPane(
         }
     }
     return lines;
+}
+
+/// Trade view: each proof property grouped with the restrictions that earned
+/// it. Unproven properties render with `(not yet)` since the renderer cannot
+/// dim text without assuming a TTY.
+fn buildTradePane(
+    allocator: std.mem.Allocator,
+    card: *const review.ProofCard,
+) !LineList {
+    var lines: LineList = .empty;
+    errdefer freeLines(allocator, &lines);
+
+    inline for (review.proof_to_restrictions) |row| {
+        // Find the label and current proven state from property_metas /
+        // ReviewFacts. The inline-for keeps this branchless at codegen.
+        const proven: bool = @field(card.current.properties, row.property_field);
+        const label: []const u8 = blk: {
+            inline for (review.property_metas) |meta| {
+                if (std.mem.eql(u8, meta.field, row.property_field)) break :blk meta.label;
+            }
+            break :blk row.property_field;
+        };
+
+        const glyph: []const u8 = if (proven) "[+]" else "[-]";
+        const suffix: []const u8 = if (proven) "" else " (not yet)";
+        const header = try std.fmt.allocPrint(
+            allocator,
+            "{s} {s}{s}",
+            .{ glyph, label, suffix },
+        );
+        try lines.append(allocator, header);
+
+        if (row.restrictions.len == 0) {
+            const earned = try std.fmt.allocPrint(allocator, "  earned: {s}", .{row.earned});
+            try lines.append(allocator, earned);
+        } else {
+            const gave = try std.mem.join(allocator, ", ", row.restrictions);
+            defer allocator.free(gave);
+            const gave_line = try std.fmt.allocPrint(allocator, "  gave up: {s}", .{gave});
+            try lines.append(allocator, gave_line);
+            const earned_line = try std.fmt.allocPrint(allocator, "  earned : {s}", .{row.earned});
+            try lines.append(allocator, earned_line);
+        }
+        try lines.append(allocator, try allocator.dupe(u8, ""));
+    }
+    return lines;
+}
+
+/// Handover view: a compact summary that fits the left pane. The
+/// full-width certificate (Studio Copy button, `proofCertificate` JSON
+/// field) lives in `buildProofCertificate`.
+fn buildHandoverPane(
+    allocator: std.mem.Allocator,
+    card: *const review.ProofCard,
+) !LineList {
+    var lines: LineList = .empty;
+    errdefer freeLines(allocator, &lines);
+
+    const intro = [_][]const u8{
+        "AI handover",
+        "",
+        "Substrate",
+        "  zigttp - deterministic",
+        "  TypeScript subset.",
+        "  no exceptions, no shared",
+        "  mutable state, no",
+        "  nondeterminism, no eval.",
+        "",
+        "Proven for this handler",
+    };
+    for (intro) |line| try lines.append(allocator, try allocator.dupe(u8, line));
+
+    var proven_count: usize = 0;
+    inline for (review.property_metas) |meta| {
+        if (@field(card.current.properties, meta.field)) {
+            try lines.append(allocator, try std.fmt.allocPrint(allocator, "  [+] {s}", .{meta.label}));
+            proven_count += 1;
+        }
+    }
+    if (proven_count == 0) {
+        try lines.append(allocator, try allocator.dupe(u8, "  (none yet)"));
+    }
+
+    try lines.append(allocator, try allocator.dupe(u8, ""));
+    try lines.append(allocator, try std.fmt.allocPrint(
+        allocator,
+        "surface: {d} routes, {d} paths,",
+        .{ card.current.routes.len, card.current.behavior_path_count },
+    ));
+    try lines.append(allocator, try std.fmt.allocPrint(
+        allocator,
+        "         {d} intents verified",
+        .{card.current.intent_assertion_count},
+    ));
+
+    const outro = [_][]const u8{
+        "",
+        "Refactor contract",
+        "  keep these proven.",
+        "  compiler blocks any edit",
+        "  that breaks them.",
+        "",
+        "Studio has the full text",
+        "and a one-click copy.",
+    };
+    for (outro) |line| try lines.append(allocator, try allocator.dupe(u8, line));
+    return lines;
+}
+
+/// Render the AI proof-certificate. Returned slice is owned by the caller.
+///
+/// Exposed publicly so `studio.zig` can serialise the exact same artifact
+/// as the `proofCertificate` JSON field; the browser Copy button then
+/// places this byte sequence on the clipboard, matching what `c` does in
+/// the TUI.
+pub fn buildProofCertificate(
+    allocator: std.mem.Allocator,
+    card: *const review.ProofCard,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+
+    try w.writeAll("AI handover\n\n");
+    try w.writeAll("Substrate\n");
+    try w.writeAll("  zigttp - deterministic TypeScript subset.\n");
+    try w.writeAll("  no exceptions, no shared mutable state, no nondeterminism,\n");
+    try w.writeAll("  no eval, no implicit coercion. compiler proves on every save.\n\n");
+
+    try w.writeAll("Proven for this handler\n");
+    var proven_count: usize = 0;
+    inline for (review.property_metas) |meta| {
+        const proven: bool = @field(card.current.properties, meta.field);
+        if (proven) {
+            try w.print("  [+] {s}\n", .{meta.label});
+            proven_count += 1;
+        }
+    }
+    if (proven_count == 0) {
+        try w.writeAll("  (no properties proven yet)\n");
+    }
+
+    try w.print(
+        "  surface: {d} routes, {d} execution paths, {d} intents verified\n\n",
+        .{
+            card.current.routes.len,
+            card.current.behavior_path_count,
+            card.current.intent_assertion_count,
+        },
+    );
+
+    if (card.current.declared_specs.len > 0) {
+        try w.writeAll("Declared specs\n");
+        for (card.current.declared_specs) |s| {
+            const glyph: []const u8 = if (s.discharged) "[*]" else "[-]";
+            try w.print("  {s} {s}\n", .{ glyph, s.name });
+        }
+        try w.writeAll("\n");
+    }
+
+    try w.writeAll("Refactor contract\n");
+    try w.writeAll("  keep these proven. compiler blocks any edit that breaks them.\n");
+
+    return try allocator.dupe(u8, aw.writer.buffered());
 }
 
 fn buildSurfacePane(
@@ -915,4 +1120,130 @@ test "writeProofCardFrame: Counterexample block includes failing request and rep
     try std.testing.expect(std.mem.indexOf(u8, out, "request: POST /api/users") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "previous build: 201  {\"id\":\"u_abc\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "this build    : crashed - cannot read length of undefined") != null);
+}
+
+// ---------------------------------------------------------------------------
+// Proof Lens tests
+// ---------------------------------------------------------------------------
+
+/// Render a frame with a specific lens around the standard test facts and
+/// return the buffered output. Tests assert on substrings.
+fn renderLensForTest(
+    allocator: std.mem.Allocator,
+    lens: Lens,
+    out_aw: *std.Io.Writer.Allocating,
+) !void {
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+
+    var delta = try review.deriveDelta(allocator, &current, null);
+    defer delta.deinit(allocator);
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "local",
+        .current = &current,
+        .baseline = null,
+        .delta = &delta,
+    };
+
+    audit_ring.clear();
+    try writeProofCardFrame(allocator, &card, &out_aw.writer, .{ .lens = lens });
+}
+
+test "Lens.next rotates Properties -> Trade -> Handover -> Properties" {
+    try std.testing.expectEqual(Lens.trade, Lens.properties.next());
+    try std.testing.expectEqual(Lens.handover, Lens.trade.next());
+    try std.testing.expectEqual(Lens.properties, Lens.handover.next());
+}
+
+test "writeProofCardFrame: trade lens groups restrictions by property" {
+    const allocator = std.testing.allocator;
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try renderLensForTest(allocator, .trade, &aw);
+    const out = aw.writer.buffered();
+
+    // Header label switches to "Trade".
+    try std.testing.expect(std.mem.indexOf(u8, out, "|Trade") != null);
+    // A property earned by restrictions appears with its trade.
+    try std.testing.expect(std.mem.indexOf(u8, out, "deterministic") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "gave up:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "try/catch") != null);
+    // A property earned by analysis (no restrictions) uses the "earned:" line.
+    try std.testing.expect(std.mem.indexOf(u8, out, "earned:") != null);
+}
+
+test "writeProofCardFrame: handover lens emits narrow certificate summary" {
+    const allocator = std.testing.allocator;
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try renderLensForTest(allocator, .handover, &aw);
+    const out = aw.writer.buffered();
+
+    // Header label switches to Handover; the narrow summary lives in the
+    // left pane and points at Studio for the full text.
+    try std.testing.expect(std.mem.indexOf(u8, out, "|Handover") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "AI handover") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Substrate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Proven for this handler") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Refactor contract") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Studio has the full text") != null);
+    // buildTestFacts proves read_only and input_validated; both must appear.
+    try std.testing.expect(std.mem.indexOf(u8, out, "[+] read-only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "[+] input-validated") != null);
+}
+
+test "writeProofCardFrame: all three lenses produce identical frame width" {
+    const allocator = std.testing.allocator;
+
+    const lenses = [_]Lens{ .properties, .trade, .handover };
+    var widths: [3]usize = undefined;
+    for (lenses, 0..) |lens, idx| {
+        var aw = std.Io.Writer.Allocating.init(allocator);
+        defer aw.deinit();
+        try renderLensForTest(allocator, lens, &aw);
+        const out = aw.writer.buffered();
+
+        var iter = std.mem.splitScalar(u8, out, '\n');
+        var max_w: usize = 0;
+        while (iter.next()) |line| {
+            if (line.len == 0) continue;
+            if (max_w == 0) max_w = line.len;
+            try std.testing.expectEqual(max_w, line.len);
+        }
+        widths[idx] = max_w;
+    }
+    try std.testing.expectEqual(widths[0], widths[1]);
+    try std.testing.expectEqual(widths[1], widths[2]);
+}
+
+test "buildProofCertificate emits the substrate paragraph and surface counts" {
+    const allocator = std.testing.allocator;
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+    current.behavior_path_count = 7;
+    current.intent_assertion_count = 2;
+
+    var delta = try review.deriveDelta(allocator, &current, null);
+    defer delta.deinit(allocator);
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "local",
+        .current = &current,
+        .baseline = null,
+        .delta = &delta,
+    };
+
+    const cert = try buildProofCertificate(allocator, &card);
+    defer allocator.free(cert);
+
+    try std.testing.expect(std.mem.indexOf(u8, cert, "AI handover") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cert, "Substrate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cert, "Proven for this handler") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cert, "2 routes, 7 execution paths, 2 intents verified") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cert, "Refactor contract") != null);
 }

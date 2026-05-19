@@ -523,6 +523,25 @@ fn factsJson(
     }
     try json.objectField("frame");
     try json.write(if (frame_bytes) |b| b else "");
+
+    // Pre-rendered AI proof certificate. Same artifact the TUI shows in
+    // its Handover lens and the Studio Copy button hands to the
+    // clipboard. Failure to render degrades to an empty string.
+    const cert_card = review.ProofCard{
+        .handler_path = handler_path,
+        .service_name = "dev",
+        .region = "local",
+        .current = update.facts,
+        .baseline = update.baseline,
+        .delta = update.delta,
+        .property_causes = update.property_causes,
+        .counterexample = update.counterexample,
+    };
+    const cert_bytes = proof_card_tui.buildProofCertificate(allocator, &cert_card) catch null;
+    defer if (cert_bytes) |b| allocator.free(b);
+    try json.objectField("proofCertificate");
+    try json.write(if (cert_bytes) |b| b else "");
+
     try json.objectField("facts");
     try update.facts.writeJson(&json);
     if (update.baseline) |b| {
@@ -908,14 +927,18 @@ pub const index_html =
     \\#terminalMirror{padding:18px 28px 22px;border-bottom:1px solid var(--line);background:#070a0e}#terminalMirror[hidden]{display:none}#terminalMirror header{padding:0 0 10px;border:0;display:flex;justify-content:space-between;align-items:baseline;gap:14px}#terminalMirror h2{font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin:0}#terminalMirror .echo{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}#frameMirror{margin:0;padding:14px 18px;background:#040608;border:1px solid var(--line);border-radius:6px;color:#cfe6ff;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;overflow-x:auto;tab-size:4}
     \\@media(max-width:900px){.grid{grid-template-columns:1fr}.status{text-align:left}header{align-items:start;flex-direction:column}.big{font-size:32px}}
     \\#onboarding{border:1px solid var(--line);background:var(--panel);color:var(--text);padding:24px 28px;max-width:560px;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.55)}#onboarding::backdrop{background:rgba(9,11,15,.78)}#onboarding h2{font-size:12px;margin:0 0 14px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}#onboarding ol{margin:0 0 18px;padding-left:22px;line-height:1.55}#onboarding ol strong{color:var(--text)}#onboarding ol code,#onboarding p code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);background:#07090d;border:1px solid var(--line);border-radius:4px;padding:1px 5px}#onboarding .hint{color:var(--muted);font-size:13px;margin:0 0 16px}#onboarding .actions{display:flex;justify-content:flex-end;gap:8px}
+    \\#lensBar{display:inline-flex;gap:4px;margin:0 0 14px;padding:4px;border:1px solid var(--line);border-radius:8px;background:#07090d}#lensBar button{appearance:none;border:0;background:transparent;color:var(--muted);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.04em;padding:5px 10px;border-radius:5px;cursor:pointer}#lensBar button:hover{color:var(--text)}#lensBar button.active{background:#10243a;color:#dceeff}
+    \\.lensPane{display:none}.lensPane.active{display:block}
+    \\#tradeRows{margin:0;padding:0;list-style:none}#tradeRows li{padding:10px 0;border-bottom:1px solid rgba(255,255,255,.06)}#tradeRows .head{display:flex;align-items:baseline;gap:8px;margin-bottom:6px}#tradeRows .head .pill{margin:0}#tradeRows .gave,#tradeRows .earned{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd7e3;display:block;margin-left:4px}#tradeRows .gave .lbl,#tradeRows .earned .lbl{color:var(--muted);display:inline-block;width:78px}#tradeRows li.off{opacity:.5}
+    \\#handoverPre{margin:0;padding:14px 18px;background:#040608;border:1px solid var(--line);border-radius:6px;color:#cfe6ff;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;overflow-x:auto;tab-size:4}#handoverActions{display:flex;gap:8px;margin-top:10px}#handoverActions button{border:1px solid #38658f;background:#10243a;color:#dceeff;border-radius:6px;padding:7px 12px;cursor:pointer}#handoverStatus{color:var(--muted);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;margin-left:6px;align-self:center}
     \\</style>
     \\</head>
     \\<body><main>
     \\<dialog id="onboarding"><h2>welcome to studio</h2><ol><li><strong>Proven Surface</strong> lists the routes, env vars, and egress hosts the compiler extracted from your handler.</li><li><strong>Property pills</strong> are the proofs the compiler discharged. Watch them flip when you save.</li><li><strong>Witnesses</strong> capture the request that would break a proof. Click one to see the failing path.</li><li>Press <code>.</code> to reopen this overlay any time.</li></ol><p class="hint">Edit your handler. Watch the proof flip live.</p><div class="actions"><button id="onboardingDismiss">Got it</button></div></dialog>
-    \\<header><div><h1>zigttp studio</h1><div class="sub">Your terminal HUD, hyperlinked. Same proof card, two surfaces.</div></div><div class="status" id="status">connecting</div></header>
+    \\<header><div><h1>zigttp studio</h1><div class="sub">Your terminal HUD, hyperlinked. A proof substrate for humans and AI agents.</div></div><div class="status" id="status">connecting</div></header>
     \\<section id="terminalMirror" hidden><header><h2>Live HUD - terminal mirror</h2><span class="echo">same frame as <code>zigttp dev</code></span></header><pre id="frameMirror" aria-label="Proof card frame mirrored from the terminal HUD"></pre></section>
     \\<section id="demoPanel" hidden><div><h2>Proof Theater</h2><p id="demoTitle"></p><p class="empty" id="demoWorkspace"></p></div><div id="demoActions"></div><div id="demoWitness" hidden></div></section>
-    \\<section class="grid"><div class="pane"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><section id="counterexampleBlock" hidden><h2 style="color:var(--bad)">Counterexample</h2><div id="counterexampleBody"></div></section><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
+    \\<section class="grid"><div class="pane"><div id="lensBar" role="tablist" aria-label="Proof lens"><button data-lens="properties" class="active">Properties</button><button data-lens="trade">Trade</button><button data-lens="handover">Handover</button></div><div class="lensPane active" data-lens="properties"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="lensPane" data-lens="trade"><h2>Trade</h2><p class="empty" style="margin:0 0 12px">Each proven property paired with the substrate restrictions that bought it.</p><ul id="tradeRows"></ul></div><div class="lensPane" data-lens="handover"><h2>AI Handover</h2><p class="empty" style="margin:0 0 12px">A proof certificate you can paste into Cursor, Claude, or any coding agent.</p><pre id="handoverPre"></pre><div id="handoverActions"><button id="handoverCopy">Copy to clipboard</button><span id="handoverStatus"></span></div></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><section id="counterexampleBlock" hidden><h2 style="color:var(--bad)">Counterexample</h2><div id="counterexampleBody"></div></section><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
     \\<footer><select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select><input id="url" value="/" aria-label="URL"><button id="send">Send</button></footer>
     \\<pre id="response"></pre>
     \\</main><script>
@@ -950,9 +973,20 @@ pub const index_html =
     \\document.addEventListener("click",ev=>{const b=ev.target.closest("[data-demo-action]");if(b)runDemoAction(b.dataset.demoAction)})
     \\function renderFrameMirror(s){const sec=$("terminalMirror");const pre=$("frameMirror");if(!sec||!pre)return;const txt=s&&typeof s.frame==="string"?s.frame:"";if(!txt){sec.hidden=true;pre.textContent="";return}sec.hidden=false;pre.textContent=txt}
     \\function render(s){$("status").textContent=`${s.status} · ${s.handlerPath||""}`;renderDiagnostics(s);renderFrameMirror(s);if(s.status!=="ready"){renderCounterexample(null);$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}renderCounterexample(s.counterexample);const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions)}
-    \\async function pull(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});render(await r.json())}catch(e){$("status").textContent=String(e)}}
+    \\// Mirror of `proof_to_restrictions` in packages/runtime/src/deploy/review.zig. Keep in sync.
+    \\const TRADE_TABLE=[{prop:"deterministic",label:"deterministic",gave:["async/await","while","do...while","for(;;)"],earned:"deterministic, replayable, AI-refactorable"},{prop:"retrySafe",label:"retry-safe",gave:["try/catch","throw"],earned:"Result-narrowed, exhaustive paths, no hidden control flow"},{prop:"stateIsolated",label:"state-isolated",gave:["class","this","++","--"],earned:"explicit data flow, no shared mutable receivers"},{prop:"readOnly",label:"read-only",gave:["delete","++","--"],earned:"shape-stable property access, no hidden writes"},{prop:"inputValidated",label:"input-validated",gave:["regex"],earned:"schema-checkable validation, no opaque accept sets"},{prop:"injectionSafe",label:"injection-safe",gave:[],earned:"flow analysis tracks user-input into sinks"},{prop:"idempotent",label:"idempotent",gave:[],earned:"earned by analysis; retries are safe"},{prop:"noSecretLeakage",label:"no-secret-leakage",gave:[],earned:"flow analysis tracks secret labels to sinks"},{prop:"noCredentialLeakage",label:"no-credential-leakage",gave:[],earned:"flow analysis tracks credential labels to sinks"},{prop:"piiContained",label:"pii-contained",gave:[],earned:"PII never reaches egress without an explicit boundary"},{prop:"resultsSafe",label:"results-safe",gave:[],earned:"all paths return a Response or Result.err"},{prop:"faultCovered",label:"fault-covered",gave:[],earned:"every failure path has a witness or test"}];
+    \\function tradeRowEl(row,on){const li=document.createElement("li");if(!on)li.className="off";const head=document.createElement("div");head.className="head";const pill=document.createElement("span");pill.className="pill "+(on?"on":"off");pill.textContent=(on?"+ ":"- ")+row.label;head.appendChild(pill);li.appendChild(head);if(row.gave.length){const g=document.createElement("span");g.className="gave";const gl=document.createElement("span");gl.className="lbl";gl.textContent="gave up:";g.appendChild(gl);g.appendChild(document.createTextNode(row.gave.join(", ")));li.appendChild(g)}const e=document.createElement("span");e.className="earned";const el=document.createElement("span");el.className="lbl";el.textContent="earned:";e.appendChild(el);e.appendChild(document.createTextNode(row.earned));li.appendChild(e);return li}
+    \\function renderTrade(facts){const props=(facts&&facts.properties)||{};const ul=$("tradeRows");while(ul.firstChild)ul.removeChild(ul.firstChild);TRADE_TABLE.forEach(r=>ul.appendChild(tradeRowEl(r,!!props[r.prop])))}
+    \\function renderHandover(s){const cert=(s&&s.proofCertificate)||"";$("handoverPre").textContent=cert||"(no certificate yet - waiting for first proof)"}
+    \\let activeLens="properties";
+    \\function applyLens(name){activeLens=name;document.querySelectorAll("#lensBar button").forEach(b=>b.classList.toggle("active",b.dataset.lens===name));document.querySelectorAll(".lensPane").forEach(p=>p.classList.toggle("active",p.dataset.lens===name));try{localStorage.setItem("zigttp.studio.lens",name)}catch(e){}}
+    \\document.addEventListener("click",ev=>{const b=ev.target.closest("#lensBar button");if(b)applyLens(b.dataset.lens)});
+    \\(function(){let saved="properties";try{saved=localStorage.getItem("zigttp.studio.lens")||"properties"}catch(e){}if(saved==="trade"||saved==="handover")applyLens(saved)})();
+    \\async function copyHandover(){const cert=$("handoverPre").textContent||"";const status=$("handoverStatus");try{await navigator.clipboard.writeText(cert);status.textContent="copied"}catch(e){status.textContent="copy failed - select and copy manually"}setTimeout(()=>{status.textContent=""},2400)}
+    \\{const b=$("handoverCopy");if(b)b.onclick=copyHandover}
+    \\async function pull(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});const s=await r.json();render(s);if(s&&s.facts)renderTrade(s.facts);renderHandover(s)}catch(e){$("status").textContent=String(e)}}
     \\let pollTimer=null;function startPolling(){if(!pollTimer)pollTimer=setInterval(pull,750)}function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
-    \\function startEvents(){let es;try{es=new EventSource("/_zigttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{render(JSON.parse(ev.data))}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
+    \\function startEvents(){let es;try{es=new EventSource("/_zigttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{const s=JSON.parse(ev.data);render(s);if(s&&s.facts)renderTrade(s.facts);renderHandover(s)}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
     \\startEvents();pull();pullDemo();setInterval(pullDemo,1200);
     \\$("send").onclick=async()=>{const r=await fetch($("url").value,{method:$("method").value});$("response").textContent=`HTTP ${r.status}\n`+await r.text()}
     \\function openOnboarding(){const d=$("onboarding");if(d&&!d.open&&typeof d.showModal==="function")d.showModal()}
@@ -1169,6 +1203,63 @@ test "studio HTML wires the terminal-mirror frame" {
     // The header copy makes the relationship explicit so the user reads the
     // two surfaces as one product, not two parallel UIs.
     try std.testing.expect(std.mem.indexOf(u8, index_html, "terminal mirror") != null);
+}
+
+test "studio HTML exposes the proof-lens tab bar and three lens panes" {
+    // The tab bar is the user-facing affordance for the lens; its absence
+    // would silently break the parity with the TUI Tab keystroke.
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"lensBar\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "data-lens=\"properties\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "data-lens=\"trade\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "data-lens=\"handover\"") != null);
+
+    // Each lens has its own pane wrapper so the toggle can show/hide them.
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "class=\"lensPane active\" data-lens=\"properties\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "class=\"lensPane\" data-lens=\"trade\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "class=\"lensPane\" data-lens=\"handover\"") != null);
+
+    // Trade rendering reads property states from the JSON facts.
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "function renderTrade") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "TRADE_TABLE") != null);
+
+    // Handover rendering targets the certificate string from the JSON state.
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "function renderHandover") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"handoverPre\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"handoverCopy\"") != null);
+
+    // Active-lens persistence so a returning developer keeps their view.
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "zigttp.studio.lens") != null);
+
+    // The AI-substrate framing lives in the header subtitle as a quiet
+    // undertone; the explicit pitch text lives in the Handover certificate.
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "proof substrate for humans and AI agents") != null);
+}
+
+test "factsJson emits proofCertificate field with substrate paragraph" {
+    const allocator = std.testing.allocator;
+    const facts = review.ReviewFacts{
+        .contract_sha = "deadbeef00000000",
+        .proof_level = .complete,
+        .env_keys = &.{},
+        .egress_hosts = &.{},
+        .cache_namespaces = &.{},
+        .routes = &.{},
+        .capabilities = &.{},
+        .properties = .{ .read_only = true, .deterministic = true },
+        .declared_specs = &.{},
+    };
+    const delta = review.ReviewDelta{};
+    const body = try factsJson(allocator, "src/handler.ts", .{
+        .facts = &facts,
+        .baseline = null,
+        .delta = &delta,
+    }, &.{});
+    defer allocator.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"proofCertificate\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "AI handover") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "Substrate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "Refactor contract") != null);
 }
 
 test "factsJson embeds the rendered proof card frame" {
