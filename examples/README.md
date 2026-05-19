@@ -6,7 +6,7 @@ Handler files grouped by what they demonstrate. The compiler treats every exampl
 
 These three handlers, in order, are the shortest path to seeing what makes zigttp different from a Node runtime.
 
-1. **[handler/spec-guardrails.ts](handler/spec-guardrails.ts)** - the magnet, in 24 lines. The handler declares `Spec<"deterministic" | "idempotent" | "no_secret_leakage" | "injection_safe">` on its return type and the compiler discharges all four. Try editing it: drop a `Date.now()` into the body and watch `-deterministic` light up in the HUD. Wrap it in `step("ts", () => Date.now())` from `zigttp:durable` and the chip flips back green.
+1. **[handler/spec-guardrails.ts](handler/spec-guardrails.ts)** - the magnet, in 24 lines. The handler declares `Spec<"deterministic" | "idempotent" | "no_secret_leakage" | "injection_safe">` on its return type and the compiler discharges all four. Try editing it: drop a `Date.now()` into the body and watch `-deterministic` light up in the proof card with a `Why:` row. Wrap it in `step("ts", () => Date.now())` from `zigttp:durable` and the chip flips back green.
 
 2. **[handler/handler-full.tsx](handler/handler-full.tsx)** - the same magnet, with branches. JSX rendering, multiple routes, Result handling, and a non-trivial `Spec<...>` declaration. Read it after the guardrails example to see how the proof obligations scale across a real handler.
 
@@ -75,4 +75,4 @@ Every `.test.jsonl` next to a handler is a replayable assertion. Run them with t
 zigttp mock examples/handler/handler.test.jsonl --port 3001
 ```
 
-When verification fails, the terminal shows the framed restriction block (why / buys / try). See `zigts restrictions` for the full table of language cuts and the proofs they unlock.
+When verification fails on an unsupported language feature, the terminal shows the framed restriction block (`why` / `buys` / `try`). See `zigts restrictions` for the full table of language cuts and the proofs they unlock.

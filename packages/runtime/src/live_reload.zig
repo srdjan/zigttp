@@ -612,42 +612,59 @@ fn printProve(comptime fmt: []const u8, args: anytype) void {
 /// in-frame code excerpt; pass the same buffer that was just analyzed.
 fn printDiagnosticLines(diagnostics: []const studio_mod.Diagnostic, source: ?[]const u8) void {
     const tty = shared.stderrIsTty();
+    var stderr_buf: [8 * 1024]u8 = undefined;
+    var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
+    writeDiagnosticLines(&stderr_writer.interface, diagnostics, source, tty) catch {};
+    stderr_writer.interface.flush() catch {};
+}
+
+fn writeDiagnosticLines(
+    writer: *std.Io.Writer,
+    diagnostics: []const studio_mod.Diagnostic,
+    source: ?[]const u8,
+    tty: bool,
+) !void {
     for (diagnostics) |d| {
         if (std.mem.eql(u8, d.code, "ZTS001")) {
-            printRestrictionFrame(d, source, tty);
+            try writeRestrictionFrame(writer, d, source, tty);
             continue;
         }
-        std.debug.print("  {s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.column, d.code, d.message });
-        if (d.suggestion) |s| std.debug.print("      hint: {s}\n", .{s});
+        try writer.print("  {s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.column, d.code, d.message });
+        if (d.suggestion) |s| try writer.print("      hint: {s}\n", .{s});
     }
 }
 
-fn printRestrictionFrame(d: studio_mod.Diagnostic, source: ?[]const u8, tty: bool) void {
+fn writeRestrictionFrame(
+    writer: *std.Io.Writer,
+    d: studio_mod.Diagnostic,
+    source: ?[]const u8,
+    tty: bool,
+) !void {
     const c = shared.palette(tty);
 
     const feature = json_diag.extractFeatureFromMessage(d.message);
     const info: ?json_diag.RestrictionInfo = if (feature) |name| json_diag.lookupRestriction(name) else null;
     const display_name = if (info) |i| i.name else feature orelse "";
 
-    std.debug.print("\n", .{});
-    std.debug.print("  {s}restriction{s} {s}{s}{s}\n", .{ c.red, c.reset, c.bold, display_name, c.reset });
-    std.debug.print("  {s}----------------------------------------------------------------------{s}\n", .{ c.dim, c.reset });
-    std.debug.print("  {s}{s}:{d}:{d}{s}\n", .{ c.dim, d.file, d.line, d.column, c.reset });
+    try writer.writeByte('\n');
+    try writer.print("  {s}restriction{s} {s}{s}{s}\n", .{ c.red, c.reset, c.bold, display_name, c.reset });
+    try writer.print("  {s}----------------------------------------------------------------------{s}\n", .{ c.dim, c.reset });
+    try writer.print("  {s}{s}:{d}:{d}{s}\n", .{ c.dim, d.file, d.line, d.column, c.reset });
 
     if (source) |src| {
         if (zigts.bool_checker.getSourceLine(src, d.line)) |line_text| {
-            std.debug.print("    {d} | {s}\n", .{ d.line, line_text });
+            try writer.print("    {d} | {s}\n", .{ d.line, line_text });
         }
     }
 
     if (info) |i| {
-        std.debug.print("  {s}why{s}    {s}\n", .{ c.bold, c.reset, i.blocked_reason });
-        std.debug.print("  {s}buys{s}   removing this unlocks: {s}\n", .{ c.green, c.reset, i.proof_unlocked });
-        std.debug.print("  {s}try{s}    {s}\n", .{ c.yellow, c.reset, i.alternative });
+        try writer.print("  {s}why{s}    {s}\n", .{ c.bold, c.reset, i.blocked_reason });
+        try writer.print("  {s}buys{s}   removing this unlocks: {s}\n", .{ c.green, c.reset, i.proof_unlocked });
+        try writer.print("  {s}try{s}    {s}\n", .{ c.yellow, c.reset, i.alternative });
     } else if (d.suggestion) |s| {
-        std.debug.print("  {s}try{s}    {s}\n", .{ c.yellow, c.reset, s });
+        try writer.print("  {s}try{s}    {s}\n", .{ c.yellow, c.reset, s });
     }
-    std.debug.print("\n", .{});
+    try writer.writeByte('\n');
 }
 
 /// Dupe each parser/checker JsonDiagnostic into an owned studio.Diagnostic
@@ -707,4 +724,83 @@ test "LiveReloadConfig defaults" {
     try std.testing.expect(!config.prove);
     try std.testing.expect(!config.force_swap);
     try std.testing.expectEqual(@as(i64, 250), config.poll_interval_ms);
+}
+
+test "writeDiagnosticLines: ZTS001 renders framed restriction rationale" {
+    const allocator = std.testing.allocator;
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+
+    const diagnostics = [_]studio_mod.Diagnostic{.{
+        .code = @constCast("ZTS001"),
+        .severity = @constCast("error"),
+        .file = @constCast("handler.ts"),
+        .line = 2,
+        .column = 5,
+        .message = @constCast("'try/catch' is not supported"),
+        .suggestion = @constCast("use Result types for error handling"),
+    }};
+    const source =
+        \\function handler(req) {
+        \\    try {
+        \\        return Response.text("ok");
+        \\    } catch (err) {
+        \\        return Response.text("bad", { status: 500 });
+        \\    }
+        \\}
+    ;
+
+    try writeDiagnosticLines(&aw.writer, &diagnostics, source, false);
+    const out = aw.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "restriction try/catch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "handler.ts:2:5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "2 |     try {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "why    exceptions are an invisible second return channel") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "buys   removing this unlocks: Result narrowing") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "try    use Result types and check .ok") != null);
+}
+
+test "writeDiagnosticLines: unknown ZTS001 falls back to suggestion" {
+    const allocator = std.testing.allocator;
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+
+    const diagnostics = [_]studio_mod.Diagnostic{.{
+        .code = @constCast("ZTS001"),
+        .severity = @constCast("error"),
+        .file = @constCast("handler.ts"),
+        .line = 1,
+        .column = 1,
+        .message = @constCast("'future syntax' is not supported"),
+        .suggestion = @constCast("rewrite it explicitly"),
+    }};
+
+    try writeDiagnosticLines(&aw.writer, &diagnostics, null, false);
+    const out = aw.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "restriction future syntax") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "try    rewrite it explicitly") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "why    ") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "buys   ") == null);
+}
+
+test "writeDiagnosticLines: non-ZTS001 keeps compact diagnostic form" {
+    const allocator = std.testing.allocator;
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+
+    const diagnostics = [_]studio_mod.Diagnostic{.{
+        .code = @constCast("ZTS308"),
+        .severity = @constCast("error"),
+        .file = @constCast("handler.ts"),
+        .line = 7,
+        .column = 11,
+        .message = @constCast("unchecked optional use"),
+        .suggestion = @constCast("guard with !== undefined"),
+    }};
+
+    try writeDiagnosticLines(&aw.writer, &diagnostics, null, false);
+    try std.testing.expectEqualStrings(
+        "  handler.ts:7:11: ZTS308: unchecked optional use\n      hint: guard with !== undefined\n",
+        aw.writer.buffered(),
+    );
 }
