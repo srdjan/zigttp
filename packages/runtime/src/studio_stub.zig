@@ -3,11 +3,20 @@ const std = @import("std");
 pub const index_html = "";
 pub const demo_state_path = "/_zigttp/studio/demo/state.json";
 pub const demo_action_path = "/_zigttp/studio/demo/action";
+pub const caller_verify_path = "/_zigttp/studio/caller-verify.json";
 
 pub const DemoAction = enum { introduce_bug, repair_bug, deploy, reset };
 
 pub const DemoConfig = struct {
     workspace_root: []const u8,
+};
+
+pub const CallerReceiptInput = struct {
+    proofs_header_value: []const u8,
+    attest_header_value: []const u8,
+    key_fingerprint_hex: []const u8,
+    host: []const u8,
+    port: u16,
 };
 
 pub const Diagnostic = struct {
@@ -43,6 +52,15 @@ pub const State = struct {
         _ = self;
     }
 
+    pub fn setCallerReceipt(self: *State, input: CallerReceiptInput) !void {
+        _ = self;
+        _ = input;
+    }
+
+    pub fn clearCallerReceipt(self: *State) void {
+        _ = self;
+    }
+
     pub fn updateChecking(self: *State) void {
         _ = self;
     }
@@ -66,6 +84,12 @@ pub const State = struct {
     pub fn generatedTests(self: *State, allocator: std.mem.Allocator) ![]u8 {
         _ = self;
         return try allocator.dupe(u8, "");
+    }
+
+    pub fn callerVerifyJsonCopy(self: *State, allocator: std.mem.Allocator) anyerror![]u8 {
+        _ = self;
+        _ = allocator;
+        return error.CallerReceiptUnavailable;
     }
 
     pub fn witnessDetailJson(self: *State, allocator: std.mem.Allocator, key: []const u8) anyerror![]u8 {

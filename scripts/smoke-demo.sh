@@ -50,6 +50,24 @@ wait_step() {
     return 1
 }
 
+wait_state_contains() {
+    local needle="$1" body=""
+    for _ in $(seq 1 120); do
+        if body=$(/usr/bin/curl -sf "http://127.0.0.1:$PORT/_zigttp/studio/demo/state.json" 2>/dev/null); then
+            if printf '%s' "$body" | grep -q "$needle"; then
+                printf '%s' "$body"
+                return 0
+            fi
+        fi
+        sleep 0.25
+        if ! kill -0 "$PID" 2>/dev/null; then
+            return 1
+        fi
+    done
+    printf '%s' "$body" >&2
+    return 1
+}
+
 post_action() {
     local action="$1"
     /usr/bin/curl -sf \
@@ -69,8 +87,13 @@ PID=$!
 baseline_body=$(wait_step baseline) || fail "baseline state not reached"
 printf '%s' "$baseline_body" | grep -q '"sessionId":"' || fail "baseline state missing sessionId"
 printf '%s' "$baseline_body" | grep -q 'zigts expert --session-id' || fail "baseline state missing TUI command"
+baseline_body=$(wait_state_contains '"callerReceiptReady":true') || fail "baseline state missing caller receipt"
+printf '%s' "$baseline_body" | grep -q '"callerReceiptReady":true' || fail "baseline state missing caller receipt"
+printf '%s' "$baseline_body" | grep -q "zigttp verify http://127.0.0.1:$PORT/" || fail "baseline state missing verify command"
 session_id=$(printf '%s' "$baseline_body" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
 [ -n "$session_id" ] || fail "could not parse sessionId"
+/usr/bin/curl -sf "http://127.0.0.1:$PORT/.well-known/zigttp-attest" >/dev/null || fail "well-known attestation endpoint missing"
+"$ZIGTTP" verify "http://127.0.0.1:$PORT/" >/dev/null || fail "zigttp verify failed against demo server"
 
 post_action introduce_bug || fail "introduce_bug action failed"
 witness_body=$(wait_step witness) || fail "witness state not reached"

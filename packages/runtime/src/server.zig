@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const zigts = @import("zigts");
 const engine = @import("engine_adapter.zig");
 const Io = std.Io;
 const net = std.Io.net;
@@ -33,6 +34,7 @@ const proof_audit_ring = @import("proof_audit_ring.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
 const attest_envelope = @import("attest/envelope.zig");
 const attest_well_known = @import("attest/well_known.zig");
+const attest_build_receipt = @import("attest/build_receipt.zig");
 const studio_mod = @import("runtime_features.zig").studio;
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
@@ -173,6 +175,28 @@ fn populateStudioResponse(
     if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) {
         const state_body = try studio.stateJsonCopy(allocator);
         response.setBodyOwned(state_body);
+        try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+        return true;
+    }
+    if (std.mem.eql(u8, path, studio_mod.caller_verify_path)) {
+        const verify_body = studio.callerVerifyJsonCopy(allocator) catch |err| {
+            switch (err) {
+                error.CallerReceiptUnavailable => {
+                    response.status = 404;
+                    response.body = "Caller receipt unavailable";
+                    try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+                    return true;
+                },
+                error.CallerReceiptInvalid => {
+                    response.status = 409;
+                    response.body = "Caller receipt signature invalid";
+                    try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+                    return true;
+                },
+                else => return err,
+            }
+        };
+        response.setBodyOwned(verify_body);
         try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
         return true;
     }
@@ -1359,15 +1383,7 @@ pub const Server = struct {
         // the attestation headers AND the well-known doc rather than serve a
         // misleading signature. A future slice will re-mint attestation on
         // each live swap.
-        if (self.attestation_headers) |*ah| {
-            ah.deinit(self.allocator);
-            self.attestation_headers = null;
-        }
-        if (self.well_known_doc) |*wkd| {
-            wkd.deinit(self.allocator);
-            self.well_known_doc = null;
-        }
-        self.signer_fingerprint_hex = null;
+        self.clearAttestation();
 
         const p = self.contract.?.properties();
         if (p.pure or (p.deterministic and p.read_only)) {
@@ -1377,6 +1393,92 @@ pub const Server = struct {
                 .{},
             );
         }
+    }
+
+    fn clearAttestation(self: *Self) void {
+        if (self.attestation_headers) |*ah| {
+            ah.deinit(self.allocator);
+            self.attestation_headers = null;
+        }
+        if (self.well_known_doc) |*wkd| {
+            wkd.deinit(self.allocator);
+            self.well_known_doc = null;
+        }
+        self.signer_fingerprint_hex = null;
+        self.syncStudioCallerReceipt();
+    }
+
+    pub fn installDevAttestation(
+        self: *Self,
+        contract_json: []const u8,
+        bytecode: []const u8,
+        contract: *const zigts.HandlerContract,
+    ) !void {
+        self.clearAttestation();
+
+        const jws = try attest_build_receipt.buildDevJws(self.allocator, contract_json, bytecode, contract);
+        defer self.allocator.free(jws);
+
+        const props_or_default = contract.properties orelse zigts.handler_contract.HandlerProperties{
+            .pure = false,
+            .read_only = false,
+            .stateless = false,
+            .retry_safe = false,
+            .deterministic = false,
+            .has_egress = false,
+        };
+
+        self.attestation_headers = try attest_header_strings.build(
+            self.allocator,
+            props_or_default,
+            jws,
+        );
+        errdefer {
+            if (self.attestation_headers) |*ah| {
+                ah.deinit(self.allocator);
+                self.attestation_headers = null;
+            }
+        }
+
+        var verify_result = try attest_envelope.verify(self.allocator, jws);
+        defer verify_result.deinit();
+
+        self.well_known_doc = try attest_well_known.build(
+            self.allocator,
+            contract_json,
+            jws,
+            verify_result.public_key,
+        );
+        errdefer {
+            if (self.well_known_doc) |*doc| {
+                doc.deinit(self.allocator);
+                self.well_known_doc = null;
+            }
+        }
+
+        self.signer_fingerprint_hex = verify_result.fingerprint_hex;
+        self.syncStudioCallerReceipt();
+    }
+
+    fn syncStudioCallerReceipt(self: *Self) void {
+        const studio = if (self.studio) |*s| s else return;
+        const headers = self.attestation_headers orelse {
+            studio.clearCallerReceipt();
+            return;
+        };
+        const fp = self.signer_fingerprint_hex orelse {
+            studio.clearCallerReceipt();
+            return;
+        };
+        studio.setCallerReceipt(.{
+            .proofs_header_value = headers.proofs_value,
+            .attest_header_value = headers.attest_value,
+            .key_fingerprint_hex = &fp,
+            .host = self.config.host,
+            .port = self.config.port,
+        }) catch |err| {
+            std.log.warn("studio caller receipt unavailable: {}", .{err});
+        };
     }
 
     pub fn start(self: *Self) !void {
@@ -1536,6 +1638,7 @@ pub const Server = struct {
                         break :build_well_known;
                     };
                     self.signer_fingerprint_hex = verify_result.fingerprint_hex;
+                    self.syncStudioCallerReceipt();
                     std.log.info("   Attestation: /.well-known/zigttp-attest enabled", .{});
                 }
             }

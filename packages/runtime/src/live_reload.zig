@@ -287,8 +287,6 @@ pub const LiveReloadState = struct {
                 };
                 defer manifest.deinit(self.allocator);
 
-                self.renderHud(&new_contract, old_contract, elapsed_ms, &sha_hex);
-
                 const verdict = manifest.verdict;
                 const should_swap = verdict == .safe or verdict == .safe_with_additions or self.config.force_swap;
                 if (should_swap) {
@@ -298,15 +296,19 @@ pub const LiveReloadState = struct {
                     self.tryLogSwap(&new_contract, &sha_hex);
                     self.updateCurrentContract(new_contract);
                     self.doSwap(&new_code, true);
+                    self.refreshDevAttestation(self.previous_code orelse "");
+                    if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
                 } else {
+                    self.renderHud(&new_contract, old_contract, elapsed_ms, &sha_hex);
                     printProve("Swap blocked. Fix the breaking change or use --force-swap.\n", .{});
                     new_contract.deinit(self.allocator);
                 }
             } else {
-                self.renderHud(&new_contract, null, elapsed_ms, &sha_hex);
                 self.tryLogSwap(&new_contract, &sha_hex);
                 self.updateCurrentContract(new_contract);
                 self.doSwap(&new_code, true);
+                self.refreshDevAttestation(self.previous_code orelse "");
+                if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
             }
         } else {
             self.doSwap(&new_code, false);
@@ -351,10 +353,11 @@ pub const LiveReloadState = struct {
         std.crypto.hash.sha2.Sha256.hash(source, &sha_digest, .{});
         const sha_hex = std.fmt.bytesToHex(sha_digest, .lower);
 
-        self.renderHud(&contract, null, elapsed_ms, &sha_hex);
         self.tryLogSwap(&contract, &sha_hex);
         self.updateCurrentContract(contract);
         self.installRuntimeContract();
+        self.refreshDevAttestation(source);
+        if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
         printProve("Initial proof ready ({d}ms).\n", .{elapsed_ms});
     }
 
@@ -375,6 +378,46 @@ pub const LiveReloadState = struct {
             };
             self.server.updateContract(validated);
         }
+    }
+
+    fn refreshDevAttestation(self: *LiveReloadState, source: []const u8) void {
+        if (!self.server.config.studio or !self.config.prove or source.len == 0) return;
+
+        var compiled = precompile.compileHandler(self.allocator, source, self.handler_path, .{
+            .emit_verify = true,
+            .emit_contract = true,
+            .sql_schema_path = self.config.sql_schema_path,
+            .system_path = self.config.system_path,
+        }) catch |err| {
+            printProve("Caller receipt skipped: compile failed: {}.\n", .{err});
+            return;
+        };
+        defer compiled.deinit(self.allocator);
+
+        if (compiled.verify_failed or compiled.bytecode.len == 0) {
+            printProve("Caller receipt skipped: no verified bytecode.\n", .{});
+            return;
+        }
+        const contract = if (compiled.contract) |*c| c else {
+            printProve("Caller receipt skipped: no contract emitted.\n", .{});
+            return;
+        };
+        std.crypto.hash.sha2.Sha256.hash(compiled.bytecode, &contract.artifact_sha256, .{});
+
+        var json_output: std.ArrayList(u8) = .empty;
+        defer json_output.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &json_output);
+        zigts.writeContractJson(contract, &aw.writer) catch |err| {
+            printProve("Caller receipt skipped: contract JSON failed: {}.\n", .{err});
+            return;
+        };
+        json_output = aw.toArrayList();
+        if (json_output.items.len == 0) return;
+
+        self.server.installDevAttestation(json_output.items, compiled.bytecode, contract) catch |err| {
+            printProve("Caller receipt skipped: attestation failed: {}.\n", .{err});
+            return;
+        };
     }
 
     /// Dedupe against the last logged sha and append a `kind=swap` row when

@@ -4,6 +4,8 @@ const zigts_cli = @import("zigts_cli");
 const review = @import("deploy/review.zig");
 const proof_ledger = @import("proof_ledger.zig");
 const proof_card_tui = @import("proof_card_tui.zig");
+const attest_envelope = @import("attest/envelope.zig");
+const attest_well_known = @import("attest/well_known.zig");
 const compat = zigts.compat;
 const demo = @import("demo.zig");
 
@@ -57,10 +59,83 @@ pub const Diagnostic = struct {
     }
 };
 
+pub const CallerReceiptInput = struct {
+    proofs_header_value: []const u8,
+    attest_header_value: []const u8,
+    key_fingerprint_hex: []const u8,
+    host: []const u8,
+    port: u16,
+};
+
+const CallerReceipt = struct {
+    proofs_header_value: []u8,
+    attest_header_value: []u8,
+    key_fingerprint_hex: []u8,
+    host: []u8,
+    port: u16,
+    verify_url: []u8,
+    verify_command: []u8,
+    well_known_url: []u8,
+
+    fn init(allocator: std.mem.Allocator, input: CallerReceiptInput) !CallerReceipt {
+        const host = try allocator.dupe(u8, input.host);
+        errdefer allocator.free(host);
+        const proofs = try allocator.dupe(u8, input.proofs_header_value);
+        errdefer allocator.free(proofs);
+        const attest = try allocator.dupe(u8, input.attest_header_value);
+        errdefer allocator.free(attest);
+        const fp = try allocator.dupe(u8, input.key_fingerprint_hex);
+        errdefer allocator.free(fp);
+        const verify_url = try std.fmt.allocPrint(allocator, "http://{s}:{d}/", .{ input.host, input.port });
+        errdefer allocator.free(verify_url);
+        const verify_command = try std.fmt.allocPrint(allocator, "zigttp verify {s}", .{verify_url});
+        errdefer allocator.free(verify_command);
+        const well_known_url = try std.fmt.allocPrint(allocator, "http://{s}:{d}{s}", .{
+            input.host,
+            input.port,
+            attest_well_known.route_path,
+        });
+        errdefer allocator.free(well_known_url);
+
+        return .{
+            .proofs_header_value = proofs,
+            .attest_header_value = attest,
+            .key_fingerprint_hex = fp,
+            .host = host,
+            .port = input.port,
+            .verify_url = verify_url,
+            .verify_command = verify_command,
+            .well_known_url = well_known_url,
+        };
+    }
+
+    fn clone(self: *const CallerReceipt, allocator: std.mem.Allocator) !CallerReceipt {
+        return try init(allocator, .{
+            .proofs_header_value = self.proofs_header_value,
+            .attest_header_value = self.attest_header_value,
+            .key_fingerprint_hex = self.key_fingerprint_hex,
+            .host = self.host,
+            .port = self.port,
+        });
+    }
+
+    fn deinit(self: *CallerReceipt, allocator: std.mem.Allocator) void {
+        allocator.free(self.proofs_header_value);
+        allocator.free(self.attest_header_value);
+        allocator.free(self.key_fingerprint_hex);
+        allocator.free(self.host);
+        allocator.free(self.verify_url);
+        allocator.free(self.verify_command);
+        allocator.free(self.well_known_url);
+        self.* = undefined;
+    }
+};
+
 pub const State = struct {
     allocator: std.mem.Allocator,
     handler_path: []u8,
     demo_config: ?DemoConfig = null,
+    caller_receipt: ?CallerReceipt = null,
     mutex: compat.Mutex = .{},
     json: []u8,
     recent: [recent_capacity]RecentEntry = undefined,
@@ -97,9 +172,25 @@ pub const State = struct {
         self.subscribers.deinit(self.allocator);
         self.subscribers_mutex.unlock();
         if (self.demo_config) |*cfg| cfg.deinit(self.allocator);
+        if (self.caller_receipt) |*receipt| receipt.deinit(self.allocator);
         self.allocator.free(self.handler_path);
         self.allocator.free(self.json);
         self.* = undefined;
+    }
+
+    pub fn setCallerReceipt(self: *State, input: CallerReceiptInput) !void {
+        const next = try CallerReceipt.init(self.allocator, input);
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.caller_receipt) |*receipt| receipt.deinit(self.allocator);
+        self.caller_receipt = next;
+    }
+
+    pub fn clearCallerReceipt(self: *State) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.caller_receipt) |*receipt| receipt.deinit(self.allocator);
+        self.caller_receipt = null;
     }
 
     pub fn subscribe(self: *State, fd: std.posix.fd_t) !void {
@@ -160,11 +251,14 @@ pub const State = struct {
 
     pub fn updateFacts(self: *State, update: FactsUpdate) void {
         self.pushRecent(update.facts, update.delta, update.recompile_ms);
+        var receipt_copy = self.callerReceiptCopy(self.allocator) catch null;
+        defer if (receipt_copy) |*receipt| receipt.deinit(self.allocator);
         const next = factsJson(
             self.allocator,
             self.handler_path,
             update,
             self.recent[0..self.recent_count],
+            if (receipt_copy) |*receipt| receipt else null,
         ) catch return;
         self.replaceJson(next);
     }
@@ -242,6 +336,41 @@ pub const State = struct {
         _ = try zigts_cli.precompile.runGenTests(allocator, self.handler_path, &aw.writer);
         buf = aw.toArrayList();
         return try buf.toOwnedSlice(allocator);
+    }
+
+    pub fn callerVerifyJsonCopy(self: *State, allocator: std.mem.Allocator) ![]u8 {
+        var receipt = (try self.callerReceiptCopy(allocator)) orelse return error.CallerReceiptUnavailable;
+        defer receipt.deinit(allocator);
+        var verified = attest_envelope.verify(allocator, receipt.attest_header_value) catch return error.CallerReceiptInvalid;
+        defer verified.deinit();
+
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        var json: std.json.Stringify = .{ .writer = &aw.writer };
+        try json.beginObject();
+        try json.objectField("ok");
+        try json.write(true);
+        try json.objectField("verifyUrl");
+        try json.write(receipt.verify_url);
+        try json.objectField("verifyCommand");
+        try json.write(receipt.verify_command);
+        try json.objectField("wellKnownUrl");
+        try json.write(receipt.well_known_url);
+        try json.objectField("keyFingerprint");
+        try json.write(&verified.fingerprint_hex);
+        try json.objectField("propertySummary");
+        try json.write(verified.claims.property_summary);
+        try json.objectField("routesCount");
+        try json.write(verified.claims.routes_count);
+        try json.endObject();
+        return try allocator.dupe(u8, aw.writer.buffered());
+    }
+
+    fn callerReceiptCopy(self: *State, allocator: std.mem.Allocator) !?CallerReceipt {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const receipt = self.caller_receipt orelse return null;
+        return try receipt.clone(allocator);
     }
 
     /// `error.InvalidWitnessKey` if the key is not 1..64 hex chars.
@@ -332,6 +461,7 @@ pub fn isStudioPath(path: []const u8) bool {
     if (std.mem.eql(u8, path, "/_zigttp/studio/")) return true;
     if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) return true;
     if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) return true;
+    if (std.mem.eql(u8, path, caller_verify_path)) return true;
     if (std.mem.eql(u8, path, demo.state_path)) return true;
     if (std.mem.eql(u8, path, demo.action_path)) return true;
     if (std.mem.eql(u8, path, sse_path)) return true;
@@ -340,6 +470,7 @@ pub fn isStudioPath(path: []const u8) bool {
 }
 
 pub const sse_path = "/_zigttp/studio/events";
+pub const caller_verify_path = "/_zigttp/studio/caller-verify.json";
 pub const demo_state_path = demo.state_path;
 pub const demo_action_path = demo.action_path;
 
@@ -495,6 +626,7 @@ fn factsJson(
     handler_path: []const u8,
     update: FactsUpdate,
     recent: []const RecentEntry,
+    caller_receipt: ?*const CallerReceipt,
 ) ![]u8 {
     const witnesses = try loadWitnessEntries(allocator, handler_path);
     defer if (witnesses) |entries| zigts.witness_corpus.freeEntries(allocator, entries);
@@ -541,6 +673,12 @@ fn factsJson(
     defer if (cert_bytes) |b| allocator.free(b);
     try json.objectField("proofCertificate");
     try json.write(if (cert_bytes) |b| b else "");
+    try json.objectField("callerReceipt");
+    if (caller_receipt) |receipt| {
+        try writeCallerReceiptJson(&json, receipt);
+    } else {
+        try json.write(null);
+    }
 
     try json.objectField("facts");
     try update.facts.writeJson(&json);
@@ -564,6 +702,29 @@ fn factsJson(
     try writeRecentJson(&json, recent);
     try json.endObject();
     return try allocator.dupe(u8, aw.writer.buffered());
+}
+
+fn writeCallerReceiptJson(json: *std.json.Stringify, receipt: *const CallerReceipt) !void {
+    try json.beginObject();
+    try json.objectField("ready");
+    try json.write(true);
+    try json.objectField("proofsHeader");
+    try json.write(receipt.proofs_header_value);
+    try json.objectField("attestHeader");
+    try json.write(receipt.attest_header_value);
+    try json.objectField("keyFingerprint");
+    try json.write(receipt.key_fingerprint_hex);
+    try json.objectField("host");
+    try json.write(receipt.host);
+    try json.objectField("port");
+    try json.write(receipt.port);
+    try json.objectField("verifyUrl");
+    try json.write(receipt.verify_url);
+    try json.objectField("verifyCommand");
+    try json.write(receipt.verify_command);
+    try json.objectField("wellKnownUrl");
+    try json.write(receipt.well_known_url);
+    try json.endObject();
 }
 
 /// Mirrors `review.CounterexamplePreview` field-for-field so the browser
@@ -930,7 +1091,7 @@ pub const index_html =
     \\#lensBar{display:inline-flex;gap:4px;margin:0 0 14px;padding:4px;border:1px solid var(--line);border-radius:8px;background:#07090d}#lensBar button{appearance:none;border:0;background:transparent;color:var(--muted);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.04em;padding:5px 10px;border-radius:5px;cursor:pointer}#lensBar button:hover{color:var(--text)}#lensBar button.active{background:#10243a;color:#dceeff}
     \\.lensPane{display:none}.lensPane.active{display:block}
     \\#tradeRows{margin:0;padding:0;list-style:none}#tradeRows li{padding:10px 0;border-bottom:1px solid rgba(255,255,255,.06)}#tradeRows .head{display:flex;align-items:baseline;gap:8px;margin-bottom:6px}#tradeRows .head .pill{margin:0}#tradeRows .gave,#tradeRows .earned{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd7e3;display:block;margin-left:4px}#tradeRows .gave .lbl,#tradeRows .earned .lbl{color:var(--muted);display:inline-block;width:78px}#tradeRows li.off{opacity:.5}
-    \\#handoverPre{margin:0;padding:14px 18px;background:#040608;border:1px solid var(--line);border-radius:6px;color:#cfe6ff;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;overflow-x:auto;tab-size:4}#handoverActions{display:flex;gap:8px;margin-top:10px}#handoverActions button{border:1px solid #38658f;background:#10243a;color:#dceeff;border-radius:6px;padding:7px 12px;cursor:pointer}#handoverStatus{color:var(--muted);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;margin-left:6px;align-self:center}
+    \\#handoverPre,#callerPre{margin:0;padding:14px 18px;background:#040608;border:1px solid var(--line);border-radius:6px;color:#cfe6ff;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;overflow-x:auto;tab-size:4}#handoverActions,#callerActions{display:flex;gap:8px;margin-top:10px;align-items:center}#handoverActions button,#callerActions button{border:1px solid #38658f;background:#10243a;color:#dceeff;border-radius:6px;padding:7px 12px;cursor:pointer}#handoverStatus,#callerStatus{color:var(--muted);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;margin-left:6px;align-self:center}
     \\</style>
     \\</head>
     \\<body><main>
@@ -938,7 +1099,7 @@ pub const index_html =
     \\<header><div><h1>zigttp studio</h1><div class="sub">Your terminal HUD, hyperlinked. A proof substrate for humans and AI agents.</div></div><div class="status" id="status">connecting</div></header>
     \\<section id="terminalMirror" hidden><header><h2>Live HUD - terminal mirror</h2><span class="echo">same frame as <code>zigttp dev</code></span></header><pre id="frameMirror" aria-label="Proof card frame mirrored from the terminal HUD"></pre></section>
     \\<section id="demoPanel" hidden><div><h2>Proof Theater</h2><p id="demoTitle"></p><p class="empty" id="demoWorkspace"></p></div><div id="demoActions"></div><div id="demoWitness" hidden></div></section>
-    \\<section class="grid"><div class="pane"><div id="lensBar" role="tablist" aria-label="Proof lens"><button data-lens="properties" class="active">Properties</button><button data-lens="trade">Trade</button><button data-lens="handover">Handover</button></div><div class="lensPane active" data-lens="properties"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="lensPane" data-lens="trade"><h2>Trade</h2><p class="empty" style="margin:0 0 12px">Each proven property paired with the substrate restrictions that bought it.</p><ul id="tradeRows"></ul></div><div class="lensPane" data-lens="handover"><h2>AI Handover</h2><p class="empty" style="margin:0 0 12px">A proof certificate you can paste into Cursor, Claude, or any coding agent.</p><pre id="handoverPre"></pre><div id="handoverActions"><button id="handoverCopy">Copy to clipboard</button><span id="handoverStatus"></span></div></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><section id="counterexampleBlock" hidden><h2 style="color:var(--bad)">Counterexample</h2><div id="counterexampleBody"></div></section><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
+    \\<section class="grid"><div class="pane"><div id="lensBar" role="tablist" aria-label="Proof lens"><button data-lens="properties" class="active">Properties</button><button data-lens="trade">Trade</button><button data-lens="handover">Handover</button><button data-lens="caller">Caller View</button></div><div class="lensPane active" data-lens="properties"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="lensPane" data-lens="trade"><h2>Trade</h2><p class="empty" style="margin:0 0 12px">Each proven property paired with the substrate restrictions that bought it.</p><ul id="tradeRows"></ul></div><div class="lensPane" data-lens="handover"><h2>AI Handover</h2><p class="empty" style="margin:0 0 12px">A proof certificate you can paste into Cursor, Claude, or any coding agent.</p><pre id="handoverPre"></pre><div id="handoverActions"><button id="handoverCopy">Copy to clipboard</button><span id="handoverStatus"></span></div></div><div class="lensPane" data-lens="caller"><h2>Caller View</h2><p class="empty" style="margin:0 0 12px">The proof receipt an outside HTTP caller can verify.</p><pre id="callerPre"></pre><div id="callerActions"><button id="callerVerify">Verify caller receipt</button><span id="callerStatus"></span></div></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><section id="counterexampleBlock" hidden><h2 style="color:var(--bad)">Counterexample</h2><div id="counterexampleBody"></div></section><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
     \\<footer><select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select><input id="url" value="/" aria-label="URL"><button id="send">Send</button></footer>
     \\<pre id="response"></pre>
     \\</main><script>
@@ -967,7 +1128,7 @@ pub const index_html =
     \\function replayRow(label,r){if(!r)return"";const body=r.error?`crashed - ${r.error}`:`${r.status} ${r.body||""}`;return `<dt>${esc(label)}</dt><dd>${esc(body)}</dd>`}
     \\function renderCounterexample(cx){const block=$("counterexampleBlock");const body=$("counterexampleBody");if(!cx){block.hidden=true;body.innerHTML="";return}block.hidden=false;const req=cx.failingRequest?`${cx.failingRequest.method} ${cx.failingRequest.url}${cx.failingRequest.body?" body="+cx.failingRequest.body:""}`:"structural proof cause";body.innerHTML=`<dl class="row"><dt>property</dt><dd><span class="bad">-${esc(cx.label||cx.field||"property")}</span></dd><dt>source</dt><dd><code>${esc(cx.handlerPath||"")}:${cx.line||0}:${cx.column||0}</code></dd><dt>snippet</dt><dd><code>${esc(cx.snippet||"")}</code></dd><dt>why</dt><dd class="hint">${esc(cx.suggestion||"inspect the demoted property and repair the source")}</dd><dt>request</dt><dd>${esc(req)}</dd>${replayRow("previous",cx.previousResponse)}${replayRow("current",cx.currentResponse)}<dt>next</dt><dd>[r] replay live · [s] pin regression · [a] ask expert</dd></dl>`}
     \\function demoButton(a){const label={introduce_bug:"Introduce unsafe edit",repair_bug:"Repair",deploy:"Deploy local",reset:"Reset"}[a]||a;return `<button data-demo-action="${esc(a)}">${esc(label)}</button>`}
-    \\function renderDemo(d){$("demoPanel").hidden=false;$("demoTitle").textContent=d.title||d.step||"";$("demoWorkspace").textContent=d.workspace?`workspace: ${d.workspace}`:"";$("demoActions").innerHTML=(d.availableActions||[]).map(demoButton).join("");const w=d.witness;const lines=[];if(w){lines.push(`property: ${esc(w.property)}<br>request: ${esc(w.request)}<br>span: ${esc(w.span)}<br>path: ${esc(w.failingPath)}`)}else if(d.receipt){lines.push(`receipt: ${esc(d.receipt.ledger)} · service ${esc(d.receipt.service)}`)}if(d.tuiCommand){lines.push(`open in TUI: <code>${esc(d.tuiCommand)}</code>`)}const p=d.proofPassport||{};if(p.ledgerReady){lines.push(`passport: session <code>${esc(p.sessionId||d.sessionId||"")}</code> has verified ledger context`)}$("demoWitness").hidden=lines.length===0;$("demoWitness").innerHTML=lines.join("<br>")}
+    \\function renderDemo(d){$("demoPanel").hidden=false;$("demoTitle").textContent=d.title||d.step||"";$("demoWorkspace").textContent=d.workspace?`workspace: ${d.workspace}`:"";$("demoActions").innerHTML=(d.availableActions||[]).map(demoButton).join("");const w=d.witness;const lines=[];if(w){lines.push(`property: ${esc(w.property)}<br>request: ${esc(w.request)}<br>span: ${esc(w.span)}<br>path: ${esc(w.failingPath)}`)}else if(d.receipt){lines.push(`receipt: ${esc(d.receipt.ledger)} · service ${esc(d.receipt.service)}`)}if(d.tuiCommand){lines.push(`open in TUI: <code>${esc(d.tuiCommand)}</code>`)}if(d.verifyCommand){lines.push(`verify caller receipt: <code>${esc(d.verifyCommand)}</code>`)}if(d.wellKnownUrl){lines.push(`well-known proof: <code>${esc(d.wellKnownUrl)}</code>`)}const p=d.proofPassport||{};if(p.ledgerReady){lines.push(`passport: session <code>${esc(p.sessionId||d.sessionId||"")}</code> has verified ledger context`)}$("demoWitness").hidden=lines.length===0;$("demoWitness").innerHTML=lines.join("<br>")}
     \\async function pullDemo(){try{const r=await fetch("/_zigttp/studio/demo/state.json",{cache:"no-store"});if(r.status===404){$("demoPanel").hidden=true;return}if(r.ok)renderDemo(await r.json())}catch(e){}}
     \\async function runDemoAction(action){const r=await fetch("/_zigttp/studio/demo/action",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action})});if(!r.ok){$("demoWitness").hidden=false;$("demoWitness").textContent=`action failed: HTTP ${r.status} ${await r.text()}`;return}await pull();await pullDemo()}
     \\document.addEventListener("click",ev=>{const b=ev.target.closest("[data-demo-action]");if(b)runDemoAction(b.dataset.demoAction)})
@@ -978,15 +1139,19 @@ pub const index_html =
     \\function tradeRowEl(row,on){const li=document.createElement("li");if(!on)li.className="off";const head=document.createElement("div");head.className="head";const pill=document.createElement("span");pill.className="pill "+(on?"on":"off");pill.textContent=(on?"+ ":"- ")+row.label;head.appendChild(pill);li.appendChild(head);if(row.gave.length){const g=document.createElement("span");g.className="gave";const gl=document.createElement("span");gl.className="lbl";gl.textContent="gave up:";g.appendChild(gl);g.appendChild(document.createTextNode(row.gave.join(", ")));li.appendChild(g)}const e=document.createElement("span");e.className="earned";const el=document.createElement("span");el.className="lbl";el.textContent="earned:";e.appendChild(el);e.appendChild(document.createTextNode(row.earned));li.appendChild(e);return li}
     \\function renderTrade(facts){const props=(facts&&facts.properties)||{};const ul=$("tradeRows");while(ul.firstChild)ul.removeChild(ul.firstChild);TRADE_TABLE.forEach(r=>ul.appendChild(tradeRowEl(r,!!props[r.prop])))}
     \\function renderHandover(s){const cert=(s&&s.proofCertificate)||"";$("handoverPre").textContent=cert||"(no certificate yet - waiting for first proof)"}
+    \\function clip(s,n){s=String(s||"");return s.length>n?s.slice(0,n)+"...":s}
+    \\function renderCaller(s){const c=s&&s.callerReceipt;if(!c){$("callerPre").textContent="(not attested yet)\n\nWaiting for a proven receipt. Rebuild without --no-attest if this remains empty." ;return}$("callerPre").textContent=`Response headers\n  Zigttp-Proofs: ${c.proofsHeader||"(none)"}\n  Zigttp-Attest: ${clip(c.attestHeader,72)}\n\nWell-known doc\n  ${c.wellKnownUrl}\n\nVerify from anywhere\n  ${c.verifyCommand}\n\nKey fingerprint\n  ${clip(c.keyFingerprint,32)}`}
     \\let activeLens="properties";
     \\function applyLens(name){activeLens=name;document.querySelectorAll("#lensBar button").forEach(b=>b.classList.toggle("active",b.dataset.lens===name));document.querySelectorAll(".lensPane").forEach(p=>p.classList.toggle("active",p.dataset.lens===name));try{localStorage.setItem("zigttp.studio.lens",name)}catch(e){}}
     \\document.addEventListener("click",ev=>{const b=ev.target.closest("#lensBar button");if(b)applyLens(b.dataset.lens)});
-    \\(function(){let saved="properties";try{saved=localStorage.getItem("zigttp.studio.lens")||"properties"}catch(e){}if(saved==="trade"||saved==="handover")applyLens(saved)})();
+    \\(function(){let saved="properties";try{saved=localStorage.getItem("zigttp.studio.lens")||"properties"}catch(e){}if(saved==="trade"||saved==="handover"||saved==="caller")applyLens(saved)})();
     \\async function copyHandover(){const cert=$("handoverPre").textContent||"";const status=$("handoverStatus");try{await navigator.clipboard.writeText(cert);status.textContent="copied"}catch(e){status.textContent="copy failed - select and copy manually"}setTimeout(()=>{status.textContent=""},2400)}
     \\{const b=$("handoverCopy");if(b)b.onclick=copyHandover}
-    \\async function pull(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});const s=await r.json();render(s);if(s&&s.facts)renderTrade(s.facts);renderHandover(s)}catch(e){$("status").textContent=String(e)}}
+    \\async function verifyCaller(){const status=$("callerStatus");status.textContent="verifying";try{const r=await fetch("/_zigttp/studio/caller-verify.json",{cache:"no-store"});if(!r.ok){status.textContent=`HTTP ${r.status}`;return}const v=await r.json();status.textContent=`verified ${clip(v.keyFingerprint,12)}`}catch(e){status.textContent="verify failed"}}
+    \\{const b=$("callerVerify");if(b)b.onclick=verifyCaller}
+    \\async function pull(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});const s=await r.json();render(s);if(s&&s.facts)renderTrade(s.facts);renderHandover(s);renderCaller(s)}catch(e){$("status").textContent=String(e)}}
     \\let pollTimer=null;function startPolling(){if(!pollTimer)pollTimer=setInterval(pull,750)}function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
-    \\function startEvents(){let es;try{es=new EventSource("/_zigttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{const s=JSON.parse(ev.data);render(s);if(s&&s.facts)renderTrade(s.facts);renderHandover(s)}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
+    \\function startEvents(){let es;try{es=new EventSource("/_zigttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{const s=JSON.parse(ev.data);render(s);if(s&&s.facts)renderTrade(s.facts);renderHandover(s);renderCaller(s)}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
     \\startEvents();pull();pullDemo();setInterval(pullDemo,1200);
     \\$("send").onclick=async()=>{const r=await fetch($("url").value,{method:$("method").value});$("response").textContent=`HTTP ${r.status}\n`+await r.text()}
     \\function openOnboarding(){const d=$("onboarding");if(d&&!d.open&&typeof d.showModal==="function")d.showModal()}

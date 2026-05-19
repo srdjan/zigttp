@@ -211,6 +211,7 @@ pub fn writeStateJson(
     var parsed_proof = std.json.parseFromSlice(std.json.Value, allocator, proof_json, .{}) catch null;
     defer if (parsed_proof) |*parsed| parsed.deinit();
     const proof_certificate = if (parsed_proof) |*parsed| proofCertificate(parsed.value) else null;
+    const caller_receipt = if (parsed_proof) |*parsed| callerReceiptObject(parsed.value) else null;
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -226,6 +227,29 @@ pub fn writeStateJson(
     try json.write(passport.session_id);
     try json.objectField("tuiCommand");
     try json.write(passport.tui_command);
+    if (caller_receipt) |receipt| {
+        if (objectString(receipt, "verifyUrl")) |value| {
+            try json.objectField("verifyUrl");
+            try json.write(value);
+        }
+        if (objectString(receipt, "verifyCommand")) |value| {
+            try json.objectField("verifyCommand");
+            try json.write(value);
+        }
+        if (objectString(receipt, "wellKnownUrl")) |value| {
+            try json.objectField("wellKnownUrl");
+            try json.write(value);
+        }
+        if (objectString(receipt, "keyFingerprint")) |value| {
+            try json.objectField("attestationFingerprint");
+            try json.write(value);
+        }
+        try json.objectField("callerReceiptReady");
+        try json.write(true);
+    } else {
+        try json.objectField("callerReceiptReady");
+        try json.write(false);
+    }
     try json.objectField("step");
     try json.write(step.toString());
     try json.objectField("title");
@@ -304,7 +328,7 @@ fn runLocalDeploy(allocator: std.mem.Allocator) !void {
     const io = io_backend.io();
 
     var child = try std.process.spawn(io, .{
-        .argv = &.{ self_path, "deploy" },
+        .argv = &.{ self_path, "deploy", "--no-attest" },
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .inherit,
@@ -399,6 +423,17 @@ fn proofCertificate(value: std.json.Value) ?[]const u8 {
     if (value != .object) return null;
     const cert = value.object.get("proofCertificate") orelse return null;
     return if (cert == .string) cert.string else null;
+}
+
+fn callerReceiptObject(value: std.json.Value) ?std.json.ObjectMap {
+    if (value != .object) return null;
+    const receipt = value.object.get("callerReceipt") orelse return null;
+    return if (receipt == .object) receipt.object else null;
+}
+
+fn objectString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = obj.get(key) orelse return null;
+    return if (value == .string) value.string else null;
 }
 
 fn deployArtifactPath(allocator: std.mem.Allocator, workspace_root: []const u8) ![]u8 {

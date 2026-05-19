@@ -17,15 +17,11 @@ const proof_ledger = @import("proof_ledger.zig");
 const live_reload = @import("live_reload.zig");
 const demo = @import("demo.zig");
 const pi_app = @import("pi_app");
-const envelope = @import("attest/envelope.zig");
-const header_strings = @import("attest/header_strings.zig");
-const identity_mod = @import("attest/identity.zig");
+const attest_build_receipt = @import("attest/build_receipt.zig");
 const verify_cli = @import("verify_cli.zig");
 
 /// Slice 1 placeholder. Replace with a build-injected constant (short git sha
 /// plus stable tag) when the `build.zig` wiring lands later in slice 1.
-const compiler_version_tag: []const u8 = "zigttp-attest-slice1";
-
 /// Legacy alias. Slice 1 introduced `--attest` as an opt-in flag; slice 2
 /// flipped attestation default-on, so the spelling now warns once and is a
 /// no-op. `--no-attest` is the explicit opt-out.
@@ -1051,6 +1047,10 @@ fn demoCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []c
         .{parsed.port},
     );
     defer allocator.free(url);
+    const verify_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{parsed.port});
+    defer allocator.free(verify_url);
+    const well_known_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/.well-known/zigttp-attest", .{parsed.port});
+    defer allocator.free(well_known_url);
 
     std.debug.print(
         \\
@@ -1058,10 +1058,12 @@ fn demoCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []c
         \\Workspace: {s}
         \\Studio:    {s}
         \\TUI:       {s}
+        \\Verify:    zigttp verify {s}
+        \\Well-known:{s}
         \\
         \\Flow: baseline -> unsafe edit -> witness -> repair -> local deploy receipt
         \\
-    , .{ workspace.root, url, passport.tui_command });
+    , .{ workspace.root, url, passport.tui_command, verify_url, well_known_url });
 
     if (!parsed.no_open) openBrowser(allocator, url);
 
@@ -1512,58 +1514,7 @@ fn buildAttestationJws(
     bytecode: []const u8,
     contract: *const zigts.HandlerContract,
 ) !?[]u8 {
-    var contract_sha: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(contract_json, &contract_sha, .{});
-    const contract_sha_hex = std.fmt.bytesToHex(contract_sha, .lower);
-
-    var bytecode_sha: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytecode, &bytecode_sha, .{});
-    const bytecode_sha_hex = std.fmt.bytesToHex(bytecode_sha, .lower);
-
-    // The rule-registry hash is already cryptographically anchored in the
-    // build and the same value is embedded in contract.json under
-    // sandbox.policyHash. Committing to it pins the compiler ruleset.
-    const policy_sha_hex = zigts.rule_registry.policyHash();
-
-    // CapabilityMatrix.hash defaults to all-zero for handlers with no
-    // capability imports; that's the same shape `parseCapabilityMatrix`
-    // produces, so an all-zero hex string is a legitimate value.
-    const capability_hash_hex = std.fmt.bytesToHex(contract.capabilities.hash, .lower);
-
-    const props_or_default = contract.properties orelse zigts.handler_contract.HandlerProperties{
-        .pure = false,
-        .read_only = false,
-        .stateless = false,
-        .retry_safe = false,
-        .deterministic = false,
-        .has_egress = false,
-    };
-    const property_summary = try header_strings.formatProofChips(allocator, props_or_default);
-    defer if (property_summary.len > 0) allocator.free(property_summary);
-
-    const claims = envelope.Claims{
-        .contract_sha256 = &contract_sha_hex,
-        .bytecode_sha256 = &bytecode_sha_hex,
-        .policy_sha256 = &policy_sha_hex,
-        .capability_hash = &capability_hash_hex,
-        .compiler_version = compiler_version_tag,
-        .signed_at_unix = @divTrunc(proof_ledger.defaultNowMs(), std.time.ms_per_s),
-        .property_summary = property_summary,
-        .routes_count = @intCast(contract.api.routes.items.len),
-    };
-
-    const identity = identity_mod.loadOrCreate(allocator) catch |err| {
-        std.log.err(
-            "attest: failed to load identity from ~/.zigttp/attest/keypair.bin: {s}. Inspect the file, fix the permissions (chmod 600), or delete it to mint a fresh key.",
-            .{@errorName(err)},
-        );
-        return err;
-    };
-    var env = try envelope.sign(allocator, claims, identity.key_pair);
-    if (identity.source == .generated) {
-        std.log.info("attest: minted persistent identity (fingerprint {s})", .{identity.fingerprint_hex[0..16]});
-    }
-    return env.intoJws();
+    return try attest_build_receipt.buildJws(allocator, contract_json, bytecode, contract);
 }
 
 fn buildArtifact(
