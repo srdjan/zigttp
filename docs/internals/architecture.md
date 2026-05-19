@@ -93,6 +93,8 @@ Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode
 - `bytecode_verifier.zig` - Bytecode structural integrity validation
 - `path_generator.zig` - Exhaustive execution path enumeration and behavioral contract generation
 - `fault_coverage.zig` - Fault coverage analysis against FailureSeverity annotations
+- `strict_checker.zig` - Default-on strict ZigTS profile (ZTS6xx): implicit-unknown call results, missing annotations on named functions, dynamic capability keys, non-exhaustive matches, avoidable `let`, dynamic computed property access
+- `effect_inference.zig` - Bottom-up call-graph traversal that infers per-function capability union, determinism, purity, and recursion. Extends the proof boundary across user-defined helpers
 
 #### JIT Compilation
 - `jit/baseline.zig` - Baseline JIT compiler for x86-64 and ARM64

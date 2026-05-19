@@ -944,19 +944,9 @@ pub fn runCheckOnlyFromSource(
         }
     }
 
-    {
-        const tc_ptr: ?*const zigts.TypeChecker = if (resolved.type_checker) |*tc| tc else null;
-        var strict_checker = zigts.StrictChecker.init(
-            allocator,
-            ir_view,
-            &atoms,
-            type_env_storage.envPtr(),
-            tc_ptr,
-        );
-        defer strict_checker.deinit();
-
-        result.strict_errors = @intCast(try strict_checker.check(root));
-        const strict_diags = strict_checker.getDiagnostics();
+    if (resolved.strict_checker != null) {
+        const strict_diags = resolved.strictDiagnostics();
+        result.strict_errors = @intCast(resolved.strict_error_count);
         result.strict_warnings = @intCast(strict_diags.len -| result.strict_errors);
         if (strict_diags.len > 0) {
             if (json_mode) {
@@ -969,7 +959,7 @@ pub fn runCheckOnlyFromSource(
                 var buf: std.ArrayList(u8) = .empty;
                 defer buf.deinit(allocator);
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-                strict_checker.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+                resolved.formatStrictDiagnostics(source_to_parse, &aw.writer) catch {};
                 buf = aw.toArrayList();
                 if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
             }
@@ -1388,6 +1378,25 @@ pub fn compileHandler(
             return error.SoundModeViolation;
         }
         if (!builtin.is_test) std.debug.print("Type check passed\n", .{});
+    }
+
+    if (resolved.strict_checker != null) {
+        const strict_diags = resolved.strictDiagnostics();
+        if (strict_diags.len > 0 and !builtin.is_test) {
+            var strict_output: std.ArrayList(u8) = .empty;
+            defer strict_output.deinit(allocator);
+            var strict_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &strict_output);
+            resolved.formatStrictDiagnostics(source_to_parse, &strict_aw.writer) catch {};
+            strict_output = strict_aw.toArrayList();
+            if (strict_output.items.len > 0) {
+                std.debug.print("{s}", .{strict_output.items});
+            }
+        }
+        if (resolved.strict_error_count > 0) {
+            if (!builtin.is_test) std.debug.print("\nStrict check failed for {s}\n", .{filename});
+            return error.SoundModeViolation;
+        }
+        if (!builtin.is_test) std.debug.print("Strict check passed\n", .{});
     }
 
     // Unified violations list: collects from FlowChecker, HandlerVerifier, and
@@ -3454,7 +3463,7 @@ test "compileHandler honors a registered partner manifest" {
 
     const source =
         \\import { writeRow } from "zigttp-ext:partner";
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\  _ = req;
         \\  const r = writeRow("k", "v");
         \\  _ = r;

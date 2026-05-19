@@ -42,6 +42,9 @@ const pi_forge_route_tool = @import("tools/pi_forge_route.zig");
 const pi_specs_status_tool = @import("tools/pi_specs_status.zig");
 const pi_witnesses_tool = @import("tools/pi_witnesses.zig");
 const pi_extension_catalog_tool = @import("tools/pi_extension_catalog.zig");
+const effects_tool = @import("tools/zigts_expert_effects.zig");
+const narrow_tool = @import("tools/zigts_expert_narrow.zig");
+const ratchet_tool = @import("tools/zigts_expert_ratchet.zig");
 
 /// Re-exported so the runtime-side witness replay implementation can
 /// share the canonical `Verdict` type and function pointer signature.
@@ -92,6 +95,9 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, pi_specs_status_tool.tool);
     try reg.register(allocator, pi_witnesses_tool.tool);
     try reg.register(allocator, pi_extension_catalog_tool.tool);
+    try reg.register(allocator, effects_tool.tool);
+    try reg.register(allocator, narrow_tool.tool);
+    try reg.register(allocator, ratchet_tool.tool);
 
     return reg;
 }

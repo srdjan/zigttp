@@ -115,6 +115,15 @@ pub const StrictChecker = struct {
         return self.diagnostics.items;
     }
 
+    /// Drop borrowed references to TypeEnv/TypeChecker after `check()` has
+    /// finished. Once sealed, the checker only holds owned diagnostics so it
+    /// is safe to move into longer-lived storage without UB if the original
+    /// borrows go out of scope. Idempotent.
+    pub fn seal(self: *StrictChecker) void {
+        self.type_env = null;
+        self.type_checker = null;
+    }
+
     pub fn formatDiagnostics(self: *const StrictChecker, source: []const u8, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;

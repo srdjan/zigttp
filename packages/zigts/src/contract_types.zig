@@ -599,7 +599,120 @@ pub const HandlerProperties = struct {
     /// Proven: every optional value from virtual modules is narrowed before use.
     /// False = unproven (verification not run). True = verified safe.
     optional_safe: bool = false,
+
+    /// Canonical list of property names that are currently proven true. The
+    /// order is stable across builds (struct-field declaration order) so
+    /// cross-build diffs surface added/dropped names instead of reordered
+    /// noise. Returns slices into static field-name strings; no allocation.
+    /// The returned count is clamped to `out.len`; callers wanting the full
+    /// set should size against `max_proven_specs`.
+    pub fn provenSpecNames(self: *const HandlerProperties, out: []?[]const u8) usize {
+        var count: usize = 0;
+        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
+            if (field.type == bool and isMonotonicProvenSpec(field.name) and @field(self, field.name)) {
+                if (count < out.len) {
+                    out[count] = field.name;
+                    count += 1;
+                }
+            }
+        }
+        return count;
+    }
+
+    /// Compile-time upper bound on the proven-set size, equal to the count of
+    /// boolean fields in `HandlerProperties`. Caller-side buffers should size
+    /// against this so `provenSpecNames` never overflows.
+    pub const max_proven_specs: usize = blk: {
+        var n: usize = 0;
+        for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
+            if (field.type == bool and isMonotonicProvenSpec(field.name)) n += 1;
+        }
+        break :blk n;
+    };
+
+    /// True when a property name belongs in monotonic proof ratchets. Positive
+    /// safety guarantees are monotonic; inverse facts such as `has_egress`
+    /// are deliberately excluded so removing risky behavior cannot regress.
+    pub fn isMonotonicProvenSpecName(name: []const u8) bool {
+        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
+            if (field.type == bool and isMonotonicProvenSpec(field.name) and std.mem.eql(u8, field.name, name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Translate a snake_case `HandlerProperties` field name (e.g. "read_only")
+    /// to the camelCase JSON key the writer emits (e.g. "readOnly"). Driven by
+    /// `@typeInfo` so adding a field automatically extends both the JSON
+    /// writer's emitted keys and the parser's camel-to-snake lookup. Returns
+    /// null for names that are not field names of this struct.
+    pub fn camelKeyFor(snake_field_name: []const u8) ?[]const u8 {
+        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
+            if (std.mem.eql(u8, field.name, snake_field_name)) {
+                return comptime snakeToCamel(field.name);
+            }
+        }
+        return null;
+    }
+
+    /// Inverse of `camelKeyFor`: map a camelCase JSON key back to the
+    /// snake_case field name. Lets baseline-contract loaders rebuild the
+    /// proven set from legacy `properties`-object payloads without
+    /// hand-rolling a translation table.
+    pub fn snakeKeyFor(camel_json_key: []const u8) ?[]const u8 {
+        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
+            if (std.mem.eql(u8, camel_json_key, comptime snakeToCamel(field.name))) {
+                return field.name;
+            }
+        }
+        return null;
+    }
 };
+
+fn isMonotonicProvenSpec(comptime field_name: []const u8) bool {
+    return !std.mem.eql(u8, field_name, "has_egress");
+}
+
+/// Compile-time snake_case -> camelCase, e.g. "no_secret_leakage" -> "noSecretLeakage".
+fn snakeToCamel(comptime snake: []const u8) []const u8 {
+    comptime {
+        var buf: [snake.len]u8 = undefined;
+        var len: usize = 0;
+        var upper_next = false;
+        for (snake) |c| {
+            if (c == '_') {
+                upper_next = true;
+                continue;
+            }
+            buf[len] = if (upper_next and c >= 'a' and c <= 'z') c - 32 else c;
+            len += 1;
+            upper_next = false;
+        }
+        const out = buf[0..len].*;
+        return &out;
+    }
+}
+
+test "HandlerProperties.provenSpecNames excludes inverse-polarity facts" {
+    const props = HandlerProperties{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = false,
+        .has_egress = true,
+    };
+
+    var buf: [HandlerProperties.max_proven_specs]?[]const u8 = undefined;
+    const count = props.provenSpecNames(&buf);
+    try std.testing.expect(count > 0);
+    for (buf[0..count]) |name_opt| {
+        try std.testing.expect(!std.mem.eql(u8, name_opt.?, "has_egress"));
+    }
+    try std.testing.expect(!HandlerProperties.isMonotonicProvenSpecName("has_egress"));
+    try std.testing.expect(HandlerProperties.isMonotonicProvenSpecName("no_secret_leakage"));
+}
 
 pub const RateLimitInfo = struct {
     namespace: []const u8, // aliases into cache.namespaces (not separately owned)

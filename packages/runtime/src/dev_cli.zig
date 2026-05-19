@@ -14,6 +14,7 @@ const shared = @import("cli_shared.zig");
 const runtime_cli = @import("runtime_cli.zig");
 const embedded_handler = @import("embedded_handler");
 const proof_ledger = @import("proof_ledger.zig");
+const ratchet_command = @import("ratchet_command.zig");
 const live_reload = @import("live_reload.zig");
 const demo = @import("demo.zig");
 const pi_app = @import("pi_app");
@@ -220,6 +221,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 std.process.exit(1);
             }
             return err;
+        };
+        return;
+    }
+    if (std.mem.eql(u8, command, "ratchet")) {
+        ratchet_command.run(allocator, user_args[1..]) catch |err| switch (err) {
+            error.MissingArgument, error.UnknownSubcommand, error.MissingBaseline => std.process.exit(1),
+            error.HandlerCompileFailed, error.Regression => std.process.exit(1),
+            else => return err,
         };
         return;
     }

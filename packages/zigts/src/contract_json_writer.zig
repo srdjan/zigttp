@@ -6,6 +6,7 @@
 const std = @import("std");
 const json_utils = @import("json_utils.zig");
 const handler_contract = @import("handler_contract.zig");
+const contract_types = @import("contract_types.zig");
 
 const HandlerContract = handler_contract.HandlerContract;
 const ApiParamInfo = handler_contract.ApiParamInfo;
@@ -513,30 +514,31 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     // properties (optional)
     if (contract.properties) |p| {
         try writer.writeAll("  \"properties\": {\n");
-        try writer.print("    \"pure\": {s},\n", .{if (p.pure) "true" else "false"});
-        try writer.print("    \"readOnly\": {s},\n", .{if (p.read_only) "true" else "false"});
-        try writer.print("    \"stateless\": {s},\n", .{if (p.stateless) "true" else "false"});
-        try writer.print("    \"retrySafe\": {s},\n", .{if (p.retry_safe) "true" else "false"});
-        try writer.print("    \"deterministic\": {s},\n", .{if (p.deterministic) "true" else "false"});
-        try writer.print("    \"hasEgress\": {s},\n", .{if (p.has_egress) "true" else "false"});
-        try writer.print("    \"noSecretLeakage\": {s},\n", .{if (p.no_secret_leakage) "true" else "false"});
-        try writer.print("    \"noCredentialLeakage\": {s},\n", .{if (p.no_credential_leakage) "true" else "false"});
-        try writer.print("    \"inputValidated\": {s},\n", .{if (p.input_validated) "true" else "false"});
-        try writer.print("    \"piiContained\": {s},\n", .{if (p.pii_contained) "true" else "false"});
-        try writer.print("    \"injectionSafe\": {s},\n", .{if (p.injection_safe) "true" else "false"});
-        try writer.print("    \"idempotent\": {s},\n", .{if (p.idempotent) "true" else "false"});
-        try writer.print("    \"stateIsolated\": {s},\n", .{if (p.state_isolated) "true" else "false"});
+        try writeBooleanProperties(p, writer);
         if (p.max_io_depth) |depth| {
-            try writer.print("    \"maxIoDepth\": {d},\n", .{depth});
+            try writer.print("    \"maxIoDepth\": {d}\n", .{depth});
         } else {
-            try writer.writeAll("    \"maxIoDepth\": null,\n");
+            try writer.writeAll("    \"maxIoDepth\": null\n");
         }
-        try writer.print("    \"faultCovered\": {s},\n", .{if (p.fault_covered) "true" else "false"});
-        try writer.print("    \"resultSafe\": {s},\n", .{if (p.result_safe) "true" else "false"});
-        try writer.print("    \"optionalSafe\": {s}\n", .{if (p.optional_safe) "true" else "false"});
         try writer.writeAll("  },\n");
+
+        // proven_specs: canonical, ordered list of property names the
+        // compiler currently proves true. This is the field cross-build
+        // ratchet checks diff against; the unsorted properties object above
+        // stays for backwards-compat consumers.
+        var spec_buf: [contract_types.HandlerProperties.max_proven_specs]?[]const u8 = undefined;
+        const proven_count = p.provenSpecNames(&spec_buf);
+        try writer.writeAll("  \"provenSpecs\": [");
+        for (spec_buf[0..proven_count], 0..) |name_opt, i| {
+            if (name_opt) |nm| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.print("\"{s}\"", .{nm});
+            }
+        }
+        try writer.writeAll("],\n");
     } else {
         try writer.writeAll("  \"properties\": null,\n");
+        try writer.writeAll("  \"provenSpecs\": [],\n");
     }
 
     // intent (optional) - author-declared assertions outside the proof boundary
@@ -920,3 +922,19 @@ fn writeApiResponseJson(writer: anytype, response: *const ApiResponseInfo) !void
     try writer.print("            \"dynamic\": {s}\n", .{if (response.schema.isDynamic()) "true" else "false"});
     try writer.writeAll("          }");
 }
+
+/// Emit every boolean field of `HandlerProperties` as `"<camelCase>": true|false,\n`.
+/// `maxIoDepth` is written separately by the caller because it is an optional
+/// integer rather than a bool. Driven by `@typeInfo`, so adding a boolean
+/// property field automatically appears in the JSON output; the camelCase
+/// key comes from `HandlerProperties.camelKeyFor`.
+fn writeBooleanProperties(p: contract_types.HandlerProperties, writer: anytype) !void {
+    inline for (@typeInfo(contract_types.HandlerProperties).@"struct".fields) |field| {
+        if (field.type == bool) {
+            const camel = comptime contract_types.HandlerProperties.camelKeyFor(field.name).?;
+            const value = @field(p, field.name);
+            try writer.print("    \"{s}\": {s},\n", .{ camel, if (value) "true" else "false" });
+        }
+    }
+}
+

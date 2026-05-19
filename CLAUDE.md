@@ -10,7 +10,7 @@ Validated on Zig 0.16.0-dev.3073+28ae5d415. Newer nightlies are best-effort unti
 
 The build produces three binaries:
 
-- `zigttp` — the primary developer CLI and local runtime entrypoint. Subcommands: `init`, `dev`, `serve`, `check`, `compile`, `prove`, `mock`, `link`, `expert` (deprecated alias), `deploy`, `verify`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`, `assert-intent`, `proofs` (with `list | show | diff | watch | export | badge | bundle | verify` subcommands), `witnesses`. The top-level `zigttp verify <url>` is the proof-receipt verifier and is distinct from `zigttp proofs verify <bundle-dir>` (bundle integrity).
+- `zigttp` — the primary developer CLI and local runtime entrypoint. Subcommands: `init`, `dev`, `serve`, `check`, `compile`, `prove`, `mock`, `link`, `expert` (deprecated alias), `deploy`, `verify`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`, `assert-intent`, `proofs` (with `list | show | diff | watch | export | badge | bundle | verify` subcommands), `ratchet` (with `show | check` subcommands), `witnesses`. The top-level `zigttp verify <url>` is the proof-receipt verifier and is distinct from `zigttp proofs verify <bundle-dir>` (bundle integrity).
 - `zigttp-runtime` — the internal runtime template used for self-contained outputs and direct runtime tests.
 - `zigts` — the engine/compiler CLI plus the interactive `zigts expert` coding-agent entrypoint.
 

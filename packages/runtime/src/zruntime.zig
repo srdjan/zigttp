@@ -915,7 +915,10 @@ pub const Runtime = struct {
             var resolved = try zq.pipeline.resolve(
                 self.allocator,
                 parsed,
-                .{ .type_env = type_env_storage.envPtr() },
+                // The runtime parse path only surfaces bool diagnostics; strict
+                // ZTS6xx is a build-time concern that precompile already ran.
+                // Skip it here to keep the runtime loop free of redundant work.
+                .{ .type_env = type_env_storage.envPtr(), .strict = false },
             );
             defer resolved.deinit();
 

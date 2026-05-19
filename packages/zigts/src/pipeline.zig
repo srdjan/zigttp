@@ -27,6 +27,7 @@ const std = @import("std");
 const parser_mod = @import("parser/root.zig");
 const bool_checker_mod = @import("bool_checker.zig");
 const type_checker_mod = @import("type_checker.zig");
+const strict_checker_mod = @import("strict_checker.zig");
 const handler_verifier_mod = @import("handler_verifier.zig");
 const flow_checker_mod = @import("flow_checker.zig");
 const context_mod = @import("context.zig");
@@ -41,6 +42,7 @@ const NodeIndex = ir_mod.NodeIndex;
 const IrView = ir_mod.IrView;
 const BoolChecker = bool_checker_mod.BoolChecker;
 const TypeChecker = type_checker_mod.TypeChecker;
+const StrictChecker = strict_checker_mod.StrictChecker;
 const HandlerVerifier = handler_verifier_mod.HandlerVerifier;
 const FlowChecker = flow_checker_mod.FlowChecker;
 const AtomTable = context_mod.AtomTable;
@@ -73,17 +75,23 @@ pub const ResolveOptions = struct {
     /// TypeEnv must outlive the returned ResolvedModule.
     type_env: ?*TypeEnv = null,
     service_type_context: ?*const ServiceTypeContext = null,
+    /// Default-on strict ZigTS profile (ZTS6xx). Type-directed rules run when
+    /// type context exists; syntax/profile rules still run for untyped sources.
+    strict: bool = true,
 };
 
 pub const ResolvedModule = struct {
     parsed: ParsedModule,
     bool_checker: BoolChecker,
     type_checker: ?TypeChecker,
+    strict_checker: ?StrictChecker,
     bool_error_count: u32,
     type_error_count: u32,
+    strict_error_count: u32,
 
     pub fn deinit(self: *ResolvedModule) void {
         self.bool_checker.deinit();
+        if (self.strict_checker) |*sc| sc.deinit();
         if (self.type_checker) |*tc| tc.deinit();
     }
 
@@ -93,6 +101,11 @@ pub const ResolvedModule = struct {
 
     pub fn typeDiagnostics(self: *const ResolvedModule) []const type_checker_mod.Diagnostic {
         if (self.type_checker) |*tc| return tc.getDiagnostics();
+        return &.{};
+    }
+
+    pub fn strictDiagnostics(self: *const ResolvedModule) []const strict_checker_mod.Diagnostic {
+        if (self.strict_checker) |*sc| return sc.getDiagnostics();
         return &.{};
     }
 
@@ -110,6 +123,14 @@ pub const ResolvedModule = struct {
         writer: anytype,
     ) !void {
         if (self.type_checker) |*tc| try tc.formatDiagnostics(source, writer);
+    }
+
+    pub fn formatStrictDiagnostics(
+        self: *const ResolvedModule,
+        source: []const u8,
+        writer: anytype,
+    ) !void {
+        if (self.strict_checker) |*sc| try sc.formatDiagnostics(source, writer);
     }
 };
 
@@ -137,12 +158,35 @@ pub fn resolve(
         type_checker_opt = tc;
     }
 
+    var strict_checker_opt: ?StrictChecker = null;
+    var strict_errors: u32 = 0;
+    if (opts.strict) {
+        const env_ptr: ?*const TypeEnv = if (type_checker_opt) |*tc| tc.env else null;
+        const tc_ptr: ?*const TypeChecker = if (type_checker_opt) |*tc| tc else null;
+        var sc = StrictChecker.init(
+            allocator,
+            parsed.ir_view,
+            parsed.atoms,
+            env_ptr,
+            tc_ptr,
+        );
+        errdefer sc.deinit();
+        strict_errors = try sc.check(parsed.root);
+        // The borrowed TypeEnv/TypeChecker pointers were stack-local; releasing
+        // them via seal() before the ResolvedModule is moved out keeps any
+        // stray future use a clean nullopt instead of UB.
+        sc.seal();
+        strict_checker_opt = sc;
+    }
+
     return .{
         .parsed = parsed,
         .bool_checker = bool_checker,
         .type_checker = type_checker_opt,
+        .strict_checker = strict_checker_opt,
         .bool_error_count = bool_errors,
         .type_error_count = type_errors,
+        .strict_error_count = strict_errors,
     };
 }
 
@@ -302,4 +346,24 @@ test "pipeline.resolve flags pointless object truthy condition" {
 
     try testing.expect(resolved.bool_error_count > 0);
     try testing.expect(resolved.boolDiagnostics().len > 0);
+}
+
+test "pipeline.resolve runs strict checker without type context" {
+    const allocator = testing.allocator;
+    const source: []const u8 = "function handler(req) { let x = 1; return Response.json({x}); }";
+
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+
+    const parsed = ParsedModule.fromExisting(parsed_state.ir_view, parsed_state.root, null);
+    var resolved = try resolve(allocator, parsed, .{ .type_env = null });
+    defer resolved.deinit();
+
+    try testing.expect(resolved.strict_checker != null);
+    try testing.expect(resolved.strict_error_count > 0);
+    var saw_avoidable_let = false;
+    for (resolved.strictDiagnostics()) |diag| {
+        if (diag.kind == .avoidable_let) saw_avoidable_let = true;
+    }
+    try testing.expect(saw_avoidable_let);
 }
