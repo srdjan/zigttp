@@ -54,6 +54,22 @@ pub fn cwdHashFull(allocator: std.mem.Allocator) !CwdHash {
     return hexLowerFixed(digest);
 }
 
+/// Resolves an explicit workspace path to its realpath, then returns the
+/// same SHA-256 hex hash `cwdHashFull` would return after chdiring there.
+pub fn cwdHashForPath(allocator: std.mem.Allocator, workspace_path: []const u8) !CwdHash {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    const realpath = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, workspace_path, allocator);
+    defer allocator.free(realpath);
+
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(realpath, &digest, .{});
+
+    return hexLowerFixed(digest);
+}
+
 /// Returns `$ROOT/<cwd_hash>/<session_id>`. Caller owns the slice. Does not
 /// create the directory.
 pub fn sessionDir(
@@ -64,6 +80,20 @@ pub fn sessionDir(
     defer allocator.free(root);
 
     const hash = try cwdHashFull(allocator);
+    return try std.fs.path.join(allocator, &.{ root, hash[0..], session_id });
+}
+
+/// Returns `$ROOT/<hash(workspace_path)>/<session_id>` without depending on
+/// the process cwd. Caller owns the slice. Does not create the directory.
+pub fn sessionDirForWorkspace(
+    allocator: std.mem.Allocator,
+    workspace_path: []const u8,
+    session_id: []const u8,
+) ![]u8 {
+    const root = try sessionRoot(allocator);
+    defer allocator.free(root);
+
+    const hash = try cwdHashForPath(allocator, workspace_path);
     return try std.fs.path.join(allocator, &.{ root, hash[0..], session_id });
 }
 
@@ -241,6 +271,36 @@ test "sessionDir concatenates root, cwd_hash, and session_id" {
     const expected = try std.fs.path.join(allocator, &.{ tmp.abs_path, hash[0..], "sess-42" });
     defer allocator.free(expected);
     try testing.expectEqualStrings(expected, dir);
+}
+
+test "sessionDirForWorkspace matches sessionDir after chdir" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const sessions_root = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_root);
+    var override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", sessions_root);
+    defer override.restore(allocator);
+
+    const workspace = try tmp.childPath(allocator, "workspace");
+    defer allocator.free(workspace);
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, workspace);
+
+    const explicit_dir = try sessionDirForWorkspace(allocator, workspace, "sess-explicit");
+    defer allocator.free(explicit_dir);
+
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.Io.Threaded.chdir(workspace);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const cwd_dir = try sessionDir(allocator, "sess-explicit");
+    defer allocator.free(cwd_dir);
+    try testing.expectEqualStrings(cwd_dir, explicit_dir);
 }
 
 test "writeWorkspacePointer round-trips with trailing newline" {

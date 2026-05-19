@@ -47,6 +47,7 @@ comptime {
     _ = @import("session_state.zig");
     _ = @import("autoloop.zig");
     _ = @import("agent.zig");
+    _ = @import("demo_passport.zig");
     _ = @import("providers/anthropic/events.zig");
     _ = @import("providers/anthropic/sse_parser.zig");
     _ = @import("providers/anthropic/json_writer.zig");

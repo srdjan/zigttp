@@ -48,6 +48,7 @@ const pi_extension_catalog_tool = @import("tools/pi_extension_catalog.zig");
 /// The host binary registers its replay function via
 /// `pi_app.witness_replay.setReplayFn` at startup.
 pub const witness_replay = @import("witness_replay.zig");
+pub const demo_passport = @import("demo_passport.zig");
 
 const Registry = registry_mod.Registry;
 

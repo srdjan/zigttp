@@ -7,9 +7,11 @@ set -euo pipefail
 ZIG="${ZIG:-zig}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ZIGTTP="${ZIGTTP:-$REPO_ROOT/zig-out/bin/zigttp}"
+ZIGTS="${ZIGTS:-$REPO_ROOT/zig-out/bin/zigts}"
 
 PORT=$((RANDOM % 1000 + 6200))
 TMP_DIR=$(mktemp -d -t zigttp-demo-smoke-XXXXXX)
+export ZIGTTP_SESSIONS_DIR="$TMP_DIR/sessions"
 APP_DIR="$TMP_DIR/proof-demo"
 LOG_FILE="$TMP_DIR/demo.log"
 PID=""
@@ -59,11 +61,16 @@ post_action() {
 
 (cd "$REPO_ROOT" && "$ZIG" build) || fail "zig build"
 [ -x "$ZIGTTP" ] || fail "missing $ZIGTTP"
+[ -x "$ZIGTS" ] || fail "missing $ZIGTS"
 
 "$ZIGTTP" demo --no-open --port "$PORT" --out "$APP_DIR" >"$LOG_FILE" 2>&1 &
 PID=$!
 
-wait_step baseline >/dev/null || fail "baseline state not reached"
+baseline_body=$(wait_step baseline) || fail "baseline state not reached"
+printf '%s' "$baseline_body" | grep -q '"sessionId":"' || fail "baseline state missing sessionId"
+printf '%s' "$baseline_body" | grep -q 'zigts expert --session-id' || fail "baseline state missing TUI command"
+session_id=$(printf '%s' "$baseline_body" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
+[ -n "$session_id" ] || fail "could not parse sessionId"
 
 post_action introduce_bug || fail "introduce_bug action failed"
 witness_body=$(wait_step witness) || fail "witness state not reached"
@@ -71,6 +78,8 @@ printf '%s' "$witness_body" | grep -q 'SECRET_KEY' || fail "witness state did no
 
 post_action repair_bug || fail "repair_bug action failed"
 wait_step repaired >/dev/null || fail "repaired state not reached"
+(cd "$APP_DIR" && "$ZIGTS" ledger export --session "$session_id" --out "$TMP_DIR/proof-passport.ndjson") || fail "proof passport ledger export failed"
+grep -q '"kind":"verified_patch"' "$TMP_DIR/proof-passport.ndjson" || fail "proof passport export missing verified patch"
 
 post_action deploy || fail "deploy action failed"
 deployed_body=$(wait_step deployed) || fail "deployed state not reached"

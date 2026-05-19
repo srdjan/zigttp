@@ -1,5 +1,6 @@
 const std = @import("std");
 const zigts = @import("zigts");
+const pi_app = @import("pi_app");
 const proof_ledger = @import("proof_ledger.zig");
 const self_extract = @import("self_extract.zig");
 
@@ -142,21 +143,48 @@ pub fn applyAction(allocator: std.mem.Allocator, config: Config, action: Action)
     switch (action) {
         .introduce_bug => {
             try zigts.file_io.writeFile(allocator, config.handler_path, bug_source);
+            var info = try pi_app.demo_passport.appendStep(allocator, .{
+                .workspace_root = config.workspace_root,
+                .handler_path = config.handler_path,
+                .step = .witness,
+            });
+            info.deinit(allocator);
             return .witness;
         },
         .repair_bug => {
+            const before = zigts.file_io.readFile(allocator, config.handler_path, 1024 * 1024) catch try allocator.dupe(u8, bug_source);
+            defer allocator.free(before);
             try zigts.file_io.writeFile(allocator, config.handler_path, repaired_source);
+            var info = try pi_app.demo_passport.appendStep(allocator, .{
+                .workspace_root = config.workspace_root,
+                .handler_path = config.handler_path,
+                .step = .repaired,
+                .before = before,
+                .after = repaired_source,
+            });
+            info.deinit(allocator);
             return .repaired;
         },
         .reset => {
             try zigts.file_io.writeFile(allocator, config.handler_path, baseline_source);
             deleteLedger(allocator);
+            var info = try pi_app.demo_passport.resetToBaseline(allocator, config.workspace_root);
+            info.deinit(allocator);
             return .baseline;
         },
         .deploy => {
             const step = try detectStep(allocator, config);
             if (step == .witness) return error.DemoNeedsRepair;
             try runLocalDeploy(allocator);
+            const artifact = try deployArtifactPath(allocator, config.workspace_root);
+            defer allocator.free(artifact);
+            var info = try pi_app.demo_passport.appendStep(allocator, .{
+                .workspace_root = config.workspace_root,
+                .handler_path = config.handler_path,
+                .step = .deployed,
+                .deploy_artifact = artifact,
+            });
+            info.deinit(allocator);
             return .deployed;
         },
     }
@@ -177,6 +205,12 @@ pub fn writeStateJson(
     proof_json: []const u8,
 ) ![]u8 {
     const step = try detectStep(allocator, config);
+    var passport = try pi_app.demo_passport.ensureSession(allocator, config.workspace_root);
+    defer passport.deinit(allocator);
+
+    var parsed_proof = std.json.parseFromSlice(std.json.Value, allocator, proof_json, .{}) catch null;
+    defer if (parsed_proof) |*parsed| parsed.deinit();
+    const proof_certificate = if (parsed_proof) |*parsed| proofCertificate(parsed.value) else null;
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -188,6 +222,10 @@ pub fn writeStateJson(
     try json.write(config.workspace_root);
     try json.objectField("handlerPath");
     try json.write(config.handler_path);
+    try json.objectField("sessionId");
+    try json.write(passport.session_id);
+    try json.objectField("tuiCommand");
+    try json.write(passport.tui_command);
     try json.objectField("step");
     try json.write(step.toString());
     try json.objectField("title");
@@ -203,13 +241,13 @@ pub fn writeStateJson(
         try writeReceipt(&json, config.handler_path);
     }
     try json.objectField("proofState");
-    var parsed_proof = std.json.parseFromSlice(std.json.Value, allocator, proof_json, .{}) catch null;
     if (parsed_proof) |*parsed| {
-        defer parsed.deinit();
         try json.write(parsed.value);
     } else {
         try json.write(null);
     }
+    try json.objectField("proofPassport");
+    try writeProofPassport(&json, step, passport, proof_certificate);
     try json.endObject();
     return try allocator.dupe(u8, aw.writer.buffered());
 }
@@ -327,6 +365,44 @@ fn writeReceipt(json: *std.json.Stringify, handler_path: []const u8) !void {
     try json.objectField("service");
     try json.write("proof-inbox");
     try json.endObject();
+}
+
+fn writeProofPassport(
+    json: *std.json.Stringify,
+    step: Step,
+    passport: pi_app.demo_passport.SessionInfo,
+    proof_certificate: ?[]const u8,
+) !void {
+    try json.beginObject();
+    try json.objectField("step");
+    try json.write(step.toString());
+    try json.objectField("sessionId");
+    try json.write(passport.session_id);
+    try json.objectField("tuiCommand");
+    try json.write(passport.tui_command);
+    try json.objectField("eventsPath");
+    try json.write(passport.events_path);
+    try json.objectField("ledgerReady");
+    try json.write(step == .repaired or step == .deployed);
+    try json.objectField("certificate");
+    if (proof_certificate) |cert| {
+        try json.write(cert);
+    } else {
+        try json.write(null);
+    }
+    try json.objectField("handoff");
+    try json.write("Open the seeded session in the TUI to inspect the same proof moment in the expert ledger.");
+    try json.endObject();
+}
+
+fn proofCertificate(value: std.json.Value) ?[]const u8 {
+    if (value != .object) return null;
+    const cert = value.object.get("proofCertificate") orelse return null;
+    return if (cert == .string) cert.string else null;
+}
+
+fn deployArtifactPath(allocator: std.mem.Allocator, workspace_root: []const u8) ![]u8 {
+    return try std.fs.path.join(allocator, &.{ ".zigttp", "deploy", std.fs.path.basename(workspace_root) });
 }
 
 pub const baseline_source =
