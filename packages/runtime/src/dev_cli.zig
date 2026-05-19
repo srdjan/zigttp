@@ -26,7 +26,20 @@ const verify_cli = @import("verify_cli.zig");
 /// plus stable tag) when the `build.zig` wiring lands later in slice 1.
 const compiler_version_tag: []const u8 = "zigttp-attest-slice1";
 
-const attest_flag: []const u8 = "--attest";
+/// Legacy alias. Slice 1 introduced `--attest` as an opt-in flag; slice 2
+/// flipped attestation default-on, so the spelling now warns once and is a
+/// no-op. `--no-attest` is the explicit opt-out.
+const attest_flag_legacy: []const u8 = "--attest";
+const no_attest_flag: []const u8 = "--no-attest";
+
+var attest_legacy_warned: bool = false;
+
+fn warnAttestLegacyOnce() void {
+    if (attest_legacy_warned) return;
+    attest_legacy_warned = true;
+    const msg = "note: --attest is now the default; drop the flag or pass --no-attest to opt out.\n";
+    _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+}
 
 const deploy_exit_drift: u8 = 2;
 const deploy_exit_ready_timeout: u8 = 3;
@@ -1269,7 +1282,7 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8) !void
 fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
-    var attest_requested = false;
+    var attest_requested = true;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -1281,8 +1294,10 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
                 return error.MissingArgument;
             }
             output_path = argv[i];
-        } else if (std.mem.eql(u8, arg, attest_flag)) {
-            attest_requested = true;
+        } else if (std.mem.eql(u8, arg, attest_flag_legacy)) {
+            warnAttestLegacyOnce();
+        } else if (std.mem.eql(u8, arg, no_attest_flag)) {
+            attest_requested = false;
         } else if (std.mem.eql(u8, arg, "--help")) {
             printCompileHelp();
             return;
@@ -1371,7 +1386,7 @@ fn prepareProjectArtifact(
 
 fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var output_override: ?[]const u8 = null;
-    var attest_requested = false;
+    var attest_requested = true;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -1383,8 +1398,10 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
                 return error.MissingArgument;
             }
             output_override = argv[i];
-        } else if (std.mem.eql(u8, arg, attest_flag)) {
-            attest_requested = true;
+        } else if (std.mem.eql(u8, arg, attest_flag_legacy)) {
+            warnAttestLegacyOnce();
+        } else if (std.mem.eql(u8, arg, no_attest_flag)) {
+            attest_requested = false;
         } else if (std.mem.eql(u8, arg, "--help")) {
             printBuildHelp();
             return;
@@ -1415,10 +1432,10 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 /// pointer to the hosted control-plane help so users do not silently get
 /// the local artifact when they expected a cloud deploy.
 const cloud_only_deploy_flags = [_][]const u8{ "--region", "--confirm", "--wait", "--no-wait" };
-const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local", "--cloud", attest_flag };
+const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local", "--cloud", attest_flag_legacy, no_attest_flag };
 
 fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    var attest_requested = false;
+    var attest_requested = true;
     for (argv) |arg| {
         if (containsString(&cloud_only_deploy_flags, arg)) {
             std.debug.print("zigttp deploy --local does not accept {s}.\n", .{arg});
@@ -1434,8 +1451,12 @@ fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
             printLocalDeployHelp();
             return;
         }
-        if (std.mem.eql(u8, arg, attest_flag)) {
-            attest_requested = true;
+        if (std.mem.eql(u8, arg, attest_flag_legacy)) {
+            warnAttestLegacyOnce();
+            continue;
+        }
+        if (std.mem.eql(u8, arg, no_attest_flag)) {
+            attest_requested = false;
             continue;
         }
         if (containsString(&local_deploy_accepted_tokens, arg)) continue;
@@ -1738,6 +1759,9 @@ fn printCompileHelp() void {
         \\
         \\Options:
         \\  -o, --output <PATH>   Output binary path (required)
+        \\  --no-attest           Skip proof-receipt signing for this build.
+        \\                        Default is to sign with the persistent
+        \\                        identity at ~/.zigttp/attest/keypair.bin.
         \\  --help                Show this help
         \\
         \\For a no-args version that auto-detects from zigttp.json, use
@@ -1749,7 +1773,7 @@ fn printCompileHelp() void {
 
 fn printBuildHelp() void {
     const help =
-        \\zigttp build [-o <output>]
+        \\zigttp build [-o <output>] [--no-attest]
         \\
         \\Verify the handler in this project and emit a self-contained binary.
         \\Reads zigttp.json from the current directory or any parent.
@@ -1757,6 +1781,9 @@ fn printBuildHelp() void {
         \\
         \\Options:
         \\  -o, --output <PATH>   Override the output binary path
+        \\  --no-attest           Skip proof-receipt signing for this build.
+        \\                        Default is to sign with the persistent
+        \\                        identity at ~/.zigttp/attest/keypair.bin.
         \\  --help                Show this help
         \\
     ;
@@ -1765,7 +1792,7 @@ fn printBuildHelp() void {
 
 fn printLocalDeployHelp() void {
     const help =
-        \\zigttp deploy --local
+        \\zigttp deploy --local [--no-attest]
         \\
         \\Build a self-contained binary for the handler in this project and
         \\record the deploy in the local proof ledger. No cloud credentials,
@@ -1778,6 +1805,9 @@ fn printLocalDeployHelp() void {
         \\Options:
         \\  --local         Use the local target (this command)
         \\  --target local  Same as --local
+        \\  --no-attest     Skip proof-receipt signing for this build.
+        \\                  Default is to sign with the persistent identity
+        \\                  at ~/.zigttp/attest/keypair.bin.
         \\  --help          Show this help
         \\
     ;
