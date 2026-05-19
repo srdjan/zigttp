@@ -100,7 +100,7 @@ zigttp deploy
 
 `deploy` does everything `build` does, plus appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. No cloud credentials, no Docker, no network access. See [docs/deploy-tutorial.md](deploy-tutorial.md) for the hosted-control-plane preview path.
 
-Add `--attest` (also accepted by `compile` and `build`) to sign the contract and bytecode hashes into a JWS embedded in the binary. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request, and `zigttp verify <url>` validates the signature from any third-party machine. Full design: [docs/roadmap/attest-slice-1.md](roadmap/attest-slice-1.md).
+Attestation is default-on (slice 2). The build signs the contract and bytecode hashes into a JWS embedded in the binary, using the persistent identity at `~/.zigttp/attest/keypair.bin`. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request and serves `GET /.well-known/zigttp-attest` as cacheable JSON. `zigttp verify <url>` validates the signature from any third-party machine. Pass `--no-attest` to skip signing for a specific build. Full design: [docs/roadmap/attest-slice-2.md](roadmap/attest-slice-2.md).
 
 ### Proof badge
 
@@ -2053,13 +2053,22 @@ parses this contract and uses it for three things:
    (default 1024 entries, 5-minute TTL, 256KB max body). Requests with
    `Cache-Control: no-cache` or `no-store` bypass the cache.
 
-5. **Attestation response headers.** When the binary was compiled with
-   `--attest`, the runtime emits `Zigttp-Proofs: <chip list>` and
-   `Zigttp-Attest: <compact JWS>` on every response. Both strings are
-   built once at startup from the embedded JWS and the proven properties,
-   so per-request cost is one `bufPrint` per header. Third parties can run
-   `zigttp verify <url>` to validate the signature and read the claims.
-   Slice 1 of proof receipts; full design: [docs/roadmap/attest-slice-1.md](roadmap/attest-slice-1.md).
+5. **Attestation response headers (default-on).** The runtime emits
+   `Zigttp-Proofs: <chip list>` and `Zigttp-Attest: <compact JWS>` on
+   every response unless the build was compiled with `--no-attest`. Both
+   strings are built once at startup from the embedded JWS and the
+   proven properties, so per-request cost is one `bufPrint` per header.
+   The signing key is the persistent identity at
+   `~/.zigttp/attest/keypair.bin`, generated on first use.
+
+6. **Well-known attestation endpoint.** Attested binaries serve
+   `GET /.well-known/zigttp-attest` with the full JWS, embedded
+   contract, and JWK public key. Content-addressed via ETag,
+   `Cache-Control: public, max-age=3600`, 304 on `If-None-Match`.
+   Third parties can run `zigttp verify <url>` against any handler
+   route to read the response headers, or fetch the well-known doc
+   directly to inspect the full contract surface offline. Full design:
+   [docs/roadmap/attest-slice-2.md](roadmap/attest-slice-2.md).
 
 ### Non-Precompiled Handlers
 

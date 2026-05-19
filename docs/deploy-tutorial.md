@@ -9,18 +9,16 @@ zigttp deploy
 
 That is the whole flow. No credentials, no Docker, no registry, no cloud account. Run the binary anywhere and it serves your handler with the same proven properties studio showed you in development.
 
-## Proof receipts on the wire (`--attest`)
+## Proof receipts on the wire
 
-```
-zigttp deploy --attest
-```
-
-Adds a slice-1 proof receipt to the build. The compiler signs the contract sha, bytecode sha, and rule-registry hash with a per-build Ed25519 key and embeds the JWS in the self-extracting binary. The running server then emits two response headers on every request:
+Attestation is default-on. Every `zigttp deploy` signs the contract sha, bytecode sha, and rule-registry hash with the persistent Ed25519 identity at `~/.zigttp/attest/keypair.bin` (minted on first use, mode 0600) and embeds the JWS in the self-extracting binary. The running server emits two response headers on every request:
 
 - `Zigttp-Proofs: pure, read_only, injection_safe, ...` - the human-readable chip list.
 - `Zigttp-Attest: <compact JWS>` - the signed envelope carrying the public key, claims, and signature.
 
-Both values are precomputed once at startup; per-request cost is one `bufPrint` per header. Any consumer can validate the signature with `zigttp verify <url>`. The flag is opt-in for slice 1, default-off, and identity-bound signing is the slice-2 deliverable. See [docs/roadmap/attest-slice-1.md](roadmap/attest-slice-1.md) for the full design and trust model.
+It also serves `GET /.well-known/zigttp-attest` with the full attestation envelope plus the embedded contract surface as cacheable JSON (`Cache-Control: public, max-age=3600`, ETag, 304 on `If-None-Match`), so security scanners and registry crawlers can fetch the proof without calling every handler route.
+
+Pass `--no-attest` to skip signing for a single build (e.g. air-gapped or privacy-restricted deploys). The legacy `--attest` flag from slice 1 still works but warns once: it is now the default. Any consumer can validate the signature with `zigttp verify <url>` from any third-party machine. See [docs/roadmap/attest-slice-2.md](roadmap/attest-slice-2.md) for the full design and trust model.
 
 ## Hosted control-plane deploy (preview)
 

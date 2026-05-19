@@ -54,7 +54,7 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 
 **Proof ledger.** Every successful `zigttp deploy` and every `dev --watch --prove` swap appends one row to `.zigttp/proofs.jsonl` with the proven facts (env keys, egress hosts, cache namespaces, routes, capabilities, properties), the contract sha, and a verdict against the prior entry. The verdict words match the deploy card and the live-reload diff. `zigttp proofs list` browses the timeline, `proofs show <ref>` re-renders any past entry, `proofs diff <a> <b>` derives the delta between two entries, `proofs watch` tails new ones, and `proofs export --format md|html|svg` produces a markdown receipt, HTML doc, or SVG verdict badge. Refs accept `HEAD`, `HEAD~N`, or a contract sha prefix. The ledger persists only contract-derived identifiers; no env values, tokens, or PII.
 
-**Proof receipts.** Slice 1 carries the proof across the deploy boundary. `zigttp compile --attest` (also valid on `build` and `deploy`) signs the contract, bytecode, and rule-registry hashes with a per-build Ed25519 key and embeds the JWS in the self-extracting binary. The running server precomputes two response headers once at startup: `Zigttp-Proofs: pure, read_only, injection_safe, ...` (the human-readable chip list) and `Zigttp-Attest: <compact JWS>` (the signed envelope). Any third party can run `zigttp verify <url>` to fetch the URL, validate the signature against the embedded public key, and print the proven claims. Optional `--trust-key <hex>` pins an expected key fingerprint; `--json` emits structured output for CI. Trust model and slice-2/3 plans: [docs/roadmap/attest-slice-1.md](docs/roadmap/attest-slice-1.md).
+**Proof receipts.** Default-on across the deploy boundary. Every fresh `zigttp compile`, `build`, or `deploy --local` signs the contract, bytecode, and rule-registry hashes with the persistent Ed25519 identity at `~/.zigttp/attest/keypair.bin` (generated on first use; verifiers pin once and trust every future deploy from that origin). The running server precomputes two response headers once at startup: `Zigttp-Proofs: pure, read_only, injection_safe, ...` (the human-readable chip list) and `Zigttp-Attest: <compact JWS>` (the signed envelope). `GET /.well-known/zigttp-attest` serves the same JWS plus the full embedded contract as cacheable JSON (ETag, `Cache-Control: max-age=3600`, 304 on `If-None-Match`), so security scanners and registry crawlers can fetch the proof without calling every handler route. Any third party can run `zigttp verify <url>` to validate the signature against the embedded public key and print the proven claims. Optional `--trust-key <hex>` pins an expected key fingerprint; `--json` emits structured output for CI. Pass `--no-attest` to suppress for a specific build. Specs and trust model: [docs/roadmap/attest-slice-1.md](docs/roadmap/attest-slice-1.md), [docs/roadmap/attest-slice-2.md](docs/roadmap/attest-slice-2.md).
 
 **Contract-driven mock server.** `zigts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
 
@@ -362,12 +362,15 @@ Cloud-only flags
 (`--region`, `--confirm`, `--wait`, `--no-wait`) are rejected with a
 pointer to the hosted path.
 
-Pass `--attest` to embed a signed JWS that the running server emits on
-every response as `Zigttp-Attest`. The signing key is ephemeral per build;
-the JWS commits to the contract sha, bytecode sha, rule-registry hash,
-and capability matrix. See the `zigttp verify` section below and
-[docs/roadmap/attest-slice-1.md](docs/roadmap/attest-slice-1.md) for
-trust-model details.
+Attestation is default-on: the build signs a JWS that the running
+server emits on every response as `Zigttp-Attest` and serves at
+`GET /.well-known/zigttp-attest` as JSON. The signing key is the
+persistent identity at `~/.zigttp/attest/keypair.bin`, so multiple
+deploys from the same operator share one verifiable fingerprint. Pass
+`--no-attest` to skip signing for one build. See the `zigttp verify`
+section below and
+[docs/roadmap/attest-slice-2.md](docs/roadmap/attest-slice-2.md) for
+the full design and trust model.
 
 ### `zigttp deploy --cloud` (hosted, preview)
 
@@ -529,9 +532,11 @@ HTTP-level error.
 `zigttp verify <url>` is distinct from `zigttp proofs verify
 <bundle-dir>`: the first checks a live endpoint over HTTP, the second
 re-hashes the components of a locally-stored proof bundle. Both belong
-to the same proof-receipt family. Slice 1 ships an ephemeral
-per-build key; slice 2 will add `/.well-known/zigttp-attest` and
-identity-bound signing.
+to the same proof-receipt family. The well-known doc at
+`/.well-known/zigttp-attest` carries the same JWS plus the full
+contract surface for offline inspection; verifiers can pin the key
+fingerprint with `--trust-key <hex>` once and trust every future
+deploy from the same operator.
 
 ### `zigttp studio`
 
