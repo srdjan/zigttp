@@ -69,7 +69,7 @@ pub const LiveReloadState = struct {
     /// Pre-rendered frames per lens so the keystroke thread can repaint
     /// from cache without re-running analysis. Indexed by `@intFromEnum`.
     lens_cache_mu: compat.Mutex,
-    lens_cache: [3]?[]u8,
+    lens_cache: [4]?[]u8,
     keystroke_handle: ?*keystroke_input.Handle,
 
     pub fn init(
@@ -92,7 +92,7 @@ pub const LiveReloadState = struct {
             .studio_footer_first_render = true,
             .lens = std.atomic.Value(u8).init(@intFromEnum(proof_card_tui.Lens.properties)),
             .lens_cache_mu = .{},
-            .lens_cache = .{ null, null, null },
+            .lens_cache = .{ null, null, null, null },
             .keystroke_handle = null,
         };
     }
@@ -504,23 +504,26 @@ pub const LiveReloadState = struct {
         stderr_writer.interface.flush() catch {};
     }
 
-    /// Render all three lenses against the same card and swap the cache
-    /// under the mutex so the keystroke thread sees a consistent set.
+    /// Render every lens against the same card and swap the cache under
+    /// the mutex so the keystroke thread sees a consistent set.
     fn refreshLensCache(
         self: *LiveReloadState,
         card: *const review_facts_mod.ProofCard,
         recompile_ms: u32,
     ) !void {
-        var rendered: [3]?[]u8 = .{ null, null, null };
+        var rendered: [4]?[]u8 = .{ null, null, null, null };
         errdefer for (&rendered) |*slot| if (slot.*) |b| self.allocator.free(b);
 
-        const lenses = [_]proof_card_tui.Lens{ .properties, .trade, .handover };
+        const caller_view = self.buildCallerView();
+
+        const lenses = [_]proof_card_tui.Lens{ .properties, .trade, .handover, .caller_view };
         for (lenses, 0..) |lens, idx| {
             var aw: std.Io.Writer.Allocating = .init(self.allocator);
             defer aw.deinit();
             try proof_card_tui.writeProofCardFrame(self.allocator, card, &aw.writer, .{
                 .recompile_ms = recompile_ms,
                 .lens = lens,
+                .caller_view = caller_view,
             });
             rendered[idx] = try self.allocator.dupe(u8, aw.writer.buffered());
         }
@@ -532,6 +535,23 @@ pub const LiveReloadState = struct {
             slot.* = rendered[idx];
             rendered[idx] = null;
         }
+    }
+
+    /// Snapshot the running server's attestation state into a CallerView
+    /// for the `.caller_view` lens. Returns null on unattested builds; the
+    /// pane renders the opt-out notice in that case. Borrowed strings; the
+    /// CallerView is valid only for the duration of this render cycle, which
+    /// is fine because the cache stores the rendered bytes, not the struct.
+    fn buildCallerView(self: *const LiveReloadState) ?proof_card_tui.CallerView {
+        const hs = self.server.attestation_headers orelse return null;
+        const fp = self.server.signer_fingerprint_hex orelse return null;
+        return .{
+            .proofs_header_value = hs.proofs_value,
+            .attest_header_value = hs.attest_value,
+            .key_fingerprint_hex = &fp,
+            .host = self.server.config.host,
+            .port = self.server.config.port,
+        };
     }
 
     /// Silent no-op when the cache is empty (no prove cycle has landed yet).

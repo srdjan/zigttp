@@ -1241,6 +1241,11 @@ pub const Server = struct {
     /// `attestation_headers`. Null on unattested builds; the route falls
     /// through to the normal handler path.
     well_known_doc: ?attest_well_known.Doc,
+    /// SHA-256 fingerprint of the signer public key, lowercase hex,
+    /// recovered from the embedded JWS during `Server.start` self-verify.
+    /// The HUD's "Caller view" lens consumes this; verifiers can pin it
+    /// with `zigttp verify --trust-key <hex>`.
+    signer_fingerprint_hex: ?[64]u8,
     /// WebSocket connection registry. Initialised lazily on the first
     /// upgrade attempt; a handler with no WS exports pays zero cost.
     ws_pool: ?websocket_pool.Pool = null,
@@ -1305,6 +1310,7 @@ pub const Server = struct {
             .studio = null,
             .attestation_headers = null,
             .well_known_doc = null,
+            .signer_fingerprint_hex = null,
             .ws_pool = null,
         };
     }
@@ -1361,6 +1367,7 @@ pub const Server = struct {
             wkd.deinit(self.allocator);
             self.well_known_doc = null;
         }
+        self.signer_fingerprint_hex = null;
 
         const p = self.contract.?.properties();
         if (p.pure or (p.deterministic and p.read_only)) {
@@ -1528,6 +1535,7 @@ pub const Server = struct {
                         std.log.warn("attestation: failed to build well-known doc: {} (continuing without)", .{err});
                         break :build_well_known;
                     };
+                    self.signer_fingerprint_hex = verify_result.fingerprint_hex;
                     std.log.info("   Attestation: /.well-known/zigttp-attest enabled", .{});
                 }
             }

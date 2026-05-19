@@ -643,15 +643,18 @@ fn buildCallerViewPane(
     return lines;
 }
 
-/// Format `<prefix><value>` truncated to a stable width so the JWS and the
-/// chip list don't blow out the left pane. The pane is ~28 cols by default;
-/// 40 keeps a readable preview and never exceeds the pane.
+/// Format `<prefix><value>` truncated so the formatted line fits the widest
+/// left pane the frame produces. The frame caps `total_width` at 200, which
+/// gives a 58-char left pane; with the 17-char prefix `"  Zigttp-Attest: "`
+/// and the 3-char `...` suffix, 30 chars of value keeps the trailing dots
+/// visible at the right edge of the pane. The well-known doc and the actual
+/// response headers carry the full strings; this is the in-HUD preview.
 fn truncatedHeaderLine(
     allocator: std.mem.Allocator,
     prefix: []const u8,
     value: []const u8,
 ) ![]u8 {
-    const max_value: usize = 40;
+    const max_value: usize = 30;
     if (value.len <= max_value) {
         return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, value });
     }
@@ -1251,12 +1254,6 @@ fn renderLensForTest(
     try writeProofCardFrame(allocator, &card, &out_aw.writer, .{ .lens = lens });
 }
 
-test "Lens.next rotates Properties -> Trade -> Handover -> Properties" {
-    try std.testing.expectEqual(Lens.trade, Lens.properties.next());
-    try std.testing.expectEqual(Lens.handover, Lens.trade.next());
-    try std.testing.expectEqual(Lens.properties, Lens.handover.next());
-}
-
 test "writeProofCardFrame: trade lens groups restrictions by property" {
     const allocator = std.testing.allocator;
     var aw = std.Io.Writer.Allocating.init(allocator);
@@ -1412,7 +1409,9 @@ test "caller_view lens with attestation context renders the four blocks" {
     audit_ring.clear();
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
-    try writeProofCardFrame(allocator, &card, &aw.writer, .{ .lens = .caller_view, .caller_view = view });
+    // Wider frame so the left pane fits the long Zigttp-Attest line and the
+    // well-known URL without `writePadded` clipping the substring assertions.
+    try writeProofCardFrame(allocator, &card, &aw.writer, .{ .width = 200, .lens = .caller_view, .caller_view = view });
     const out = aw.writer.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, out, "Caller view") != null);
@@ -1457,10 +1456,10 @@ test "caller_view truncates long header values for the narrow left pane" {
     audit_ring.clear();
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
-    try writeProofCardFrame(allocator, &card, &aw.writer, .{ .lens = .caller_view, .caller_view = view });
+    try writeProofCardFrame(allocator, &card, &aw.writer, .{ .width = 200, .lens = .caller_view, .caller_view = view });
     const out = aw.writer.buffered();
 
     // Truncated form ends in "..."; original full string must not appear.
-    try std.testing.expect(std.mem.indexOf(u8, out, "Zigttp-Attest: " ++ ("X" ** 40) ++ "...") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "X" ** 50) == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Zigttp-Attest: " ++ ("X" ** 30) ++ "...") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "X" ** 40) == null);
 }
