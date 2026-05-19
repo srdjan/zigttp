@@ -10,7 +10,7 @@ Validated on Zig 0.16.0-dev.3073+28ae5d415. Newer nightlies are best-effort unti
 
 The build produces three binaries:
 
-- `zigttp` — the primary developer CLI and local runtime entrypoint. Subcommands: `init`, `dev`, `serve`, `check`, `compile`, `prove`, `mock`, `link`, `expert` (deprecated alias), `deploy`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`, `assert-intent`, `proofs` (with `list | show | diff | watch | export | badge | bundle | verify` subcommands), `witnesses`.
+- `zigttp` — the primary developer CLI and local runtime entrypoint. Subcommands: `init`, `dev`, `serve`, `check`, `compile`, `prove`, `mock`, `link`, `expert` (deprecated alias), `deploy`, `verify`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`, `assert-intent`, `proofs` (with `list | show | diff | watch | export | badge | bundle | verify` subcommands), `witnesses`. The top-level `zigttp verify <url>` is the proof-receipt verifier and is distinct from `zigttp proofs verify <bundle-dir>` (bundle integrity).
 - `zigttp-runtime` — the internal runtime template used for self-contained outputs and direct runtime tests.
 - `zigts` — the engine/compiler CLI plus the interactive `zigts expert` coding-agent entrypoint.
 
@@ -121,6 +121,8 @@ TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, r
 ### zigttp deploy
 
 `zigttp deploy` takes no arguments. It auto-detects the handler file, service name, and `.env` in the current directory, then ships to the zigttp runtime. First run prompts for browser sign-in; credentials persist in `~/.zigttp/credentials`. `zigttp logout` clears them. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
+
+The optional `--attest` flag (also accepted by `compile` and `build`) is slice 1 of proof receipts: signs the contract, bytecode, and rule-registry hashes with an ephemeral Ed25519 key and embeds the JWS in the self-extracting binary. The running server then emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request, and `zigttp verify <url>` validates the signature from any third-party machine. Spec: [docs/roadmap/attest-slice-1.md](docs/roadmap/attest-slice-1.md).
 
 ### zigts (compiler/analyzer)
 

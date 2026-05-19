@@ -100,6 +100,8 @@ zigttp deploy
 
 `deploy` does everything `build` does, plus appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. No cloud credentials, no Docker, no network access. See [docs/deploy-tutorial.md](deploy-tutorial.md) for the hosted-control-plane preview path.
 
+Add `--attest` (also accepted by `compile` and `build`) to sign the contract and bytecode hashes into a JWS embedded in the binary. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request, and `zigttp verify <url>` validates the signature from any third-party machine. Full design: [docs/roadmap/attest-slice-1.md](roadmap/attest-slice-1.md).
+
 ### Proof badge
 
 ```bash
@@ -2050,6 +2052,14 @@ parses this contract and uses it for three things:
    include an `X-Zigttp-Proof-Cache: hit` header. The cache uses FIFO eviction
    (default 1024 entries, 5-minute TTL, 256KB max body). Requests with
    `Cache-Control: no-cache` or `no-store` bypass the cache.
+
+5. **Attestation response headers.** When the binary was compiled with
+   `--attest`, the runtime emits `Zigttp-Proofs: <chip list>` and
+   `Zigttp-Attest: <compact JWS>` on every response. Both strings are
+   built once at startup from the embedded JWS and the proven properties,
+   so per-request cost is one `bufPrint` per header. Third parties can run
+   `zigttp verify <url>` to validate the signature and read the claims.
+   Slice 1 of proof receipts; full design: [docs/roadmap/attest-slice-1.md](roadmap/attest-slice-1.md).
 
 ### Non-Precompiled Handlers
 

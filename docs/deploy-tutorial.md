@@ -9,6 +9,19 @@ zigttp deploy
 
 That is the whole flow. No credentials, no Docker, no registry, no cloud account. Run the binary anywhere and it serves your handler with the same proven properties studio showed you in development.
 
+## Proof receipts on the wire (`--attest`)
+
+```
+zigttp deploy --attest
+```
+
+Adds a slice-1 proof receipt to the build. The compiler signs the contract sha, bytecode sha, and rule-registry hash with a per-build Ed25519 key and embeds the JWS in the self-extracting binary. The running server then emits two response headers on every request:
+
+- `Zigttp-Proofs: pure, read_only, injection_safe, ...` - the human-readable chip list.
+- `Zigttp-Attest: <compact JWS>` - the signed envelope carrying the public key, claims, and signature.
+
+Both values are precomputed once at startup; per-request cost is one `bufPrint` per header. Any consumer can validate the signature with `zigttp verify <url>`. The flag is opt-in for slice 1, default-off, and identity-bound signing is the slice-2 deliverable. See [docs/roadmap/attest-slice-1.md](roadmap/attest-slice-1.md) for the full design and trust model.
+
 ## Hosted control-plane deploy (preview)
 
 `zigttp deploy --cloud` ships to the hosted Zigttp control plane (currently Northflank-backed). This path is in preview for v1.0: it works end-to-end but requires a Zigttp account, and the API surface may shift before general availability.
