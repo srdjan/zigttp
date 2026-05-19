@@ -502,6 +502,7 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
             .dep_bytecodes = payload.dep_bytecodes,
         } },
         .contract_json = payload.contract_json,
+        .attestation_jws = payload.attestation_jws,
         .port = 3000,
     };
 

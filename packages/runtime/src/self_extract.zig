@@ -9,7 +9,7 @@ const handler_policy = zigts.handler_policy;
 // 0       8     payload_offset
 // 8       8     payload_size
 // 16      2     format_version
-// 18      2     flags (bit 0: has_contract)
+// 18      2     flags (bit 0: has_contract, bit 1: has_attestation)
 // 20      4     checksum (CRC-32 of payload)
 // 24      8     magic
 
@@ -24,6 +24,7 @@ pub const Section = enum(u8) {
     contract = 3,
     policy = 4,
     metadata = 5,
+    attestation = 6, // slice 1 of proof receipts: compact JWS bytes
 };
 
 pub const Payload = struct {
@@ -33,12 +34,16 @@ pub const Payload = struct {
     policy: handler_policy.RuntimePolicy,
     // Owned string slices backing the policy allow lists
     policy_strings: []const []const u8,
+    /// Compact JWS (RFC 7515 Section 7.1) signing the contract+bytecode+policy
+    /// commitments. Null when the binary was built without `--attest`.
+    attestation_jws: ?[]const u8 = null,
 
     pub fn deinit(self: *const Payload, allocator: std.mem.Allocator) void {
         allocator.free(self.bytecode);
         for (self.dep_bytecodes) |dep| allocator.free(dep);
         allocator.free(self.dep_bytecodes);
         if (self.contract_json) |c| allocator.free(c);
+        if (self.attestation_jws) |a| allocator.free(a);
         // Free the values arrays inside each policy allow list
         if (self.policy.env.values.len > 0) allocator.free(self.policy.env.values);
         if (self.policy.egress.values.len > 0) allocator.free(self.policy.egress.values);
@@ -111,6 +116,7 @@ pub fn create(
     dep_bytecodes: []const []const u8,
     contract_json: ?[]const u8,
     policy: *const handler_policy.RuntimePolicy,
+    attestation: ?[]const u8,
 ) !void {
     // Read base binary (100MB limit matches payload sanity check)
     const base_data = try readFile(allocator, base_binary_path, 100 * 1024 * 1024);
@@ -120,7 +126,7 @@ pub fn create(
     const clean_size = getCleanBinarySize(base_data);
 
     // Serialize payload
-    const payload = try serializePayload(allocator, bytecode, dep_bytecodes, contract_json, policy);
+    const payload = try serializePayload(allocator, bytecode, dep_bytecodes, contract_json, policy, attestation);
     defer allocator.free(payload);
 
     // Build trailer
@@ -128,7 +134,9 @@ pub fn create(
     const payload_size: u64 = @intCast(payload.len);
     const checksum = std.hash.crc.Crc32.hash(payload);
 
-    const flags: u16 = if (contract_json != null) 1 else 0;
+    var flags: u16 = 0;
+    if (contract_json != null) flags |= 1;
+    if (attestation != null) flags |= 2;
 
     var trailer: [TRAILER_SIZE]u8 = undefined;
     std.mem.writeInt(u64, trailer[0..8], payload_offset, .little);
@@ -176,6 +184,7 @@ fn serializePayload(
     dep_bytecodes: []const []const u8,
     contract_json: ?[]const u8,
     policy: *const handler_policy.RuntimePolicy,
+    attestation: ?[]const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -185,6 +194,7 @@ fn serializePayload(
     if (dep_bytecodes.len > 0) section_count += 1;
     if (contract_json != null) section_count += 1;
     section_count += 1; // policy always present
+    if (attestation != null) section_count += 1;
 
     try buf.ensureTotalCapacity(allocator, bytecode.len + 256);
     try writeU16(&buf, allocator, section_count);
@@ -214,6 +224,11 @@ fn serializePayload(
     defer allocator.free(policy_data);
     try writeSection(&buf, allocator, .policy, policy_data);
 
+    // Section 6: attestation JWS (if any)
+    if (attestation) |jws| {
+        try writeSection(&buf, allocator, .attestation, jws);
+    }
+
     return buf.toOwnedSlice(allocator);
 }
 
@@ -226,6 +241,7 @@ fn parsePayload(allocator: std.mem.Allocator, data: []const u8) !?Payload {
     var bytecode: ?[]const u8 = null;
     var dep_bytecodes: ?[]const []const u8 = null;
     var contract_json: ?[]const u8 = null;
+    var attestation_jws: ?[]const u8 = null;
     var policy: handler_policy.RuntimePolicy = .{};
     var policy_strings: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -235,6 +251,7 @@ fn parsePayload(allocator: std.mem.Allocator, data: []const u8) !?Payload {
             allocator.free(deps);
         }
         if (contract_json) |c| allocator.free(c);
+        if (attestation_jws) |a| allocator.free(a);
         for (policy_strings.items) |s| allocator.free(s);
         policy_strings.deinit(allocator);
     }
@@ -263,6 +280,9 @@ fn parsePayload(allocator: std.mem.Allocator, data: []const u8) !?Payload {
             @intFromEnum(Section.policy) => {
                 policy = try deserializePolicy(allocator, section_data, &policy_strings);
             },
+            @intFromEnum(Section.attestation) => {
+                attestation_jws = try allocator.dupe(u8, section_data);
+            },
             else => {}, // skip unknown sections for forward compatibility
         }
     }
@@ -275,6 +295,7 @@ fn parsePayload(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         .contract_json = contract_json,
         .policy = policy,
         .policy_strings = try policy_strings.toOwnedSlice(allocator),
+        .attestation_jws = attestation_jws,
     };
 }
 
@@ -471,6 +492,7 @@ test "roundtrip: serialize and parse payload" {
         &.{},
         contract,
         &policy,
+        null,
     );
     defer allocator.free(serialized);
 
@@ -480,6 +502,7 @@ test "roundtrip: serialize and parse payload" {
     try std.testing.expectEqualStrings(bytecode, parsed.bytecode);
     try std.testing.expectEqualStrings(contract, parsed.contract_json.?);
     try std.testing.expectEqual(@as(usize, 0), parsed.dep_bytecodes.len);
+    try std.testing.expect(parsed.attestation_jws == null);
 }
 
 test "roundtrip: payload with deps" {
@@ -491,7 +514,7 @@ test "roundtrip: payload with deps" {
     const deps = [_][]const u8{ dep1, dep2 };
     const policy = handler_policy.RuntimePolicy{};
 
-    const serialized = try serializePayload(allocator, bytecode, &deps, null, &policy);
+    const serialized = try serializePayload(allocator, bytecode, &deps, null, &policy, null);
     defer allocator.free(serialized);
 
     const parsed = (try parsePayload(allocator, serialized)).?;
@@ -502,6 +525,40 @@ test "roundtrip: payload with deps" {
     try std.testing.expectEqualStrings(dep1, parsed.dep_bytecodes[0]);
     try std.testing.expectEqualStrings(dep2, parsed.dep_bytecodes[1]);
     try std.testing.expect(parsed.contract_json == null);
+}
+
+test "roundtrip: payload with attestation JWS" {
+    const allocator = std.testing.allocator;
+
+    const bytecode = "bc";
+    const jws = "eyJhbGciOiJFZERTQSJ9.eyJ2IjoiMSJ9.AAA";
+    const policy = handler_policy.RuntimePolicy{};
+
+    const serialized = try serializePayload(allocator, bytecode, &.{}, null, &policy, jws);
+    defer allocator.free(serialized);
+
+    const parsed = (try parsePayload(allocator, serialized)).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings(jws, parsed.attestation_jws.?);
+    try std.testing.expect(parsed.contract_json == null);
+}
+
+test "older payload (no attestation section) parses with null attestation" {
+    const allocator = std.testing.allocator;
+
+    const bytecode = "bc";
+    const contract = "{}";
+    const policy = handler_policy.RuntimePolicy{};
+
+    const serialized = try serializePayload(allocator, bytecode, &.{}, contract, &policy, null);
+    defer allocator.free(serialized);
+
+    const parsed = (try parsePayload(allocator, serialized)).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expect(parsed.attestation_jws == null);
+    try std.testing.expectEqualStrings(contract, parsed.contract_json.?);
 }
 
 test "getCleanBinarySize: no trailer returns full size" {

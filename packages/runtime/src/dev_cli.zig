@@ -16,6 +16,16 @@ const embedded_handler = @import("embedded_handler");
 const proof_ledger = @import("proof_ledger.zig");
 const live_reload = @import("live_reload.zig");
 const demo = @import("demo.zig");
+const pi_app = @import("pi_app");
+const envelope = @import("attest/envelope.zig");
+const header_strings = @import("attest/header_strings.zig");
+const verify_cli = @import("verify_cli.zig");
+
+/// Slice 1 placeholder. Replace with a build-injected constant (short git sha
+/// plus stable tag) when the `build.zig` wiring lands later in slice 1.
+const compiler_version_tag: []const u8 = "zigttp-attest-slice1";
+
+const attest_flag: []const u8 = "--attest";
 
 const deploy_exit_drift: u8 = 2;
 const deploy_exit_ready_timeout: u8 = 3;
@@ -205,7 +215,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return;
         }
         std.debug.print("zigttp expert is deprecated; use `zigts expert`.\n", .{});
-        const pi_app = @import("pi_app");
         const witness_replay_lib = @import("witness_replay_lib.zig");
         pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
         try pi_app.run(allocator);
@@ -307,6 +316,27 @@ pub fn main(init: std.process.Init.Minimal) !void {
             std.log.err("Deploy failed: {}", .{err});
             return err;
         };
+        return;
+    }
+    if (std.mem.eql(u8, command, "verify")) {
+        const opts = verify_cli.parseArgs(user_args[1..]) catch |err| switch (err) {
+            error.HelpRequested => {
+                verify_cli.printHelp();
+                return;
+            },
+            error.MissingArgument => {
+                std.debug.print("zigttp verify: <url> is required\n\n", .{});
+                verify_cli.printHelp();
+                std.process.exit(verify_cli.exit_arg_error);
+            },
+            error.UnknownArgument, error.TooManyArguments, error.InvalidTrustKey => {
+                std.debug.print("zigttp verify: invalid arguments\n\n", .{});
+                verify_cli.printHelp();
+                std.process.exit(verify_cli.exit_arg_error);
+            },
+        };
+        const code = try verify_cli.run(allocator, opts);
+        if (code != 0) std.process.exit(code);
         return;
     }
     if (std.mem.eql(u8, command, "review")) {
@@ -977,6 +1007,8 @@ fn demoCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []c
     var workspace = try demo.createWorkspace(allocator, parsed.out_dir, parsed.port);
     defer workspace.deinit(allocator);
     defer workspace.cleanup(allocator);
+    var passport = try pi_app.demo_passport.resetToBaseline(allocator, workspace.root);
+    defer passport.deinit(allocator);
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -1002,10 +1034,11 @@ fn demoCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []c
         \\zigttp proof theater
         \\Workspace: {s}
         \\Studio:    {s}
+        \\TUI:       {s}
         \\
         \\Flow: baseline -> unsafe edit -> witness -> repair -> local deploy receipt
         \\
-    , .{ workspace.root, url });
+    , .{ workspace.root, url, passport.tui_command });
 
     if (!parsed.no_open) openBrowser(allocator, url);
 
@@ -1235,6 +1268,7 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8) !void
 fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
+    var attest_requested = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -1246,6 +1280,8 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
                 return error.MissingArgument;
             }
             output_path = argv[i];
+        } else if (std.mem.eql(u8, arg, attest_flag)) {
+            attest_requested = true;
         } else if (std.mem.eql(u8, arg, "--help")) {
             printCompileHelp();
             return;
@@ -1265,7 +1301,7 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
         return error.MissingArgument;
     }
 
-    try buildArtifact(allocator, handler_path.?, output_path.?, null);
+    try buildArtifact(allocator, handler_path.?, output_path.?, null, attest_requested);
 }
 
 const ProjectArtifact = struct {
@@ -1334,6 +1370,7 @@ fn prepareProjectArtifact(
 
 fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var output_override: ?[]const u8 = null;
+    var attest_requested = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -1345,6 +1382,8 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
                 return error.MissingArgument;
             }
             output_override = argv[i];
+        } else if (std.mem.eql(u8, arg, attest_flag)) {
+            attest_requested = true;
         } else if (std.mem.eql(u8, arg, "--help")) {
             printBuildHelp();
             return;
@@ -1361,7 +1400,7 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var artifact = try prepareProjectArtifact(allocator, io_backend.io(), "build", output_override);
     defer artifact.deinit(allocator);
 
-    try buildArtifact(allocator, artifact.handler_path, artifact.output_path, null);
+    try buildArtifact(allocator, artifact.handler_path, artifact.output_path, null, attest_requested);
 
     std.debug.print(
         \\
@@ -1375,9 +1414,10 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 /// pointer to the hosted control-plane help so users do not silently get
 /// the local artifact when they expected a cloud deploy.
 const cloud_only_deploy_flags = [_][]const u8{ "--region", "--confirm", "--wait", "--no-wait" };
-const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local", "--cloud" };
+const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local", "--cloud", attest_flag };
 
 fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var attest_requested = false;
     for (argv) |arg| {
         if (containsString(&cloud_only_deploy_flags, arg)) {
             std.debug.print("zigttp deploy --local does not accept {s}.\n", .{arg});
@@ -1392,6 +1432,10 @@ fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         if (std.mem.eql(u8, arg, "--help")) {
             printLocalDeployHelp();
             return;
+        }
+        if (std.mem.eql(u8, arg, attest_flag)) {
+            attest_requested = true;
+            continue;
         }
         if (containsString(&local_deploy_accepted_tokens, arg)) continue;
 
@@ -1412,7 +1456,7 @@ fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
     // surface, not silently warn.
     try std.Io.Threaded.chdir(artifact.project.root_dir);
 
-    try buildArtifact(allocator, artifact.handler_path, artifact.output_path, artifact.project_name);
+    try buildArtifact(allocator, artifact.handler_path, artifact.output_path, artifact.project_name, attest_requested);
 
     std.debug.print(
         \\
@@ -1426,11 +1470,86 @@ fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
     , .{ artifact.output_path, artifact.output_path, artifact.project.host, artifact.project.port });
 }
 
+/// Slice 1 of proof receipts (docs/roadmap/attest-slice-1.md). Produces a
+/// compact JWS committing to (contract_json, bytecode, rule-registry policy,
+/// capability matrix) for the current build. Caller owns the returned bytes.
+/// Returns null when the compile did not yield a HandlerContract; we cannot
+/// sign chips we never derived.
+fn buildAttestationJws(
+    allocator: std.mem.Allocator,
+    contract_json: []const u8,
+    bytecode: []const u8,
+    contract: *const zigts.HandlerContract,
+) !?[]u8 {
+    var contract_sha: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(contract_json, &contract_sha, .{});
+    const contract_sha_hex = std.fmt.bytesToHex(contract_sha, .lower);
+
+    var bytecode_sha: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytecode, &bytecode_sha, .{});
+    const bytecode_sha_hex = std.fmt.bytesToHex(bytecode_sha, .lower);
+
+    // The rule-registry hash is already cryptographically anchored in the
+    // build and the same value is embedded in contract.json under
+    // sandbox.policyHash. Committing to it pins the compiler ruleset.
+    const policy_sha_hex = zigts.rule_registry.policyHash();
+
+    // CapabilityMatrix.hash defaults to all-zero for handlers with no
+    // capability imports; that's the same shape `parseCapabilityMatrix`
+    // produces, so an all-zero hex string is a legitimate value.
+    const capability_hash_hex = std.fmt.bytesToHex(contract.capabilities.hash, .lower);
+
+    const props_or_default = contract.properties orelse zigts.handler_contract.HandlerProperties{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = false,
+        .has_egress = false,
+    };
+    const property_summary = try header_strings.formatProofChips(allocator, props_or_default);
+    defer if (property_summary.len > 0) allocator.free(property_summary);
+
+    const claims = envelope.Claims{
+        .contract_sha256 = &contract_sha_hex,
+        .bytecode_sha256 = &bytecode_sha_hex,
+        .policy_sha256 = &policy_sha_hex,
+        .capability_hash = &capability_hash_hex,
+        .compiler_version = compiler_version_tag,
+        .signed_at_unix = @divTrunc(proof_ledger.defaultNowMs(), std.time.ms_per_s),
+        .property_summary = property_summary,
+        .routes_count = @intCast(contract.api.routes.items.len),
+    };
+
+    var seed: [std.crypto.sign.Ed25519.KeyPair.seed_length]u8 = undefined;
+    try fillCsprngSeed(&seed);
+    const key_pair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
+    var env = try envelope.sign(allocator, claims, key_pair);
+    return env.intoJws();
+}
+
+/// CSPRNG seed for build-time keypair generation. Slice 1 mints an ephemeral
+/// key per build; identity-bound signing comes in slice 2. Uses /dev/urandom
+/// so a single code path covers both macOS and Linux without the
+/// `std.c.getrandom` vs `std.c.getentropy` platform stub mess.
+fn fillCsprngSeed(buf: *[std.crypto.sign.Ed25519.KeyPair.seed_length]u8) !void {
+    const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.UrandomOpenFailed;
+    defer _ = std.c.close(fd);
+    var filled: usize = 0;
+    while (filled < buf.len) {
+        const n = std.c.read(fd, buf[filled..].ptr, buf.len - filled);
+        if (n <= 0) return error.UrandomReadFailed;
+        filled += @intCast(n);
+    }
+}
+
 fn buildArtifact(
     allocator: std.mem.Allocator,
     handler_path: []const u8,
     output_path: []const u8,
     ledger_service_name: ?[]const u8,
+    attest_requested: bool,
 ) !void {
     const source = zigts.file_io.readFile(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
         std.log.err("Failed to read handler '{s}': {}", .{ handler_path, err });
@@ -1494,6 +1613,17 @@ fn buildArtifact(
 
     const dep_bytecodes: []const []const u8 = compiled.dep_bytecodes orelse &.{};
 
+    const attestation_jws: ?[]u8 = blk: {
+        if (!attest_requested) break :blk null;
+        const cj = contract_json orelse {
+            std.log.warn("--attest requested but no contract was emitted; skipping attestation", .{});
+            break :blk null;
+        };
+        const contract_ptr = if (compiled.contract) |*c| c else break :blk null;
+        break :blk try buildAttestationJws(allocator, cj, compiled.bytecode, contract_ptr);
+    };
+    defer if (attestation_jws) |a| allocator.free(a);
+
     const policy = zigts.handler_policy.RuntimePolicy{};
     self_extract.create(
         allocator,
@@ -1503,6 +1633,7 @@ fn buildArtifact(
         dep_bytecodes,
         contract_json,
         &policy,
+        attestation_jws,
     ) catch |err| {
         if (err == error.FileNotFound) {
             // self_extract opens both the runtime template and the output

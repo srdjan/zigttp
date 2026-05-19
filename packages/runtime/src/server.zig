@@ -30,6 +30,7 @@ const websocket_pool = @import("websocket_pool.zig");
 const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const proof_audit_ring = @import("proof_audit_ring.zig");
+const attest_header_strings = @import("attest/header_strings.zig");
 const studio_mod = @import("runtime_features.zig").studio;
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
@@ -677,10 +678,10 @@ const ConnectionPool = struct {
     }
 
     fn sendResponseSync(self: *ConnectionPool, fd: std.posix.fd_t, response: *HttpResponse, keep_alive: bool) !void {
-        _ = self;
-
-        // FAST PATH: If prebuilt_raw is available, write it directly (zero header construction)
-        // Note: prebuilt responses use Connection: keep-alive, which is the common case
+        // FAST PATH: If prebuilt_raw is available, write it directly (zero header construction).
+        // Slice 1 of proof receipts intentionally skips this path: cached
+        // static-file responses don't carry handler semantics, so omitting
+        // attestation headers there is the correct shape.
         if (response.prebuilt_raw) |prebuilt| {
             if (keep_alive) {
                 // Prebuilt response already has keep-alive, write directly
@@ -708,6 +709,8 @@ const ConnectionPool = struct {
             const header_line = std.fmt.bufPrint(header_buf[pos..], "{s}: {s}\r\n", .{ h.key, h.value }) catch return error.BufferOverflow;
             pos += header_line.len;
         }
+
+        pos = try appendAttestationHeaders(self.server.attestation_headers, &header_buf, pos);
 
         // Content-Length and Connection
         const content_len = std.fmt.bufPrint(header_buf[pos..], "Content-Length: {d}\r\n", .{response.body.len}) catch return error.BufferOverflow;
@@ -943,6 +946,26 @@ fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
     }
 }
 
+/// Append the precomputed `Zigttp-Proofs` and `Zigttp-Attest` header lines.
+/// Slice 1 of proof receipts: per-request work is two `bufPrint`s of static
+/// strings, never a parse or signature operation. `proofs_value.len == 0`
+/// signals "no chip is proven; skip the line so the header is never empty."
+fn appendAttestationHeaders(
+    headers: ?attest_header_strings.HeaderStrings,
+    buf: []u8,
+    start: usize,
+) !usize {
+    const hs = headers orelse return start;
+    var pos = start;
+    if (hs.proofs_value.len > 0) {
+        const line = std.fmt.bufPrint(buf[pos..], "{s}: {s}\r\n", .{ attest_header_strings.header_name_proofs, hs.proofs_value }) catch return error.BufferOverflow;
+        pos += line.len;
+    }
+    const attest_line = std.fmt.bufPrint(buf[pos..], "{s}: {s}\r\n", .{ attest_header_strings.header_name_attest, hs.attest_value }) catch return error.BufferOverflow;
+    pos += attest_line.len;
+    return pos;
+}
+
 fn createUnixSocketPair() ![2]std.posix.fd_t {
     if (@TypeOf(std.posix.system.socketpair) == void) {
         return error.OperationUnsupported;
@@ -1085,6 +1108,12 @@ pub const ServerConfig = struct {
     /// startup env validation, route pre-filtering, property logging.
     contract_json: ?[]const u8 = null,
 
+    /// Compact JWS (slice 1 of proof receipts) embedded by `zigttp compile
+    /// --attest`. When present alongside a validated contract, the server
+    /// precomputes `Zigttp-Proofs` and `Zigttp-Attest` response headers once
+    /// and emits them on every HTTP response.
+    attestation_jws: ?[]const u8 = null,
+
     /// Skip startup env validation (for testing/development)
     skip_env_check: bool = false,
 
@@ -1148,6 +1177,10 @@ pub const Server = struct {
     proof_cache: ?proof_adapter.ProofCache,
     security_logger: ?*SecurityLogger,
     studio: ?studio_mod.State,
+    /// Precomputed `Zigttp-Proofs` and `Zigttp-Attest` header strings, built
+    /// once in `start` when both a validated contract and an attestation JWS
+    /// are present. Null otherwise; both response paths skip the writes.
+    attestation_headers: ?attest_header_strings.HeaderStrings,
     /// WebSocket connection registry. Initialised lazily on the first
     /// upgrade attempt; a handler with no WS exports pays zero cost.
     ws_pool: ?websocket_pool.Pool = null,
@@ -1210,6 +1243,7 @@ pub const Server = struct {
             .proof_cache = null,
             .security_logger = null,
             .studio = null,
+            .attestation_headers = null,
             .ws_pool = null,
         };
     }
@@ -1222,6 +1256,7 @@ pub const Server = struct {
         if (self.proof_cache) |*pc| pc.deinit();
         if (self.ws_pool) |*wsp| wsp.deinit();
         if (self.contract) |*c| c.deinit();
+        if (self.attestation_headers) |*ah| ah.deinit(self.allocator);
         if (self.security_logger) |logger| logger.deinit();
         if (self.studio) |*studio| studio.deinit();
         engine.deinitSecurityEvents();
@@ -1249,6 +1284,15 @@ pub const Server = struct {
         if (self.proof_cache) |*pc| {
             pc.deinit();
             self.proof_cache = null;
+        }
+
+        // The signed JWS commits to the prior build's bytecode and contract
+        // hashes. After a swap those commitments no longer match, so silence
+        // the attestation headers rather than serve a misleading signature.
+        // Slice 2 will mint a fresh attestation on each live swap.
+        if (self.attestation_headers) |*ah| {
+            ah.deinit(self.allocator);
+            self.attestation_headers = null;
         }
 
         const p = self.contract.?.properties();
@@ -1377,6 +1421,25 @@ pub const Server = struct {
                     .{},
                 );
                 std.log.info("   Proof cache: enabled (handler proven deterministic + read_only)", .{});
+            }
+        }
+
+        // Slice 1 of proof receipts: precompute the two response headers once.
+        // The values are deterministic for a build, so per-request cost is one
+        // memcpy per header into the response buffer.
+        if (self.contract) |*contract| {
+            if (self.config.attestation_jws) |jws| {
+                self.attestation_headers = attest_header_strings.build(
+                    self.allocator,
+                    contract.properties(),
+                    jws,
+                ) catch |err| blk: {
+                    std.log.warn("attestation: failed to build response headers: {} (continuing without)", .{err});
+                    break :blk null;
+                };
+                if (self.attestation_headers != null) {
+                    std.log.info("   Attestation: response headers enabled", .{});
+                }
             }
         }
 
@@ -1899,14 +1962,15 @@ pub const Server = struct {
     }
 
     fn sendResponse(self: *Self, stream: *net.Stream, io: Io, response: *HttpResponse, keep_alive: bool) !void {
-        _ = self;
         // Increased buffer to 8KB to fit headers + most response bodies in single flush
         var out_buf: [8192]u8 = undefined;
         var writer = stream.writer(io, &out_buf);
         const out = &writer.interface;
 
-        // FAST PATH: If prebuilt_raw is available, write it directly (zero header construction)
-        // Note: prebuilt responses use Connection: keep-alive, which is the common case
+        // FAST PATH: If prebuilt_raw is available, write it directly (zero header construction).
+        // Slice 1 of proof receipts intentionally skips this path: cached
+        // static-file responses don't carry handler semantics, so omitting
+        // attestation headers there is the correct shape.
         if (response.prebuilt_raw) |prebuilt| {
             if (keep_alive) {
                 try out.writeAll(prebuilt);
@@ -1954,6 +2018,8 @@ pub const Server = struct {
                 ) catch break :blk false;
                 header_len += hdr.len;
             }
+
+            header_len = appendAttestationHeaders(self.attestation_headers, &header_buf, header_len) catch break :blk false;
 
             if (header_len + 2 > header_buf.len) break :blk false;
             header_buf[header_len] = '\r';
@@ -2622,6 +2688,44 @@ test "get content type" {
     try std.testing.expectEqualStrings("application/javascript; charset=utf-8", getContentType("app.js"));
     try std.testing.expectEqualStrings("application/json", getContentType("data.json"));
     try std.testing.expectEqualStrings("image/png", getContentType("logo.png"));
+}
+
+test "appendAttestationHeaders: null headers is a no-op" {
+    var buf: [256]u8 = undefined;
+    const out = try appendAttestationHeaders(null, &buf, 7);
+    try std.testing.expectEqual(@as(usize, 7), out);
+}
+
+test "appendAttestationHeaders: empty proofs writes only Zigttp-Attest" {
+    var buf: [256]u8 = undefined;
+    const hs = attest_header_strings.HeaderStrings{
+        .proofs_value = "",
+        .attest_value = "abc.def.ghi",
+    };
+    const out = try appendAttestationHeaders(hs, &buf, 0);
+    try std.testing.expectEqualStrings("Zigttp-Attest: abc.def.ghi\r\n", buf[0..out]);
+}
+
+test "appendAttestationHeaders: both lines written in order" {
+    var buf: [256]u8 = undefined;
+    const hs = attest_header_strings.HeaderStrings{
+        .proofs_value = "pure, injection_safe",
+        .attest_value = "h.p.s",
+    };
+    const out = try appendAttestationHeaders(hs, &buf, 0);
+    try std.testing.expectEqualStrings(
+        "Zigttp-Proofs: pure, injection_safe\r\nZigttp-Attest: h.p.s\r\n",
+        buf[0..out],
+    );
+}
+
+test "appendAttestationHeaders: BufferOverflow when buf too small" {
+    var buf: [10]u8 = undefined;
+    const hs = attest_header_strings.HeaderStrings{
+        .proofs_value = "x",
+        .attest_value = "y",
+    };
+    try std.testing.expectError(error.BufferOverflow, appendAttestationHeaders(hs, &buf, 0));
 }
 
 test "get status text" {
