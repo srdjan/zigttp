@@ -31,6 +31,8 @@ const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const proof_audit_ring = @import("proof_audit_ring.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
+const attest_envelope = @import("attest/envelope.zig");
+const attest_well_known = @import("attest/well_known.zig");
 const studio_mod = @import("runtime_features.zig").studio;
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
@@ -485,6 +487,21 @@ const ConnectionPool = struct {
                     std.log.warn("static file error for {s}: {}", .{ request.url, err });
                     self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
                 };
+                return outcome_if_alive;
+            }
+        }
+
+        // Well-known proof-receipt endpoint (slice 2 item B). Intercept before
+        // the contract route filter so this fixed path is reachable even on
+        // handlers whose contract proves a restricted route set.
+        if (self.server.well_known_doc) |*doc| {
+            if (std.mem.eql(u8, request.path, attest_well_known.route_path)) {
+                const inm = findHeaderValue(request.headers.items, "If-None-Match");
+                const cached = etagMatchesIfNoneMatch(inm, &doc.etag_hex);
+                var header_buf: [512]u8 = undefined;
+                const header_len = formatWellKnownHeaders(doc, cached, keep_alive, &header_buf) catch return .close;
+                writeAllFd(fd, header_buf[0..header_len]) catch return .close;
+                if (!cached) writeAllFd(fd, doc.body) catch return .close;
                 return outcome_if_alive;
             }
         }
@@ -946,6 +963,45 @@ fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
     }
 }
 
+/// Format the headers + body bytes for a `GET /.well-known/zigttp-attest`
+/// response. Writes 304 with empty body when `cached` (caller's
+/// `If-None-Match` already matched the doc ETag), otherwise 200 with the
+/// precomputed body. Returns the prefix length (headers) plus tells the
+/// caller via `body_out` what body bytes to write next. Two writes total:
+/// headers from a stack buffer, body from the precomputed slice.
+fn formatWellKnownHeaders(
+    doc: *const attest_well_known.Doc,
+    cached: bool,
+    keep_alive: bool,
+    header_buf: []u8,
+) !usize {
+    const conn = if (keep_alive) "keep-alive" else "close";
+    if (cached) {
+        const out = try std.fmt.bufPrint(
+            header_buf,
+            "HTTP/1.1 304 Not Modified\r\nETag: \"{s}\"\r\nCache-Control: public, max-age={d}\r\nConnection: {s}\r\nContent-Length: 0\r\n\r\n",
+            .{ doc.etag_hex, attest_well_known.cache_max_age_seconds, conn },
+        );
+        return out.len;
+    }
+    const out = try std.fmt.bufPrint(
+        header_buf,
+        "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nETag: \"{s}\"\r\nCache-Control: public, max-age={d}\r\nConnection: {s}\r\nContent-Length: {d}\r\n\r\n",
+        .{ attest_well_known.content_type, doc.etag_hex, attest_well_known.cache_max_age_seconds, conn, doc.body.len },
+    );
+    return out.len;
+}
+
+/// True when `If-None-Match` header value matches `etag_hex`. Tolerant of
+/// `W/` weak-validator prefix and surrounding double quotes per RFC 9110.
+fn etagMatchesIfNoneMatch(if_none_match: ?[]const u8, etag_hex: []const u8) bool {
+    const raw = if_none_match orelse return false;
+    var trimmed = raw;
+    if (std.mem.startsWith(u8, trimmed, "W/")) trimmed = trimmed[2..];
+    trimmed = std.mem.trim(u8, trimmed, "\"");
+    return std.mem.eql(u8, trimmed, etag_hex);
+}
+
 /// Append the precomputed `Zigttp-Proofs` and `Zigttp-Attest` header lines.
 /// Slice 1 of proof receipts: per-request work is two `bufPrint`s of static
 /// strings, never a parse or signature operation. `proofs_value.len == 0`
@@ -1181,6 +1237,10 @@ pub const Server = struct {
     /// once in `start` when both a validated contract and an attestation JWS
     /// are present. Null otherwise; both response paths skip the writes.
     attestation_headers: ?attest_header_strings.HeaderStrings,
+    /// Precomputed `GET /.well-known/zigttp-attest` body, built alongside
+    /// `attestation_headers`. Null on unattested builds; the route falls
+    /// through to the normal handler path.
+    well_known_doc: ?attest_well_known.Doc,
     /// WebSocket connection registry. Initialised lazily on the first
     /// upgrade attempt; a handler with no WS exports pays zero cost.
     ws_pool: ?websocket_pool.Pool = null,
@@ -1244,6 +1304,7 @@ pub const Server = struct {
             .security_logger = null,
             .studio = null,
             .attestation_headers = null,
+            .well_known_doc = null,
             .ws_pool = null,
         };
     }
@@ -1257,6 +1318,7 @@ pub const Server = struct {
         if (self.ws_pool) |*wsp| wsp.deinit();
         if (self.contract) |*c| c.deinit();
         if (self.attestation_headers) |*ah| ah.deinit(self.allocator);
+        if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
         if (self.security_logger) |logger| logger.deinit();
         if (self.studio) |*studio| studio.deinit();
         engine.deinitSecurityEvents();
@@ -1288,11 +1350,16 @@ pub const Server = struct {
 
         // The signed JWS commits to the prior build's bytecode and contract
         // hashes. After a swap those commitments no longer match, so silence
-        // the attestation headers rather than serve a misleading signature.
-        // Slice 2 will mint a fresh attestation on each live swap.
+        // the attestation headers AND the well-known doc rather than serve a
+        // misleading signature. A future slice will re-mint attestation on
+        // each live swap.
         if (self.attestation_headers) |*ah| {
             ah.deinit(self.allocator);
             self.attestation_headers = null;
+        }
+        if (self.well_known_doc) |*wkd| {
+            wkd.deinit(self.allocator);
+            self.well_known_doc = null;
         }
 
         const p = self.contract.?.properties();
@@ -1439,6 +1506,31 @@ pub const Server = struct {
                 };
                 if (self.attestation_headers != null) {
                     std.log.info("   Attestation: response headers enabled", .{});
+                }
+
+                // Slice 2 item B: precompute the /.well-known/zigttp-attest body.
+                // Recovers the public key by verifying the embedded JWS against
+                // itself; the verify acts as a self-check that the binary's
+                // attestation is internally consistent.
+                if (self.config.contract_json) |cj| {
+                    if (attest_envelope.verify(self.allocator, jws)) |*r| {
+                        var verify_result = r.*;
+                        defer verify_result.deinit();
+                        self.well_known_doc = attest_well_known.build(
+                            self.allocator,
+                            cj,
+                            jws,
+                            verify_result.public_key,
+                        ) catch |err| blk: {
+                            std.log.warn("attestation: failed to build well-known doc: {} (continuing without)", .{err});
+                            break :blk null;
+                        };
+                        if (self.well_known_doc != null) {
+                            std.log.info("   Attestation: /.well-known/zigttp-attest enabled", .{});
+                        }
+                    } else |err| {
+                        std.log.warn("attestation: embedded JWS failed self-verify: {} (well-known disabled)", .{err});
+                    }
                 }
             }
         }
@@ -1664,6 +1756,24 @@ pub const Server = struct {
         if (self.config.static_dir) |static_dir| {
             if (std.mem.startsWith(u8, request.url, "/static/")) {
                 try self.serveStaticFile(stream, io, static_dir, request.url[7..], keep_alive, request.headers.items);
+                return keep_alive;
+            }
+        }
+
+        // Well-known proof-receipt endpoint (slice 2 item B). Intercept before
+        // the contract route filter so this fixed path is reachable on every
+        // attested binary.
+        if (self.well_known_doc) |*doc| {
+            if (std.mem.eql(u8, request.path, attest_well_known.route_path)) {
+                const inm = findHeaderValue(request.headers.items, "If-None-Match");
+                const cached = etagMatchesIfNoneMatch(inm, &doc.etag_hex);
+                var header_buf: [512]u8 = undefined;
+                const header_len = try formatWellKnownHeaders(doc, cached, keep_alive, &header_buf);
+                var out_buf: [8192]u8 = undefined;
+                var writer = stream.writer(io, &out_buf);
+                try writer.interface.writeAll(header_buf[0..header_len]);
+                if (!cached) try writer.interface.writeAll(doc.body);
+                try writer.interface.flush();
                 return keep_alive;
             }
         }
