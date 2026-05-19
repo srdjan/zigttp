@@ -82,7 +82,7 @@ This creates `src/handler.ts`, `tests/handler.test.jsonl`, `public/`, `zigttp.js
 zigttp dev
 ```
 
-Edit `src/handler.ts` in your editor; the terminal HUD re-verifies on save and shows the verdict, proven surface, proof deltas, and counterexamples. For the browser workbench, run `zigttp studio`; the dashboard lives at `http://localhost:3000/_zigttp/studio`.
+Edit `src/handler.ts` in your editor; the terminal HUD re-verifies on save and shows the verdict, proven surface, proof deltas, and counterexamples. When `--studio` is on, the HUD prints a `Studio mirror: http://...` footer beneath each frame; modern terminals (iTerm2, WezTerm, Ghostty, VS Code) make it click-to-open. The browser workbench at `http://localhost:3000/_zigttp/studio` opens with that same ASCII frame mirrored at the top, then the rest of the dashboard below.
 
 ### Build a self-contained binary
 

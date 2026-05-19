@@ -59,6 +59,10 @@ pub const LiveReloadState = struct {
     /// duplicate appends when the watcher fires for a no-op save (or when
     /// our own ledger write trips the recursive directory walk).
     last_ledger_sha: ?[std.crypto.hash.sha2.Sha256.digest_length * 2]u8,
+    /// True until the first proof card frame has been rendered. Drives the
+    /// one-shot bold emphasis on the Studio mirror footer so the URL stands
+    /// out the first time the HUD lights up, then settles into neutral.
+    studio_footer_first_render: bool,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -77,6 +81,7 @@ pub const LiveReloadState = struct {
             .previous_stamp = 0,
             .watch_paths = watch_paths,
             .last_ledger_sha = null,
+            .studio_footer_first_render = true,
         };
     }
 
@@ -431,6 +436,7 @@ pub const LiveReloadState = struct {
                 .delta = &delta,
                 .recompile_ms = elapsed_ms,
                 .counterexample = cx_preview,
+                .property_causes = causes_buf[0..n_causes],
             });
             studio.broadcast();
         }
@@ -452,6 +458,16 @@ pub const LiveReloadState = struct {
         try proof_card_tui.writeProofCardFrame(self.allocator, &card, &stderr_writer.interface, .{
             .recompile_ms = recompile_ms,
         });
+        if (self.server.config.studio) {
+            const first = self.studio_footer_first_render;
+            proof_card_tui.writeStudioFooter(&stderr_writer.interface, .{
+                .host = self.server.config.host,
+                .port = self.server.config.port,
+                .first_time = first,
+                .tty = shared.stderrIsTty(),
+            }) catch {};
+            self.studio_footer_first_render = false;
+        }
         stderr_writer.interface.flush() catch {};
     }
 

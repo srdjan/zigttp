@@ -505,15 +505,20 @@ zigttp studio examples/handler/handler.ts
 ```
 
 Studio runs the handler with `--watch --prove` and serves
-`/_zigttp/studio`. The workbench shows release readiness, declared
+`/_zigttp/studio`. The workbench opens with a terminal mirror: the
+same ASCII proof card frame the HUD writes to stderr, rendered
+byte-for-byte in the browser. Below it sit release readiness, declared
 `Spec<...>` status, proven properties, surface deltas, the witness
 corpus, a verdict timeline of recent rebuilds, and next actions that
 link the compiler-backed CLI and `zigts expert` flows. Failing spec
 pills expand inline to the matching ZTS500/501/502 diagnostic with
 source line and snippet; witness rows expand to show the falsifying
 request, expected vs got, and IO stubs without a CLI hop. Generated
-path tests download with a one-click link. In the expert REPL,
-`/studio <handler.ts>` prints the same startup command and URL.
+path tests download with a one-click link. The terminal HUD prints a
+one-line `Studio mirror: http://...` footer beneath each proof card
+frame, wrapped in an OSC 8 hyperlink so modern terminals make it
+click-to-open. In the expert REPL, `/studio <handler.ts>` prints the
+same startup command and URL.
 
 ### zigts CLI (compiler and analyzer)
 

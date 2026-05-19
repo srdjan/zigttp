@@ -45,6 +45,64 @@ const ColumnWidths = struct {
     }
 };
 
+pub const StudioFooterOptions = struct {
+    host: []const u8,
+    port: u16,
+    /// When true, render the footer with an extra emphasis attribute so the
+    /// first render after `zigttp dev` boot stands out, then settles into
+    /// neutral on subsequent renders.
+    first_time: bool = false,
+    /// When true, emit OSC 8 hyperlink escape sequences. Callers pass the
+    /// stderr-is-a-tty result so non-TTY consumers (CI logs, piped output)
+    /// see a plain URL.
+    tty: bool = false,
+};
+
+/// Print the one-line "Studio mirror" footer beneath a proof card frame.
+/// The footer is the polish-release affordance that wires the terminal HUD
+/// and the browser Studio together: same proof card, two skins, one URL.
+/// Renders as plain text (URL only) when `tty=false` so CI logs stay grep-friendly.
+pub fn writeStudioFooter(
+    writer: *std.Io.Writer,
+    opts: StudioFooterOptions,
+) !void {
+    var url_buf: [256]u8 = undefined;
+    const url = try std.fmt.bufPrint(
+        &url_buf,
+        "http://{s}:{d}/_zigttp/studio",
+        .{ opts.host, opts.port },
+    );
+
+    if (!opts.tty) {
+        try writer.print("  Studio mirror: {s}\n", .{url});
+        return;
+    }
+
+    // ANSI control sequences. We compose them explicitly rather than via a
+    // palette helper because the footer mixes hyperlink (OSC 8) and inline
+    // emphasis (SGR) escapes; the existing palette only models SGR.
+    const dim = "\x1b[2m";
+    const bold = "\x1b[1m";
+    const reset = "\x1b[0m";
+    const link_open_prefix = "\x1b]8;;";
+    const st = "\x1b\\";
+    const link_close = "\x1b]8;;\x1b\\";
+
+    const label_open: []const u8 = if (opts.first_time) bold else dim;
+    try writer.print(
+        "  {s}Studio mirror:{s} {s}{s}{s}{s}{s}\n",
+        .{
+            label_open,
+            reset,
+            link_open_prefix,
+            url,
+            st,
+            url,
+            link_close,
+        },
+    );
+}
+
 /// Render a ProofCard as a three-pane TUI frame. Caller flushes the writer.
 pub fn writeProofCardFrame(
     allocator: std.mem.Allocator,
@@ -796,6 +854,42 @@ test "writeProofCardFrame: omits Counterexample block when card has none" {
     defer aw.deinit();
     try renderForTest(allocator, .none, null, &aw);
     try std.testing.expect(std.mem.indexOf(u8, aw.writer.buffered(), "Counterexample:") == null);
+}
+
+test "writeStudioFooter: plain URL on non-TTY" {
+    const allocator = std.testing.allocator;
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeStudioFooter(&aw.writer, .{ .host = "127.0.0.1", .port = 3000, .tty = false });
+    const out = aw.writer.buffered();
+    try std.testing.expectEqualStrings("  Studio mirror: http://127.0.0.1:3000/_zigttp/studio\n", out);
+}
+
+test "writeStudioFooter: TTY emits OSC 8 hyperlink with URL as both target and visible text" {
+    const allocator = std.testing.allocator;
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeStudioFooter(&aw.writer, .{ .host = "localhost", .port = 8787, .tty = true });
+    const out = aw.writer.buffered();
+    // Hyperlink open escape with target URL.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b]8;;http://localhost:8787/_zigttp/studio\x1b\\") != null);
+    // Hyperlink close.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b]8;;\x1b\\") != null);
+    // Same URL appears as the visible link text.
+    try std.testing.expect(std.mem.indexOf(u8, out, "http://localhost:8787/_zigttp/studio") != null);
+}
+
+test "writeStudioFooter: first_time uses bold emphasis instead of dim" {
+    const allocator = std.testing.allocator;
+    var aw_first = std.Io.Writer.Allocating.init(allocator);
+    defer aw_first.deinit();
+    try writeStudioFooter(&aw_first.writer, .{ .host = "127.0.0.1", .port = 3000, .tty = true, .first_time = true });
+    try std.testing.expect(std.mem.indexOf(u8, aw_first.writer.buffered(), "\x1b[1m") != null);
+
+    var aw_neutral = std.Io.Writer.Allocating.init(allocator);
+    defer aw_neutral.deinit();
+    try writeStudioFooter(&aw_neutral.writer, .{ .host = "127.0.0.1", .port = 3000, .tty = true, .first_time = false });
+    try std.testing.expect(std.mem.indexOf(u8, aw_neutral.writer.buffered(), "\x1b[2m") != null);
 }
 
 test "writeProofCardFrame: Counterexample block includes failing request and replay diff when present" {

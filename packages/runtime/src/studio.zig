@@ -3,6 +3,7 @@ const zigts = @import("zigts");
 const zigts_cli = @import("zigts_cli");
 const review = @import("deploy/review.zig");
 const proof_ledger = @import("proof_ledger.zig");
+const proof_card_tui = @import("proof_card_tui.zig");
 const compat = zigts.compat;
 const demo = @import("demo.zig");
 
@@ -28,6 +29,10 @@ pub const FactsUpdate = struct {
     delta: *const review.ReviewDelta,
     recompile_ms: ?u64,
     counterexample: ?review.CounterexamplePreview = null,
+    /// Causes for demoted properties, used to render the "Why:" row in the
+    /// proof card frame. Empty means no demotion attribution to show; the
+    /// frame still renders but skips the Why row, matching terminal behavior.
+    property_causes: []const review.PropertyCauseEntry = &.{},
 };
 
 /// A single ZTS diagnostic carried into studio for browser-side display.
@@ -454,6 +459,37 @@ fn writeDiagnosticsJson(json: *std.json.Stringify, diagnostics: []const Diagnost
     try json.endArray();
 }
 
+/// Render the same ProofCard frame the terminal HUD prints, returning the
+/// rendered ASCII text. Used to populate the studio's "frame" JSON field so
+/// the browser overlay shows the literal terminal output, byte-for-byte.
+/// The renderer is the single source of truth for both surfaces.
+fn renderProofCardFrame(
+    allocator: std.mem.Allocator,
+    handler_path: []const u8,
+    update: FactsUpdate,
+) ![]u8 {
+    const card = review.ProofCard{
+        .handler_path = handler_path,
+        .service_name = "dev",
+        .region = "local",
+        .current = update.facts,
+        .baseline = update.baseline,
+        .delta = update.delta,
+        .property_causes = update.property_causes,
+        .counterexample = update.counterexample,
+    };
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const recompile_ms_u32: ?u32 = if (update.recompile_ms) |ms|
+        @intCast(@min(ms, std.math.maxInt(u32)))
+    else
+        null;
+    try proof_card_tui.writeProofCardFrame(allocator, &card, &aw.writer, .{
+        .recompile_ms = recompile_ms_u32,
+    });
+    return try allocator.dupe(u8, aw.writer.buffered());
+}
+
 fn factsJson(
     allocator: std.mem.Allocator,
     handler_path: []const u8,
@@ -464,6 +500,12 @@ fn factsJson(
     defer if (witnesses) |entries| zigts.witness_corpus.freeEntries(allocator, entries);
     const witness_total: usize = if (witnesses) |entries| entries.len else 0;
     const verdict = review.classify(update.delta);
+
+    // Render the proof card frame once and embed it as a string. Failure here
+    // degrades to an empty frame string rather than aborting the JSON snapshot:
+    // the browser can fall back to its native panes if the mirror is unavailable.
+    const frame_bytes = renderProofCardFrame(allocator, handler_path, update) catch null;
+    defer if (frame_bytes) |b| allocator.free(b);
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -479,6 +521,8 @@ fn factsJson(
         try json.objectField("recompileMs");
         try json.write(ms);
     }
+    try json.objectField("frame");
+    try json.write(if (frame_bytes) |b| b else "");
     try json.objectField("facts");
     try update.facts.writeJson(&json);
     if (update.baseline) |b| {
@@ -861,13 +905,15 @@ pub const index_html =
     \\#diagnosticsList li{padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06)}#diagnosticsList .code{color:var(--bad);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}#diagnosticsList .loc{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;margin-left:8px}#diagnosticsList .msg{margin-top:4px;color:#dceeff}#diagnosticsList .hint{margin-top:4px;color:var(--muted);font-style:italic}
     \\#counterexampleBlock{margin-bottom:22px;padding:12px;border:1px solid #73333a;background:#251217;border-radius:6px}#counterexampleBlock[hidden]{display:none}#counterexampleBody{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#dceeff}#counterexampleBody .row{display:grid;grid-template-columns:92px 1fr;gap:6px 12px;margin-bottom:6px}#counterexampleBody dt{color:var(--muted)}#counterexampleBody dd{margin:0}#counterexampleBody .bad{color:var(--bad)}#counterexampleBody .hint{color:#ffd0d0}
     \\#demoPanel{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;padding:14px 28px;border-bottom:1px solid var(--line);background:#0c1118}#demoPanel[hidden]{display:none}#demoPanel h2{margin:0 0 6px}#demoPanel p{margin:0;color:#cbd7e3}#demoActions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}#demoWitness{grid-column:1/-1;margin-top:2px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:#07090d;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd7e3}
+    \\#terminalMirror{padding:18px 28px 22px;border-bottom:1px solid var(--line);background:#070a0e}#terminalMirror[hidden]{display:none}#terminalMirror header{padding:0 0 10px;border:0;display:flex;justify-content:space-between;align-items:baseline;gap:14px}#terminalMirror h2{font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin:0}#terminalMirror .echo{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}#frameMirror{margin:0;padding:14px 18px;background:#040608;border:1px solid var(--line);border-radius:6px;color:#cfe6ff;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;overflow-x:auto;tab-size:4}
     \\@media(max-width:900px){.grid{grid-template-columns:1fr}.status{text-align:left}header{align-items:start;flex-direction:column}.big{font-size:32px}}
     \\#onboarding{border:1px solid var(--line);background:var(--panel);color:var(--text);padding:24px 28px;max-width:560px;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.55)}#onboarding::backdrop{background:rgba(9,11,15,.78)}#onboarding h2{font-size:12px;margin:0 0 14px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}#onboarding ol{margin:0 0 18px;padding-left:22px;line-height:1.55}#onboarding ol strong{color:var(--text)}#onboarding ol code,#onboarding p code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);background:#07090d;border:1px solid var(--line);border-radius:4px;padding:1px 5px}#onboarding .hint{color:var(--muted);font-size:13px;margin:0 0 16px}#onboarding .actions{display:flex;justify-content:flex-end;gap:8px}
     \\</style>
     \\</head>
     \\<body><main>
     \\<dialog id="onboarding"><h2>welcome to studio</h2><ol><li><strong>Proven Surface</strong> lists the routes, env vars, and egress hosts the compiler extracted from your handler.</li><li><strong>Property pills</strong> are the proofs the compiler discharged. Watch them flip when you save.</li><li><strong>Witnesses</strong> capture the request that would break a proof. Click one to see the failing path.</li><li>Press <code>.</code> to reopen this overlay any time.</li></ol><p class="hint">Edit your handler. Watch the proof flip live.</p><div class="actions"><button id="onboardingDismiss">Got it</button></div></dialog>
-    \\<header><div><h1>zigttp studio</h1><div class="sub">The compiler-visible shape of your handler, live.</div></div><div class="status" id="status">connecting</div></header>
+    \\<header><div><h1>zigttp studio</h1><div class="sub">Your terminal HUD, hyperlinked. Same proof card, two surfaces.</div></div><div class="status" id="status">connecting</div></header>
+    \\<section id="terminalMirror" hidden><header><h2>Live HUD - terminal mirror</h2><span class="echo">same frame as <code>zigttp dev</code></span></header><pre id="frameMirror" aria-label="Proof card frame mirrored from the terminal HUD"></pre></section>
     \\<section id="demoPanel" hidden><div><h2>Proof Theater</h2><p id="demoTitle"></p><p class="empty" id="demoWorkspace"></p></div><div id="demoActions"></div><div id="demoWitness" hidden></div></section>
     \\<section class="grid"><div class="pane"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><section id="counterexampleBlock" hidden><h2 style="color:var(--bad)">Counterexample</h2><div id="counterexampleBody"></div></section><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
     \\<footer><select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select><input id="url" value="/" aria-label="URL"><button id="send">Send</button></footer>
@@ -902,7 +948,8 @@ pub const index_html =
     \\async function pullDemo(){try{const r=await fetch("/_zigttp/studio/demo/state.json",{cache:"no-store"});if(r.status===404){$("demoPanel").hidden=true;return}if(r.ok)renderDemo(await r.json())}catch(e){}}
     \\async function runDemoAction(action){const r=await fetch("/_zigttp/studio/demo/action",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action})});if(!r.ok){$("demoWitness").hidden=false;$("demoWitness").textContent=`action failed: HTTP ${r.status} ${await r.text()}`;return}await pull();await pullDemo()}
     \\document.addEventListener("click",ev=>{const b=ev.target.closest("[data-demo-action]");if(b)runDemoAction(b.dataset.demoAction)})
-    \\function render(s){$("status").textContent=`${s.status} · ${s.handlerPath||""}`;renderDiagnostics(s);if(s.status!=="ready"){renderCounterexample(null);$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}renderCounterexample(s.counterexample);const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions)}
+    \\function renderFrameMirror(s){const sec=$("terminalMirror");const pre=$("frameMirror");if(!sec||!pre)return;const txt=s&&typeof s.frame==="string"?s.frame:"";if(!txt){sec.hidden=true;pre.textContent="";return}sec.hidden=false;pre.textContent=txt}
+    \\function render(s){$("status").textContent=`${s.status} · ${s.handlerPath||""}`;renderDiagnostics(s);renderFrameMirror(s);if(s.status!=="ready"){renderCounterexample(null);$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}renderCounterexample(s.counterexample);const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions)}
     \\async function pull(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});render(await r.json())}catch(e){$("status").textContent=String(e)}}
     \\let pollTimer=null;function startPolling(){if(!pollTimer)pollTimer=setInterval(pull,750)}function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
     \\function startEvents(){let es;try{es=new EventSource("/_zigttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{render(JSON.parse(ev.data))}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
@@ -1108,6 +1155,53 @@ test "studio HTML renders counterexample payload" {
     try std.testing.expect(std.mem.indexOf(u8, index_html, "counterexampleBlock") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "renderCounterexample") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "s.counterexample") != null);
+}
+
+test "studio HTML wires the terminal-mirror frame" {
+    // The browser surface renders the same proof card the terminal HUD prints.
+    // These markers anchor the unification: a hidden-by-default section, a
+    // <pre> sink keyed off the JSON `frame` field, and a JS renderer that only
+    // unhides the section when a frame string is present.
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"terminalMirror\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"frameMirror\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "function renderFrameMirror") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "renderFrameMirror(s)") != null);
+    // The header copy makes the relationship explicit so the user reads the
+    // two surfaces as one product, not two parallel UIs.
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "terminal mirror") != null);
+}
+
+test "factsJson embeds the rendered proof card frame" {
+    const allocator = std.testing.allocator;
+    const facts = review.ReviewFacts{
+        .contract_sha = "deadbeef00000000",
+        .proof_level = .complete,
+        .env_keys = &.{},
+        .egress_hosts = &.{},
+        .cache_namespaces = &.{},
+        .routes = &.{},
+        .capabilities = &.{},
+        .properties = .{ .read_only = true, .deterministic = true },
+        .declared_specs = &.{},
+    };
+    const delta = review.ReviewDelta{};
+    const body = try factsJson(allocator, "src/handler.ts", .{
+        .facts = &facts,
+        .baseline = null,
+        .delta = &delta,
+        .recompile_ms = 7,
+    }, &.{});
+    defer allocator.free(body);
+
+    // The frame field is present and non-empty.
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"frame\":\"") != null);
+    // The terminal frame's column headers serialize through (JSON escapes
+    // newlines and pipes as plain characters).
+    try std.testing.expect(std.mem.indexOf(u8, body, "Properties") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "Surface") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "Requests") != null);
+    // Verdict line from writeStatusBar lands in the embedded frame.
+    try std.testing.expect(std.mem.indexOf(u8, body, "Verdict: safe") != null);
 }
 
 test "pushRecent keeps newest first and caps at recent_capacity" {
