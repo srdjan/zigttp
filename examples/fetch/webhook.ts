@@ -19,7 +19,7 @@
 
 import { fetch } from "zigttp:fetch";
 
-export function handler(req) {
+export function handler(req: Request): Response {
   if (req.path !== "/charge") {
     return Response.text("not found", { status: 404 });
   }

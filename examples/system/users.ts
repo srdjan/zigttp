@@ -10,7 +10,7 @@ type Guardrails = Spec<
     | "no_secret_leakage"
 >;
 
-function getUserById(req) {
+function getUserById(req: Request): Response {
   const id = req.params.id;
   // Check cache first
   const cached = cacheGet("users", id);
@@ -36,7 +36,7 @@ function getUserById(req) {
   return Response.json({ user: user });
 }
 
-function listUsers(req) {
+function listUsers(req: Request): Response {
   return Response.json({ users: [] });
 }
 

@@ -1,0 +1,765 @@
+//! Default strict ZigTS profile.
+//!
+//! This pass enforces the smaller "expert" subset that keeps handler code
+//! explicit enough for proof-driven tooling. It runs after parsing and the
+//! normal type/sound passes, and before handler verification/contract work.
+
+const std = @import("std");
+const ir = @import("parser/ir.zig");
+const object = @import("object.zig");
+const context = @import("context.zig");
+const type_env_mod = @import("type_env.zig");
+const type_checker_mod = @import("type_checker.zig");
+const type_pool_mod = @import("type_pool.zig");
+const bool_checker = @import("bool_checker.zig");
+
+const NodeIndex = ir.NodeIndex;
+const NodeTag = ir.NodeTag;
+const IrView = ir.IrView;
+const null_node = ir.null_node;
+const TypeEnv = type_env_mod.TypeEnv;
+const TypeChecker = type_checker_mod.TypeChecker;
+const null_type_idx = type_pool_mod.null_type_idx;
+
+pub const Severity = enum {
+    err,
+    warning,
+
+    pub fn label(self: Severity) []const u8 {
+        return switch (self) {
+            .err => "error",
+            .warning => "warning",
+        };
+    }
+};
+
+pub const DiagnosticKind = enum {
+    implicit_unknown,
+    missing_public_annotation,
+    dynamic_capability_access,
+    non_exhaustive_profile_match,
+    avoidable_let,
+    computed_property_access,
+};
+
+pub const Diagnostic = struct {
+    severity: Severity,
+    kind: DiagnosticKind,
+    node: NodeIndex,
+    message: []const u8,
+    help: ?[]const u8,
+};
+
+const ImportedFunction = struct {
+    slot: u16,
+    module: []const u8,
+    name: []const u8,
+};
+
+pub const StrictChecker = struct {
+    allocator: std.mem.Allocator,
+    ir_view: IrView,
+    atoms: ?*context.AtomTable,
+    type_env: ?*const TypeEnv,
+    type_checker: ?*const TypeChecker,
+    diagnostics: std.ArrayList(Diagnostic),
+    assigned_bindings: std.AutoHashMapUnmanaged(u32, void),
+    annotated_function_bindings: std.AutoHashMapUnmanaged(u32, void),
+    static_literal_bindings: std.AutoHashMapUnmanaged(u32, void),
+    imported_functions: std.ArrayList(ImportedFunction),
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        atoms: ?*context.AtomTable,
+        type_env: ?*const TypeEnv,
+        type_checker: ?*const TypeChecker,
+    ) StrictChecker {
+        return .{
+            .allocator = allocator,
+            .ir_view = ir_view,
+            .atoms = atoms,
+            .type_env = type_env,
+            .type_checker = type_checker,
+            .diagnostics = .empty,
+            .assigned_bindings = .empty,
+            .annotated_function_bindings = .empty,
+            .static_literal_bindings = .empty,
+            .imported_functions = .empty,
+        };
+    }
+
+    pub fn deinit(self: *StrictChecker) void {
+        self.imported_functions.deinit(self.allocator);
+        self.static_literal_bindings.deinit(self.allocator);
+        self.annotated_function_bindings.deinit(self.allocator);
+        self.assigned_bindings.deinit(self.allocator);
+        self.diagnostics.deinit(self.allocator);
+    }
+
+    pub fn check(self: *StrictChecker, root: NodeIndex) !u32 {
+        self.scanImports();
+        self.collectAnnotatedFunctions(root);
+        self.collectStaticLiterals(root);
+        self.collectAssignments(root);
+        self.walkStmt(root);
+
+        var error_count: u32 = 0;
+        for (self.diagnostics.items) |diag| {
+            if (diag.severity == .err) error_count += 1;
+        }
+        return error_count;
+    }
+
+    pub fn getDiagnostics(self: *const StrictChecker) []const Diagnostic {
+        return self.diagnostics.items;
+    }
+
+    pub fn formatDiagnostics(self: *const StrictChecker, source: []const u8, writer: anytype) !void {
+        for (self.diagnostics.items) |diag| {
+            const loc = self.ir_view.getLoc(diag.node) orelse continue;
+            try writer.print("strict {s}: {s}\n", .{ diag.severity.label(), diag.message });
+            try writer.print("  --> {d}:{d}\n", .{ loc.line, loc.column });
+            if (getSourceLine(source, loc.line)) |line| {
+                try writer.print("   |\n", .{});
+                try writer.print("{d: >3} | {s}\n", .{ loc.line, line });
+                try writer.print("   | ", .{});
+                var col: u16 = 1;
+                while (col < loc.column) : (col += 1) try writer.writeByte(' ');
+                try writer.writeAll("^\n");
+            }
+            if (diag.help) |help| try writer.print("   = help: {s}\n", .{help});
+            try writer.writeByte('\n');
+        }
+    }
+
+    fn addDiagnostic(self: *StrictChecker, diag: Diagnostic) void {
+        self.diagnostics.append(self.allocator, diag) catch {};
+    }
+
+    fn walkStmt(self: *StrictChecker, node: NodeIndex) void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                for (0..block.stmts_count) |i| {
+                    self.walkStmt(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
+                }
+            },
+            .export_decl => {
+                const export_decl = self.ir_view.getExportDecl(node) orelse return;
+                if (export_decl.declaration != null_node) {
+                    self.checkExportedDeclaration(export_decl.declaration);
+                    self.walkStmt(export_decl.declaration);
+                }
+            },
+            .function_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                self.checkFunctionAnnotation(decl.init);
+                if (self.ir_view.getFunction(decl.init)) |func| {
+                    self.walkStmt(func.body);
+                }
+            },
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                if (decl.kind == .let and !self.assigned_bindings.contains(bindingKey(decl.binding))) {
+                    self.addDiagnostic(.{
+                        .severity = .err,
+                        .kind = .avoidable_let,
+                        .node = node,
+                        .message = "let binding is never reassigned",
+                        .help = "use const for bindings that do not change",
+                    });
+                }
+                if (decl.init != null_node) {
+                    if (self.isHandlerBinding(decl.binding) and self.isFunctionNode(decl.init)) {
+                        self.checkFunctionAnnotation(decl.init);
+                    }
+                    self.walkExpr(decl.init);
+                }
+            },
+            .if_stmt => {
+                const if_stmt = self.ir_view.getIfStmt(node) orelse return;
+                self.walkExpr(if_stmt.condition);
+                self.walkStmt(if_stmt.then_branch);
+                self.walkStmt(if_stmt.else_branch);
+            },
+            .for_of_stmt => {
+                const for_iter = self.ir_view.getForIter(node) orelse return;
+                if (!for_iter.is_const) {
+                    self.addDiagnostic(.{
+                        .severity = .err,
+                        .kind = .avoidable_let,
+                        .node = node,
+                        .message = "for-of binding uses let",
+                        .help = "use `for (const item of items)` unless the loop binding itself is reassigned",
+                    });
+                }
+                self.walkExpr(for_iter.iterable);
+                self.walkStmt(for_iter.body);
+            },
+            .return_stmt, .expr_stmt => {
+                if (self.ir_view.getOptValue(node)) |value| self.walkExpr(value);
+            },
+            else => self.walkExpr(node),
+        }
+    }
+
+    fn walkExpr(self: *StrictChecker, node: NodeIndex) void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+
+        switch (tag) {
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return;
+                self.walkExpr(bin.left);
+                self.walkExpr(bin.right);
+            },
+            .unary_op, .spread => {
+                const un = self.ir_view.getUnary(node) orelse return;
+                self.walkExpr(un.operand);
+            },
+            .ternary => {
+                const ternary = self.ir_view.getTernary(node) orelse return;
+                self.walkExpr(ternary.condition);
+                self.walkExpr(ternary.then_branch);
+                self.walkExpr(ternary.else_branch);
+            },
+            .call, .method_call => {
+                self.checkCall(node);
+                const call = self.ir_view.getCall(node) orelse return;
+                self.walkExpr(call.callee);
+                for (0..call.args_count) |i| {
+                    self.walkExpr(self.ir_view.getListIndex(call.args_start, @intCast(i)));
+                }
+            },
+            .member_access, .optional_chain => {
+                const member = self.ir_view.getMember(node) orelse return;
+                self.walkExpr(member.object);
+            },
+            .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return;
+                self.walkExpr(member.object);
+                if (member.computed != null_node) {
+                    self.walkExpr(member.computed);
+                    if (!self.isStaticComputedKey(member.computed)) {
+                        self.addDiagnostic(.{
+                            .severity = .err,
+                            .kind = .computed_property_access,
+                            .node = node,
+                            .message = "dynamic computed property access is not part of strict ZigTS",
+                            .help = "use a typed field, a literal key, or validate/narrow the object before indexing",
+                        });
+                    }
+                }
+            },
+            .assignment => {
+                const assign = self.ir_view.getAssignment(node) orelse return;
+                self.walkExpr(assign.target);
+                self.walkExpr(assign.value);
+            },
+            .array_literal => {
+                const arr = self.ir_view.getArray(node) orelse return;
+                for (0..arr.elements_count) |i| {
+                    self.walkExpr(self.ir_view.getListIndex(arr.elements_start, @intCast(i)));
+                }
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(node) orelse return;
+                for (0..obj.properties_count) |i| {
+                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+                    const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                    if (prop.is_computed and !self.isStaticComputedKey(prop.key)) {
+                        self.addDiagnostic(.{
+                            .severity = .err,
+                            .kind = .computed_property_access,
+                            .node = prop_idx,
+                            .message = "dynamic computed object keys are not part of strict ZigTS",
+                            .help = "use a literal field name so object shape stays compiler-visible",
+                        });
+                    }
+                    self.walkExpr(prop.value);
+                }
+            },
+            .template_literal => {
+                const tmpl = self.ir_view.getTemplate(node) orelse return;
+                for (0..tmpl.parts_count) |i| {
+                    const part = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
+                    if (self.ir_view.getOptValue(part)) |value| self.walkExpr(value);
+                }
+            },
+            .match_expr => {
+                const match = self.ir_view.getMatchExpr(node) orelse return;
+                self.walkExpr(match.discriminant);
+                if (!self.matchHasDefault(match)) {
+                    self.addDiagnostic(.{
+                        .severity = .err,
+                        .kind = .non_exhaustive_profile_match,
+                        .node = node,
+                        .message = "match expression must be exhaustive in strict ZigTS",
+                        .help = "cover every finite union member or add an explicit default when the type is not finite",
+                    });
+                }
+                for (0..match.arms_count) |i| {
+                    const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
+                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+                    self.walkExpr(arm.body);
+                }
+            },
+            .function_expr, .arrow_function => {
+                self.checkFunctionAnnotation(node);
+                if (self.ir_view.getFunction(node)) |func| self.walkStmt(func.body);
+            },
+            .jsx_element => {
+                const jsx = self.ir_view.getJsxElement(node) orelse return;
+                for (0..jsx.props_count) |i| {
+                    const attr_idx = self.ir_view.getListIndex(jsx.props_start, @intCast(i));
+                    if (self.ir_view.getJsxAttr(attr_idx)) |attr| self.walkExpr(attr.value);
+                }
+                for (0..jsx.children_count) |i| {
+                    self.walkExpr(self.ir_view.getListIndex(jsx.children_start, @intCast(i)));
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn checkExportedDeclaration(self: *StrictChecker, node: NodeIndex) void {
+        const tag = self.ir_view.getTag(node) orelse return;
+        if (tag == .function_decl) {
+            const decl = self.ir_view.getVarDecl(node) orelse return;
+            self.checkFunctionAnnotation(decl.init);
+        } else if (tag == .var_decl) {
+            const decl = self.ir_view.getVarDecl(node) orelse return;
+            if (decl.init != null_node and self.isFunctionNode(decl.init)) {
+                self.checkFunctionAnnotation(decl.init);
+            }
+        }
+    }
+
+    fn checkFunctionAnnotation(self: *StrictChecker, node: NodeIndex) void {
+        const func = self.ir_view.getFunction(node) orelse return;
+        if (!self.functionNeedsAnnotation(node, func)) return;
+
+        const loc = self.ir_view.getLoc(node) orelse return;
+        const sig = if (self.type_env) |env| env.getFnSigByLoc(loc.line) else null;
+        const ok = if (sig) |s|
+            s.return_type != null_type_idx and s.param_count >= func.params_count
+        else
+            false;
+        if (!ok) {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .missing_public_annotation,
+                .node = node,
+                .message = "strict ZigTS requires explicit function parameter and return types",
+                .help = "annotate each parameter and the return type, for example `function handler(req: Request): Response`",
+            });
+        }
+    }
+
+    fn functionNeedsAnnotation(self: *StrictChecker, node: NodeIndex, func: ir.Node.FunctionExpr) bool {
+        if (func.name_atom != 0) return true;
+
+        // Anonymous callbacks passed to proof-relevant helpers must also be
+        // annotated. v1 detects those at the call site via implicit_unknown.
+        const loc = self.ir_view.getLoc(node) orelse return false;
+        _ = loc;
+        return false;
+    }
+
+    fn checkCall(self: *StrictChecker, node: NodeIndex) void {
+        const call = self.ir_view.getCall(node) orelse return;
+        if (self.importedFunctionForCallee(call.callee)) |imported| {
+            if (literalRequiredArg(imported.module, imported.name)) |arg_pos| {
+                if (arg_pos < call.args_count) {
+                    const arg = self.ir_view.getListIndex(call.args_start, @intCast(arg_pos));
+                    if (!self.isLiteralOrStaticTemplate(arg)) {
+                        self.addDiagnostic(.{
+                            .severity = .err,
+                            .kind = .dynamic_capability_access,
+                            .node = arg,
+                            .message = "capability access must use a compiler-visible literal",
+                            .help = "use a literal env key, cache namespace, SQL query name, egress URL, route path, or service name",
+                        });
+                    }
+                }
+            }
+        }
+
+        if (self.type_checker) |tc| {
+            const inferred = tc.inferType(node);
+            if (inferred == null_type_idx or inferred == tc.env.pool.idx_unknown) {
+                if (self.isUserFunctionOrUnknownCall(call.callee)) {
+                    self.addDiagnostic(.{
+                        .severity = .err,
+                        .kind = .implicit_unknown,
+                        .node = node,
+                        .message = "call result has implicit unknown type",
+                        .help = "add a return type annotation, use a modeled virtual module, or narrow with a type guard/assert",
+                    });
+                }
+            }
+        }
+    }
+
+    fn isUserFunctionOrUnknownCall(self: *StrictChecker, callee: NodeIndex) bool {
+        const tag = self.ir_view.getTag(callee) orelse return false;
+        if (tag != .identifier) return false;
+        const binding = self.ir_view.getBinding(callee) orelse return false;
+        if (self.annotated_function_bindings.contains(bindingKey(binding))) return false;
+        if (self.importedFunctionForSlot(binding.slot) != null) return false;
+        const name = self.resolveAtomName(binding.slot) orelse return false;
+        if (isKnownGlobalFunction(name)) {
+            return false;
+        }
+        return true;
+    }
+
+    fn scanImports(self: *StrictChecker) void {
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx| {
+            const node: NodeIndex = @intCast(idx);
+            if (self.ir_view.getTag(node) != .import_decl) continue;
+            const import_decl = self.ir_view.getImportDecl(node) orelse continue;
+            const module = self.ir_view.getString(import_decl.module_idx) orelse continue;
+            for (0..import_decl.specifiers_count) |i| {
+                const spec_idx = self.ir_view.getListIndex(import_decl.specifiers_start, @intCast(i));
+                const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
+                const name = self.resolveAtomName(spec.imported_atom) orelse continue;
+                self.imported_functions.append(self.allocator, .{
+                    .slot = spec.local_binding.slot,
+                    .module = module,
+                    .name = name,
+                }) catch {};
+            }
+        }
+    }
+
+    fn collectAnnotatedFunctions(self: *StrictChecker, node: NodeIndex) void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                for (0..block.stmts_count) |i| {
+                    self.collectAnnotatedFunctions(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
+                }
+            },
+            .export_decl => {
+                const export_decl = self.ir_view.getExportDecl(node) orelse return;
+                self.collectAnnotatedFunctions(export_decl.declaration);
+            },
+            .function_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                if (self.functionHasAnnotation(decl.init)) {
+                    self.annotated_function_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch {};
+                }
+                if (self.ir_view.getFunction(decl.init)) |func| {
+                    self.collectAnnotatedFunctions(func.body);
+                }
+            },
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                if (decl.init != null_node and self.isFunctionNode(decl.init) and self.functionHasAnnotation(decl.init)) {
+                    self.annotated_function_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch {};
+                }
+                self.collectAnnotatedFunctions(decl.init);
+            },
+            .function_expr, .arrow_function => {
+                if (self.ir_view.getFunction(node)) |func| self.collectAnnotatedFunctions(func.body);
+            },
+            .if_stmt => {
+                const if_stmt = self.ir_view.getIfStmt(node) orelse return;
+                self.collectAnnotatedFunctions(if_stmt.then_branch);
+                self.collectAnnotatedFunctions(if_stmt.else_branch);
+            },
+            .for_of_stmt => {
+                const for_iter = self.ir_view.getForIter(node) orelse return;
+                self.collectAnnotatedFunctions(for_iter.body);
+            },
+            else => {},
+        }
+    }
+
+    fn functionHasAnnotation(self: *const StrictChecker, node: NodeIndex) bool {
+        const func = self.ir_view.getFunction(node) orelse return false;
+        const loc = self.ir_view.getLoc(node) orelse return false;
+        const sig = if (self.type_env) |env| env.getFnSigByLoc(loc.line) else null;
+        return if (sig) |s|
+            s.return_type != null_type_idx and s.param_count >= func.params_count
+        else
+            false;
+    }
+
+    fn collectAssignments(self: *StrictChecker, node: NodeIndex) void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                for (0..block.stmts_count) |i| {
+                    self.collectAssignments(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
+                }
+            },
+            .assignment => {
+                const assign = self.ir_view.getAssignment(node) orelse return;
+                if (self.ir_view.getTag(assign.target) == .identifier) {
+                    if (self.ir_view.getBinding(assign.target)) |binding| {
+                        self.assigned_bindings.put(self.allocator, bindingKey(binding), {}) catch {};
+                    }
+                }
+                self.collectAssignments(assign.value);
+            },
+            .function_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                self.collectAssignments(decl.init);
+            },
+            .function_expr, .arrow_function => {
+                if (self.ir_view.getFunction(node)) |func| self.collectAssignments(func.body);
+            },
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                self.collectAssignments(decl.init);
+            },
+            .if_stmt => {
+                const if_stmt = self.ir_view.getIfStmt(node) orelse return;
+                self.collectAssignments(if_stmt.condition);
+                self.collectAssignments(if_stmt.then_branch);
+                self.collectAssignments(if_stmt.else_branch);
+            },
+            .for_of_stmt => {
+                const for_iter = self.ir_view.getForIter(node) orelse return;
+                self.collectAssignments(for_iter.iterable);
+                self.collectAssignments(for_iter.body);
+            },
+            .return_stmt, .expr_stmt => {
+                if (self.ir_view.getOptValue(node)) |value| self.collectAssignments(value);
+            },
+            else => self.collectExprAssignments(node),
+        }
+    }
+
+    fn collectStaticLiterals(self: *StrictChecker, node: NodeIndex) void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                for (0..block.stmts_count) |i| {
+                    self.collectStaticLiterals(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
+                }
+            },
+            .export_decl => {
+                const export_decl = self.ir_view.getExportDecl(node) orelse return;
+                self.collectStaticLiterals(export_decl.declaration);
+            },
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                if (decl.kind == .@"const" and self.isLiteralOrStaticTemplate(decl.init)) {
+                    self.static_literal_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch {};
+                }
+                self.collectStaticLiterals(decl.init);
+            },
+            .function_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                self.collectStaticLiterals(decl.init);
+            },
+            .function_expr, .arrow_function => {
+                if (self.ir_view.getFunction(node)) |func| self.collectStaticLiterals(func.body);
+            },
+            .if_stmt => {
+                const if_stmt = self.ir_view.getIfStmt(node) orelse return;
+                self.collectStaticLiterals(if_stmt.then_branch);
+                self.collectStaticLiterals(if_stmt.else_branch);
+            },
+            .for_of_stmt => {
+                const for_iter = self.ir_view.getForIter(node) orelse return;
+                self.collectStaticLiterals(for_iter.body);
+            },
+            else => {},
+        }
+    }
+
+    fn collectExprAssignments(self: *StrictChecker, node: NodeIndex) void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return;
+                self.collectAssignments(bin.left);
+                self.collectAssignments(bin.right);
+            },
+            .unary_op, .spread => {
+                const un = self.ir_view.getUnary(node) orelse return;
+                self.collectAssignments(un.operand);
+            },
+            .call, .method_call => {
+                const call = self.ir_view.getCall(node) orelse return;
+                self.collectAssignments(call.callee);
+                for (0..call.args_count) |i| {
+                    self.collectAssignments(self.ir_view.getListIndex(call.args_start, @intCast(i)));
+                }
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return;
+                self.collectAssignments(member.object);
+                self.collectAssignments(member.computed);
+            },
+            else => {},
+        }
+    }
+
+    fn importedFunctionForCallee(self: *const StrictChecker, callee: NodeIndex) ?ImportedFunction {
+        if (self.ir_view.getTag(callee) != .identifier) return null;
+        const binding = self.ir_view.getBinding(callee) orelse return null;
+        return self.importedFunctionForSlot(binding.slot);
+    }
+
+    fn importedFunctionForSlot(self: *const StrictChecker, slot: u16) ?ImportedFunction {
+        for (self.imported_functions.items) |func| {
+            if (func.slot == slot) return func;
+        }
+        return null;
+    }
+
+    fn isHandlerBinding(self: *const StrictChecker, binding: ir.BindingRef) bool {
+        const name = self.resolveAtomName(binding.slot) orelse return false;
+        return std.mem.eql(u8, name, "handler");
+    }
+
+    fn isFunctionNode(self: *const StrictChecker, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        return tag == .function_decl or tag == .function_expr or tag == .arrow_function;
+    }
+
+    fn matchHasDefault(self: *const StrictChecker, match: ir.Node.MatchExpr) bool {
+        for (0..match.arms_count) |i| {
+            const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
+            const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+            if (arm.pattern == null_node) return true;
+        }
+        return false;
+    }
+
+    fn isStaticComputedKey(self: *const StrictChecker, node: NodeIndex) bool {
+        return switch (self.ir_view.getTag(node) orelse return false) {
+            .lit_string, .lit_int => true,
+            .identifier => blk: {
+                const binding = self.ir_view.getBinding(node) orelse break :blk false;
+                break :blk self.static_literal_bindings.contains(bindingKey(binding));
+            },
+            else => false,
+        };
+    }
+
+    fn isLiteralOrStaticTemplate(self: *const StrictChecker, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        if (tag == .lit_string) return true;
+        if (tag == .lit_int) return true;
+        if (tag == .identifier) {
+            const binding = self.ir_view.getBinding(node) orelse return false;
+            return self.static_literal_bindings.contains(bindingKey(binding));
+        }
+        if (tag != .template_literal) return false;
+        const tmpl = self.ir_view.getTemplate(node) orelse return false;
+        for (0..tmpl.parts_count) |i| {
+            const part = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
+            if (self.ir_view.getTag(part) == .template_part_expr) return false;
+        }
+        return true;
+    }
+
+    fn resolveAtomName(self: *const StrictChecker, atom_value: u32) ?[]const u8 {
+        const atom: object.Atom = @enumFromInt(atom_value);
+        if (atom.isPredefined()) return atom.toPredefinedName();
+        if (self.atoms) |table| return table.getName(atom);
+        return null;
+    }
+};
+
+fn literalRequiredArg(module: []const u8, name: []const u8) ?u8 {
+    if (std.mem.eql(u8, module, "zigttp:env") and std.mem.eql(u8, name, "env")) return 0;
+    if (std.mem.eql(u8, module, "zigttp:fetch") and std.mem.eql(u8, name, "fetchSync")) return 0;
+    if (std.mem.eql(u8, module, "zigttp:service") and std.mem.eql(u8, name, "serviceCall")) return 0;
+    if (std.mem.eql(u8, module, "zigttp:sql")) return 0;
+    if (std.mem.eql(u8, module, "zigttp:cache")) return 0;
+    return null;
+}
+
+fn isKnownGlobalFunction(name: []const u8) bool {
+    const names = [_][]const u8{
+        "Array",
+        "Boolean",
+        "Date",
+        "Headers",
+        "JSON",
+        "Math",
+        "Number",
+        "Object",
+        "Request",
+        "Response",
+        "String",
+        "assert",
+        "h",
+        "parallel",
+        "parseFloat",
+        "parseInt",
+        "race",
+        "range",
+        "renderToString",
+    };
+    for (names) |candidate| {
+        if (std.mem.eql(u8, name, candidate)) return true;
+    }
+    return false;
+}
+
+fn bindingKey(binding: ir.BindingRef) u32 {
+    return bool_checker.packBindingKey(binding.scope_id, binding.slot);
+}
+
+fn getSourceLine(source: []const u8, line_num: u32) ?[]const u8 {
+    if (line_num == 0) return null;
+    var current_line: u32 = 1;
+    var start: usize = 0;
+    for (source, 0..) |c, i| {
+        if (c == '\n') {
+            if (current_line == line_num) return source[start..i];
+            current_line += 1;
+            start = i + 1;
+        }
+    }
+    if (current_line == line_num) return source[start..];
+    return null;
+}
+
+const testing = std.testing;
+
+test "strict checker flags avoidable let" {
+    const source = "function handler(req) { let x = 1; return Response.json({x}); }";
+    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var checker = StrictChecker.init(testing.allocator, view, null, null, null);
+    defer checker.deinit();
+    const errors = try checker.check(root);
+    try testing.expect(errors > 0);
+}
+
+test "strict checker accepts reassigned let" {
+    const source = "function handler(req) { let x = 1; x = 2; return Response.json({x}); }";
+    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var checker = StrictChecker.init(testing.allocator, view, null, null, null);
+    defer checker.deinit();
+    _ = try checker.check(root);
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .avoidable_let);
+    }
+}

@@ -1,1 +1,1 @@
-{"ok":true,"policy_version":"2026.04.2","policy_hash":"81052472e6ea8214003609760cfecd7dc9e1cebaf4c77051bd513ddd074b1797","checked_files":["packages/tools/tests/fixtures/expert/clean_handler.ts"],"violations":[]}
+{"ok":true,"policy_version":"2026.04.2","policy_hash":"646ff2e41eda8b7f7357514973278f2302554429b7f5be2953ca2de2dc0a1a77","checked_files":["packages/tools/tests/fixtures/expert/clean_handler.ts"],"violations":[]}

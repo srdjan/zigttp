@@ -17,7 +17,7 @@ schemaCompile("profile.query", JSON.stringify({
     },
 }));
 
-function updateProfile(req) {
+function updateProfile(req: Request): Response {
     const parsed = decodeJson("profile.update", req.body ?? "{}");
     const body = parsed.ok ? parsed.value : { displayName: "anonymous" };
     const query = decodeQuery("profile.query", req.query ?? {});
@@ -36,7 +36,7 @@ const routes = {
     "POST /profiles/:id": updateProfile,
 };
 
-function handler(req) {
+function handler(req: Request): Response {
     const found = routerMatch(routes, req);
     if (found !== undefined) {
         req.params = found.params;

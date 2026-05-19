@@ -3,7 +3,7 @@ import { cacheGet, cacheSet } from "zigttp:cache";
 import { routerMatch } from "zigttp:router";
 import { serviceCall } from "zigttp:service";
 
-function getUserById(req) {
+function getUserById(req: Request): Response {
   const id = req.params.id;
   // Check cache first
   const cached = cacheGet("users", id);
@@ -29,7 +29,7 @@ function getUserById(req) {
   return Response.json({ user: user });
 }
 
-function listUsers(req) {
+function listUsers(req: Request): Response {
   return Response.json({ users: [] });
 }
 
@@ -38,7 +38,7 @@ const routes = {
   "GET /api/users": listUsers,
 };
 
-function handler(req) {
+function handler(req: Request): Response {
   const found = routerMatch(routes, req);
   if (found !== undefined) {
     req.params = found.params;

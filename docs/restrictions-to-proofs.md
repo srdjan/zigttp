@@ -36,6 +36,11 @@ earned each `[+]` chip.
 | `enum` | dual numeric/string lookup and non-exhaustive cases | exhaustive match coverage on discriminated unions | use object literals or discriminated unions |
 | `decorator (@)` | implicit metaprogramming and target rewriting | static call-graph and visible effect composition | use function composition |
 | `namespace` | module-graph blind spots | AST-driven contract extraction | use ES6 modules |
+| implicit unknown call result | untyped helper boundaries | typed call graph for expert repair | annotate local helpers or use modeled virtual modules |
+| missing named-function annotations | inferred public contracts | stable handler and helper signatures | add parameter and return types |
+| dynamic capability key | hidden env/cache/sql/egress authority | literal capability manifests | use string literals or const literal aliases |
+| avoidable `let` | needless mutable slots | simpler state-isolation proof | use `const` unless reassigned |
+| dynamic computed property access | shape-erasing indexed reads | shape-stable property access | use fields, literal keys, or const literal aliases |
 
 ## Why
 
@@ -62,3 +67,8 @@ making?" in one sentence.
 - **`enum`** - TS enums emit dual numeric/string lookups that bypass exhaustive match checking.
 - **`decorator (@)`** - decorators rewrite their target at runtime in ways the contract extractor cannot trace.
 - **`namespace`** - TS namespaces compile to closures with mutable internals invisible to the module graph.
+- **implicit unknown call result** - unknown return types hide control-flow and data-flow facts from the checker.
+- **missing named-function annotations** - public helper boundaries need stable signatures for repeatable repair.
+- **dynamic capability key** - non-literal authority cannot be represented in a precise deployment contract.
+- **avoidable `let`** - unnecessary mutable slots widen the state the verifier must track.
+- **dynamic computed property access** - arbitrary indexes erase object shape and defeat field-level narrowing.

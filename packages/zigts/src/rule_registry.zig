@@ -1,13 +1,15 @@
 //! Static registry of all diagnostic rules.
 //!
 //! Derived at comptime from the handler_verifier.DiagnosticKind,
-//! handler_policy ViolationKind, and property_diagnostics.ViolationKind
+//! strict_checker.DiagnosticKind, handler_policy ViolationKind, and
+//! property_diagnostics.ViolationKind
 //! enums so the registry cannot drift from the actual checkers.
 //!
 //! Used by `zigts describe-rule`, `zigts search`, and policy hash assertions.
 
 const std = @import("std");
 const handler_verifier = @import("handler_verifier.zig");
+const strict_checker = @import("strict_checker.zig");
 const handler_policy = @import("handler_policy.zig");
 const property_diagnostics = @import("property_diagnostics.zig");
 
@@ -160,6 +162,61 @@ const verifier_meta = [_]struct {
 };
 
 // ---------------------------------------------------------------------------
+// Strict rules (ZTS6xx) - default expert language profile
+// ---------------------------------------------------------------------------
+
+const strict_meta = [_]struct {
+    kind: strict_checker.DiagnosticKind,
+    code: []const u8,
+    description: []const u8,
+    example: ?[]const u8,
+    help: []const u8,
+}{
+    .{
+        .kind = .implicit_unknown,
+        .code = "ZTS600",
+        .description = "A handler-reachable call result has implicit unknown type.",
+        .example = "const x = makeThing(); return Response.json(x);",
+        .help = "Add a return type annotation, use a modeled virtual module, or narrow the value with a type guard/assert.",
+    },
+    .{
+        .kind = .missing_public_annotation,
+        .code = "ZTS601",
+        .description = "A function lacks explicit parameter or return annotations.",
+        .example = "function handler(req) { return Response.json({ok: true}); }",
+        .help = "Annotate every parameter and the return type, for example `function handler(req: Request): Response`.",
+    },
+    .{
+        .kind = .dynamic_capability_access,
+        .code = "ZTS602",
+        .description = "Capability-bearing virtual module access uses a dynamic argument.",
+        .example = "env(req.headers.name)",
+        .help = "Use compiler-visible literal env keys, cache namespaces, SQL query names, egress URLs, route paths, or service names.",
+    },
+    .{
+        .kind = .non_exhaustive_profile_match,
+        .code = "ZTS603",
+        .description = "A match expression is not exhaustive under the strict profile.",
+        .example = "match (method) { 'GET' => ok }",
+        .help = "Cover every finite union member or add an explicit default when the discriminant is not finite.",
+    },
+    .{
+        .kind = .avoidable_let,
+        .code = "ZTS604",
+        .description = "A let binding is not reassigned.",
+        .example = "let x = 1; return x;",
+        .help = "Use `const` for bindings that do not change.",
+    },
+    .{
+        .kind = .computed_property_access,
+        .code = "ZTS605",
+        .description = "Dynamic computed property access hides object shape from the compiler.",
+        .example = "obj[key]",
+        .help = "Use a typed field, a literal key, or validate/narrow the object before indexing.",
+    },
+};
+
+// ---------------------------------------------------------------------------
 // Policy rules (POL0xx) - derived from handler_policy combinations
 // ---------------------------------------------------------------------------
 
@@ -279,7 +336,11 @@ fn propertyName(kind: property_diagnostics.ViolationKind) []const u8 {
     return @tagName(kind);
 }
 
-const total_count = verifier_meta.len + policy_meta.len + property_meta.len;
+fn strictName(kind: strict_checker.DiagnosticKind) []const u8 {
+    return @tagName(kind);
+}
+
+const total_count = verifier_meta.len + strict_meta.len + policy_meta.len + property_meta.len;
 
 pub const all_rules: [total_count]RuleEntry = blk: {
     var rules: [total_count]RuleEntry = undefined;
@@ -293,6 +354,18 @@ pub const all_rules: [total_count]RuleEntry = blk: {
             .description = v.description,
             .example = v.example,
             .help = v.help,
+        };
+        i += 1;
+    }
+
+    for (strict_meta) |s| {
+        rules[i] = .{
+            .name = strictName(s.kind),
+            .code = s.code,
+            .category = .verifier,
+            .description = s.description,
+            .example = s.example,
+            .help = s.help,
         };
         i += 1;
     }
@@ -455,18 +528,20 @@ test "policyHash is deterministic and 64 hex chars" {
     try std.testing.expectEqual(@as(usize, 64), hash1.len);
 }
 
-test "all verifier rules have ZTS3xx or ZTS5xx codes" {
+test "all verifier rules have ZTS3xx, ZTS5xx, or ZTS6xx codes" {
     // ZTS3xx covers the structural checks (return analysis, result/optional
     // checking, dead code, state isolation, websocket consistency).
     // ZTS4xx is reserved for FlowChecker (defined in tools/json_diagnostics
     // alongside the runtime flow analysis pipeline). ZTS5xx covers
     // author-declared spec discharge (ZTS500 not_discharged, ZTS501
-    // incompatible_with_import, ZTS502 unknown_name).
+    // incompatible_with_import, ZTS502 unknown_name). ZTS6xx covers the
+    // default strict ZigTS language profile.
     for (&all_rules) |*rule| {
         if (rule.category == .verifier) {
             try std.testing.expect(
                 std.mem.startsWith(u8, rule.code, "ZTS3") or
-                    std.mem.startsWith(u8, rule.code, "ZTS5"),
+                    std.mem.startsWith(u8, rule.code, "ZTS5") or
+                    std.mem.startsWith(u8, rule.code, "ZTS6"),
             );
         }
     }

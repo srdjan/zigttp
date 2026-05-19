@@ -323,7 +323,7 @@ pub fn synthesizeRoute(
     } else {
         try out.append(allocator, '\n');
     }
-    try out.print(allocator, "function {s}(req) {{\n", .{handler_name});
+    try out.print(allocator, "function {s}(req: Request): Response {{\n", .{handler_name});
     if (spec.body_schema) |schema| {
         try out.print(
             allocator,

@@ -5,19 +5,19 @@ import { routerMatch } from "zigttp:router";
 import { sha256 } from "zigttp:crypto";
 import { env } from "zigttp:env";
 
-function getHome(req) {
+function getHome(req: Request): Response {
     return Response.json({ name: env("APP_NAME"), status: "ok" });
 }
 
-function getHealth(req) {
+function getHealth(req: Request): Response {
     return Response.json({ healthy: true });
 }
 
-function getUser(req) {
+function getUser(req: Request): Response {
     return Response.json({ id: req.params.id, hash: sha256(req.params.id) });
 }
 
-function postEcho(req) {
+function postEcho(req: Request): Response {
     return Response.json({ received: req.body, hash: sha256(req.body) });
 }
 
@@ -28,7 +28,7 @@ const routes = {
     "POST /echo": postEcho,
 };
 
-function handler(req) {
+function handler(req: Request): Response {
     const found = routerMatch(routes, req);
     if (found !== undefined) {
         req.params = found.params;

@@ -153,7 +153,7 @@ When the BoolChecker cannot determine the type statically, it infers `unknown`. 
 | `typeof` | string |
 | `void` | undefined |
 | `const x = expr; ... x` | same as expr |
-| `let x = expr; ... x` | same as expr (invalidated on reassignment) |
+| reassigned `let x = expr; ... x` | same as expr until reassignment invalidates it |
 | `cond ? a : b` | unified type of a and b |
 | `match (...) { ... }` | unified arm type (if compatible) |
 | `const f = (x) => x > 0; f(1)` | return type of f (boolean) |

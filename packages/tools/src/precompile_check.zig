@@ -16,6 +16,8 @@ pub const CheckResult = struct {
     bool_errors: u32 = 0,
     bool_warnings: u32 = 0,
     type_errors: u32 = 0,
+    strict_errors: u32 = 0,
+    strict_warnings: u32 = 0,
     is_typescript: bool = false,
     verify_ran: bool = false,
     verify_errors: u32 = 0,
@@ -42,11 +44,11 @@ pub const CheckResult = struct {
     pinned_witness_regressions: usize = 0,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
-        return self.parse_errors + self.bool_errors + self.type_errors + self.verify_errors + self.flow_errors + self.specErrors();
+        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.specErrors();
     }
 
     pub fn totalWarnings(self: *const CheckResult) u32 {
-        return self.bool_warnings + self.verify_warnings + self.flow_warnings;
+        return self.bool_warnings + self.strict_warnings + self.verify_warnings + self.flow_warnings;
     }
 
     pub fn deinit(self: *CheckResult, allocator: std.mem.Allocator) void {
@@ -193,6 +195,14 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         writer.print("FAIL ({d} errors)\n", .{r.bool_errors}) catch return;
     } else if (r.bool_specializations > 0) {
         writer.print("OK ({d} specializations)\n", .{r.bool_specializations}) catch return;
+    } else {
+        writer.print("OK\n", .{}) catch return;
+    }
+
+    // Strict profile
+    writeDotted(writer, "Strict ZigTS", 24);
+    if (r.strict_errors > 0) {
+        writer.print("FAIL ({d} errors)\n", .{r.strict_errors}) catch return;
     } else {
         writer.print("OK\n", .{}) catch return;
     }

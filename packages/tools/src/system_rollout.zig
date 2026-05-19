@@ -933,7 +933,7 @@ test "rollout degrades additive multi-route updates to needs_review when payload
     const old_gateway =
         \\import { serviceCall } from "zigttp:service";
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
         \\    if (user.status !== 200) {
         \\        return Response.json({ error: "upstream" }, { status: 502 });
@@ -944,7 +944,7 @@ test "rollout degrades additive multi-route updates to needs_review when payload
     const old_users =
         \\import { routerMatch } from "zigttp:router";
         \\
-        \\function getUser(req) {
+        \\function getUser(req: Request): Response {
         \\    return Response.json({ id: "42" });
         \\}
         \\
@@ -952,7 +952,7 @@ test "rollout degrades additive multi-route updates to needs_review when payload
         \\    "GET /api/users/42": getUser,
         \\};
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -963,11 +963,11 @@ test "rollout degrades additive multi-route updates to needs_review when payload
     const new_users =
         \\import { routerMatch } from "zigttp:router";
         \\
-        \\function getUser(req) {
+        \\function getUser(req: Request): Response {
         \\    return Response.json({ id: "42" });
         \\}
         \\
-        \\function health(req) {
+        \\function health(req: Request): Response {
         \\    return Response.json({ ok: true });
         \\}
         \\
@@ -976,7 +976,7 @@ test "rollout degrades additive multi-route updates to needs_review when payload
         \\    "GET /health": health,
         \\};
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -1012,7 +1012,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
     const old_gateway =
         \\import { serviceCall } from "zigttp:service";
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
         \\    if (user.status !== 200) {
         \\        return Response.json({ error: "upstream" }, { status: 502 });
@@ -1023,7 +1023,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
     const new_gateway =
         \\import { serviceCall } from "zigttp:service";
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const user = serviceCall("users", "GET /api/profiles/42", {});
         \\    if (user.status !== 200) {
         \\        return Response.json({ error: "upstream" }, { status: 502 });
@@ -1034,7 +1034,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
     const old_users =
         \\import { routerMatch } from "zigttp:router";
         \\
-        \\function getUser(req) {
+        \\function getUser(req: Request): Response {
         \\    return Response.json({ id: "42" });
         \\}
         \\
@@ -1042,7 +1042,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
         \\    "GET /api/users/42": getUser,
         \\};
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -1053,7 +1053,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
     const new_users =
         \\import { routerMatch } from "zigttp:router";
         \\
-        \\function getProfile(req) {
+        \\function getProfile(req: Request): Response {
         \\    return Response.json({ id: "42" });
         \\}
         \\
@@ -1061,7 +1061,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
         \\    "GET /api/profiles/42": getProfile,
         \\};
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -1097,7 +1097,7 @@ test "rollout reports breaking when target system leaves an internal edge unreso
     const gateway =
         \\import { serviceCall } from "zigttp:service";
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
         \\    if (user.status !== 200) {
         \\        return Response.json({ error: "upstream" }, { status: 502 });
@@ -1108,7 +1108,7 @@ test "rollout reports breaking when target system leaves an internal edge unreso
     const old_users =
         \\import { routerMatch } from "zigttp:router";
         \\
-        \\function getUser(req) {
+        \\function getUser(req: Request): Response {
         \\    return Response.json({ id: "42" });
         \\}
         \\
@@ -1116,7 +1116,7 @@ test "rollout reports breaking when target system leaves an internal edge unreso
         \\    "GET /api/users/42": getUser,
         \\};
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -1127,7 +1127,7 @@ test "rollout reports breaking when target system leaves an internal edge unreso
     const new_users =
         \\import { routerMatch } from "zigttp:router";
         \\
-        \\function getProfile(req) {
+        \\function getProfile(req: Request): Response {
         \\    return Response.json({ id: "42" });
         \\}
         \\
@@ -1135,7 +1135,7 @@ test "rollout reports breaking when target system leaves an internal edge unreso
         \\    "GET /api/profiles/42": getProfile,
         \\};
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -1156,14 +1156,14 @@ test "rollout reports breaking when target system leaves an internal edge unreso
     try std.testing.expect(plan.blockers.items.len > 0);
 }
 
-test "rollout falls back to needs_review for dynamic internal edges" {
+test "rollout rejects dynamic internal edges at compile time" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     const old_gateway =
         \\import { serviceCall } from "zigttp:service";
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
         \\    if (user.status !== 200) {
         \\        return Response.json({ error: "upstream" }, { status: 502 });
@@ -1172,7 +1172,7 @@ test "rollout falls back to needs_review for dynamic internal edges" {
         \\}
     ;
     const dynamic_gateway =
-        \\function fetchJson(req) {
+        \\function fetchJson(req: Request): Response {
         \\    const suffix = req.path === "/alt" ? "42" : "42";
         \\    const resp = fetchSync(`https://users.internal/api/users/${suffix}`);
         \\    if (resp.status !== 200) {
@@ -1181,14 +1181,14 @@ test "rollout falls back to needs_review for dynamic internal edges" {
         \\    return Response.json(resp.json());
         \\}
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    return fetchJson(req);
         \\}
     ;
     const users =
         \\import { routerMatch } from "zigttp:router";
         \\
-        \\function getUser(req) {
+        \\function getUser(req: Request): Response {
         \\    return Response.json({ id: "42" });
         \\}
         \\
@@ -1196,7 +1196,7 @@ test "rollout falls back to needs_review for dynamic internal edges" {
         \\    "GET /api/users/42": getUser,
         \\};
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -1210,10 +1210,8 @@ test "rollout falls back to needs_review for dynamic internal edges" {
     const new_system = try writeSystemFiles(std.testing.allocator, tmp, "new", dynamic_gateway, users);
     defer std.testing.allocator.free(new_system);
 
-    var plan = try analyzeRollout(std.testing.allocator, old_system, new_system);
-    defer plan.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(RolloutVerdict.needs_review, plan.verdict);
-    try std.testing.expect(plan.phases.items.len >= 1);
-    try std.testing.expect(plan.phases.items[plan.phases.items.len - 1].notes.len > 0);
+    try std.testing.expectError(
+        error.SystemHandlerCompilationFailed,
+        analyzeRollout(std.testing.allocator, old_system, new_system),
+    );
 }

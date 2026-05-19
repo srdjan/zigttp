@@ -339,7 +339,6 @@ fn loadServiceTypeContext(
 /// Write a file synchronously using posix operations
 pub const writeFilePosix = util.writeFilePosix;
 
-
 const ResolvedGeneratorPack = struct {
     sql_schema_path: ?[]const u8 = null,
     manifest_path: ?[]const u8 = null,
@@ -945,6 +944,41 @@ pub fn runCheckOnlyFromSource(
         }
     }
 
+    {
+        const tc_ptr: ?*const zigts.TypeChecker = if (resolved.type_checker) |*tc| tc else null;
+        var strict_checker = zigts.StrictChecker.init(
+            allocator,
+            ir_view,
+            &atoms,
+            type_env_storage.envPtr(),
+            tc_ptr,
+        );
+        defer strict_checker.deinit();
+
+        result.strict_errors = @intCast(try strict_checker.check(root));
+        const strict_diags = strict_checker.getDiagnostics();
+        result.strict_warnings = @intCast(strict_diags.len -| result.strict_errors);
+        if (strict_diags.len > 0) {
+            if (json_mode) {
+                for (strict_diags) |diag| {
+                    if (json_diag.fromStrictDiagnostic(diag, ir_view, handler_path)) |jd| {
+                        result.json_diagnostics.append(allocator, jd) catch {};
+                    }
+                }
+            } else {
+                var buf: std.ArrayList(u8) = .empty;
+                defer buf.deinit(allocator);
+                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+                strict_checker.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+                buf = aw.toArrayList();
+                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+            }
+        }
+        if (result.strict_errors > 0) {
+            return result;
+        }
+    }
+
     if (skip_contract) return result;
 
     var verify_info: ?VerificationInfo = null;
@@ -1166,7 +1200,6 @@ pub fn runGenTests(
     try gen.writeJsonl(writer);
     return @intCast(gen.getTests().len);
 }
-
 
 pub const CompileOptions = struct {
     emit_aot: bool = false,
@@ -3374,7 +3407,7 @@ test "runCheckOnly keeps mirrored properties aligned with finalized fault covera
     const source =
         \\import { jwtVerify } from "zigttp:auth";
         \\
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\  _ = req;
         \\  const auth = jwtVerify("token", "secret");
         \\  if (!auth.ok) {
@@ -3384,7 +3417,7 @@ test "runCheckOnly keeps mirrored properties aligned with finalized fault covera
         \\}
     ;
 
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.js", null, true, null, false);
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.ts", null, true, null, false);
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 0), result.totalErrors());

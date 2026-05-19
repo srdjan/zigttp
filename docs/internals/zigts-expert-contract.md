@@ -66,6 +66,7 @@ Frozen in v1 (`packages/tools/src/json_diagnostics.zig:42-129`):
 - `ZTS300`–`ZTS3xx` — handler verifier (missing return path, unchecked result, unused imports, module-scope mutation, unchecked optional access).
 - `ZTS400`–`ZTS4xx` — flow checker (secret/credential reaching response/log/egress, unvalidated input at egress).
 - `ZTS500`–`ZTS5xx` — author-declared spec discharge (`spec_not_discharged`, `spec_incompatible_with_import`, `spec_unknown_name`). Surfaced in `zigts check --json` two ways: as structured entries in `proof.spec_diagnostics` (with `kind`, `spec_name`, optional `incompatible_module`, optional `suggestion`) and as standard error-severity entries in the top-level `diagnostics` array (with `file`/`line`/`column`/`suggestion`, the same shape every other ZTS code emits). The structured form is preferred for agent dispatch; the standard form is what gates exit code and what `verify-paths` / `edit-simulate` consume. See [verification.md](../verification.md) and [user-guide.md](../user-guide.md#author-declared-specs).
+- `ZTS600`–`ZTS6xx` — strict ZigTS profile diagnostics. These are default-on and cover implicit unknown call results, missing named-function annotations, dynamic capability keys, non-exhaustive profile matches, avoidable `let`, and dynamic computed property access.
 - `ZVM001`+ — virtual-module audit diagnostics from `verify-modules` (direct effect usage, missing checked helpers, spec drift). See `packages/tools/src/module_audit.zig`.
 
 New codes may be added in v1. Existing codes cannot move ranges or change meaning.
@@ -84,11 +85,11 @@ Emits compiler and policy metadata. Use it to record which policy a session or C
   "policy_version": "2026.04.2",
   "policy_hash": "<hex>",
   "module_registry_hash": "<hex>",
-  "rule_count": 42,
+  "rule_count": 36,
   "categories": {
-    "verifier": 11,
-    "policy": 20,
-    "property": 11
+    "verifier": 22,
+    "policy": 8,
+    "property": 6
   },
   "mode": "embedded"
 }
@@ -430,7 +431,7 @@ These are both additive: new specifiers, exports, features, or statuses can appe
 For as long as v1 is advertised by `zigts meta` (via `mode: "embedded"` and the `compiler_version` / `policy_version` fields), clients may rely on:
 
 1. Every field and type documented above.
-2. Every `ZTS0xx`/`ZTS1xx`/`ZTS2xx`/`ZTS3xx`/`ZVM0xx` code number retaining its meaning.
+2. Every `ZTS0xx`/`ZTS1xx`/`ZTS2xx`/`ZTS3xx`/`ZTS4xx`/`ZTS5xx`/`ZTS6xx`/`ZVM0xx` code number retaining its meaning.
 3. Exit codes as specified per-command.
 4. Unknown fields being ignored by all first-party clients — the contract is open for extension.
 5. Stable JSON output ordering within a single invocation (across invocations the order is not guaranteed).

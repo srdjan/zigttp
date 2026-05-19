@@ -2,6 +2,12 @@
 
 zigttp includes native TypeScript and TSX support through two features: a type stripper that removes type annotations at load time, and a compile-time evaluator for the `comptime()` function.
 
+Strict ZigTS is the default profile. Named functions must carry explicit
+parameter and return annotations, `any` is rejected, capability access
+must use compiler-visible literal keys, dynamic computed property access
+is rejected unless the key is a literal or const literal alias, and a
+`let` binding is only allowed when the binding is actually reassigned.
+
 ---
 
 ## Type Stripper
@@ -17,7 +23,7 @@ The type stripper (`packages/zigts/src/stripper.zig`) removes TypeScript syntax 
 - `export type ...` / `export distinct type ...` / `import type ...`
 
 **Type annotations** (stripped in place):
-- Variable annotations: `let x: T = ...`
+- Variable annotations: `const x: T = ...` or reassigned `let x: T = ...`
 - Parameter annotations: `function f(x: T) { ... }`
 - Return annotations: `function f(): T { ... }`
 
@@ -231,7 +237,7 @@ const bad: ApiRoute = "/other";        // ERROR
 
 ### Literal Types and Annotation Semantics
 
-`const` bindings preserve their literal type (`const x = 200` has type `200`). `let` bindings without explicit annotations are widened to the base type (`let x = 200` has type `number`), so `x = 404` compiles without error.
+`const` bindings preserve their literal type (`const x = 200` has type `200`). Use `let` only for bindings that are reassigned; strict ZigTS rejects an avoidable `let` with ZTS604.
 
 When a `const` binding has a base primitive annotation, the compiler validates assignability but keeps the narrower literal type:
 

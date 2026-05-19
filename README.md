@@ -703,7 +703,7 @@ zigts ledger replay --input <path> --onto <git-ref>  # Re-apply a ledger onto a 
 
 On success, the output includes a proof summary: env vars, outbound hosts, virtual modules, and handler properties.
 
-Code ranges: ZTS0xx (parser), ZTS1xx (sound mode), ZTS2xx (type checker), ZTS3xx (handler verifier).
+Code ranges: ZTS0xx (parser), ZTS1xx (sound mode), ZTS2xx (type checker), ZTS3xx (handler verifier), ZTS4xx (flow checker), ZTS5xx (author-declared specs), ZTS6xx (strict ZigTS profile).
 
 ## Key Features
 

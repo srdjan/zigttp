@@ -12,6 +12,7 @@ const zigts = @import("zigts");
 const parser = zigts.parser;
 const bool_checker = zigts.bool_checker;
 const type_checker = zigts.type_checker;
+const strict_checker = zigts.strict_checker;
 const handler_verifier = zigts.handler_verifier;
 const flow_checker = zigts.flow_checker;
 const handler_contract = zigts.handler_contract;
@@ -134,6 +135,18 @@ fn verifierCode(kind: handler_verifier.DiagnosticKind) []const u8 {
     };
 }
 
+/// StrictChecker error codes: ZTS6xx
+fn strictCheckerCode(kind: strict_checker.DiagnosticKind) []const u8 {
+    return switch (kind) {
+        .implicit_unknown => "ZTS600",
+        .missing_public_annotation => "ZTS601",
+        .dynamic_capability_access => "ZTS602",
+        .non_exhaustive_profile_match => "ZTS603",
+        .avoidable_let => "ZTS604",
+        .computed_property_access => "ZTS605",
+    };
+}
+
 /// FlowChecker error codes: ZTS4xx
 fn flowCheckerCode(kind: flow_checker.DiagnosticKind) []const u8 {
     return switch (kind) {
@@ -215,6 +228,10 @@ pub fn fromBoolDiagnostic(diag: bool_checker.Diagnostic, ir_view: IrView, file: 
 
 pub fn fromTypeDiagnostic(diag: type_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
     return fromCheckerDiagnostic(typeCheckerCode, diag, ir_view, file);
+}
+
+pub fn fromStrictDiagnostic(diag: strict_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
+    return fromCheckerDiagnostic(strictCheckerCode, diag, ir_view, file);
 }
 
 pub fn fromVerifierDiagnostic(diag: handler_verifier.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {

@@ -1,6 +1,6 @@
 import { run, step, waitSignal } from "zigttp:durable";
 
-function handler(req) {
+function handler(req: Request): unknown {
     if (req.path !== "/orders/42") {
         return Response.json({ error: "not found" }, { status: 404 });
     }

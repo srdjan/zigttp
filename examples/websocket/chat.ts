@@ -21,9 +21,9 @@ import {
   deserializeAttachment,
 } from "zigttp:websocket";
 
-export function onOpen(ws, url) {}
+export function onOpen(ws: WebSocket, url: string): void {}
 
-export function onMessage(ws, data, room) {
+export function onMessage(ws: WebSocket, data: string, room: string): void {
   const name = deserializeAttachment(ws);
   if (name === undefined) {
     serializeAttachment(ws, data);
@@ -36,8 +36,8 @@ export function onMessage(ws, data, room) {
   }
 }
 
-export function onClose(ws, code, reason) {}
+export function onClose(ws: WebSocket, code: number, reason: string): void {}
 
-export function handler(req) {
+export function handler(req: Request): Response {
   return Response.text("ws endpoint", { status: 404 });
 }

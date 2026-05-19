@@ -3,7 +3,7 @@ import { parseBearer, jwtVerify } from "zigttp:auth";
 import { env } from "zigttp:env";
 import { serviceCall } from "zigttp:service";
 
-function handler(req) {
+function handler(req: Request): Response {
   // Authenticate
   const token = parseBearer(req.headers["authorization"]);
   if (!token) {
