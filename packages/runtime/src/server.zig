@@ -1512,25 +1512,23 @@ pub const Server = struct {
                 // Recovers the public key by verifying the embedded JWS against
                 // itself; the verify acts as a self-check that the binary's
                 // attestation is internally consistent.
-                if (self.config.contract_json) |cj| {
-                    if (attest_envelope.verify(self.allocator, jws)) |*r| {
-                        var verify_result = r.*;
-                        defer verify_result.deinit();
-                        self.well_known_doc = attest_well_known.build(
-                            self.allocator,
-                            cj,
-                            jws,
-                            verify_result.public_key,
-                        ) catch |err| blk: {
-                            std.log.warn("attestation: failed to build well-known doc: {} (continuing without)", .{err});
-                            break :blk null;
-                        };
-                        if (self.well_known_doc != null) {
-                            std.log.info("   Attestation: /.well-known/zigttp-attest enabled", .{});
-                        }
-                    } else |err| {
+                build_well_known: {
+                    const cj = self.config.contract_json orelse break :build_well_known;
+                    var verify_result = attest_envelope.verify(self.allocator, jws) catch |err| {
                         std.log.warn("attestation: embedded JWS failed self-verify: {} (well-known disabled)", .{err});
-                    }
+                        break :build_well_known;
+                    };
+                    defer verify_result.deinit();
+                    self.well_known_doc = attest_well_known.build(
+                        self.allocator,
+                        cj,
+                        jws,
+                        verify_result.public_key,
+                    ) catch |err| {
+                        std.log.warn("attestation: failed to build well-known doc: {} (continuing without)", .{err});
+                        break :build_well_known;
+                    };
+                    std.log.info("   Attestation: /.well-known/zigttp-attest enabled", .{});
                 }
             }
         }

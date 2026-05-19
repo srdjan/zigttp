@@ -34,6 +34,15 @@ const no_attest_flag: []const u8 = "--no-attest";
 
 var attest_legacy_warned: bool = false;
 
+/// Shared help text describing `--no-attest`. Three command help printers
+/// all advertise the same flag; one source of truth prevents drift.
+const no_attest_help_block: []const u8 =
+    \\  --no-attest           Skip proof-receipt signing for this build.
+    \\                        Default is to sign with the persistent
+    \\                        identity at ~/.zigttp/attest/keypair.bin.
+    \\
+;
+
 fn warnAttestLegacyOnce() void {
     if (attest_legacy_warned) return;
     attest_legacy_warned = true;
@@ -1759,9 +1768,8 @@ fn printCompileHelp() void {
         \\
         \\Options:
         \\  -o, --output <PATH>   Output binary path (required)
-        \\  --no-attest           Skip proof-receipt signing for this build.
-        \\                        Default is to sign with the persistent
-        \\                        identity at ~/.zigttp/attest/keypair.bin.
+        \\
+    ++ no_attest_help_block ++
         \\  --help                Show this help
         \\
         \\For a no-args version that auto-detects from zigttp.json, use
@@ -1781,9 +1789,8 @@ fn printBuildHelp() void {
         \\
         \\Options:
         \\  -o, --output <PATH>   Override the output binary path
-        \\  --no-attest           Skip proof-receipt signing for this build.
-        \\                        Default is to sign with the persistent
-        \\                        identity at ~/.zigttp/attest/keypair.bin.
+        \\
+    ++ no_attest_help_block ++
         \\  --help                Show this help
         \\
     ;
@@ -1803,12 +1810,11 @@ fn printLocalDeployHelp() void {
         \\Ledger: .zigttp/proofs.jsonl (appends a kind=deploy row)
         \\
         \\Options:
-        \\  --local         Use the local target (this command)
-        \\  --target local  Same as --local
-        \\  --no-attest     Skip proof-receipt signing for this build.
-        \\                  Default is to sign with the persistent identity
-        \\                  at ~/.zigttp/attest/keypair.bin.
-        \\  --help          Show this help
+        \\  --local               Use the local target (this command)
+        \\  --target local        Same as --local
+        \\
+    ++ no_attest_help_block ++
+        \\  --help                Show this help
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
