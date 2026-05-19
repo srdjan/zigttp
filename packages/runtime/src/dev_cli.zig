@@ -19,6 +19,7 @@ const demo = @import("demo.zig");
 const pi_app = @import("pi_app");
 const envelope = @import("attest/envelope.zig");
 const header_strings = @import("attest/header_strings.zig");
+const identity_mod = @import("attest/identity.zig");
 const verify_cli = @import("verify_cli.zig");
 
 /// Slice 1 placeholder. Replace with a build-injected constant (short git sha
@@ -1521,27 +1522,12 @@ fn buildAttestationJws(
         .routes_count = @intCast(contract.api.routes.items.len),
     };
 
-    var seed: [std.crypto.sign.Ed25519.KeyPair.seed_length]u8 = undefined;
-    try fillCsprngSeed(&seed);
-    const key_pair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
-    var env = try envelope.sign(allocator, claims, key_pair);
-    return env.intoJws();
-}
-
-/// CSPRNG seed for build-time keypair generation. Slice 1 mints an ephemeral
-/// key per build; identity-bound signing comes in slice 2. Uses /dev/urandom
-/// so a single code path covers both macOS and Linux without the
-/// `std.c.getrandom` vs `std.c.getentropy` platform stub mess.
-fn fillCsprngSeed(buf: *[std.crypto.sign.Ed25519.KeyPair.seed_length]u8) !void {
-    const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-    if (fd < 0) return error.UrandomOpenFailed;
-    defer _ = std.c.close(fd);
-    var filled: usize = 0;
-    while (filled < buf.len) {
-        const n = std.c.read(fd, buf[filled..].ptr, buf.len - filled);
-        if (n <= 0) return error.UrandomReadFailed;
-        filled += @intCast(n);
+    const identity = try identity_mod.loadOrCreate(allocator);
+    var env = try envelope.sign(allocator, claims, identity.key_pair);
+    if (identity.source == .generated) {
+        std.log.info("attest: minted persistent identity (fingerprint {s})", .{identity.fingerprint_hex[0..16]});
     }
+    return env.intoJws();
 }
 
 fn buildArtifact(
