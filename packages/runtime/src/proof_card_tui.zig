@@ -22,17 +22,19 @@ const audit_ring = @import("proof_audit_ring.zig");
 /// Which view the left pane of the proof card renders. Only the left
 /// pane and its header swap between lenses; the Surface and Requests
 /// panes plus the status bar stay identical so frame geometry (and the
-/// Studio SSE frame mirror) is stable across all three.
+/// Studio SSE frame mirror) is stable across all four.
 pub const Lens = enum {
     properties,
     trade,
     handover,
+    caller_view,
 
     pub fn label(self: Lens) []const u8 {
         return switch (self) {
             .properties => "Properties",
             .trade => "Trade",
             .handover => "Handover",
+            .caller_view => "Caller view",
         };
     }
 
@@ -40,9 +42,26 @@ pub const Lens = enum {
         return switch (self) {
             .properties => .trade,
             .trade => .handover,
-            .handover => .properties,
+            .handover => .caller_view,
+            .caller_view => .properties,
         };
     }
+};
+
+/// Per-build attestation snapshot the `.caller_view` lens renders.
+/// Caller-owned strings; the render does not free them. Slice 2 item D.
+pub const CallerView = struct {
+    /// Value of the `Zigttp-Proofs` header, or empty/null when no chip is
+    /// proven (the runtime omits the header line in that case).
+    proofs_header_value: []const u8,
+    /// Value of the `Zigttp-Attest` header (compact JWS).
+    attest_header_value: []const u8,
+    /// SHA-256 fingerprint of the public key, lowercase hex, 64 chars.
+    key_fingerprint_hex: []const u8,
+    /// Host the running server is bound to (typically `127.0.0.1` or `0.0.0.0`).
+    host: []const u8,
+    /// Port the running server is bound to.
+    port: u16,
 };
 
 pub const FrameOptions = struct {
@@ -54,6 +73,10 @@ pub const FrameOptions = struct {
     /// Which lens to render in the left pane. Defaults to `.properties`
     /// so existing callers and tests are unaffected.
     lens: Lens = .properties,
+    /// Caller-side view of what an external HTTP consumer sees. Required
+    /// only when `lens == .caller_view`; null on other lenses renders an
+    /// "(not attested; pass --no-attest off or rebuild)" message.
+    caller_view: ?CallerView = null,
 };
 
 const ColumnWidths = struct {
@@ -141,7 +164,7 @@ pub fn writeProofCardFrame(
 ) !void {
     const widths = ColumnWidths.from(opts.width);
 
-    var left = try buildLeftPane(allocator, card, opts.lens);
+    var left = try buildLeftPane(allocator, card, opts.lens, opts.caller_view);
     defer freeLines(allocator, &left);
     var surface = try buildSurfacePane(allocator, card);
     defer freeLines(allocator, &surface);
@@ -349,11 +372,13 @@ fn buildLeftPane(
     allocator: std.mem.Allocator,
     card: *const review.ProofCard,
     lens: Lens,
+    caller_view: ?CallerView,
 ) !LineList {
     return switch (lens) {
         .properties => buildPropertiesPane(allocator, card),
         .trade => buildTradePane(allocator, card),
         .handover => buildHandoverPane(allocator, card),
+        .caller_view => buildCallerViewPane(allocator, caller_view),
     };
 }
 
@@ -557,6 +582,80 @@ pub fn buildProofCertificate(
     try w.writeAll("  keep these proven. compiler blocks any edit that breaks them.\n");
 
     return try allocator.dupe(u8, aw.writer.buffered());
+}
+
+/// Caller view: what an external HTTP consumer of this attested build sees.
+/// Slice 2 item D. Renders four blocks in the left pane: live response-header
+/// preview, the `/.well-known/zigttp-attest` URL, a copy-pasteable
+/// `zigttp verify` command, and the public-key fingerprint plus pinning hint.
+/// Long strings (the JWS, the proofs chip list, the fingerprint) are
+/// truncated for the narrow left pane; the full values live in the well-known
+/// doc and the response headers the caller actually consumes.
+fn buildCallerViewPane(
+    allocator: std.mem.Allocator,
+    caller_view: ?CallerView,
+) !LineList {
+    var lines: LineList = .empty;
+    errdefer freeLines(allocator, &lines);
+
+    const view = caller_view orelse {
+        try lines.append(allocator, try allocator.dupe(u8, "(not attested)"));
+        try lines.append(allocator, try allocator.dupe(u8, ""));
+        try lines.append(allocator, try allocator.dupe(u8, "This build emits no Zigttp-Proofs"));
+        try lines.append(allocator, try allocator.dupe(u8, "or Zigttp-Attest headers. Rebuild"));
+        try lines.append(allocator, try allocator.dupe(u8, "without --no-attest to opt back in."));
+        return lines;
+    };
+
+    try lines.append(allocator, try allocator.dupe(u8, "Response headers"));
+    if (view.proofs_header_value.len > 0) {
+        try lines.append(allocator, try truncatedHeaderLine(allocator, "  Zigttp-Proofs: ", view.proofs_header_value));
+    }
+    try lines.append(allocator, try truncatedHeaderLine(allocator, "  Zigttp-Attest: ", view.attest_header_value));
+    try lines.append(allocator, try allocator.dupe(u8, ""));
+
+    try lines.append(allocator, try allocator.dupe(u8, "Well-known doc"));
+    try lines.append(allocator, try std.fmt.allocPrint(
+        allocator,
+        "  http://{s}:{d}/.well-known/zigttp-attest",
+        .{ view.host, view.port },
+    ));
+    try lines.append(allocator, try allocator.dupe(u8, ""));
+
+    try lines.append(allocator, try allocator.dupe(u8, "Verify from anywhere"));
+    try lines.append(allocator, try std.fmt.allocPrint(
+        allocator,
+        "  zigttp verify http://{s}:{d}/",
+        .{ view.host, view.port },
+    ));
+    try lines.append(allocator, try allocator.dupe(u8, ""));
+
+    try lines.append(allocator, try allocator.dupe(u8, "Key fingerprint"));
+    const fp_short_len = @min(view.key_fingerprint_hex.len, 16);
+    try lines.append(allocator, try std.fmt.allocPrint(
+        allocator,
+        "  {s}...",
+        .{view.key_fingerprint_hex[0..fp_short_len]},
+    ));
+    try lines.append(allocator, try allocator.dupe(u8, "  pin: zigttp verify <url>"));
+    try lines.append(allocator, try allocator.dupe(u8, "       --trust-key <full-hex>"));
+
+    return lines;
+}
+
+/// Format `<prefix><value>` truncated to a stable width so the JWS and the
+/// chip list don't blow out the left pane. The pane is ~28 cols by default;
+/// 40 keeps a readable preview and never exceeds the pane.
+fn truncatedHeaderLine(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    value: []const u8,
+) ![]u8 {
+    const max_value: usize = 40;
+    if (value.len <= max_value) {
+        return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, value });
+    }
+    return std.fmt.allocPrint(allocator, "{s}{s}...", .{ prefix, value[0..max_value] });
 }
 
 fn buildSurfacePane(
@@ -1246,4 +1345,122 @@ test "buildProofCertificate emits the substrate paragraph and surface counts" {
     try std.testing.expect(std.mem.indexOf(u8, cert, "Proven for this handler") != null);
     try std.testing.expect(std.mem.indexOf(u8, cert, "2 routes, 7 execution paths, 2 intents verified") != null);
     try std.testing.expect(std.mem.indexOf(u8, cert, "Refactor contract") != null);
+}
+
+test "Lens.next cycles through all four variants" {
+    try std.testing.expectEqual(Lens.trade, Lens.properties.next());
+    try std.testing.expectEqual(Lens.handover, Lens.trade.next());
+    try std.testing.expectEqual(Lens.caller_view, Lens.handover.next());
+    try std.testing.expectEqual(Lens.properties, Lens.caller_view.next());
+}
+
+test "Lens.label reports human-readable text per variant" {
+    try std.testing.expectEqualStrings("Caller view", Lens.caller_view.label());
+}
+
+test "caller_view lens with null caller_view renders the opt-out notice" {
+    const allocator = std.testing.allocator;
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+    var delta = try review.deriveDelta(allocator, &current, null);
+    defer delta.deinit(allocator);
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "local",
+        .current = &current,
+        .baseline = null,
+        .delta = &delta,
+    };
+
+    audit_ring.clear();
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeProofCardFrame(allocator, &card, &aw.writer, .{ .lens = .caller_view });
+    const out = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Caller view") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(not attested)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "--no-attest") != null);
+}
+
+test "caller_view lens with attestation context renders the four blocks" {
+    const allocator = std.testing.allocator;
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+    var delta = try review.deriveDelta(allocator, &current, null);
+    defer delta.deinit(allocator);
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "local",
+        .current = &current,
+        .baseline = null,
+        .delta = &delta,
+    };
+
+    const view = CallerView{
+        .proofs_header_value = "pure, read_only, injection_safe",
+        .attest_header_value = "eyJhbGciOiJFZERTQSJ9.eyJ2IjoiMSJ9.SIG",
+        .key_fingerprint_hex = "abcdef0123456789" ++ ("0" ** 48),
+        .host = "127.0.0.1",
+        .port = 3000,
+    };
+
+    audit_ring.clear();
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeProofCardFrame(allocator, &card, &aw.writer, .{ .lens = .caller_view, .caller_view = view });
+    const out = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Caller view") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Response headers") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Zigttp-Proofs: pure, read_only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Zigttp-Attest: eyJh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Well-known doc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "http://127.0.0.1:3000/.well-known/zigttp-attest") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Verify from anywhere") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "zigttp verify http://127.0.0.1:3000/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Key fingerprint") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "abcdef0123456789...") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "--trust-key") != null);
+}
+
+test "caller_view truncates long header values for the narrow left pane" {
+    const allocator = std.testing.allocator;
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+    var delta = try review.deriveDelta(allocator, &current, null);
+    defer delta.deinit(allocator);
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "local",
+        .current = &current,
+        .baseline = null,
+        .delta = &delta,
+    };
+
+    // 100-char JWS forces truncation.
+    const long_jws = "X" ** 100;
+    const view = CallerView{
+        .proofs_header_value = "pure",
+        .attest_header_value = long_jws,
+        .key_fingerprint_hex = "f" ** 64,
+        .host = "127.0.0.1",
+        .port = 3000,
+    };
+
+    audit_ring.clear();
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeProofCardFrame(allocator, &card, &aw.writer, .{ .lens = .caller_view, .caller_view = view });
+    const out = aw.writer.buffered();
+
+    // Truncated form ends in "..."; original full string must not appear.
+    try std.testing.expect(std.mem.indexOf(u8, out, "Zigttp-Attest: " ++ ("X" ** 40) ++ "...") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "X" ** 50) == null);
 }
