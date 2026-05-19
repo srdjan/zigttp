@@ -15,14 +15,18 @@ const std = @import("std");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+/// Named tags this module surfaces. Callers can pattern-match these for
+/// operator-facing diagnostics; everything else (raw POSIX errors from open,
+/// read, write, mkdirat) flows through the inferred return type unchanged.
 pub const KeyError = error{
     HomeDirUnavailable,
     KeyFileMalformed,
     KeyFilePermissionsTooOpen,
     UrandomOpenFailed,
     UrandomReadFailed,
+    WriteFailed,
     OutOfMemory,
-} || std.fs.File.OpenError || std.posix.WriteError || std.posix.ReadError;
+};
 
 pub const KeySource = enum { generated, loaded };
 
@@ -34,6 +38,9 @@ pub const SignerIdentity = struct {
 
 const file_size_bytes: usize = Ed25519.KeyPair.seed_length + Ed25519.PublicKey.encoded_length;
 const file_mode: std.posix.mode_t = 0o600;
+/// Permission bits below the user-rwx triple. Any one of these set on the
+/// key file means group or other can read or modify the private key.
+const permission_group_bits: std.posix.mode_t = 0o077;
 
 /// Default user-scoped entry. Resolves `$HOME/.zigttp/attest/keypair.bin`,
 /// loads on cache hit, generates and writes on cache miss.
@@ -75,9 +82,7 @@ fn loadExisting(file_path: []const u8) !SignerIdentity {
     var stat: std.c.Stat = undefined;
     if (std.c.fstat(fd, &stat) != 0) return error.KeyFileMalformed;
     if (stat.size != file_size_bytes) return error.KeyFileMalformed;
-    // World/group permissions widen the trust surface; reject any non-zero
-    // bits below the user-rwx triple.
-    if (stat.mode & 0o077 != 0) return error.KeyFilePermissionsTooOpen;
+    if (stat.mode & permission_group_bits != 0) return error.KeyFilePermissionsTooOpen;
 
     var bytes: [file_size_bytes]u8 = undefined;
     var filled: usize = 0;
@@ -152,7 +157,7 @@ fn writeFileStrict(file_path: []const u8, bytes: []const u8) !void {
     var total: usize = 0;
     while (total < bytes.len) {
         const n = std.c.write(fd, bytes[total..].ptr, bytes.len - total);
-        if (n <= 0) return error.UrandomReadFailed;
+        if (n <= 0) return error.WriteFailed;
         total += @intCast(n);
     }
 

@@ -1522,7 +1522,13 @@ fn buildAttestationJws(
         .routes_count = @intCast(contract.api.routes.items.len),
     };
 
-    const identity = try identity_mod.loadOrCreate(allocator);
+    const identity = identity_mod.loadOrCreate(allocator) catch |err| {
+        std.log.err(
+            "attest: failed to load identity from ~/.zigttp/attest/keypair.bin: {s}. Inspect the file, fix the permissions (chmod 600), or delete it to mint a fresh key.",
+            .{@errorName(err)},
+        );
+        return err;
+    };
     var env = try envelope.sign(allocator, claims, identity.key_pair);
     if (identity.source == .generated) {
         std.log.info("attest: minted persistent identity (fingerprint {s})", .{identity.fingerprint_hex[0..16]});
