@@ -121,24 +121,37 @@ pub fn suggestionForIncompatible(spec_name: []const u8, module: []const u8) ?[]c
     return null;
 }
 
-/// ZTS502 suggestion: when an unknown spec name is close enough to a
-/// v1 spec name (Levenshtein <= 2), point at the nearest match. Returns
-/// an owned slice when a candidate is found, else null. The caller is
-/// responsible for freeing.
-pub fn suggestionForUnknown(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
+/// v1 spec names, derived from `v1_specs` so the two cannot drift.
+const v1_spec_names = blk: {
+    var names: [v1_specs.len][]const u8 = undefined;
+    for (v1_specs, 0..) |s, i| names[i] = s.name;
+    break :blk names;
+};
+
+/// Nearest-match suggestion: when `name` is within Levenshtein distance 2 of
+/// a candidate, return an owned `did you mean ...` string, else null. The
+/// distance-2 cap keeps further misses from being more noise than signal.
+fn nearestSuggestion(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    candidates: []const []const u8,
+) !?[]const u8 {
     var best_name: ?[]const u8 = null;
     var best_dist: usize = std.math.maxInt(usize);
-    for (v1_specs) |spec| {
-        const d = levenshtein(name, spec.name);
+    for (candidates) |cand| {
+        const d = levenshtein(name, cand);
         if (d < best_dist) {
             best_dist = d;
-            best_name = spec.name;
+            best_name = cand;
         }
     }
-    // Cap the suggestion at distance 2: further than that and the
-    // suggestion is more noise than signal.
     if (best_name == null or best_dist > 2) return null;
     return try std.fmt.allocPrint(allocator, "did you mean `{s}`?", .{best_name.?});
+}
+
+/// ZTS502 suggestion for an unknown handler spec name. Caller frees.
+pub fn suggestionForUnknown(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
+    return nearestSuggestion(allocator, name, &v1_spec_names);
 }
 
 /// Iterative Levenshtein distance with a single row buffer. Bounded
@@ -290,6 +303,124 @@ fn containsString(list: []const []const u8, target: []const u8) bool {
         if (std.mem.eql(u8, s, target)) return true;
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Proof-capsule discharge
+//
+// Function-level proof capsules (`Proof<T, S>`) discharge a smaller property
+// set than handler `Spec<...>`: the four keystone properties whose facts come
+// from per-function effect inference and path-return analysis. Capsule
+// discharge reuses the SpecDiagnostic shape (ZTS500 / ZTS502) so helper
+// failures flow through the same diagnostic channel as handler Spec failures.
+// ZTS501 (import contradiction) has no capsule analogue: the per-function
+// EffectRow knows precisely whether a helper writes, so the coarse
+// import-level heuristic is unnecessary.
+// ---------------------------------------------------------------------------
+
+/// The v1 capsule property set. A keystone-scoped subset; flow properties
+/// (no_secret_leakage, injection_safe, ...) join in a later slice.
+pub const CapsuleProperty = enum {
+    total,
+    pure,
+    read_only,
+    deterministic,
+
+    pub fn fromName(name: []const u8) ?CapsuleProperty {
+        return std.meta.stringToEnum(CapsuleProperty, name);
+    }
+};
+
+/// Capsule property names, derived from the enum so the two cannot drift.
+pub const capsule_property_names = blk: {
+    const fields = @typeInfo(CapsuleProperty).@"enum".fields;
+    var names: [fields.len][]const u8 = undefined;
+    for (fields, 0..) |f, i| names[i] = f.name;
+    break :blk names;
+};
+
+/// Facts the compiler proved about one function, used to discharge its
+/// declared capsule. A recursive function is treated as unproven for every
+/// property: slice 1 does not certify specs at a recursive fixed point.
+pub const CapsuleFacts = struct {
+    total: bool = false,
+    pure: bool = false,
+    read_only: bool = false,
+    deterministic: bool = false,
+    recursive: bool = false,
+
+    pub fn holds(self: CapsuleFacts, prop: CapsuleProperty) bool {
+        if (self.recursive) return false;
+        return switch (prop) {
+            .total => self.total,
+            .pure => self.pure,
+            .read_only => self.read_only,
+            .deterministic => self.deterministic,
+        };
+    }
+};
+
+fn capsuleSuggestionFor(prop: CapsuleProperty) []const u8 {
+    return switch (prop) {
+        .total => "return a value on every path so the capsule's `total` property holds.",
+        .pure => "remove module calls and Date.now()/Math.random() so the helper stays pure.",
+        .read_only => "remove writing module calls (zigttp:cache / zigttp:sql) and egress from the helper.",
+        .deterministic => "remove Date.now() / Math.random() from the helper.",
+    };
+}
+
+const recursive_capsule_suggestion =
+    "recursive functions are not yet supported for capsule discharge; inline or remove the recursion.";
+
+/// ZTS502 suggestion for an unknown capsule property name. Caller frees.
+fn suggestionForUnknownCapsule(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
+    return nearestSuggestion(allocator, name, &capsule_property_names);
+}
+
+/// Discharge a helper's declared capsule properties against the facts the
+/// compiler proved about it. Emits ZTS500 (not discharged) and ZTS502
+/// (unknown name). The caller owns the returned list and must call
+/// `SpecDiagnostic.deinit` on each entry before deinit-ing the list.
+pub fn dischargeCapsule(
+    allocator: std.mem.Allocator,
+    declared: []const []const u8,
+    facts: CapsuleFacts,
+) !std.ArrayList(SpecDiagnostic) {
+    var out: std.ArrayList(SpecDiagnostic) = .empty;
+    errdefer {
+        for (out.items) |*d| @constCast(d).deinit(allocator);
+        out.deinit(allocator);
+    }
+
+    for (declared) |name| {
+        const prop = CapsuleProperty.fromName(name) orelse {
+            const spec_name = try allocator.dupe(u8, name);
+            errdefer allocator.free(spec_name);
+            const suggestion = try suggestionForUnknownCapsule(allocator, name);
+            errdefer if (suggestion) |s| allocator.free(s);
+            try out.append(allocator, .{
+                .kind = .unknown_name,
+                .spec_name = spec_name,
+                .suggestion = suggestion,
+            });
+            continue;
+        };
+
+        if (facts.holds(prop)) continue;
+
+        const spec_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(spec_name);
+        const text = if (facts.recursive) recursive_capsule_suggestion else capsuleSuggestionFor(prop);
+        const suggestion = try allocator.dupe(u8, text);
+        errdefer allocator.free(suggestion);
+        try out.append(allocator, .{
+            .kind = .not_discharged,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+        });
+    }
+
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -521,4 +652,59 @@ test "levenshtein distance basics" {
     try std.testing.expectEqual(@as(usize, 1), levenshtein("abc", "ab"));
     try std.testing.expectEqual(@as(usize, 3), levenshtein("", "abc"));
     try std.testing.expectEqual(@as(usize, 2), levenshtein("idemptoent", "idempotent"));
+}
+
+fn freeDiags(allocator: std.mem.Allocator, diags: *std.ArrayList(SpecDiagnostic)) void {
+    for (diags.items) |*d| @constCast(d).deinit(allocator);
+    diags.deinit(allocator);
+}
+
+test "dischargeCapsule all-proven returns empty" {
+    const allocator = std.testing.allocator;
+    const facts = CapsuleFacts{ .total = true, .pure = true, .read_only = true, .deterministic = true };
+    const declared: [3][]const u8 = .{ "total", "pure", "deterministic" };
+    var diags = try dischargeCapsule(allocator, &declared, facts);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+test "dischargeCapsule unmet property emits ZTS500" {
+    const allocator = std.testing.allocator;
+    const facts = CapsuleFacts{ .total = true, .pure = false, .read_only = true, .deterministic = true };
+    const declared: [1][]const u8 = .{"pure"};
+    var diags = try dischargeCapsule(allocator, &declared, facts);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, diags.items[0].kind);
+    try std.testing.expectEqualStrings("pure", diags.items[0].spec_name);
+    try std.testing.expect(diags.items[0].suggestion != null);
+}
+
+test "dischargeCapsule unknown name emits ZTS502 with suggestion" {
+    const allocator = std.testing.allocator;
+    const facts = CapsuleFacts{ .total = true, .pure = true, .read_only = true, .deterministic = true };
+    const declared: [1][]const u8 = .{"read_onyl"};
+    var diags = try dischargeCapsule(allocator, &declared, facts);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.unknown_name, diags.items[0].kind);
+    try std.testing.expect(diags.items[0].suggestion != null);
+    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "read_only") != null);
+}
+
+test "dischargeCapsule recursive function fails every declared property" {
+    const allocator = std.testing.allocator;
+    const facts = CapsuleFacts{
+        .total = true,
+        .pure = true,
+        .read_only = true,
+        .deterministic = true,
+        .recursive = true,
+    };
+    const declared: [1][]const u8 = .{"pure"};
+    var diags = try dischargeCapsule(allocator, &declared, facts);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, diags.items[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "recursive") != null);
 }

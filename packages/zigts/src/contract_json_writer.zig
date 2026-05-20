@@ -671,17 +671,17 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
             .not_discharged => "not_discharged",
             .incompatible_with_import => "incompatible_with_import",
             .unknown_name => "unknown_name",
+            .missing_capsule => "missing_capsule",
         };
         try writeJsonString(writer, kind_str);
         try writer.writeAll(",\n      \"code\": ");
-        const code_str: []const u8 = switch (d.kind) {
-            .not_discharged => "ZTS500",
-            .incompatible_with_import => "ZTS501",
-            .unknown_name => "ZTS502",
-        };
-        try writeJsonString(writer, code_str);
+        try writeJsonString(writer, d.kind.code());
         try writer.writeAll(",\n      \"specName\": ");
         try writeJsonString(writer, d.spec_name);
+        if (d.function) |func| {
+            try writer.writeAll(",\n      \"function\": ");
+            try writeJsonString(writer, func);
+        }
         if (d.incompatible_module) |module_name| {
             try writer.writeAll(",\n      \"incompatibleModule\": ");
             try writeJsonString(writer, module_name);

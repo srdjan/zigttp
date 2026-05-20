@@ -342,37 +342,8 @@ pub fn writeSuccessJson(
         }
         try writer.writeByte(']');
 
-        // spec_diagnostics: per-spec discharge results (ZTS500/501/502).
-        try writer.writeAll(",\"spec_diagnostics\":[");
-        for (c.spec_diagnostics.items, 0..) |d, i| {
-            if (i > 0) try writer.writeByte(',');
-            const code: []const u8 = switch (d.kind) {
-                .not_discharged => "ZTS500",
-                .incompatible_with_import => "ZTS501",
-                .unknown_name => "ZTS502",
-            };
-            const kind_str: []const u8 = switch (d.kind) {
-                .not_discharged => "not_discharged",
-                .incompatible_with_import => "incompatible_with_import",
-                .unknown_name => "unknown_name",
-            };
-            try writer.writeAll("{\"code\":");
-            try writeJsonString(writer, code);
-            try writer.writeAll(",\"kind\":");
-            try writeJsonString(writer, kind_str);
-            try writer.writeAll(",\"spec_name\":");
-            try writeJsonString(writer, d.spec_name);
-            if (d.incompatible_module) |module_name| {
-                try writer.writeAll(",\"incompatible_module\":");
-                try writeJsonString(writer, module_name);
-            }
-            if (d.suggestion) |suggestion| {
-                try writer.writeAll(",\"suggestion\":");
-                try writeJsonString(writer, suggestion);
-            }
-            try writer.writeByte('}');
-        }
-        try writer.writeByte(']');
+        try writer.writeByte(',');
+        try writeSpecAndCapsulesJson(writer, c);
 
         if (witnesses_block_json) |wb| {
             try writer.writeAll(",\"witnesses\":");
@@ -441,36 +412,8 @@ pub fn writeErrorJson(
             if (i > 0) try writer.writeByte(',');
             try writeJsonString(writer, s);
         }
-        try writer.writeAll("],\"spec_diagnostics\":[");
-        for (c.spec_diagnostics.items, 0..) |d, i| {
-            if (i > 0) try writer.writeByte(',');
-            const code: []const u8 = switch (d.kind) {
-                .not_discharged => "ZTS500",
-                .incompatible_with_import => "ZTS501",
-                .unknown_name => "ZTS502",
-            };
-            const kind_str: []const u8 = switch (d.kind) {
-                .not_discharged => "not_discharged",
-                .incompatible_with_import => "incompatible_with_import",
-                .unknown_name => "unknown_name",
-            };
-            try writer.writeAll("{\"code\":");
-            try writeJsonString(writer, code);
-            try writer.writeAll(",\"kind\":");
-            try writeJsonString(writer, kind_str);
-            try writer.writeAll(",\"spec_name\":");
-            try writeJsonString(writer, d.spec_name);
-            if (d.incompatible_module) |module_name| {
-                try writer.writeAll(",\"incompatible_module\":");
-                try writeJsonString(writer, module_name);
-            }
-            if (d.suggestion) |suggestion| {
-                try writer.writeAll(",\"suggestion\":");
-                try writeJsonString(writer, suggestion);
-            }
-            try writer.writeByte('}');
-        }
-        try writer.writeAll("]");
+        try writer.writeAll("],");
+        try writeSpecAndCapsulesJson(writer, c);
         if (witnesses_block_json) |wb| {
             try writer.writeAll(",\"witnesses\":");
             try writer.writeAll(wb);
@@ -480,6 +423,70 @@ pub fn writeErrorJson(
     try writer.writeAll(",\"diagnostics\":");
     try writeDiagnosticsArray(writer, diagnostics);
     try writer.writeAll("}\n");
+}
+
+/// Emit the `spec_diagnostics` array: handler `Spec<...>` discharge results
+/// (ZTS500/501/502) plus helper capsule discharge and ZTS606. The `function`
+/// key is present only on capsule diagnostics, attributing them to a helper.
+fn writeSpecDiagnosticsJson(writer: anytype, items: anytype) !void {
+    try writer.writeByte('[');
+    for (items, 0..) |d, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"code\":");
+        try writeJsonString(writer, d.kind.code());
+        try writer.writeAll(",\"kind\":");
+        try writeJsonString(writer, @tagName(d.kind));
+        try writer.writeAll(",\"spec_name\":");
+        try writeJsonString(writer, d.spec_name);
+        if (d.function) |func| {
+            try writer.writeAll(",\"function\":");
+            try writeJsonString(writer, func);
+        }
+        if (d.incompatible_module) |module_name| {
+            try writer.writeAll(",\"incompatible_module\":");
+            try writeJsonString(writer, module_name);
+        }
+        if (d.suggestion) |suggestion| {
+            try writer.writeAll(",\"suggestion\":");
+            try writeJsonString(writer, suggestion);
+        }
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+}
+
+/// Emit `"spec_diagnostics":[...],"proofCapsules":[...]` with no leading
+/// separator. Shared verbatim by the success and error envelopes.
+fn writeSpecAndCapsulesJson(
+    writer: anytype,
+    c: *const handler_contract.HandlerContract,
+) !void {
+    try writer.writeAll("\"spec_diagnostics\":");
+    try writeSpecDiagnosticsJson(writer, c.spec_diagnostics.items);
+    try writer.writeAll(",\"proofCapsules\":");
+    try writeProofCapsulesJson(writer, c.function_capsules.items);
+}
+
+/// Emit the `proofCapsules` array: per-helper `Proof<...>` capsule discharge
+/// summary, so an agent can read which helpers proved which properties
+/// without re-running the compiler.
+fn writeProofCapsulesJson(writer: anytype, items: anytype) !void {
+    try writer.writeByte('[');
+    for (items, 0..) |cap, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"function\":");
+        try writeJsonString(writer, cap.function);
+        try writer.print(",\"line\":{d},\"declared\":[", .{cap.line});
+        for (cap.declared.items, 0..) |s, j| {
+            if (j > 0) try writer.writeByte(',');
+            try writeJsonString(writer, s);
+        }
+        try writer.print(
+            "],\"proven\":{{\"total\":{},\"pure\":{},\"read_only\":{},\"deterministic\":{}}},\"discharged\":{}}}",
+            .{ cap.proven_total, cap.proven_pure, cap.proven_read_only, cap.proven_deterministic, cap.discharged },
+        );
+    }
+    try writer.writeByte(']');
 }
 
 // -------------------------------------------------------------------------

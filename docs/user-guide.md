@@ -2217,6 +2217,29 @@ witness:
 - **ZTS502 - spec_unknown_name**: the declared name is not in the v1 set.
   Correct the typo or pick one of the eleven.
 
+### Proof capsules for helpers
+
+`Spec<...>` covers the handler; `Proof<T, S>` covers the helpers it calls.
+A helper annotates its return type with `Proof<T, "...">`, which resolves
+to `T` for type checking while declaring a capsule the compiler discharges
+against the helper's own body:
+
+```typescript
+import type { Proof } from "zigttp:types";
+
+function fullName(u: User): Proof<string, "pure" | "total"> {
+    return `${u.first} ${u.last}`;
+}
+```
+
+Four capsule properties ship in v1: `total` (every path returns a value),
+`pure`, `read_only`, `deterministic`. A helper that declares a capsule it
+cannot satisfy fails with ZTS500; an unknown name fails with ZTS502 - both
+carry a `function` field naming the helper. A handler-reachable helper that
+breaks a property the handler's `Spec<...>` demands, while carrying no
+capsule for it, fails with **ZTS606**. Proven helpers compose: the
+handler's property accounts for every helper it transitively calls.
+
 ### Where declared specs surface
 
 - Live HUD pane under `zigttp serve --watch --prove`: a `Specs (declared)`
@@ -2236,8 +2259,9 @@ witness:
   diagnosticMessage?, sourceLine?, sourceColumn?, sourceSnippet?}]` so
   historical entries diff without re-running the verifier. Only failed
   specs carry the diagnostic fields.
-- `zigts check --json` adds a `declared_specs` array and a `spec_diagnostics`
-  array to the proof envelope.
+- `zigts check --json` adds `declared_specs`, `spec_diagnostics`, and
+  `proofCapsules` arrays to the proof envelope. Capsule discharge failures
+  and ZTS606 appear in `spec_diagnostics` with a `function` field.
 - `zigts expert`: the `pi_specs_status` tool returns the active set and
   discharge state for a handler. Drive `pi_repair_plan` from this tool's
   output rather than from the `--goal` CLI flag - the author's `Spec<...>` is

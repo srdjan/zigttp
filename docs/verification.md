@@ -240,6 +240,22 @@ and the `pi_specs_status` agent tool. See
 [user-guide.md](user-guide.md#author-declared-specs) for the author-side
 view.
 
+### 9. Proof-Carrying Functions
+
+Spec discharge also runs per helper. A `Proof<T, "...">` annotation on a
+helper's return type is discharged against the facts effect inference
+and path-return analysis prove about that function (`function_specs.zig`),
+for the v1 capsule set `total`, `pure`, `read_only`, `deterministic`.
+Helper failures reuse ZTS500 / ZTS502, each carrying a `function`
+attribution. A helper that breaks a property the handler's `Spec<...>`
+demands while carrying no capsule for it gets **ZTS606 -
+missing_capsule**: the proof cannot compose across that call boundary.
+`computeProperties` intersects the handler's classified properties with
+its call-graph-composed effect row, so a property the handler claims
+also accounts for every helper it transitively calls. `zigts check
+--json` adds a `proofCapsules` array; see
+[zigts-expert-contract.md](internals/zigts-expert-contract.md).
+
 Counterexample-rich specs additionally feed a persistent on-disk
 corpus. Each falsifying input the analyzer materialises is written
 under `.zigttp/witnesses/<short_hash>/` so the same logical leak does

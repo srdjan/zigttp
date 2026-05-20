@@ -127,6 +127,70 @@ const ReturnStatus = enum {
     sometimes, // some paths return, some don't
 };
 
+/// Pure path-return analysis for an arbitrary function body. Returns true
+/// when every path through `body` reaches a `return`. Unlike the verifier's
+/// `stmtReturns`, this emits no diagnostics and needs no `HandlerVerifier`
+/// instance, so capsule discharge can call it per-helper to settle the
+/// `total` proof property. Expression-bodied arrows count as total: the
+/// expression is itself the return value.
+pub fn functionAlwaysReturns(ir_view: IrView, body: NodeIndex) bool {
+    const tag = ir_view.getTag(body) orelse return false;
+    return switch (tag) {
+        .block, .program => pureBlockReturns(ir_view, body) == .always,
+        .return_stmt => true,
+        .if_stmt => pureStmtReturns(ir_view, body) == .always,
+        .for_of_stmt,
+        .var_decl,
+        .expr_stmt,
+        .empty_stmt,
+        .import_decl,
+        .export_decl,
+        .function_decl,
+        .break_stmt,
+        .continue_stmt,
+        => false,
+        // Anything else is an expression-bodied arrow; the expression is the
+        // return value, so every path returns.
+        else => true,
+    };
+}
+
+fn pureStmtReturns(ir_view: IrView, node: NodeIndex) ReturnStatus {
+    const tag = ir_view.getTag(node) orelse return .never;
+    return switch (tag) {
+        .return_stmt => .always,
+        .block, .program => pureBlockReturns(ir_view, node),
+        .if_stmt => pureIfReturns(ir_view, node),
+        else => .never,
+    };
+}
+
+fn pureBlockReturns(ir_view: IrView, node: NodeIndex) ReturnStatus {
+    const block = ir_view.getBlock(node) orelse return .never;
+    if (block.stmts_count == 0) return .never;
+    var last_status: ReturnStatus = .never;
+    var i: u16 = 0;
+    while (i < block.stmts_count) : (i += 1) {
+        const stmt_idx = ir_view.getListIndex(block.stmts_start, i);
+        const status = pureStmtReturns(ir_view, stmt_idx);
+        if (status == .always) return .always;
+        last_status = status;
+    }
+    return last_status;
+}
+
+fn pureIfReturns(ir_view: IrView, node: NodeIndex) ReturnStatus {
+    const if_stmt = ir_view.getIfStmt(node) orelse return .never;
+    const then_status = pureStmtReturns(ir_view, if_stmt.then_branch);
+    if (if_stmt.else_branch == null_node) {
+        return if (then_status == .always) .sometimes else .never;
+    }
+    const else_status = pureStmtReturns(ir_view, if_stmt.else_branch);
+    if (then_status == .always and else_status == .always) return .always;
+    if (then_status == .never and else_status == .never) return .never;
+    return .sometimes;
+}
+
 /// Tracks a local binding for result checking and dead variable detection.
 const BindingState = struct {
     scope_id: ir.ScopeId, // scope that owns this binding

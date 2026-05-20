@@ -16,6 +16,7 @@ const object = @import("object.zig");
 const context = @import("context.zig");
 const module_binding = @import("module_binding.zig");
 const builtin_modules = @import("builtin_modules.zig");
+const manifest_registry_mod = @import("manifest_registry.zig");
 const bool_checker = @import("bool_checker.zig");
 
 const NodeIndex = ir.NodeIndex;
@@ -31,6 +32,10 @@ pub const EffectRow = struct {
     pure: bool = true,
     recursive: bool = false,
     has_egress: bool = false,
+    /// True when a direct or transitive call reaches an imported module export
+    /// classified `.write`. Drives the per-function `read_only` capsule
+    /// property: `read_only == !writes and !has_egress`.
+    writes: bool = false,
 
     pub const empty: EffectRow = .{};
 
@@ -41,6 +46,7 @@ pub const EffectRow = struct {
             .pure = a.pure and b.pure,
             .recursive = a.recursive or b.recursive,
             .has_egress = a.has_egress or b.has_egress,
+            .writes = a.writes or b.writes,
         };
     }
 
@@ -49,7 +55,15 @@ pub const EffectRow = struct {
             a.deterministic == b.deterministic and
             a.pure == b.pure and
             a.recursive == b.recursive and
-            a.has_egress == b.has_egress;
+            a.has_egress == b.has_egress and
+            a.writes == b.writes;
+    }
+
+    /// `read_only` capsule property: the function performs no external writes
+    /// and opens no egress. Derived, not stored, so it always tracks the
+    /// other fields.
+    pub fn readOnly(self: EffectRow) bool {
+        return !self.writes and !self.has_egress;
     }
 };
 
@@ -79,6 +93,7 @@ pub const Analyzer = struct {
     allocator: std.mem.Allocator,
     ir_view: IrView,
     atoms: ?*context.AtomTable,
+    manifest_registry: ?*const manifest_registry_mod.Registry,
     functions: std.ArrayListUnmanaged(FunctionEffect),
     /// Imported callee metadata keyed by local binding slot.
     imports: std.AutoHashMapUnmanaged(u16, ImportedFunction),
@@ -92,10 +107,20 @@ pub const Analyzer = struct {
     callee_storage: std.ArrayListUnmanaged(usize),
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) Analyzer {
+        return initWithManifestRegistry(allocator, ir_view, atoms, null);
+    }
+
+    pub fn initWithManifestRegistry(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        atoms: ?*context.AtomTable,
+        manifest_registry: ?*const manifest_registry_mod.Registry,
+    ) Analyzer {
         return .{
             .allocator = allocator,
             .ir_view = ir_view,
             .atoms = atoms,
+            .manifest_registry = manifest_registry,
             .functions = .empty,
             .imports = .empty,
             .user_fn_by_slot = .empty,
@@ -377,6 +402,9 @@ pub const Analyzer = struct {
                 for (mb.required_capabilities) |cap| row.capabilities.insert(cap);
             }
             row.pure = false;
+            // A `.write`-classified export modifies external state; that
+            // demotes the enclosing function's `read_only` capsule property.
+            if (self.importEffect(imported.module, imported.name) == .write) row.writes = true;
             if (std.mem.eql(u8, imported.module, fetch_module_specifier) and
                 std.mem.eql(u8, imported.name, fetch_sync_export))
             {
@@ -394,6 +422,13 @@ pub const Analyzer = struct {
             const gop = try seen_users.getOrPut(self.allocator, callee_idx);
             if (!gop.found_existing) try self.callee_storage.append(self.allocator, callee_idx);
         }
+    }
+
+    fn importEffect(self: *const Analyzer, module: []const u8, name: []const u8) module_binding.EffectClass {
+        if (builtin_modules.findExport(module, name)) |exp| return exp.func.effect;
+        const registry = self.manifest_registry orelse return .none;
+        const exp = registry.findExport(module, name) orelse return .none;
+        return exp.effect;
     }
 
     const ObjectProperty = struct { object: []const u8, property: []const u8 };
@@ -515,6 +550,7 @@ fn isNonDeterministic(object_name: []const u8, property_name: []const u8) bool {
 
 const testing = std.testing;
 const JsParser = @import("parser/root.zig").JsParser;
+const module_manifest = @import("module_manifest.zig");
 
 test "leaf pure function has empty effect row" {
     const allocator = testing.allocator;
@@ -655,6 +691,104 @@ test "pure helper next to non-deterministic helper stays pure" {
     try testing.expect(clean.deterministic);
     try testing.expect(clean.pure);
     try testing.expect(!rnd.deterministic);
+}
+
+test "calling a write-classified import marks the function as writing" {
+    const allocator = testing.allocator;
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { cacheSet } from "zigttp:cache";
+        \\function store(k) { return cacheSet("ns", k, "v"); }
+        \\function clean(s) { return s; }
+    ;
+    var parser = JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const store = analyzer.lookup("store") orelse return error.FunctionNotFound;
+    const clean = analyzer.lookup("clean") orelse return error.FunctionNotFound;
+    try testing.expect(store.writes);
+    try testing.expect(!store.readOnly());
+    try testing.expect(!clean.writes);
+    try testing.expect(clean.readOnly());
+}
+
+test "write effect propagates transitively to callers" {
+    const allocator = testing.allocator;
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { cacheSet } from "zigttp:cache";
+        \\function inner(k) { return cacheSet("ns", k, "v"); }
+        \\function outer(k) { return inner(k); }
+    ;
+    var parser = JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const outer = analyzer.lookup("outer") orelse return error.FunctionNotFound;
+    try testing.expect(outer.writes);
+}
+
+test "partner write-classified import marks function and callers as writing" {
+    const allocator = testing.allocator;
+
+    const manifest_json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zigttp-ext:stripe",
+        \\  "exports": [
+        \\    { "name": "chargeCard", "effect": "write", "returns": "result" }
+        \\  ]
+        \\}
+    ;
+    var manifest = try module_manifest.parse(allocator, manifest_json);
+
+    var registry = manifest_registry_mod.Registry.init(allocator);
+    defer registry.deinit();
+    registry.register(manifest) catch |err| {
+        manifest.deinit(allocator);
+        return err;
+    };
+
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { chargeCard } from "zigttp-ext:stripe";
+        \\function charge(tok) { return chargeCard(tok); }
+        \\function wrapper(tok) { return charge(tok); }
+        \\function clean(tok) { return tok; }
+    ;
+    var parser = JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.initWithManifestRegistry(allocator, view, &atoms, &registry);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const charge = analyzer.lookup("charge") orelse return error.FunctionNotFound;
+    const wrapper = analyzer.lookup("wrapper") orelse return error.FunctionNotFound;
+    const clean = analyzer.lookup("clean") orelse return error.FunctionNotFound;
+
+    try testing.expect(charge.writes);
+    try testing.expect(!charge.readOnly());
+    try testing.expect(wrapper.writes);
+    try testing.expect(!wrapper.readOnly());
+    try testing.expect(!clean.writes);
+    try testing.expect(clean.readOnly());
 }
 
 test "empty program is a no-op" {

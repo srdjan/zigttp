@@ -325,6 +325,26 @@ const property_meta = [_]struct {
 };
 
 // ---------------------------------------------------------------------------
+// Proof-capsule rules (ZTS606) - function-level Proof<...> capsule discharge
+// ---------------------------------------------------------------------------
+
+const capsule_meta = [_]struct {
+    name: []const u8,
+    code: []const u8,
+    description: []const u8,
+    example: ?[]const u8,
+    help: []const u8,
+}{
+    .{
+        .name = "missing_proof_capsule",
+        .code = "ZTS606",
+        .description = "A handler-reachable helper breaks a capsule property the handler's Spec demands and carries no Proof<...> capsule declaring it.",
+        .example = "function load(): User { return cacheSet('ns', 'k', 'v'); } function handler(req: Request): Response & Spec<\"read_only\"> { return Response.json(load()); }",
+        .help = "Annotate the helper's return type with `Proof<T, \"...\">` and satisfy the property, or inline the helper into the handler.",
+    },
+};
+
+// ---------------------------------------------------------------------------
 // Unified rule table (comptime-assembled)
 // ---------------------------------------------------------------------------
 
@@ -340,7 +360,7 @@ fn strictName(kind: strict_checker.DiagnosticKind) []const u8 {
     return @tagName(kind);
 }
 
-const total_count = verifier_meta.len + strict_meta.len + policy_meta.len + property_meta.len;
+const total_count = verifier_meta.len + strict_meta.len + capsule_meta.len + policy_meta.len + property_meta.len;
 
 pub const all_rules: [total_count]RuleEntry = blk: {
     var rules: [total_count]RuleEntry = undefined;
@@ -366,6 +386,18 @@ pub const all_rules: [total_count]RuleEntry = blk: {
             .description = s.description,
             .example = s.example,
             .help = s.help,
+        };
+        i += 1;
+    }
+
+    for (capsule_meta) |c| {
+        rules[i] = .{
+            .name = c.name,
+            .code = c.code,
+            .category = .verifier,
+            .description = c.description,
+            .example = c.example,
+            .help = c.help,
         };
         i += 1;
     }
