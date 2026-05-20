@@ -822,7 +822,7 @@ pub fn runCheckOnlyFromSource(
             .enable_comptime = true,
             .comptime_env = .{},
         }) catch |err| {
-            std.debug.print("TypeScript strip error: {}\n", .{err});
+            if (!builtin.is_test) std.debug.print("TypeScript strip error: {}\n", .{err});
             result.parse_errors = 1;
             return result;
         };
@@ -846,7 +846,7 @@ pub fn runCheckOnlyFromSource(
             for (errors) |parse_error| {
                 result.json_diagnostics.append(allocator, json_diag.fromParseError(parse_error, handler_path)) catch {};
             }
-        } else {
+        } else if (!builtin.is_test) {
             for (errors) |parse_error| {
                 std.debug.print("{s}:{}:{}: {s}\n", .{
                     handler_path,
@@ -911,7 +911,7 @@ pub fn runCheckOnlyFromSource(
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
                 resolved.formatBoolDiagnostics(source_to_parse, &aw.writer) catch {};
                 buf = aw.toArrayList();
-                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+                if (!builtin.is_test and buf.items.len > 0) std.debug.print("{s}", .{buf.items});
             }
         }
         if (result.bool_errors > 0) {
@@ -936,7 +936,7 @@ pub fn runCheckOnlyFromSource(
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
                 resolved.formatTypeDiagnostics(source_to_parse, &aw.writer) catch {};
                 buf = aw.toArrayList();
-                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+                if (!builtin.is_test and buf.items.len > 0) std.debug.print("{s}", .{buf.items});
             }
         }
         if (result.type_errors > 0) {
@@ -961,7 +961,7 @@ pub fn runCheckOnlyFromSource(
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
                 resolved.formatStrictDiagnostics(source_to_parse, &aw.writer) catch {};
                 buf = aw.toArrayList();
-                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+                if (!builtin.is_test and buf.items.len > 0) std.debug.print("{s}", .{buf.items});
             }
         }
         if (result.strict_errors > 0) {
@@ -994,7 +994,7 @@ pub fn runCheckOnlyFromSource(
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
                 checked.verifier.formatDiagnostics(source_to_parse, &aw.writer) catch {};
                 buf = aw.toArrayList();
-                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+                if (!builtin.is_test and buf.items.len > 0) std.debug.print("{s}", .{buf.items});
             }
         }
 
@@ -3438,6 +3438,29 @@ test "runCheckOnly keeps mirrored properties aligned with finalized fault covera
 
     try std.testing.expect(finalized.fault_covered);
     try std.testing.expectEqual(finalized.fault_covered, mirrored.fault_covered);
+}
+
+test "runCheckOnlyFromSource keeps diagnostics off stderr in test mode" {
+    // Regression guard: every non-JSON std.debug.print diagnostic in
+    // runCheckOnlyFromSource must stay gated behind !builtin.is_test.
+    // The Zig build runner flags any test that writes to stderr, so a
+    // dropped gate here turns a passing test into a build failure
+    // (this is exactly how the strict-diagnostic leak was caught).
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const path = req.path;
+        \\  const data = fetchSync(`https://example.internal${path}`);
+        \\  return Response.json(data);
+        \\}
+    ;
+
+    // json_mode = false routes diagnostics through the std.debug.print path.
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.ts", null, false, null, false);
+    defer result.deinit(std.testing.allocator);
+
+    // Strict mode (default) rejects the implicit-unknown fetchSync result.
+    try std.testing.expect(result.strict_errors > 0);
+    try std.testing.expect(result.totalErrors() > 0);
 }
 
 test "compileHandler honors a registered partner manifest" {
