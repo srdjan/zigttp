@@ -76,6 +76,12 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll("    \"capabilityHash\": ");
     try json_utils.writeJsonHex(writer, contract.capabilities.hash);
     try writer.writeAll(",\n");
+    try writer.writeAll("    \"declaredBudget\": [");
+    for (contract.capability_budget.slice(), 0..) |cap, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeJsonString(writer, @tagName(cap));
+    }
+    try writer.writeAll("],\n");
     try writer.writeAll("    \"policyHash\": ");
     try json_utils.writeJsonHex(writer, contract.policy_hash);
     try writer.writeAll(",\n");
@@ -667,13 +673,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         if (i > 0) try writer.writeAll(", ");
         try writer.writeAll("\n    {");
         try writer.writeAll("\n      \"kind\": ");
-        const kind_str: []const u8 = switch (d.kind) {
-            .not_discharged => "not_discharged",
-            .incompatible_with_import => "incompatible_with_import",
-            .unknown_name => "unknown_name",
-            .missing_capsule => "missing_capsule",
-        };
-        try writeJsonString(writer, kind_str);
+        try writeJsonString(writer, @tagName(d.kind));
         try writer.writeAll(",\n      \"code\": ");
         try writeJsonString(writer, d.kind.code());
         try writer.writeAll(",\n      \"specName\": ");

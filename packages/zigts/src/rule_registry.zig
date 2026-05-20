@@ -342,6 +342,55 @@ const capsule_meta = [_]struct {
         .example = "function load(): User { return cacheSet('ns', 'k', 'v'); } function handler(req: Request): Response & Spec<\"read_only\"> { return Response.json(load()); }",
         .help = "Annotate the helper's return type with `Proof<T, \"...\">` and satisfy the property, or inline the helper into the handler.",
     },
+    .{
+        .name = "effects_undeclared_capability",
+        .code = "ZTS503",
+        .description = "A function reaches a capability that its declared Effects<...> ceiling does not list.",
+        .example = "function load(): Effects<string, \"env\"> { return sha256('x'); } // sha256 needs crypto",
+        .help = "Add the capability to the Effects<...> ceiling, or remove the call that reaches it.",
+    },
+    .{
+        .name = "effects_unknown_capability",
+        .code = "ZTS504",
+        .description = "An Effects<...> ceiling names a capability that is not a runtime capability.",
+        .example = "function load(): Effects<string, \"databse\"> { return env('X'); }",
+        .help = "Use one of: env, clock, random, crypto, stderr, runtime_callback, sqlite, filesystem, network, policy_check.",
+    },
+    .{
+        .name = "effects_over_declared",
+        .code = "ZTS505",
+        .description = "An Effects<...> ceiling names a capability the function never reaches. Advisory; never fails a build.",
+        .example = "function pure(s: string): Effects<string, \"crypto\"> { return s; }",
+        .help = "Remove the unused capability from the Effects<...> ceiling to keep it least-privilege.",
+    },
+    .{
+        .name = "handler_budget_exceeded",
+        .code = "ZTS506",
+        .description = "The handler reaches a capability directly that is outside its declared Effects<...> budget.",
+        .example = "function handler(req: Request): Effects<Response, \"env\"> { return Response.json({ t: Date.now() }); }",
+        .help = "Add the capability to the handler's Effects<...> budget, or remove the call that reaches it.",
+    },
+    .{
+        .name = "missing_effects_capsule",
+        .code = "ZTS507",
+        .description = "An exported helper carries no Effects<...> capsule. Emitted only under the opt-in docs mode.",
+        .example = "export function load(s: string): string { return env(s); }",
+        .help = "Annotate the exported helper's return type with `Effects<T, \"...\">` to document its capability ceiling.",
+    },
+    .{
+        .name = "missing_proof_capsule_export",
+        .code = "ZTS508",
+        .description = "An exported helper carries no Proof<...> capsule. Emitted only under the opt-in docs mode.",
+        .example = "export function clean(s: string): string { return s; }",
+        .help = "Annotate the exported helper's return type with `Proof<T, \"...\">` to document its proven properties.",
+    },
+    .{
+        .name = "helper_exceeds_handler_budget",
+        .code = "ZTS607",
+        .description = "A handler-reachable helper reaches a capability outside the handler's declared Effects<...> budget.",
+        .example = "function load(): string { return sha256('x'); } function handler(req: Request): Effects<Response, \"env\"> { return Response.text(load()); }",
+        .help = "Add the capability to the handler's Effects<...> budget, or remove the call from the reachable helper.",
+    },
 };
 
 // ---------------------------------------------------------------------------

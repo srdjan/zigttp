@@ -1732,10 +1732,12 @@ fn parseSpecDiagnostics(
         var spec_name: ?[]const u8 = null;
         var incompatible_module: ?[]const u8 = null;
         var suggestion: ?[]const u8 = null;
+        var function: ?[]const u8 = null;
         errdefer {
             if (spec_name) |s| allocator.free(s);
             if (incompatible_module) |s| allocator.free(s);
             if (suggestion) |s| allocator.free(s);
+            if (function) |s| allocator.free(s);
         }
 
         while (true) {
@@ -1763,6 +1765,8 @@ fn parseSpecDiagnostics(
                 incompatible_module = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
             } else if (std.mem.eql(u8, key, "suggestion")) {
                 suggestion = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "function")) {
+                function = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
             } else {
                 parser.skipValue();
             }
@@ -1775,24 +1779,29 @@ fn parseSpecDiagnostics(
             .spec_name = owned_name,
             .incompatible_module = incompatible_module,
             .suggestion = suggestion,
+            .function = function,
         });
         spec_name = null;
         incompatible_module = null;
         suggestion = null;
+        function = null;
     }
 }
 
 fn specDiagnosticKindFromString(value: []const u8) ?SpecDiagnostic.Kind {
-    if (std.mem.eql(u8, value, "not_discharged")) return .not_discharged;
-    if (std.mem.eql(u8, value, "incompatible_with_import")) return .incompatible_with_import;
-    if (std.mem.eql(u8, value, "unknown_name")) return .unknown_name;
+    inline for (std.meta.fields(SpecDiagnostic.Kind)) |field| {
+        if (std.mem.eql(u8, value, field.name)) {
+            return @field(SpecDiagnostic.Kind, field.name);
+        }
+    }
     return null;
 }
 
 fn specDiagnosticKindFromCode(value: []const u8) ?SpecDiagnostic.Kind {
-    if (std.mem.eql(u8, value, "ZTS500")) return .not_discharged;
-    if (std.mem.eql(u8, value, "ZTS501")) return .incompatible_with_import;
-    if (std.mem.eql(u8, value, "ZTS502")) return .unknown_name;
+    inline for (std.meta.fields(SpecDiagnostic.Kind)) |field| {
+        const kind = @field(SpecDiagnostic.Kind, field.name);
+        if (std.mem.eql(u8, value, kind.code())) return kind;
+    }
     return null;
 }
 

@@ -48,6 +48,7 @@ pub const generateTypeDefs = check_mod.generateTypeDefs;
 const persistFlowWitnesses = check_mod.persistFlowWitnesses;
 const syncCheckResultProperties = check_mod.syncCheckResultProperties;
 const appendSpecDiagnosticsJson = check_mod.appendSpecDiagnosticsJson;
+pub const appendExportCapsuleDiagnostics = check_mod.appendExportCapsuleDiagnostics;
 const refreshSpecDiagnostics = check_mod.refreshSpecDiagnostics;
 
 const buildtime_mod = @import("precompile_buildtime.zig");
@@ -3356,6 +3357,187 @@ test "buildTestContractForSource extracts durable workflow contract" {
     try std.testing.expect(saw_wait_signal);
     try std.testing.expect(saw_return);
     try std.testing.expect(contract.durable.workflow.edges.items.len >= 3);
+}
+
+test "runCheckOnlyFromSource: helper reaching outside its Effects ceiling gets ZTS503" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zigttp:crypto";
+        \\
+        \\function digest(s: string): Effects<string, "env"> {
+        \\  sha256(s);
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.text(digest("x"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "ceiling.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    var saw_503 = false;
+    var saw_505 = false;
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind == .effect_undeclared and std.mem.eql(u8, d.spec_name, "crypto")) saw_503 = true;
+        if (d.kind == .effect_over_declared and std.mem.eql(u8, d.spec_name, "env")) saw_505 = true;
+    }
+    try std.testing.expect(saw_503);
+    try std.testing.expect(saw_505);
+    try std.testing.expect(contract.function_effect_capsules.items.len >= 1);
+}
+
+test "runCheckOnlyFromSource: helper exceeding handler Effects budget gets ZTS607" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zigttp:crypto";
+        \\
+        \\function digest(s: string): string {
+        \\  sha256(s);
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Effects<Response, "env"> {
+        \\  return Response.text(digest("x"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "budget.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    var saw_607 = false;
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind == .helper_budget_exceeded) {
+            saw_607 = true;
+            try std.testing.expectEqualStrings("crypto", d.spec_name);
+            try std.testing.expectEqualStrings("digest", d.function.?);
+        }
+    }
+    try std.testing.expect(saw_607);
+    // The handler's declared budget is recorded on the contract.
+    try std.testing.expectEqual(@as(u8, 1), contract.capability_budget.len);
+}
+
+test "runCheckOnlyFromSource: composed Spec and Effects preserves handler budget diagnostics" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zigttp:crypto";
+        \\
+        \\function handler(req: Request): Effects<Response, "env"> & Spec<"state_isolated"> {
+        \\  return Response.text(sha256("x"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "composed-budget.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    var saw_506 = false;
+    var saw_json_506 = false;
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind == .budget_exceeded and std.mem.eql(u8, d.spec_name, "crypto")) {
+            saw_506 = true;
+            try std.testing.expect(d.function == null);
+        }
+    }
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS506")) saw_json_506 = true;
+    }
+    try std.testing.expect(saw_506);
+    try std.testing.expect(saw_json_506);
+}
+
+test "runCheckOnlyFromSource: missing capsule ignores unreachable helpers" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function unused(): string {
+        \\  return String(Date.now());
+        \\}
+        \\
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "unreachable-capsule.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind == .missing_capsule) return error.TestUnexpectedResult;
+    }
+}
+
+test "runCheckOnlyFromSource: handler Effects budget covering reached capabilities is clean" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zigttp:crypto";
+        \\
+        \\function handler(req: Request): Effects<Response, "crypto"> {
+        \\  return Response.text(sha256("x"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "ok.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    for (contract.spec_diagnostics.items) |d| {
+        try std.testing.expect(d.kind != .budget_exceeded);
+        try std.testing.expect(d.kind != .helper_budget_exceeded);
+    }
+}
+
+test "runCheckOnlyFromSource: a helper with no Effects ceiling is never flagged" {
+    const allocator = std.testing.allocator;
+    // `digest` reaches crypto but declares no `Effects<...>` ceiling, and the
+    // handler declares no budget. Capsules are opt-in: nothing is flagged.
+    const source =
+        \\import { sha256 } from "zigttp:crypto";
+        \\
+        \\function digest(s: string): string {
+        \\  sha256(s);
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.text(digest("x"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "noceiling.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    for (contract.spec_diagnostics.items) |d| {
+        try std.testing.expect(d.kind != .effect_undeclared);
+        try std.testing.expect(d.kind != .effect_over_declared);
+        try std.testing.expect(d.kind != .budget_exceeded);
+        try std.testing.expect(d.kind != .helper_budget_exceeded);
+    }
+}
+
+test "appendExportCapsuleDiagnostics: exported helper without capsules gets ZTS507/ZTS508" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function clean(s: string): string {
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.text(clean("x"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "docs.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    appendExportCapsuleDiagnostics(allocator, &result, "docs.ts");
+
+    var saw_507 = false;
+    var saw_508 = false;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS507")) saw_507 = true;
+        if (std.mem.eql(u8, d.code, "ZTS508")) saw_508 = true;
+    }
+    try std.testing.expect(saw_507);
+    try std.testing.expect(saw_508);
 }
 
 test "buildTestContractForSource marks durable workflow partial for dynamic signal name" {

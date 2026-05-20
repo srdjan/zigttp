@@ -129,6 +129,7 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var emit_contract = false;
     var emit_types = false;
     var json_mode = false;
+    var require_export_capsules = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -155,6 +156,10 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         }
         if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--require-export-capsules")) {
+            require_export_capsules = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--help")) {
@@ -184,6 +189,12 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     var result = try precompile.runCheckOnly(allocator, target, sql_schema_path, json_mode, system_path);
     defer result.deinit(allocator);
+
+    // Opt-in docs mode: ask exported helpers to carry explicit capsules
+    // (ZTS507 / ZTS508). Warning-only; never changes the exit code.
+    if (require_export_capsules) {
+        precompile.appendExportCapsuleDiagnostics(allocator, &result, target);
+    }
 
     if (json_mode) {
         // JSON output to stdout
@@ -233,6 +244,13 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         card_buf = card_aw.toArrayList();
         if (card_buf.items.len > 0) {
             _ = std.c.write(std.c.STDERR_FILENO, card_buf.items.ptr, card_buf.items.len);
+        }
+    }
+
+    if (require_export_capsules) {
+        for (result.json_diagnostics.items) |d| {
+            if (!std.mem.eql(u8, d.code, "ZTS507") and !std.mem.eql(u8, d.code, "ZTS508")) continue;
+            std.debug.print("  {s} (warning) {s}:{d}  {s}\n", .{ d.code, d.file, d.line, d.message });
         }
     }
 
@@ -460,6 +478,9 @@ fn printCheckHelp() void {
         \\  --types          Emit zigttp.d.ts type definitions for IDE autocomplete
         \\  --sql-schema P   SQLite schema file for query validation
         \\  --system P       system.json for internal serviceCall typing
+        \\  --require-export-capsules
+        \\                   Docs mode: warn (ZTS507/ZTS508) when an exported
+        \\                   helper carries no Effects<...> / Proof<...> capsule
         \\
         \\If no handler is specified, uses the entry from zigttp.json.
         \\

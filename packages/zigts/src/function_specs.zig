@@ -27,8 +27,9 @@ const CapsuleFacts = spec_discharge.CapsuleFacts;
 /// The reserved handler entry point - discharged via `Spec<...>` elsewhere.
 const handler_fn_name = "handler";
 
-/// One helper's proof capsule: the declared properties, the facts the
-/// compiler proved, and the per-function discharge diagnostics.
+/// One helper's capsules: the declared `Proof<...>` properties and
+/// `Effects<...>` capability ceiling, the facts the compiler proved, and the
+/// per-function discharge diagnostics for each.
 pub const Capsule = struct {
     /// Owned copy of the function name.
     name: []const u8,
@@ -39,12 +40,34 @@ pub const Capsule = struct {
     declared: std.ArrayList([]const u8) = .empty,
     /// Facts proved about this function by effect inference + return analysis.
     proven: CapsuleFacts,
-    /// ZTS500 / ZTS502 for this function's own declared capsule.
+    /// ZTS500 / ZTS502 for this function's own declared `Proof<...>` capsule.
     diagnostics: std.ArrayList(SpecDiagnostic) = .empty,
+    /// Owned, de-duplicated capability names declared via `Effects<...>`.
+    /// Empty when the helper carries no `Effects<...>` annotation.
+    effect_declared: std.ArrayList([]const u8) = .empty,
+    /// The capability set effect inference computed for this function.
+    inferred_caps: spec_discharge.CapabilitySet = spec_discharge.CapabilitySet.initEmpty(),
+    /// ZTS503 / ZTS504 / ZTS505 for this function's `Effects<...>` ceiling.
+    effect_diagnostics: std.ArrayList(SpecDiagnostic) = .empty,
+    /// True when the helper is exported. The opt-in docs mode asks exported
+    /// helpers to carry explicit `Proof<...>` / `Effects<...>` capsules.
+    exported: bool = false,
 
-    /// True when the function declared a capsule and every property held.
+    /// True when the function declared a `Proof<...>` capsule and every
+    /// property held.
     pub fn discharged(self: *const Capsule) bool {
         return self.declared.items.len > 0 and self.diagnostics.items.len == 0;
+    }
+
+    /// True when the function declared an `Effects<...>` ceiling and no
+    /// error-severity diagnostic fired against it. A `ZTS505` over-declaration
+    /// warning does not break the ceiling.
+    pub fn effectDischarged(self: *const Capsule) bool {
+        if (self.effect_declared.items.len == 0) return false;
+        for (self.effect_diagnostics.items) |d| {
+            if (d.kind.severity() == .err) return false;
+        }
+        return true;
     }
 
     pub fn deinit(self: *Capsule, allocator: std.mem.Allocator) void {
@@ -53,6 +76,10 @@ pub const Capsule = struct {
         self.declared.deinit(allocator);
         for (self.diagnostics.items) |*d| @constCast(d).deinit(allocator);
         self.diagnostics.deinit(allocator);
+        for (self.effect_declared.items) |s| allocator.free(s);
+        self.effect_declared.deinit(allocator);
+        for (self.effect_diagnostics.items) |*d| @constCast(d).deinit(allocator);
+        self.effect_diagnostics.deinit(allocator);
     }
 };
 
@@ -105,12 +132,29 @@ pub fn discharge(
             for (declared.items) |s| allocator.free(s);
             declared.deinit(allocator);
         }
-        try collectDeclared(allocator, env, line, &declared);
+        try collectDeclared(allocator, env, line, &declared, false);
 
         var diagnostics = try spec_discharge.dischargeCapsule(allocator, declared.items, facts);
         errdefer {
             for (diagnostics.items) |*d| @constCast(d).deinit(allocator);
             diagnostics.deinit(allocator);
+        }
+
+        var effect_declared: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (effect_declared.items) |s| allocator.free(s);
+            effect_declared.deinit(allocator);
+        }
+        try collectDeclared(allocator, env, line, &effect_declared, true);
+
+        var effect_diagnostics = try spec_discharge.dischargeEffects(
+            allocator,
+            effect_declared.items,
+            fe.row.capabilities,
+        );
+        errdefer {
+            for (effect_diagnostics.items) |*d| @constCast(d).deinit(allocator);
+            effect_diagnostics.deinit(allocator);
         }
 
         const owned_name = try allocator.dupe(u8, fe.name);
@@ -122,19 +166,25 @@ pub fn discharge(
             .declared = declared,
             .proven = facts,
             .diagnostics = diagnostics,
+            .effect_declared = effect_declared,
+            .inferred_caps = fe.row.capabilities,
+            .effect_diagnostics = effect_diagnostics,
+            .exported = fe.exported,
         });
     }
 
     return table;
 }
 
-/// Read the declared capsule property names from a function's return-type
-/// annotation. Owned, de-duplicated copies are appended to `out`.
+/// Read the declared capsule property names (`Proof<...>`) or capability
+/// names (`Effects<...>`, when `effects` is true) from a function's
+/// return-type annotation. Owned, de-duplicated copies are appended to `out`.
 fn collectDeclared(
     allocator: std.mem.Allocator,
     env: ?*const TypeEnv,
     line: u32,
     out: *std.ArrayList([]const u8),
+    comptime effects: bool,
 ) !void {
     const e = env orelse return;
     if (line == 0) return;
@@ -143,7 +193,11 @@ fn collectDeclared(
 
     var raw: std.ArrayListUnmanaged([]const u8) = .empty;
     defer raw.deinit(allocator);
-    e.extractSpecMembers(sig.return_type, &raw);
+    if (effects) {
+        e.extractEffectMembers(sig.return_type, &raw);
+    } else {
+        e.extractSpecMembers(sig.return_type, &raw);
+    }
 
     for (raw.items) |name| {
         if (json_utils.containsString(out.items, name)) continue;

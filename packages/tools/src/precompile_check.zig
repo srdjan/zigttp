@@ -48,7 +48,7 @@ pub const CheckResult = struct {
     }
 
     pub fn totalWarnings(self: *const CheckResult) u32 {
-        return self.bool_warnings + self.strict_warnings + self.verify_warnings + self.flow_warnings;
+        return self.bool_warnings + self.strict_warnings + self.verify_warnings + self.flow_warnings + self.specWarnings();
     }
 
     pub fn deinit(self: *CheckResult, allocator: std.mem.Allocator) void {
@@ -56,9 +56,28 @@ pub const CheckResult = struct {
         self.json_diagnostics.deinit(allocator);
     }
 
+    /// Error-severity spec diagnostics: handler Spec ZTS500/501/502, helper
+    /// capsule ZTS500/502, ZTS606, and the error-level Effects diagnostics
+    /// (ZTS503/504/506/607). Warning-level entries are excluded so an
+    /// over-declared `Effects<...>` ceiling never fails a build.
     fn specErrors(self: *const CheckResult) u32 {
-        if (self.contract) |*contract| return @intCast(contract.spec_diagnostics.items.len);
-        return 0;
+        const contract = if (self.contract) |*c| c else return 0;
+        var n: u32 = 0;
+        for (contract.spec_diagnostics.items) |d| {
+            if (d.kind.severity() == .err) n += 1;
+        }
+        return n;
+    }
+
+    /// Warning-severity spec diagnostics: ZTS505 over-declaration and the
+    /// docs-mode ZTS507/508 missing-capsule prompts.
+    fn specWarnings(self: *const CheckResult) u32 {
+        const contract = if (self.contract) |*c| c else return 0;
+        var n: u32 = 0;
+        for (contract.spec_diagnostics.items) |d| {
+            if (d.kind.severity() == .warn) n += 1;
+        }
+        return n;
     }
 };
 
@@ -136,15 +155,58 @@ pub fn appendSpecDiagnosticsJson(
             .incompatible_with_import => "declared Spec is incompatible with imported module",
             .unknown_name => "declared Spec name is not recognized",
             .missing_capsule => "helper breaks a handler-demanded property and carries no Proof<...> capsule",
+            .effect_undeclared => "function reaches a capability outside its declared Effects<...> ceiling",
+            .effect_unknown_capability => "Effects<...> names an unknown capability",
+            .effect_over_declared => "declared capability is never reached by the function",
+            .budget_exceeded => "handler reaches a capability outside its declared Effects<...> budget",
+            .helper_budget_exceeded => "helper reaches a capability outside the handler's Effects<...> budget",
+            .missing_effects_capsule => "exported helper carries no Effects<...> capsule",
+            .missing_proof_capsule_export => "exported helper carries no Proof<...> capsule",
         };
         result.json_diagnostics.append(allocator, .{
             .code = code,
-            .severity = "error",
+            .severity = if (diag.kind.severity() == .warn) "warning" else "error",
             .message = message,
             .file = handler_path,
             .line = contract.handler.line,
             .column = @intCast(@min(contract.handler.column, std.math.maxInt(u16))),
             .suggestion = diag.suggestion,
+        }) catch {};
+    }
+}
+
+/// Opt-in docs mode: ask every exported helper to carry an explicit
+/// `Effects<...>` capsule (ZTS507) and `Proof<...>` capsule (ZTS508). Off by
+/// default and warning-only - it never fails a build. Diagnostics are
+/// appended to `result.json_diagnostics`; non-exported helpers are untouched.
+pub fn appendExportCapsuleDiagnostics(
+    allocator: std.mem.Allocator,
+    result: *CheckResult,
+    handler_path: []const u8,
+) void {
+    const contract = if (result.contract) |*c| c else return;
+    for (contract.function_effect_capsules.items) |cap| {
+        if (!cap.exported or cap.declared.items.len > 0) continue;
+        result.json_diagnostics.append(allocator, .{
+            .code = "ZTS507",
+            .severity = "warning",
+            .message = "exported helper carries no Effects<...> capsule",
+            .file = handler_path,
+            .line = cap.line,
+            .column = 0,
+            .suggestion = "annotate the exported helper's return type with `Effects<T, \"...\">` to document its capability ceiling.",
+        }) catch {};
+    }
+    for (contract.function_capsules.items) |cap| {
+        if (!cap.exported or cap.declared.items.len > 0) continue;
+        result.json_diagnostics.append(allocator, .{
+            .code = "ZTS508",
+            .severity = "warning",
+            .message = "exported helper carries no Proof<...> capsule",
+            .file = handler_path,
+            .line = cap.line,
+            .column = 0,
+            .suggestion = "annotate the exported helper's return type with `Proof<T, \"...\">` to document its proven properties.",
         }) catch {};
     }
 }
@@ -156,10 +218,12 @@ pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult
     // Re-discharge the handler's Spec<...> obligations against the freshly
     // classified properties. Capsule diagnostics - those carrying a
     // `function` - come from proof-carrying-function discharge, which this
-    // refresh does not re-run; they are cloned across so the helper
-    // ZTS500/ZTS502 and ZTS606 entries survive. The clone (rather than a
-    // move) keeps `contract.spec_diagnostics` intact until the swap, so an
-    // OOM mid-loop leaves both lists individually consistent.
+    // refresh does not re-run; handler-level Effects diagnostics also come
+    // from the capability-budget pass. Clone them across so helper
+    // ZTS500/ZTS502/ZTS606 and handler ZTS504/ZTS506 entries survive. The
+    // clone (rather than a move) keeps `contract.spec_diagnostics` intact
+    // until the swap, so an OOM mid-loop leaves both lists individually
+    // consistent.
     var refreshed = try zigts.spec_discharge.dischargeSpecs(
         allocator,
         contract.declared_specs.items,
@@ -171,13 +235,24 @@ pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult
         refreshed.deinit(allocator);
     }
     for (contract.spec_diagnostics.items) |*diag| {
-        if (diag.function != null) {
+        if (preserveDuringSpecRefresh(diag.*)) {
             try refreshed.append(allocator, try diag.clone(allocator));
         }
     }
     for (contract.spec_diagnostics.items) |*diag| diag.deinit(allocator);
     contract.spec_diagnostics.deinit(allocator);
     contract.spec_diagnostics = refreshed;
+}
+
+fn preserveDuringSpecRefresh(diag: handler_contract.SpecDiagnostic) bool {
+    if (diag.function != null) return true;
+    return switch (diag.kind) {
+        .not_discharged,
+        .incompatible_with_import,
+        .unknown_name,
+        => false,
+        else => true,
+    };
 }
 
 /// Format a structured proof card showing what the compiler proved.

@@ -28,6 +28,12 @@ const TypeMapEntry = type_map_mod.TypeMapEntry;
 /// Sized to be unmistakable for any user-authored field.
 pub const spec_marker_field = "__zigttp_spec__";
 
+/// The field name marking the body of an instantiated `Effects<...>` generic
+/// alias. Distinct from `spec_marker_field` so a return type carrying both
+/// (`Effects<Response, "env"> & Spec<"deterministic">`) keeps capability
+/// names and proof-property names in separate extraction passes.
+pub const effect_marker_field = "__zigttp_effect__";
+
 // ---------------------------------------------------------------------------
 // Generic scope
 // ---------------------------------------------------------------------------
@@ -132,7 +138,10 @@ pub const TypeEnv = struct {
     /// (last-write-wins matches the existing populateFromTypeMap pattern).
     pub fn registerBuiltins(self: *TypeEnv) void {
         self.registerSpecBuiltin();
-        self.registerProofBuiltin();
+        // Proof<T, S> and Effects<T, S> share the capsule shape
+        // `T & { <marker>: S }`; they differ only in the marker field.
+        self.registerCapsuleAlias("Proof", spec_marker_field);
+        self.registerCapsuleAlias("Effects", effect_marker_field);
     }
 
     /// Spec<S>: phantom marker carrying the declared spec name set as S.
@@ -168,19 +177,18 @@ pub const TypeEnv = struct {
         self.generic_aliases.put(self.allocator, owned_name, alias) catch {};
     }
 
-    /// Proof<T, S>: a function-level proof capsule. Registered as a two-param
-    /// generic alias whose body is `T & { __zigttp_spec__: S }`. After
-    /// instantiation, the underlying return type `T` survives for type
-    /// checking while the phantom marker carries the declared capsule
-    /// properties as `S`. Because the body is an intersection bearing the
-    /// same `spec_marker_field` as `Spec<S>`, `extractSpecMembers` recovers
-    /// the capsule property set with no extra extraction logic - a helper's
-    /// `Proof<...>` and a handler's `Spec<...>` discharge through one path.
-    fn registerProofBuiltin(self: *TypeEnv) void {
+    /// Register a two-param capsule alias `Name<T, S>` whose body is
+    /// `T & { <marker>: S }` - the shape shared by `Proof<T, S>` (marker
+    /// `__zigttp_spec__`) and `Effects<T, S>` (marker `__zigttp_effect__`).
+    /// After instantiation the underlying return type `T` survives for type
+    /// checking while the phantom marker record carries `S`. Distinct marker
+    /// fields let a return type carry both capsules and have each extraction
+    /// (`extractSpecMembers` / `extractEffectMembers`) recover only its own.
+    fn registerCapsuleAlias(self: *TypeEnv, alias_name: []const u8, marker_field: []const u8) void {
         self.pushGenericScope();
         const t_param = self.addGenericParam("T");
         const s_param = self.addGenericParam("S");
-        const field_name = self.pool.addName(self.allocator, spec_marker_field);
+        const field_name = self.pool.addName(self.allocator, marker_field);
         const marker = self.pool.addRecord(self.allocator, &.{
             .{
                 .name_start = field_name.start,
@@ -194,7 +202,7 @@ pub const TypeEnv = struct {
 
         if (body == null_type_idx) return;
 
-        const owned_name = self.internName("Proof");
+        const owned_name = self.internName(alias_name);
         if (owned_name.len == 0) return;
         const owned_t = self.internName("T");
         const owned_s = self.internName("S");
@@ -441,11 +449,19 @@ pub const TypeEnv = struct {
                 if (base_name.len == 0) return idx;
                 const alias = self.generic_aliases.get(base_name) orelse return idx;
                 if (info.args.len != alias.param_count) return idx;
+                // Instantiate nested generic-app arguments first, so a composed
+                // type like `Proof<Effects<string, "env">, "pure">` carries
+                // both the proof marker and the effect marker.
+                var inst_args: [8]TypeIndex = undefined;
+                const argc = @min(info.args.len, inst_args.len);
+                for (info.args[0..argc], 0..) |a, i| {
+                    inst_args[i] = self.tryInstantiateGenericApp(a);
+                }
                 return self.pool.instantiate(
                     self.allocator,
                     alias.body,
                     alias.param_names[0..alias.param_count],
-                    info.args,
+                    inst_args[0..argc],
                     0,
                 );
             },
@@ -518,13 +534,26 @@ pub const TypeEnv = struct {
         idx: TypeIndex,
         out: *std.ArrayListUnmanaged([]const u8),
     ) void {
-        self.collectSpecMembers(idx, out, 0);
+        self.collectMarkedMembers(idx, out, spec_marker_field, 0);
     }
 
-    fn collectSpecMembers(
+    /// Like `extractSpecMembers`, but recovers the capability name strings
+    /// inside an `Effects<...>` marker. A return type may carry both an
+    /// `Effects<...>` and a `Spec<...>` / `Proof<...>` marker; each extraction
+    /// keys on its own field name and ignores the other.
+    pub fn extractEffectMembers(
         self: *const TypeEnv,
         idx: TypeIndex,
         out: *std.ArrayListUnmanaged([]const u8),
+    ) void {
+        self.collectMarkedMembers(idx, out, effect_marker_field, 0);
+    }
+
+    fn collectMarkedMembers(
+        self: *const TypeEnv,
+        idx: TypeIndex,
+        out: *std.ArrayListUnmanaged([]const u8),
+        marker: []const u8,
         depth: u8,
     ) void {
         if (idx == null_type_idx or depth > 8) return;
@@ -533,19 +562,19 @@ pub const TypeEnv = struct {
         switch (tag) {
             .t_intersection => {
                 for (self.pool.getIntersectionMembers(idx)) |member| {
-                    self.collectSpecMembers(member, out, depth + 1);
+                    self.collectMarkedMembers(member, out, marker, depth + 1);
                 }
             },
             .t_ref => {
                 const name = self.pool.getRefName(idx);
                 if (self.type_aliases.get(name)) |resolved| {
-                    self.collectSpecMembers(resolved, out, depth + 1);
+                    self.collectMarkedMembers(resolved, out, marker, depth + 1);
                 }
             },
             .t_record => {
                 for (self.pool.getRecordFields(idx)) |field| {
                     const fname = self.pool.getName(field.name_start, field.name_len);
-                    if (std.mem.eql(u8, fname, spec_marker_field)) {
+                    if (std.mem.eql(u8, fname, marker)) {
                         self.collectLiteralUnionStrings(field.type_idx, out);
                     }
                 }
@@ -1272,6 +1301,69 @@ test "extractSpecMembers handles inline return type Proof<T, \"name\">" {
 
     try std.testing.expectEqual(@as(usize, 1), names.items.len);
     try std.testing.expectEqualStrings("read_only", names.items[0]);
+}
+
+test "TypeEnv registers Effects<T, S> built-in alias on init" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const alias = env.generic_aliases.get("Effects") orelse return error.MissingAlias;
+    try std.testing.expectEqual(@as(u8, 2), alias.param_count);
+    try std.testing.expectEqualStrings("T", alias.param_names[0]);
+    try std.testing.expectEqualStrings("S", alias.param_names[1]);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_intersection, pool.getTag(alias.body).?);
+}
+
+test "resolveType Effects<T, S> carries capability members under its own marker" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const idx = env.resolveType("Effects<string, \"env\" | \"crypto\">");
+
+    var caps: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer caps.deinit(allocator);
+    env.extractEffectMembers(idx, &caps);
+    try std.testing.expectEqual(@as(usize, 2), caps.items.len);
+    try std.testing.expectEqualStrings("env", caps.items[0]);
+    try std.testing.expectEqualStrings("crypto", caps.items[1]);
+
+    // The effect marker is distinct from the spec marker: an Effects<...>
+    // type carries no Spec/Proof members.
+    var specs: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer specs.deinit(allocator);
+    env.extractSpecMembers(idx, &specs);
+    try std.testing.expectEqual(@as(usize, 0), specs.items.len);
+}
+
+test "Proof<Effects<...>, ...> composes: each marker extracted independently" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const idx = env.resolveType("Proof<Effects<string, \"env\">, \"pure\">");
+
+    var caps: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer caps.deinit(allocator);
+    env.extractEffectMembers(idx, &caps);
+    try std.testing.expectEqual(@as(usize, 1), caps.items.len);
+    try std.testing.expectEqualStrings("env", caps.items[0]);
+
+    var specs: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer specs.deinit(allocator);
+    env.extractSpecMembers(idx, &specs);
+    try std.testing.expectEqual(@as(usize, 1), specs.items.len);
+    try std.testing.expectEqualStrings("pure", specs.items[0]);
 }
 
 test "TypeEnv leading-pipe union literal" {

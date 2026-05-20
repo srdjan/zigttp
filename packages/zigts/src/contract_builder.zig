@@ -494,6 +494,11 @@ pub const ContractBuilder = struct {
         // ZTS606 to spec_diagnostics, and project a CapsuleSummary per helper.
         try self.dischargeFunctionCapsules(&contract, &effects);
 
+        // Phase 4c: handler capability budget. Discharge the handler's
+        // `Effects<...>` budget against its inferred capability row and
+        // attribute every over-budget capability (ZTS506 / ZTS607).
+        try self.dischargeCapabilityBudget(&contract, &effects, handler_loc);
+
         // Clear moved lists so deinit() won't double-free
         self.modules_list = .empty;
         self.functions_map = .empty;
@@ -610,6 +615,9 @@ pub const ContractBuilder = struct {
             if (spec_discharge.CapsuleProperty.fromName(name)) |p| handler_demands.insert(p);
         }
 
+        const reachable = try handlerReachability(self.allocator, analyzer);
+        defer if (reachable) |r| self.allocator.free(r);
+
         for (table.capsules.items) |*cap| {
             // The helper's own capsule discharge (ZTS500 / ZTS502),
             // attributed to the helper.
@@ -620,25 +628,36 @@ pub const ContractBuilder = struct {
                 try contract.spec_diagnostics.append(self.allocator, copy);
             }
 
+            // The helper's own `Effects<...>` ceiling discharge
+            // (ZTS503 / ZTS504 / ZTS505), attributed to the helper.
+            for (cap.effect_diagnostics.items) |d| {
+                var copy = try d.clone(self.allocator);
+                errdefer copy.deinit(self.allocator);
+                if (copy.function == null) copy.function = try self.allocator.dupe(u8, cap.name);
+                try contract.spec_diagnostics.append(self.allocator, copy);
+            }
+
             // ZTS606: the handler demands a capsule property this helper
             // breaks, and the helper carries no capsule declaring it. A
             // helper that declared the property already owns a ZTS500, so
             // skipping declared properties avoids double-reporting.
-            inline for (.{
-                spec_discharge.CapsuleProperty.total,
-                spec_discharge.CapsuleProperty.pure,
-                spec_discharge.CapsuleProperty.read_only,
-                spec_discharge.CapsuleProperty.deterministic,
-            }) |prop| {
-                const pname = @tagName(prop);
-                if (handler_demands.contains(prop) and
-                    !cap.proven.holds(prop) and
-                    !containsString(cap.declared.items, pname))
-                {
-                    try contract.spec_diagnostics.append(
-                        self.allocator,
-                        try makeMissingCapsule(self.allocator, pname, cap.name),
-                    );
+            if (helperReachable(analyzer, reachable, cap.name)) {
+                inline for (.{
+                    spec_discharge.CapsuleProperty.total,
+                    spec_discharge.CapsuleProperty.pure,
+                    spec_discharge.CapsuleProperty.read_only,
+                    spec_discharge.CapsuleProperty.deterministic,
+                }) |prop| {
+                    const pname = @tagName(prop);
+                    if (handler_demands.contains(prop) and
+                        !cap.proven.holds(prop) and
+                        !containsString(cap.declared.items, pname))
+                    {
+                        try contract.spec_diagnostics.append(
+                            self.allocator,
+                            try makeMissingCapsule(self.allocator, pname, cap.name),
+                        );
+                    }
                 }
             }
 
@@ -650,13 +669,77 @@ pub const ContractBuilder = struct {
                 .proven_read_only = cap.proven.read_only,
                 .proven_deterministic = cap.proven.deterministic,
                 .discharged = cap.discharged(),
+                .exported = cap.exported,
             };
             errdefer summary.deinit(self.allocator);
             for (cap.declared.items) |name| {
                 try summary.declared.append(self.allocator, try self.allocator.dupe(u8, name));
             }
             try contract.function_capsules.append(self.allocator, summary);
+
+            var effect_summary = contract_types.EffectCapsuleSummary{
+                .function = try self.allocator.dupe(u8, cap.name),
+                .line = cap.line,
+                .discharged = cap.effectDischarged(),
+                .exported = cap.exported,
+            };
+            errdefer effect_summary.deinit(self.allocator);
+            for (cap.effect_declared.items) |name| {
+                try effect_summary.declared.append(self.allocator, try self.allocator.dupe(u8, name));
+            }
+            var caps_it = cap.inferred_caps.iterator();
+            while (caps_it.next()) |c| {
+                try effect_summary.inferred.append(
+                    self.allocator,
+                    try self.allocator.dupe(u8, @tagName(c)),
+                );
+            }
+            try contract.function_effect_capsules.append(self.allocator, effect_summary);
         }
+    }
+
+    fn handlerReachability(
+        allocator: std.mem.Allocator,
+        analyzer: *const effect_inference.Analyzer,
+    ) !?[]bool {
+        const functions = analyzer.all();
+        const h = findFunctionIndex(functions, "handler") orelse return null;
+        var reachable = try allocator.alloc(bool, functions.len);
+        errdefer allocator.free(reachable);
+        @memset(reachable, false);
+
+        var stack: std.ArrayListUnmanaged(usize) = .empty;
+        defer stack.deinit(allocator);
+        reachable[h] = true;
+        try stack.append(allocator, h);
+        while (stack.pop()) |cur| {
+            for (analyzer.calleesOf(cur)) |callee| {
+                if (callee < reachable.len and !reachable[callee]) {
+                    reachable[callee] = true;
+                    try stack.append(allocator, callee);
+                }
+            }
+        }
+        return reachable;
+    }
+
+    fn helperReachable(
+        analyzer: *const effect_inference.Analyzer,
+        reachable: ?[]const bool,
+        name: []const u8,
+    ) bool {
+        const r = reachable orelse return false;
+        if (findFunctionIndex(analyzer.all(), name)) |idx| {
+            return idx < r.len and r[idx];
+        }
+        return false;
+    }
+
+    fn findFunctionIndex(functions: []const effect_inference.FunctionEffect, name: []const u8) ?usize {
+        for (functions, 0..) |fe, i| {
+            if (std.mem.eql(u8, fe.name, name)) return i;
+        }
+        return null;
     }
 
     /// Build a ZTS606 diagnostic for a helper that breaks a handler-demanded
@@ -677,6 +760,164 @@ pub const ContractBuilder = struct {
         );
         return .{
             .kind = .missing_capsule,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+            .function = owned_func,
+        };
+    }
+
+    /// Phase 4c: discharge the handler's capability budget. The handler
+    /// declares its budget with an `Effects<...>` on its return type, exactly
+    /// as a helper declares a ceiling - but the handler's budget also bounds
+    /// every helper it reaches. The budget is checked `inferred ⊆ declared`.
+    /// A capability the handler reaches directly and outside the budget gets
+    /// ZTS506; one a reachable helper introduces gets ZTS607, attributed to
+    /// that helper. The check runs only against inferred facts - no capability
+    /// is ever assumed.
+    fn dischargeCapabilityBudget(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        analyzer: *const effect_inference.Analyzer,
+        handler_loc: ?ir.SourceLocation,
+    ) !void {
+        const env = self.type_env orelse return;
+        const loc = handler_loc orelse return;
+        if (loc.line == 0) return;
+
+        const sig = env.getFnSigByLoc(loc.line) orelse return;
+        if (sig.return_type == type_pool_mod.null_type_idx) return;
+
+        var raw: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer raw.deinit(self.allocator);
+        env.extractEffectMembers(sig.return_type, &raw);
+        if (raw.items.len == 0) return; // no budget declared, no check
+
+        // Parse the budget. An unknown name is the handler-level analogue of
+        // ZTS504; it is reported and dropped from the budget set.
+        var budget = effect_inference.CapabilitySet.initEmpty();
+        for (raw.items) |name| {
+            if (std.meta.stringToEnum(module_binding.ModuleCapability, name)) |cap| {
+                budget.insert(cap);
+            } else {
+                const spec_name = try self.allocator.dupe(u8, name);
+                errdefer self.allocator.free(spec_name);
+                const suggestion = try spec_discharge.suggestionForUnknownCapability(self.allocator, name);
+                errdefer if (suggestion) |s| self.allocator.free(s);
+                try contract.spec_diagnostics.append(self.allocator, .{
+                    .kind = .effect_unknown_capability,
+                    .spec_name = spec_name,
+                    .suggestion = suggestion,
+                });
+            }
+        }
+
+        // Record the declared budget (valid names only) so the json writer
+        // can serialise `sandbox.declaredBudget`.
+        contract.capability_budget = capabilityMatrixFromSet(budget);
+
+        // An all-invalid budget: the ZTS504s above are the actionable errors;
+        // do not cascade ZTS506 / ZTS607 against an empty budget.
+        if (budget.count() == 0) return;
+
+        // Locate the handler's FunctionEffect and index.
+        const functions = analyzer.all();
+        const h = findFunctionIndex(functions, "handler") orelse return;
+        const hfe = functions[h];
+
+        // Reachability: the budget bounds only helpers the handler can reach.
+        var reachable = try self.allocator.alloc(bool, functions.len);
+        defer self.allocator.free(reachable);
+        @memset(reachable, false);
+        var stack: std.ArrayListUnmanaged(usize) = .empty;
+        defer stack.deinit(self.allocator);
+        reachable[h] = true;
+        try stack.append(self.allocator, h);
+        while (stack.pop()) |cur| {
+            for (analyzer.calleesOf(cur)) |callee| {
+                if (callee < reachable.len and !reachable[callee]) {
+                    reachable[callee] = true;
+                    try stack.append(self.allocator, callee);
+                }
+            }
+        }
+
+        // Every capability in the handler's transitive row that the budget
+        // omits is a violation, attributed to its direct source.
+        var cap_it = hfe.row.capabilities.iterator();
+        while (cap_it.next()) |cap| {
+            if (budget.contains(cap)) continue;
+            if (hfe.direct_caps.contains(cap)) {
+                try contract.spec_diagnostics.append(
+                    self.allocator,
+                    try makeBudgetExceeded(self.allocator, @tagName(cap)),
+                );
+            }
+            for (functions, 0..) |fe, i| {
+                if (i == h) continue;
+                if (!reachable[i]) continue;
+                if (!fe.direct_caps.contains(cap)) continue;
+                try contract.spec_diagnostics.append(
+                    self.allocator,
+                    try makeHelperBudgetExceeded(self.allocator, @tagName(cap), fe.name),
+                );
+            }
+        }
+    }
+
+    /// Project a capability set into the contract's `CapabilityMatrix` shape,
+    /// in canonical enum order with a stable hash.
+    fn capabilityMatrixFromSet(set: effect_inference.CapabilitySet) contract_types.CapabilityMatrix {
+        var matrix: contract_types.CapabilityMatrix = .{};
+        var n: u8 = 0;
+        for (std.enums.values(module_binding.ModuleCapability)) |c| {
+            if (set.contains(c)) {
+                matrix.items[n] = c;
+                n += 1;
+            }
+        }
+        matrix.len = n;
+        matrix.hash = module_binding.capabilityHash(matrix.slice());
+        return matrix;
+    }
+
+    /// Build a ZTS506 diagnostic: the handler reaches a capability directly
+    /// that is outside its declared `Effects<...>` budget.
+    fn makeBudgetExceeded(
+        allocator: std.mem.Allocator,
+        capability: []const u8,
+    ) !contract_types.SpecDiagnostic {
+        const spec_name = try allocator.dupe(u8, capability);
+        errdefer allocator.free(spec_name);
+        const suggestion = try std.fmt.allocPrint(
+            allocator,
+            "add `{s}` to the handler's `Effects<...>` budget, or remove the call that reaches it.",
+            .{capability},
+        );
+        return .{
+            .kind = .budget_exceeded,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+        };
+    }
+
+    /// Build a ZTS607 diagnostic: a handler-reachable helper reaches a
+    /// capability outside the handler's declared `Effects<...>` budget.
+    fn makeHelperBudgetExceeded(
+        allocator: std.mem.Allocator,
+        capability: []const u8,
+        func: []const u8,
+    ) !contract_types.SpecDiagnostic {
+        const spec_name = try allocator.dupe(u8, capability);
+        errdefer allocator.free(spec_name);
+        const owned_func = try allocator.dupe(u8, func);
+        errdefer allocator.free(owned_func);
+        const suggestion = try std.fmt.allocPrint(
+            allocator,
+            "helper `{s}` reaches `{s}`; add it to the handler's `Effects<...>` budget, or remove the call.",
+            .{ func, capability },
+        );
+        return .{
+            .kind = .helper_budget_exceeded,
             .spec_name = spec_name,
             .suggestion = suggestion,
             .function = owned_func,

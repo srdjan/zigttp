@@ -795,6 +795,8 @@ pub const SpecDiagnostic = struct {
     /// the handler is implied.
     function: ?[]const u8 = null,
 
+    pub const Severity = enum { err, warn };
+
     pub const Kind = enum {
         /// ZTS500: the corresponding property is false (handler Spec) or the
         /// declared capsule property does not hold (helper Proof).
@@ -808,6 +810,26 @@ pub const SpecDiagnostic = struct {
         /// handler's Spec demands and carries no `Proof<...>` capsule
         /// declaring it. The proof cannot compose across the call boundary.
         missing_capsule,
+        /// ZTS503: a function reaches a capability outside its declared
+        /// `Effects<...>` ceiling.
+        effect_undeclared,
+        /// ZTS504: an `Effects<...>` ceiling names an unknown capability.
+        effect_unknown_capability,
+        /// ZTS505 (warning): an `Effects<...>` ceiling names a capability the
+        /// function never reaches.
+        effect_over_declared,
+        /// ZTS506: the handler reaches a capability directly that is outside
+        /// its declared `Effects<...>` budget.
+        budget_exceeded,
+        /// ZTS607: a handler-reachable helper reaches a capability outside
+        /// the handler's declared `Effects<...>` budget.
+        helper_budget_exceeded,
+        /// ZTS507 (warning): an exported helper carries no `Effects<...>`
+        /// capsule. Emitted only under the opt-in docs mode.
+        missing_effects_capsule,
+        /// ZTS508 (warning): an exported helper carries no `Proof<...>`
+        /// capsule. Emitted only under the opt-in docs mode.
+        missing_proof_capsule_export,
 
         pub fn code(self: Kind) []const u8 {
             return switch (self) {
@@ -815,6 +837,25 @@ pub const SpecDiagnostic = struct {
                 .incompatible_with_import => "ZTS501",
                 .unknown_name => "ZTS502",
                 .missing_capsule => "ZTS606",
+                .effect_undeclared => "ZTS503",
+                .effect_unknown_capability => "ZTS504",
+                .effect_over_declared => "ZTS505",
+                .budget_exceeded => "ZTS506",
+                .helper_budget_exceeded => "ZTS607",
+                .missing_effects_capsule => "ZTS507",
+                .missing_proof_capsule_export => "ZTS508",
+            };
+        }
+
+        /// Diagnostic severity. Over-declaration and the docs-mode
+        /// missing-capsule prompts are advisory; everything else is an error.
+        pub fn severity(self: Kind) Severity {
+            return switch (self) {
+                .effect_over_declared,
+                .missing_effects_capsule,
+                .missing_proof_capsule_export,
+                => .warn,
+                else => .err,
             };
         }
     };
@@ -1184,11 +1225,40 @@ pub const CapsuleSummary = struct {
     proven_deterministic: bool = false,
     /// True when the function declared a capsule and every property held.
     discharged: bool = false,
+    /// True when the helper is exported. Used by the opt-in docs mode.
+    exported: bool = false,
 
     pub fn deinit(self: *CapsuleSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.function);
         for (self.declared.items) |s| allocator.free(s);
         self.declared.deinit(allocator);
+    }
+};
+
+/// One helper function's effect capsule, projected for the `effectCapsules`
+/// JSON envelope. Transient: populated during build, consumed by
+/// `zigts check --json`, never serialized into contract.json.
+pub const EffectCapsuleSummary = struct {
+    /// Owned copy of the function name.
+    function: []const u8,
+    /// 1-based source line of the function declaration.
+    line: u32,
+    /// Owned capability names declared via `Effects<...>`.
+    declared: std.ArrayList([]const u8) = .empty,
+    /// Owned capability names effect inference computed for the function.
+    inferred: std.ArrayList([]const u8) = .empty,
+    /// True when the function declared a ceiling and every reached
+    /// capability fell inside it.
+    discharged: bool = false,
+    /// True when the helper is exported. Used by the opt-in docs mode.
+    exported: bool = false,
+
+    pub fn deinit(self: *EffectCapsuleSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.function);
+        for (self.declared.items) |s| allocator.free(s);
+        self.declared.deinit(allocator);
+        for (self.inferred.items) |s| allocator.free(s);
+        self.inferred.deinit(allocator);
     }
 };
 
@@ -1240,9 +1310,18 @@ pub const HandlerContract = struct {
     /// and NOT part of the signed attestation surface - the json writer
     /// skips it. Owned by the contract.
     function_capsules: std.ArrayList(CapsuleSummary) = .empty,
+    /// Per-helper effect capsules (`Effects<...>` discharge results).
+    /// Transient analysis output: populated during build, rendered as
+    /// `effectCapsules` in the `--json` analysis envelope. NOT serialized
+    /// into contract.json. Owned by the contract.
+    function_effect_capsules: std.ArrayList(EffectCapsuleSummary) = .empty,
     behaviors: std.ArrayList(BehaviorPath) = .empty,
     behaviors_exhaustive: bool = false,
     capabilities: CapabilityMatrix = .empty,
+    /// The capability budget the handler declared via `Effects<...>` on its
+    /// return type. Empty when the handler declares no budget. Serialized
+    /// into contract.json under `sandbox.declaredBudget`.
+    capability_budget: CapabilityMatrix = .empty,
     /// SHA-256 of the compiled handler bytecode. Stamped by the build
     /// pipeline after compile and verified at runtime startup.
     artifact_sha256: [32]u8 = [_]u8{0} ** 32,
@@ -1319,6 +1398,10 @@ pub const HandlerContract = struct {
             @constCast(c).deinit(allocator);
         }
         self.function_capsules.deinit(allocator);
+        for (self.function_effect_capsules.items) |*c| {
+            @constCast(c).deinit(allocator);
+        }
+        self.function_effect_capsules.deinit(allocator);
         var ext_it = self.extensions.iterator();
         while (ext_it.next()) |entry| {
             allocator.free(entry.key_ptr.*);

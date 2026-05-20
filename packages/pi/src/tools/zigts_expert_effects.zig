@@ -101,10 +101,20 @@ fn execute(
         );
     };
 
+    // A type env populated from the strip pass lets the report show each
+    // function's declared `Effects<...>` ceiling next to the inferred row,
+    // so the expert can surface declared-vs-inferred drift.
+    var type_pool = zigts.TypePool.init(allocator);
+    defer type_pool.deinit(allocator);
+    var type_env = zigts.TypeEnv.init(allocator, &type_pool);
+    defer type_env.deinit();
+    type_env.populateFromTypeMap(&strip_result.type_map);
+
+    const ctx: WriteContext = .{ .allocator = allocator, .env = &type_env, .ir_view = ir_view };
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try writeEnvelope(&aw.writer, args[0], analyzer.all());
+    try writeEnvelope(&aw.writer, ctx, args[0], analyzer.all());
     buf = aw.toArrayList();
 
     return .{
@@ -113,8 +123,18 @@ fn execute(
     };
 }
 
+/// What `writeFunction` needs to resolve a function's declared `Effects<...>`
+/// ceiling: the type env (return-type lookup), the IR view (declaration
+/// line), and an allocator for the transient member list.
+const WriteContext = struct {
+    allocator: std.mem.Allocator,
+    env: *const zigts.TypeEnv,
+    ir_view: ir.IrView,
+};
+
 fn writeEnvelope(
     writer: *std.Io.Writer,
+    ctx: WriteContext,
     path: []const u8,
     functions: []const effect_inference.FunctionEffect,
 ) !void {
@@ -123,13 +143,14 @@ fn writeEnvelope(
     try writer.writeAll("\",\"functions\":[");
     for (functions, 0..) |fe, i| {
         if (i > 0) try writer.writeByte(',');
-        try writeFunction(writer, fe);
+        try writeFunction(writer, ctx, fe);
     }
     try writer.writeAll("]}");
 }
 
 fn writeFunction(
     writer: *std.Io.Writer,
+    ctx: WriteContext,
     fe: effect_inference.FunctionEffect,
 ) !void {
     try writer.writeAll("{\"name\":\"");
@@ -151,6 +172,24 @@ fn writeFunction(
         try writer.writeByte('"');
         try writer.writeAll(@tagName(cap));
         try writer.writeByte('"');
+    }
+    // An empty `declared` array means the function carries no `Effects<...>`.
+    try writer.writeAll("],\"declared\":[");
+    {
+        var declared: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer declared.deinit(ctx.allocator);
+        const line: u32 = if (ctx.ir_view.getLoc(fe.decl_node)) |loc| loc.line else 0;
+        if (line != 0) {
+            if (ctx.env.getFnSigByLoc(line)) |sig| {
+                ctx.env.extractEffectMembers(sig.return_type, &declared);
+            }
+        }
+        for (declared.items, 0..) |capname, j| {
+            if (j > 0) try writer.writeByte(',');
+            try writer.writeByte('"');
+            try writer.writeAll(capname);
+            try writer.writeByte('"');
+        }
     }
     try writer.writeAll("]}");
 }

@@ -2240,6 +2240,40 @@ breaks a property the handler's `Spec<...>` demands, while carrying no
 capsule for it, fails with **ZTS606**. Proven helpers compose: the
 handler's property accounts for every helper it transitively calls.
 
+### Capability capsules with `Effects<...>`
+
+`Effects<T, "...">` declares a least-privilege *ceiling* on a function's
+capabilities - the inferred effect row may be no wider than the named
+set. It resolves to `T` for type checking, opt-in like `Proof<...>`:
+
+```typescript
+import type { Effects } from "zigttp:types";
+
+function loadRegion(): Effects<string, "env"> {
+    return env("REGION");
+}
+```
+
+A function reaching a capability outside its ceiling fails with
+**ZTS503**; an unknown capability name fails with **ZTS504**; a declared
+capability the function never reaches is the warning **ZTS505**. The
+vocabulary is the runtime capability set: `env`, `clock`, `random`,
+`crypto`, `stderr`, `runtime_callback`, `sqlite`, `filesystem`,
+`network`, `policy_check`, `websocket`.
+
+`Effects<...>` on the handler's return type is a **budget** that bounds
+every reachable helper. A capability the handler reaches directly outside
+the budget fails with **ZTS506**; one a reachable helper introduces fails
+with **ZTS607**, attributed to that helper. The budget is recorded in
+`contract.json` under `sandbox.declaredBudget`. Because the effect marker
+is distinct from the proof marker, the two capsules compose:
+`Proof<Effects<string, "crypto">, "total">`.
+
+`zigts check --require-export-capsules` is an opt-in, warning-only docs
+mode: it asks every exported helper to carry an explicit capsule
+(**ZTS507** for a missing `Effects<...>`, **ZTS508** for a missing
+`Proof<...>`). It is off by default and never changes the exit code.
+
 ### Where declared specs surface
 
 - Live HUD pane under `zigttp serve --watch --prove`: a `Specs (declared)`

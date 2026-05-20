@@ -73,6 +73,15 @@ pub const FunctionEffect = struct {
     decl_node: NodeIndex,
     body_node: NodeIndex,
     row: EffectRow = .{},
+    /// Capabilities reached by this function's own direct module calls,
+    /// captured before call-graph propagation. `row.capabilities` is the
+    /// transitive union; `direct_caps` is the subset this function reaches
+    /// itself, used to attribute a budget violation (ZTS607) to the helper
+    /// that actually performs the call rather than every caller above it.
+    direct_caps: CapabilitySet = CapabilitySet.initEmpty(),
+    /// True when the function declaration sits under an `export`. The
+    /// opt-in docs mode asks exported helpers to carry explicit capsules.
+    exported: bool = false,
 };
 
 const ImportedFunction = struct {
@@ -179,38 +188,44 @@ pub const Analyzer = struct {
     }
 
     fn collectFunctions(self: *Analyzer, root: NodeIndex) !void {
-        try self.collectFunctionsIn(root);
+        try self.collectFunctionsIn(root, false);
     }
 
-    fn collectFunctionsIn(self: *Analyzer, node: NodeIndex) !void {
+    fn collectFunctionsIn(self: *Analyzer, node: NodeIndex, exported: bool) WalkError!void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
         switch (tag) {
             .program, .block => {
                 const block = self.ir_view.getBlock(node) orelse return;
                 for (0..block.stmts_count) |i| {
-                    try self.collectFunctionsIn(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
+                    try self.collectFunctionsIn(self.ir_view.getListIndex(block.stmts_start, @intCast(i)), exported);
                 }
             },
             .export_decl => {
                 const export_decl = self.ir_view.getExportDecl(node) orelse return;
-                try self.collectFunctionsIn(export_decl.declaration);
+                try self.collectFunctionsIn(export_decl.declaration, true);
             },
             .function_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
-                try self.recordNamedFunction(decl.binding, node, decl.init);
+                try self.recordNamedFunction(decl.binding, node, decl.init, exported);
             },
             .var_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 if (decl.init != null_node and self.isFunctionNode(decl.init)) {
-                    try self.recordNamedFunction(decl.binding, node, decl.init);
+                    try self.recordNamedFunction(decl.binding, node, decl.init, exported);
                 }
             },
             else => {},
         }
     }
 
-    fn recordNamedFunction(self: *Analyzer, binding: ir.BindingRef, decl_node: NodeIndex, fn_node: NodeIndex) !void {
+    fn recordNamedFunction(
+        self: *Analyzer,
+        binding: ir.BindingRef,
+        decl_node: NodeIndex,
+        fn_node: NodeIndex,
+        exported: bool,
+    ) !void {
         const func = self.ir_view.getFunction(fn_node) orelse return;
         const name = self.resolveAtomName(binding.slot) orelse return;
         const key = bool_checker.packBindingKey(binding.scope_id, binding.slot);
@@ -220,6 +235,7 @@ pub const Analyzer = struct {
             .binding_key = key,
             .decl_node = decl_node,
             .body_node = func.body,
+            .exported = exported,
         });
         try self.user_fn_by_slot.put(self.allocator, binding.slot, idx);
     }
@@ -234,12 +250,23 @@ pub const Analyzer = struct {
             var row: EffectRow = .{};
             try self.walkBaseExpr(self.functions.items[i].body_node, i, &row, &seen_users);
             self.functions.items[i].row = row;
+            // Snapshot the direct capability set before propagation unions in
+            // the rows of transitively-called user functions.
+            self.functions.items[i].direct_caps = row.capabilities;
         }
         self.callee_starts.items[fn_count] = @intCast(self.callee_storage.items.len);
     }
 
     fn calleeCount(self: *const Analyzer, fn_idx: usize) u32 {
         return self.callee_starts.items[fn_idx + 1] - self.callee_starts.items[fn_idx];
+    }
+
+    /// Direct callees of function `fn_idx`, as indices into `functions` -
+    /// the public view of the CSR-encoded call graph.
+    pub fn calleesOf(self: *const Analyzer, fn_idx: usize) []const usize {
+        const start = self.callee_starts.items[fn_idx];
+        const end = self.callee_starts.items[fn_idx + 1];
+        return self.callee_storage.items[start..end];
     }
 
     const WalkError = std.mem.Allocator.Error;

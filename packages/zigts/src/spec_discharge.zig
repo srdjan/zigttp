@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const contract_types = @import("contract_types.zig");
+const module_binding = @import("module_binding.zig");
 
 const HandlerProperties = contract_types.HandlerProperties;
 const PropertyCause = contract_types.PropertyCause;
@@ -424,6 +425,116 @@ pub fn dischargeCapsule(
 }
 
 // ---------------------------------------------------------------------------
+// Effects-capsule discharge
+//
+// Function-level capability capsules (`Effects<T, S>`) declare a ceiling on
+// the inferred effect row: the function may reach at most the capabilities in
+// `S`. Discharge is the inverse direction of `Proof` / `Spec`. A proof
+// property is checked `declared => proven`; an effect ceiling is checked
+// `inferred is a subset of declared`. Reaching a capability outside the
+// ceiling is an error (ZTS503); naming an unknown capability is an error
+// (ZTS504); naming a capability the function never reaches is a warning
+// (ZTS505).
+// ---------------------------------------------------------------------------
+
+/// Capability vocabulary for `Effects<...>`: the exact `ModuleCapability`
+/// enum field names, derived so the two cannot drift.
+pub const effect_capability_names = blk: {
+    const fields = @typeInfo(module_binding.ModuleCapability).@"enum".fields;
+    var names: [fields.len][]const u8 = undefined;
+    for (fields, 0..) |f, i| names[i] = f.name;
+    break :blk names;
+};
+
+/// The inferred capability set type, shared with effect_inference.
+pub const CapabilitySet = std.EnumSet(module_binding.ModuleCapability);
+
+/// ZTS504 suggestion for an unknown capability name. Caller frees.
+pub fn suggestionForUnknownCapability(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
+    return nearestSuggestion(allocator, name, &effect_capability_names);
+}
+
+/// Discharge a function's declared `Effects<...>` ceiling against the
+/// capability set effect inference computed for it. Emits ZTS503 (a reached
+/// capability is outside the ceiling), ZTS504 (unknown capability name), and
+/// ZTS505 (a declared capability is never reached). The caller owns the
+/// returned list and must `deinit` each entry before deinit-ing the list.
+pub fn dischargeEffects(
+    allocator: std.mem.Allocator,
+    declared: []const []const u8,
+    inferred: CapabilitySet,
+) !std.ArrayList(SpecDiagnostic) {
+    var out: std.ArrayList(SpecDiagnostic) = .empty;
+    errdefer {
+        for (out.items) |*d| @constCast(d).deinit(allocator);
+        out.deinit(allocator);
+    }
+
+    // No `Effects<...>` annotation means no declared ceiling, so no check.
+    // The capsule is opt-in: a function the author never annotated must not
+    // be flagged for the capabilities it reaches.
+    if (declared.len == 0) return out;
+
+    // Parse the declared ceiling. An unknown name produces ZTS504 and is
+    // dropped from the ceiling so it neither widens nor narrows it.
+    var ceiling = CapabilitySet.initEmpty();
+    for (declared) |name| {
+        const cap = std.meta.stringToEnum(module_binding.ModuleCapability, name) orelse {
+            const spec_name = try allocator.dupe(u8, name);
+            errdefer allocator.free(spec_name);
+            const suggestion = try nearestSuggestion(allocator, name, &effect_capability_names);
+            errdefer if (suggestion) |s| allocator.free(s);
+            try out.append(allocator, .{
+                .kind = .effect_unknown_capability,
+                .spec_name = spec_name,
+                .suggestion = suggestion,
+            });
+            continue;
+        };
+        ceiling.insert(cap);
+    }
+
+    // ZTS503: every inferred capability must be inside the ceiling.
+    var inferred_it = inferred.iterator();
+    while (inferred_it.next()) |cap| {
+        if (ceiling.contains(cap)) continue;
+        const spec_name = try allocator.dupe(u8, @tagName(cap));
+        errdefer allocator.free(spec_name);
+        const suggestion = try std.fmt.allocPrint(
+            allocator,
+            "add `{s}` to the Effects<...> ceiling, or remove the call that reaches it.",
+            .{@tagName(cap)},
+        );
+        errdefer allocator.free(suggestion);
+        try out.append(allocator, .{
+            .kind = .effect_undeclared,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+        });
+    }
+
+    // ZTS505 (warning): a declared capability the function never reaches.
+    for (declared) |name| {
+        const cap = std.meta.stringToEnum(module_binding.ModuleCapability, name) orelse continue;
+        if (inferred.contains(cap)) continue;
+        const spec_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(spec_name);
+        const suggestion = try allocator.dupe(
+            u8,
+            "the function never reaches this capability; remove it to tighten the ceiling.",
+        );
+        errdefer allocator.free(suggestion);
+        try out.append(allocator, .{
+            .kind = .effect_over_declared,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+        });
+    }
+
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -535,6 +646,59 @@ test "dischargeSpecs unknown name emits ZTS403" {
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.unknown_name, diags.items[0].kind);
     try std.testing.expectEqualStrings("made_up_name", diags.items[0].spec_name);
+}
+
+test "dischargeEffects ceiling matching the inferred row returns empty" {
+    const allocator = std.testing.allocator;
+    var inferred = CapabilitySet.initEmpty();
+    inferred.insert(.env);
+    inferred.insert(.clock);
+    const declared: [2][]const u8 = .{ "env", "clock" };
+
+    var diags = try dischargeEffects(allocator, &declared, inferred);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+test "dischargeEffects reached capability outside ceiling emits ZTS503" {
+    const allocator = std.testing.allocator;
+    var inferred = CapabilitySet.initEmpty();
+    inferred.insert(.env);
+    inferred.insert(.crypto);
+    const declared: [1][]const u8 = .{"env"};
+
+    var diags = try dischargeEffects(allocator, &declared, inferred);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.effect_undeclared, diags.items[0].kind);
+    try std.testing.expectEqualStrings("crypto", diags.items[0].spec_name);
+}
+
+test "dischargeEffects unknown capability name emits ZTS504" {
+    const allocator = std.testing.allocator;
+    var inferred = CapabilitySet.initEmpty();
+    inferred.insert(.env);
+    const declared: [2][]const u8 = .{ "env", "databse" };
+
+    var diags = try dischargeEffects(allocator, &declared, inferred);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.effect_unknown_capability, diags.items[0].kind);
+    try std.testing.expectEqualStrings("databse", diags.items[0].spec_name);
+}
+
+test "dischargeEffects over-declared capability emits ZTS505 warning" {
+    const allocator = std.testing.allocator;
+    var inferred = CapabilitySet.initEmpty();
+    inferred.insert(.env);
+    const declared: [2][]const u8 = .{ "env", "crypto" };
+
+    var diags = try dischargeEffects(allocator, &declared, inferred);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.effect_over_declared, diags.items[0].kind);
+    try std.testing.expectEqualStrings("crypto", diags.items[0].spec_name);
+    try std.testing.expectEqual(SpecDiagnostic.Severity.warn, diags.items[0].kind.severity());
 }
 
 test "dischargeSpecs ZTS402 suppresses ZTS401 for the same spec" {

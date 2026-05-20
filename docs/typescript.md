@@ -102,6 +102,63 @@ ZTS502. Proven and trivially-clean helpers compose into the caller's
 proof; an effectful helper with no capsule that breaks a property the
 handler's `Spec<...>` demands fails with ZTS606.
 
+**Capability capsules with `Effects<T, S>`:**
+
+`Effects<T, S>` is the capability dual of `Proof<T, S>`. Where a proof
+property is a guarantee the compiler discharges, an `Effects<...>`
+annotation declares a *ceiling*: the function's inferred effect row may
+be no wider than `S`. It resolves to `T` for type checking and carries
+`S` - a union of capability names - as the ceiling:
+
+```typescript
+import type { Effects } from "zigttp:types";
+
+function loadRegion(): Effects<string, "env"> {
+    return env("REGION");
+}
+```
+
+The capability vocabulary is the runtime capability set: `env`, `clock`,
+`random`, `crypto`, `stderr`, `runtime_callback`, `sqlite`,
+`filesystem`, `network`, `policy_check`, `websocket`. The check is `inferred ⊆
+declared`: a function that reaches a capability outside its ceiling
+fails with ZTS503; an unknown capability name fails with ZTS504; a
+declared capability the function never reaches is the warning ZTS505.
+
+The same annotation on the handler's return type is a **budget** that
+also bounds every helper the handler reaches. A capability the handler
+reaches directly outside its budget fails with ZTS506; one a reachable
+helper introduces fails with ZTS607, attributed to that helper:
+
+```typescript
+function handler(req: Request): Effects<Response, "env" | "clock"> {
+    return Response.json({ region: loadRegion() });
+}
+```
+
+`Effects<...>` is opt-in: a function with no annotation gets no ceiling
+and no check. Because the effect marker is distinct from the proof
+marker, the two capsules compose - a helper can carry both:
+
+```typescript
+function makeToken(u: User): Proof<Effects<string, "crypto">, "total"> {
+    return sign(u.id);
+}
+```
+
+`Effects<...>` declares an explicit contract; `Proof<...>` rides
+inference. Both are checked only against facts inferred from real
+function bodies - an annotation never substitutes for a proof.
+
+**Docs mode (`--require-export-capsules`):**
+
+`zigts check --require-export-capsules` is an opt-in, warning-only mode
+that asks every *exported* helper to carry an explicit capsule:
+ZTS507 when an exported helper has no `Effects<...>`, ZTS508 when it has
+no `Proof<...>`. It is off by default, never touches non-exported
+helpers, and never changes the exit code - it documents a package's
+public API surface.
+
 ### Examples
 
 ```typescript

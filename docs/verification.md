@@ -262,6 +262,33 @@ under `.zigttp/witnesses/<short_hash>/` so the same logical leak does
 not need to be rediscovered next session. See [witnesses.md](witnesses.md)
 for layout, CLI (`zigttp witnesses`), and agent tool (`pi_witnesses`).
 
+### 10. Capability Capsules
+
+`Effects<T, "...">` is the capability dual of `Proof<T, "...">`. Where a
+proof property declares a guarantee, an `Effects<...>` annotation
+declares a *ceiling*: the function's inferred capability row may be no
+wider than the named set. Discharge is the inverse direction of proof
+discharge - checked `inferred ⊆ declared` against the row
+`effect_inference.zig` computes from real call sites. A reached
+capability outside the ceiling is **ZTS503**, an unknown capability name
+is **ZTS504**, and a declared-but-unreached capability is the warning
+**ZTS505**. The vocabulary is the runtime capability set (`env`,
+`clock`, `crypto`, `network`, ...).
+
+The same annotation on the handler's return type is a **budget** that
+bounds every reachable helper. A capability the handler reaches directly
+outside the budget is **ZTS506**; one a reachable helper introduces is
+**ZTS607**, attributed to that helper (`contract_builder.zig` Phase 4c).
+The declared budget is recorded in `contract.json` under
+`sandbox.declaredBudget`. `zigts check --json` adds an `effectCapsules`
+array alongside `proofCapsules`.
+
+`Effects<...>` is opt-in - a function with no annotation gets no check.
+The budget and every ceiling are discharged only against inferred facts
+from real function bodies, never an assumed claim. The opt-in
+`zigts check --require-export-capsules` docs mode additionally warns
+(**ZTS507** / **ZTS508**) when an exported helper carries no capsule.
+
 ### Runtime Optimizations from Verification
 
 Verified properties also control runtime behavior:

@@ -436,6 +436,8 @@ fn writeSpecDiagnosticsJson(writer: anytype, items: anytype) !void {
         try writeJsonString(writer, d.kind.code());
         try writer.writeAll(",\"kind\":");
         try writeJsonString(writer, @tagName(d.kind));
+        try writer.writeAll(",\"severity\":");
+        try writeJsonString(writer, if (d.kind.severity() == .warn) "warning" else "error");
         try writer.writeAll(",\"spec_name\":");
         try writeJsonString(writer, d.spec_name);
         if (d.function) |func| {
@@ -465,6 +467,8 @@ fn writeSpecAndCapsulesJson(
     try writeSpecDiagnosticsJson(writer, c.spec_diagnostics.items);
     try writer.writeAll(",\"proofCapsules\":");
     try writeProofCapsulesJson(writer, c.function_capsules.items);
+    try writer.writeAll(",\"effectCapsules\":");
+    try writeEffectCapsulesJson(writer, c.function_effect_capsules.items);
 }
 
 /// Emit the `proofCapsules` array: per-helper `Proof<...>` capsule discharge
@@ -485,6 +489,30 @@ fn writeProofCapsulesJson(writer: anytype, items: anytype) !void {
             "],\"proven\":{{\"total\":{},\"pure\":{},\"read_only\":{},\"deterministic\":{}}},\"discharged\":{}}}",
             .{ cap.proven_total, cap.proven_pure, cap.proven_read_only, cap.proven_deterministic, cap.discharged },
         );
+    }
+    try writer.writeByte(']');
+}
+
+/// Emit the `effectCapsules` array: per-helper `Effects<...>` capability
+/// capsule discharge summary, so an agent can read each helper's declared
+/// ceiling and inferred capability row without re-running the compiler.
+fn writeEffectCapsulesJson(writer: anytype, items: anytype) !void {
+    try writer.writeByte('[');
+    for (items, 0..) |cap, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"function\":");
+        try writeJsonString(writer, cap.function);
+        try writer.print(",\"line\":{d},\"declared\":[", .{cap.line});
+        for (cap.declared.items, 0..) |s, j| {
+            if (j > 0) try writer.writeByte(',');
+            try writeJsonString(writer, s);
+        }
+        try writer.writeAll("],\"inferred\":[");
+        for (cap.inferred.items, 0..) |s, j| {
+            if (j > 0) try writer.writeByte(',');
+            try writeJsonString(writer, s);
+        }
+        try writer.print("],\"discharged\":{}}}", .{cap.discharged});
     }
     try writer.writeByte(']');
 }

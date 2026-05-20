@@ -32,5 +32,12 @@ fn specDiagnosticMessage(d: zigts.SpecDiagnostic) []const u8 {
         .incompatible_with_import => d.incompatible_module orelse "spec contradicts a virtual-module import",
         .unknown_name => "spec name is not in the v1 set",
         .missing_capsule => d.suggestion orelse "helper has no Proof<...> capsule for a demanded property",
+        .effect_undeclared => d.suggestion orelse "capability reached outside the declared Effects<...> ceiling",
+        .effect_unknown_capability => d.suggestion orelse "Effects<...> names an unknown capability",
+        .effect_over_declared => d.suggestion orelse "declared capability is never reached",
+        .budget_exceeded => d.suggestion orelse "capability reached outside the handler's Effects<...> budget",
+        .helper_budget_exceeded => d.suggestion orelse "helper reaches a capability outside the handler's budget",
+        .missing_effects_capsule => d.suggestion orelse "exported helper has no Effects<...> capsule",
+        .missing_proof_capsule_export => d.suggestion orelse "exported helper has no Proof<...> capsule",
     };
 }

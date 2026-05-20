@@ -298,6 +298,16 @@ test "parseFromJson roundtrip preserves declared specs and diagnostics" {
         .spec_name = try allocator.dupe(u8, "read_only"),
         .incompatible_module = try allocator.dupe(u8, "zigttp:cache"),
     });
+    try spec_diagnostics.append(allocator, .{
+        .kind = .effect_undeclared,
+        .spec_name = try allocator.dupe(u8, "crypto"),
+        .function = try allocator.dupe(u8, "digest"),
+    });
+    try spec_diagnostics.append(allocator, .{
+        .kind = .missing_capsule,
+        .spec_name = try allocator.dupe(u8, "deterministic"),
+        .function = try allocator.dupe(u8, "stamp"),
+    });
 
     var original = HandlerContract{
         .handler = .{ .path = try allocator.dupe(u8, "spec.ts"), .line = 3, .column = 12 },
@@ -339,12 +349,18 @@ test "parseFromJson roundtrip preserves declared specs and diagnostics" {
     try std.testing.expectEqual(@as(usize, 2), parsed.declared_specs.items.len);
     try std.testing.expectEqualStrings("idempotent", parsed.declared_specs.items[0]);
     try std.testing.expectEqualStrings("read_only", parsed.declared_specs.items[1]);
-    try std.testing.expectEqual(@as(usize, 2), parsed.spec_diagnostics.items.len);
+    try std.testing.expectEqual(@as(usize, 4), parsed.spec_diagnostics.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, parsed.spec_diagnostics.items[0].kind);
     try std.testing.expectEqualStrings("idempotent", parsed.spec_diagnostics.items[0].spec_name);
     try std.testing.expectEqualStrings("remove Date.now()", parsed.spec_diagnostics.items[0].suggestion.?);
     try std.testing.expectEqual(SpecDiagnostic.Kind.incompatible_with_import, parsed.spec_diagnostics.items[1].kind);
     try std.testing.expectEqualStrings("zigttp:cache", parsed.spec_diagnostics.items[1].incompatible_module.?);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.effect_undeclared, parsed.spec_diagnostics.items[2].kind);
+    try std.testing.expectEqualStrings("crypto", parsed.spec_diagnostics.items[2].spec_name);
+    try std.testing.expectEqualStrings("digest", parsed.spec_diagnostics.items[2].function.?);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.missing_capsule, parsed.spec_diagnostics.items[3].kind);
+    try std.testing.expectEqualStrings("deterministic", parsed.spec_diagnostics.items[3].spec_name);
+    try std.testing.expectEqualStrings("stamp", parsed.spec_diagnostics.items[3].function.?);
 }
 
 test "parseFromJson roundtrip preserves partner extensions section" {
