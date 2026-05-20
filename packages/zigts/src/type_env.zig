@@ -132,6 +132,7 @@ pub const TypeEnv = struct {
     /// (last-write-wins matches the existing populateFromTypeMap pattern).
     pub fn registerBuiltins(self: *TypeEnv) void {
         self.registerSpecBuiltin();
+        self.registerProofBuiltin();
     }
 
     /// Spec<S>: phantom marker carrying the declared spec name set as S.
@@ -163,6 +164,45 @@ pub const TypeEnv = struct {
         var alias = GenericAlias{};
         alias.param_names[0] = owned_param;
         alias.param_count = 1;
+        alias.body = body;
+        self.generic_aliases.put(self.allocator, owned_name, alias) catch {};
+    }
+
+    /// Proof<T, S>: a function-level proof capsule. Registered as a two-param
+    /// generic alias whose body is `T & { __zigttp_spec__: S }`. After
+    /// instantiation, the underlying return type `T` survives for type
+    /// checking while the phantom marker carries the declared capsule
+    /// properties as `S`. Because the body is an intersection bearing the
+    /// same `spec_marker_field` as `Spec<S>`, `extractSpecMembers` recovers
+    /// the capsule property set with no extra extraction logic - a helper's
+    /// `Proof<...>` and a handler's `Spec<...>` discharge through one path.
+    fn registerProofBuiltin(self: *TypeEnv) void {
+        self.pushGenericScope();
+        const t_param = self.addGenericParam("T");
+        const s_param = self.addGenericParam("S");
+        const field_name = self.pool.addName(self.allocator, spec_marker_field);
+        const marker = self.pool.addRecord(self.allocator, &.{
+            .{
+                .name_start = field_name.start,
+                .name_len = field_name.len,
+                .type_idx = s_param,
+                .optional = false,
+            },
+        });
+        const body = self.pool.addIntersection(self.allocator, &.{ t_param, marker });
+        self.popGenericScope();
+
+        if (body == null_type_idx) return;
+
+        const owned_name = self.internName("Proof");
+        if (owned_name.len == 0) return;
+        const owned_t = self.internName("T");
+        const owned_s = self.internName("S");
+
+        var alias = GenericAlias{};
+        alias.param_names[0] = owned_t;
+        alias.param_names[1] = owned_s;
+        alias.param_count = 2;
         alias.body = body;
         self.generic_aliases.put(self.allocator, owned_name, alias) catch {};
     }
@@ -1159,6 +1199,79 @@ test "extractSpecMembers returns empty when no Spec marker" {
     env.extractSpecMembers(sig.return_type, &names);
 
     try std.testing.expectEqual(@as(usize, 0), names.items.len);
+}
+
+test "TypeEnv registers Proof<T, S> built-in alias on init" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    try std.testing.expect(env.getTypeAlias("Proof") == null);
+    const alias = env.generic_aliases.get("Proof") orelse return error.MissingAlias;
+    try std.testing.expectEqual(@as(u8, 2), alias.param_count);
+    try std.testing.expectEqualStrings("T", alias.param_names[0]);
+    try std.testing.expectEqualStrings("S", alias.param_names[1]);
+
+    // Body is an intersection: the underlying T plus the spec marker record.
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_intersection, pool.getTag(alias.body).?);
+}
+
+test "resolveType Proof<T, S> carries capsule property members" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // A capsule with two declared properties on an underlying string return.
+    const idx = env.resolveType("Proof<string, \"total\" | \"pure\">");
+
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer names.deinit(allocator);
+    env.extractSpecMembers(idx, &names);
+
+    try std.testing.expectEqual(@as(usize, 2), names.items.len);
+    try std.testing.expectEqualStrings("total", names.items[0]);
+    try std.testing.expectEqualStrings("pure", names.items[1]);
+}
+
+test "extractSpecMembers handles inline return type Proof<T, \"name\">" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // function load(): Proof<string, "read_only"> { ... }
+    const source = "function load(): Proof<string, \"read_only\"> { return \"\"; }";
+    var tm = TypeMap.init(source);
+    defer tm.deinit(allocator);
+
+    try tm.addEntry(allocator, .{
+        .kind = .return_annotation,
+        .source_start = 17,
+        .source_end = 43,
+        .context_line = 4,
+        .context_col = 1,
+        .name_start = 0,
+        .name_end = 0,
+    });
+
+    env.populateFromTypeMap(&tm);
+
+    const sig = env.getFnSigByLoc(4) orelse return error.MissingSig;
+
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer names.deinit(allocator);
+    env.extractSpecMembers(sig.return_type, &names);
+
+    try std.testing.expectEqual(@as(usize, 1), names.items.len);
+    try std.testing.expectEqualStrings("read_only", names.items[0]);
 }
 
 test "TypeEnv leading-pipe union literal" {

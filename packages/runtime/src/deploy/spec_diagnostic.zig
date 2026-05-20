@@ -31,5 +31,6 @@ fn specDiagnosticMessage(d: zigts.SpecDiagnostic) []const u8 {
         .not_discharged => d.suggestion orelse "property not discharged",
         .incompatible_with_import => d.incompatible_module orelse "spec contradicts a virtual-module import",
         .unknown_name => "spec name is not in the v1 set",
+        .missing_capsule => d.suggestion orelse "helper has no Proof<...> capsule for a demanded property",
     };
 }

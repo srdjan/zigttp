@@ -80,6 +80,28 @@ any declared spec is not discharged, contradicts an import, or names a
 property outside the v1 set. The proof HUD, proof ledger, and
 `pi_specs_status` agent tool all read from this annotation.
 
+**Helper capsules with `Proof<T, S>`:**
+
+`Proof<T, S>` is the helper-level companion to `Spec<S>`. It annotates a
+helper's return type, resolving to `T` for type checking while carrying
+`S` as a proof obligation the compiler discharges against the helper's
+own body:
+
+```typescript
+import type { Proof } from "zigttp:types";
+
+function fullName(u: User): Proof<string, "pure" | "total"> {
+    return `${u.first} ${u.last}`;
+}
+```
+
+The v1 capsule properties are `total` (every path returns a value),
+`pure`, `read_only`, and `deterministic`. A helper that declares a
+capsule it cannot satisfy fails with ZTS500; an unknown name fails with
+ZTS502. Proven and trivially-clean helpers compose into the caller's
+proof; an effectful helper with no capsule that breaks a property the
+handler's `Spec<...>` demands fails with ZTS606.
+
 ### Examples
 
 ```typescript

@@ -789,21 +789,32 @@ pub const SpecDiagnostic = struct {
     /// suggestion string the HUD renders as `Try: <suggestion>`. Owned when
     /// present.
     suggestion: ?[]const u8 = null,
+    /// For capsule diagnostics (helper ZTS500 / ZTS502, and ZTS606): the
+    /// name of the user-defined function the diagnostic is attributed to.
+    /// Owned when present; null for handler-level Spec diagnostics, where
+    /// the handler is implied.
+    function: ?[]const u8 = null,
 
     pub const Kind = enum {
-        /// ZTS401: the corresponding HandlerProperties field is false.
+        /// ZTS500: the corresponding property is false (handler Spec) or the
+        /// declared capsule property does not hold (helper Proof).
         not_discharged,
-        /// ZTS402: the spec contradicts a virtual-module import the
+        /// ZTS501: the spec contradicts a virtual-module import the
         /// handler declared.
         incompatible_with_import,
-        /// ZTS403: the spec name is not in the v1 set.
+        /// ZTS502: the spec / capsule property name is not in the v1 set.
         unknown_name,
+        /// ZTS606: a handler-reachable helper breaks a property the
+        /// handler's Spec demands and carries no `Proof<...>` capsule
+        /// declaring it. The proof cannot compose across the call boundary.
+        missing_capsule,
 
         pub fn code(self: Kind) []const u8 {
             return switch (self) {
                 .not_discharged => "ZTS500",
                 .incompatible_with_import => "ZTS501",
                 .unknown_name => "ZTS502",
+                .missing_capsule => "ZTS606",
             };
         }
     };
@@ -812,7 +823,29 @@ pub const SpecDiagnostic = struct {
         allocator.free(self.spec_name);
         if (self.incompatible_module) |m| allocator.free(m);
         if (self.suggestion) |s| allocator.free(s);
+        if (self.function) |f| allocator.free(f);
         // cause snippet is borrowed; do not free.
+    }
+
+    /// Deep-copy. The caller owns the result and must `deinit` it. Used to
+    /// lift capsule diagnostics out of a transient table and to carry them
+    /// across a spec-diagnostic refresh.
+    pub fn clone(self: SpecDiagnostic, allocator: std.mem.Allocator) !SpecDiagnostic {
+        const spec_name = try allocator.dupe(u8, self.spec_name);
+        errdefer allocator.free(spec_name);
+        const incompatible_module = try dupeOptionalString(allocator, self.incompatible_module);
+        errdefer if (incompatible_module) |m| allocator.free(m);
+        const suggestion = try dupeOptionalString(allocator, self.suggestion);
+        errdefer if (suggestion) |s| allocator.free(s);
+        const function = try dupeOptionalString(allocator, self.function);
+        return .{
+            .kind = self.kind,
+            .spec_name = spec_name,
+            .cause = self.cause,
+            .incompatible_module = incompatible_module,
+            .suggestion = suggestion,
+            .function = function,
+        };
     }
 };
 
@@ -1133,6 +1166,32 @@ pub const IntentInfo = struct {
     }
 };
 
+/// One helper function's proof capsule, projected for the `proofCapsules`
+/// JSON envelope. Plain data so it carries no import dependency on the
+/// capsule discharge driver. Transient: populated during build, consumed by
+/// `zigts check --json` / verify-paths, never serialized into contract.json
+/// and never part of the signed attestation surface.
+pub const CapsuleSummary = struct {
+    /// Owned copy of the function name.
+    function: []const u8,
+    /// 1-based source line of the function declaration.
+    line: u32,
+    /// Owned, de-duplicated capsule property names declared via `Proof<...>`.
+    declared: std.ArrayList([]const u8) = .empty,
+    proven_total: bool = false,
+    proven_pure: bool = false,
+    proven_read_only: bool = false,
+    proven_deterministic: bool = false,
+    /// True when the function declared a capsule and every property held.
+    discharged: bool = false,
+
+    pub fn deinit(self: *CapsuleSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.function);
+        for (self.declared.items) |s| allocator.free(s);
+        self.declared.deinit(allocator);
+    }
+};
+
 pub const HandlerContract = struct {
     version: u32 = 14,
     handler: HandlerLoc,
@@ -1175,6 +1234,12 @@ pub const HandlerContract = struct {
     /// Empty when every declared spec is satisfied. Owned by the contract;
     /// each entry's deinit must run before the contract is freed.
     spec_diagnostics: std.ArrayList(SpecDiagnostic) = .empty,
+    /// Per-helper proof capsules (`Proof<...>` discharge results). Transient
+    /// analysis output: populated during build, rendered as `proofCapsules`
+    /// in the `--json` analysis envelope. NOT serialized into contract.json
+    /// and NOT part of the signed attestation surface - the json writer
+    /// skips it. Owned by the contract.
+    function_capsules: std.ArrayList(CapsuleSummary) = .empty,
     behaviors: std.ArrayList(BehaviorPath) = .empty,
     behaviors_exhaustive: bool = false,
     capabilities: CapabilityMatrix = .empty,
@@ -1250,6 +1315,10 @@ pub const HandlerContract = struct {
             @constCast(d).deinit(allocator);
         }
         self.spec_diagnostics.deinit(allocator);
+        for (self.function_capsules.items) |*c| {
+            @constCast(c).deinit(allocator);
+        }
+        self.function_capsules.deinit(allocator);
         var ext_it = self.extensions.iterator();
         while (ext_it.next()) |entry| {
             allocator.free(entry.key_ptr.*);

@@ -2097,6 +2097,7 @@ fn buildContract(
         filename,
         handler_loc,
         handler_fn,
+        root,
         dispatch,
         has_default,
         verify_info,

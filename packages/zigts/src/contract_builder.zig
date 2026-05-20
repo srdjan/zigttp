@@ -28,6 +28,8 @@ const type_pool_mod = @import("type_pool.zig");
 const rule_registry = @import("rule_registry.zig");
 const spec_discharge = @import("spec_discharge.zig");
 const intent_extractor = @import("intent_extractor.zig");
+const effect_inference = @import("effect_inference.zig");
+const function_specs = @import("function_specs.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -296,10 +298,23 @@ pub const ContractBuilder = struct {
         handler_path: []const u8,
         handler_loc: ?ir.SourceLocation,
         handler_fn: ?NodeIndex,
+        root: NodeIndex,
         dispatch: ?*const PatternDispatchTable,
         default_response: bool,
         verification: ?VerificationInfo,
     ) !HandlerContract {
+        // Proof-carrying functions: infer per-function effect rows across the
+        // call graph. The handler's composed row tightens computeProperties;
+        // the full table drives capsule discharge after the contract is built.
+        var effects = effect_inference.Analyzer.initWithManifestRegistry(
+            self.allocator,
+            self.ir_view,
+            self.atoms,
+            self.manifest_registry,
+        );
+        defer effects.deinit();
+        try effects.analyze(root);
+
         // Phase 1: Scan imports to discover modules, functions, and binding slots
         try self.scanImports();
 
@@ -326,8 +341,8 @@ pub const ContractBuilder = struct {
             try self.extractDurableWorkflow(handler_path, hf);
         }
 
-        // Phase 3: Compute handler effect properties
-        const properties = self.computeProperties();
+        // Phase 3: Compute handler effect properties.
+        const properties = self.computeProperties(effects.lookup("handler"));
 
         // Phase 3b: Detect rate limiting (guard composition + cacheIncr)
         const rate_limiting = self.detectRateLimiting();
@@ -474,6 +489,11 @@ pub const ContractBuilder = struct {
         // ZTS401/ZTS402/ZTS403 against HandlerProperties.
         try self.populateDeclaredSpecs(&contract, handler_loc);
 
+        // Phase 4b: Proof-carrying functions. Discharge each helper's
+        // `Proof<...>` capsule, append helper ZTS500/ZTS502 and caller-demand
+        // ZTS606 to spec_diagnostics, and project a CapsuleSummary per helper.
+        try self.dischargeFunctionCapsules(&contract, &effects);
+
         // Clear moved lists so deinit() won't double-free
         self.modules_list = .empty;
         self.functions_map = .empty;
@@ -558,6 +578,109 @@ pub const ContractBuilder = struct {
             contract.properties,
             contract.modules.items,
         );
+    }
+
+    /// Proof-carrying functions: discharge every helper's `Proof<...>`
+    /// capsule against the facts effect inference proved, append the
+    /// resulting diagnostics to `contract.spec_diagnostics`, and project a
+    /// `CapsuleSummary` per helper into `contract.function_capsules`.
+    ///
+    /// Two diagnostic kinds are produced. A helper that declared a capsule
+    /// property it does not satisfy gets ZTS500 / ZTS502 (its own failure).
+    /// A helper that breaks a capsule property the handler's `Spec` demands,
+    /// while carrying no capsule declaring that property, gets ZTS606: the
+    /// handler's proof cannot compose across that call boundary.
+    fn dischargeFunctionCapsules(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        analyzer: *const effect_inference.Analyzer,
+    ) !void {
+        var table = try function_specs.discharge(
+            self.allocator,
+            analyzer,
+            self.type_env,
+            self.ir_view,
+        );
+        defer table.deinit(self.allocator);
+
+        // Capsule properties the handler's Spec demands: the intersection of
+        // the declared spec set with the v1 capsule property set.
+        var handler_demands = std.EnumSet(spec_discharge.CapsuleProperty).initEmpty();
+        for (contract.declared_specs.items) |name| {
+            if (spec_discharge.CapsuleProperty.fromName(name)) |p| handler_demands.insert(p);
+        }
+
+        for (table.capsules.items) |*cap| {
+            // The helper's own capsule discharge (ZTS500 / ZTS502),
+            // attributed to the helper.
+            for (cap.diagnostics.items) |d| {
+                var copy = try d.clone(self.allocator);
+                errdefer copy.deinit(self.allocator);
+                if (copy.function == null) copy.function = try self.allocator.dupe(u8, cap.name);
+                try contract.spec_diagnostics.append(self.allocator, copy);
+            }
+
+            // ZTS606: the handler demands a capsule property this helper
+            // breaks, and the helper carries no capsule declaring it. A
+            // helper that declared the property already owns a ZTS500, so
+            // skipping declared properties avoids double-reporting.
+            inline for (.{
+                spec_discharge.CapsuleProperty.total,
+                spec_discharge.CapsuleProperty.pure,
+                spec_discharge.CapsuleProperty.read_only,
+                spec_discharge.CapsuleProperty.deterministic,
+            }) |prop| {
+                const pname = @tagName(prop);
+                if (handler_demands.contains(prop) and
+                    !cap.proven.holds(prop) and
+                    !containsString(cap.declared.items, pname))
+                {
+                    try contract.spec_diagnostics.append(
+                        self.allocator,
+                        try makeMissingCapsule(self.allocator, pname, cap.name),
+                    );
+                }
+            }
+
+            var summary = contract_types.CapsuleSummary{
+                .function = try self.allocator.dupe(u8, cap.name),
+                .line = cap.line,
+                .proven_total = cap.proven.total,
+                .proven_pure = cap.proven.pure,
+                .proven_read_only = cap.proven.read_only,
+                .proven_deterministic = cap.proven.deterministic,
+                .discharged = cap.discharged(),
+            };
+            errdefer summary.deinit(self.allocator);
+            for (cap.declared.items) |name| {
+                try summary.declared.append(self.allocator, try self.allocator.dupe(u8, name));
+            }
+            try contract.function_capsules.append(self.allocator, summary);
+        }
+    }
+
+    /// Build a ZTS606 diagnostic for a helper that breaks a handler-demanded
+    /// capsule property without declaring a capsule for it.
+    fn makeMissingCapsule(
+        allocator: std.mem.Allocator,
+        property: []const u8,
+        func: []const u8,
+    ) !contract_types.SpecDiagnostic {
+        const spec_name = try allocator.dupe(u8, property);
+        errdefer allocator.free(spec_name);
+        const owned_func = try allocator.dupe(u8, func);
+        errdefer allocator.free(owned_func);
+        const suggestion = try std.fmt.allocPrint(
+            allocator,
+            "annotate `{s}` with `Proof<T, \"{s}\">` and satisfy it, or inline the helper into the handler.",
+            .{ func, property },
+        );
+        return .{
+            .kind = .missing_capsule,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+            .function = owned_func,
+        };
     }
 
     // -----------------------------------------------------------------
@@ -2841,18 +2964,34 @@ pub const ContractBuilder = struct {
     }
 
     /// Derive handler-level properties from the aggregate effect summary.
-    fn computeProperties(self: *const ContractBuilder) HandlerProperties {
+    /// `handler_row`, when present, is the handler's call-graph composed
+    /// effect row: intersecting with it makes a property the handler claims
+    /// also account for every helper it transitively calls. This is a
+    /// monotone tightening - it can only make a property falser, never
+    /// unsoundly true - so the proof composes across helper boundaries.
+    fn computeProperties(
+        self: *const ContractBuilder,
+        handler_row: ?effect_inference.EffectRow,
+    ) HandlerProperties {
         const s = self.computeEffectSummary();
 
-        const read_only = s.io != .write;
+        var read_only = s.io != .write;
+        var deterministic = !self.has_nondeterministic_builtin;
+        var pure = !s.has_any_call and !s.has_egress;
+
+        if (handler_row) |row| {
+            deterministic = deterministic and row.deterministic;
+            read_only = read_only and row.readOnly();
+            pure = pure and row.pure;
+        }
+
         const durable_only_writes = s.io == .write and self.durable_used and !s.has_bare_write;
-        const deterministic = !self.has_nondeterministic_builtin;
         // Scope cleanup callbacks run exactly once on unwind; retrying the request
         // would re-run them, violating at-most-once guarantees for resource cleanup.
         const retry_safe = !self.scope_used and (read_only or durable_only_writes);
 
         return .{
-            .pure = !s.has_any_call and !s.has_egress,
+            .pure = pure,
             .read_only = read_only,
             .stateless = read_only and !s.has_cache_read,
             .retry_safe = retry_safe,
@@ -2993,7 +3132,7 @@ test "computeProperties pure handler stays pure" {
     var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
     defer builder.deinit();
 
-    const props = builder.computeProperties();
+    const props = builder.computeProperties(null);
 
     try std.testing.expect(props.pure);
     try std.testing.expect(props.read_only);
@@ -3010,7 +3149,7 @@ test "computeProperties cache read is read-only but not stateless" {
 
     try appendTrackedFunction(&builder, "zigttp:cache", "cacheGet");
 
-    const props = builder.computeProperties();
+    const props = builder.computeProperties(null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(props.read_only);
@@ -3027,7 +3166,7 @@ test "computeProperties bare writes are not retry safe" {
 
     try appendTrackedFunction(&builder, "zigttp:cache", "cacheSet");
 
-    const props = builder.computeProperties();
+    const props = builder.computeProperties(null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(!props.read_only);
@@ -3045,7 +3184,7 @@ test "computeProperties durable-only writes stay retry safe" {
     try appendTrackedFunction(&builder, "zigttp:durable", "step");
     builder.durable_used = true;
 
-    const props = builder.computeProperties();
+    const props = builder.computeProperties(null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(!props.read_only);
@@ -3063,7 +3202,7 @@ test "computeProperties nondeterministic builtins clear idempotence" {
     try appendTrackedFunction(&builder, "zigttp:cache", "cacheGet");
     builder.has_nondeterministic_builtin = true;
 
-    const props = builder.computeProperties();
+    const props = builder.computeProperties(null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(props.read_only);
@@ -3080,7 +3219,7 @@ test "computeProperties egress is conservative write" {
 
     builder.egress_dynamic = true;
 
-    const props = builder.computeProperties();
+    const props = builder.computeProperties(null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(!props.read_only);
@@ -3166,7 +3305,7 @@ test "registered partner manifest contributes effect class to handler properties
     try std.testing.expectEqualStrings("zigttp-ext:stripe", builder.functions_map.items[0].module);
     try std.testing.expect(containsString(builder.functions_map.items[0].names.items, "chargeCard"));
 
-    const props = builder.computeProperties();
+    const props = builder.computeProperties(null);
     try std.testing.expect(!props.read_only);
     try std.testing.expect(!props.idempotent);
     try std.testing.expect(!props.pure);

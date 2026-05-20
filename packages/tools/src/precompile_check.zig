@@ -130,15 +130,12 @@ pub fn appendSpecDiagnosticsJson(
 ) void {
     const contract = if (result.contract) |*c| c else return;
     for (contract.spec_diagnostics.items) |diag| {
-        const code: []const u8 = switch (diag.kind) {
-            .not_discharged => "ZTS500",
-            .incompatible_with_import => "ZTS501",
-            .unknown_name => "ZTS502",
-        };
+        const code: []const u8 = diag.kind.code();
         const message: []const u8 = switch (diag.kind) {
             .not_discharged => "declared Spec was not discharged by handler proof",
             .incompatible_with_import => "declared Spec is incompatible with imported module",
             .unknown_name => "declared Spec name is not recognized",
+            .missing_capsule => "helper breaks a handler-demanded property and carries no Proof<...> capsule",
         };
         result.json_diagnostics.append(allocator, .{
             .code = code,
@@ -155,16 +152,32 @@ pub fn appendSpecDiagnosticsJson(
 pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult) !void {
     const contract = if (result.contract) |*c| c else return;
     if (contract.declared_specs.items.len == 0) return;
-    for (contract.spec_diagnostics.items) |*diag| {
-        diag.deinit(allocator);
-    }
-    contract.spec_diagnostics.deinit(allocator);
-    contract.spec_diagnostics = try zigts.spec_discharge.dischargeSpecs(
+
+    // Re-discharge the handler's Spec<...> obligations against the freshly
+    // classified properties. Capsule diagnostics - those carrying a
+    // `function` - come from proof-carrying-function discharge, which this
+    // refresh does not re-run; they are cloned across so the helper
+    // ZTS500/ZTS502 and ZTS606 entries survive. The clone (rather than a
+    // move) keeps `contract.spec_diagnostics` intact until the swap, so an
+    // OOM mid-loop leaves both lists individually consistent.
+    var refreshed = try zigts.spec_discharge.dischargeSpecs(
         allocator,
         contract.declared_specs.items,
         contract.properties,
         contract.modules.items,
     );
+    errdefer {
+        for (refreshed.items) |*d| d.deinit(allocator);
+        refreshed.deinit(allocator);
+    }
+    for (contract.spec_diagnostics.items) |*diag| {
+        if (diag.function != null) {
+            try refreshed.append(allocator, try diag.clone(allocator));
+        }
+    }
+    for (contract.spec_diagnostics.items) |*diag| diag.deinit(allocator);
+    contract.spec_diagnostics.deinit(allocator);
+    contract.spec_diagnostics = refreshed;
 }
 
 /// Format a structured proof card showing what the compiler proved.
