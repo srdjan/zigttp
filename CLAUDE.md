@@ -127,7 +127,7 @@ Proof receipts ship default-on as of slice 2: every fresh `compile`, `build`, or
 ### zigts (compiler/analyzer)
 
 ```bash
-zigts check [handler.ts] [--json] [--contract] [--types] [--sql-schema path]
+zigts check [handler.ts] [--json] [--contract] [--types] [--sql-schema path] [--system path] [--require-export-capsules]
 zigts compile [flags] <handler.ts> <output.zig>
 zigts prove <old.json> <new.json> [output-dir/]
 zigts mock <tests.jsonl> [--port PORT]
