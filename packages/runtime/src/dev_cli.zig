@@ -827,7 +827,7 @@ fn printInitNextSteps(allocator: std.mem.Allocator, name: []const u8) void {
     std.debug.print("  try it:\n", .{});
     std.debug.print("\n", .{});
     std.debug.print("    cd {s}\n", .{name});
-    std.debug.print("    {s}zigttp dev{s}          {s}# watch, prove, and stream the proof HUD{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
+    std.debug.print("    {s}zigttp dev{s}          {s}# watch, prove, and start the Proof Quest{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
     std.debug.print("\n", .{});
     std.debug.print("  also useful:\n", .{});
     std.debug.print("    zigttp check        {s}# verify once and exit{s}\n", .{ c.dim, c.reset });
@@ -921,7 +921,6 @@ fn maybeShowFirstRunTour(allocator: std.mem.Allocator, argv: []const []const u8)
 }
 
 fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
-    maybeShowFirstRunTour(allocator, argv);
     try runDevPreflight(allocator, argv);
 
     const serve_binary = try resolveDeveloperServeBinary(allocator, program_path);
@@ -934,6 +933,9 @@ fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []co
     const user_no_prove = shared.hasFlag(argv, "--no-prove");
     const user_has_watch = shared.hasFlag(argv, "--watch");
     const user_has_prove = shared.hasFlag(argv, "--prove");
+    const user_has_quest = shared.hasFlag(argv, "--quest");
+    const user_no_tour = shared.hasFlag(argv, "--no-tour");
+    const default_quest = !user_no_tour and !user_has_quest and shared.stderrIsTty() and !tourMarkerExists(allocator);
 
     var child_args = std.ArrayList([]const u8).empty;
     defer child_args.deinit(allocator);
@@ -946,6 +948,7 @@ fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []co
     }
     if (!user_has_watch) try child_args.append(allocator, "--watch");
     if (!user_has_prove and !user_no_prove) try child_args.append(allocator, "--prove");
+    if (default_quest and !user_no_prove) try child_args.append(allocator, "--quest-default");
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -1915,7 +1918,7 @@ fn printHelp() void {
         \\  zigttp init <name> [--template basic|api|htmx]  Create project
         \\  zigttp demo [--no-open] [--port N] [--out DIR]  Guided local proof theater
         \\  zigttp studio [--template basic|api|htmx]  Browser proof workbench (scaffolds in empty dir)
-        \\  zigttp dev [handler-or-project]         Watch + proven hot reload (HUD on)
+        \\  zigttp dev [handler-or-project] [--quest]  Watch + proven hot reload
         \\  zigttp serve [options] [handler.ts]    Run handler locally
         \\  zigttp edge [--config FILE]            Run in-process edge runtime
         \\  zigttp expert                          Deprecated alias for `zigts expert`
@@ -2307,32 +2310,7 @@ const htmxManifest =
     \\}
 ;
 
-const basicHandler =
-    \\// Magnet starter: a tiny handler with an author-declared Spec<...>.
-    \\// Save this file and watch the proof chips light up green in the dev HUD.
-    \\//
-    \\// Try the magnet demo: drop `Date.now()` into the handler body and
-    \\// watch -deterministic flip red. Wrap it in
-    \\// `step("ts", () => Date.now())` from "zigttp:durable" and the chip
-    \\// flips back green.
-    \\
-    \\import type { Spec } from "zigttp:types";
-    \\
-    \\type Guardrails = Spec<
-    \\    | "deterministic"
-    \\    | "no_secret_leakage"
-    \\    | "injection_safe"
-    \\>;
-    \\
-    \\function handler(req: Request): Response & Guardrails {
-    \\    if (req.method === "GET" && req.path === "/") {
-    \\        return Response.html(
-    \\            "<main><h1>Hello, world!</h1><p>Proven at compile time.</p></main>"
-    \\        );
-    \\    }
-    \\    return Response.json({ error: "not found" }, { status: 404 });
-    \\}
-;
+const basicHandler = zigts_cli.proof_quest_fixture.starter_source;
 
 const apiHandler =
     \\function handler(req) {
@@ -2410,12 +2388,17 @@ const basicReadme =
     \\
     \\## Quick start
     \\
-    \\1. Open the proof workbench in your browser:
+    \\1. Start the terminal proof loop:
     \\
-    \\       zigttp studio
+    \\       zigttp dev
     \\
-    \\2. Edit `src/handler.ts` in your editor. Studio re-verifies on save and
-    \\   shows the verdict, proven surface, witnesses, and any spec diagnostics.
+    \\   On a fresh scaffold, the Proof Quest runs once. Press `b` to preview
+    \\   a tiny edit that breaks `deterministic`, `y` to apply it, then `r`
+    \\   and `y` to repair it. Use `zigttp dev --quest` to replay it later.
+    \\
+    \\2. Edit `src/handler.ts` in your editor. The HUD re-verifies on save and
+    \\   shows the verdict, proven surface, proof deltas, and spec diagnostics.
+    \\   Press `Tab` or `l` to rotate proof lenses.
     \\
     \\3. When you are happy with the verdict, build a self-contained binary:
     \\
@@ -2431,6 +2414,7 @@ const basicReadme =
     \\## Other useful commands
     \\
     \\- `zigttp check` - run the analyzer once and exit
+    \\- `zigttp studio` - open the browser workbench mirror
     \\- `zigttp doctor` - validate the project layout
     \\- `zigttp proofs list` - browse the proof ledger
 ;

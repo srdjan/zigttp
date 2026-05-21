@@ -166,29 +166,14 @@ fn attestCommand(allocator: std.mem.Allocator) !void {
 }
 
 pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    // Extract live reload flags before parsing server config
-    var watch_enabled = false;
-    var prove_enabled = false;
-    var force_swap = false;
-    var studio_enabled = false;
-    var demo_enabled = false;
-    for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--watch")) watch_enabled = true;
-        if (std.mem.eql(u8, arg, "--prove")) prove_enabled = true;
-        if (std.mem.eql(u8, arg, "--force-swap")) force_swap = true;
-        if (std.mem.eql(u8, arg, "--studio")) studio_enabled = true;
-        if (std.mem.eql(u8, arg, "--demo")) demo_enabled = true;
-    }
-    if (demo_enabled) studio_enabled = true;
-    if (studio_enabled) {
+    const feature_flags = parseServeFeatureFlags(argv);
+    if (feature_flags.studio_enabled) {
         if (!feature_options.enable_studio) {
             std.log.err("--studio is not available in zigttp-runtime; use the zigttp developer CLI", .{});
             std.process.exit(1);
         }
-        watch_enabled = true;
-        prove_enabled = true;
     }
-    if (watch_enabled and !feature_options.enable_live_reload) {
+    if (feature_flags.watch_enabled and !feature_options.enable_live_reload) {
         std.log.err("--watch is not available in zigttp-runtime; use the zigttp developer CLI", .{});
         std.process.exit(1);
     }
@@ -197,8 +182,8 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         if (err == error.HelpRequested) return;
         return err;
     };
-    if (studio_enabled) config.studio = true;
-    if (demo_enabled) {
+    if (feature_flags.studio_enabled) config.studio = true;
+    if (feature_flags.demo_enabled) {
         config.studio = true;
         config.studio_demo_root = ".";
     }
@@ -243,7 +228,7 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
     defer server.deinit();
 
     // Start with proven live reload if --watch was requested
-    if (watch_enabled) {
+    if (feature_flags.watch_enabled) {
         const handler_path = switch (config.handler) {
             .file_path => |path| path,
             else => {
@@ -264,8 +249,9 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
             handler_path,
             watch_set.paths,
             .{
-                .prove = prove_enabled,
-                .force_swap = force_swap,
+                .prove = feature_flags.prove_enabled,
+                .force_swap = feature_flags.force_swap,
+                .quest = .{ .enabled = feature_flags.quest_enabled, .explicit = feature_flags.quest_explicit },
             },
         );
         defer live_reload.deinit();
@@ -280,6 +266,39 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
             return;
         };
     }
+}
+
+const ServeFeatureFlags = struct {
+    watch_enabled: bool = false,
+    prove_enabled: bool = false,
+    force_swap: bool = false,
+    studio_enabled: bool = false,
+    demo_enabled: bool = false,
+    quest_enabled: bool = false,
+    quest_explicit: bool = false,
+};
+
+fn parseServeFeatureFlags(argv: []const []const u8) ServeFeatureFlags {
+    var flags = ServeFeatureFlags{};
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--watch")) flags.watch_enabled = true;
+        if (std.mem.eql(u8, arg, "--prove")) flags.prove_enabled = true;
+        if (std.mem.eql(u8, arg, "--force-swap")) flags.force_swap = true;
+        if (std.mem.eql(u8, arg, "--studio")) flags.studio_enabled = true;
+        if (std.mem.eql(u8, arg, "--demo")) flags.demo_enabled = true;
+        if (std.mem.eql(u8, arg, "--quest")) {
+            flags.quest_enabled = true;
+            flags.quest_explicit = true;
+        }
+        if (std.mem.eql(u8, arg, "--quest-default")) flags.quest_enabled = true;
+    }
+
+    if (flags.demo_enabled) flags.studio_enabled = true;
+    if (flags.studio_enabled or flags.quest_enabled) {
+        flags.watch_enabled = true;
+        flags.prove_enabled = true;
+    }
+    return flags;
 }
 
 /// Parse a single flag shared between `serve` and `serve --appended`.
@@ -457,7 +476,9 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             std.mem.eql(u8, arg, "--prove") or
             std.mem.eql(u8, arg, "--force-swap") or
             std.mem.eql(u8, arg, "--studio") or
-            std.mem.eql(u8, arg, "--demo"))
+            std.mem.eql(u8, arg, "--demo") or
+            std.mem.eql(u8, arg, "--quest") or
+            std.mem.eql(u8, arg, "--quest-default"))
         {
             // Handled by serveCommand before parseServeArgs is called
             continue;
@@ -594,6 +615,7 @@ fn printServeHelp() void {
         \\  --prove               With --watch, gate swaps on upgrade verdict
         \\  --force-swap          With --watch, apply breaking swaps anyway
         \\  --studio              Serve the local proof workbench
+        \\  --quest               Run the first-run proof quest
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -606,6 +628,33 @@ test "parseCommonServeFlag: -p consumes next arg as port" {
     try std.testing.expect(try parseCommonServeFlag(argv[0], &i, &argv, &config));
     try std.testing.expectEqual(@as(u16, 4242), config.port);
     try std.testing.expectEqual(@as(usize, 1), i);
+}
+
+test "parseServeFeatureFlags: quest implies watch and prove" {
+    const quest = parseServeFeatureFlags(&.{"--quest"});
+    try std.testing.expect(quest.quest_enabled);
+    try std.testing.expect(quest.quest_explicit);
+    try std.testing.expect(quest.watch_enabled);
+    try std.testing.expect(quest.prove_enabled);
+
+    const quest_default = parseServeFeatureFlags(&.{"--quest-default"});
+    try std.testing.expect(quest_default.quest_enabled);
+    try std.testing.expect(!quest_default.quest_explicit);
+    try std.testing.expect(quest_default.watch_enabled);
+    try std.testing.expect(quest_default.prove_enabled);
+}
+
+test "parseServeFeatureFlags: studio and demo imply proof watch loop" {
+    const studio = parseServeFeatureFlags(&.{"--studio"});
+    try std.testing.expect(studio.studio_enabled);
+    try std.testing.expect(studio.watch_enabled);
+    try std.testing.expect(studio.prove_enabled);
+
+    const demo = parseServeFeatureFlags(&.{"--demo"});
+    try std.testing.expect(demo.demo_enabled);
+    try std.testing.expect(demo.studio_enabled);
+    try std.testing.expect(demo.watch_enabled);
+    try std.testing.expect(demo.prove_enabled);
 }
 
 test "parseCommonServeFlag: --cors toggles enable_cors, no value consumed" {

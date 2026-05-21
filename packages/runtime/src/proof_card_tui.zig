@@ -77,6 +77,10 @@ pub const FrameOptions = struct {
     /// only when `lens == .caller_view`; null on other lenses renders an
     /// "(not attested; pass --no-attest off or rebuild)" message.
     caller_view: ?CallerView = null,
+    /// Pre-rendered `proofTrace` JSON object from the analyzer. When present,
+    /// a "Proof trace" block beneath the panes surfaces the reasoning behind
+    /// every red proof. Null (the default) skips the block entirely.
+    proof_trace_json: ?[]const u8 = null,
 };
 
 const ColumnWidths = struct {
@@ -198,6 +202,16 @@ pub fn writeProofCardFrame(
     if (card.counterexample) |cx| {
         try writeCounterexampleBlock(allocator, writer, widths, &cx);
         try writeBorder(writer, widths);
+    }
+    // The proof trace pairs with the Properties chips; render it only on
+    // that lens. This also keeps the JSON parse off the other three lens
+    // renders that `refreshLensCache` performs every recompile.
+    if (opts.lens == .properties) {
+        if (opts.proof_trace_json) |ptj| {
+            if (try writeProofTraceBlock(allocator, writer, widths, ptj)) {
+                try writeBorder(writer, widths);
+            }
+        }
     }
     try writeStatusBar(writer, widths, card);
     try writeBorder(writer, widths);
@@ -324,6 +338,53 @@ fn writeFullRow(
     try writer.writeAll(content[0..visible]);
     try writer.splatByteAll(' ', inside_width - visible);
     try writer.writeAll("|\n");
+}
+
+/// Render the "Proof trace" block: for every headline property that did not
+/// hold, one full-width row carrying the analyzer's reasoning. Surfaces the
+/// counterexample behind each red chip without a keystroke. Returns true when
+/// at least one row was written. `json` is the analyzer's `proofTrace` object;
+/// a parse failure is non-fatal and simply skips the block.
+fn writeProofTraceBlock(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    widths: ColumnWidths,
+    json: []const u8,
+) !bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return false;
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return false,
+    };
+
+    var wrote_title = false;
+    inline for (review.property_metas) |meta| {
+        const e: ?std.json.ObjectMap = if (obj.get(meta.field)) |entry| switch (entry) {
+            .object => |o| o,
+            else => null,
+        } else null;
+        if (e) |fields| {
+            const holds = if (fields.get("holds")) |h| switch (h) {
+                .bool => |b| b,
+                else => true,
+            } else true;
+            if (!holds) {
+                if (!wrote_title) {
+                    try writeFullRow(writer, widths, "Proof trace: how each red proof broke");
+                    wrote_title = true;
+                }
+                const summary: []const u8 = if (fields.get("summary")) |s| switch (s) {
+                    .string => |str| str,
+                    else => "",
+                } else "";
+                const line = try std.fmt.allocPrint(allocator, "  -{s}: {s}", .{ meta.label, summary });
+                defer allocator.free(line);
+                try writeFullRow(writer, widths, line);
+            }
+        }
+    }
+    return wrote_title;
 }
 
 /// Render the verdict / contract sha / baseline sha row at the bottom of the
@@ -905,6 +966,45 @@ test "writeProofCardFrame: every row has identical visible width" {
         try std.testing.expectEqual(expected_width.?, line.len);
     }
     try std.testing.expectEqual(@as(usize, 100), expected_width.?);
+}
+
+test "writeProofCardFrame: proof trace block surfaces failing properties and keeps width" {
+    const allocator = std.testing.allocator;
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+
+    var delta = try review.deriveDelta(allocator, &current, null);
+    defer delta.deinit(allocator);
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "us-east",
+        .current = &current,
+        .baseline = null,
+        .delta = &delta,
+    };
+
+    const trace_json =
+        \\{"deterministic":{"holds":false,"kind":"structural","summary":"Date.now() reads a clock."},
+        \\"read_only":{"holds":true,"kind":"structural","summary":"no writes"}}
+    ;
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeProofCardFrame(allocator, &card, &aw.writer, .{ .width = 100, .proof_trace_json = trace_json });
+    const out = aw.writer.buffered();
+
+    // The failing property appears with its reasoning; the passing one does not.
+    try std.testing.expect(std.mem.indexOf(u8, out, "Proof trace: how each red proof broke") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Date.now() reads a clock.") != null);
+
+    // Every rendered row still has identical visible width.
+    var iter = std.mem.splitScalar(u8, out, '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) continue;
+        try std.testing.expectEqual(@as(usize, 100), line.len);
+    }
 }
 
 test "writeProofCardFrame: requests pane renders audit events newest-first" {

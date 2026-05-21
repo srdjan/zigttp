@@ -1142,6 +1142,31 @@ pub fn runCheckOnlyFromSource(
         }
     }
 
+    // Stage 11: Proof trace - per-property reasoning for the proof card.
+    // Renders while the IR view and flow diagnostics are still alive; the
+    // result is a pre-formatted JSON object stored on CheckResult.
+    if (result.contract) |*c| {
+        var trace_arena = std.heap.ArenaAllocator.init(allocator);
+        defer trace_arena.deinit();
+        const flow_for_trace: []const zigts.flow_checker.Diagnostic =
+            if (checked_opt) |*ck| ck.flowDiagnostics() else &.{};
+        if (zigts.proof_trace.collect(
+            trace_arena.allocator(),
+            c,
+            flow_for_trace,
+            ir_view,
+            result.paths_enumerated,
+            result.paths_exhaustive,
+        )) |traces| {
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
+            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+            const ok = if (zigts.proof_trace.writeJson(&aw.writer, traces)) |_| true else |_| false;
+            buf = aw.toArrayList();
+            if (ok) result.proof_trace_json = allocator.dupe(u8, buf.items) catch null;
+        } else |_| {}
+    }
+
     // Later analysis stages mutate contract.properties, so keep the flat
     // CheckResult mirror aligned with the finalized contract before returning.
     syncCheckResultProperties(&result);

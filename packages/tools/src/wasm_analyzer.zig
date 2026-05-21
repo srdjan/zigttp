@@ -18,6 +18,7 @@ const std = @import("std");
 const zigts = @import("zigts");
 const precompile = @import("precompile.zig");
 const json_diag = precompile.json_diag;
+pub const proof_quest_fixture = @import("proof_quest_fixture.zig");
 
 /// Freestanding/wasm has no stderr. `std.log`'s default sink pulls a threaded
 /// IO stack that does not compile here, so route every log record to a no-op.
@@ -115,8 +116,8 @@ fn runAnalysis(a: std.mem.Allocator, source: []const u8, is_tsx: bool, w: *std.I
     const contract_ptr: ?*const zigts.handler_contract.HandlerContract =
         if (result.contract) |*c| c else null;
     if (result.totalErrors() > 0) {
-        try json_diag.writeErrorJson(w, contract_ptr, result.json_diagnostics.items, null);
+        try json_diag.writeErrorJson(w, contract_ptr, result.json_diagnostics.items, null, result.proof_trace_json);
     } else {
-        try json_diag.writeSuccessJson(w, contract_ptr, result.json_diagnostics.items, null);
+        try json_diag.writeSuccessJson(w, contract_ptr, result.json_diagnostics.items, null, result.proof_trace_json);
     }
 }

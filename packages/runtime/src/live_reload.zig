@@ -32,6 +32,7 @@ const printer_mod = @import("deploy/printer.zig");
 const studio_mod = @import("runtime_features.zig").studio;
 const counterexample_pipeline = @import("counterexample_pipeline.zig");
 const json_diag = precompile.json_diag;
+const proof_quest = @import("proof_quest.zig");
 
 pub const LiveReloadConfig = struct {
     /// Enable contract diffing (--prove)
@@ -44,6 +45,8 @@ pub const LiveReloadConfig = struct {
     sql_schema_path: ?[]const u8 = null,
     /// system.json path for service linking
     system_path: ?[]const u8 = null,
+    /// First-run guided proof quest for scaffolded projects.
+    quest: proof_quest.Config = .{},
 };
 
 pub const LiveReloadState = struct {
@@ -71,6 +74,11 @@ pub const LiveReloadState = struct {
     lens_cache_mu: compat.Mutex,
     lens_cache: [4]?[]u8,
     keystroke_handle: ?*keystroke_input.Handle,
+    quest: proof_quest.State,
+    /// Last analyzer `proofTrace` JSON, persisted across recompiles so every
+    /// HUD repaint (including lens rotation) can show the per-property
+    /// reasoning. Owned; replaced on each successful analysis.
+    proof_trace_json: ?[]u8,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -94,6 +102,8 @@ pub const LiveReloadState = struct {
             .lens_cache_mu = .{},
             .lens_cache = .{ null, null, null, null },
             .keystroke_handle = null,
+            .quest = proof_quest.State.init(allocator, handler_path, config.quest),
+            .proof_trace_json = null,
         };
     }
 
@@ -107,6 +117,7 @@ pub const LiveReloadState = struct {
         }
         if (self.current_contract) |*c| c.deinit(self.allocator);
         if (self.previous_code) |code| self.allocator.free(code);
+        if (self.proof_trace_json) |ptj| self.allocator.free(ptj);
     }
 
     /// Read the active lens. Clamped against the enum tag range so adding
@@ -126,6 +137,7 @@ pub const LiveReloadState = struct {
         self.keystroke_handle = keystroke_input.install(self.allocator, self, onKeystroke);
         if (self.config.prove) {
             self.seedInitialProof();
+            self.quest.maybeStart();
         }
 
         while (self.server.running) {
@@ -162,6 +174,9 @@ pub const LiveReloadState = struct {
 
         const contract = result.contract;
         result.contract = null;
+        // Steal the pre-rendered proof trace before deinit frees it.
+        const proof_trace_json = result.proof_trace_json;
+        result.proof_trace_json = null;
         const errors = result.totalErrors();
         const pinned_regressions = result.pinned_witness_regressions;
         result.deinit(self.allocator);
@@ -171,6 +186,7 @@ pub const LiveReloadState = struct {
             .errors = errors,
             .pinned_regressions = pinned_regressions,
             .diagnostics = diagnostics,
+            .proof_trace_json = proof_trace_json,
         };
     }
 
@@ -179,6 +195,7 @@ pub const LiveReloadState = struct {
         errors: u32,
         pinned_regressions: usize,
         diagnostics: []studio_mod.Diagnostic,
+        proof_trace_json: ?[]u8 = null,
 
         fn deinitContract(self: *AnalysisResult, allocator: std.mem.Allocator) void {
             if (self.contract) |*c| c.deinit(allocator);
@@ -212,6 +229,11 @@ pub const LiveReloadState = struct {
         defer if (analysis.contract != null) analysis.deinitContract(self.allocator);
         defer analysis.deinitDiagnostics(self.allocator);
 
+        // Adopt the freshest proof trace; the HUD reads it on every repaint.
+        if (self.proof_trace_json) |old| self.allocator.free(old);
+        self.proof_trace_json = analysis.proof_trace_json;
+        analysis.proof_trace_json = null;
+
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
 
         if (analysis.errors > 0) {
@@ -221,6 +243,7 @@ pub const LiveReloadState = struct {
                 elapsed_ms,
             });
             printDiagnosticLines(analysis.diagnostics, new_code);
+            self.quest.afterProofFailed();
             if (analysis.pinned_regressions > 0) {
                 printReload("[witnesses] {d} pinned witness(es) re-fired - regression of a previously defended pattern.\n", .{analysis.pinned_regressions});
             }
@@ -252,6 +275,15 @@ pub const LiveReloadState = struct {
             const sha_hex = std.fmt.bytesToHex(sha_digest, .lower);
 
             if (self.current_contract) |*old_contract| {
+                if (self.last_ledger_sha) |prev_sha| {
+                    if (std.mem.eql(u8, &prev_sha, &sha_hex)) {
+                        self.renderHud(&new_contract, old_contract, elapsed_ms, &sha_hex);
+                        printProve("No proof delta. Running handler already matches this source.\n", .{});
+                        new_contract.deinit(self.allocator);
+                        return;
+                    }
+                }
+
                 if (new_contract.durable.used) {
                     printProve("Handler uses durable execution. Live swap refused.\n", .{});
                     printProve("Restart the server to apply changes.\n", .{});
@@ -333,6 +365,11 @@ pub const LiveReloadState = struct {
         };
         defer if (analysis.contract != null) analysis.deinitContract(self.allocator);
         defer analysis.deinitDiagnostics(self.allocator);
+
+        // Adopt the freshest proof trace; the HUD reads it on every repaint.
+        if (self.proof_trace_json) |old| self.allocator.free(old);
+        self.proof_trace_json = analysis.proof_trace_json;
+        analysis.proof_trace_json = null;
 
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
         if (analysis.errors > 0) {
@@ -503,6 +540,9 @@ pub const LiveReloadState = struct {
             &delta,
         );
 
+        self.quest.afterProofRendered();
+        const quest_snapshot = self.quest.snapshot();
+
         if (self.server.studio) |*studio| {
             studio.updateFacts(.{
                 .facts = &new_facts,
@@ -510,7 +550,9 @@ pub const LiveReloadState = struct {
                 .delta = &delta,
                 .recompile_ms = elapsed_ms,
                 .counterexample = cx_preview,
+                .quest = quest_snapshot,
                 .property_causes = causes_buf[0..n_causes],
+                .proof_trace_json = self.proof_trace_json,
             });
             studio.broadcast();
         }
@@ -567,6 +609,7 @@ pub const LiveReloadState = struct {
                 .recompile_ms = recompile_ms,
                 .lens = lens,
                 .caller_view = caller_view,
+                .proof_trace_json = self.proof_trace_json,
             });
             rendered[idx] = try self.allocator.dupe(u8, aw.writer.buffered());
         }
@@ -614,6 +657,7 @@ pub const LiveReloadState = struct {
     fn onKeystroke(ctx: *anyopaque, byte: u8) void {
         const self: *LiveReloadState = @ptrCast(@alignCast(ctx));
         switch (byte) {
+            'b', 'B', 'r', 'R', 'y', 'Y', 's', 'S' => if (self.quest.handleKey(byte)) return,
             0x09, 'l', 'L' => self.rotateLens(),
             else => {},
         }

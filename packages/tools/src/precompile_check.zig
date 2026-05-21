@@ -43,6 +43,10 @@ pub const CheckResult = struct {
     /// by `--watch --prove` as a HUD-adjacent toast so authors notice when
     /// a defended-against pattern reappears.
     pinned_witness_regressions: usize = 0,
+    /// Pre-rendered `proofTrace` JSON object: per-property reasoning for the
+    /// proof card (how each proof was discharged, or the counterexample that
+    /// broke it). Null when no contract was produced. Owned by CheckResult.
+    proof_trace_json: ?[]u8 = null,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
         return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.specErrors();
@@ -55,6 +59,7 @@ pub const CheckResult = struct {
     pub fn deinit(self: *CheckResult, allocator: std.mem.Allocator) void {
         if (self.contract) |*c| c.deinit(allocator);
         self.json_diagnostics.deinit(allocator);
+        if (self.proof_trace_json) |ptj| allocator.free(ptj);
     }
 
     /// Error-severity spec diagnostics: handler Spec ZTS500/501/502, helper

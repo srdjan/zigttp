@@ -286,6 +286,7 @@ pub fn writeSuccessJson(
     contract: ?*const handler_contract.HandlerContract,
     diagnostics: []const JsonDiagnostic,
     witnesses_block_json: ?[]const u8,
+    proof_trace_json: ?[]const u8,
 ) !void {
     try writer.writeAll("{\"success\":true");
 
@@ -332,6 +333,13 @@ pub fn writeSuccessJson(
             try writer.writeByte('}');
         }
 
+        // proofTrace: per-property reasoning for the proof card. Additive
+        // sibling of `properties`; pre-rendered JSON object or omitted.
+        if (proof_trace_json) |ptj| {
+            try writer.writeAll(",\"proofTrace\":");
+            try writer.writeAll(ptj);
+        }
+
         // declared_specs: surface the author's `Spec<...>` declaration so
         // tools (pi_specs_status, the agent autoloop) can read intent
         // straight from the proof JSON.
@@ -371,6 +379,7 @@ pub fn writeErrorJson(
     contract: ?*const handler_contract.HandlerContract,
     diagnostics: []const JsonDiagnostic,
     witnesses_block_json: ?[]const u8,
+    proof_trace_json: ?[]const u8,
 ) !void {
     try writer.writeAll("{\"success\":false");
     if (contract) |c| {
@@ -405,6 +414,11 @@ pub fn writeErrorJson(
                 props.fault_covered,
             });
             try writer.writeByte('}');
+        }
+
+        if (proof_trace_json) |ptj| {
+            try writer.writeAll(",\"proofTrace\":");
+            try writer.writeAll(ptj);
         }
 
         try writer.writeAll(",\"declared_specs\":[");

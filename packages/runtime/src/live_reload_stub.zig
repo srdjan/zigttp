@@ -4,6 +4,10 @@ const Server = @import("server.zig").Server;
 pub const Options = struct {
     prove: bool = false,
     force_swap: bool = false,
+    quest: struct {
+        enabled: bool = false,
+        explicit: bool = false,
+    } = .{},
 };
 
 pub const LiveReloadState = struct {

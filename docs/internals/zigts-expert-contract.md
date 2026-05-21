@@ -366,7 +366,7 @@ Substring search across rule names, descriptions, and help text.
 
 ## Proof-card envelope (from `zigts check --json`)
 
-`zigts check --json` is not reached via the direct verification commands, but it is part of the v1 contract because `zigts expert` calls the same underlying functions in-process. Two envelopes exist (`packages/tools/src/json_diagnostics.zig:245-311`).
+`zigts check --json` is not reached via the direct verification commands, but it is part of the v1 contract because `zigts expert` calls the same underlying functions in-process. Two envelopes exist (`packages/tools/src/json_diagnostics.zig:284-440`).
 
 **Success envelope** (emitted when analysis completes with no error-severity diagnostics):
 
@@ -386,6 +386,25 @@ Substring search across rule names, descriptions, and help text.
       "state_isolated": true,
       "fault_covered": true
     },
+    "proofTrace": {
+      "deterministic": {
+        "holds": false,
+        "kind": "structural",
+        "summary": "Date.now() reads a clock or RNG: two runs of the same request can differ.",
+        "counterexample": {
+          "kind": "offending-node",
+          "location": { "line": 14, "column": 9 },
+          "snippet": "Date.now()",
+          "fix": "move the call inside a durable step() from zigttp:durable, or take the value from the request."
+        }
+      },
+      "retry_safe": {
+        "holds": true,
+        "kind": "path-enumeration",
+        "summary": "Read-only, or every write is inside a durable step: safe to retry.",
+        "facts": { "pathsEnumerated": 4, "pathsExhaustive": true, "failableSites": 0, "coveredSites": 0 }
+      }
+    },
     "declared_specs": ["idempotent", "deterministic"],
     "spec_diagnostics": []
   },
@@ -401,6 +420,7 @@ Fields:
   - `outbound_hosts` (string array) — static egress destinations extracted from the contract.
   - `virtual_modules` (string array) — `zigttp:*` module specifiers the handler imports.
   - `properties` (object, closed set in v1) — seven boolean flags, all keys guaranteed: `retry_safe`, `idempotent`, `injection_safe`, `deterministic`, `read_only`, `state_isolated`, `fault_covered`. New property flags would be a v2 change.
+  - `proofTrace` (object) — per-property reasoning keyed by `HandlerProperties` field name. Each entry has `holds` (boolean), `kind` (`path-enumeration` / `flow-trace` / `structural`), and `summary` (one-line explanation). Path-enumeration entries also carry `facts` (`pathsEnumerated`, `pathsExhaustive`, `failableSites`, `coveredSites`). Failing entries that have a concrete counterexample carry `counterexample`: either `offending-node` (a `location`, `snippet`, and `fix`) or `flow-chain` (the source-to-sink `flow` steps, the synthesized `request`, and a `fix`). Additive: clients that read only `properties` are unaffected. Omitted when no contract was produced.
   - `declared_specs` (string array) — author-declared spec names extracted from the handler return type's `Spec<...>` annotation. Empty when no `Spec<...>` is declared. Always present on the success envelope.
   - `spec_diagnostics` (array of objects) — per-spec and per-capsule discharge results in their structured form. Each entry has `code` (`ZTS500`-`ZTS506`, `ZTS606`, `ZTS607`), `kind` (`not_discharged` / `incompatible_with_import` / `unknown_name` / `missing_capsule` / `effect_undeclared` / `effect_unknown_capability` / `effect_over_declared` / `budget_exceeded` / `helper_budget_exceeded`), `severity` (`error` / `warning`), `spec_name` (a spec, capsule property, or capability name depending on `kind`), optional `function` (present on helper capsule diagnostics, `ZTS606`, and `ZTS607`, naming the user-defined function the diagnostic is attributed to), optional `incompatible_module` (ZTS501 only), optional `suggestion`. Empty when every declared spec and capsule is satisfied. Note that error-severity entries also produce matching entries in the top-level `diagnostics` array, which is what gates exit code and what `verify-paths` consumes; the structured form here exists so agent dispatch can branch on `kind` without parsing message strings.
   - `proofCapsules` (array of objects) — per-helper proof-carrying-function discharge results. Each entry has `function`, `line`, `declared` (capsule property names from the helper's `Proof<T, "...">` annotation), `proven` (object with `total` / `pure` / `read_only` / `deterministic` booleans the compiler proved about the helper), and `discharged` (true when the helper declared a capsule and every property held). Transient analysis output: present in the `--json` envelope but never written to `contract.json` or the signed attestation surface. Empty when the module has no user-defined helpers.

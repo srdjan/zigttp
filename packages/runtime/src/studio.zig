@@ -8,6 +8,7 @@ const attest_envelope = @import("attest/envelope.zig");
 const attest_well_known = @import("attest/well_known.zig");
 const compat = zigts.compat;
 const demo = @import("demo.zig");
+const proof_quest = @import("proof_quest.zig");
 
 /// Mutated and read only on the live-reload thread, so no extra sync beyond
 /// the existing `replaceJson` swap is required.
@@ -31,10 +32,17 @@ pub const FactsUpdate = struct {
     delta: *const review.ReviewDelta,
     recompile_ms: ?u64,
     counterexample: ?review.CounterexamplePreview = null,
+    /// Optional first-run Proof Passport state. Terminal live-reload owns the
+    /// state machine; Studio renders this read-only snapshot.
+    quest: ?proof_quest.Snapshot = null,
     /// Causes for demoted properties, used to render the "Why:" row in the
     /// proof card frame. Empty means no demotion attribution to show; the
     /// frame still renders but skips the Why row, matching terminal behavior.
     property_causes: []const review.PropertyCauseEntry = &.{},
+    /// Pre-rendered `proofTrace` JSON object from the analyzer: per-property
+    /// reasoning the browser surfaces under each expandable proof pill. Null
+    /// when the analyzer produced no contract.
+    proof_trace_json: ?[]const u8 = null,
 };
 
 /// A single ZTS diagnostic carried into studio for browser-side display.
@@ -694,6 +702,18 @@ fn factsJson(
         try json.objectField("counterexample");
         try writeCounterexampleJson(&json, &cx);
     }
+    if (update.quest) |quest| {
+        try json.objectField("quest");
+        try writeQuestJson(&json, quest);
+    }
+    if (update.proof_trace_json) |ptj| {
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, ptj, .{}) catch null;
+        if (parsed) |*p| {
+            defer p.deinit();
+            try json.objectField("proofTrace");
+            try json.write(p.value);
+        }
+    }
     try json.objectField("releaseReadiness");
     try writeReleaseReadinessJson(&json, update.facts, verdict);
     try json.objectField("nextActions");
@@ -702,6 +722,27 @@ fn factsJson(
     try writeRecentJson(&json, recent);
     try json.endObject();
     return try allocator.dupe(u8, aw.writer.buffered());
+}
+
+fn writeQuestJson(json: *std.json.Stringify, quest: proof_quest.Snapshot) !void {
+    try json.beginObject();
+    try json.objectField("enabled");
+    try json.write(quest.enabled);
+    try json.objectField("explicit");
+    try json.write(quest.explicit);
+    try json.objectField("stage");
+    try json.write(quest.stage);
+    try json.objectField("title");
+    try json.write(quest.title);
+    try json.objectField("message");
+    try json.write(quest.message);
+    try json.objectField("complete");
+    try json.write(quest.complete);
+    try json.objectField("availableActions");
+    try json.beginArray();
+    for (quest.available_actions) |action| try json.write(action);
+    try json.endArray();
+    try json.endObject();
 }
 
 fn writeCallerReceiptJson(json: *std.json.Stringify, receipt: *const CallerReceipt) !void {
@@ -1078,6 +1119,7 @@ pub const index_html =
     \\.pill.on{color:var(--ok);border-color:#2e7d4c;background:#102318}.pill.off{color:var(--bad);border-color:#73333a;background:#251217}.pill.add{color:var(--accent);border-color:#315a7e}.pill.remove{color:var(--bad);border-color:#73333a}
     \\li.witness{cursor:pointer}li.witness:hover{background:rgba(100,181,255,.06)}li.witness>.detail{display:none;margin-top:8px;padding:10px 12px;background:#07090d;border:1px solid var(--line);border-radius:6px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}li.witness.open>.detail{display:block}li.witness .detail .row{display:grid;grid-template-columns:90px 1fr;gap:6px 12px;margin-bottom:6px}li.witness .detail .row dt{color:var(--muted)}li.witness .detail pre{margin:0;max-height:none;color:#cbd7e3;white-space:pre-wrap;overflow-wrap:anywhere}
     \\.spec{display:inline-block;vertical-align:top;margin:0 6px 6px 0}.spec>.pill{cursor:default}.spec.has-diag>.pill{cursor:pointer}.spec .diag{display:none;margin-top:4px;padding:6px 9px;background:#07090d;border:1px solid var(--line);border-radius:6px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd7e3;max-width:360px}.spec.open .diag{display:block}.spec .diag .code{color:var(--bad)}.spec .diag .loc{color:var(--muted)}.spec .diag .msg{margin-top:4px;color:#dceeff}
+    \\.prop{display:inline-block;vertical-align:top;margin:0 6px 6px 0}.prop.has-trace>.pill{cursor:pointer}.prop .diag{display:none;margin-top:4px;padding:7px 10px;background:#07090d;border:1px solid var(--line);border-radius:6px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd7e3;max-width:380px}.prop.open .diag{display:block}.prop .diag .head{color:var(--muted);text-transform:uppercase;font-size:10px;letter-spacing:.07em}.prop .diag .msg{margin-top:4px;color:#dceeff}.prop .diag .fact{margin-top:4px;color:var(--muted)}.prop .diag .flow{margin-top:4px;color:#ffd0d0}.prop .diag .fix{margin-top:4px;color:var(--ok)}.prop .diag .loc{color:var(--muted)}
     \\#timeline{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 14px;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}#timeline .tick{padding:2px 6px;border:1px solid var(--line);border-radius:4px;color:var(--muted);background:#07090d}#timeline .tick.safe{border-color:#2e7d4c;color:var(--ok)}#timeline .tick.safe_with_additions{border-color:#315a7e;color:var(--accent)}#timeline .tick.breaking{border-color:#73333a;color:var(--bad)}#timeline .tick.first{box-shadow:inset 0 0 0 1px currentColor}
     \\dl{display:grid;grid-template-columns:90px 1fr;gap:8px 14px;margin:0}dt{color:var(--muted)}dd{margin:0;min-width:0;overflow-wrap:anywhere}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#cfe6ff}
     \\ul{list-style:none;margin:0;padding:0}li{padding:7px 0;border-bottom:1px solid rgba(255,255,255,.06);overflow-wrap:anywhere}.empty{color:var(--muted)}
@@ -1085,6 +1127,7 @@ pub const index_html =
     \\#diagnosticsList li{padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06)}#diagnosticsList .code{color:var(--bad);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}#diagnosticsList .loc{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;margin-left:8px}#diagnosticsList .msg{margin-top:4px;color:#dceeff}#diagnosticsList .hint{margin-top:4px;color:var(--muted);font-style:italic}
     \\#counterexampleBlock{margin-bottom:22px;padding:12px;border:1px solid #73333a;background:#251217;border-radius:6px}#counterexampleBlock[hidden]{display:none}#counterexampleBody{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#dceeff}#counterexampleBody .row{display:grid;grid-template-columns:92px 1fr;gap:6px 12px;margin-bottom:6px}#counterexampleBody dt{color:var(--muted)}#counterexampleBody dd{margin:0}#counterexampleBody .bad{color:var(--bad)}#counterexampleBody .hint{color:#ffd0d0}
     \\#demoPanel{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;padding:14px 28px;border-bottom:1px solid var(--line);background:#0c1118}#demoPanel[hidden]{display:none}#demoPanel h2{margin:0 0 6px}#demoPanel p{margin:0;color:#cbd7e3}#demoActions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}#demoWitness{grid-column:1/-1;margin-top:2px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:#07090d;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd7e3}
+    \\#questPanel{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;padding:14px 28px;border-bottom:1px solid var(--line);background:#0b1511}#questPanel[hidden]{display:none}#questPanel h2{margin:0 0 6px;color:#a9f1c8}#questPanel p{margin:0;color:#cbd7e3}#questActions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}#questActions .key{display:inline-flex;align-items:center;border:1px solid #2e7d4c;background:#102318;color:var(--ok);border-radius:6px;padding:6px 9px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}#questPanel.complete{background:#101622}#questPanel.complete #questActions .key{border-color:#315a7e;background:#10243a;color:var(--accent)}
     \\#terminalMirror{padding:18px 28px 22px;border-bottom:1px solid var(--line);background:#070a0e}#terminalMirror[hidden]{display:none}#terminalMirror header{padding:0 0 10px;border:0;display:flex;justify-content:space-between;align-items:baseline;gap:14px}#terminalMirror h2{font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin:0}#terminalMirror .echo{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}#frameMirror{margin:0;padding:14px 18px;background:#040608;border:1px solid var(--line);border-radius:6px;color:#cfe6ff;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;overflow-x:auto;tab-size:4}
     \\@media(max-width:900px){.grid{grid-template-columns:1fr}.status{text-align:left}header{align-items:start;flex-direction:column}.big{font-size:32px}}
     \\#onboarding{border:1px solid var(--line);background:var(--panel);color:var(--text);padding:24px 28px;max-width:560px;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.55)}#onboarding::backdrop{background:rgba(9,11,15,.78)}#onboarding h2{font-size:12px;margin:0 0 14px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}#onboarding ol{margin:0 0 18px;padding-left:22px;line-height:1.55}#onboarding ol strong{color:var(--text)}#onboarding ol code,#onboarding p code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);background:#07090d;border:1px solid var(--line);border-radius:4px;padding:1px 5px}#onboarding .hint{color:var(--muted);font-size:13px;margin:0 0 16px}#onboarding .actions{display:flex;justify-content:flex-end;gap:8px}
@@ -1098,6 +1141,7 @@ pub const index_html =
     \\<dialog id="onboarding"><h2>welcome to studio</h2><ol><li><strong>Proven Surface</strong> lists the routes, env vars, and egress hosts the compiler extracted from your handler.</li><li><strong>Property pills</strong> are the proofs the compiler discharged. Watch them flip when you save.</li><li><strong>Witnesses</strong> capture the request that would break a proof. Click one to see the failing path.</li><li>Press <code>.</code> to reopen this overlay any time.</li></ol><p class="hint">Edit your handler. Watch the proof flip live.</p><div class="actions"><button id="onboardingDismiss">Got it</button></div></dialog>
     \\<header><div><h1>zigttp studio</h1><div class="sub">Your terminal HUD, hyperlinked. A proof substrate for humans and AI agents.</div></div><div class="status" id="status">connecting</div></header>
     \\<section id="terminalMirror" hidden><header><h2>Live HUD - terminal mirror</h2><span class="echo">same frame as <code>zigttp dev</code></span></header><pre id="frameMirror" aria-label="Proof card frame mirrored from the terminal HUD"></pre></section>
+    \\<section id="questPanel" hidden><div><h2 id="questTitle">Proof Passport</h2><p id="questMessage"></p></div><div id="questActions"></div></section>
     \\<section id="demoPanel" hidden><div><h2>Proof Theater</h2><p id="demoTitle"></p><p class="empty" id="demoWorkspace"></p></div><div id="demoActions"></div><div id="demoWitness" hidden></div></section>
     \\<section class="grid"><div class="pane"><div id="lensBar" role="tablist" aria-label="Proof lens"><button data-lens="properties" class="active">Properties</button><button data-lens="trade">Trade</button><button data-lens="handover">Handover</button><button data-lens="caller">Caller View</button></div><div class="lensPane active" data-lens="properties"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (declared)</h2><div id="specs"></div></div><div class="lensPane" data-lens="trade"><h2>Trade</h2><p class="empty" style="margin:0 0 12px">Each proven property paired with the substrate restrictions that bought it.</p><ul id="tradeRows"></ul></div><div class="lensPane" data-lens="handover"><h2>AI Handover</h2><p class="empty" style="margin:0 0 12px">A proof certificate you can paste into Cursor, Claude, or any coding agent.</p><pre id="handoverPre"></pre><div id="handoverActions"><button id="handoverCopy">Copy to clipboard</button><span id="handoverStatus"></span></div></div><div class="lensPane" data-lens="caller"><h2>Caller View</h2><p class="empty" style="margin:0 0 12px">The proof receipt an outside HTTP caller can verify.</p><pre id="callerPre"></pre><div id="callerActions"><button id="callerVerify">Verify caller receipt</button><span id="callerStatus"></span></div></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul></div><div class="pane"><section id="counterexampleBlock" hidden><h2 style="color:var(--bad)">Counterexample</h2><div id="counterexampleBody"></div></section><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
     \\<footer><select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select><input id="url" value="/" aria-label="URL"><button id="send">Send</button></footer>
@@ -1106,7 +1150,9 @@ pub const index_html =
     \\const $=id=>document.getElementById(id);
     \\function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]))}
     \\function list(title,items){return `<h2>${esc(title)} (${items.length})</h2>`+(items.length?`<ul>${items.map(x=>`<li><code>${esc(x.pattern||x)}</code>${x.isPrefix?" prefix":""}</li>`).join("")}</ul>`:`<p class=empty>none</p>`)}
-    \\function pills(obj){return Object.entries(obj||{}).map(([k,v])=>`<span class="pill ${v?"on":"off"}">${v?"+":"-"}${esc(k)}</span>`).join("")}
+    \\function camelToSnake(s){return String(s).replace(/[A-Z]/g,c=>"_"+c.toLowerCase())}
+    \\function traceDetail(t){if(!t)return"";let h=`<div class="head">${t.holds?"How the compiler proved this":"Counterexample"}</div><div class="msg">${esc(t.summary||"")}</div>`;const f=t.facts;if(f&&typeof f.pathsEnumerated==="number"){let x=f.pathsEnumerated+" path"+(f.pathsEnumerated===1?"":"s")+" enumerated"+(f.pathsExhaustive?" (exhaustive)":"");if(f.failableSites>0)x+=" - "+f.coveredSites+"/"+f.failableSites+" failable I/O sites covered";h+=`<div class="fact">${esc(x)}</div>`}const cx=t.counterexample;if(cx&&cx.kind==="flow-chain"){h+=`<div class="flow">${(cx.flow||[]).map(esc).join(" &rarr; ")}</div>`;if(cx.request)h+=`<div class="fact">triggered by ${esc(cx.request.method)} ${esc(cx.request.url)}${cx.request.hasAuthHeader?" with an Authorization header":""}</div>`}else if(cx&&cx.kind==="offending-node"){h+=`<div class="fact"><span class="loc">handler.ts:${cx.location.line}</span> <code>${esc(cx.snippet)}</code></div>`}if(cx&&cx.fix)h+=`<div class="fix">fix: ${esc(cx.fix)}</div>`;return `<div class="diag">${h}</div>`}
+    \\function pills(obj,traces){return Object.entries(obj||{}).map(([k,v])=>{const t=traces&&traces[camelToSnake(k)];const detail=t?traceDetail(t):"";const cls=detail?"prop has-trace":"prop";return `<span class="${cls}" data-prop="${esc(k)}"><span class="pill ${v?"on":"off"}">${v?"+":"-"}${esc(k)}</span>${detail}</span>`}).join("")}
     \\function specDiag(s){if(!s.diagnosticCode&&!s.diagnosticMessage)return"";const loc=s.sourceLine?` <span class="loc">line ${s.sourceLine}${s.sourceColumn?":"+s.sourceColumn:""}${s.sourceSnippet?" — <code>"+esc(s.sourceSnippet)+"</code>":""}</span>`:"";const code=s.diagnosticCode?`<span class="code">${esc(s.diagnosticCode)}</span>`:"";const msg=s.diagnosticMessage?`<div class="msg">${esc(s.diagnosticMessage)}</div>`:"";return `<div class="diag">${code}${loc}${msg}</div>`}
     \\function specPills(items){return (items||[]).map(s=>{const diag=specDiag(s);const cls=diag?"spec has-diag":"spec";return `<span class="${cls}" data-spec="${esc(s.name)}"><span class="pill ${s.discharged?"on":"off"}">${s.discharged?"✓":"✗"} spec ${esc(s.name)}</span>${diag}</span>`}).join("")}
     \\function changes(label,items,cls){return items&&items.length?items.map(x=>`<span class="pill ${cls}">${label} ${esc(x.label||x.pattern||x)}</span>`).join(""):""}
@@ -1115,7 +1161,7 @@ pub const index_html =
     \\function fmtUnix(s){if(!s)return"";const d=new Date(s*1000);return d.toISOString().replace("T"," ").replace(/\.\d+Z$/,"Z")}
     \\function renderWitness(d){const meta=(d.events||[]).find(e=>e.type==="witness")||{};const req=(d.events||[]).find(e=>e.type==="request")||{};const ios=(d.events||[]).filter(e=>e.type==="io");const headers=req.headers&&Object.keys(req.headers).length?JSON.stringify(req.headers):"none";const body=req.body==null?"none":(typeof req.body==="string"?req.body:JSON.stringify(req.body));const origin=meta.origin?`line ${meta.origin.line}, col ${meta.origin.column}`:"";const sink=meta.sink?`line ${meta.sink.line}, col ${meta.sink.column}`:"";const stubs=ios.length?`<pre>${esc(ios.map(e=>`#${e.seq} ${e.module}.${e.fn} -> ${typeof e.result==="string"?e.result:JSON.stringify(e.result)}`).join("\n"))}</pre>`:'<span class="empty">none</span>';return `<div class="row"><dt>property</dt><dd>${esc(meta.property||"")}</dd><dt>origin</dt><dd>${esc(origin)}</dd><dt>sink</dt><dd>${esc(sink)}</dd><dt>summary</dt><dd>${esc(meta.summary||"")}</dd><dt>request</dt><dd><code>${esc(req.method||"")} ${esc(req.url||"")}</code></dd><dt>headers</dt><dd>${esc(headers)}</dd><dt>body</dt><dd>${esc(body)}</dd><dt>io stubs</dt><dd>${stubs}</dd><dt>pinned</dt><dd>${d.pinned?"yes":"no"}</dd></div>`}
     \\async function toggleWitness(li){const detail=li.querySelector(".detail");if(li.classList.contains("open")){li.classList.remove("open");return}li.classList.add("open");if(detail.dataset.loaded==="1")return;detail.innerHTML='<span class="empty">loading...</span>';try{const r=await fetch(`/_zigttp/studio/witness/${encodeURIComponent(li.dataset.key)}.json`,{cache:"no-store"});if(!r.ok){detail.innerHTML=`<span class="empty">HTTP ${r.status}</span>`;return}const d=await r.json();detail.innerHTML=renderWitness(d);detail.dataset.loaded="1"}catch(e){detail.innerHTML=`<span class="empty">${esc(String(e))}</span>`}}
-    \\document.addEventListener("click",ev=>{const li=ev.target.closest("li.witness");if(li){toggleWitness(li);return}const sp=ev.target.closest(".spec.has-diag");if(sp)sp.classList.toggle("open")})
+    \\document.addEventListener("click",ev=>{const li=ev.target.closest("li.witness");if(li){toggleWitness(li);return}const pr=ev.target.closest(".prop.has-trace");if(pr){pr.classList.toggle("open");return}const sp=ev.target.closest(".spec.has-diag");if(sp)sp.classList.toggle("open")})
     \\function readiness(r){if(!r)return"";return `<h2>Release Checklist</h2><ul><li>${r.declaredSpecsPass?"✓":"✗"} declared specs pass</li><li>${r.deployReady?"✓":"✗"} deploy verdict: <code>${esc(r.deployVerdict)}</code></li></ul>`}
     \\function actions(items){return (items||[]).map(a=>`<li><span class="pill ${a.severity==="success"?"on":a.severity==="error"?"off":"add"}">${esc(a.kind)}</span><strong>${esc(a.title)}</strong><p>${esc(a.detail)}</p><code>${esc(a.command)}</code></li>`).join("")||"<p class=empty>none</p>"}
     \\let lastWitnessFingerprint="";let lastSpecsFingerprint="";
@@ -1133,7 +1179,8 @@ pub const index_html =
     \\async function runDemoAction(action){const r=await fetch("/_zigttp/studio/demo/action",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action})});if(!r.ok){$("demoWitness").hidden=false;$("demoWitness").textContent=`action failed: HTTP ${r.status} ${await r.text()}`;return}await pull();await pullDemo()}
     \\document.addEventListener("click",ev=>{const b=ev.target.closest("[data-demo-action]");if(b)runDemoAction(b.dataset.demoAction)})
     \\function renderFrameMirror(s){const sec=$("terminalMirror");const pre=$("frameMirror");if(!sec||!pre)return;const txt=s&&typeof s.frame==="string"?s.frame:"";if(!txt){sec.hidden=true;pre.textContent="";return}sec.hidden=false;pre.textContent=txt}
-    \\function render(s){$("status").textContent=`${s.status} · ${s.handlerPath||""}`;renderDiagnostics(s);renderFrameMirror(s);if(s.status!=="ready"){renderCounterexample(null);$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}renderCounterexample(s.counterexample);const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions)}
+    \\function renderQuest(q){const p=$("questPanel");if(!p)return;if(!q||!q.enabled){p.hidden=true;p.classList.remove("complete");return}p.hidden=false;p.classList.toggle("complete",!!q.complete);$("questTitle").textContent=q.title||"Proof Passport";$("questMessage").textContent=q.message||"";$("questActions").innerHTML=(q.availableActions||[]).map(a=>`<span class="key">${esc(a)}</span>`).join("")}
+    \\function render(s){$("status").textContent=`${s.status} · ${s.handlerPath||""}`;renderDiagnostics(s);renderFrameMirror(s);renderQuest(s.quest);if(s.status!=="ready"){renderCounterexample(null);$("verdict").textContent=s.status;$("summary").innerHTML=`<dt>message</dt><dd>${esc(s.message||"")}</dd>`;return}renderCounterexample(s.counterexample);const f=s.facts;$("verdict").textContent=s.verdict;$("timeline").innerHTML=timeline(s.recent);$("summary").innerHTML=`<dt>proof</dt><dd>${esc(f.proofLevel)}</dd><dt>contract</dt><dd><code>${esc(f.contractSha).slice(0,16)}</code></dd><dt>recompile</dt><dd>${s.recompileMs??0}ms</dd>`+readiness(s.releaseReadiness);$("properties").innerHTML=pills(f.properties,s.proofTrace);const ds=f.declaredSpecs||[];$("specsHeading").hidden=ds.length===0;{const fp=specsFingerprint(ds);if(fp!==lastSpecsFingerprint){$("specs").innerHTML=ds.length?specPills(ds):"";lastSpecsFingerprint=fp}}$("surface").innerHTML=list("routes",f.routes)+list("env",f.envKeys)+list("egress",f.egressHosts)+list("cache",f.cacheNamespaces)+list("capabilities",f.capabilities);const d=s.delta;$("delta").innerHTML=(changes("+ route",d.addedRoutes,"add")+changes("- route",d.removedRoutes,"remove")+changes("+ prop",d.promotedProperties,"add")+changes("- prop",d.demotedProperties,"remove")+changes("+ env",d.addedEnv,"add")+changes("+ egress",d.addedEgress,"add")+changes("+ cap",d.addedCapabilities,"add"))||"<p class=empty>no changes against baseline</p>";const w=s.witnesses||{total:0,byProperty:{},entries:[]};$("witnessesHeading").hidden=w.total===0;$("witnessesCounts").innerHTML=w.total?witnessCounts(w.byProperty):"";const fp=witnessFingerprint(w.entries);if(fp!==lastWitnessFingerprint){$("witnessesList").innerHTML=w.total?witnessRows(w.entries):"";lastWitnessFingerprint=fp}{const a=$("testsLink");if(a)a.setAttribute("download",((s.handlerPath||"handler").split("/").pop())+".tests.jsonl")}$("actions").innerHTML=actions(s.nextActions)}
     \\// Mirror of `proof_to_restrictions` in packages/runtime/src/deploy/review.zig. Keep in sync.
     \\const TRADE_TABLE=[{prop:"deterministic",label:"deterministic",gave:["async/await","while","do...while","for(;;)"],earned:"deterministic, replayable, AI-refactorable"},{prop:"retrySafe",label:"retry-safe",gave:["try/catch","throw"],earned:"Result-narrowed, exhaustive paths, no hidden control flow"},{prop:"stateIsolated",label:"state-isolated",gave:["class","this","++","--"],earned:"explicit data flow, no shared mutable receivers"},{prop:"readOnly",label:"read-only",gave:["delete","++","--"],earned:"shape-stable property access, no hidden writes"},{prop:"inputValidated",label:"input-validated",gave:["regex"],earned:"schema-checkable validation, no opaque accept sets"},{prop:"injectionSafe",label:"injection-safe",gave:[],earned:"flow analysis tracks user-input into sinks"},{prop:"idempotent",label:"idempotent",gave:[],earned:"earned by analysis; retries are safe"},{prop:"noSecretLeakage",label:"no-secret-leakage",gave:[],earned:"flow analysis tracks secret labels to sinks"},{prop:"noCredentialLeakage",label:"no-credential-leakage",gave:[],earned:"flow analysis tracks credential labels to sinks"},{prop:"piiContained",label:"pii-contained",gave:[],earned:"PII never reaches egress without an explicit boundary"},{prop:"resultsSafe",label:"results-safe",gave:[],earned:"all paths return a Response or Result.err"},{prop:"faultCovered",label:"fault-covered",gave:[],earned:"every failure path has a witness or test"}];
     \\function tradeRowEl(row,on){const li=document.createElement("li");if(!on)li.className="off";const head=document.createElement("div");head.className="head";const pill=document.createElement("span");pill.className="pill "+(on?"on":"off");pill.textContent=(on?"+ ":"- ")+row.label;head.appendChild(pill);li.appendChild(head);if(row.gave.length){const g=document.createElement("span");g.className="gave";const gl=document.createElement("span");gl.className="lbl";gl.textContent="gave up:";g.appendChild(gl);g.appendChild(document.createTextNode(row.gave.join(", ")));li.appendChild(g)}const e=document.createElement("span");e.className="earned";const el=document.createElement("span");el.className="lbl";el.textContent="earned:";e.appendChild(el);e.appendChild(document.createTextNode(row.earned));li.appendChild(e);return li}
@@ -1356,6 +1403,13 @@ test "studio HTML renders counterexample payload" {
     try std.testing.expect(std.mem.indexOf(u8, index_html, "s.counterexample") != null);
 }
 
+test "studio HTML renders Proof Passport state" {
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"questPanel\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "Proof Passport") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "function renderQuest") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "renderQuest(s.quest)") != null);
+}
+
 test "studio HTML wires the terminal-mirror frame" {
     // The browser surface renders the same proof card the terminal HUD prints.
     // These markers anchor the unification: a hidden-by-default section, a
@@ -1425,6 +1479,43 @@ test "factsJson emits proofCertificate field with substrate paragraph" {
     try std.testing.expect(std.mem.indexOf(u8, body, "AI handover") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "Substrate") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "Refactor contract") != null);
+}
+
+test "factsJson carries Proof Passport snapshot when provided" {
+    const allocator = std.testing.allocator;
+    const facts = review.ReviewFacts{
+        .contract_sha = "abc123",
+        .proof_level = .complete,
+        .env_keys = &.{},
+        .egress_hosts = &.{},
+        .cache_namespaces = &.{},
+        .routes = &.{},
+        .capabilities = &.{},
+        .properties = .{ .deterministic = true },
+        .declared_specs = &.{},
+    };
+    const delta = review.ReviewDelta{};
+    const actions = [_][]const u8{ "zigttp check", "zigttp deploy" };
+    const body = try factsJson(allocator, "src/handler.ts", .{
+        .facts = &facts,
+        .baseline = null,
+        .delta = &delta,
+        .quest = .{
+            .enabled = true,
+            .explicit = false,
+            .stage = "complete",
+            .title = "Proof Passport",
+            .message = "Passport complete.",
+            .available_actions = &actions,
+            .complete = true,
+        },
+    }, &.{});
+    defer allocator.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"quest\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"stage\":\"complete\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"availableActions\":[\"zigttp check\",\"zigttp deploy\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"complete\":true") != null);
 }
 
 test "factsJson embeds the rendered proof card frame" {

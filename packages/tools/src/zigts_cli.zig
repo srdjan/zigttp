@@ -12,6 +12,7 @@ pub const edit_simulate = @import("edit_simulate.zig");
 pub const module_audit = @import("module_audit.zig");
 pub const json_diagnostics = @import("json_diagnostics.zig");
 pub const system_analysis = @import("system_analysis.zig");
+pub const proof_quest_fixture = @import("proof_quest_fixture.zig");
 const json_diag = precompile.json_diag;
 const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
@@ -221,10 +222,10 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
         if (result.totalErrors() > 0) {
             const contract_ptr: ?*const zigts.handler_contract.HandlerContract = if (result.contract) |*c| c else null;
-            json_diag.writeErrorJson(&aw.writer, contract_ptr, result.json_diagnostics.items, witnesses_block) catch {};
+            json_diag.writeErrorJson(&aw.writer, contract_ptr, result.json_diagnostics.items, witnesses_block, result.proof_trace_json) catch {};
         } else {
             const contract_ptr: ?*const zigts.handler_contract.HandlerContract = if (result.contract) |*c| c else null;
-            json_diag.writeSuccessJson(&aw.writer, contract_ptr, result.json_diagnostics.items, witnesses_block) catch {};
+            json_diag.writeSuccessJson(&aw.writer, contract_ptr, result.json_diagnostics.items, witnesses_block, result.proof_trace_json) catch {};
         }
 
         buf = aw.toArrayList();
