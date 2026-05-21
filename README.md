@@ -318,10 +318,31 @@ zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sq
 ## CLI Options
 
 ```bash
+zigttp init <name> [--template basic|api|htmx]
+zigttp dev [options] [handler.ts]
+zigttp check [handler.ts] [--json] [--contract] [--types]
+zigttp build [-o <bin>] [--no-attest]
+zigttp deploy [--local|--cloud] [--no-attest]
+zigttp proofs [list|show|diff|watch|export|badge]
+zigttp doctor [path]
+
 zigttp serve [options] <handler.js>
+zigttp serve -e "<inline-code>"
+```
+
+Project commands auto-detect `zigttp.json` from the current directory or a
+parent. `serve` is the lower-level path for one-off handlers and self-contained
+binaries; scaffolded projects set `"port": 3000`, while raw `serve` defaults to
+8080 unless a project manifest is discovered.
+
+Common `dev` / `serve` options:
+
+```bash
+zigttp dev [options] [handler.ts]
+zigttp serve [options] [handler.ts]
 
 Options:
-  -p, --port <PORT>     Port (default: 8080)
+  -p, --port <PORT>     Port (project default: 3000; raw serve: 8080)
   -h, --host <HOST>     Host (default: 127.0.0.1)
   -e, --eval <CODE>     Inline JavaScript handler
   -m, --memory <SIZE>   JS runtime memory limit (default: 0 = no limit)
@@ -346,6 +367,9 @@ Options:
   --lifecycle <MODE>    Runtime lifecycle: ephemeral | bounded | reuse
   --no-env-check        Skip startup env var validation (development use)
 ```
+
+Use `zigttp dev --help`, `zigttp studio --help`, and `zigttp doctor --help`
+for command-specific guidance.
 
 ### `zigttp deploy`
 

@@ -75,6 +75,11 @@ pub const ProofTrace = struct {
     counterexample: ?ProofCounterexample = null,
 };
 
+fn wirePropertyName(name: []const u8) []const u8 {
+    if (eql(name, "result_safe")) return "results_safe";
+    return name;
+}
+
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
@@ -424,14 +429,14 @@ fn flowCounterexample(
 // JSON wire format
 // ---------------------------------------------------------------------------
 
-/// Emit the `proofTrace` object: one entry per property keyed by snake_case
-/// field name. Additive sibling of `proof.properties`; existing parsers that
-/// read the booleans are unaffected.
+/// Emit the `proofTrace` object: one entry per UI-facing snake_case property
+/// key. Additive sibling of `proof.properties`; existing parsers that read the
+/// booleans are unaffected.
 pub fn writeJson(writer: anytype, traces: []const ProofTrace) !void {
     try writer.writeByte('{');
     for (traces, 0..) |trace, i| {
         if (i > 0) try writer.writeByte(',');
-        try json_utils.writeJsonString(writer, trace.property);
+        try json_utils.writeJsonString(writer, wirePropertyName(trace.property));
         try writer.writeAll(":{\"holds\":");
         try writer.writeAll(if (trace.holds) "true" else "false");
         try writer.writeAll(",\"kind\":");
@@ -524,6 +529,23 @@ test "writeJson emits a path-enumeration trace with facts" {
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"kind\":\"path-enumeration\"") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"pathsEnumerated\":5") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"coveredSites\":3") != null);
+}
+
+test "writeJson maps result_safe to results_safe UI key" {
+    const traces = [_]ProofTrace{.{
+        .property = "result_safe",
+        .holds = false,
+        .kind = .path_enumeration,
+        .summary = "A Result.ok value is used without being guarded first.",
+    }};
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
+    try writeJson(&aw.writer, &traces);
+    buf = aw.toArrayList();
+
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"results_safe\":{") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"result_safe\":{") == null);
 }
 
 test "writeJson emits an offending-node counterexample" {

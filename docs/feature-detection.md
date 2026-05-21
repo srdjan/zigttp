@@ -23,7 +23,9 @@ These features exist only in TypeScript type annotation positions that are strip
 
 ## Supported Module Syntax
 
-The parser supports ES6 `import`/`export` syntax for the virtual module system (`zigttp:*`).
+The parser supports ES6 `import`/`export` syntax for built-in virtual modules
+(`zigttp:*`) and registered extension modules (`zigttp-ext:*`). The
+`zigttp:types` specifier is type-only and stripped before runtime.
 
 ### Supported Import Forms
 
@@ -37,6 +39,7 @@ The parser supports ES6 `import`/`export` syntax for the virtual module system (
 | `import { decodeJson, decodeForm } from "zigttp:decode"` | Typed ingress module imports |
 | `import { cacheGet, cacheSet } from "zigttp:cache"` | Cache module imports |
 | `import { run, step } from "zigttp:durable"` | Durable execution imports |
+| `import { double } from "zigttp-ext:math"` | Registered extension imports |
 | `import type { Spec, Proof, Effects } from "zigttp:types"` | Type-only imports for the built-in `Spec<...>` obligation alias and the `Proof<...>` / `Effects<...>` capsule aliases (stripped at load time) |
 
 ### Supported Export Forms
@@ -261,4 +264,3 @@ Runtime checks should only exist as defensive programming (e.g., `UnimplementedO
 Before consolidation, features like `class` and `enum` were detected in the stripper for .ts files but only in the parser for .js files. This created inconsistent developer experience based on file extension. Moving all keyword-level detection to the parser ensures all developers see the same helpful error with rich formatting (source context, underlines) regardless of file type.
 
 The features remaining in the stripper are `any` type detection (because `any` only appears in type annotation positions that are stripped before the parser runs) and `as`/`satisfies` assertion rejection (because these are type-position syntax that the parser never sees).
-

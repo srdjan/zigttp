@@ -118,6 +118,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "dev")) {
+        if (hasLongHelpFlag(user_args[1..])) {
+            printDevHelp();
+            return;
+        }
         devCommand(allocator, args[0], user_args[1..]) catch |err| {
             if (handlePreflightError(err, command)) std.process.exit(1);
             return err;
@@ -125,6 +129,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "studio")) {
+        if (hasLongHelpFlag(user_args[1..])) {
+            printStudioHelp();
+            return;
+        }
         studioCommand(allocator, args[0], user_args[1..]) catch |err| {
             if (handlePreflightError(err, command)) std.process.exit(1);
             return err;
@@ -174,6 +182,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "doctor")) {
+        if (hasHelpFlag(user_args[1..])) {
+            printDoctorHelp();
+            return;
+        }
         doctorCommand(allocator, user_args[1..]) catch |err| {
             if (err == error.NoProjectConfig) {
                 printNoProjectConfigDiagnostic(command);
@@ -492,6 +504,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
 fn hasHelpFlag(argv: []const []const u8) bool {
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help")) return true;
+    }
+    return false;
+}
+
+fn hasLongHelpFlag(argv: []const []const u8) bool {
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "help")) return true;
     }
     return false;
 }
@@ -1253,29 +1272,76 @@ fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     defer if (project) |*p| p.deinit(allocator);
 
     if (project) |*cfg| {
-        std.debug.print("Manifest: {s}\n", .{cfg.manifest_path});
+        var failures: usize = 0;
+
+        std.debug.print("zigttp doctor\n", .{});
+        std.debug.print("Project root: {s}\n\n", .{cfg.root_dir});
+
+        printDoctorOk("manifest", cfg.manifest_path);
+
         const entry = try cfg.resolvedEntry(allocator);
         defer allocator.free(entry);
-        std.debug.print("Entry:    {s}\n", .{entry});
-        try std.Io.Dir.accessAbsolute(io, entry, .{});
+        const entry_ok = doctorPathExists(io, entry);
+        if (!entry_ok) failures += 1;
+        printDoctorPath("entry", entry, entry_ok);
 
         if (try cfg.resolvedStaticDir(allocator)) |static_dir| {
             defer allocator.free(static_dir);
-            std.debug.print("Static:   {s}\n", .{static_dir});
-            try std.Io.Dir.accessAbsolute(io, static_dir, .{});
+            const ok = doctorPathExists(io, static_dir);
+            if (!ok) failures += 1;
+            printDoctorPath("static", static_dir, ok);
+        } else {
+            printDoctorSkip("static", "not configured");
         }
+
         if (try cfg.resolvedSqlitePath(allocator)) |sqlite_path| {
             defer allocator.free(sqlite_path);
-            std.debug.print("SQLite:   {s}\n", .{sqlite_path});
+            std.debug.print("[info] sqlite   {s}\n", .{sqlite_path});
+        } else {
+            printDoctorSkip("sqlite", "not configured");
         }
+
         if (try cfg.resolvedDurableDir(allocator)) |durable_dir| {
             defer allocator.free(durable_dir);
-            std.debug.print("Durable:  {s}\n", .{durable_dir});
+            std.debug.print("[info] durable  {s}\n", .{durable_dir});
+        } else {
+            printDoctorSkip("durable", "not configured");
         }
+
+        if (try cfg.resolvedSystemPath(allocator)) |system_path| {
+            defer allocator.free(system_path);
+            const ok = doctorPathExists(io, system_path);
+            if (!ok) failures += 1;
+            printDoctorPath("system", system_path, ok);
+        } else {
+            printDoctorSkip("system", "not configured");
+        }
+
         if (cfg.outbound_hosts.len > 1) {
+            std.debug.print("[fail] outbound multiple outboundHosts are configured; current runtime accepts one\n", .{});
             return error.UnsupportedMultipleOutboundHosts;
         }
+        if (cfg.outbound_http) {
+            if (cfg.outbound_hosts.len == 1) {
+                std.debug.print("[ok]   outbound host allowlist: {s}\n", .{cfg.outbound_hosts[0]});
+            } else {
+                std.debug.print("[warn] outbound enabled without host allowlist\n", .{});
+            }
+        } else {
+            printDoctorSkip("outbound", "not enabled");
+        }
+
+        const tests_path = try std.fs.path.resolve(allocator, &.{ cfg.root_dir, "tests", "handler.test.jsonl" });
+        defer allocator.free(tests_path);
+        printDoctorOptionalPath("tests", tests_path, doctorPathExists(io, tests_path));
+
+        std.debug.print("\n", .{});
+        if (failures > 0) {
+            std.debug.print("Doctor: {d} required check{s} failed\n", .{ failures, if (failures == 1) @as([]const u8, "") else "s" });
+            return error.FileNotFound;
+        }
         std.debug.print("Doctor: OK\n", .{});
+        std.debug.print("Next: zigttp dev\n", .{});
         return;
     }
 
@@ -1287,6 +1353,35 @@ fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
 
     return error.NoProjectConfig;
+}
+
+fn doctorPathExists(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
+    return true;
+}
+
+fn printDoctorOk(label: []const u8, detail: []const u8) void {
+    std.debug.print("[ok]   {s:<8} {s}\n", .{ label, detail });
+}
+
+fn printDoctorSkip(label: []const u8, reason: []const u8) void {
+    std.debug.print("[skip] {s:<8} {s}\n", .{ label, reason });
+}
+
+fn printDoctorPath(label: []const u8, path: []const u8, ok: bool) void {
+    if (ok) {
+        printDoctorOk(label, path);
+    } else {
+        std.debug.print("[fail] {s:<8} missing: {s}\n", .{ label, path });
+    }
+}
+
+fn printDoctorOptionalPath(label: []const u8, path: []const u8, ok: bool) void {
+    if (ok) {
+        printDoctorOk(label, path);
+    } else {
+        std.debug.print("[warn] {s:<8} missing: {s}\n", .{ label, path });
+    }
 }
 
 fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -1720,6 +1815,73 @@ fn printInitHelp() void {
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 
+fn printDevHelp() void {
+    const help =
+        \\zigttp dev [options] [handler.ts]
+        \\
+        \\Start the local edit loop. The command runs `zigttp check`, then
+        \\re-enters `zigttp serve` with watch mode enabled. By default it also
+        \\proves each change before hot-swapping the running handler.
+        \\
+        \\Common options:
+        \\  -p, --port <PORT>     Port to listen on (project default: 3000)
+        \\  -h, --host <HOST>     Host to bind to (project default: 127.0.0.1)
+        \\  --studio              Also serve /_zigttp/studio
+        \\  --no-prove            Watch and reload without contract proof gating
+        \\  --no-tour             Skip the first-run proof tour
+        \\  --quest               Replay the guided proof quest
+        \\  --outbound-http       Enable native outbound HTTP bridge
+        \\  --sqlite <FILE>       SQLite database for zigttp:sql
+        \\  --system <FILE>       System registry for zigttp:service
+        \\  --help                Show this help
+        \\
+        \\If no handler path is passed, the entry in zigttp.json is used.
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn printStudioHelp() void {
+    const help =
+        \\zigttp studio [options] [handler.ts]
+        \\
+        \\Open the browser proof workbench at /_zigttp/studio. In an empty
+        \\directory, this command scaffolds a project in place before launching.
+        \\
+        \\Options:
+        \\  --template basic|api|htmx  Template used for empty-dir scaffolding
+        \\  -p, --port <PORT>          Port to listen on (default: 3000)
+        \\  -h, --host <HOST>          Host to bind to (default: 127.0.0.1)
+        \\  --no-env-check             Skip startup env validation
+        \\  --help                     Show this help
+        \\
+        \\Studio implies --watch --prove and keeps the old handler running when
+        \\a save fails verification.
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn printDoctorHelp() void {
+    const help =
+        \\zigttp doctor [path]
+        \\
+        \\Validate the project discovered from the current directory, a handler
+        \\path, or a zigttp.json path. Prints a checklist for the files and
+        \\runtime options that affect local development.
+        \\
+        \\Checks:
+        \\  manifest, entry, static directory, system file, tests fixture,
+        \\  sqlite/durable settings, and outbound HTTP configuration.
+        \\
+        \\Examples:
+        \\  zigttp doctor
+        \\  zigttp doctor src/handler.ts
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
 fn printCompileHelp() void {
     const help =
         \\zigttp compile <handler.ts> -o <output>
@@ -1917,8 +2079,8 @@ fn printHelp() void {
         \\Usage:
         \\  zigttp init <name> [--template basic|api|htmx]  Create project
         \\  zigttp demo [--no-open] [--port N] [--out DIR]  Guided local proof theater
-        \\  zigttp studio [--template basic|api|htmx]  Browser proof workbench (scaffolds in empty dir)
-        \\  zigttp dev [handler-or-project] [--quest]  Watch + proven hot reload
+        \\  zigttp studio [options] [handler.ts]       Browser proof workbench
+        \\  zigttp dev [options] [handler.ts]          Watch + proven hot reload
         \\  zigttp serve [options] [handler.ts]    Run handler locally
         \\  zigttp edge [--config FILE]            Run in-process edge runtime
         \\  zigttp expert                          Deprecated alias for `zigts expert`
@@ -1931,7 +2093,7 @@ fn printHelp() void {
         \\  zigttp grants [project-name]            List reusable capability grants
         \\  zigttp revoke-grant <grant-id>          Revoke a reusable capability grant
         \\  zigttp logout                           Forget saved sign-in credentials
-        \\  zigttp proofs [list|show|diff|watch|export]  Browse the proof ledger
+        \\  zigttp proofs [list|show|diff|watch|export|badge]  Browse the proof ledger
         \\  zigttp prove <old.json> <new.json>      Upgrade safety check
         \\  zigttp mock <tests.jsonl> [--port N]    Mock server from tests
         \\  zigttp link <system.json>               Cross-handler linking
@@ -1975,6 +2137,13 @@ test "parseTemplate accepts v1 templates only" {
     try std.testing.expectEqual(Template.api, parseTemplate("api").?);
     try std.testing.expectEqual(Template.htmx, parseTemplate("htmx").?);
     try std.testing.expect(parseTemplate("react") == null);
+}
+
+test "hasLongHelpFlag preserves -h for host flags" {
+    try std.testing.expect(hasLongHelpFlag(&.{"--help"}));
+    try std.testing.expect(hasLongHelpFlag(&.{"help"}));
+    try std.testing.expect(!hasLongHelpFlag(&.{"-h"}));
+    try std.testing.expect(!hasLongHelpFlag(&.{ "-h", "0.0.0.0" }));
 }
 
 test "deployArgsRequestCloud requires explicit opt-in" {

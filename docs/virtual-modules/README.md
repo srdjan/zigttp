@@ -87,6 +87,20 @@ Runtime primitives with no domain coupling.
 - [`zigttp:time`](./platform/time.md) - ISO 8601 / HTTP date
   formatting, Unix-ms arithmetic.
 
+## Type-only Module
+
+`zigttp:types` is a type-only import surface for proof annotations. It is
+stripped before runtime and does not appear in the native module registry.
+Use it for `Spec<...>` handler obligations and the helper-level
+`Proof<...>` / `Effects<...>` capsules:
+
+```ts
+import type { Spec, Proof, Effects } from "zigttp:types";
+```
+
+See [`../typescript.md`](../typescript.md) for the supported property and
+capability vocabularies.
+
 ## Effect classification
 
 Every export carries an effect annotation used for handler property

@@ -134,12 +134,71 @@ Useful for multitenant routing, internal request fan-out, or A/B routing during 
 ## Command Line Reference
 
 ```
+zigttp init <name> [--template basic|api|htmx]
+zigttp dev [options] [handler.ts]
+zigttp studio [options] [handler.ts]
+zigttp check [handler.ts] [--json] [--contract] [--types]
+zigttp build [-o <bin>] [--no-attest]
+zigttp deploy [--local|--cloud] [--no-attest]
+zigttp proofs [list|show|diff|watch|export|badge]
+zigttp doctor [path]
+
 zigttp serve [OPTIONS] <handler.js>
 zigttp serve -e "<inline-code>"
+```
 
+Project commands discover `zigttp.json` from the current directory or any
+parent. The default scaffold sets `"port": 3000`; raw `serve` without a project
+uses the runtime default of 8080.
+
+### Project Commands
+
+```
+zigttp init <name> [--template basic|api|htmx]
+```
+
+Creates `zigttp.json`, `src/handler.ts`, `tests/handler.test.jsonl`,
+`public/`, `.gitignore`, and a starter README. Project names may contain
+letters, numbers, `-`, and `_`; path-like names are rejected.
+
+```
+zigttp dev [options] [handler.ts]
+```
+
+Runs `zigttp check`, starts the server, watches the handler and local imports,
+and hot-swaps safe changes. By default, `dev` implies `--watch --prove`, so
+breaking contract changes are blocked and the old handler keeps serving.
+
+Common `dev` options:
+
+```
+  -p, --port <PORT>     Port to listen on (project default: 3000)
+  -h, --host <HOST>     Host/IP to bind to
+  --studio              Also serve /_zigttp/studio
+  --no-prove            Watch and reload without proof gating
+  --no-tour             Skip the first-run tour
+  --quest               Replay the proof quest
+```
+
+```
+zigttp check [handler.ts] [--json] [--contract] [--types]
+zigttp build [-o <bin>] [--no-attest]
+zigttp deploy [--local|--cloud] [--no-attest]
+zigttp doctor [path]
+```
+
+`check` verifies once and exits. `build` writes `.zigttp/build/<project-name>`.
+Bare `deploy` is local by default and writes `.zigttp/deploy/<project-name>`
+plus a `kind=deploy` row in `.zigttp/proofs.jsonl`. `doctor` prints a checklist
+for the manifest, entry file, tests fixture, optional system/static paths, and
+runtime-affecting settings.
+
+### Ad Hoc Serve
+
+```
 OPTIONS:
   -p, --port <PORT>     Port to listen on
-                        Default: 8080
+                        Project default: 3000; raw serve default: 8080
                         Example: -p 3000
 
   -h, --host <HOST>     Host/IP to bind to
