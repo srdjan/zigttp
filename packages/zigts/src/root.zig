@@ -24,6 +24,7 @@
 //! ```
 
 const std = @import("std");
+const build_options = @import("build_options");
 
 // Core modules
 pub const value = @import("value.zig");
@@ -36,9 +37,13 @@ pub const bytecode = @import("bytecode.zig");
 pub const interpreter = @import("interpreter.zig");
 
 // JIT C-ABI helpers are referenced from generated machine code via `extern fn`.
-// Anchor the module here so the linker emits the symbols.
+// Anchor the module here so the linker emits the symbols. The analyzer-only
+// build (wasm/freestanding) never reaches the JIT, so skip the anchor to keep
+// the interpreter/JIT/GC subtree out of the module graph.
 comptime {
-    _ = @import("interpreter/jit_intrinsics.zig");
+    if (!build_options.analyzer_only) {
+        _ = @import("interpreter/jit_intrinsics.zig");
+    }
 }
 pub const type_feedback = @import("type_feedback.zig");
 pub const builtins = @import("builtins/root.zig");

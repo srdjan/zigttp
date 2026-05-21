@@ -3,6 +3,7 @@
 //! CheckResult values live in precompile.zig.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zigts = @import("zigts");
 
 const handler_contract = zigts.handler_contract;
@@ -87,7 +88,23 @@ pub const CheckResult = struct {
 /// analysis result; the corpus is best-effort persistence. Returns the
 /// number of pinned witnesses re-fired by this build, which the live
 /// reload HUD surfaces as a regression toast.
+///
+/// The corpus is filesystem state, so freestanding/wasm analyzer builds skip
+/// it: `persistFlowWitnessesNative` is referenced only inside the comptime
+/// branch below, keeping the `witness_corpus` subtree out of the module graph.
 pub fn persistFlowWitnesses(
+    allocator: std.mem.Allocator,
+    flow_diags: []const zigts.flow_checker.Diagnostic,
+    ir_view: zigts.parser.IrView,
+    handler_path: []const u8,
+) usize {
+    if (comptime builtin.target.os.tag != .freestanding) {
+        return persistFlowWitnessesNative(allocator, flow_diags, ir_view, handler_path);
+    }
+    return 0;
+}
+
+fn persistFlowWitnessesNative(
     allocator: std.mem.Allocator,
     flow_diags: []const zigts.flow_checker.Diagnostic,
     ir_view: zigts.parser.IrView,

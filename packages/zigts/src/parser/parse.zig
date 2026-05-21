@@ -4,6 +4,7 @@
 //! Supports ES5 + limited ES6 (arrow functions, template literals, classes).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const tokenizer_mod = @import("tokenizer.zig");
 const ir = @import("ir.zig");
 const scope_mod = @import("scope.zig");
@@ -648,12 +649,17 @@ pub const Parser = struct {
             return error.TooManyLocals;
         };
 
-        if (std.c.getenv("ZTS_TRACE_FUN_DECL") != null) {
-            const scope = self.scopes.getCurrentScope();
-            std.debug.print(
-                "[fun_decl] name={s} scope={} kind={s}\n",
-                .{ name.text(self.source), self.scopes.current_scope, @tagName(scope.kind) },
-            );
+        // Dev-only trace gate. `std.c.getenv` needs libc and `std.debug.print`
+        // needs a stderr stack; both are absent on freestanding/wasm, so the
+        // whole block is comptime-elided for the analyzer build.
+        if (comptime builtin.target.os.tag != .freestanding) {
+            if (std.c.getenv("ZTS_TRACE_FUN_DECL") != null) {
+                const scope = self.scopes.getCurrentScope();
+                std.debug.print(
+                    "[fun_decl] name={s} scope={} kind={s}\n",
+                    .{ name.text(self.source), self.scopes.current_scope, @tagName(scope.kind) },
+                );
+            }
         }
 
         // Parse function body

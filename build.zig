@@ -90,6 +90,7 @@ pub fn build(b: *std.Build) void {
     });
     const zigts_build_options = b.addOptions();
     zigts_build_options.addOption(bool, "perf_histogram", perf_histogram_enabled);
+    zigts_build_options.addOption(bool, "analyzer_only", false);
     zigts_tests_root.addOptions("build_options", zigts_build_options);
     zigts_tests_root.addImport("zigttp-sdk", zigttp_sdk_dep.module("zigttp-sdk"));
     zigts_tests_root.addImport("zigttp-modules", zigttp_modules_dep.module("zigttp-modules"));
@@ -415,6 +416,39 @@ pub fn build(b: *std.Build) void {
     zigts_exe.root_module.addImport("pi_app", pi_app_mod);
     zigts_exe.root_module.addImport("runtime_witness_replay", runtime_witness_replay_mod);
     b.installArtifact(zigts_exe);
+
+    // WebAssembly analyzer — the zigts static analysis pipeline compiled to
+    // wasm64-freestanding for the in-browser proof playground. It runs the
+    // same `runCheckOnlyFromSource` path as `zigts check --json`, so the
+    // playground renders the real compiler's verdict, not an approximation.
+    // wasm64 (not wasm32) because the value layer's NaN-boxing assumes 64-bit
+    // pointers. `analyzer_only` strips the interpreter, JIT, GC, SQLite, libc.
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm64,
+        .os_tag = .freestanding,
+    });
+    const wasm_zigts_dep = b.dependency("zigts", .{
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+        .analyzer_only = true,
+    });
+    const wasm_exe = b.addExecutable(.{
+        .name = "zigts-analyzer",
+        .root_module = b.createModule(.{
+            .root_source_file = tools_dep.path("src/wasm_analyzer.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    wasm_exe.root_module.addImport("zigts", wasm_zigts_dep.module("zigts"));
+    // Reactor-style module: no _start, exported functions only.
+    wasm_exe.entry = .disabled;
+    wasm_exe.rdynamic = true;
+    const wasm_install = b.addInstallArtifact(wasm_exe, .{
+        .dest_dir = .{ .override = .{ .custom = "wasm" } },
+    });
+    const wasm_step = b.step("wasm", "Build the zigts analyzer as a wasm64-freestanding module for the web playground");
+    wasm_step.dependOn(&wasm_install.step);
 
     const run_module_governance = b.addRunArtifact(zigts_exe);
     run_module_governance.addArgs(&.{ "verify-modules", "--builtins", "--strict", "--json" });

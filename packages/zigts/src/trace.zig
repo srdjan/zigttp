@@ -9,6 +9,7 @@
 //! of (Request, VirtualModuleResponses).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const context = @import("context.zig");
 const value = @import("value.zig");
 const object = @import("object.zig");
@@ -1588,16 +1589,21 @@ fn appendJSValueBuf(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, ctx: 
 }
 
 /// Current wall-clock time in milliseconds since Unix epoch.
+/// Freestanding/wasm has no POSIX clock; the analyzer never executes handler
+/// I/O, so the clock code is comptime-elided there and the call returns 0.
 pub fn unixMillis() i64 {
-    var ts: std.posix.timespec = undefined;
-    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
-        .SUCCESS => {
-            const secs: i64 = @intCast(ts.sec);
-            const nanos: i64 = @intCast(ts.nsec);
-            return (secs * 1000) + @divTrunc(nanos, 1_000_000);
-        },
-        else => return 0,
+    if (comptime builtin.target.os.tag != .freestanding) {
+        var ts: std.posix.timespec = undefined;
+        switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+            .SUCCESS => {
+                const secs: i64 = @intCast(ts.sec);
+                const nanos: i64 = @intCast(ts.nsec);
+                return (secs * 1000) + @divTrunc(nanos, 1_000_000);
+            },
+            else => return 0,
+        }
     }
+    return 0;
 }
 
 /// Write all bytes to fd, retrying on partial writes.

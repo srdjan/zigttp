@@ -61,6 +61,15 @@ const runManifestAlignment = prove_mod.runManifestAlignment;
 const runPropertyExpectations = prove_mod.runPropertyExpectations;
 const writeBuildReport = prove_mod.writeBuildReport;
 
+/// Stderr diagnostic print. On freestanding/wasm there is no stderr and
+/// `std.debug.print` pulls a threaded IO stack that does not compile, so the
+/// call is comptime-elided. Native builds behave exactly like `std.debug.print`.
+fn debugPrint(comptime fmt: []const u8, args: anytype) void {
+    if (comptime builtin.target.os.tag != .freestanding) {
+        std.debug.print(fmt, args);
+    }
+}
+
 const AotAnalysis = struct {
     dispatch: ?*zigts.PatternDispatchTable = null,
     default_response: ?zigts.HandlerAnalyzer.StaticResponseInfo = null,
@@ -307,7 +316,22 @@ fn buildContractForServiceContext(
     );
 }
 
+/// Load the cross-handler service type context from a `--system` file.
+/// This is filesystem-backed; the freestanding/wasm analyzer build has no
+/// `--system` input, so the native implementation is referenced only inside
+/// the comptime-gated branch and stays out of the wasm module graph.
 fn loadServiceTypeContext(
+    allocator: std.mem.Allocator,
+    system_path: ?[]const u8,
+    sql_schema_path: ?[]const u8,
+) !?ServiceTypeContext {
+    if (comptime builtin.target.os.tag != .freestanding) {
+        return loadServiceTypeContextNative(allocator, system_path, sql_schema_path);
+    }
+    return null;
+}
+
+fn loadServiceTypeContextNative(
     allocator: std.mem.Allocator,
     system_path: ?[]const u8,
     sql_schema_path: ?[]const u8,
@@ -454,7 +478,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     defer if (generator_pack) |*pack| pack.deinit(allocator);
     if (opts.generator_pack_path) |pack_path| {
         generator_pack = resolveGeneratorPack(allocator, pack_path) catch |err| {
-            std.debug.print("Error resolving generator pack '{s}': {}\n", .{ pack_path, err });
+            debugPrint("Error resolving generator pack '{s}': {}\n", .{ pack_path, err });
             return err;
         };
         if (opts.sql_schema_path == null) opts.sql_schema_path = generator_pack.?.sql_schema_path;
@@ -482,7 +506,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
 
     // Read the handler source file (using posix for synchronous I/O)
     const source = readFilePosix(allocator, handler_path_final, 10 * 1024 * 1024) catch |err| {
-        std.debug.print("Error reading handler file '{s}': {}\n", .{ handler_path_final, err });
+        debugPrint("Error reading handler file '{s}': {}\n", .{ handler_path_final, err });
         return err;
     };
     defer allocator.free(source);
@@ -491,18 +515,18 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     defer if (policy) |*p| p.deinit(allocator);
     if (policy_path) |path| {
         const policy_source = readFilePosix(allocator, path, 1024 * 1024) catch |err| {
-            std.debug.print("Error reading policy file '{s}': {}\n", .{ path, err });
+            debugPrint("Error reading policy file '{s}': {}\n", .{ path, err });
             return err;
         };
         defer allocator.free(policy_source);
 
         policy = handler_policy.parsePolicyJson(allocator, policy_source) catch |err| {
-            std.debug.print("Error parsing policy file '{s}': {}\n", .{ path, err });
+            debugPrint("Error parsing policy file '{s}': {}\n", .{ path, err });
             return err;
         };
     }
 
-    std.debug.print("Compiling handler: {s} ({d} bytes)\n", .{ handler_path_final, source.len });
+    debugPrint("Compiling handler: {s} ({d} bytes)\n", .{ handler_path_final, source.len });
 
     // Compile the handler to bytecode (+ optional AOT analysis + optional verification + optional contract)
     const generate_tests = opts.generate_tests;
@@ -517,7 +541,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         .system_path = system_path,
         .manifest_registry = registry_ptr,
     }) catch |err| {
-        std.debug.print("Compilation failed: {}\n", .{err});
+        debugPrint("Compilation failed: {}\n", .{err});
         return err;
     };
     defer compiled.deinit(allocator);
@@ -526,25 +550,25 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     if (compiled.verify_failed) {
         if (compiled.violations_jsonl) |viol_jsonl| {
             const viol_path = deriveSiblingPath(allocator, output_path_final, "handler.violations.jsonl") catch |err| {
-                std.debug.print("Error deriving violations output path: {}\n", .{err});
+                debugPrint("Error deriving violations output path: {}\n", .{err});
                 return error.VerificationFailed;
             };
             defer allocator.free(viol_path);
             writeFilePosix(viol_path, viol_jsonl, allocator) catch |err| {
-                std.debug.print("Error writing violations file '{s}': {}\n", .{ viol_path, err });
+                debugPrint("Error writing violations file '{s}': {}\n", .{ viol_path, err });
             };
-            if (compiled.violations_summary) |summary| std.debug.print("{s}", .{summary});
-            std.debug.print("  Counterexample tests written to: {s}\n", .{viol_path});
-            std.debug.print("  Run: zig build run -- {s} --test {s}\n", .{ output_path_final, viol_path });
+            if (compiled.violations_summary) |summary| debugPrint("{s}", .{summary});
+            debugPrint("  Counterexample tests written to: {s}\n", .{viol_path});
+            debugPrint("  Run: zig build run -- {s} --test {s}\n", .{ output_path_final, viol_path });
         } else if (compiled.violations_summary) |summary| {
-            std.debug.print("{s}", .{summary});
+            debugPrint("{s}", .{summary});
         }
         return error.VerificationFailed;
     }
 
-    std.debug.print("Generated bytecode: {d} bytes\n", .{compiled.bytecode.len});
+    debugPrint("Generated bytecode: {d} bytes\n", .{compiled.bytecode.len});
     if (compiled.aot != null) {
-        std.debug.print("AOT analysis enabled\n", .{});
+        debugPrint("AOT analysis enabled\n", .{});
     }
 
     // Run replay verification if --replay was passed.
@@ -552,13 +576,13 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     // if any regressions are detected.
     if (replay_trace_path) |trace_path| {
         const trace_source = readFilePosix(allocator, trace_path, 100 * 1024 * 1024) catch |err| {
-            std.debug.print("Error reading trace file '{s}': {}\n", .{ trace_path, err });
+            debugPrint("Error reading trace file '{s}': {}\n", .{ trace_path, err });
             return err;
         };
         defer allocator.free(trace_source);
 
         const groups = zigts.trace.parseTraceFile(allocator, trace_source) catch |err| {
-            std.debug.print("Error parsing trace file '{s}': {}\n", .{ trace_path, err });
+            debugPrint("Error parsing trace file '{s}': {}\n", .{ trace_path, err });
             return err;
         };
         defer {
@@ -567,20 +591,20 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         }
 
         if (groups.len == 0) {
-            std.debug.print("Warning: no traces found in '{s}'\n", .{trace_path});
+            debugPrint("Warning: no traces found in '{s}'\n", .{trace_path});
         } else {
-            std.debug.print("Replaying {d} traces for regression verification...\n", .{groups.len});
+            debugPrint("Replaying {d} traces for regression verification...\n", .{groups.len});
             const replay_result = runBuildTimeReplay(allocator, source, handler_path_final, groups) catch |err| {
-                std.debug.print("Replay verification failed: {}\n", .{err});
+                debugPrint("Replay verification failed: {}\n", .{err});
                 return err;
             };
-            std.debug.print("Replay: {d}/{d} identical", .{ replay_result.pass, replay_result.total });
+            debugPrint("Replay: {d}/{d} identical", .{ replay_result.pass, replay_result.total });
             if (replay_result.fail > 0) {
-                std.debug.print(", {d} REGRESSIONS DETECTED", .{replay_result.fail});
+                debugPrint(", {d} REGRESSIONS DETECTED", .{replay_result.fail});
             }
-            std.debug.print("\n", .{});
+            debugPrint("\n", .{});
             if (replay_result.fail > 0) {
-                std.debug.print("Build aborted: replay verification failed.\n", .{});
+                debugPrint("Build aborted: replay verification failed.\n", .{});
                 return error.ReplayVerificationFailed;
             }
         }
@@ -589,33 +613,33 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     // Run handler tests if --test-file was passed.
     if (test_file_path) |t_path| {
         const test_source = readFilePosix(allocator, t_path, 100 * 1024 * 1024) catch |err| {
-            std.debug.print("Error reading test file '{s}': {}\n", .{ t_path, err });
+            debugPrint("Error reading test file '{s}': {}\n", .{ t_path, err });
             return err;
         };
         defer allocator.free(test_source);
 
         const test_result = runBuildTimeTests(allocator, source, handler_path_final, test_source) catch |err| {
-            std.debug.print("Build-time test execution failed: {}\n", .{err});
+            debugPrint("Build-time test execution failed: {}\n", .{err});
             return err;
         };
-        std.debug.print("Tests: {d}/{d} passed", .{ test_result.pass, test_result.total });
+        debugPrint("Tests: {d}/{d} passed", .{ test_result.pass, test_result.total });
         if (test_result.fail > 0) {
-            std.debug.print(", {d} FAILED", .{test_result.fail});
+            debugPrint(", {d} FAILED", .{test_result.fail});
         }
-        std.debug.print("\n", .{});
+        debugPrint("\n", .{});
         if (test_result.fail > 0) {
-            std.debug.print("Build aborted: handler tests failed.\n", .{});
+            debugPrint("Build aborted: handler tests failed.\n", .{});
             return error.TestsFailed;
         }
     }
 
     // Write the output Zig file
     writeZigFile(output_path_final, compiled, handler_path_final, policy, allocator) catch |err| {
-        std.debug.print("Error writing output file '{s}': {}\n", .{ output_path_final, err });
+        debugPrint("Error writing output file '{s}': {}\n", .{ output_path_final, err });
         return err;
     };
 
-    std.debug.print("Wrote embedded handler to: {s}\n", .{output_path_final});
+    debugPrint("Wrote embedded handler to: {s}\n", .{output_path_final});
 
     // Print sandbox report when auto-deriving from contract (no explicit policy)
     if (policy == null) {
@@ -637,7 +661,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         // Write contract.json alongside the output if requested
         if (emit_contract) {
             const contract_path = deriveSiblingPath(allocator, output_path_final, "contract.json") catch |err| {
-                std.debug.print("Error deriving contract path: {}\n", .{err});
+                debugPrint("Error deriving contract path: {}\n", .{err});
                 return err;
             };
             defer allocator.free(contract_path);
@@ -647,22 +671,22 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
             var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_output);
 
             writeContractJson(contract, &aw.writer) catch |err| {
-                std.debug.print("Error serializing contract: {}\n", .{err});
+                debugPrint("Error serializing contract: {}\n", .{err});
                 return err;
             };
             json_output = aw.toArrayList();
 
             writeFilePosix(contract_path, json_output.items, allocator) catch |err| {
-                std.debug.print("Error writing contract file '{s}': {}\n", .{ contract_path, err });
+                debugPrint("Error writing contract file '{s}': {}\n", .{ contract_path, err });
                 return err;
             };
 
-            std.debug.print("Wrote contract manifest to: {s}\n", .{contract_path});
+            debugPrint("Wrote contract manifest to: {s}\n", .{contract_path});
         }
 
         if (emit_openapi) {
             const openapi_path = deriveSiblingPath(allocator, output_path_final, "openapi.json") catch |err| {
-                std.debug.print("Error deriving OpenAPI path: {}\n", .{err});
+                debugPrint("Error deriving OpenAPI path: {}\n", .{err});
                 return err;
             };
             defer allocator.free(openapi_path);
@@ -672,17 +696,17 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
             var openapi_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &openapi_output);
 
             openapi_manifest.writeOpenApiJson(&openapi_aw.writer, contract, .{}) catch |err| {
-                std.debug.print("Error serializing OpenAPI manifest: {}\n", .{err});
+                debugPrint("Error serializing OpenAPI manifest: {}\n", .{err});
                 return err;
             };
             openapi_output = openapi_aw.toArrayList();
 
             writeFilePosix(openapi_path, openapi_output.items, allocator) catch |err| {
-                std.debug.print("Error writing OpenAPI file '{s}': {}\n", .{ openapi_path, err });
+                debugPrint("Error writing OpenAPI file '{s}': {}\n", .{ openapi_path, err });
                 return err;
             };
 
-            std.debug.print("Wrote OpenAPI manifest to: {s}\n", .{openapi_path});
+            debugPrint("Wrote OpenAPI manifest to: {s}\n", .{openapi_path});
         }
 
         if (sdk_target) |target| {
@@ -692,17 +716,17 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         // Write generated tests if --generate-tests was passed
         if (compiled.generated_tests) |tests_jsonl| {
             const tests_path = deriveSiblingPath(allocator, output_path_final, "handler.auto-tests.jsonl") catch |err| {
-                std.debug.print("Error deriving test output path: {}\n", .{err});
+                debugPrint("Error deriving test output path: {}\n", .{err});
                 return err;
             };
             defer allocator.free(tests_path);
 
             writeFilePosix(tests_path, tests_jsonl, allocator) catch |err| {
-                std.debug.print("Error writing generated tests '{s}': {}\n", .{ tests_path, err });
+                debugPrint("Error writing generated tests '{s}': {}\n", .{ tests_path, err });
                 return err;
             };
 
-            std.debug.print("Wrote generated tests to: {s}\n", .{tests_path});
+            debugPrint("Wrote generated tests to: {s}\n", .{tests_path});
         }
 
         // Write property violation counterexample tests and print unified summary.
@@ -710,24 +734,24 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         // violations_jsonl is only present when fault-coverage counterexamples exist.
         if (compiled.violations_jsonl) |viol_jsonl| {
             const viol_path = deriveSiblingPath(allocator, output_path_final, "handler.violations.jsonl") catch |err| {
-                std.debug.print("Error deriving violations output path: {}\n", .{err});
+                debugPrint("Error deriving violations output path: {}\n", .{err});
                 return err;
             };
             defer allocator.free(viol_path);
 
             writeFilePosix(viol_path, viol_jsonl, allocator) catch |err| {
-                std.debug.print("Error writing violations file '{s}': {}\n", .{ viol_path, err });
+                debugPrint("Error writing violations file '{s}': {}\n", .{ viol_path, err });
                 return err;
             };
 
             if (compiled.violations_summary) |summary| {
-                std.debug.print("{s}", .{summary});
+                debugPrint("{s}", .{summary});
             }
-            std.debug.print("  Counterexample tests written to: {s}\n", .{viol_path});
-            std.debug.print("  Run: zig build run -- {s} --test {s}\n", .{ output_path_final, viol_path });
+            debugPrint("  Counterexample tests written to: {s}\n", .{viol_path});
+            debugPrint("  Run: zig build run -- {s} --test {s}\n", .{ output_path_final, viol_path });
         } else if (compiled.violations_summary) |summary| {
             // Violations from flow or verifier analysis (no counterexample JSONL).
-            std.debug.print("{s}", .{summary});
+            debugPrint("{s}", .{summary});
         }
 
         if (prove_spec) |spec| {
@@ -781,7 +805,7 @@ pub fn runCheckOnly(
 ) !CheckResult {
     const source = readFilePosix(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
         if (!json_mode) {
-            std.debug.print("Error reading handler file '{s}': {}\n", .{ handler_path, err });
+            debugPrint("Error reading handler file '{s}': {}\n", .{ handler_path, err });
         }
         return err;
     };
@@ -823,7 +847,7 @@ pub fn runCheckOnlyFromSource(
             .enable_comptime = true,
             .comptime_env = .{},
         }) catch |err| {
-            if (!builtin.is_test) std.debug.print("TypeScript strip error: {}\n", .{err});
+            if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
             result.parse_errors = 1;
             return result;
         };
@@ -849,7 +873,7 @@ pub fn runCheckOnlyFromSource(
             }
         } else if (!builtin.is_test) {
             for (errors) |parse_error| {
-                std.debug.print("{s}:{}:{}: {s}\n", .{
+                debugPrint("{s}:{}:{}: {s}\n", .{
                     handler_path,
                     parse_error.location.line,
                     parse_error.location.column,
@@ -912,7 +936,7 @@ pub fn runCheckOnlyFromSource(
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
                 resolved.formatBoolDiagnostics(source_to_parse, &aw.writer) catch {};
                 buf = aw.toArrayList();
-                if (!builtin.is_test and buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+                if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
         }
         if (result.bool_errors > 0) {
@@ -937,7 +961,7 @@ pub fn runCheckOnlyFromSource(
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
                 resolved.formatTypeDiagnostics(source_to_parse, &aw.writer) catch {};
                 buf = aw.toArrayList();
-                if (!builtin.is_test and buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+                if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
         }
         if (result.type_errors > 0) {
@@ -962,7 +986,7 @@ pub fn runCheckOnlyFromSource(
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
                 resolved.formatStrictDiagnostics(source_to_parse, &aw.writer) catch {};
                 buf = aw.toArrayList();
-                if (!builtin.is_test and buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+                if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
         }
         if (result.strict_errors > 0) {
@@ -995,7 +1019,7 @@ pub fn runCheckOnlyFromSource(
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
                 checked.verifier.formatDiagnostics(source_to_parse, &aw.writer) catch {};
                 buf = aw.toArrayList();
-                if (!builtin.is_test and buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+                if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
         }
 
@@ -1136,7 +1160,7 @@ pub fn runGenTests(
     writer: anytype,
 ) !u32 {
     const source = readFilePosix(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print("Error reading handler file '{s}': {}\n", .{ handler_path, err });
+        debugPrint("Error reading handler file '{s}': {}\n", .{ handler_path, err });
         return err;
     };
     defer allocator.free(source);
@@ -1153,7 +1177,7 @@ pub fn runGenTests(
             .enable_comptime = true,
             .comptime_env = .{},
         }) catch |err| {
-            std.debug.print("TypeScript strip error: {}\n", .{err});
+            debugPrint("TypeScript strip error: {}\n", .{err});
             return err;
         };
         source_to_parse = strip_result.?.code;
@@ -1172,7 +1196,7 @@ pub fn runGenTests(
     const root = js_parser.parse() catch {
         const errors = js_parser.errors.getErrors();
         for (errors) |parse_error| {
-            std.debug.print("{s}:{}:{}: {s}\n", .{
+            debugPrint("{s}:{}:{}: {s}\n", .{
                 handler_path,
                 parse_error.location.line,
                 parse_error.location.column,
@@ -1242,11 +1266,11 @@ pub fn compileHandler(
             .enable_comptime = true,
             .comptime_env = comptime_env,
         }) catch |err| {
-            std.debug.print("TypeScript strip error: {}\n", .{err});
+            debugPrint("TypeScript strip error: {}\n", .{err});
             return err;
         };
         source_to_parse = strip_result.?.code;
-        if (!builtin.is_test) std.debug.print("TypeScript stripped successfully\n", .{});
+        if (!builtin.is_test) debugPrint("TypeScript stripped successfully\n", .{});
     }
 
     // Initialize string table and atom table for parsing
@@ -1271,7 +1295,7 @@ pub fn compileHandler(
         const errors = js_parser.errors.getErrors();
         if (errors.len > 0) {
             for (errors) |parse_error| {
-                std.debug.print("Parse error at {s}:{}:{}: {s}\n", .{
+                debugPrint("Parse error at {s}:{}:{}: {s}\n", .{
                     filename,
                     parse_error.location.line,
                     parse_error.location.column,
@@ -1298,7 +1322,7 @@ pub fn compileHandler(
     const stc_ptr: ?*const ServiceTypeContext = if (service_type_context) |*ctx| ctx else null;
 
     if (has_file_imports) {
-        if (!builtin.is_test) std.debug.print("File imports detected, building module graph...\n", .{});
+        if (!builtin.is_test) debugPrint("File imports detected, building module graph...\n", .{});
         return compileMultiModule(
             allocator,
             source_to_parse,
@@ -1341,25 +1365,25 @@ pub fn compileHandler(
     {
         const bool_diags = resolved.boolDiagnostics();
         if (bool_diags.len > 0 and !builtin.is_test) {
-            std.debug.print("\n", .{});
+            debugPrint("\n", .{});
             var bool_output: std.ArrayList(u8) = .empty;
             defer bool_output.deinit(allocator);
             var bool_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &bool_output);
             resolved.formatBoolDiagnostics(source_to_parse, &bool_aw.writer) catch {};
             bool_output = bool_aw.toArrayList();
             if (bool_output.items.len > 0) {
-                std.debug.print("{s}", .{bool_output.items});
+                debugPrint("{s}", .{bool_output.items});
             }
-            std.debug.print("{d} boolean check error(s), {d} warning(s)\n", .{
+            debugPrint("{d} boolean check error(s), {d} warning(s)\n", .{
                 resolved.bool_error_count,
                 bool_diags.len - resolved.bool_error_count,
             });
         }
         if (resolved.bool_error_count > 0) {
-            if (!builtin.is_test) std.debug.print("\nBoolean check failed for {s}\n", .{filename});
+            if (!builtin.is_test) debugPrint("\nBoolean check failed for {s}\n", .{filename});
             return error.SoundModeViolation;
         }
-        if (!builtin.is_test) std.debug.print("Boolean check passed\n", .{});
+        if (!builtin.is_test) debugPrint("Boolean check passed\n", .{});
     }
 
     if (type_env_storage.envPtr() != null) {
@@ -1371,14 +1395,14 @@ pub fn compileHandler(
             resolved.formatTypeDiagnostics(source_to_parse, &tc_aw.writer) catch {};
             tc_output = tc_aw.toArrayList();
             if (tc_output.items.len > 0) {
-                std.debug.print("{s}", .{tc_output.items});
+                debugPrint("{s}", .{tc_output.items});
             }
         }
         if (resolved.type_error_count > 0) {
-            if (!builtin.is_test) std.debug.print("\nType check failed for {s}\n", .{filename});
+            if (!builtin.is_test) debugPrint("\nType check failed for {s}\n", .{filename});
             return error.SoundModeViolation;
         }
-        if (!builtin.is_test) std.debug.print("Type check passed\n", .{});
+        if (!builtin.is_test) debugPrint("Type check passed\n", .{});
     }
 
     if (resolved.strict_checker != null) {
@@ -1390,14 +1414,14 @@ pub fn compileHandler(
             resolved.formatStrictDiagnostics(source_to_parse, &strict_aw.writer) catch {};
             strict_output = strict_aw.toArrayList();
             if (strict_output.items.len > 0) {
-                std.debug.print("{s}", .{strict_output.items});
+                debugPrint("{s}", .{strict_output.items});
             }
         }
         if (resolved.strict_error_count > 0) {
-            if (!builtin.is_test) std.debug.print("\nStrict check failed for {s}\n", .{filename});
+            if (!builtin.is_test) debugPrint("\nStrict check failed for {s}\n", .{filename});
             return error.SoundModeViolation;
         }
-        if (!builtin.is_test) std.debug.print("Strict check passed\n", .{});
+        if (!builtin.is_test) debugPrint("Strict check passed\n", .{});
     }
 
     // Unified violations list: collects from FlowChecker, HandlerVerifier, and
@@ -1431,16 +1455,16 @@ pub fn compileHandler(
             const diags = verifier.getDiagnostics();
 
             if (diags.len > 0 and !builtin.is_test) {
-                std.debug.print("\n", .{});
+                debugPrint("\n", .{});
                 var diag_output: std.ArrayList(u8) = .empty;
                 defer diag_output.deinit(allocator);
                 var diag_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &diag_output);
                 verifier.formatDiagnostics(source_to_parse, &diag_aw.writer) catch {};
                 diag_output = diag_aw.toArrayList();
                 if (diag_output.items.len > 0) {
-                    std.debug.print("{s}", .{diag_output.items});
+                    debugPrint("{s}", .{diag_output.items});
                 }
-                std.debug.print("{d} error(s), {d} warning(s)\n", .{
+                debugPrint("{d} error(s), {d} warning(s)\n", .{
                     error_count,
                     diags.len - error_count,
                 });
@@ -1481,7 +1505,7 @@ pub fn compileHandler(
                     }
                 }
 
-                if (!builtin.is_test) std.debug.print("\nVerification failed for {s}\n", .{filename});
+                if (!builtin.is_test) debugPrint("\nVerification failed for {s}\n", .{filename});
                 return .{
                     .verify_failed = true,
                     .violations_jsonl = viol_jsonl_result,
@@ -1510,9 +1534,9 @@ pub fn compileHandler(
             result_safe = true;
             optional_safe = true;
 
-            if (!builtin.is_test) std.debug.print("Verification passed\n", .{});
+            if (!builtin.is_test) debugPrint("Verification passed\n", .{});
         } else {
-            if (!builtin.is_test) std.debug.print("Warning: no handler function found for verification\n", .{});
+            if (!builtin.is_test) debugPrint("Warning: no handler function found for verification\n", .{});
         }
     }
 
@@ -1536,12 +1560,12 @@ pub fn compileHandler(
     const func = try code_gen.generate(root);
     defer code_gen.freeOwnedConstantPayloads();
 
-    if (!builtin.is_test) std.debug.print("Parsed successfully: {d} bytes of bytecode\n", .{func.code.len});
+    if (!builtin.is_test) debugPrint("Parsed successfully: {d} bytes of bytecode\n", .{func.code.len});
 
     // Bytecode verification: reject malformed bytecode before serialization
     const verify_bc = zigts.BytecodeVerifier.verify(&func);
     if (!verify_bc.valid) {
-        std.debug.print("Bytecode verification failed at offset {d}: {s}\n", .{
+        debugPrint("Bytecode verification failed at offset {d}: {s}\n", .{
             verify_bc.offset,
             verify_bc.message,
         });
@@ -1550,14 +1574,14 @@ pub fn compileHandler(
 
     // Get object literal shapes from parser
     const shapes = code_gen.shapes.items;
-    if (!builtin.is_test) std.debug.print("Collected {d} object literal shapes\n", .{shapes.len});
+    if (!builtin.is_test) debugPrint("Collected {d} object literal shapes\n", .{shapes.len});
 
     // Serialize bytecode with atoms AND shapes for complete cache format
     var buffer: [256 * 1024]u8 = undefined; // 256KB buffer
     var writer = zigts.bytecode_cache.SliceWriter{ .buffer = &buffer };
 
     zigts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(&func, &atoms, shapes, &writer, allocator) catch |err| {
-        std.debug.print("Serialization error: {}\n", .{err});
+        debugPrint("Serialization error: {}\n", .{err});
         return err;
     };
 
@@ -1575,7 +1599,7 @@ pub fn compileHandler(
         // Note: transpiler is NOT deferred deinit - its output is borrowed
 
         const result = transpiler.transpileHandler(root) catch |err| {
-            std.debug.print("Transpiler error: {}, falling back to pattern matcher\n", .{err});
+            debugPrint("Transpiler error: {}, falling back to pattern matcher\n", .{err});
             transpiler.deinit();
             aot = try analyzeAot(allocator, &js_parser, &atoms, root);
 
@@ -1610,13 +1634,13 @@ pub fn compileHandler(
         };
 
         if (result.handler_name != null and result.functions_transpiled > 0) {
-            std.debug.print("Transpiler: {d} functions transpiled, {d} bailed\n", .{
+            debugPrint("Transpiler: {d} functions transpiled, {d} bailed\n", .{
                 result.functions_transpiled, result.functions_bailed,
             });
             transpiled_source = try allocator.dupe(u8, result.source);
             transpiler.deinit();
         } else {
-            std.debug.print("Transpiler produced no output, falling back to pattern matcher\n", .{});
+            debugPrint("Transpiler produced no output, falling back to pattern matcher\n", .{});
             transpiler.deinit();
             aot = try analyzeAot(allocator, &js_parser, &atoms, root);
         }
@@ -1722,7 +1746,7 @@ pub fn compileHandler(
                     fc.formatMatrix(fc_report, &fc_aw.writer) catch {};
                     fc_buf = fc_aw.toArrayList();
                     if (fc_buf.items.len > 0) {
-                        std.debug.print("{s}", .{fc_buf.items});
+                        debugPrint("{s}", .{fc_buf.items});
                     }
                     fc_buf.deinit(allocator);
 
@@ -1732,7 +1756,7 @@ pub fn compileHandler(
                         fc.formatDiagnostics(&diag_aw.writer) catch {};
                         diag_buf = diag_aw.toArrayList();
                         if (diag_buf.items.len > 0) {
-                            std.debug.print("{s}", .{diag_buf.items});
+                            debugPrint("{s}", .{diag_buf.items});
                         }
                         diag_buf.deinit(allocator);
                     }
@@ -1793,7 +1817,7 @@ pub fn compileHandler(
             }
 
             if (!builtin.is_test) {
-                std.debug.print("Generated {d} test case(s) from path analysis\n", .{test_count});
+                debugPrint("Generated {d} test case(s) from path analysis\n", .{test_count});
             }
         }
     }
@@ -1848,7 +1872,7 @@ fn validateVirtualModuleImports(
         }
 
         if (zigts.modules.validateImports(binding, name_buf[0..name_count])) |missing| {
-            if (!builtin.is_test) std.debug.print(
+            if (!builtin.is_test) debugPrint(
                 "import error: module '{s}' does not export '{s}'\n  --> {s}\n",
                 .{ module_str, missing, filename },
             );
@@ -1898,11 +1922,11 @@ fn compileMultiModule(
     defer graph.deinit();
 
     graph.build(filename, entry_source, readFilePosixForGraph) catch |err| {
-        if (!builtin.is_test) std.debug.print("Module graph error: {}\n", .{err});
+        if (!builtin.is_test) debugPrint("Module graph error: {}\n", .{err});
         return err;
     };
 
-    if (!builtin.is_test) std.debug.print("Module graph: {d} modules ({d} dependencies)\n", .{
+    if (!builtin.is_test) debugPrint("Module graph: {d} modules ({d} dependencies)\n", .{
         graph.module_list.items.len,
         graph.dependencyCount(),
     });
@@ -1910,7 +1934,7 @@ fn compileMultiModule(
     // Compile all modules with shared atoms
     var module_compiler = zigts.modules.ModuleCompiler.init(allocator, atoms, strings);
     var compile_result = module_compiler.compileAll(&graph) catch |err| {
-        std.debug.print("Multi-module compilation error: {}\n", .{err});
+        debugPrint("Multi-module compilation error: {}\n", .{err});
         return err;
     };
     defer compile_result.deinit();
@@ -1938,7 +1962,7 @@ fn compileMultiModule(
             &writer,
             allocator,
         ) catch |err| {
-            std.debug.print("Dependency serialization error: {}\n", .{err});
+            debugPrint("Dependency serialization error: {}\n", .{err});
             return err;
         };
 
@@ -1957,14 +1981,14 @@ fn compileMultiModule(
         &entry_writer,
         allocator,
     ) catch |err| {
-        std.debug.print("Entry serialization error: {}\n", .{err});
+        debugPrint("Entry serialization error: {}\n", .{err});
         return err;
     };
 
     const entry_bytecode = try allocator.dupe(u8, entry_writer.getWritten());
     errdefer allocator.free(entry_bytecode);
 
-    if (!builtin.is_test) std.debug.print("Multi-module bundle: {d} dependency modules + entry\n", .{dep_bytecodes.len});
+    if (!builtin.is_test) debugPrint("Multi-module bundle: {d} dependency modules + entry\n", .{dep_bytecodes.len});
 
     var contract: ?HandlerContract = null;
     if (needs_contract) {
@@ -2163,16 +2187,16 @@ fn buildContractWithPolicy(
             const fresh = precomputed_flow == null;
 
             if (fresh and flow_diags.len > 0 and !builtin.is_test) {
-                std.debug.print("\n", .{});
+                debugPrint("\n", .{});
                 var flow_output: std.ArrayList(u8) = .empty;
                 defer flow_output.deinit(allocator);
                 var flow_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &flow_output);
                 flow.formatDiagnostics("", &flow_aw.writer) catch {};
                 flow_output = flow_aw.toArrayList();
                 if (flow_output.items.len > 0) {
-                    std.debug.print("{s}", .{flow_output.items});
+                    debugPrint("{s}", .{flow_output.items});
                 }
-                std.debug.print("{d} flow error(s), {d} warning(s)\n", .{
+                debugPrint("{d} flow error(s), {d} warning(s)\n", .{
                     flow_errors,
                     flow_diags.len - flow_errors,
                 });
@@ -2192,7 +2216,7 @@ fn buildContractWithPolicy(
             }
 
             if (fresh and !builtin.is_test and flow_errors == 0) {
-                std.debug.print("Flow analysis passed\n", .{});
+                debugPrint("Flow analysis passed\n", .{});
             }
         }
     }
@@ -2200,7 +2224,7 @@ fn buildContractWithPolicy(
     try validateSqlContract(allocator, &contract, sql_schema_path);
     try enforcePolicyForContract(allocator, filename, &contract, policy);
     if (policy != null) {
-        if (!builtin.is_test) std.debug.print("Capability policy check passed\n", .{});
+        if (!builtin.is_test) debugPrint("Capability policy check passed\n", .{});
     }
 
     return contract;
@@ -2257,7 +2281,7 @@ fn buildMultiModuleContract(
     }
 
     if (policy_checked) {
-        if (!builtin.is_test) std.debug.print("Capability policy check passed\n", .{});
+        if (!builtin.is_test) debugPrint("Capability policy check passed\n", .{});
     }
 
     return merged;
@@ -2532,7 +2556,21 @@ fn hasApiRoute(routes: []const handler_contract.ApiRouteInfo, method: []const u8
     return false;
 }
 
+/// Validate `zigttp:sql` queries against a schema database. SQLite is a C
+/// dependency unavailable on freestanding/wasm, and the analyzer build has no
+/// `--sql-schema` input, so the native implementation is referenced only
+/// inside the comptime-gated branch and stays out of the wasm module graph.
 fn validateSqlContract(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    sql_schema_path: ?[]const u8,
+) !void {
+    if (comptime builtin.target.os.tag != .freestanding) {
+        return validateSqlContractNative(allocator, contract, sql_schema_path);
+    }
+}
+
+fn validateSqlContractNative(
     allocator: std.mem.Allocator,
     contract: *HandlerContract,
     sql_schema_path: ?[]const u8,
@@ -2541,7 +2579,7 @@ fn validateSqlContract(
 
     const schema_path = sql_schema_path orelse {
         if (!builtin.is_test) {
-            std.debug.print("zigttp:sql queries require --sql-schema <schema.sql|schema.sqlite>\n", .{});
+            debugPrint("zigttp:sql queries require --sql-schema <schema.sql|schema.sqlite>\n", .{});
         }
         return error.MissingSqlSchema;
     };
@@ -2552,7 +2590,7 @@ fn validateSqlContract(
     for (contract.sql.queries.items) |*query| {
         var analysis = sql_analysis.analyzeStatement(allocator, query.statement) catch |err| {
             if (!builtin.is_test) {
-                std.debug.print("Unsupported SQL statement for query '{s}': {s}\n", .{ query.name, query.statement });
+                debugPrint("Unsupported SQL statement for query '{s}': {s}\n", .{ query.name, query.statement });
             }
             return err;
         };
@@ -2560,7 +2598,7 @@ fn validateSqlContract(
 
         var stmt = db.prepare(query.statement) catch {
             if (!builtin.is_test) {
-                std.debug.print("SQL validation failed for query '{s}': {s}\n", .{ query.name, db.errmsg() });
+                debugPrint("SQL validation failed for query '{s}': {s}\n", .{ query.name, db.errmsg() });
             }
             return error.InvalidSqlQuery;
         };
@@ -2596,7 +2634,7 @@ fn ensureNamedParameters(stmt: *sqlite.Stmt, query_name: []const u8) !void {
     for (1..count + 1) |idx| {
         if (stmt.paramName(idx) == null) {
             if (!builtin.is_test) {
-                std.debug.print("SQL query '{s}' uses positional parameters; only named parameters are supported\n", .{query_name});
+                debugPrint("SQL query '{s}' uses positional parameters; only named parameters are supported\n", .{query_name});
             }
             return error.PositionalSqlParameter;
         }
@@ -2617,14 +2655,14 @@ fn enforcePolicyForContract(
     if (!report.hasViolations()) return;
 
     if (!@import("builtin").is_test) {
-        std.debug.print("\nCapability policy violations in {s}:\n", .{label_path});
+        debugPrint("\nCapability policy violations in {s}:\n", .{label_path});
         var output: std.ArrayList(u8) = .empty;
         defer output.deinit(allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
         handler_policy.formatViolations(&report, &aw.writer) catch {};
         output = aw.toArrayList();
         if (output.items.len > 0) {
-            std.debug.print("{s}", .{output.items});
+            debugPrint("{s}", .{output.items});
         }
     }
     return error.PolicyViolation;
@@ -2637,9 +2675,9 @@ fn printSandboxReport(contract: *const HandlerContract) void {
     const sql_restricted = !contract.sql.dynamic;
 
     if (env_restricted and egress_restricted and cache_restricted and sql_restricted) {
-        std.debug.print("Sandbox: complete (all access statically proven)\n", .{});
+        debugPrint("Sandbox: complete (all access statically proven)\n", .{});
     } else {
-        std.debug.print("Sandbox derived from contract:\n", .{});
+        debugPrint("Sandbox derived from contract:\n", .{});
     }
 
     printSandboxSection("env", contract.env.literal.items, env_restricted, "no dynamic access");
@@ -2651,7 +2689,7 @@ fn printSandboxReport(contract: *const HandlerContract) void {
 fn printPropertiesReport(contract: *const HandlerContract) void {
     const props = contract.properties orelse return;
 
-    std.debug.print("Handler Properties:\n", .{});
+    debugPrint("Handler Properties:\n", .{});
 
     const fields = [_]struct { name: []const u8, value: bool, desc: []const u8 }{
         .{ .name = "pure", .value = props.pure, .desc = "handler is a deterministic function of the request" },
@@ -2668,47 +2706,47 @@ fn printPropertiesReport(contract: *const HandlerContract) void {
 
     for (fields) |f| {
         const label = if (f.value) "PROVEN" else "---   ";
-        std.debug.print("  {s} {s: <15} {s}\n", .{ label, f.name, f.desc });
+        debugPrint("  {s} {s: <15} {s}\n", .{ label, f.name, f.desc });
     }
 
     if (props.max_io_depth) |depth| {
-        std.debug.print("  PROVEN {s: <15} max {d} I/O calls per request\n", .{ "max_io_depth", depth });
+        debugPrint("  PROVEN {s: <15} max {d} I/O calls per request\n", .{ "max_io_depth", depth });
     }
 }
 
 fn printSqlSandboxSection(contract: *const HandlerContract) void {
     if (contract.sql.dynamic) {
-        std.debug.print("  sql: unrestricted (dynamic access detected)\n", .{});
+        debugPrint("  sql: unrestricted (dynamic access detected)\n", .{});
         return;
     }
     if (contract.sql.queries.items.len == 0) {
-        std.debug.print("  sql: restricted to [] (none proven, no dynamic access)\n", .{});
+        debugPrint("  sql: restricted to [] (none proven, no dynamic access)\n", .{});
         return;
     }
 
-    std.debug.print("  sql: restricted to [", .{});
+    debugPrint("  sql: restricted to [", .{});
     for (contract.sql.queries.items, 0..) |query, idx| {
-        if (idx > 0) std.debug.print(", ", .{});
-        std.debug.print("{s}", .{query.name});
+        if (idx > 0) debugPrint(", ", .{});
+        debugPrint("{s}", .{query.name});
     }
-    std.debug.print("] ({d} proven, no dynamic access)\n", .{contract.sql.queries.items.len});
+    debugPrint("] ({d} proven, no dynamic access)\n", .{contract.sql.queries.items.len});
 }
 
 fn printSandboxSection(name: []const u8, items: []const []const u8, restricted: bool, reason: []const u8) void {
     if (!restricted) {
-        std.debug.print("  {s}: unrestricted (dynamic access detected)\n", .{name});
+        debugPrint("  {s}: unrestricted (dynamic access detected)\n", .{name});
         return;
     }
     if (items.len == 0) {
-        std.debug.print("  {s}: restricted to [] (none proven, {s})\n", .{ name, reason });
+        debugPrint("  {s}: restricted to [] (none proven, {s})\n", .{ name, reason });
         return;
     }
-    std.debug.print("  {s}: restricted to [", .{name});
+    debugPrint("  {s}: restricted to [", .{name});
     for (items, 0..) |item, i| {
-        if (i > 0) std.debug.print(", ", .{});
-        std.debug.print("{s}", .{item});
+        if (i > 0) debugPrint(", ", .{});
+        debugPrint("{s}", .{item});
     }
-    std.debug.print("] ({d} proven, {s})\n", .{ items.len, reason });
+    debugPrint("] ({d} proven, {s})\n", .{ items.len, reason });
 }
 
 /// Derive contract.json path from the output .zig path.
@@ -2721,12 +2759,12 @@ fn writeSdkArtifact(
     sdk_target: []const u8,
 ) !void {
     if (!std.mem.eql(u8, sdk_target, "ts")) {
-        std.debug.print("Unknown SDK target: {s} (supported: ts)\n", .{sdk_target});
+        debugPrint("Unknown SDK target: {s} (supported: ts)\n", .{sdk_target});
         return error.InvalidArgument;
     }
 
     const sdk_path = deriveSiblingPath(allocator, output_path, "client.ts") catch |err| {
-        std.debug.print("Error deriving SDK path: {}\n", .{err});
+        debugPrint("Error deriving SDK path: {}\n", .{err});
         return err;
     };
     defer allocator.free(sdk_path);
@@ -2736,17 +2774,17 @@ fn writeSdkArtifact(
     var sdk_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &sdk_output);
 
     sdk_codegen.writeTypeScriptClient(&sdk_aw.writer, allocator, contract, .{}) catch |err| {
-        std.debug.print("Error serializing SDK artifact: {}\n", .{err});
+        debugPrint("Error serializing SDK artifact: {}\n", .{err});
         return err;
     };
     sdk_output = sdk_aw.toArrayList();
 
     writeFilePosix(sdk_path, sdk_output.items, allocator) catch |err| {
-        std.debug.print("Error writing SDK file '{s}': {}\n", .{ sdk_path, err });
+        debugPrint("Error writing SDK file '{s}': {}\n", .{ sdk_path, err });
         return err;
     };
 
-    if (!builtin.is_test) std.debug.print("Wrote TypeScript SDK to: {s}\n", .{sdk_path});
+    if (!builtin.is_test) debugPrint("Wrote TypeScript SDK to: {s}\n", .{sdk_path});
 }
 
 fn writeZigFile(
@@ -2779,7 +2817,7 @@ fn writeZigFile(
 
         output = aw.toArrayList();
         try writeFilePosix(path, output.items, allocator);
-        std.debug.print("Wrote transpiled handler to: {s}\n", .{path});
+        debugPrint("Wrote transpiled handler to: {s}\n", .{path});
         return;
     }
 

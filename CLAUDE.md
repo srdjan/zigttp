@@ -28,6 +28,9 @@ zig build run -- examples/handler/handler.ts --watch --prove  # Proven live relo
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
 zig build cli -- --help                        # Run zigttp
 
+zig build wasm                     # Build zigts analyzer as a wasm module (web playground)
+bash scripts/build-wasm-playground.sh  # Build wasm + publish to zigttp-website/static
+
 zig build test                     # All tests (runtime + CLI + engine + zruntime)
 zig build test-zigts               # Engine tests only
 zig build test-zruntime            # Runtime tests only
