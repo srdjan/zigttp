@@ -178,12 +178,14 @@ pub const LiveReloadState = struct {
         const proof_trace_json = result.proof_trace_json;
         result.proof_trace_json = null;
         const errors = result.totalErrors();
+        const failure_stage = firstFailingStage(&result);
         const pinned_regressions = result.pinned_witness_regressions;
         result.deinit(self.allocator);
 
         return .{
             .contract = contract,
             .errors = errors,
+            .failure_stage = failure_stage,
             .pinned_regressions = pinned_regressions,
             .diagnostics = diagnostics,
             .proof_trace_json = proof_trace_json,
@@ -193,6 +195,7 @@ pub const LiveReloadState = struct {
     const AnalysisResult = struct {
         contract: ?HandlerContract,
         errors: u32,
+        failure_stage: []const u8,
         pinned_regressions: usize,
         diagnostics: []studio_mod.Diagnostic,
         proof_trace_json: ?[]u8 = null,
@@ -208,6 +211,17 @@ pub const LiveReloadState = struct {
             self.diagnostics = &.{};
         }
     };
+
+    fn firstFailingStage(result: *const precompile.CheckResult) []const u8 {
+        if (result.parse_errors > 0) return "parse";
+        if (result.bool_errors > 0) return "sound";
+        if (result.type_errors > 0) return "types";
+        if (result.strict_errors > 0) return "strict";
+        if (result.verify_errors > 0) return "verify";
+        if (result.flow_errors > 0) return "flow";
+        if (result.totalErrors() > 0) return "spec";
+        return "analysis";
+    }
 
     fn recompileAndSwap(self: *LiveReloadState) void {
         if (self.server.studio) |*studio| studio.updateChecking();
@@ -237,12 +251,18 @@ pub const LiveReloadState = struct {
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
 
         if (analysis.errors > 0) {
-            if (self.server.studio) |*studio| studio.updateDiagnostics("compilation failed", analysis.diagnostics);
-            printReload("Compilation failed ({d} error(s), {d}ms). Keeping previous handler.\n", .{
+            if (self.server.studio) |*studio| {
+                var msg_buf: [64]u8 = undefined;
+                const message = std.fmt.bufPrint(&msg_buf, "compilation failed at {s}", .{analysis.failure_stage}) catch "compilation failed";
+                studio.updateDiagnostics(message, analysis.diagnostics);
+            }
+            printReload("Compilation failed at {s} ({d} error(s), {d}ms). Keeping previous handler.\n", .{
+                analysis.failure_stage,
                 analysis.errors,
                 elapsed_ms,
             });
             printDiagnosticLines(analysis.diagnostics, new_code);
+            printReload("Next: fix the {s} diagnostic above; the previous handler is still serving.\n", .{analysis.failure_stage});
             self.quest.afterProofFailed();
             if (analysis.pinned_regressions > 0) {
                 printReload("[witnesses] {d} pinned witness(es) re-fired - regression of a previously defended pattern.\n", .{analysis.pinned_regressions});
@@ -373,9 +393,14 @@ pub const LiveReloadState = struct {
 
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
         if (analysis.errors > 0) {
-            if (self.server.studio) |*studio| studio.updateDiagnostics("initial compilation failed", analysis.diagnostics);
-            printProve("Initial proof failed ({d} error(s), {d}ms).\n", .{ analysis.errors, elapsed_ms });
+            if (self.server.studio) |*studio| {
+                var msg_buf: [72]u8 = undefined;
+                const message = std.fmt.bufPrint(&msg_buf, "initial compilation failed at {s}", .{analysis.failure_stage}) catch "initial compilation failed";
+                studio.updateDiagnostics(message, analysis.diagnostics);
+            }
+            printProve("Initial proof failed at {s} ({d} error(s), {d}ms).\n", .{ analysis.failure_stage, analysis.errors, elapsed_ms });
             printDiagnosticLines(analysis.diagnostics, source);
+            printProve("Next: fix the {s} diagnostic above, then save again.\n", .{analysis.failure_stage});
             return;
         }
 
@@ -1030,4 +1055,15 @@ test "writeDiagnosticLines: non-ZTS001 keeps compact diagnostic form" {
         "  handler.ts:7:11: ZTS308: unchecked optional use\n      hint: guard with !== undefined\n",
         aw.writer.buffered(),
     );
+}
+
+test "firstFailingStage names the earliest failing analyzer stage" {
+    var check = precompile.CheckResult{ .strict_errors = 1, .verify_errors = 1 };
+    try std.testing.expectEqualStrings("strict", LiveReloadState.firstFailingStage(&check));
+
+    check = .{ .parse_errors = 1, .strict_errors = 1 };
+    try std.testing.expectEqualStrings("parse", LiveReloadState.firstFailingStage(&check));
+
+    check = .{};
+    try std.testing.expectEqualStrings("analysis", LiveReloadState.firstFailingStage(&check));
 }

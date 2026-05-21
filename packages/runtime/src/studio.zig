@@ -1336,7 +1336,7 @@ test "factsJson includes release readiness and next actions" {
         .baseline = null,
         .delta = &delta,
         .recompile_ms = 4,
-    }, recent[0..]);
+    }, recent[0..], null);
     defer allocator.free(body);
 
     try std.testing.expect(std.mem.indexOf(u8, body, "\"releaseReadiness\"") != null);
@@ -1382,7 +1382,7 @@ test "factsJson carries counterexample preview for studio rendering" {
         .delta = &delta,
         .recompile_ms = 4,
         .counterexample = cx,
-    }, &.{});
+    }, &.{}, null);
     defer allocator.free(body);
 
     try std.testing.expect(std.mem.indexOf(u8, body, "\"counterexample\"") != null);
@@ -1472,7 +1472,8 @@ test "factsJson emits proofCertificate field with substrate paragraph" {
         .facts = &facts,
         .baseline = null,
         .delta = &delta,
-    }, &.{});
+        .recompile_ms = null,
+    }, &.{}, null);
     defer allocator.free(body);
 
     try std.testing.expect(std.mem.indexOf(u8, body, "\"proofCertificate\":") != null);
@@ -1500,6 +1501,7 @@ test "factsJson carries Proof Passport snapshot when provided" {
         .facts = &facts,
         .baseline = null,
         .delta = &delta,
+        .recompile_ms = null,
         .quest = .{
             .enabled = true,
             .explicit = false,
@@ -1509,7 +1511,7 @@ test "factsJson carries Proof Passport snapshot when provided" {
             .available_actions = &actions,
             .complete = true,
         },
-    }, &.{});
+    }, &.{}, null);
     defer allocator.free(body);
 
     try std.testing.expect(std.mem.indexOf(u8, body, "\"quest\"") != null);
@@ -1537,7 +1539,7 @@ test "factsJson embeds the rendered proof card frame" {
         .baseline = null,
         .delta = &delta,
         .recompile_ms = 7,
-    }, &.{});
+    }, &.{}, null);
     defer allocator.free(body);
 
     // The frame field is present and non-empty.

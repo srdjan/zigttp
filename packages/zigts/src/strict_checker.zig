@@ -18,6 +18,7 @@ const NodeTag = ir.NodeTag;
 const IrView = ir.IrView;
 const null_node = ir.null_node;
 const TypeEnv = type_env_mod.TypeEnv;
+const FunctionSig = type_env_mod.FunctionSig;
 const TypeChecker = type_checker_mod.TypeChecker;
 const null_type_idx = type_pool_mod.null_type_idx;
 
@@ -55,6 +56,11 @@ const ImportedFunction = struct {
     module: []const u8,
     name: []const u8,
 };
+
+fn functionSigCovers(sig: ?FunctionSig, params_count: u16) bool {
+    const s = sig orelse return false;
+    return s.return_type != null_type_idx and s.param_count >= params_count;
+}
 
 pub const StrictChecker = struct {
     allocator: std.mem.Allocator,
@@ -353,12 +359,7 @@ pub const StrictChecker = struct {
         if (!self.functionNeedsAnnotation(node, func)) return;
 
         const loc = self.ir_view.getLoc(node) orelse return;
-        const sig = if (self.type_env) |env| env.getFnSigByLoc(loc.line) else null;
-        const ok = if (sig) |s|
-            s.return_type != null_type_idx and s.param_count >= func.params_count
-        else
-            false;
-        if (!ok) {
+        if (!self.hasCompleteFunctionAnnotation(func, loc.line)) {
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .missing_public_annotation,
@@ -377,6 +378,14 @@ pub const StrictChecker = struct {
         const loc = self.ir_view.getLoc(node) orelse return false;
         _ = loc;
         return false;
+    }
+
+    fn hasCompleteFunctionAnnotation(self: *const StrictChecker, func: ir.Node.FunctionExpr, line: u32) bool {
+        const env = self.type_env orelse return false;
+        if (functionSigCovers(env.getFnSigByLoc(line), func.params_count)) return true;
+        if (func.name_atom == 0) return false;
+        const name = self.resolveAtomName(func.name_atom) orelse return false;
+        return functionSigCovers(env.getFnSigByName(name), func.params_count);
     }
 
     fn checkCall(self: *StrictChecker, node: NodeIndex) void {

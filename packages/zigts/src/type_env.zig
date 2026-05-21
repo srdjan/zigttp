@@ -262,6 +262,8 @@ pub const TypeEnv = struct {
         // Group param and return annotations by context line to build function sigs
         var fn_params_by_line: std.AutoHashMapUnmanaged(u32, FunctionSig) = .empty;
         defer fn_params_by_line.deinit(self.allocator);
+        var fn_names_by_line: std.AutoHashMapUnmanaged(u32, []const u8) = .empty;
+        defer fn_names_by_line.deinit(self.allocator);
 
         for (tm.entries.items) |entry| {
             switch (entry.kind) {
@@ -286,6 +288,10 @@ pub const TypeEnv = struct {
                         gop.value_ptr.* = .{};
                     }
                     gop.value_ptr.return_type = type_idx;
+                    if (tm.getNameText(entry)) |name| {
+                        const owned_name = self.internName(name);
+                        fn_names_by_line.put(self.allocator, entry.context_line, owned_name) catch {};
+                    }
                 },
                 else => {},
             }
@@ -295,6 +301,9 @@ pub const TypeEnv = struct {
         var iter = fn_params_by_line.iterator();
         while (iter.next()) |kv| {
             self.fn_signatures.put(self.allocator, kv.key_ptr.*, kv.value_ptr.*) catch {};
+            if (fn_names_by_line.get(kv.key_ptr.*)) |name| {
+                self.fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch {};
+            }
         }
     }
 

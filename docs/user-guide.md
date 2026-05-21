@@ -66,7 +66,10 @@ directly to FaaS platforms or container environments.
 
 ## Quick Start
 
-The v1 user flow is `init` → `dev` → edit → `build` → `deploy` → `proofs badge`. Each command auto-detects the project from `zigttp.json`, so most steps take no arguments. Local deploy is the default; `--local` is accepted when you want the target to be explicit.
+The v1 user flow is `init` -> `dev` -> edit -> `check` -> `test` -> `build`
+-> `deploy` -> `proofs badge`. Each command auto-detects the project from
+`zigttp.json`, so most steps take no arguments. Local deploy is the default;
+`--local` is accepted when you want the target to be explicit.
 
 ### Scaffold a project
 
@@ -74,7 +77,7 @@ The v1 user flow is `init` → `dev` → edit → `build` → `deploy` → `proo
 zigttp init my-app && cd my-app
 ```
 
-This creates `src/handler.ts`, `tests/handler.test.jsonl`, `public/`, `zigttp.json`, a starter `README.md`, and a `.gitignore`.
+This creates `src/handler.ts`, `tests/handler.test.jsonl`, `public/`, `zigttp.json`, a starter `README.md`, and a `.gitignore`. The HTMX template uses `src/handler.tsx`.
 
 ### Start proof-aware live reload
 
@@ -82,7 +85,17 @@ This creates `src/handler.ts`, `tests/handler.test.jsonl`, `public/`, `zigttp.js
 zigttp dev
 ```
 
-Edit `src/handler.ts` in your editor; the terminal proof card re-verifies on save and shows the verdict, proven surface, proof deltas, counterexamples, and `Why:` rows for attributed property demotions. Press `Tab` to rotate the proof card's left pane through three lenses: `Properties` (the default `[+]`/`[-]` pills), `Trade` (each proof paired with the substrate restrictions that earned it), and `Handover` (a copy-pasteable AI proof certificate). The same three views are mirrored in Studio with a tab bar and a one-click Copy button on the Handover view. When `--studio` is on, the HUD prints a `Studio mirror: http://...` footer beneath each frame; modern terminals (iTerm2, WezTerm, Ghostty, VS Code) make it click-to-open. The browser workbench at `http://localhost:3000/_zigttp/studio` opens with that same ASCII frame mirrored at the top, then the rest of the dashboard below.
+Edit `src/handler.ts` in your editor; HTMX projects use `src/handler.tsx`. The terminal proof card re-verifies on save and shows the verdict, proven surface, proof deltas, counterexamples, and `Why:` rows for attributed property demotions. If a save fails, the reload banner names the failing analyzer stage and keeps the previous handler serving. Press `Tab` to rotate the proof card's left pane through three lenses: `Properties` (the default `[+]`/`[-]` pills), `Trade` (each proof paired with the substrate restrictions that earned it), and `Handover` (a copy-pasteable AI proof certificate). The same three views are mirrored in Studio with a tab bar and a one-click Copy button on the Handover view. When `--studio` is on, the HUD prints a `Studio mirror: http://...` footer beneath each frame; modern terminals (iTerm2, WezTerm, Ghostty, VS Code) make it click-to-open. The browser workbench at `http://localhost:3000/_zigttp/studio` opens with that same ASCII frame mirrored at the top, then the rest of the dashboard below.
+
+### Check and test
+
+```bash
+zigttp check
+zigttp test
+```
+
+`test` runs the analyzer first, then runs the project fixture at
+`tests/handler.test.jsonl`. Pass a path to run a different fixture.
 
 ### Build a self-contained binary
 
@@ -138,6 +151,7 @@ zigttp init <name> [--template basic|api|htmx]
 zigttp dev [options] [handler.ts]
 zigttp studio [options] [handler.ts]
 zigttp check [handler.ts] [--json] [--contract] [--types]
+zigttp test [tests.jsonl]
 zigttp build [-o <bin>] [--no-attest]
 zigttp deploy [--local|--cloud] [--no-attest]
 zigttp proofs [list|show|diff|watch|export|badge]
@@ -157,7 +171,8 @@ uses the runtime default of 8080.
 zigttp init <name> [--template basic|api|htmx]
 ```
 
-Creates `zigttp.json`, `src/handler.ts`, `tests/handler.test.jsonl`,
+Creates `zigttp.json`, `src/handler.ts` for basic/API projects or
+`src/handler.tsx` for HTMX projects, `tests/handler.test.jsonl`,
 `public/`, `.gitignore`, and a starter README. Project names may contain
 letters, numbers, `-`, and `_`; path-like names are rejected.
 
@@ -182,16 +197,19 @@ Common `dev` options:
 
 ```
 zigttp check [handler.ts] [--json] [--contract] [--types]
+zigttp test [tests.jsonl]
 zigttp build [-o <bin>] [--no-attest]
 zigttp deploy [--local|--cloud] [--no-attest]
 zigttp doctor [path]
 ```
 
-`check` verifies once and exits. `build` writes `.zigttp/build/<project-name>`.
+`check` verifies once and exits. `test` verifies first, then runs declarative
+request fixtures through the local runtime. `build` writes
+`.zigttp/build/<project-name>`.
 Bare `deploy` is local by default and writes `.zigttp/deploy/<project-name>`
 plus a `kind=deploy` row in `.zigttp/proofs.jsonl`. `doctor` prints a checklist
-for the manifest, entry file, tests fixture, optional system/static paths, and
-runtime-affecting settings.
+for the manifest, runtime template, entry file, analyzer result, tests fixture,
+optional system/static paths, and runtime-affecting settings.
 
 ### Ad Hoc Serve
 
@@ -954,7 +972,13 @@ For examples that combine modules in a handler, see
 
 ## JavaScript Subset Reference
 
-zigts implements a restricted JavaScript subset optimized for FaaS workloads. The restrictions enable compile-time verification, deterministic replay, and contract extraction. See [restrictions-to-proofs.md](restrictions-to-proofs.md) for each cut mapped to the failure class it eliminates and the proof it unlocks (also available as `zigts restrictions [--by proof|class]`).
+zigts implements a restricted JavaScript subset optimized for FaaS workloads.
+The restrictions enable compile-time verification, deterministic replay, and
+contract extraction. For a compact supported/unsupported reference, see
+[language-subset.md](language-subset.md). See
+[restrictions-to-proofs.md](restrictions-to-proofs.md) for each cut mapped to
+the failure class it eliminates and the proof it unlocks (also available as
+`zigts restrictions [--by proof|class]`).
 
 ### Supported Features
 

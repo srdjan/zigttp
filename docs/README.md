@@ -8,6 +8,10 @@ notes document design contracts, governance, and roadmap work.
 
 - [User Guide](user-guide.md) - install, run handlers, routing, JSON, tests,
   and troubleshooting.
+- [Getting Started](getting-started.md) - zero to local deploy, covered by
+  `zig build smoke-getting-started`.
+- [Language Subset](language-subset.md) - supported ZigTS syntax, unsupported
+  JavaScript/TypeScript features, and replacements.
 - [TypeScript](typescript.md) - type stripping, type checking, and
   `comptime()`.
 - [JSX Guide](jsx-guide.md) - JSX/TSX handlers and server-side rendering.

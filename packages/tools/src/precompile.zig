@@ -3709,6 +3709,27 @@ test "runCheckOnlyFromSource keeps diagnostics off stderr in test mode" {
     try std.testing.expect(result.totalErrors() > 0);
 }
 
+test "runCheckOnlyFromSource accepts annotated TSX handler after JSX block" {
+    const source =
+        \\function Page(): JSX.Element {
+        \\    return <main><h1>zigttp</h1></main>;
+        \\}
+        \\
+        \\function handler(req: Request): Response {
+        \\    if (req.path === "/") {
+        \\        return Response.html(renderToString(<Page />));
+        \\    }
+        \\    return Response.text("Not Found", { status: 404 });
+        \\}
+    ;
+
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.tsx", null, true, null, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+}
+
 test "compileHandler honors a registered partner manifest" {
     const allocator = std.testing.allocator;
 

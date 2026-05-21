@@ -91,7 +91,10 @@ zig build -Doptimize=ReleaseFast
 
 ## Quick Start
 
-The v1 user flow is `init` → `dev` → edit → `build` → `deploy` → `proofs badge`. Each command auto-detects the project from `zigttp.json` so most steps take no arguments. Local deploy is the default; `--local` is accepted when you want the target to be explicit.
+The v1 user flow is `init` -> `dev` -> edit -> `check` -> `test` -> `build`
+-> `deploy` -> `proofs badge`. Each command auto-detects the project from
+`zigttp.json` so most steps take no arguments. Local deploy is the default;
+`--local` is accepted when you want the target to be explicit.
 
 ```bash
 # 1. Scaffold a new project
@@ -101,17 +104,22 @@ zigttp init my-app && cd my-app
 zigttp dev
 
 # 3. Edit src/handler.ts in your editor.
-#    The HUD re-verifies on save and shows proof deltas/counterexamples.
+#    HTMX projects use src/handler.tsx.
+#    The HUD re-verifies on save and names the failing stage on errors.
 
-# 4. Build a self-contained binary
+# 4. Verify and run the starter fixture
+zigttp check
+zigttp test   # runs check first, then tests/handler.test.jsonl
+
+# 5. Build a self-contained binary
 zigttp build
 ./.zigttp/build/my-app
 
-# 5. Or do a verified local deploy (also writes .zigttp/proofs.jsonl)
+# 6. Or do a verified local deploy (also writes .zigttp/proofs.jsonl)
 zigttp deploy
 ./.zigttp/deploy/my-app
 
-# 6. Write a shareable proof badge from the latest ledger row
+# 7. Write a shareable proof badge from the latest ledger row
 zigttp proofs badge
 ```
 
@@ -122,6 +130,9 @@ curl http://localhost:3000/
 ```
 
 `zigttp serve [handler.ts]` and `zigttp serve -e "..."` still work for one-off testing without a project.
+
+For the full first project path, see [Getting Started](docs/getting-started.md).
+That guide is covered by `zig build smoke-getting-started`.
 
 The hosted control-plane deploy (`zigttp deploy --cloud`) is in preview and requires Zigttp cloud credentials; see [docs/deploy-tutorial.md](docs/deploy-tutorial.md) for the current state.
 
@@ -321,6 +332,7 @@ zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sq
 zigttp init <name> [--template basic|api|htmx]
 zigttp dev [options] [handler.ts]
 zigttp check [handler.ts] [--json] [--contract] [--types]
+zigttp test [tests.jsonl]
 zigttp build [-o <bin>] [--no-attest]
 zigttp deploy [--local|--cloud] [--no-attest]
 zigttp proofs [list|show|diff|watch|export|badge]
@@ -1328,7 +1340,8 @@ zigts implements ES5 with select ES6+ extensions:
 
 **Not Supported**: Classes, async/await, Promises, `var`, `while`/`do-while` loops, `this`, `new`, `try/catch`, `null`, regular expressions, labeled `break`/`continue`, `as`/`satisfies` type assertions. All unsupported features are detected at parse time with helpful error messages suggesting alternatives. Use `undefined` as the sole absent-value sentinel.
 
-See [User Guide](docs/user-guide.md#javascript-subset-reference) for full details.
+See [Language Subset](docs/language-subset.md) and
+[User Guide](docs/user-guide.md#javascript-subset-reference) for full details.
 
 ## License
 

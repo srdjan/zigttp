@@ -198,7 +198,7 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
 
     if (config.runtime_config.test_file_path != null) {
         test_runner.run(allocator, config) catch |err| {
-            if (err != error.TestsFailed) {
+            if (err != error.TestsFailed and err != error.InvalidTestFixture) {
                 std.log.err("Test error: {}", .{err});
             }
             std.process.exit(if (err == error.TestsFailed) 1 else 2);

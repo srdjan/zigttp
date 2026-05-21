@@ -15,6 +15,7 @@
 //!   zig build run -- handler.ts --test tests.jsonl
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zq = @import("zigts");
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 const Runtime = @import("zruntime.zig").Runtime;
@@ -50,7 +51,12 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
     };
     defer allocator.free(test_source);
 
-    const tests = try parseTestFile(allocator, test_source);
+    const tests = parseTestFile(allocator, test_source) catch |err| {
+        if (err == error.InvalidTestFixture) {
+            std.log.err("Invalid test fixture '{s}'. Expected JSONL rows with type=test/request/io/expect.", .{test_path});
+        }
+        return err;
+    };
     defer {
         for (tests) |t| allocator.free(t.io_calls);
         allocator.free(tests);
@@ -267,10 +273,18 @@ fn parseTestFile(allocator: std.mem.Allocator, source: []const u8) ![]TestCase {
     var current_assertions: TestAssertions = .{};
 
     var lines = std.mem.splitScalar(u8, source, '\n');
+    var line_no: usize = 0;
     while (lines.next()) |line| {
-        if (line.len == 0) continue;
+        line_no += 1;
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
 
-        const type_str = trace.findJsonStringValue(line, "\"type\"") orelse continue;
+        const type_str = trace.findJsonStringValue(trimmed, "\"type\"") orelse {
+            if (!builtin.is_test) {
+                std.log.err("Invalid test fixture line {d}: missing string field \"type\"", .{line_no});
+            }
+            return error.InvalidTestFixture;
+        };
 
         if (std.mem.eql(u8, type_str, "test")) {
             if (current_name != null) {
@@ -283,28 +297,33 @@ fn parseTestFile(allocator: std.mem.Allocator, source: []const u8) ![]TestCase {
                 current_request = null;
                 current_assertions = .{};
             }
-            current_name = trace.findJsonStringValue(line, "\"name\"") orelse "unnamed";
+            current_name = trace.findJsonStringValue(trimmed, "\"name\"") orelse "unnamed";
         } else if (std.mem.eql(u8, type_str, "request")) {
             current_request = .{
-                .method = trace.findJsonStringValue(line, "\"method\"") orelse "GET",
-                .url = trace.findJsonStringValue(line, "\"url\"") orelse "/",
-                .headers_json = trace.findJsonObjectValue(line, "\"headers\"") orelse "{}",
-                .body = trace.findJsonStringValue(line, "\"body\""),
+                .method = trace.findJsonStringValue(trimmed, "\"method\"") orelse "GET",
+                .url = trace.findJsonStringValue(trimmed, "\"url\"") orelse "/",
+                .headers_json = trace.findJsonObjectValue(trimmed, "\"headers\"") orelse "{}",
+                .body = trace.findJsonStringValue(trimmed, "\"body\""),
             };
         } else if (std.mem.eql(u8, type_str, "io")) {
             try current_io.append(allocator, .{
-                .seq = @intCast(trace.findJsonIntValue(line, "\"seq\"") orelse 0),
-                .module = trace.findJsonStringValue(line, "\"module\"") orelse "",
-                .func = trace.findJsonStringValue(line, "\"fn\"") orelse "",
-                .args_json = trace.findJsonArrayValue(line, "\"args\"") orelse "[]",
-                .result_json = trace.findJsonAnyValue(line, "\"result\"") orelse "null",
+                .seq = @intCast(trace.findJsonIntValue(trimmed, "\"seq\"") orelse 0),
+                .module = trace.findJsonStringValue(trimmed, "\"module\"") orelse "",
+                .func = trace.findJsonStringValue(trimmed, "\"fn\"") orelse "",
+                .args_json = trace.findJsonArrayValue(trimmed, "\"args\"") orelse "[]",
+                .result_json = trace.findJsonAnyValue(trimmed, "\"result\"") orelse "null",
             });
         } else if (std.mem.eql(u8, type_str, "expect")) {
-            const status_val = trace.findJsonIntValue(line, "\"status\"");
+            const status_val = trace.findJsonIntValue(trimmed, "\"status\"");
             current_assertions.status = if (status_val) |s| @intCast(@max(0, @min(999, s))) else null;
-            current_assertions.body = trace.findJsonStringValue(line, "\"body\"");
-            current_assertions.body_contains = trace.findJsonStringValue(line, "\"bodyContains\"");
-            current_assertions.headers_json = trace.findJsonObjectValue(line, "\"headers\"");
+            current_assertions.body = trace.findJsonStringValue(trimmed, "\"body\"");
+            current_assertions.body_contains = trace.findJsonStringValue(trimmed, "\"bodyContains\"");
+            current_assertions.headers_json = trace.findJsonObjectValue(trimmed, "\"headers\"");
+        } else {
+            if (!builtin.is_test) {
+                std.log.err("Invalid test fixture line {d}: unknown type \"{s}\"", .{ line_no, type_str });
+            }
+            return error.InvalidTestFixture;
         }
     }
 
@@ -332,6 +351,11 @@ test "parseTestFile: empty input" {
     const tests = try parseTestFile(std.testing.allocator, "");
     defer std.testing.allocator.free(tests);
     try std.testing.expectEqual(@as(usize, 0), tests.len);
+}
+
+test "parseTestFile: invalid non-empty row fails" {
+    try std.testing.expectError(error.InvalidTestFixture, parseTestFile(std.testing.allocator, "not json"));
+    try std.testing.expectError(error.InvalidTestFixture, parseTestFile(std.testing.allocator, "{\"type\":\"bogus\"}"));
 }
 
 test "parseTestFile: single test with status assertion" {

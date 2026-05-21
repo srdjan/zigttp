@@ -120,3 +120,21 @@ classification:
 
 For internal capability governance, see
 [`../internals/capabilities.md`](../internals/capabilities.md).
+
+## Runtime Requirements
+
+Most modules work without extra flags. Modules that cross a process, disk, or
+durability boundary need runtime configuration:
+
+| Module | Runtime Requirement |
+|---|---|
+| `zigttp:env` | Proven literal env vars are checked at startup unless `--no-env-check` is passed. |
+| `zigttp:sql` | Start with `--sqlite <FILE>` for query execution. Use `-Dsql-schema=<schema.sql>` or `--sql-schema` during checks for schema validation. |
+| `zigttp:fetch` | Start with `--outbound-http` or `--outbound-host <host>`. Durable fetch also needs `--durable <DIR>`. |
+| `zigttp:service` | Start with `--system <FILE>` or set `"system"` in `zigttp.json`. |
+| `zigttp:durable` | Start with `--durable <DIR>`. |
+| `zigttp:websocket` | Run through the server/WebSocket gateway; no standalone compile flag is enough. |
+| `zigttp:log` | Writes structured lines to stderr. Do not log raw secrets or credentials. |
+
+`zigttp doctor` checks the project manifest, entry file, runtime template, test
+fixture, and configured static/system paths before you start the dev loop.

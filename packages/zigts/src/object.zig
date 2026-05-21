@@ -1716,7 +1716,6 @@ pub const JSObject = extern struct {
             std.log.debug("getBytecodeFunc fail: FUNC_IS_BYTECODE is undefined", .{});
             return null;
         }
-        std.log.debug("getBytecodeFunc success!", .{});
         return slot.toExternPtr(BytecodeFunctionData);
     }
 

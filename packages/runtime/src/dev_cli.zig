@@ -191,6 +191,43 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 printNoProjectConfigDiagnostic(command);
                 std.process.exit(1);
             }
+            if (err == error.FileNotFound or
+                err == error.UnsupportedMultipleOutboundHosts or
+                err == error.CheckFailed or
+                err == error.DoctorFailed or
+                err == error.InvalidArgument)
+            {
+                std.process.exit(1);
+            }
+            return err;
+        };
+        return;
+    }
+    if (std.mem.eql(u8, command, "test")) {
+        testCommand(allocator, user_args[1..]) catch |err| {
+            if (err == error.HelpRequested) {
+                printTestHelp();
+                return;
+            }
+            if (err == error.NoProjectConfig) {
+                printNoProjectConfigDiagnostic(command);
+                std.process.exit(1);
+            }
+            if (err == error.FileNotFound) {
+                std.process.exit(1);
+            }
+            if (err == error.UnknownOption or err == error.TooManyArguments) {
+                if (err == error.UnknownOption) {
+                    std.debug.print("zigttp test accepts a single optional tests.jsonl path; flags are not supported here.\n\n", .{});
+                } else {
+                    std.debug.print("zigttp test accepts at most one tests.jsonl path.\n\n", .{});
+                }
+                printTestHelp();
+                std.process.exit(1);
+            }
+            if (err == error.CheckFailed or err == error.UnsupportedMultipleOutboundHosts) {
+                std.process.exit(1);
+            }
             return err;
         };
         return;
@@ -587,6 +624,9 @@ fn handlePreflightError(err: anyerror, command: []const u8) bool {
         , .{});
         return true;
     }
+    if (err == error.CheckFailed) {
+        return true;
+    }
     return false;
 }
 
@@ -637,7 +677,7 @@ fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const template = parseTemplate(template_name) orelse return error.InvalidTemplate;
 
     try scaffoldProject(allocator, name, template);
-    printInitNextSteps(allocator, name);
+    printInitNextSteps(name, template);
 }
 
 fn validateProjectName(name: []const u8) !void {
@@ -686,7 +726,7 @@ fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template: Tem
         .basic, .api => defaultManifest,
         .htmx => htmxManifest,
     });
-    try writeProjectFile(allocator, name, "src/handler.ts", switch (template) {
+    try writeProjectFile(allocator, name, handlerPathForTemplate(template), switch (template) {
         .basic => basicHandler,
         .api => apiHandler,
         .htmx => htmxHandler,
@@ -832,14 +872,22 @@ fn printInitExtensionNextSteps(name: []const u8) void {
 
 /// Print the post-init welcome panel. `zigttp dev` owns the first-run tour so
 /// the tour marker is written inside the project on the first real dev run.
-fn printInitNextSteps(allocator: std.mem.Allocator, name: []const u8) void {
+fn printInitNextSteps(name: []const u8, template: Template) void {
     const tty = shared.stderrIsTty();
     const c = shared.palette(tty);
-    _ = allocator;
 
     std.debug.print("\n", .{});
     std.debug.print("  {s}+{s} initialized zigttp project in {s}{s}{s}\n", .{ c.green, c.reset, c.bold, name, c.reset });
+    std.debug.print("  template: {s}\n", .{@tagName(template)});
     std.debug.print("  {s}----------------------------------------------------------------------{s}\n", .{ c.dim, c.reset });
+    std.debug.print("\n", .{});
+    std.debug.print("  created:\n", .{});
+    std.debug.print("    zigttp.json\n", .{});
+    std.debug.print("    {s}\n", .{handlerPathForTemplate(template)});
+    std.debug.print("    tests/handler.test.jsonl\n", .{});
+    std.debug.print("    public/.keep\n", .{});
+    std.debug.print("    README.md\n", .{});
+    std.debug.print("    .gitignore\n", .{});
     std.debug.print("\n", .{});
     std.debug.print("  {s}edit your handler. watch the proof flip live.{s}\n", .{ c.bold, c.reset });
     std.debug.print("\n", .{});
@@ -847,9 +895,11 @@ fn printInitNextSteps(allocator: std.mem.Allocator, name: []const u8) void {
     std.debug.print("\n", .{});
     std.debug.print("    cd {s}\n", .{name});
     std.debug.print("    {s}zigttp dev{s}          {s}# watch, prove, and start the Proof Quest{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
+    std.debug.print("    curl http://127.0.0.1:3000{s}\n", .{starterPathForTemplate(template)});
     std.debug.print("\n", .{});
     std.debug.print("  also useful:\n", .{});
     std.debug.print("    zigttp check        {s}# verify once and exit{s}\n", .{ c.dim, c.reset });
+    std.debug.print("    zigttp test         {s}# run tests/handler.test.jsonl{s}\n", .{ c.dim, c.reset });
     std.debug.print("    zigttp build        {s}# self-contained binary at .zigttp/build/{s}{s}\n", .{ c.dim, name, c.reset });
     std.debug.print("    zigttp deploy       {s}# local deploy + ledger entry at .zigttp/deploy/{s}{s}\n", .{ c.dim, name, c.reset });
     std.debug.print("    zigttp proofs badge {s}# write ./zigttp-proof.svg after deploy{s}\n", .{ c.dim, c.reset });
@@ -940,7 +990,7 @@ fn maybeShowFirstRunTour(allocator: std.mem.Allocator, argv: []const []const u8)
 }
 
 fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
-    try runDevPreflight(allocator, argv);
+    try runDevPreflight(allocator, argv, "dev");
 
     const serve_binary = try resolveDeveloperServeBinary(allocator, program_path);
     defer allocator.free(serve_binary);
@@ -987,7 +1037,7 @@ fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: [
     defer allocator.free(parsed.filtered);
 
     try studioPreflight(allocator, parsed.template);
-    try runDevPreflight(allocator, parsed.filtered);
+    try runDevPreflight(allocator, parsed.filtered, "studio");
 
     const serve_binary = try resolveDeveloperServeBinary(allocator, program_path);
     defer allocator.free(serve_binary);
@@ -1263,6 +1313,12 @@ fn resolveRuntimeBinary(allocator: std.mem.Allocator, program_path: []const u8) 
 }
 
 fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    if (argv.len > 1) {
+        std.debug.print("zigttp doctor accepts at most one path.\n\n", .{});
+        printDoctorHelp();
+        return error.InvalidArgument;
+    }
+
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
@@ -1278,12 +1334,33 @@ fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         std.debug.print("Project root: {s}\n\n", .{cfg.root_dir});
 
         printDoctorOk("manifest", cfg.manifest_path);
+        printDoctorRuntimeTemplate(allocator);
 
         const entry = try cfg.resolvedEntry(allocator);
         defer allocator.free(entry);
         const entry_ok = doctorPathExists(io, entry);
         if (!entry_ok) failures += 1;
         printDoctorPath("entry", entry, entry_ok);
+
+        const sqlite_path = try cfg.resolvedSqlitePath(allocator);
+        defer if (sqlite_path) |path| allocator.free(path);
+
+        if (entry_ok) {
+            var check = runDoctorAnalyzerForProject(allocator, cfg, entry, sqlite_path) catch |err| {
+                failures += 1;
+                printDoctorAnalyzerError(err);
+                return error.CheckFailed;
+            };
+            defer check.deinit(allocator);
+            if (check.totalErrors() > 0) {
+                failures += 1;
+                printDoctorCheckFailure(&check);
+            } else {
+                std.debug.print("[ok]   check    handler passes analyzer\n", .{});
+            }
+        } else {
+            printDoctorSkip("check", "entry missing");
+        }
 
         if (try cfg.resolvedStaticDir(allocator)) |static_dir| {
             defer allocator.free(static_dir);
@@ -1294,9 +1371,8 @@ fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
             printDoctorSkip("static", "not configured");
         }
 
-        if (try cfg.resolvedSqlitePath(allocator)) |sqlite_path| {
-            defer allocator.free(sqlite_path);
-            std.debug.print("[info] sqlite   {s}\n", .{sqlite_path});
+        if (sqlite_path) |path| {
+            std.debug.print("[info] sqlite   {s}\n", .{path});
         } else {
             printDoctorSkip("sqlite", "not configured");
         }
@@ -1338,7 +1414,8 @@ fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         std.debug.print("\n", .{});
         if (failures > 0) {
             std.debug.print("Doctor: {d} required check{s} failed\n", .{ failures, if (failures == 1) @as([]const u8, "") else "s" });
-            return error.FileNotFound;
+            std.debug.print("Next: fix the failed row above, then run `zigttp doctor` again.\n", .{});
+            return error.DoctorFailed;
         }
         std.debug.print("Doctor: OK\n", .{});
         std.debug.print("Next: zigttp dev\n", .{});
@@ -1347,7 +1424,11 @@ fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 
     if (start_path) |path| {
         std.debug.print("No zigttp.json found. Treating '{s}' as ad hoc source.\n", .{path});
-        try std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{});
+        std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{}) catch |err| {
+            std.debug.print("[fail] source   cannot read {s}: {}\n", .{ path, err });
+            std.debug.print("Next: pass a readable handler path or run inside a project with zigttp.json.\n", .{});
+            return error.FileNotFound;
+        };
         std.debug.print("Doctor: OK\n", .{});
         return;
     }
@@ -1355,8 +1436,66 @@ fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     return error.NoProjectConfig;
 }
 
+fn runDoctorAnalyzerForProject(
+    allocator: std.mem.Allocator,
+    cfg: *const project_config_mod.ProjectConfig,
+    entry: []const u8,
+    sqlite_path: ?[]const u8,
+) !precompile.CheckResult {
+    const system_for_check = try cfg.resolvedSystemPath(allocator);
+    defer if (system_for_check) |path| allocator.free(path);
+    return try precompile.runCheckOnly(allocator, entry, sqlite_path, false, system_for_check);
+}
+
+fn printDoctorAnalyzerError(err: anyerror) void {
+    std.debug.print("[fail] check    handler analyzer could not run: {}\n", .{err});
+    std.debug.print("       next     run `zigttp check` for full diagnostics after fixing the project paths\n", .{});
+}
+
+fn printDoctorCheckFailure(check: *const precompile.CheckResult) void {
+    std.debug.print("[fail] check    handler analyzer found {d} error(s)\n", .{check.totalErrors()});
+    printCheckStageFailures(check, "       ");
+    std.debug.print("       next     run `zigttp check` for full diagnostics\n", .{});
+}
+
+fn printCheckStageFailures(check: *const precompile.CheckResult, prefix: []const u8) void {
+    if (check.parse_errors > 0) std.debug.print("{s}parse    {d} error(s)\n", .{ prefix, check.parse_errors });
+    if (check.bool_errors > 0) std.debug.print("{s}sound    {d} error(s)\n", .{ prefix, check.bool_errors });
+    if (check.type_errors > 0) std.debug.print("{s}types    {d} error(s)\n", .{ prefix, check.type_errors });
+    if (check.strict_errors > 0) std.debug.print("{s}strict   {d} error(s)\n", .{ prefix, check.strict_errors });
+    if (check.verify_errors > 0) std.debug.print("{s}verify   {d} error(s)\n", .{ prefix, check.verify_errors });
+    if (check.flow_errors > 0) std.debug.print("{s}flow     {d} error(s)\n", .{ prefix, check.flow_errors });
+    const spec_errors = check.totalErrors() -|
+        (check.parse_errors + check.bool_errors + check.type_errors + check.strict_errors + check.verify_errors + check.flow_errors);
+    if (spec_errors > 0) std.debug.print("{s}spec     {d} error(s)\n", .{ prefix, spec_errors });
+}
+
+fn printDoctorRuntimeTemplate(allocator: std.mem.Allocator) void {
+    const self_path = self_extract.getSelfExePath(allocator) catch {
+        printDoctorSkip("runtime", "could not locate current executable");
+        return;
+    };
+    defer allocator.free(self_path);
+
+    const runtime_path = resolveRuntimeBinary(allocator, self_path) catch {
+        printDoctorSkip("runtime", "zigttp-runtime not found beside zigttp");
+        return;
+    };
+    defer allocator.free(runtime_path);
+
+    if (std.mem.endsWith(u8, runtime_path, "zigttp-runtime")) {
+        printDoctorOk("runtime", runtime_path);
+    } else {
+        std.debug.print("[warn] runtime  using fallback template: {s}\n", .{runtime_path});
+    }
+}
+
 fn doctorPathExists(io: std.Io, path: []const u8) bool {
-    std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
+    if (std.fs.path.isAbsolute(path)) {
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
+    } else {
+        std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{}) catch return false;
+    }
     return true;
 }
 
@@ -1384,17 +1523,155 @@ fn printDoctorOptionalPath(label: []const u8, path: []const u8, ok: bool) void {
     }
 }
 
-fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    var check_args = std.ArrayList([]const u8).empty;
-    defer check_args.deinit(allocator);
-    try check_args.append(allocator, "check");
+fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, command: []const u8) !void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
 
-    const path = shared.findPositionalPath(argv);
-    if (path) |p| {
-        try check_args.append(allocator, p);
+    const explicit_path = shared.findPositionalPath(argv);
+    var project = try project_config_mod.discover(allocator, io, explicit_path);
+    defer if (project) |*p| p.deinit(allocator);
+
+    const target = if (explicit_path) |path|
+        path
+    else if (project) |*cfg|
+        try cfg.resolvedEntry(allocator)
+    else
+        return error.NoProjectConfig;
+    defer if (explicit_path == null) allocator.free(target);
+
+    if (!doctorPathExists(io, target)) {
+        if (!builtin.is_test) {
+            std.debug.print("zigttp {s} preflight failed: handler not found: {s}\n", .{ command, target });
+            std.debug.print("Next: update `entry` in zigttp.json or pass an explicit handler path.\n", .{});
+        }
+        return error.FileNotFound;
     }
 
-    try zigts_cli.run(allocator, check_args.items);
+    const explicit_sqlite = optionValue(argv, "--sqlite");
+    const explicit_system = optionValue(argv, "--system");
+
+    const discovered_sqlite = if (explicit_sqlite == null and project != null)
+        try project.?.resolvedSqlitePath(allocator)
+    else
+        null;
+    defer if (discovered_sqlite) |path| allocator.free(path);
+
+    const discovered_system = if (explicit_system == null and project != null)
+        try project.?.resolvedSystemPath(allocator)
+    else
+        null;
+    defer if (discovered_system) |path| allocator.free(path);
+
+    const sqlite_path = explicit_sqlite orelse discovered_sqlite;
+    const system_path = explicit_system orelse discovered_system;
+
+    var check = precompile.runCheckOnly(allocator, target, sqlite_path, false, system_path) catch |err| {
+        if (!builtin.is_test) {
+            std.debug.print("zigttp {s} preflight could not run for {s}: {}\n", .{ command, target, err });
+            std.debug.print("Next: run `zigttp check {s}` for full diagnostics.\n", .{target});
+        }
+        return error.CheckFailed;
+    };
+    defer check.deinit(allocator);
+
+    if (check.totalErrors() > 0) {
+        if (!builtin.is_test) {
+            std.debug.print("zigttp {s} preflight failed for {s}: {d} error(s)\n", .{ command, target, check.totalErrors() });
+            printCheckStageFailures(&check, "  ");
+            std.debug.print("Next: fix `zigttp check`, then rerun `zigttp {s}`.\n", .{command});
+        }
+        return error.CheckFailed;
+    }
+
+    if (!builtin.is_test) {
+        var card_buf: std.ArrayList(u8) = .empty;
+        defer card_buf.deinit(allocator);
+        var card_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &card_buf);
+        precompile.formatProofCard(&card_aw.writer, &check, target);
+        card_buf = card_aw.toArrayList();
+        if (card_buf.items.len > 0) {
+            _ = std.c.write(std.c.STDERR_FILENO, card_buf.items.ptr, card_buf.items.len);
+        }
+    }
+}
+
+fn optionValue(argv: []const []const u8, name: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        if (!std.mem.eql(u8, argv[i], name)) continue;
+        return if (i + 1 < argv.len) argv[i + 1] else null;
+    }
+    return null;
+}
+
+fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var explicit_test_path: ?[]const u8 = null;
+
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return error.HelpRequested;
+        }
+        if (std.mem.startsWith(u8, arg, "-")) return error.UnknownOption;
+        if (explicit_test_path != null) return error.TooManyArguments;
+        explicit_test_path = arg;
+    }
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var project = try project_config_mod.discover(allocator, io, null);
+    defer if (project) |*p| p.deinit(allocator);
+    const cfg = if (project) |*p| p else return error.NoProjectConfig;
+    if (cfg.outbound_hosts.len > 1) {
+        std.debug.print("zigttp test cannot run with multiple outboundHosts; current runtime accepts one.\n", .{});
+        return error.UnsupportedMultipleOutboundHosts;
+    }
+
+    const test_path = if (explicit_test_path) |path|
+        try allocator.dupe(u8, path)
+    else
+        try std.fs.path.resolve(allocator, &.{ cfg.root_dir, "tests", "handler.test.jsonl" });
+    defer allocator.free(test_path);
+
+    if (!doctorPathExists(io, test_path)) {
+        std.debug.print("Test fixture not found: {s}\n", .{test_path});
+        std.debug.print("Run `zigttp gen-tests` or create tests/handler.test.jsonl.\n", .{});
+        return error.FileNotFound;
+    }
+
+    const entry = try cfg.resolvedEntry(allocator);
+    defer allocator.free(entry);
+    if (!doctorPathExists(io, entry)) {
+        std.debug.print("Handler not found: {s}\n", .{entry});
+        std.debug.print("Next: update `entry` in zigttp.json or create the handler file.\n", .{});
+        return error.FileNotFound;
+    }
+
+    const sqlite_path = try cfg.resolvedSqlitePath(allocator);
+    defer if (sqlite_path) |path| allocator.free(path);
+    var check = runDoctorAnalyzerForProject(allocator, cfg, entry, sqlite_path) catch |err| {
+        if (!builtin.is_test) {
+            std.debug.print("Pre-test check could not run: {}\n", .{err});
+            std.debug.print("Next: run `zigttp check` for full diagnostics.\n", .{});
+        }
+        return error.CheckFailed;
+    };
+    defer check.deinit(allocator);
+    if (check.totalErrors() > 0) {
+        if (!builtin.is_test) {
+            std.debug.print("Pre-test check failed for {s}: {d} error(s)\n", .{ entry, check.totalErrors() });
+            printCheckStageFailures(&check, "  ");
+            std.debug.print("Next: fix `zigttp check`, then rerun `zigttp test`.\n", .{});
+        }
+        return error.CheckFailed;
+    }
+
+    var serve_args = [_][]const u8{ "--test", test_path };
+    var serve_arena: std.heap.ArenaAllocator = .init(allocator);
+    defer serve_arena.deinit();
+    try runtime_cli.serveCommand(serve_arena.allocator(), &serve_args);
 }
 
 fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -1787,16 +2064,17 @@ fn printInitHelp() void {
         \\
         \\Project files (default):
         \\  zigttp.json
-        \\  src/handler.ts
+        \\  src/handler.ts     (basic/api)
+        \\  src/handler.tsx    (htmx)
         \\  tests/handler.test.jsonl
         \\  public/
         \\  .gitignore
         \\  README.md
         \\
         \\Project templates:
-        \\  basic   Small text handler (default)
-        \\  api     Health and echo JSON API
-        \\  htmx    TSX/HTMX page and fragment
+        \\  basic   Proof-focused starter for the default dev loop
+        \\  api     JSON health and echo endpoints
+        \\  htmx    TSX page and HTMX fragment
         \\
         \\Extension files (--extension):
         \\  zigttp-module.json     proof metadata for the partner module
@@ -1877,6 +2155,22 @@ fn printDoctorHelp() void {
         \\Examples:
         \\  zigttp doctor
         \\  zigttp doctor src/handler.ts
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn printTestHelp() void {
+    const help =
+        \\zigttp test [tests.jsonl]
+        \\
+        \\Run declarative handler tests for the current project. If no test
+        \\file is passed, zigttp reads tests/handler.test.jsonl under the
+        \\project root discovered from zigttp.json.
+        \\
+        \\Examples:
+        \\  zigttp test
+        \\  zigttp test tests/handler.test.jsonl
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -2076,19 +2370,28 @@ fn printHelp() void {
     const help =
         \\zigttp - developer tool for zigttp projects
         \\
-        \\Usage:
+        \\Start:
         \\  zigttp init <name> [--template basic|api|htmx]  Create project
         \\  zigttp demo [--no-open] [--port N] [--out DIR]  Guided local proof theater
         \\  zigttp studio [options] [handler.ts]       Browser proof workbench
         \\  zigttp dev [options] [handler.ts]          Watch + proven hot reload
         \\  zigttp serve [options] [handler.ts]    Run handler locally
         \\  zigttp edge [--config FILE]            Run in-process edge runtime
-        \\  zigttp expert                          Deprecated alias for `zigts expert`
+        \\
+        \\Validate:
         \\  zigttp check [handler.ts] [--contract]  Verify handler
+        \\  zigttp test [tests.jsonl]               Run handler tests
+        \\  zigttp doctor [path]                    Validate project readiness
+        \\
+        \\Package and deploy:
         \\  zigttp build [-o <bin>]                 Verify and emit self-contained binary
         \\  zigttp compile <handler.ts> -o <bin>    Build self-contained binary (explicit args)
+        \\  zigttp deploy                           Local deploy by default
+        \\  zigttp deploy --cloud                   Hosted deploy preview
+        \\
+        \\Inspect:
+        \\  zigttp expert                          Deprecated alias for `zigts expert`
         \\  zigttp login                            Store deploy credentials
-        \\  zigttp deploy                           Deploy the handler in this directory
         \\  zigttp review <plan-id>                 Inspect, approve, or reject a deploy plan
         \\  zigttp grants [project-name]            List reusable capability grants
         \\  zigttp revoke-grant <grant-id>          Revoke a reusable capability grant
@@ -2097,8 +2400,12 @@ fn printHelp() void {
         \\  zigttp prove <old.json> <new.json>      Upgrade safety check
         \\  zigttp mock <tests.jsonl> [--port N]    Mock server from tests
         \\  zigttp link <system.json>               Cross-handler linking
-        \\  zigttp doctor [path]                    Validate project
         \\  zigttp version                          Show version
+        \\
+        \\Happy path:
+        \\  zigttp init my-app && cd my-app
+        \\  zigttp dev
+        \\  zigttp test && zigttp build && zigttp deploy
         \\
         \\The internal runtime template is installed as `zigttp-runtime`.
         \\
@@ -2124,6 +2431,13 @@ fn printExpertAliasHelp() void {
 
 const Template = enum { basic, api, htmx };
 const template_choices = "basic, api, htmx";
+
+fn handlerPathForTemplate(template: Template) []const u8 {
+    return switch (template) {
+        .basic, .api => "src/handler.ts",
+        .htmx => "src/handler.tsx",
+    };
+}
 
 fn parseTemplate(name: []const u8) ?Template {
     if (std.mem.eql(u8, name, "basic")) return .basic;
@@ -2456,6 +2770,266 @@ test "initCommand scaffolds the v1 project layout" {
     for (expected) |path| {
         try std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{});
     }
+
+    const handler = try zigts.file_io.readFile(testing.allocator, "demo/src/handler.ts", 64 * 1024);
+    defer testing.allocator.free(handler);
+    try testing.expect(std.mem.indexOf(u8, handler, "function handler(req: Request): Response") != null);
+}
+
+test "initCommand writes template-specific starter README files" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try scaffoldProject(testing.allocator, "api-demo", .api);
+    try scaffoldProject(testing.allocator, "htmx-demo", .htmx);
+
+    const api_readme = try zigts.file_io.readFile(testing.allocator, "api-demo/README.md", 64 * 1024);
+    defer testing.allocator.free(api_readme);
+    const htmx_readme = try zigts.file_io.readFile(testing.allocator, "htmx-demo/README.md", 64 * 1024);
+    defer testing.allocator.free(htmx_readme);
+    const htmx_manifest = try zigts.file_io.readFile(testing.allocator, "htmx-demo/zigttp.json", 64 * 1024);
+    defer testing.allocator.free(htmx_manifest);
+
+    try testing.expect(std.mem.indexOf(u8, api_readme, "# zigttp API app") != null);
+    try testing.expect(std.mem.indexOf(u8, api_readme, "curl http://127.0.0.1:3000/health") != null);
+    try testing.expect(std.mem.indexOf(u8, htmx_readme, "# zigttp HTMX app") != null);
+    try testing.expect(std.mem.indexOf(u8, htmx_readme, "src/handler.tsx") != null);
+    try testing.expect(std.mem.indexOf(u8, htmx_readme, "zigttp test") != null);
+    try testing.expect(std.mem.indexOf(u8, htmx_manifest, "\"entry\": \"src/handler.tsx\"") != null);
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "htmx-demo/src/handler.tsx", .{});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "htmx-demo/src/handler.ts", .{}));
+}
+
+test "testCommand validates arguments before project discovery" {
+    try std.testing.expectError(error.HelpRequested, testCommand(std.testing.allocator, &.{"--help"}));
+    try std.testing.expectError(error.UnknownOption, testCommand(std.testing.allocator, &.{"--watch"}));
+    try std.testing.expectError(error.TooManyArguments, testCommand(std.testing.allocator, &.{ "a.jsonl", "b.jsonl" }));
+}
+
+test "testCommand runs analyzer before runtime tests" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try tmp.dir.createDirPath(io, "src");
+    try tmp.dir.createDirPath(io, "tests");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "zigttp.json",
+        .data =
+        \\{
+        \\  "entry": "src/handler.ts"
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/handler.ts",
+        .data =
+        \\function handler(req) {
+        \\    return Response.text("ok");
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "tests/handler.test.jsonl",
+        .data =
+        \\{"type":"test","name":"root"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect","status":200,"bodyContains":"ok"}
+        ,
+    });
+
+    try testing.expectError(error.CheckFailed, testCommand(testing.allocator, &.{}));
+}
+
+test "testCommand accepts relative explicit fixture path" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try tmp.dir.createDirPath(io, "src");
+    try tmp.dir.createDirPath(io, "tests");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "zigttp.json",
+        .data =
+        \\{
+        \\  "entry": "src/handler.ts"
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/handler.ts",
+        .data =
+        \\function handler(req: Request): Response {
+        \\    return Response.text("ok");
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "tests/custom.test.jsonl",
+        .data =
+        \\{"type":"test","name":"root"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect","status":200,"bodyContains":"ok"}
+        ,
+    });
+
+    try testCommand(testing.allocator, &.{"tests/custom.test.jsonl"});
+}
+
+test "runDevPreflight reports analyzer failure before starting dev loop" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try tmp.dir.createDirPath(io, "src");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "zigttp.json",
+        .data =
+        \\{
+        \\  "entry": "src/handler.ts"
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/handler.ts",
+        .data =
+        \\function handler(req) {
+        \\    return Response.text("ok");
+        \\}
+        ,
+    });
+
+    try testing.expectError(error.CheckFailed, runDevPreflight(testing.allocator, &.{}, "dev"));
+}
+
+test "doctorPathExists accepts relative paths" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "zigttp.json",
+        .data =
+        \\{
+        \\  "entry": "examples/handler/handler.ts"
+        \\}
+        ,
+    });
+    try tmp.dir.createDirPath(io, "examples/handler");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "examples/handler/handler.ts",
+        .data =
+        \\function handler(req: Request): Response {
+        \\    return Response.text("ok");
+        \\}
+        ,
+    });
+
+    try testing.expect(doctorPathExists(io, "examples/handler/handler.ts"));
+    try testing.expect(!doctorPathExists(io, "examples/handler/missing.ts"));
+}
+
+test "doctorCommand passes configured sqlite path into analyzer" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try tmp.dir.createDirPath(io, "src");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "zigttp.json",
+        .data =
+        \\{
+        \\  "entry": "src/handler.ts",
+        \\  "sqlite": "schema.sql"
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "schema.sql",
+        .data =
+        \\CREATE TABLE users (
+        \\    id INTEGER PRIMARY KEY,
+        \\    name TEXT NOT NULL
+        \\);
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/handler.ts",
+        .data =
+        \\import { sql, sqlMany } from "zigttp:sql";
+        \\
+        \\sql("listUsers", "SELECT id, name FROM users ORDER BY id ASC");
+        \\
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ users: sqlMany("listUsers", {}) });
+        \\}
+        ,
+    });
+
+    var project = try project_config_mod.discover(testing.allocator, io, null);
+    defer if (project) |*cfg| cfg.deinit(testing.allocator);
+
+    if (project) |*cfg| {
+        const entry = try cfg.resolvedEntry(testing.allocator);
+        defer testing.allocator.free(entry);
+        const sqlite_path = try cfg.resolvedSqlitePath(testing.allocator);
+        defer if (sqlite_path) |path| testing.allocator.free(path);
+
+        var check = try runDoctorAnalyzerForProject(testing.allocator, cfg, entry, sqlite_path);
+        defer check.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 0), check.totalErrors());
+    } else {
+        return error.NoProjectConfig;
+    }
 }
 
 fn writeProjectFile(allocator: std.mem.Allocator, project_name: []const u8, relative_path: []const u8, data: []const u8) !void {
@@ -2473,7 +3047,7 @@ const defaultManifest =
 
 const htmxManifest =
     \\{
-    \\  "entry": "src/handler.ts",
+    \\  "entry": "src/handler.tsx",
     \\  "port": 3000,
     \\  "staticDir": "public"
     \\}
@@ -2482,7 +3056,7 @@ const htmxManifest =
 const basicHandler = zigts_cli.proof_quest_fixture.starter_source;
 
 const apiHandler =
-    \\function handler(req) {
+    \\function handler(req: Request): Response {
     \\    if (req.method === "GET" && req.path === "/health") {
     \\        return Response.json({ ok: true });
     \\    }
@@ -2498,8 +3072,15 @@ const apiHandler =
     \\}
 ;
 
+fn starterPathForTemplate(template: Template) []const u8 {
+    return switch (template) {
+        .api => "/health",
+        .basic, .htmx => "/",
+    };
+}
+
 const htmxHandler =
-    \\function Page() {
+    \\function Page(): JSX.Element {
     \\    return (
     \\        <html>
     \\            <body>
@@ -2513,7 +3094,7 @@ const htmxHandler =
     \\    );
     \\}
     \\
-    \\function handler(req) {
+    \\function handler(req: Request): Response {
     \\    if (req.method === "GET" && req.path === "/") {
     \\        return Response.html(renderToString(<Page />));
     \\    }
@@ -2534,13 +3115,13 @@ const basicTests =
 
 const apiTests =
     \\{"type":"test","name":"health returns ok"}
-    \\{"type":"request","method":"GET","url":"/health?probe=1","headers":{},"body":null}
+    \\{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
     \\{"type":"expect","status":200,"body":"{\"ok\":true}"}
 ;
 
 const htmxTests =
     \\{"type":"test","name":"root renders html"}
-    \\{"type":"request","method":"GET","url":"/?probe=1","headers":{},"body":null}
+    \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
     \\{"type":"expect","status":200,"bodyContains":"zigttp"}
 ;
 
@@ -2583,13 +3164,72 @@ const basicReadme =
     \\## Other useful commands
     \\
     \\- `zigttp check` - run the analyzer once and exit
+    \\- `zigttp test` - run `tests/handler.test.jsonl`
     \\- `zigttp studio` - open the browser workbench mirror
     \\- `zigttp doctor` - validate the project layout
     \\- `zigttp proofs list` - browse the proof ledger
 ;
 
-const apiReadme = basicReadme;
-const htmxReadme = basicReadme;
+const apiReadme =
+    \\# zigttp API app
+    \\
+    \\## Quick start
+    \\
+    \\1. Start the local dev loop:
+    \\
+    \\       zigttp dev
+    \\
+    \\2. Try the starter endpoints:
+    \\
+    \\       curl http://127.0.0.1:3000/health
+    \\       curl -X POST http://127.0.0.1:3000/echo -d 'hello'
+    \\
+    \\3. Run the fixture:
+    \\
+    \\       zigttp test
+    \\
+    \\4. Build or deploy locally:
+    \\
+    \\       zigttp build
+    \\       zigttp deploy
+    \\
+    \\## Other useful commands
+    \\
+    \\- `zigttp check` - run the analyzer once and exit
+    \\- `zigttp studio` - open the browser workbench mirror
+    \\- `zigttp doctor` - validate the project layout
+    \\- `zigttp proofs list` - browse the proof ledger
+;
+
+const htmxReadme =
+    \\# zigttp HTMX app
+    \\
+    \\## Quick start
+    \\
+    \\1. Start the TSX/HTMX dev loop:
+    \\
+    \\       zigttp dev
+    \\
+    \\2. Edit `src/handler.tsx`, then open the page:
+    \\
+    \\       http://127.0.0.1:3000/
+    \\
+    \\3. Run the fixture:
+    \\
+    \\       zigttp test
+    \\
+    \\4. Build or deploy locally:
+    \\
+    \\       zigttp build
+    \\       zigttp deploy
+    \\
+    \\## Other useful commands
+    \\
+    \\- `zigttp check` - run the analyzer once and exit
+    \\- `zigttp studio` - open the browser workbench mirror
+    \\- `zigttp doctor` - validate the project layout
+    \\- `zigttp proofs list` - browse the proof ledger
+;
 
 // `{{name}}` is replaced by the extension name at scaffold time.
 const extension_manifest_template =

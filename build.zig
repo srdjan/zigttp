@@ -619,6 +619,11 @@ pub fn build(b: *std.Build) void {
     const smoke_v1_step = b.step("smoke-v1", "Run the v1 user-flow smoke test in a temp dir");
     smoke_v1_step.dependOn(&smoke_v1_cmd.step);
 
+    const smoke_getting_started_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/smoke-getting-started.sh" });
+    smoke_getting_started_cmd.has_side_effects = true;
+    const smoke_getting_started_step = b.step("smoke-getting-started", "Run the Getting Started guide smoke test in a temp dir");
+    smoke_getting_started_step.dependOn(&smoke_getting_started_cmd.step);
+
     const smoke_demo_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/smoke-demo.sh" });
     smoke_demo_cmd.has_side_effects = true;
     const smoke_demo_step = b.step("smoke-demo", "Run the Proof Theater demo smoke test in a temp dir");
