@@ -60,7 +60,7 @@ Diagnostics carry no trailing comma, no extra fields today, but clients **must i
 Frozen in v1 (`packages/tools/src/json_diagnostics.zig:42-129`):
 
 - `ZTS000` — file-level error envelope used by `verify-paths` when a file cannot be read or processed at all. `line` and `column` are `0`, `message` contains the Zig error name.
-- `ZTS001`–`ZTS0xx` — parser errors (unsupported feature, unexpected token, invalid import, JSX mismatches, etc.).
+- `ZTS001`–`ZTS0xx` — parser errors (unsupported feature, unexpected token, invalid import, JSX mismatches, etc.). `ZTS041`–`ZTS043` within this block are TypeScript type-stripper rejections (`any` type, `as` assertion, `satisfies` assertion), emitted from the strip stage before parsing.
 - `ZTS100`–`ZTS1xx` — bool-checker diagnostics (non-boolean condition, nullish misuse, arithmetic on non-numeric).
 - `ZTS200`–`ZTS2xx` — type-checker diagnostics (type mismatch, arg count, return type, non-exhaustive match).
 - `ZTS300`–`ZTS3xx` — handler verifier (missing return path, unchecked result, unused imports, module-scope mutation, unchecked optional access).

@@ -12,6 +12,8 @@ notes document design contracts, governance, and roadmap work.
   `zig build smoke-getting-started`.
 - [Language Subset](language-subset.md) - supported ZigTS syntax, unsupported
   JavaScript/TypeScript features, and replacements.
+- [Reading the Proof Card](proof-card.md) - the verdict, proven surface, and
+  counterexamples that `check` and `dev` print on every save.
 - [TypeScript](typescript.md) - type stripping, type checking, and
   `comptime()`.
 - [JSX Guide](jsx-guide.md) - JSX/TSX handlers and server-side rendering.

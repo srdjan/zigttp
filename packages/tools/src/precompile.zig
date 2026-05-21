@@ -70,6 +70,17 @@ fn debugPrint(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
+/// Print a TypeScript strip failure with `file:line:column` and a remediation
+/// message when the stripper supplied a structured diagnostic, falling back to
+/// the bare error name when it did not (OOM and other location-free failures).
+fn debugPrintStripError(path: []const u8, err: anyerror, diag: ?zigts.StripDiagnostic) void {
+    if (diag) |d| {
+        debugPrint("{s}:{d}:{d}: {s}\n", .{ path, d.line, d.column, d.kind.message() });
+    } else {
+        debugPrint("TypeScript strip error in {s}: {}\n", .{ path, err });
+    }
+}
+
 const AotAnalysis = struct {
     dispatch: ?*zigts.PatternDispatchTable = null,
     default_response: ?zigts.HandlerAnalyzer.StaticResponseInfo = null,
@@ -272,11 +283,16 @@ fn buildContractForServiceContext(
     const is_ts = std.mem.endsWith(u8, handler_path, ".ts");
     const is_tsx = std.mem.endsWith(u8, handler_path, ".tsx");
     if (is_ts or is_tsx) {
-        strip_result = try zigts.strip(allocator, source, .{
+        var strip_diag: ?zigts.StripDiagnostic = null;
+        strip_result = zigts.strip(allocator, source, .{
             .tsx_mode = is_tsx,
             .enable_comptime = true,
             .comptime_env = .{},
-        });
+            .diagnostic_out = &strip_diag,
+        }) catch |err| {
+            debugPrintStripError(handler_path, err, strip_diag);
+            return err;
+        };
         source_to_parse = strip_result.?.code;
     }
 
@@ -842,12 +858,17 @@ pub fn runCheckOnlyFromSource(
 
     // Stage 1: TypeScript strip
     if (is_ts or is_tsx) {
+        var strip_diag: ?zigts.StripDiagnostic = null;
         strip_result = zigts.strip(allocator, source, .{
             .tsx_mode = is_tsx,
             .enable_comptime = true,
             .comptime_env = .{},
+            .diagnostic_out = &strip_diag,
         }) catch |err| {
             if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
+            if (strip_diag) |d| {
+                result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
+            }
             result.parse_errors = 1;
             return result;
         };
@@ -1197,12 +1218,14 @@ pub fn runGenTests(
     const is_ts = std.mem.endsWith(u8, handler_path, ".ts");
     const is_tsx = std.mem.endsWith(u8, handler_path, ".tsx");
     if (is_ts or is_tsx) {
+        var strip_diag: ?zigts.StripDiagnostic = null;
         strip_result = zigts.strip(allocator, source, .{
             .tsx_mode = is_tsx,
             .enable_comptime = true,
             .comptime_env = .{},
+            .diagnostic_out = &strip_diag,
         }) catch |err| {
-            debugPrint("TypeScript strip error: {}\n", .{err});
+            debugPrintStripError(handler_path, err, strip_diag);
             return err;
         };
         source_to_parse = strip_result.?.code;
@@ -1286,12 +1309,14 @@ pub fn compileHandler(
             .env_vars = null,
         };
 
+        var strip_diag: ?zigts.StripDiagnostic = null;
         strip_result = zigts.strip(allocator, source, .{
             .tsx_mode = is_tsx,
             .enable_comptime = true,
             .comptime_env = comptime_env,
+            .diagnostic_out = &strip_diag,
         }) catch |err| {
-            debugPrint("TypeScript strip error: {}\n", .{err});
+            debugPrintStripError(filename, err, strip_diag);
             return err;
         };
         source_to_parse = strip_result.?.code;

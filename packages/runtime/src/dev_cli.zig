@@ -1915,6 +1915,7 @@ fn buildArtifact(
     defer allocator.free(source);
 
     std.log.info("Compiling {s}...", .{handler_path});
+    shared.step("Compiling handler...");
 
     var compiled = precompile.compileHandler(allocator, source, handler_path, .{
         .emit_verify = true,
@@ -1981,6 +1982,7 @@ fn buildArtifact(
     };
     defer if (attestation_jws) |a| allocator.free(a);
 
+    shared.step("Writing binary...");
     const policy = zigts.handler_policy.RuntimePolicy{};
     self_extract.create(
         allocator,
@@ -2015,6 +2017,7 @@ fn buildArtifact(
 
     if (ledger_service_name) |service_name| {
         if (compiled.contract) |*contract| {
+            shared.step("Recording proof ledger...");
             var sha_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash(source, &sha_digest, .{});
             const sha_hex = std.fmt.bytesToHex(sha_digest, .lower);

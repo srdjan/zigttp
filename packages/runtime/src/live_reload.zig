@@ -352,6 +352,7 @@ pub const LiveReloadState = struct {
                     if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
                 } else {
                     self.renderHud(&new_contract, old_contract, elapsed_ms, &sha_hex);
+                    printBlockedDetails(&diff, &manifest);
                     printProve("Swap blocked. Fix the breaking change or use --force-swap.\n", .{});
                     new_contract.deinit(self.allocator);
                 }
@@ -833,6 +834,44 @@ fn printReload(comptime fmt: []const u8, args: anytype) void {
 
 fn printProve(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("[prove]  " ++ fmt, args);
+}
+
+// Render the breaking entries from the already-computed contract diff and
+// upgrade manifest. Without this the developer only sees "Swap blocked" and
+// has to re-derive what regressed; the diff and manifest already hold the
+// answer (live_reload computes both just above this call site).
+fn printBlockedDetails(
+    diff: *const contract_diff.ContractDiff,
+    manifest: *const upgrade_verifier.UpgradeManifest,
+) void {
+    printProve("Verdict: {s}. Breaking changes:\n", .{manifest.verdict.toString()});
+
+    for (manifest.property_regressions.items) |r| {
+        printProve("  property {s} regressed: true -> false ({s})\n", .{
+            r.field,
+            r.severity.toString(),
+        });
+    }
+    for (diff.routes.items) |r| {
+        if (r.status == .removed) printProve("  route removed: {s}\n", .{r.pattern});
+    }
+    for (diff.api_route_changes.items) |r| {
+        if (r.status == .removed) {
+            printProve("  api route removed: {s} {s}\n", .{ r.method, r.path });
+        } else if (r.response == .breaking) {
+            printProve("  api route response changed: {s} {s}\n", .{ r.method, r.path });
+        }
+    }
+    for (diff.env_changes.items) |c| {
+        if (c.status == .added) printProve("  env var now required: {s}\n", .{c.value});
+    }
+    for (diff.egress_changes.items) |c| {
+        if (c.status == .added) printProve("  egress host added: {s}\n", .{c.value});
+    }
+    if (manifest.behavioral) |b| {
+        if (b.removed > 0) printProve("  behavioral paths removed: {d}\n", .{b.removed});
+        if (b.response_changed > 0) printProve("  behavioral responses changed: {d}\n", .{b.response_changed});
+    }
 }
 
 fn mentionsAiRelevantProof(proof_unlocked: []const u8) bool {

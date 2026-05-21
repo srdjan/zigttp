@@ -140,6 +140,8 @@ waiting, drift checks, and review approvals.
 
 ## Common Next Steps
 
+- Read [Reading the Proof Card](proof-card.md) to understand the verdict that
+  `check` and `dev` print on every save.
 - Add `zigttp:env` for configuration values.
 - Add `zigttp:decode` and `zigttp:validate` for request payloads.
 - Add `zigttp:sql` with `--sqlite <file>` for SQLite-backed handlers.

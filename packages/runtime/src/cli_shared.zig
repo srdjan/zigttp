@@ -45,6 +45,15 @@ pub fn palette(tty: bool) Palette {
     };
 }
 
+/// Emit a phase-start line to stderr so a long-running local command shows
+/// progress instead of going silent until it finishes. Dimmed on a TTY,
+/// plain when piped. Stderr-only so `--json` stdout stays machine-pure;
+/// mirrors the `deploy --cloud` step-line style for a consistent feel.
+pub fn step(label: []const u8) void {
+    const p = palette(stderrIsTty());
+    std.debug.print("  {s}{s}{s}\n", .{ p.dim, label, p.reset });
+}
+
 pub fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
     var args_iter = std.process.Args.Iterator.init(args_vector);
     defer args_iter.deinit();

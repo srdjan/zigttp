@@ -204,6 +204,31 @@ pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
     };
 }
 
+/// Type stripper error codes: ZTS04x (continues the parser ZTS0xx range).
+fn stripErrorCode(kind: zigts.StripDiagnosticKind) []const u8 {
+    return switch (kind) {
+        .any_type => "ZTS041",
+        .as_assertion => "ZTS042",
+        .satisfies_assertion => "ZTS043",
+    };
+}
+
+/// Map a TypeScript stripper rejection to a structured diagnostic so `--json`
+/// consumers and the `zigts expert` agent see a ZTS code, location, and
+/// suggestion instead of a swallowed `error.StripFailed`.
+pub fn fromStripError(diag: zigts.StripDiagnostic, file: []const u8) JsonDiagnostic {
+    const parts = splitSuggestion(diag.kind.message());
+    return .{
+        .code = stripErrorCode(diag.kind),
+        .severity = "error",
+        .message = parts.msg,
+        .file = file,
+        .line = diag.line,
+        .column = @intCast(diag.column),
+        .suggestion = parts.suggestion,
+    };
+}
+
 fn fromCheckerDiagnostic(
     comptime codeFn: anytype,
     diag: anytype,
@@ -1141,4 +1166,22 @@ test "writeRestrictionsMarkdown mentions every blocked feature" {
         const found = std.mem.indexOf(u8, buf.items, f.name) != null;
         try std.testing.expect(found);
     }
+}
+
+test "fromStripError maps any-type to ZTS041 with a suggestion" {
+    const diag = zigts.StripDiagnostic{ .line = 3, .column = 12, .kind = .any_type };
+    const jd = fromStripError(diag, "handler.ts");
+    try std.testing.expectEqualStrings("ZTS041", jd.code);
+    try std.testing.expectEqualStrings("error", jd.severity);
+    try std.testing.expectEqualStrings("handler.ts", jd.file);
+    try std.testing.expectEqual(@as(u32, 3), jd.line);
+    try std.testing.expectEqual(@as(u16, 12), jd.column);
+    try std.testing.expect(jd.suggestion != null);
+}
+
+test "fromStripError maps as and satisfies to distinct codes" {
+    const as_jd = fromStripError(.{ .line = 1, .column = 1, .kind = .as_assertion }, "h.ts");
+    try std.testing.expectEqualStrings("ZTS042", as_jd.code);
+    const sat_jd = fromStripError(.{ .line = 1, .column = 1, .kind = .satisfies_assertion }, "h.ts");
+    try std.testing.expectEqualStrings("ZTS043", sat_jd.code);
 }

@@ -88,7 +88,18 @@ fn executeBuildTimeHandler(
     const is_ts = std.mem.endsWith(u8, handler_filename, ".ts");
     const is_tsx = std.mem.endsWith(u8, handler_filename, ".tsx");
     if (is_ts or is_tsx) {
-        strip_result = zigts.strip(allocator, handler_source, .{ .tsx_mode = is_tsx }) catch return error.StripFailed;
+        var strip_diag: ?zigts.StripDiagnostic = null;
+        strip_result = zigts.strip(allocator, handler_source, .{
+            .tsx_mode = is_tsx,
+            .diagnostic_out = &strip_diag,
+        }) catch |err| {
+            if (strip_diag) |d| {
+                std.debug.print("{s}:{d}:{d}: {s}\n", .{ handler_filename, d.line, d.column, d.kind.message() });
+            } else {
+                std.debug.print("TypeScript strip error in {s}: {}\n", .{ handler_filename, err });
+            }
+            return error.StripFailed;
+        };
         source_to_parse = strip_result.?.code;
     }
 

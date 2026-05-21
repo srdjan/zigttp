@@ -42,6 +42,33 @@ pub const StripError = error{
     UnsupportedSatisfiesAssertion,
 };
 
+/// Kind of unsupported-TypeScript construct rejected by the stripper. Each
+/// kind maps to a fixed remediation message; `json_diagnostics` projects it
+/// onto a ZTS error code so `--json` consumers see a structured diagnostic.
+pub const StripDiagnosticKind = enum {
+    any_type,
+    as_assertion,
+    satisfies_assertion,
+
+    pub fn message(self: StripDiagnosticKind) []const u8 {
+        return switch (self) {
+            .any_type => "'any' type is not supported; use specific types (string, number, object) or union types instead",
+            .as_assertion => "'as' type assertion is not supported; use type-safe patterns instead",
+            .satisfies_assertion => "'satisfies' type assertion is not supported; use type-safe patterns instead",
+        };
+    }
+};
+
+/// Structured location for an unsupported-TypeScript rejection. Populated
+/// through `StripOptions.diagnostic_out` so `--json` consumers and the
+/// `zigts expert` agent see the same line/column the std.log path reports,
+/// rather than a bare `error.StripFailed`.
+pub const StripDiagnostic = struct {
+    line: u32,
+    column: u32,
+    kind: StripDiagnosticKind,
+};
+
 pub const StripResult = struct {
     code: []const u8,
     allocator: std.mem.Allocator,
@@ -74,6 +101,10 @@ pub const StripOptions = struct {
     /// Emit unsupported-feature diagnostics to std.log
     /// Disabled by default in tests to avoid expected-error log failures.
     report_errors: bool = !builtin.is_test,
+    /// When set, the stripper writes the line/column/kind of the first
+    /// unsupported-feature rejection here before returning the StripError.
+    /// Left null for OOM and other location-free failures.
+    diagnostic_out: ?*?StripDiagnostic = null,
 };
 
 /// Strip TypeScript types from source code
@@ -99,6 +130,7 @@ const Stripper = struct {
     enable_comptime: bool,
     comptime_env: ?ComptimeEnv,
     report_errors: bool,
+    diagnostic_out: ?*?StripDiagnostic,
 
     // State
     line: u32,
@@ -136,6 +168,7 @@ const Stripper = struct {
             .enable_comptime = options.enable_comptime,
             .comptime_env = options.comptime_env,
             .report_errors = options.report_errors,
+            .diagnostic_out = options.diagnostic_out,
             .line = 1,
             .col = 1,
             .in_expression = false,
@@ -1079,8 +1112,9 @@ const Stripper = struct {
         }
 
         if (self.report_errors) {
-            std.log.err("{}:{}: 'as' type assertion is not supported; use type-safe patterns instead", .{ self.line, self.col });
+            std.log.err("{}:{}: {s}", .{ self.line, self.col, StripDiagnosticKind.as_assertion.message() });
         }
+        self.recordDiagnostic(.as_assertion);
         return StripError.UnsupportedAsAssertion;
     }
 
@@ -1093,8 +1127,9 @@ const Stripper = struct {
         }
 
         if (self.report_errors) {
-            std.log.err("{}:{}: 'satisfies' type assertion is not supported; use type-safe patterns instead", .{ self.line, self.col });
+            std.log.err("{}:{}: {s}", .{ self.line, self.col, StripDiagnosticKind.satisfies_assertion.message() });
         }
+        self.recordDiagnostic(.satisfies_assertion);
         return StripError.UnsupportedSatisfiesAssertion;
     }
 
@@ -1274,6 +1309,15 @@ const Stripper = struct {
     // Banned Type Detection
     // ========================================================================
 
+    /// Record the location of an unsupported-feature rejection for callers
+    /// that requested structured diagnostics. A no-op when `diagnostic_out`
+    /// is null. The matching `StripError` is still returned by the caller.
+    fn recordDiagnostic(self: *Self, kind: StripDiagnosticKind) void {
+        if (self.diagnostic_out) |out| {
+            out.* = .{ .line = self.line, .column = self.col, .kind = kind };
+        }
+    }
+
     fn checkForAnyType(self: *Self) StripError!void {
         if (self.pos >= self.source.len) return;
         if (!isIdentifierStart(self.source[self.pos])) return;
@@ -1283,7 +1327,8 @@ const Stripper = struct {
             // Word boundary: next char after "any" must not continue the identifier
             const after = self.pos + 3;
             if (after >= self.source.len or !isIdentifierContinue(self.source[after])) {
-                if (self.report_errors) std.log.err("{}:{}: 'any' type is not supported; use specific types (string, number, object) or union types instead", .{ self.line, self.col });
+                if (self.report_errors) std.log.err("{}:{}: {s}", .{ self.line, self.col, StripDiagnosticKind.any_type.message() });
+                self.recordDiagnostic(.any_type);
                 return StripError.UnsupportedAnyType;
             }
         }
@@ -1929,6 +1974,39 @@ test "decorator passes through to parser" {
 test "any type annotation errors" {
     const result = strip(std.testing.allocator, "const x: any = 5;", .{});
     try std.testing.expectError(StripError.UnsupportedAnyType, result);
+}
+
+test "diagnostic_out captures any-type rejection location" {
+    var diag: ?StripDiagnostic = null;
+    const result = strip(std.testing.allocator, "const x: any = 5;", .{ .diagnostic_out = &diag });
+    try std.testing.expectError(StripError.UnsupportedAnyType, result);
+    try std.testing.expect(diag != null);
+    try std.testing.expectEqual(StripDiagnosticKind.any_type, diag.?.kind);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.line);
+    try std.testing.expectEqual(@as(u32, 10), diag.?.column);
+}
+
+test "diagnostic_out captures as-assertion rejection" {
+    var diag: ?StripDiagnostic = null;
+    const result = strip(std.testing.allocator, "const x = value as number;", .{ .diagnostic_out = &diag });
+    try std.testing.expectError(StripError.UnsupportedAsAssertion, result);
+    try std.testing.expect(diag != null);
+    try std.testing.expectEqual(StripDiagnosticKind.as_assertion, diag.?.kind);
+}
+
+test "diagnostic_out captures satisfies-assertion rejection" {
+    var diag: ?StripDiagnostic = null;
+    const result = strip(std.testing.allocator, "const c = { p: 1 } satisfies Config;", .{ .diagnostic_out = &diag });
+    try std.testing.expectError(StripError.UnsupportedSatisfiesAssertion, result);
+    try std.testing.expect(diag != null);
+    try std.testing.expectEqual(StripDiagnosticKind.satisfies_assertion, diag.?.kind);
+}
+
+test "diagnostic_out left null on a clean strip" {
+    var diag: ?StripDiagnostic = null;
+    var result = try strip(std.testing.allocator, "const x: number = 5;", .{ .diagnostic_out = &diag });
+    defer result.deinit();
+    try std.testing.expect(diag == null);
 }
 
 test "any function param errors" {

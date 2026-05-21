@@ -132,7 +132,8 @@ curl http://localhost:3000/
 `zigttp serve [handler.ts]` and `zigttp serve -e "..."` still work for one-off testing without a project.
 
 For the full first project path, see [Getting Started](docs/getting-started.md).
-That guide is covered by `zig build smoke-getting-started`.
+That guide is covered by `zig build smoke-getting-started`. To read the verdict
+`check` and `dev` print on every save, see [Reading the Proof Card](docs/proof-card.md).
 
 The hosted control-plane deploy (`zigttp deploy --cloud`) is in preview and requires Zigttp cloud credentials; see [docs/deploy-tutorial.md](docs/deploy-tutorial.md) for the current state.
 
