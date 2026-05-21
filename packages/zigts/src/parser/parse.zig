@@ -383,6 +383,7 @@ pub const Parser = struct {
 
         // Check for rest element: ...rest
         if (self.match(.spread)) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "rest element in object destructuring is not supported; bind the remaining properties explicitly instead");
             const name = try self.expectIdentifier("identifier after '...'");
             const name_atom = try self.addAtom(name.text(self.source));
 
@@ -411,8 +412,6 @@ pub const Parser = struct {
 
         // Property name (could be renamed: { name: localName })
         const key_name = try self.expectPropertyIdentifier("property name in object pattern");
-        // Use addString for consistency with object literals (which also use string constants for keys)
-        const key_str_idx = try self.addString(key_name.text(self.source));
         const key_atom_for_binding = try self.addAtom(key_name.text(self.source));
 
         var local_name = key_name;
@@ -432,7 +431,7 @@ pub const Parser = struct {
                             .kind = .object,
                             .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
                             .key = nested, // Nested pattern
-                            .key_atom = key_str_idx, // Use string constant index for get_field
+                            .key_atom = key_atom_for_binding, // property-name atom for get_field
                             .default_value = null_node,
                         },
                     },
@@ -448,7 +447,7 @@ pub const Parser = struct {
                             .kind = .array,
                             .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
                             .key = nested, // Nested pattern
-                            .key_atom = key_str_idx, // Use string constant index for get_field
+                            .key_atom = key_atom_for_binding, // property-name atom for get_field
                             .default_value = null_node,
                         },
                     },
@@ -485,7 +484,7 @@ pub const Parser = struct {
                     .kind = .simple,
                     .binding = binding,
                     .key = null_node,
-                    .key_atom = key_str_idx, // Use string constant index for get_field
+                    .key_atom = key_atom_for_binding, // property-name atom for get_field
                     .default_value = default_value,
                 },
             },
@@ -534,6 +533,7 @@ pub const Parser = struct {
 
         // Check for rest element: ...rest
         if (self.match(.spread)) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "rest element in array destructuring is not supported; index the remaining elements explicitly instead");
             const name = try self.expectIdentifier("identifier after '...'");
             const name_atom = try self.addAtom(name.text(self.source));
 

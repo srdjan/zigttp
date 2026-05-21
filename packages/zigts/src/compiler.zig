@@ -420,6 +420,50 @@ test "Compiler error handling" {
     try std.testing.expect(result.errors.len > 0);
 }
 
+test "Compiler rejects rest element in object destructuring" {
+    const allocator = std.testing.allocator;
+
+    var compiler = Compiler.init(allocator, 1);
+    defer compiler.deinit();
+
+    var result = compiler.compileOne(.{
+        .source = "let obj = { a: 1, b: 2, c: 3 }; let { a, ...rest } = obj;",
+        .filename = "rest-obj.js",
+    });
+    defer {
+        if (result.arena) |arena| {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
+    }
+
+    // Rest in destructuring is not implemented; it must be a clear compile
+    // error rather than silently binding `rest` to undefined.
+    try std.testing.expect(!result.isSuccess());
+    try std.testing.expect(result.errors.len > 0);
+}
+
+test "Compiler rejects rest element in array destructuring" {
+    const allocator = std.testing.allocator;
+
+    var compiler = Compiler.init(allocator, 1);
+    defer compiler.deinit();
+
+    var result = compiler.compileOne(.{
+        .source = "let arr = [10, 20, 30]; let [x, ...rest] = arr;",
+        .filename = "rest-arr.js",
+    });
+    defer {
+        if (result.arena) |arena| {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
+    }
+
+    try std.testing.expect(!result.isSuccess());
+    try std.testing.expect(result.errors.len > 0);
+}
+
 test "simple compile API" {
     const allocator = std.testing.allocator;
 

@@ -116,6 +116,10 @@ const Stripper = struct {
     // to false, causing the next sibling property colon to be mis-treated
     // as a type annotation.
     brace_stack: std.ArrayListUnmanaged(bool),
+    // True between a `const`/`let`/`var` keyword and the binding it introduces.
+    // A `{` seen while this holds opens a destructuring pattern, where property
+    // colons are renames (`{ a: localName }`), never type annotations.
+    expect_binding: bool,
 
     // TypeMap: records type annotations for downstream type checking
     type_map: TypeMap,
@@ -137,6 +141,7 @@ const Stripper = struct {
             .in_expression = false,
             .in_import = false,
             .brace_stack = .empty,
+            .expect_binding = false,
             .type_map = TypeMap.init(source),
         };
     }
@@ -218,6 +223,10 @@ const Stripper = struct {
         if (isIdentifierStart(c)) {
             const ident = self.scanIdentifier();
 
+            // Any identifier other than const/let/var ends a pending binding
+            // position; the keyword branch below re-arms it when applicable.
+            self.expect_binding = false;
+
             // Check for comptime() expression
             if (self.enable_comptime and std.mem.eql(u8, ident, "comptime")) {
                 if (try self.tryEvaluateComptime(start)) return;
@@ -258,6 +267,7 @@ const Stripper = struct {
                 std.mem.eql(u8, ident, "var"))
             {
                 self.in_expression = false;
+                self.expect_binding = true;
             }
 
             self.output.appendSlice(self.allocator, ident) catch return StripError.OutOfMemory;
@@ -333,6 +343,12 @@ const Stripper = struct {
                 // `[`, or `:` is a value-position object literal where property
                 // colons stay expressions; a `{` after `)` or a statement is a
                 // block where labels and `let`/`const` again drive the flag.
+                // Exception: a `{` right after `const`/`let`/`var` opens a
+                // destructuring pattern whose property colons are renames, so
+                // colons inside must stay in expression context.
+                if (self.expect_binding) {
+                    self.in_expression = true;
+                }
             },
             '}' => {
                 if (self.brace_stack.pop()) |prev| {
@@ -349,6 +365,10 @@ const Stripper = struct {
             ']' => {}, // Keep context
             else => {},
         }
+
+        // Any punctuator ends a pending binding position (the `{` case above
+        // has already consumed the flag for destructuring patterns).
+        self.expect_binding = false;
 
         // Other punctuators - pass through
         self.pos += 1;
@@ -2507,6 +2527,31 @@ test "array of objects preserves sibling property colons" {
     const result = try strip(std.testing.allocator, source, .{});
     defer @constCast(&result).deinit();
     try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "destructuring pattern rename colons survive stripping" {
+    // Regression: a `{` right after `const`/`let`/`var` opens a destructuring
+    // pattern whose `c: renamed` is a rename, not a `: Type` annotation. The
+    // stripper used to leave `in_expression` false inside the pattern, so every
+    // rename colon after the first element was blanked as a type annotation,
+    // leaving the renamed binding undeclared.
+    const source =
+        \\const { b, c: renamed } = obj;
+        \\let { x: first, y: second } = pt;
+    ;
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "type annotation after destructuring pattern still strips" {
+    // Must NOT regress: the `: { a: number }` after the pattern is a real
+    // type annotation on the binding and must be blanked.
+    const source = "const { a }: { a: number } = obj;";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "{ a }") != null);
 }
 
 test "type annotation with object-typed value still strips" {

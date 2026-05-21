@@ -747,9 +747,9 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
 
             // Convert to strings and compare lexicographically (JS default)
             const str_a = valueToStringSimple(allocator, a) catch return false;
-            defer if (!a.isString()) allocator.destroy(str_a);
+            defer if (!a.isString()) string.freeString(allocator, str_a);
             const str_b = valueToStringSimple(allocator, b) catch return false;
-            defer if (!b.isString()) allocator.destroy(str_b);
+            defer if (!b.isString()) string.freeString(allocator, str_b);
 
             const slice_a = str_a.data();
             const slice_b = str_b.data();
@@ -773,4 +773,42 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
     }
     result.setArrayLength(len);
     return result.toValue();
+}
+
+test "arrayToSorted sorts non-string elements without an allocator mismatch" {
+    // Regression: the sort comparator coerces non-string elements to strings via
+    // `valueToStringSimple` (a `createString` allocation) but freed them with
+    // `allocator.destroy`, which releases only `@sizeOf(JSString)` instead of the
+    // `@sizeOf(JSString) + len` block -- a size-mismatched free.
+    // A self-managed DebugAllocator catches that mismatch at the point of the bad
+    // free. It is deliberately not deinit'd: GC-managed JSObjects are not freed
+    // individually in tests, and the resulting leak report is irrelevant here.
+    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = dbg.allocator();
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const arr = try ctx.createArray();
+    arr.prototype = ctx.array_prototype;
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(3));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(1));
+    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(2));
+    arr.setArrayLength(3);
+
+    const sorted = arrayToSorted(ctx, arr.toValue(), &.{});
+    const sorted_obj = getObject(sorted) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 3), sorted_obj.getArrayLength());
+    try std.testing.expectEqual(@as(i32, 1), (sorted_obj.getIndex(0) orelse value.JSValue.undefined_val).getInt());
+    try std.testing.expectEqual(@as(i32, 2), (sorted_obj.getIndex(1) orelse value.JSValue.undefined_val).getInt());
+    try std.testing.expectEqual(@as(i32, 3), (sorted_obj.getIndex(2) orelse value.JSValue.undefined_val).getInt());
 }
