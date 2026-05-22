@@ -66,10 +66,10 @@ directly to FaaS platforms or container environments.
 
 ## Quick Start
 
-The v1 user flow is `init` -> `dev` -> edit -> `check` -> `test` -> `build`
--> `deploy` -> `proofs badge`. Each command auto-detects the project from
-`zigttp.json`, so most steps take no arguments. Local deploy is the default;
-`--local` is accepted when you want the target to be explicit.
+The v1 user flow is `init` -> `dev` -> edit -> `test` -> `deploy`. Each command
+auto-detects the project from `zigttp.json`, so most steps take no arguments.
+Local deploy is the default; `--local` is accepted when you want the target to
+be explicit.
 
 ### Scaffold a project
 
@@ -87,22 +87,24 @@ zigttp dev
 
 Edit `src/handler.ts` in your editor; HTMX projects use `src/handler.tsx`. The terminal proof card re-verifies on save and shows the verdict, proven surface, proof deltas, counterexamples, and `Why:` rows for attributed property demotions. If a save fails, the reload banner names the failing analyzer stage and keeps the previous handler serving. Press `Tab` to rotate the proof card's left pane through three lenses: `Properties` (the default `[+]`/`[-]` pills), `Trade` (each proof paired with the substrate restrictions that earned it), and `Handover` (a copy-pasteable AI proof certificate). The same three views are mirrored in Studio with a tab bar and a one-click Copy button on the Handover view. When `--studio` is on, the HUD prints a `Studio mirror: http://...` footer beneath each frame; modern terminals (iTerm2, WezTerm, Ghostty, VS Code) make it click-to-open. The browser workbench at `http://localhost:3000/_zigttp/studio` opens with that same ASCII frame mirrored at the top, then the rest of the dashboard below.
 
-### Check and test
+### Test
 
 ```bash
-zigttp check
 zigttp test
 ```
 
 `test` runs the analyzer first, then runs the project fixture at
 `tests/handler.test.jsonl`. Pass a path to run a different fixture.
 
-### Build a self-contained binary
+### The expert
 
 ```bash
-zigttp build
-./.zigttp/build/my-app
+zigttp expert
 ```
+
+`expert` opens the interactive compiler-in-the-loop agent. It runs the same
+analyzers the compiler uses, so it can explain a diagnostic, verify an edit,
+and propose a fix against your handler as you work.
 
 ### Verified local deploy
 
@@ -111,7 +113,11 @@ zigttp deploy
 ./.zigttp/deploy/my-app
 ```
 
-`deploy` does everything `build` does, plus appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. No cloud credentials, no Docker, no network access. See [docs/deploy-tutorial.md](deploy-tutorial.md) for the hosted-control-plane preview path.
+`deploy` verifies the handler, emits the self-contained binary at
+`.zigttp/deploy/<project-name>`, and appends a `kind=deploy` row to
+`.zigttp/proofs.jsonl`. No cloud credentials, no Docker, no network access. See
+[docs/deploy-tutorial.md](deploy-tutorial.md) for the hosted-control-plane
+preview path.
 
 Attestation is default-on (slice 2). The build signs the contract and bytecode hashes into a JWS embedded in the binary, using the persistent identity at `~/.zigttp/attest/keypair.bin`. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request and serves `GET /.well-known/zigttp-attest` as cacheable JSON. `zigttp verify <url>` validates the signature from any third-party machine. Pass `--no-attest` to skip signing for a specific build. Full design: [docs/roadmap/attest-slice-2.md](roadmap/attest-slice-2.md).
 
@@ -146,20 +152,21 @@ Useful for multitenant routing, internal request fan-out, or A/B routing during 
 
 ## Command Line Reference
 
+Day-to-day use is five commands:
+
 ```
 zigttp init <name> [--template basic|api|htmx]
 zigttp dev [options] [handler.ts]
-zigttp studio [options] [handler.ts]
-zigttp check [handler.ts] [--json] [--contract] [--types]
 zigttp test [tests.jsonl]
-zigttp build [-o <bin>] [--no-attest]
+zigttp expert
 zigttp deploy [--local|--cloud] [--no-attest]
-zigttp proofs [list|show|diff|watch|export|badge]
-zigttp doctor [path]
-
-zigttp serve [OPTIONS] <handler.js>
-zigttp serve -e "<inline-code>"
 ```
+
+Run `zigttp help --all` for the advanced commands - the analyzer commands
+(`check`, `prove`, `mock`, `link`, `gen-tests`), `serve`, `build`, `compile`,
+`doctor`, `studio`, `edge`, `proofs`, `verify`, and the cloud-deploy set
+(`login`, `logout`, `review`, `grants`, `revoke-grant`). Each keeps its own
+`zigttp <command> --help`.
 
 Project commands discover `zigttp.json` from the current directory or any
 parent. The default scaffold sets `"port": 3000`; raw `serve` without a project
@@ -180,7 +187,7 @@ letters, numbers, `-`, and `_`; path-like names are rejected.
 zigttp dev [options] [handler.ts]
 ```
 
-Runs `zigttp check`, starts the server, watches the handler and local imports,
+Runs the analyzer, starts the server, watches the handler and local imports,
 and hot-swaps safe changes. By default, `dev` implies `--watch --prove`, so
 breaking contract changes are blocked and the old handler keeps serving.
 
@@ -196,18 +203,16 @@ Common `dev` options:
 ```
 
 ```
-zigttp check [handler.ts] [--json] [--contract] [--types]
 zigttp test [tests.jsonl]
-zigttp build [-o <bin>] [--no-attest]
+zigttp expert
 zigttp deploy [--local|--cloud] [--no-attest]
-zigttp doctor [path]
 ```
 
-`check` verifies once and exits. `test` verifies first, then runs declarative
-request fixtures through the local runtime. `build` writes
-`.zigttp/build/<project-name>`.
+`test` verifies first, then runs declarative request fixtures through the local
+runtime. `expert` opens the interactive compiler-in-the-loop agent.
 Bare `deploy` is local by default and writes `.zigttp/deploy/<project-name>`
-plus a `kind=deploy` row in `.zigttp/proofs.jsonl`. `doctor` prints a checklist
+plus a `kind=deploy` row in `.zigttp/proofs.jsonl`. The advanced `doctor`
+command (under `zigttp help --all`) prints a checklist
 for the manifest, runtime template, entry file, analyzer result, tests fixture,
 optional system/static paths, and runtime-affecting settings.
 

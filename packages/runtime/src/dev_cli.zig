@@ -283,15 +283,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (std.mem.eql(u8, command, "expert")) {
         if (hasHelpFlag(user_args[1..])) {
-            printExpertAliasHelp();
+            printExpertHelp();
             return;
         }
         if (user_args.len > 1) {
-            std.debug.print("zigttp expert does not accept arguments. Use direct commands like `zigts meta` or `zigts verify-paths`.\n\n", .{});
-            printExpertAliasHelp();
+            std.debug.print("zigttp expert does not accept arguments.\n\n", .{});
+            printExpertHelp();
             return;
         }
-        std.debug.print("zigttp expert is deprecated; use `zigts expert`.\n", .{});
         const witness_replay_lib = @import("witness_replay_lib.zig");
         pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
         try pi_app.run(allocator);
@@ -529,7 +528,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "help")) {
-        printHelp();
+        if (hasAllFlag(user_args[1..])) printHelpAll() else printHelp();
         return;
     }
 
@@ -897,12 +896,8 @@ fn printInitNextSteps(name: []const u8, template: Template) void {
     std.debug.print("    {s}zigttp dev{s}          {s}# watch, prove, and start the Proof Quest{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
     std.debug.print("    curl http://127.0.0.1:3000{s}\n", .{starterPathForTemplate(template)});
     std.debug.print("\n", .{});
-    std.debug.print("  also useful:\n", .{});
-    std.debug.print("    zigttp check        {s}# verify once and exit{s}\n", .{ c.dim, c.reset });
-    std.debug.print("    zigttp test         {s}# run tests/handler.test.jsonl{s}\n", .{ c.dim, c.reset });
-    std.debug.print("    zigttp build        {s}# self-contained binary at .zigttp/build/{s}{s}\n", .{ c.dim, name, c.reset });
-    std.debug.print("    zigttp deploy       {s}# local deploy + ledger entry at .zigttp/deploy/{s}{s}\n", .{ c.dim, name, c.reset });
-    std.debug.print("    zigttp proofs badge {s}# write ./zigttp-proof.svg after deploy{s}\n", .{ c.dim, c.reset });
+    std.debug.print("    {s}zigttp test{s}         {s}# run tests/handler.test.jsonl{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
+    std.debug.print("    {s}zigttp deploy{s}       {s}# build, prove, and deploy to .zigttp/deploy/{s}{s}\n", .{ c.cyan, c.reset, c.dim, name, c.reset });
     std.debug.print("\n", .{});
 }
 
@@ -1579,7 +1574,7 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
         if (!builtin.is_test) {
             std.debug.print("zigttp {s} preflight failed for {s}: {d} error(s)\n", .{ command, target, check.totalErrors() });
             printCheckStageFailures(&check, "  ");
-            std.debug.print("Next: fix `zigttp check`, then rerun `zigttp {s}`.\n", .{command});
+            std.debug.print("Next: fix the errors above, then rerun `zigttp {s}`.\n", .{command});
         }
         return error.CheckFailed;
     }
@@ -1663,7 +1658,7 @@ fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         if (!builtin.is_test) {
             std.debug.print("Pre-test check failed for {s}: {d} error(s)\n", .{ entry, check.totalErrors() });
             printCheckStageFailures(&check, "  ");
-            std.debug.print("Next: fix `zigttp check`, then rerun `zigttp test`.\n", .{});
+            std.debug.print("Next: fix the errors above, then rerun `zigttp test`.\n", .{});
         }
         return error.CheckFailed;
     }
@@ -1882,6 +1877,7 @@ fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         \\Try:      curl http://{s}:{d}/
         \\Ledger:   .zigttp/proofs.jsonl (kind=deploy)
         \\
+        \\Inspect the proof ledger: zigttp proofs list
         \\Tip: pass --cloud to deploy to the zigttp hosted runtime instead.
         \\
     , .{ artifact.output_path, artifact.output_path, artifact.project.host, artifact.project.port });
@@ -2100,8 +2096,8 @@ fn printDevHelp() void {
     const help =
         \\zigttp dev [options] [handler.ts]
         \\
-        \\Start the local edit loop. The command runs `zigttp check`, then
-        \\re-enters `zigttp serve` with watch mode enabled. By default it also
+        \\Start the local edit loop. The command runs the analyzer, then
+        \\serves the handler with watch mode enabled. By default it also
         \\proves each change before hot-swapping the running handler.
         \\
         \\Common options:
@@ -2369,64 +2365,102 @@ fn printRevokeGrantHelp() void {
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 
+fn hasAllFlag(argv: []const []const u8) bool {
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "all")) return true;
+    }
+    return false;
+}
+
+/// The default `zigttp --help` surface: only the five core verbs. Everything
+/// else lives behind `zigttp help --all` (`core_help_all`).
+const core_help =
+    \\zigttp - serverless JavaScript runtime
+    \\
+    \\Commands:
+    \\  zigttp init <name>     Create a project
+    \\  zigttp dev             Run locally, watch and prove on every save
+    \\  zigttp test            Run handler tests
+    \\  zigttp expert          Interactive compiler-in-the-loop agent
+    \\  zigttp deploy          Build, prove, and deploy (local by default)
+    \\
+    \\Get started:
+    \\  zigttp init my-app && cd my-app
+    \\  zigttp dev
+    \\
+    \\Run `zigttp help --all` for advanced commands.
+    \\
+;
+
 fn printHelp() void {
-    const help =
-        \\zigttp - developer tool for zigttp projects
+    _ = std.c.write(std.c.STDOUT_FILENO, core_help.ptr, core_help.len);
+}
+
+const core_help_all =
+    \\zigttp - serverless JavaScript runtime
         \\
-        \\Start:
-        \\  zigttp init <name> [--template basic|api|htmx]  Create project
-        \\  zigttp demo [--no-open] [--port N] [--out DIR]  Guided local proof theater
-        \\  zigttp studio [options] [handler.ts]       Browser proof workbench
-        \\  zigttp dev [options] [handler.ts]          Watch + proven hot reload
-        \\  zigttp serve [options] [handler.ts]    Run handler locally
-        \\  zigttp edge [--config FILE]            Run in-process edge runtime
+        \\Core commands:
+        \\  zigttp init <name> [--template basic|api|htmx]  Create a project
+        \\  zigttp dev [handler.ts]                Run locally, watch and prove on save
+        \\  zigttp test [tests.jsonl]              Run handler tests
+        \\  zigttp expert                          Interactive compiler-in-the-loop agent
+        \\  zigttp deploy [--cloud]                Build, prove, deploy (local default)
         \\
-        \\Validate:
-        \\  zigttp check [handler.ts] [--contract]  Verify handler
-        \\  zigttp test [tests.jsonl]               Run handler tests
-        \\  zigttp doctor [path]                    Validate project readiness
+        \\Analyze:
+        \\  zigttp check [handler.ts]              Run the analyzer once
+        \\  zigttp prove <old.json> <new.json>     Contract upgrade safety check
+        \\  zigttp mock <tests.jsonl>              Mock server from test fixtures
+        \\  zigttp link <system.json>              Cross-handler system linking
+        \\  zigttp gen-tests [handler.ts]          Generate a starter test fixture
         \\
-        \\Package and deploy:
-        \\  zigttp build [-o <bin>]                 Verify and emit self-contained binary
-        \\  zigttp compile <handler.ts> -o <bin>    Build self-contained binary (explicit args)
-        \\  zigttp deploy                           Local deploy by default
-        \\  zigttp deploy --cloud                   Hosted deploy preview
+        \\Run and inspect:
+        \\  zigttp serve [handler.ts]              Run a handler without watch or proof
+        \\  zigttp doctor [path]                   Check project readiness
+        \\  zigttp demo                            Guided local proof theater
+        \\  zigttp studio [handler.ts]             Browser proof workbench
+        \\  zigttp edge [--config FILE]            Run the in-process edge runtime
         \\
-        \\Inspect:
-        \\  zigttp expert                          Deprecated alias for `zigts expert`
-        \\  zigttp login                            Store deploy credentials
-        \\  zigttp review <plan-id>                 Inspect, approve, or reject a deploy plan
-        \\  zigttp grants [project-name]            List reusable capability grants
-        \\  zigttp revoke-grant <grant-id>          Revoke a reusable capability grant
-        \\  zigttp logout                           Forget saved sign-in credentials
-        \\  zigttp proofs [list|show|diff|watch|export|badge]  Browse the proof ledger
-        \\  zigttp prove <old.json> <new.json>      Upgrade safety check
-        \\  zigttp mock <tests.jsonl> [--port N]    Mock server from tests
-        \\  zigttp link <system.json>               Cross-handler linking
-        \\  zigttp version                          Show version
+        \\Package:
+        \\  zigttp build [-o <bin>]                Emit a self-contained binary
+        \\  zigttp compile <handler.ts> -o <bin>   Build a binary from an explicit path
         \\
-        \\Happy path:
-        \\  zigttp init my-app && cd my-app
-        \\  zigttp dev
-        \\  zigttp test && zigttp build && zigttp deploy
+        \\Cloud deploy:
+        \\  zigttp login                           Store deploy credentials
+        \\  zigttp logout                          Forget saved credentials
+        \\  zigttp review <plan-id>                Approve or reject a deploy plan
+        \\  zigttp grants [project-name]           List reusable capability grants
+        \\  zigttp revoke-grant <grant-id>         Revoke a capability grant
+        \\
+        \\Proof ledger:
+        \\  zigttp proofs [list|show|diff|watch|export|badge|bundle|verify]
+        \\  zigttp verify <url>                    Verify a deployed proof receipt
+        \\
+        \\Advanced:
+        \\  zigttp ratchet [show|check]            Property-regression gate
+        \\  zigttp witnesses [list|pin|unpin|prune|synthesize]  Falsifying-input corpus
+        \\  zigttp assert-intent                   Run author intent assertions
+        \\  zigttp version                         Show version
+        \\
+        \\Every command keeps its own `--help`.
         \\
         \\The internal runtime template is installed as `zigttp-runtime`.
         \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+;
+
+fn printHelpAll() void {
+    _ = std.c.write(std.c.STDOUT_FILENO, core_help_all.ptr, core_help_all.len);
 }
 
-fn printExpertAliasHelp() void {
+fn printExpertHelp() void {
     const help =
-        \\zigttp expert - deprecated interactive expert alias
+        \\zigttp expert - interactive compiler-in-the-loop agent
         \\
         \\Usage:
         \\  zigttp expert
         \\
-        \\This alias will be removed in a future release.
-        \\Use `zigts expert` for the interactive coding-agent workflow.
-        \\Use direct `zigts` commands such as `zigts meta` and
-        \\`zigts verify-paths` for machine-facing tooling.
+        \\Starts the interactive coding agent. It runs the same analyzers the
+        \\compiler uses, so it can verify edits, explain diagnostics, and propose
+        \\fixes against your handler as you work.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -2454,6 +2488,45 @@ test "parseTemplate accepts v1 templates only" {
     try std.testing.expectEqual(Template.api, parseTemplate("api").?);
     try std.testing.expectEqual(Template.htmx, parseTemplate("htmx").?);
     try std.testing.expect(parseTemplate("react") == null);
+}
+
+test "default help advertises only the five core commands" {
+    const has = struct {
+        fn f(haystack: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, haystack, needle) != null;
+        }
+    }.f;
+    inline for (.{
+        "zigttp init", "zigttp dev", "zigttp test", "zigttp expert", "zigttp deploy",
+    }) |verb| {
+        try std.testing.expect(has(core_help, verb));
+    }
+    inline for (.{
+        "zigttp check", "zigttp serve", "zigttp compile", "zigttp proofs", "zigttp doctor",
+    }) |hidden| {
+        try std.testing.expect(!has(core_help, hidden));
+    }
+}
+
+test "help --all surfaces the advanced commands" {
+    const has = struct {
+        fn f(haystack: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, haystack, needle) != null;
+        }
+    }.f;
+    inline for (.{
+        "zigttp serve",  "zigttp build",  "zigttp compile", "zigttp doctor",
+        "zigttp proofs", "zigttp studio", "zigttp check",    "zigttp prove",
+    }) |cmd| {
+        try std.testing.expect(has(core_help_all, cmd));
+    }
+}
+
+test "hasAllFlag detects the --all escape hatch" {
+    try std.testing.expect(hasAllFlag(&.{"--all"}));
+    try std.testing.expect(hasAllFlag(&.{ "foo", "all" }));
+    try std.testing.expect(!hasAllFlag(&.{"--help"}));
+    try std.testing.expect(!hasAllFlag(&.{}));
 }
 
 test "hasLongHelpFlag preserves -h for host flags" {
@@ -3153,24 +3226,21 @@ const basicReadme =
     \\   shows the verdict, proven surface, proof deltas, and spec diagnostics.
     \\   Press `Tab` or `l` to rotate proof lenses.
     \\
-    \\3. When you are happy with the verdict, build a self-contained binary:
+    \\3. Run the fixture:
     \\
-    \\       zigttp build
-    \\       ./.zigttp/build/<this-app-name>
+    \\       zigttp test
     \\
-    \\4. Or do a verified local deploy that also records the proof in the
-    \\   ledger at `.zigttp/proofs.jsonl`:
+    \\4. When you are happy with the verdict, do a verified local deploy. It
+    \\   builds a self-contained binary and records the proof in the ledger at
+    \\   `.zigttp/proofs.jsonl`:
     \\
     \\       zigttp deploy
     \\       ./.zigttp/deploy/<this-app-name>
     \\
-    \\## Other useful commands
+    \\## More
     \\
-    \\- `zigttp check` - run the analyzer once and exit
-    \\- `zigttp test` - run `tests/handler.test.jsonl`
-    \\- `zigttp studio` - open the browser workbench mirror
-    \\- `zigttp doctor` - validate the project layout
-    \\- `zigttp proofs list` - browse the proof ledger
+    \\- `zigttp expert` - interactive compiler-in-the-loop agent
+    \\- `zigttp help --all` - advanced commands
 ;
 
 const apiReadme =
@@ -3191,17 +3261,14 @@ const apiReadme =
     \\
     \\       zigttp test
     \\
-    \\4. Build or deploy locally:
+    \\4. Deploy locally (builds the binary and records the proof ledger entry):
     \\
-    \\       zigttp build
     \\       zigttp deploy
     \\
-    \\## Other useful commands
+    \\## More
     \\
-    \\- `zigttp check` - run the analyzer once and exit
-    \\- `zigttp studio` - open the browser workbench mirror
-    \\- `zigttp doctor` - validate the project layout
-    \\- `zigttp proofs list` - browse the proof ledger
+    \\- `zigttp expert` - interactive compiler-in-the-loop agent
+    \\- `zigttp help --all` - advanced commands
 ;
 
 const htmxReadme =
@@ -3221,17 +3288,14 @@ const htmxReadme =
     \\
     \\       zigttp test
     \\
-    \\4. Build or deploy locally:
+    \\4. Deploy locally (builds the binary and records the proof ledger entry):
     \\
-    \\       zigttp build
     \\       zigttp deploy
     \\
-    \\## Other useful commands
+    \\## More
     \\
-    \\- `zigttp check` - run the analyzer once and exit
-    \\- `zigttp studio` - open the browser workbench mirror
-    \\- `zigttp doctor` - validate the project layout
-    \\- `zigttp proofs list` - browse the proof ledger
+    \\- `zigttp expert` - interactive compiler-in-the-loop agent
+    \\- `zigttp help --all` - advanced commands
 ;
 
 // `{{name}}` is replaced by the extension name at scaffold time.

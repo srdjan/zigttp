@@ -6,7 +6,7 @@
 #
 # What this script automates:
 #   1. fresh tmp project from `zigttp init`
-#   2. assert next-steps copy mentions the badge command
+#   2. assert next-steps copy mentions the core dev/test/deploy commands
 #   3. seed the ledger with a known fixture
 #   4. run `zigttp proofs badge` and assert the SVG and snippet land
 #   5. assert the tour-shown marker is not yet present
@@ -44,9 +44,10 @@ cd "$TMP_DIR"
 INIT_OUT="$("$ZIGTTP_BIN" init magnet-app 2>&1)"
 echo "$INIT_OUT" | sed 's/^/    /'
 
-echo "[2/6] next-steps copy mentions dev + badge"
-echo "$INIT_OUT" | grep -q "zigttp dev " || { echo "  FAIL: next-steps missing zigttp dev"; exit 1; }
-echo "$INIT_OUT" | grep -q "proofs badge" || { echo "  FAIL: next-steps missing proofs badge"; exit 1; }
+echo "[2/6] next-steps copy mentions the core commands"
+echo "$INIT_OUT" | grep -q "zigttp dev" || { echo "  FAIL: next-steps missing zigttp dev"; exit 1; }
+echo "$INIT_OUT" | grep -q "zigttp test" || { echo "  FAIL: next-steps missing zigttp test"; exit 1; }
+echo "$INIT_OUT" | grep -q "zigttp deploy" || { echo "  FAIL: next-steps missing zigttp deploy"; exit 1; }
 echo "    OK"
 
 cd "$TMP_DIR/magnet-app"

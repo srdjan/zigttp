@@ -54,7 +54,7 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 
 **Proof ledger.** Every successful `zigttp deploy` and every `dev --watch --prove` swap appends one row to `.zigttp/proofs.jsonl` with the proven facts (env keys, egress hosts, cache namespaces, routes, capabilities, properties), the contract sha, and a verdict against the prior entry. The verdict words match the deploy card and the live-reload diff. `zigttp proofs list` browses the timeline, `proofs show <ref>` re-renders any past entry, `proofs diff <a> <b>` derives the delta between two entries, `proofs watch` tails new ones, and `proofs export --format md|html|svg` produces a markdown receipt, HTML doc, or SVG verdict badge. Refs accept `HEAD`, `HEAD~N`, or a contract sha prefix. The ledger persists only contract-derived identifiers; no env values, tokens, or PII.
 
-**Proof receipts.** Default-on across the deploy boundary. Every fresh `zigttp compile`, `build`, or `deploy --local` signs the contract, bytecode, and rule-registry hashes with the persistent Ed25519 identity at `~/.zigttp/attest/keypair.bin` (generated on first use; verifiers pin once and trust every future deploy from that origin). The running server precomputes two response headers once at startup: `Zigttp-Proofs: pure, read_only, injection_safe, ...` (the human-readable chip list) and `Zigttp-Attest: <compact JWS>` (the signed envelope). `GET /.well-known/zigttp-attest` serves the same JWS plus the full embedded contract as cacheable JSON (ETag, `Cache-Control: max-age=3600`, 304 on `If-None-Match`), so security scanners and registry crawlers can fetch the proof without calling every handler route. Any third party can run `zigttp verify <url>` to validate the signature against the embedded public key and print the proven claims. Optional `--trust-key <hex>` pins an expected key fingerprint; `--json` emits structured output for CI. Pass `--no-attest` to suppress for a specific build. Specs and trust model: [docs/roadmap/attest-slice-1.md](docs/roadmap/attest-slice-1.md), [docs/roadmap/attest-slice-2.md](docs/roadmap/attest-slice-2.md).
+**Proof receipts.** Default-on across the deploy boundary. Every fresh `zigttp deploy` signs the contract, bytecode, and rule-registry hashes with the persistent Ed25519 identity at `~/.zigttp/attest/keypair.bin` (generated on first use; verifiers pin once and trust every future deploy from that origin). The running server precomputes two response headers once at startup: `Zigttp-Proofs: pure, read_only, injection_safe, ...` (the human-readable chip list) and `Zigttp-Attest: <compact JWS>` (the signed envelope). `GET /.well-known/zigttp-attest` serves the same JWS plus the full embedded contract as cacheable JSON (ETag, `Cache-Control: max-age=3600`, 304 on `If-None-Match`), so security scanners and registry crawlers can fetch the proof without calling every handler route. Any third party can run `zigttp verify <url>` to validate the signature against the embedded public key and print the proven claims. Optional `--trust-key <hex>` pins an expected key fingerprint; `--json` emits structured output for CI. Pass `--no-attest` to suppress for a specific build. Specs and trust model: [docs/roadmap/attest-slice-1.md](docs/roadmap/attest-slice-1.md), [docs/roadmap/attest-slice-2.md](docs/roadmap/attest-slice-2.md).
 
 **Property ratchet.** Slice 4 of the attest program closes the cross-build gap. Every contract.json now carries a top-level `provenSpecs` array (the canonical, ordered list of properties the compiler proves true) alongside the existing `properties` object. The array rides inside the signed JWS payload, so a third party can diff two builds and see exactly which property moved. `zigttp ratchet show <handler.ts>` compiles the handler and prints the current set; `zigttp ratchet check --baseline <old-contract.json> <handler.ts>` compiles the current source, compares against the baseline, and exits 1 if any previously-proven property is no longer provable. The check names the lost properties in stderr. Spec and follow-up backlog: [docs/roadmap/attest-slice-4.md](docs/roadmap/attest-slice-4.md).
 
@@ -91,36 +91,32 @@ zig build -Doptimize=ReleaseFast
 
 ## Quick Start
 
-The v1 user flow is `init` -> `dev` -> edit -> `check` -> `test` -> `build`
--> `deploy` -> `proofs badge`. Each command auto-detects the project from
-`zigttp.json` so most steps take no arguments. Local deploy is the default;
-`--local` is accepted when you want the target to be explicit.
+The v1 user flow is `init` -> `dev` -> edit -> `test` -> `deploy`. Each command
+auto-detects the project from `zigttp.json` so most steps take no arguments.
+Local deploy is the default; `--local` is accepted when you want the target to
+be explicit.
+
+Day-to-day use is five commands: `init`, `dev`, `test`, `expert`, `deploy`.
+Everything else stays in the background until you need it - run
+`zigttp help --all` to see the advanced commands.
 
 ```bash
 # 1. Scaffold a new project
 zigttp init my-app && cd my-app
 
-# 2. Start proof-aware live reload
+# 2. Start proof-aware live reload (runs the analyzer, then watches)
 zigttp dev
 
 # 3. Edit src/handler.ts in your editor.
 #    HTMX projects use src/handler.tsx.
 #    The HUD re-verifies on save and names the failing stage on errors.
 
-# 4. Verify and run the starter fixture
-zigttp check
-zigttp test   # runs check first, then tests/handler.test.jsonl
+# 4. Run the starter fixture
+zigttp test
 
-# 5. Build a self-contained binary
-zigttp build
-./.zigttp/build/my-app
-
-# 6. Or do a verified local deploy (also writes .zigttp/proofs.jsonl)
+# 5. Build, prove, and deploy locally (writes .zigttp/proofs.jsonl)
 zigttp deploy
 ./.zigttp/deploy/my-app
-
-# 7. Write a shareable proof badge from the latest ledger row
-zigttp proofs badge
 ```
 
 Test it:
@@ -129,11 +125,11 @@ Test it:
 curl http://localhost:3000/
 ```
 
-`zigttp serve [handler.ts]` and `zigttp serve -e "..."` still work for one-off testing without a project.
+`zigttp expert` opens the interactive compiler-in-the-loop agent.
 
 For the full first project path, see [Getting Started](docs/getting-started.md).
 That guide is covered by `zig build smoke-getting-started`. To read the verdict
-`check` and `dev` print on every save, see [Reading the Proof Card](docs/proof-card.md).
+`dev` and `test` print on every save, see [Reading the Proof Card](docs/proof-card.md).
 
 The hosted control-plane deploy (`zigttp deploy --cloud`) is in preview and requires Zigttp cloud credentials; see [docs/deploy-tutorial.md](docs/deploy-tutorial.md) for the current state.
 
@@ -329,24 +325,26 @@ zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sq
 
 ## CLI Options
 
+Five commands cover day-to-day use:
+
 ```bash
 zigttp init <name> [--template basic|api|htmx]
 zigttp dev [options] [handler.ts]
-zigttp check [handler.ts] [--json] [--contract] [--types]
 zigttp test [tests.jsonl]
-zigttp build [-o <bin>] [--no-attest]
+zigttp expert
 zigttp deploy [--local|--cloud] [--no-attest]
-zigttp proofs [list|show|diff|watch|export|badge]
-zigttp doctor [path]
-
-zigttp serve [options] <handler.js>
-zigttp serve -e "<inline-code>"
 ```
 
+Everything else is advanced and stays out of the default help. Run
+`zigttp help --all` for the full list - the analyzer commands (`check`,
+`prove`, `mock`, `link`, `gen-tests`), `serve`, `build`, `compile`, `doctor`,
+`studio`, `proofs`, the cloud-deploy commands, and more. Each keeps its own
+`zigttp <command> --help`.
+
 Project commands auto-detect `zigttp.json` from the current directory or a
-parent. `serve` is the lower-level path for one-off handlers and self-contained
-binaries; scaffolded projects set `"port": 3000`, while raw `serve` defaults to
-8080 unless a project manifest is discovered.
+parent. The advanced `serve` command is the lower-level path for one-off
+handlers and self-contained binaries; scaffolded projects set `"port": 3000`,
+while raw `serve` defaults to 8080 unless a project manifest is discovered.
 
 Common `dev` / `serve` options:
 
@@ -381,8 +379,8 @@ Options:
   --no-env-check        Skip startup env var validation (development use)
 ```
 
-Use `zigttp dev --help`, `zigttp studio --help`, and `zigttp doctor --help`
-for command-specific guidance.
+Every command keeps its own `--help` (`zigttp dev --help`,
+`zigttp deploy --help`, and so on), including the advanced ones.
 
 ### `zigttp deploy`
 

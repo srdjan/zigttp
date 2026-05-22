@@ -1,27 +1,34 @@
 # Getting Started
 
 This guide takes a new zigttp project from an empty directory to a verified
-local deploy. The hosted deploy path is optional and marked preview.
+local deploy using the five commands you need: `init`, `dev`, `test`, `expert`,
+and `deploy`. The hosted deploy path is optional and marked preview.
 
-The local path below is covered by:
+## The Five Commands
 
-```bash
-zig build smoke-getting-started
-```
+Everything in day-to-day use is one of five verbs:
+
+- `zigttp init` - create a project.
+- `zigttp dev` - run it locally; watch and prove on every save.
+- `zigttp test` - run the handler test fixture.
+- `zigttp expert` - the interactive compiler-in-the-loop agent.
+- `zigttp deploy` - build, prove, and deploy.
+
+Advanced commands (the proof ledger, project diagnostics, the analyzer,
+cloud capability grants, and more) stay out of the way until you need them.
+Run `zigttp help --all` to see them; each keeps its own `--help`.
 
 ## 1. Install
 
-Build from source with Zig 0.16.0:
+Pre-built binaries for macOS and Linux (x86_64, aarch64):
 
 ```bash
-git clone https://github.com/srdjan/zigttp
-cd zigttp
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zigttp --help
+curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
+zigttp --help
 ```
 
-The release build installs three binaries under `zig-out/bin`: `zigttp`,
-`zigttp-runtime`, and `zigts`.
+This installs the `zigttp` command. That is the only binary you need to follow
+this guide.
 
 ## 2. Create A Project
 
@@ -45,14 +52,14 @@ endpoints, and `--template htmx` for a TSX/HTMX page with a `.tsx` entry.
 ## 3. Run Locally
 
 ```bash
-zigttp doctor
 zigttp dev
 ```
 
-`doctor` checks the project shape, configured entry file, runtime tools, and
-analyzer path. `dev` runs the same preflight, starts the server, watches the
-handler and local imports, and proves each save before swapping the running
-handler. Check failures show the failing stage before the server starts.
+`dev` checks the project shape and configured entry, runs the analyzer, starts
+the server, watches the handler and local imports, and proves each save before
+swapping the running handler. A failing check prints the proof card and the
+failing stage before the server starts, so there is no separate readiness or
+verify step to run first.
 
 Try the API starter:
 
@@ -60,13 +67,7 @@ Try the API starter:
 curl http://127.0.0.1:3000/health
 ```
 
-## 4. Check And Test
-
-Run the analyzer once:
-
-```bash
-zigttp check
-```
+## 4. Test
 
 Run the project fixture:
 
@@ -78,37 +79,28 @@ zigttp test
 `tests/handler.test.jsonl`. Pass a path when you want to run a different
 fixture.
 
-## 5. Build
+## 5. The Expert
+
+`zigttp expert` opens an interactive coding agent that runs the same analyzers
+the compiler uses. It can explain a diagnostic, verify an edit, and propose a
+fix against your handler as you work:
 
 ```bash
-zigttp build
-./.zigttp/build/my-app -p 3001
-curl http://127.0.0.1:3001/health
+zigttp expert
 ```
 
-`build` verifies the handler and emits a self-contained binary using the
-`zigttp-runtime` template.
-
-## 6. Deploy Locally
+## 6. Deploy
 
 ```bash
 zigttp deploy
-./.zigttp/deploy/my-app -p 3002
-curl http://127.0.0.1:3002/health
+./.zigttp/deploy/my-app -p 3001
+curl http://127.0.0.1:3001/health
 ```
 
-Bare `deploy` is local. It writes `.zigttp/deploy/<project-name>` and appends a
-`kind=deploy` row to `.zigttp/proofs.jsonl`.
-
-Inspect the proof ledger:
-
-```bash
-zigttp proofs list
-zigttp proofs show HEAD
-zigttp proofs badge
-```
-
-`zigttp proofs badge` writes `zigttp-proof.svg` in the project directory.
+Bare `deploy` is local. It verifies the handler, emits a self-contained binary
+using the `zigttp-runtime` template at `.zigttp/deploy/<project-name>`, and
+appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. The command output
+points at `zigttp proofs list` if you want to inspect the ledger.
 
 ## 7. Try The HTMX Starter
 
@@ -119,12 +111,11 @@ cd ..
 zigttp init htmx-app --template htmx
 cd htmx-app
 test -f src/handler.tsx
-zigttp check
 zigttp test
 ```
 
-The generated `zigttp.json` points at `src/handler.tsx`, so `check`, `test`,
-`build`, and `dev` all use the TSX stripping path.
+The generated `zigttp.json` points at `src/handler.tsx`, so `test`, `dev`, and
+`deploy` all use the TSX stripping path.
 
 ## 8. Optional Hosted Deploy
 
@@ -141,7 +132,7 @@ waiting, drift checks, and review approvals.
 ## Common Next Steps
 
 - Read [Reading the Proof Card](proof-card.md) to understand the verdict that
-  `check` and `dev` print on every save.
+  `dev` and `test` print on every save.
 - Add `zigttp:env` for configuration values.
 - Add `zigttp:decode` and `zigttp:validate` for request payloads.
 - Add `zigttp:sql` with `--sqlite <file>` for SQLite-backed handlers.

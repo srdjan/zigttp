@@ -7,8 +7,9 @@ guide explains how to read it.
 
 The card comes from one analysis, shown in three places:
 
-- `zigttp check` prints it once to the terminal.
-- `zigttp dev` redraws it on every save, above the live-reload HUD.
+- `zigttp dev` redraws it on every save, above the live-reload HUD, and
+  `zigttp test` prints it as the pre-test check.
+- `zigttp check` prints it once to the terminal for a one-shot run.
 - `zigttp studio` mirrors it in the browser workbench.
 
 The in-browser playground on the zigttp website runs the same analyzer
@@ -111,7 +112,7 @@ auto-rendered block in the terminal HUD, to see:
   `flow-trace` is a source-to-sink data-flow taint trace.
 - The `counterexample`, when the property does not hold.
 
-The trace is the same data on every surface. `zigts check --json` emits it as
+The trace is the same data on every surface. `zigttp check --json` emits it as
 a `proof.proofTrace` object keyed by property name, so agents and CI read the
 exact reasoning the HUD shows.
 

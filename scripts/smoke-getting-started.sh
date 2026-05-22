@@ -1,7 +1,7 @@
 #!/bin/bash
 # Smoke test for docs/getting-started.md.
 # Runs the guide path in a temp dir:
-#   build CLI -> init api -> doctor -> dev -> check -> test -> build -> deploy.
+#   build CLI -> init api -> dev -> test -> deploy.
 #
 # Usage: bash scripts/smoke-getting-started.sh
 
@@ -12,8 +12,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ZIGTTP="${ZIGTTP:-$REPO_ROOT/zig-out/bin/zigttp}"
 
 DEV_PORT=$((RANDOM % 1000 + 5600))
-BUILD_PORT=$((DEV_PORT + 1))
-DEPLOY_PORT=$((DEV_PORT + 2))
+DEPLOY_PORT=$((DEV_PORT + 1))
 
 TMP_DIR=$(mktemp -d -t zigttp-getting-started-XXXXXX)
 APP_NAME="my-app"
@@ -22,7 +21,6 @@ HTMX_DIR="$TMP_DIR/htmx-app"
 
 cleanup() {
     pkill -f "zigttp.*--port $DEV_PORT" 2>/dev/null || true
-    pkill -f "$APP_DIR/.zigttp/build/$APP_NAME" 2>/dev/null || true
     pkill -f "$APP_DIR/.zigttp/deploy/$APP_NAME" 2>/dev/null || true
     rm -rf "$TMP_DIR"
 }
@@ -57,6 +55,15 @@ step "build zigttp"
 [ -x "$ZIGTTP" ] || fail "missing $ZIGTTP after build"
 [ -x "$REPO_ROOT/zig-out/bin/zigttp-runtime" ] || fail "missing zigttp-runtime after build"
 
+step "default help lists only the five core commands"
+help_out="$("$ZIGTTP" --help)"
+for verb in init dev test expert deploy; do
+    printf '%s' "$help_out" | grep -q "zigttp $verb" || fail "core command missing from help: $verb"
+done
+for hidden in check serve compile proofs; do
+    printf '%s' "$help_out" | grep -q "zigttp $hidden " && fail "advanced command leaked into default help: $hidden"
+done
+
 step "init api project"
 (cd "$TMP_DIR" && "$ZIGTTP" init "$APP_NAME" --template api >/dev/null) || fail "init api"
 [ -f "$APP_DIR/zigttp.json" ] || fail "missing zigttp.json"
@@ -64,9 +71,6 @@ step "init api project"
 [ -f "$APP_DIR/tests/handler.test.jsonl" ] || fail "missing tests/handler.test.jsonl"
 
 cd "$APP_DIR"
-
-step "doctor"
-"$ZIGTTP" doctor >/dev/null || fail "doctor"
 
 step "dev serves /health"
 "$ZIGTTP" dev --port "$DEV_PORT" --no-tour >/tmp/zigttp-getting-started-dev.log 2>&1 &
@@ -78,20 +82,8 @@ health_body=$(wait_for_http "http://127.0.0.1:$DEV_PORT/health" 75) || {
 printf '%s' "$health_body" | grep -q '"ok":true' || fail "unexpected /health body: $health_body"
 stop_bg "$DEV_PID" "zigttp.*--port $DEV_PORT"
 
-step "check"
-"$ZIGTTP" check >/dev/null || fail "check"
-
 step "test"
 "$ZIGTTP" test >/dev/null || fail "test"
-
-step "build and run artifact"
-"$ZIGTTP" build >/dev/null 2>&1 || fail "build"
-[ -x "$APP_DIR/.zigttp/build/$APP_NAME" ] || fail "missing build artifact"
-"$APP_DIR/.zigttp/build/$APP_NAME" -p "$BUILD_PORT" >/dev/null 2>&1 &
-BUILD_PID=$!
-build_body=$(wait_for_http "http://127.0.0.1:$BUILD_PORT/health" 25) || fail "build artifact did not serve /health"
-printf '%s' "$build_body" | grep -q '"ok":true' || fail "unexpected build artifact body: $build_body"
-stop_bg "$BUILD_PID" "$APP_DIR/.zigttp/build/$APP_NAME"
 
 step "deploy and run artifact"
 "$ZIGTTP" deploy >/dev/null 2>&1 || fail "deploy"
@@ -103,15 +95,10 @@ deploy_body=$(wait_for_http "http://127.0.0.1:$DEPLOY_PORT/health" 25) || fail "
 printf '%s' "$deploy_body" | grep -q '"ok":true' || fail "unexpected deploy artifact body: $deploy_body"
 stop_bg "$DEPLOY_PID" "$APP_DIR/.zigttp/deploy/$APP_NAME"
 
-step "proof commands"
-"$ZIGTTP" proofs list >/dev/null || fail "proofs list"
-"$ZIGTTP" proofs badge >/dev/null || fail "proofs badge"
-[ -f "$APP_DIR/zigttp-proof.svg" ] || fail "proof badge not written"
-
 step "htmx scaffold uses tsx"
 (cd "$TMP_DIR" && "$ZIGTTP" init htmx-app --template htmx >/dev/null) || fail "init htmx"
 [ -f "$HTMX_DIR/src/handler.tsx" ] || fail "htmx missing src/handler.tsx"
 [ ! -f "$HTMX_DIR/src/handler.ts" ] || fail "htmx should not write src/handler.ts"
-(cd "$HTMX_DIR" && "$ZIGTTP" check >/dev/null && "$ZIGTTP" test >/dev/null) || fail "htmx check/test"
+(cd "$HTMX_DIR" && "$ZIGTTP" test >/dev/null) || fail "htmx test"
 
 step "PASS: getting started guide commands work"

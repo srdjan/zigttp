@@ -10,7 +10,7 @@ Validated on Zig 0.16.0-dev.3073+28ae5d415. Newer nightlies are best-effort unti
 
 The build produces three binaries:
 
-- `zigttp` — the primary developer CLI and local runtime entrypoint. Subcommands: `init`, `dev`, `serve`, `check`, `compile`, `prove`, `mock`, `link`, `expert` (deprecated alias), `deploy`, `verify`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`, `assert-intent`, `proofs` (with `list | show | diff | watch | export | badge | bundle | verify` subcommands), `ratchet` (with `show | check` subcommands), `witnesses`. The top-level `zigttp verify <url>` is the proof-receipt verifier and is distinct from `zigttp proofs verify <bundle-dir>` (bundle integrity).
+- `zigttp` — the primary developer CLI and local runtime entrypoint. `zigttp --help` advertises only the five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Everything else is advanced and listed under `zigttp help --all`: the analyzer commands `check`, `prove`, `mock`, `link`, `gen-tests`, plus `serve`, `compile`, `build`, `verify`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`, `demo`, `studio`, `edge`, `assert-intent`, `proofs` (with `list | show | diff | watch | export | badge | bundle | verify` subcommands), `ratchet` (with `show | check` subcommands), `witnesses`. All advanced commands still dispatch in-process and keep their own `--help`; nothing was removed, only hidden from default help. The top-level `zigttp verify <url>` is the proof-receipt verifier and is distinct from `zigttp proofs verify <bundle-dir>` (bundle integrity).
 - `zigttp-runtime` — the internal runtime template used for self-contained outputs and direct runtime tests.
 - `zigts` — the engine/compiler CLI plus the interactive `zigts expert` coding-agent entrypoint.
 
@@ -49,7 +49,7 @@ zigttp link system.json         # Cross-handler contract linking
 Monorepo with packages under `packages/`. Runtime (`packages/runtime/`): HTTP, CLI, request routing, static files, live reload. Two entry points after the split:
 
 - `main.zig` → `runtime_cli.zig` — the `zigttp-runtime` runtime template binary (serve, attest, self-extract startup, version, help).
-- `cli_main.zig` → `dev_cli.zig` — the `zigttp` developer binary (init, dev, check, compile, expert, deploy, etc.).
+- `cli_main.zig` → `dev_cli.zig` — the `zigttp` developer binary (init, dev, test, expert, deploy, and the advanced commands).
 - `cli_shared.zig` — arg parsing, watch sets, size parsing shared by both.
 
 HTTP: `server.zig`, runtime management: `zruntime.zig`, live reload: `live_reload.zig`. Engine (`packages/zigts/`): JS engine with two-pass compilation (parse to IR, then bytecode). Parser in `packages/zigts/src/parser/`, VM in `interpreter.zig`, values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`. Tools (`packages/tools/`): build-time precompilation, CLI, analysis.
