@@ -1911,6 +1911,47 @@ test "Context catch handler" {
     try std.testing.expect(ctx.getCatchHandler() == null);
 }
 
+test "Context stack overflow surfaces typed errors" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    // Small caps keep the test fast; the bounds-check logic is identical to
+    // the production 1MB value stack / 1024-frame call stack defaults.
+    var ctx = try Context.init(allocator, &gc_state, .{
+        .stack_size = 256, // 256 bytes / 8-byte JSValue = 32 value slots
+        .call_stack_size = 4,
+    });
+    defer ctx.deinit();
+
+    // Value stack: every slot fills, then push returns StackOverflow rather
+    // than writing out of bounds.
+    var pushed: usize = 0;
+    while (pushed < ctx.stack.len) : (pushed += 1) {
+        try ctx.push(value.JSValue.fromInt(@intCast(pushed)));
+    }
+    try std.testing.expectError(error.StackOverflow, ctx.push(value.JSValue.true_val));
+
+    // Call stack: every frame fills, then pushFrame returns CallStackOverflow
+    // (this is the cap that bounds unbounded handler recursion).
+    var frames: usize = 0;
+    while (frames < ctx.call_stack.len) : (frames += 1) {
+        try ctx.pushFrame(value.JSValue.undefined_val, value.JSValue.undefined_val, 0);
+    }
+    try std.testing.expectError(
+        error.CallStackOverflow,
+        ctx.pushFrame(value.JSValue.undefined_val, value.JSValue.undefined_val, 0),
+    );
+
+    // Catch-handler stack: fixed depth, then pushCatch returns CallStackOverflow.
+    var handlers: usize = 0;
+    while (handlers < ctx.catch_stack.len) : (handlers += 1) {
+        try ctx.pushCatch(handlers);
+    }
+    try std.testing.expectError(error.CallStackOverflow, ctx.pushCatch(999));
+}
+
 test "Context global variables" {
     const allocator = std.testing.allocator;
 

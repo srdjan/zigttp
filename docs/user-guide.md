@@ -340,6 +340,24 @@ function handler(request) {
 
 The function receives a `request` object and must return a `Response`.
 
+### Handler Lifecycle
+
+A handler runs once per request, start to finish:
+
+1. The server accepts the connection and parses the HTTP request.
+2. It checks out an isolated JavaScript runtime from the handler pool.
+3. Your `handler` function runs synchronously and must return a `Response`.
+4. The server writes the response, frees the request-scoped memory, and
+   returns the runtime to the pool for the next request.
+
+There is no middleware layer and no per-request init or teardown hook - the
+handler function is the whole request lifecycle. There is no shared mutable
+state between requests except where a virtual module is explicitly designed to
+persist it (for example `zigttp:cache`). If the handler throws or returns an
+error the server responds `500` and stays up - see
+[Limits and Failure Behavior](reliability.md). Runtime internals are covered in
+[the architecture doc](internals/architecture.md).
+
 ---
 
 ## Request Object

@@ -40,12 +40,32 @@ The `zigts` engine enforces three fixed caps, none configurable:
 
 | Limit | Value |
 |-------|------:|
-| Value stack | 1 MB (1,048,576 slots) |
+| Value stack | 1 MB (131,072 JSValue slots) |
 | Call-stack depth | 1,024 frames |
 | Saved-state depth | 1,024 |
 
 Exceeding any of them raises a typed error rather than corrupting memory. Deep
 or unbounded recursion in a handler hits the 1,024-frame call cap.
+
+### Rate limiting
+
+zigttp v0.1.0-beta has **no server-level rate limiting** - the HTTP server
+enforces no per-IP or global request cap. This is a deliberate v0.1.0 scope
+decision, not an oversight:
+
+- In the target FaaS and edge deployments (AWS Lambda, Cloudflare Workers,
+  edge), network-layer rate limiting is owned by the platform, ahead of the
+  runtime.
+- A standalone `zigttp serve` process should sit behind a reverse proxy or
+  load balancer that enforces per-IP limits.
+- Application-level limits (per API key, per user, per route) belong in the
+  handler. The `zigttp:ratelimit` virtual module provides `rateCheck` and
+  `rateReset` fixed-window counters for exactly that.
+
+The known consequence: a standalone server with no proxy and no handler-level
+`rateCheck` can have its handler pool saturated by a client opening many
+concurrent connections. A built-in server-level gate is a candidate for a
+later release.
 
 ## Failure behavior
 

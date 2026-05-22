@@ -6572,6 +6572,78 @@ test "HandlerPool pooled teardown survives repeated pool lifecycles" {
     }
 }
 
+test "HandlerPool does not leak request data across pooled requests" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    // The handler reflects every request-scoped input back into the response.
+    // If body, a header, or the url survived a runtime recycle, a request with
+    // none of them set would echo a prior request's values.
+    const handler_code =
+        \\function handler(req) {
+        \\  return Response.json({
+        \\    body: req.body ?? "NONE",
+        \\    secret: req.headers.get("x-secret") ?? "NONE",
+        \\    url: req.url,
+        \\  });
+        \\}
+    ;
+
+    // Pool size 1 forces every request onto the same recycled runtime.
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 1, 0);
+    defer pool.deinit();
+
+    const Probe = struct {
+        fn tainted(a: std.mem.Allocator, marker: []const u8) !HttpRequestOwned {
+            var req = HttpRequestOwned{
+                .method = try a.dupe(u8, "POST"),
+                .url = try std.fmt.allocPrint(a, "/path-{s}", .{marker}),
+                .headers = .empty,
+                .body = try std.fmt.allocPrint(a, "BODY-{s}", .{marker}),
+            };
+            try req.headers.append(a, .{
+                .key = try a.dupe(u8, "X-Secret"),
+                .value = try std.fmt.allocPrint(a, "SECRET-{s}", .{marker}),
+            });
+            return req;
+        }
+        fn clean(a: std.mem.Allocator) !HttpRequestOwned {
+            return HttpRequestOwned{
+                .method = try a.dupe(u8, "GET"),
+                .url = try a.dupe(u8, "/clean"),
+                .headers = .empty,
+                .body = null,
+            };
+        }
+    };
+
+    // Alternate tainted and clean requests so the recycle is exercised in both
+    // directions across several cycles on the one shared runtime.
+    var cycle: usize = 0;
+    while (cycle < 4) : (cycle += 1) {
+        var marker_buf: [16]u8 = undefined;
+        const marker = try std.fmt.bufPrint(&marker_buf, "{d}", .{cycle});
+
+        var tainted_req = try Probe.tainted(allocator, marker);
+        defer tainted_req.deinit(allocator);
+        var tainted_resp = try pool.executeHandler(tainted_req.asView());
+        defer tainted_resp.deinit();
+        // The tainted request must see exactly its own data.
+        try std.testing.expect(std.mem.indexOf(u8, tainted_resp.body, "BODY-") != null);
+        try std.testing.expect(std.mem.indexOf(u8, tainted_resp.body, "SECRET-") != null);
+
+        var clean_req = try Probe.clean(allocator);
+        defer clean_req.deinit(allocator);
+        var clean_resp = try pool.executeHandler(clean_req.asView());
+        defer clean_resp.deinit();
+        // The clean request, on the same recycled runtime, must carry none of
+        // the prior request's body, header, or url.
+        try std.testing.expect(std.mem.indexOf(u8, clean_resp.body, "BODY-") == null);
+        try std.testing.expect(std.mem.indexOf(u8, clean_resp.body, "SECRET-") == null);
+        try std.testing.expect(std.mem.indexOf(u8, clean_resp.body, "path-") == null);
+    }
+}
+
 test "JIT object literal overflow slots remain valid" {
     if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     if (std.c.getenv("ZTS_DISABLE_JIT_TESTS") != null or std.c.getenv("ZTS_DISABLE_JIT") != null) {

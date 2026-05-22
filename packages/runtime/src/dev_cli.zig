@@ -1329,6 +1329,7 @@ fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         std.debug.print("Project root: {s}\n\n", .{cfg.root_dir});
 
         printDoctorOk("manifest", cfg.manifest_path);
+        printDoctorPlatform();
         printDoctorRuntimeTemplate(allocator);
 
         const entry = try cfg.resolvedEntry(allocator);
@@ -1482,6 +1483,21 @@ fn printDoctorRuntimeTemplate(allocator: std.mem.Allocator) void {
         printDoctorOk("runtime", runtime_path);
     } else {
         std.debug.print("[warn] runtime  using fallback template: {s}\n", .{runtime_path});
+    }
+}
+
+fn printDoctorPlatform() void {
+    const os = builtin.os.tag;
+    const arch = builtin.cpu.arch;
+    const supported = (os == .macos or os == .linux) and
+        (arch == .x86_64 or arch == .aarch64);
+    if (supported) {
+        std.debug.print("[ok]   {s:<8} {s}-{s}\n", .{ "platform", @tagName(os), @tagName(arch) });
+    } else {
+        std.debug.print(
+            "[warn] platform {s}-{s} is not an officially supported target (macOS/Linux, x86-64/ARM64)\n",
+            .{ @tagName(os), @tagName(arch) },
+        );
     }
 }
 
