@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: '0.16.0-dev.3073+28ae5d415'
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  format:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Check formatting
+        run: zig fmt --check build.zig packages/
+
+  test:
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Run all tests
+        run: zig build test test-zigts test-zruntime test-expert test-expert-app test-capability-audit test-module-governance
+
+      - name: Build release binaries
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Run v1 user-flow smoke
+        run: zig build smoke-v1
+
+      - name: Run example handler tests
+        run: bash scripts/test-examples.sh
+
+      - name: Assert policy hash unchanged
+        run: |
+          EXPECTED=$(cat policy-hash.txt 2>/dev/null || echo "")
+          ACTUAL=$(./zig-out/bin/zigts describe-rule --hash)
+          if [ -n "$EXPECTED" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Policy hash mismatch - rules changed without updating policy-hash.txt"
+            echo "Expected: $EXPECTED"
+            echo "Actual:   $ACTUAL"
+            echo "Run: ./zig-out/bin/zigts describe-rule --hash > policy-hash.txt"
+            exit 1
+          fi
+
+      - name: Verify expert subsystem
+        run: |
+          META=$(./zig-out/bin/zigts meta --json)
+          echo "$META" | jq -e '.rule_count >= 25'
+          echo "$META" | jq -e '.policy_hash | length == 64'
