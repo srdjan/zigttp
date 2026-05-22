@@ -41,6 +41,8 @@ notes document design contracts, governance, and roadmap work.
   unlocks. Generated from the same source as `zigts restrictions`.
 - [Performance](performance.md) - benchmarks, cold starts, memory, and
   deployment tuning.
+- [Limits and Failure Behavior](reliability.md) - request, memory, and stack
+  limits, and how the runtime reports handler errors, faults, and exit codes.
 - [Blog: URL Shortener](blog/url-shortener-in-133-lines.md) - worked example
   with guard composition and module usage.
 
