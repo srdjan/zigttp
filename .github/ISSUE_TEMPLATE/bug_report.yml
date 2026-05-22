@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a defect in the zigttp runtime, the zigts engine, or the CLI.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. For security vulnerabilities, do not use this
+        form - follow [SECURITY.md](../blob/main/SECURITY.md) instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `zigttp version`, or the git commit / binary hash.
+      placeholder: "zigttp 0.16.0-rc2"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system and CPU architecture.
+      placeholder: "macOS 14, arm64"
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: The handler source and the CLI command or flags that trigger the bug.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full error output or stack trace.
+    validations:
+      required: true
