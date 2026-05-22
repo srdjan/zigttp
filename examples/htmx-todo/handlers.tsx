@@ -5,12 +5,6 @@ import { guard } from "zigttp:compose";
 import { decodeForm } from "zigttp:decode";
 import { schemaCompile } from "zigttp:validate";
 
-type TodoTuple = [string, string, boolean];
-
-const TODO_ID = 0;
-const TODO_TEXT = 1;
-const TODO_DONE = 2;
-
 schemaCompile("todo.create", JSON.stringify({
     type: "object",
     required: ["text"],
@@ -53,24 +47,22 @@ function renderTodoForm(): JSX.Element {
     );
 }
 
-function renderTodoItem(todo: TodoTuple): JSX.Element {
-    const done = todo[TODO_DONE];
+function renderTodoItem(id: string, text: string, done: boolean): JSX.Element {
     const doneClass = done ? "todo-item done" : "todo-item";
     const toggleClass = done ? "btn-toggle undo" : "btn-toggle";
     const toggleText = done ? "Undo" : "Done";
-    const id = todo[TODO_ID];
     const domId = id.length > 0 ? id : "todo";
     const togglePath = "/todos/toggle?id=" +
         encodeFormValue(domId) +
         "&text=" +
-        encodeFormValue(todo[TODO_TEXT]) +
+        encodeFormValue(text) +
         "&done=" +
         (done ? "1" : "0");
     const deletePath = "/todos/delete?id=" + encodeFormValue(domId);
 
     return (
         <div id={domId} class={doneClass}>
-            <span>{todo[TODO_TEXT]}</span>
+            <span>{text}</span>
             <button
                 class={toggleClass}
                 hx-post={togglePath}
@@ -165,8 +157,7 @@ function addTodo(req: Request): Response {
     if (id.length === 0) {
         id = fallbackId();
     }
-    const todo: TodoTuple = [id, text, false];
-    return Response.html(renderToString(renderTodoItem(todo)));
+    return Response.html(renderToString(renderTodoItem(id, text, false)));
 }
 
 function toggleTodo(req: Request): Response {
@@ -185,8 +176,7 @@ function toggleTodo(req: Request): Response {
         id = fallbackId();
     }
     const done = doneParam === "1";
-    const todo: TodoTuple = [id, text, !done];
-    return Response.html(renderToString(renderTodoItem(todo)));
+    return Response.html(renderToString(renderTodoItem(id, text, !done)));
 }
 
 function deleteTodo(): Response {

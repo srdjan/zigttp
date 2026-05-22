@@ -284,15 +284,17 @@ function apiGetCart(req: Request): Response {
 }
 
 function apiAdd(req: Request): Response {
-    let productId = getQueryParam(req.url, "product");
+    const queryProductId = getQueryParam(req.url, "product");
+    if (queryProductId) return addProductToCart(req, queryProductId);
 
-    if (!productId) {
-        if (!req.body) return Response.json({ error: "Missing productId" }, { status: 400 });
-        const result = decodeJson("addItem", req.body);
-        if (!result.ok) return Response.json({ error: "Invalid input" }, { status: 400 });
-        productId = result.value.productId;
-    }
+    if (!req.body) return Response.json({ error: "Missing productId" }, { status: 400 });
+    const result = decodeJson("addItem", req.body);
+    if (!result.ok) return Response.json({ error: "Invalid input" }, { status: 400 });
+    const bodyProductId: string = result.value.productId;
+    return addProductToCart(req, bodyProductId);
+}
 
+function addProductToCart(req: Request, productId: string): Response {
     const name = productName(productId);
     if (!name) return Response.json({ error: "Product '" + productId + "' not found" }, { status: 404 });
     const price = productPrice(productId);
