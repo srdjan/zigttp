@@ -214,7 +214,11 @@ Bare `deploy` is local by default and writes `.zigttp/deploy/<project-name>`
 plus a `kind=deploy` row in `.zigttp/proofs.jsonl`. The advanced `doctor`
 command (under `zigttp help --all`) prints a checklist
 for the manifest, runtime template, entry file, analyzer result, tests fixture,
-optional system/static paths, and runtime-affecting settings.
+optional system/static paths, and runtime-affecting settings. Release owners
+can run `zigttp doctor --release [--json] [--out FILE]` from the repo root to
+emit the v0.1.0-beta proof passport: version alignment, release evidence,
+gate wiring, public performance-claim drift, unresolved launch blockers, known
+reliability gaps, and proof-surface readiness.
 
 ### Ad Hoc Serve
 
