@@ -2,6 +2,11 @@
 #
 # Regenerate: `vhs docs/pi-tui-demo.tape` from the repo root.
 # Output:     docs/pi-tui-demo.gif
+#
+# Requires ANTHROPIC_API_KEY (or OPENAI_API_KEY) in the recorder's env:
+# `zigts expert` exits with a setup message when no backend is configured,
+# so the TUI never renders without a key. The natural-language turn near
+# the end of this tape also issues a real model call.
 
 Output docs/pi-tui-demo.gif
 
@@ -14,9 +19,7 @@ Set Theme "Builtin Dark"
 Set TypingSpeed 55ms
 Set PlaybackSpeed 1.0
 
-# Force the stub backend so the demo stays reproducible without network
-# access or local auth state.
-Type "env -u ANTHROPIC_API_KEY ./zig-out/bin/zigts expert --no-session"
+Type "./zig-out/bin/zigts expert --no-session"
 Enter
 Sleep 1200ms
 

@@ -46,6 +46,20 @@ fn runExpertCommand(argv: []const []const u8, allocator: std.mem.Allocator) !voi
         std.process.exit(1);
     }
 
+    if (!pi_app.envHasModelBackend()) {
+        std.debug.print(
+            \\zigts expert needs a model backend.
+            \\
+            \\Set one of these environment variables, then run `zigts expert` again:
+            \\  ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
+            \\  OPENAI_API_KEY
+            \\
+            \\See `zigts expert --help` for details.
+            \\
+        , .{});
+        std.process.exit(1);
+    }
+
     pi_app.setInvocationArgv(argv);
     pi_app.witness_replay.setReplayFn(runtime_witness_replay.replayWitnessJsonl);
     try pi_app.run(allocator);
@@ -97,6 +111,13 @@ fn printExpertHelp() void {
         \\  --print <prompt>           run a single non-interactive turn and exit
         \\  --mode json                with --print, emit NDJSON transcript events
         \\                             instead of rendered text
+        \\
+        \\Model backend:
+        \\  Set one of these environment variables before launching:
+        \\    ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
+        \\    OPENAI_API_KEY
+        \\  An empty value counts as missing; the command exits with a setup
+        \\  message instead of launching against an unconfigured backend.
         \\
         \\Launches the interactive compiler-in-the-loop expert session.
         \\For machine-facing tooling, use direct commands such as:

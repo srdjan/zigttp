@@ -15,7 +15,8 @@ zigttp proofs badge
 
 `zigttp deploy` is local by default for v1. It emits `.zigttp/deploy/<app>`
 and appends a proof-ledger row without credentials, Docker, or network access.
-Hosted deploy remains preview-only behind `zigttp deploy --cloud`.
+Hosted deploy is deferred from v0.1.0-beta: the `--cloud` path and the account
+commands are gated at the CLI boundary (see Milestone 5).
 
 ## Release Contract
 
@@ -30,8 +31,8 @@ Hosted deploy remains preview-only behind `zigttp deploy --cloud`.
 - `zigttp build` verifies the handler and emits `.zigttp/build/<app>`.
 - `zigttp deploy` verifies the handler, emits `.zigttp/deploy/<app>`, and
   records `kind=deploy` in `.zigttp/proofs.jsonl`.
-- `zigttp deploy --cloud` is the hosted preview path and is documented
-  separately from the v1 local flow.
+- `zigttp deploy --cloud` and the hosted account commands are deferred from
+  v0.1.0-beta (see Milestone 5).
 
 ## Milestone 1: Project Scaffolding
 
@@ -122,26 +123,21 @@ zigttp proofs show HEAD
 
 ## Milestone 5: Hosted Deploy Preview
 
-Status: preview.
+Status: deferred from v0.1.0-beta.
 
-Required:
+The hosted control-plane deploy is feature-complete but lacks integration-test
+coverage, so it is hidden for the beta. `zigttp deploy --cloud`, `login`,
+`logout`, `review`, `grants`, and `revoke-grant` are gated at the CLI boundary
+and reject with a "not in this beta" message; the control-plane code stays in
+`packages/runtime/src/deploy/`. Re-enabling is a matter of restoring the CLI
+dispatch once the path has CI smoke coverage.
 
-- Hosted deploy requires `zigttp deploy --cloud` or a cloud-only flag such as
-  `--region`, `--confirm`, `--wait`, or `--no-wait`.
-- `zigttp login`, `zigttp logout`, review plans, grants, and drift handling
-  stay outside the default v1 local path.
-- Docs must mark hosted deploy as preview and avoid showing it as the default
+Required before re-enabling:
+
+- A cloud smoke test that exercises the path end-to-end against the control
+  plane, run separately from the local release smoke (credentials and network).
+- Docs that mark hosted deploy as preview and avoid showing it as the default
   release path.
-
-Acceptance:
-
-```bash
-zigttp deploy --cloud --help
-zigttp login --help
-```
-
-Cloud integration tests should run separately from the local release smoke
-because they require credentials and network access.
 
 ## Milestone 6: Release Gates
 
@@ -170,4 +166,5 @@ zig build smoke-v1
   small browser editor. The current release contract assumes editor-based
   authoring.
 - Whether cloud-only flags should continue implying `--cloud` for compatibility
-  or require explicit `--cloud` after v1.
+  or require explicit `--cloud`. Deferred along with hosted cloud deploy;
+  revisit when the path is re-enabled.

@@ -5,7 +5,6 @@ const project_config_mod = @import("project_config");
 const zigts = @import("zigts");
 const self_extract = @import("self_extract.zig");
 const zigts_cli = @import("zigts_cli");
-const deploy = @import("deploy.zig");
 const proofs_cli = @import("proofs_cli.zig");
 const witnesses_cli = @import("witnesses_cli.zig");
 const intent_runner = @import("intent_runner.zig");
@@ -15,6 +14,10 @@ const runtime_cli = @import("runtime_cli.zig");
 const embedded_handler = @import("embedded_handler");
 const proof_ledger = @import("proof_ledger.zig");
 const ratchet_command = @import("ratchet_command.zig");
+// Hosted cloud deploy is deferred from v0.1.0-beta: the CLI entry points are
+// gated in `main` (see `rejectCloudCommand`). The control-plane module stays
+// imported so it keeps compiling, ready to re-enable in a later release.
+const deploy = @import("deploy.zig");
 const live_reload = @import("live_reload.zig");
 const demo = @import("demo.zig");
 const pi_app = @import("pi_app");
@@ -46,10 +49,6 @@ fn warnAttestLegacyOnce() void {
     const msg = "note: --attest is now the default; drop the flag or pass --no-attest to opt out.\n";
     _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
 }
-
-const deploy_exit_drift: u8 = 2;
-const deploy_exit_ready_timeout: u8 = 3;
-const deploy_exit_did_not_start: u8 = 4;
 
 pub fn main(init: std.process.Init.Minimal) !void {
     var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
@@ -291,106 +290,54 @@ pub fn main(init: std.process.Init.Minimal) !void {
             printExpertHelp();
             return;
         }
+        if (!pi_app.envHasModelBackend()) {
+            std.debug.print(
+                \\zigttp expert needs a model backend.
+                \\
+                \\Set one of these environment variables, then run `zigttp expert` again:
+                \\  ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
+                \\  OPENAI_API_KEY
+                \\
+                \\See `zigttp expert --help` for details.
+                \\
+            , .{});
+            std.process.exit(1);
+        }
         const witness_replay_lib = @import("witness_replay_lib.zig");
         pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
         try pi_app.run(allocator);
         return;
     }
-    if (std.mem.eql(u8, command, "login")) {
-        deploy.login(allocator, user_args[1..]) catch |err| {
-            if (err == error.HelpRequested) {
-                printLoginHelp();
-                return;
-            }
-            if (err == error.UnknownOption) {
-                std.debug.print("zigttp login only accepts --token-stdin and --device.\n\n", .{});
-                printLoginHelp();
-                return;
-            }
-            if (err == error.InvalidOptionCombination) {
-                std.debug.print("Choose either --token-stdin or --device, not both.\n\n", .{});
-                printLoginHelp();
-                return;
-            }
-            if (err == error.TokenPromptUnavailable) {
-                std.debug.print("Interactive token entry requires a TTY. Use `zigttp login --token-stdin` or `zigttp login --device`.\n", .{});
-                return;
-            }
-            if (err == error.EmptyToken) {
-                std.debug.print("No token was provided.\n", .{});
-                return;
-            }
-            if (err == error.InvalidToken) {
-                std.debug.print("Token rejected by the control plane.\n", .{});
-                return;
-            }
-            std.log.err("Login failed: {}", .{err});
-            return err;
-        };
-        return;
-    }
+    if (std.mem.eql(u8, command, "login")) rejectCloudCommand("login");
     if (std.mem.eql(u8, command, "deploy")) {
-        if (!deployArgsRequestCloud(user_args[1..])) {
-            localDeployCommand(allocator, user_args[1..]) catch |err| {
-                if (err == error.NoProjectConfig) {
-                    printNoProjectConfigDiagnostic(command);
-                    std.process.exit(1);
-                }
-                if (err == error.UnknownOption) {
-                    std.process.exit(1);
-                }
-                // buildArtifact already printed a remediation line for each
-                // of these; exit cleanly so the user does not also see a
-                // Zig panic-style stack trace.
-                switch (err) {
-                    error.ParseError,
-                    error.VerificationFailed,
-                    error.NoBytecode,
-                    error.FileNotFound,
-                    error.AccessDenied,
-                    => std.process.exit(1),
-                    else => return err,
-                }
-            };
-            return;
+        if (deployArgsRequestCloud(user_args[1..])) |flag| {
+            std.debug.print(
+                "zigttp deploy with `{s}` selects hosted cloud deploy, which is not available in v0.1.0-beta.\n" ++
+                    "Run `zigttp deploy` without the flag to build a self-contained binary you can run anywhere.\n",
+                .{flag},
+            );
+            std.process.exit(1);
         }
-        const cloud_args = try stripFlag(allocator, user_args[1..], "--cloud");
-        defer allocator.free(cloud_args);
-        deploy.run(allocator, cloud_args) catch |err| {
-            if (err == error.HelpRequested) {
-                printDeployHelp();
-                return;
+        localDeployCommand(allocator, user_args[1..]) catch |err| {
+            if (err == error.NoProjectConfig) {
+                printNoProjectConfigDiagnostic(command);
+                std.process.exit(1);
             }
             if (err == error.UnknownOption) {
-                std.debug.print("zigttp deploy --cloud only accepts --confirm, --region <name>, --wait, and --no-wait.\n\n", .{});
-                printDeployHelp();
-                return;
+                std.process.exit(1);
             }
-            if (err == error.MissingOptionValue) {
-                std.debug.print("--region requires a value, for example: zigttp deploy --cloud --region us-east\n\n", .{});
-                printDeployHelp();
-                return;
+            // buildArtifact already printed a remediation line for each
+            // of these; exit cleanly so the user does not also see a
+            // Zig panic-style stack trace.
+            switch (err) {
+                error.ParseError,
+                error.VerificationFailed,
+                error.NoBytecode,
+                error.FileNotFound,
+                error.AccessDenied,
+                => std.process.exit(1),
+                else => return err,
             }
-            if (err == error.HandlerNotFound) {
-                std.debug.print("Could not find a handler file. Create one of handler.ts, handler.tsx, handler.jsx, or handler.js (optionally under src/) and try again.\n", .{});
-                return;
-            }
-            if (err == error.NameUndetectable) {
-                std.debug.print("Could not determine a service name from package.json, git remote, or directory name.\n", .{});
-                return;
-            }
-            if (err == error.ContractUnavailable) {
-                std.debug.print("Could not extract a handler contract for this deploy.\n", .{});
-                return;
-            }
-            if (err == error.ControlPlaneReviewRequired) {
-                return;
-            }
-            if (err == error.DeployDrift) std.process.exit(deploy_exit_drift);
-            if (err == error.ServiceReadyTimeout) std.process.exit(deploy_exit_ready_timeout);
-            if (err == error.ServiceDidNotStart) std.process.exit(deploy_exit_did_not_start);
-            std.log.err("Deploy failed: {}", .{err});
-            return err;
         };
         return;
     }
@@ -415,94 +362,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (code != 0) std.process.exit(code);
         return;
     }
-    if (std.mem.eql(u8, command, "review")) {
-        deploy.review(allocator, user_args[1..]) catch |err| {
-            if (err == error.HelpRequested) {
-                printReviewHelp();
-                return;
-            }
-            if (err == error.UnknownOption) {
-                std.debug.print("zigttp review accepts <plan-id> and optional --approve|--reject, with --grant only for approvals.\n\n", .{});
-                printReviewHelp();
-                return;
-            }
-            if (err == error.MissingPlanId) {
-                std.debug.print("zigttp review requires a plan id.\n\n", .{});
-                printReviewHelp();
-                return;
-            }
-            if (err == error.InvalidOptionCombination) {
-                std.debug.print("Use exactly one of --approve or --reject. --grant only works with --approve.\n\n", .{});
-                printReviewHelp();
-                return;
-            }
-            if (err == error.PlanNotFound) {
-                std.debug.print("Deploy plan not found.\n", .{});
-                return;
-            }
-            if (err == error.PlanConflict) {
-                std.debug.print("Deploy plan cannot be changed in its current state.\n", .{});
-                return;
-            }
-            if (err == error.PlanExpired) {
-                std.debug.print("Deploy plan has expired.\n", .{});
-                return;
-            }
-            std.log.err("Review failed: {}", .{err});
-            return err;
-        };
-        return;
-    }
-    if (std.mem.eql(u8, command, "grants")) {
-        deploy.grants(allocator, user_args[1..]) catch |err| {
-            if (err == error.HelpRequested) {
-                printGrantsHelp();
-                return;
-            }
-            if (err == error.UnknownOption or err == error.InvalidOptionCombination) {
-                std.debug.print("zigttp grants accepts at most one optional project name.\n\n", .{});
-                printGrantsHelp();
-                return;
-            }
-            std.log.err("Grant listing failed: {}", .{err});
-            return err;
-        };
-        return;
-    }
-    if (std.mem.eql(u8, command, "revoke-grant")) {
-        deploy.revokeGrant(allocator, user_args[1..]) catch |err| {
-            if (err == error.HelpRequested) {
-                printRevokeGrantHelp();
-                return;
-            }
-            if (err == error.UnknownOption) {
-                std.debug.print("zigttp revoke-grant only accepts a grant id.\n\n", .{});
-                printRevokeGrantHelp();
-                return;
-            }
-            if (err == error.MissingGrantId) {
-                std.debug.print("zigttp revoke-grant requires a grant id.\n\n", .{});
-                printRevokeGrantHelp();
-                return;
-            }
-            if (err == error.InvalidOptionCombination) {
-                std.debug.print("zigttp revoke-grant accepts exactly one grant id.\n\n", .{});
-                printRevokeGrantHelp();
-                return;
-            }
-            if (err == error.GrantNotFound) {
-                std.debug.print("Capability grant not found.\n", .{});
-                return;
-            }
-            std.log.err("Grant revoke failed: {}", .{err});
-            return err;
-        };
-        return;
-    }
-    if (std.mem.eql(u8, command, "logout")) {
-        try deploy.logout(allocator);
-        return;
-    }
+    if (std.mem.eql(u8, command, "review")) rejectCloudCommand("review");
+    if (std.mem.eql(u8, command, "grants")) rejectCloudCommand("grants");
+    if (std.mem.eql(u8, command, "revoke-grant")) rejectCloudCommand("revoke-grant");
+    if (std.mem.eql(u8, command, "logout")) rejectCloudCommand("logout");
     if (std.mem.eql(u8, command, "proofs")) {
         // Expected user-input errors are explained on stderr by proofs_cli
         // itself; only unexpected ones (allocator, etc.) bubble.
@@ -558,30 +421,31 @@ fn containsString(haystack: []const []const u8, needle: []const u8) bool {
     return false;
 }
 
-/// Returns true when the user explicitly opts into the hosted control-plane
-/// deploy. Bare `zigttp deploy` (no flags) returns false and produces a local
-/// artifact. Cloud-only flags (`--region`, `--confirm`, `--wait`, `--no-wait`)
-/// imply `--cloud` so existing scripts keep working through v1.x.
-fn deployArgsRequestCloud(argv: []const []const u8) bool {
+/// Returns the first flag that selects the hosted control-plane deploy, or
+/// null when bare `zigttp deploy` should fall through to the local path.
+/// Cloud-only flags (`--region`, `--confirm`, `--wait`, `--no-wait`) imply
+/// `--cloud` so existing scripts keep working through v1.x. Callers use the
+/// returned literal to label the rejection so the user sees the flag they
+/// actually typed, not a hardcoded `--cloud`.
+fn deployArgsRequestCloud(argv: []const []const u8) ?[]const u8 {
     for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--cloud")) return true;
-        if (containsString(&cloud_only_deploy_flags, arg)) return true;
+        if (std.mem.eql(u8, arg, "--cloud")) return "--cloud";
+        if (containsString(&cloud_only_deploy_flags, arg)) return arg;
     }
-    return false;
+    return null;
 }
 
-/// Allocate a copy of `argv` with every occurrence of `flag` removed. Used
-/// to strip `--cloud` before forwarding to `deploy.run`, whose arg parser
-/// does not recognise the new opt-in flag.
-fn stripFlag(allocator: std.mem.Allocator, argv: []const []const u8, flag: []const u8) ![][]const u8 {
-    var kept = try allocator.alloc([]const u8, argv.len);
-    var n: usize = 0;
-    for (argv) |arg| {
-        if (std.mem.eql(u8, arg, flag)) continue;
-        kept[n] = arg;
-        n += 1;
-    }
-    return try allocator.realloc(kept, n);
+/// Hosted cloud deploy (`login`, `logout`, `review`, `grants`, `revoke-grant`,
+/// and `deploy --cloud`) is deferred from v0.1.0-beta. The control-plane code
+/// stays in the tree; only these CLI entry points are gated, so the path is
+/// trivially re-enabled in a later release.
+fn rejectCloudCommand(name: []const u8) noreturn {
+    std.debug.print(
+        "zigttp {s} is part of hosted cloud deploy, which is not available in v0.1.0-beta.\n" ++
+            "`zigttp deploy` builds a self-contained binary you can run anywhere.\n",
+        .{name},
+    );
+    std.process.exit(1);
 }
 
 fn printNoProjectConfigDiagnostic(command: []const u8) void {
@@ -2252,25 +2116,15 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     , .{ artifact.output_path, artifact.output_path });
 }
 
-/// Cloud-only `zigttp deploy` flags. The local target rejects them with a
-/// pointer to the hosted control-plane help so users do not silently get
-/// the local artifact when they expected a cloud deploy.
+/// `zigttp deploy` flags that opt into hosted cloud deploy. They are
+/// intercepted by `deployArgsRequestCloud` before `localDeployCommand` runs
+/// and rejected while cloud deploy is deferred from the beta.
 const cloud_only_deploy_flags = [_][]const u8{ "--region", "--confirm", "--wait", "--no-wait" };
-const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local", "--cloud", attest_flag_legacy, no_attest_flag };
+const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local", attest_flag_legacy, no_attest_flag };
 
 fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var attest_requested = true;
     for (argv) |arg| {
-        if (containsString(&cloud_only_deploy_flags, arg)) {
-            std.debug.print("zigttp deploy --local does not accept {s}.\n", .{arg});
-            std.debug.print("Cloud-only flags (", .{});
-            for (cloud_only_deploy_flags, 0..) |flag, i| {
-                if (i > 0) std.debug.print(", ", .{});
-                std.debug.print("{s}", .{flag});
-            }
-            std.debug.print(") apply only to the hosted control-plane deploy.\n", .{});
-            return error.UnknownOption;
-        }
         if (std.mem.eql(u8, arg, "--help")) {
             printLocalDeployHelp();
             return;
@@ -2312,7 +2166,6 @@ fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         \\Ledger:   .zigttp/proofs.jsonl (kind=deploy)
         \\
         \\Inspect the proof ledger: zigttp proofs list
-        \\Tip: pass --cloud to deploy to the zigttp hosted runtime instead.
         \\
     , .{ artifact.output_path, artifact.output_path, artifact.project.host, artifact.project.port });
 }
@@ -2696,115 +2549,6 @@ fn printDemoHelp() void {
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 
-fn printDeployHelp() void {
-    const help =
-        \\zigttp deploy [--cloud]
-        \\
-        \\Deploy the handler in this directory. Defaults to building a
-        \\self-contained binary at .zigttp/deploy/<name> and recording the
-        \\deploy in .zigttp/proofs.jsonl. No credentials, network, or Docker
-        \\required.
-        \\
-        \\With --cloud: deploy to the zigttp hosted runtime instead. If
-        \\credentials are missing, Zigttp first prompts for an access token.
-        \\Submit an empty token to fall back to browser-based device login.
-        \\
-        \\The command auto-detects everything by default. Optional flags:
-        \\  --cloud          Deploy to the hosted runtime (otherwise: local)
-        \\  --local          Explicit alias for the local default
-        \\  --confirm        Allow replace-like updates after showing the drift warning
-        \\  --region <name>  Override the deployment region for this run
-        \\  --wait           Block until the service reports ready (default)
-        \\  --no-wait        Return immediately after the deploy is accepted
-        \\
-        \\Exit codes:
-        \\  0  success
-        \\  2  drift detected, re-run with --confirm
-        \\  3  timed out waiting for the service to become ready
-        \\  4  service failed to start
-        \\
-        \\Related:
-        \\  zigttp login    Store deploy credentials explicitly
-        \\  zigttp logout   Forget the saved sign-in credentials
-        \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
-}
-
-fn printLoginHelp() void {
-    const help =
-        \\zigttp login
-        \\
-        \\Store a Zigttp access token for future deploys.
-        \\
-        \\Default behavior prompts for a token in the terminal. Submit an empty
-        \\line to fall back to browser-based device login.
-        \\
-        \\Options:
-        \\  --token-stdin   Read the token from stdin
-        \\  --device        Skip token entry and use browser-based device login
-        \\
-        \\Related:
-        \\  zigttp deploy   Deploy using saved credentials or prompt if needed
-        \\  zigttp logout   Forget the saved sign-in credentials
-        \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
-}
-
-fn printReviewHelp() void {
-    const help =
-        \\zigttp review <plan-id>
-        \\zigttp review <plan-id> --approve [--grant]
-        \\zigttp review <plan-id> --reject
-        \\
-        \\Inspect, approve, or reject a deploy capability review.
-        \\
-        \\Options:
-        \\  <plan-id>       Show the current plan status and risky additions
-        \\  --approve       Approve the plan for one use
-        \\  --grant         When approving, also create a reusable capability grant
-        \\  --reject        Reject the plan
-        \\
-        \\Related:
-        \\  zigttp deploy   Trigger a deploy and surface plan-required reviews
-        \\  zigttp login    Store deploy credentials explicitly
-        \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
-}
-
-fn printGrantsHelp() void {
-    const help =
-        \\zigttp grants [project-name]
-        \\
-        \\List reusable capability grants visible to the current account.
-        \\
-        \\Arguments:
-        \\  project-name    Optional project filter
-        \\
-        \\Related:
-        \\  zigttp revoke-grant <grant-id>   Revoke a reusable capability grant
-        \\  zigttp review <plan-id>          Inspect or approve a pending review
-        \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
-}
-
-fn printRevokeGrantHelp() void {
-    const help =
-        \\zigttp revoke-grant <grant-id>
-        \\
-        \\Revoke a reusable capability grant so future risky deploys must be reviewed again.
-        \\
-        \\Related:
-        \\  zigttp grants                    List reusable capability grants
-        \\  zigttp review <plan-id>         Approve a new review or grant
-        \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
-}
-
 fn hasAllFlag(argv: []const []const u8) bool {
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "all")) return true;
@@ -2844,7 +2588,7 @@ const core_help_all =
     \\  zigttp dev [handler.ts]                Run locally, watch and prove on save
     \\  zigttp test [tests.jsonl]              Run handler tests
     \\  zigttp expert                          Interactive compiler-in-the-loop agent
-    \\  zigttp deploy [--cloud]                Build, prove, deploy (local default)
+    \\  zigttp deploy                          Build, prove, deploy (local default)
     \\
     \\Analyze:
     \\  zigttp check [handler.ts]              Run the analyzer once
@@ -2864,13 +2608,6 @@ const core_help_all =
     \\  zigttp build [-o <bin>]                Emit a self-contained binary
     \\  zigttp compile <handler.ts> -o <bin>   Build a binary from an explicit path
     \\
-    \\Cloud deploy:
-    \\  zigttp login                           Store deploy credentials
-    \\  zigttp logout                          Forget saved credentials
-    \\  zigttp review <plan-id>                Approve or reject a deploy plan
-    \\  zigttp grants [project-name]           List reusable capability grants
-    \\  zigttp revoke-grant <grant-id>         Revoke a capability grant
-    \\
     \\Proof ledger:
     \\  zigttp proofs [list|show|diff|watch|export|badge|bundle|verify]
     \\  zigttp verify <url>                    Verify a deployed proof receipt
@@ -2878,7 +2615,6 @@ const core_help_all =
     \\Advanced:
     \\  zigttp ratchet [show|check]            Property-regression gate
     \\  zigttp witnesses [list|pin|unpin|prune|synthesize]  Falsifying-input corpus
-    \\  zigttp assert-intent                   Run author intent assertions
     \\  zigttp version                         Show version
     \\
     \\Every command keeps its own `--help`.
@@ -2901,6 +2637,13 @@ fn printExpertHelp() void {
         \\Starts the interactive coding agent. It runs the same analyzers the
         \\compiler uses, so it can verify edits, explain diagnostics, and propose
         \\fixes against your handler as you work.
+        \\
+        \\Model backend:
+        \\  Set one of these environment variables before launching:
+        \\    ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
+        \\    OPENAI_API_KEY
+        \\  An empty value counts as missing; the command exits with a setup
+        \\  message instead of launching against an unconfigured backend.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -2976,25 +2719,31 @@ test "hasLongHelpFlag preserves -h for host flags" {
     try std.testing.expect(!hasLongHelpFlag(&.{ "-h", "0.0.0.0" }));
 }
 
-test "deployArgsRequestCloud requires explicit opt-in" {
-    try std.testing.expect(!deployArgsRequestCloud(&.{}));
-    try std.testing.expect(!deployArgsRequestCloud(&.{"--local"}));
-    try std.testing.expect(!deployArgsRequestCloud(&.{ "--target", "local" }));
+test "deployArgsRequestCloud requires explicit opt-in and reports the triggering flag" {
+    try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{}));
+    try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{"--local"}));
+    try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{ "--target", "local" }));
 
-    try std.testing.expect(deployArgsRequestCloud(&.{"--cloud"}));
-    try std.testing.expect(deployArgsRequestCloud(&.{ "--region", "us-east" }));
-    try std.testing.expect(deployArgsRequestCloud(&.{"--confirm"}));
-    try std.testing.expect(deployArgsRequestCloud(&.{"--wait"}));
-    try std.testing.expect(deployArgsRequestCloud(&.{"--no-wait"}));
+    try std.testing.expectEqualStrings("--cloud", deployArgsRequestCloud(&.{"--cloud"}).?);
+    try std.testing.expectEqualStrings("--region", deployArgsRequestCloud(&.{ "--region", "us-east" }).?);
+    try std.testing.expectEqualStrings("--confirm", deployArgsRequestCloud(&.{"--confirm"}).?);
+    try std.testing.expectEqualStrings("--wait", deployArgsRequestCloud(&.{"--wait"}).?);
+    try std.testing.expectEqualStrings("--no-wait", deployArgsRequestCloud(&.{"--no-wait"}).?);
 }
 
-test "stripFlag removes only the named flag" {
-    const argv = [_][]const u8{ "--cloud", "--region", "us-east", "--cloud" };
-    const out = try stripFlag(std.testing.allocator, &argv, "--cloud");
-    defer std.testing.allocator.free(out);
-    try std.testing.expectEqual(@as(usize, 2), out.len);
-    try std.testing.expectEqualStrings("--region", out[0]);
-    try std.testing.expectEqualStrings("us-east", out[1]);
+test "help --all no longer advertises hosted cloud deploy" {
+    const has = struct {
+        fn f(haystack: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, haystack, needle) != null;
+        }
+    }.f;
+    inline for (.{
+        "zigttp login",  "zigttp logout",       "zigttp review",
+        "zigttp grants", "zigttp revoke-grant", "zigttp assert-intent",
+        "--cloud",
+    }) |hidden| {
+        try std.testing.expect(!has(core_help_all, hidden));
+    }
 }
 
 test "resolveDeveloperServeBinary re-enters developer CLI for studio and dev" {

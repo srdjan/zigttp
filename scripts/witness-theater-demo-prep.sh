@@ -14,6 +14,16 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Preflight: the autoloop below runs `zigts expert`, which now requires a
+# model backend (it no longer falls back to the offline stub). Catch a
+# missing key here so the failure is named, not masked behind a downstream
+# "no session events file found" error.
+if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
+    echo "error: witness-theater-demo-prep runs the autoloop and needs a model backend." >&2
+    echo "Set ANTHROPIC_API_KEY (recommended) or OPENAI_API_KEY before running." >&2
+    exit 1
+fi
+
 DEMO_DIR="$REPO_ROOT/temp/witness-demo"
 HANDLER_PATH="$DEMO_DIR/handler.ts"
 REGRESSIONS_PATH="$DEMO_DIR/witness-regressions.jsonl"
@@ -41,7 +51,11 @@ echo "Running autoloop..."
     --handler "$HANDLER_PATH" \
     --goal no_secret_leakage \
     --max-iters 2 \
-    >/tmp/witness-theater-prep.log 2>&1 || true
+    >/tmp/witness-theater-prep.log 2>&1 || {
+    echo "error: zigts expert autoloop failed. Log:" >&2
+    cat /tmp/witness-theater-prep.log >&2
+    exit 1
+}
 
 # Reset handler so the file the demo opens reads as the original leak.
 # The autoloop mutated it during convergence; the persisted patch

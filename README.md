@@ -38,7 +38,7 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 
 **Structured concurrent I/O.** `parallel()` and `race()` from `zigttp:io` overlap outbound HTTP without async/await or Promises. Handler code stays synchronous and linear; concurrency happens in the I/O layer using OS threads. Three API calls at 50ms each complete in ~50ms total.
 
-**One-command deploy.** `zigttp deploy` produces a local self-contained binary at `.zigttp/deploy/<your-app>` and appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. No cloud credentials, Docker, or network. `zigttp deploy --local` is the explicit spelling for the same v1 path. The hosted control-plane preview is opt-in with `zigttp deploy --cloud`: it cross-compiles to Linux musl, packages an OCI image with proven-fact labels (proof level, env vars, egress hosts, cache namespaces, routes, handler properties), and provisions the service through the Zigttp control plane. Hosted deploy requires Zigttp account credentials. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
+**One-command deploy.** `zigttp deploy` produces a self-contained binary at `.zigttp/deploy/<your-app>` and appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. No credentials, Docker, or network: run the binary anywhere. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
 
 **Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state. Handlers become deterministic pure functions of (Request, VirtualModuleResponses).
 
@@ -130,8 +130,6 @@ curl http://localhost:3000/
 For the full first project path, see [Getting Started](docs/getting-started.md).
 That guide is covered by `zig build smoke-getting-started`. To read the verdict
 `dev` and `test` print on every save, see [Reading the Proof Card](docs/proof-card.md).
-
-The hosted control-plane deploy (`zigttp deploy --cloud`) is in preview and requires Zigttp cloud credentials; see [docs/deploy-tutorial.md](docs/deploy-tutorial.md) for the current state.
 
 ## Handler Example
 
@@ -332,13 +330,13 @@ zigttp init <name> [--template basic|api|htmx]
 zigttp dev [options] [handler.ts]
 zigttp test [tests.jsonl]
 zigttp expert
-zigttp deploy [--local|--cloud] [--no-attest]
+zigttp deploy [--no-attest]
 ```
 
 Everything else is advanced and stays out of the default help. Run
 `zigttp help --all` for the full list - the analyzer commands (`check`,
 `prove`, `mock`, `link`, `gen-tests`), `serve`, `build`, `compile`, `doctor`,
-`studio`, `proofs`, the cloud-deploy commands, and more. Each keeps its own
+`studio`, `proofs`, and more. Each keeps its own
 `zigttp <command> --help`.
 
 Project commands auto-detect `zigttp.json` from the current directory or a
@@ -394,10 +392,8 @@ zigttp deploy
 ./.zigttp/deploy/<project-name>
 ```
 
-`zigttp deploy --local` and `zigttp deploy --target local` are aliases.
-Cloud-only flags
-(`--region`, `--confirm`, `--wait`, `--no-wait`) are rejected with a
-pointer to the hosted path.
+`zigttp deploy --local` and `zigttp deploy --target local` are explicit
+aliases for the same path.
 
 Attestation is default-on: the build signs a JWS that the running
 server emits on every response as `Zigttp-Attest` and serves at
@@ -409,83 +405,12 @@ section below and
 [docs/roadmap/attest-slice-2.md](docs/roadmap/attest-slice-2.md) for
 the full design and trust model.
 
-### `zigttp deploy --cloud` (hosted, preview)
+### Hosted cloud deploy
 
-Cross-compiles the handler to a Linux musl binary, packages it as an OCI
-image, pushes it through the Zigttp control plane, and provisions the
-service. The control plane mints short-lived registry credentials per
-deploy and forwards the image to the upstream provider, so there is no
-account to create, no registry to configure, and no API token to manage
-on the client. This path requires a Zigttp account and is in preview for
-v1.0; the API surface may shift before general availability.
-
-```bash
-zigttp deploy --cloud [options]
-
-Options:
-  --region <name>   Override the deployment region for this run
-  --confirm         Acknowledge drift and proceed with a replace-like update
-  --wait            Block until the service reports ready (default)
-  --no-wait         Return immediately after the deploy is accepted
-  -h, --help        Show usage
-```
-
-If credentials are missing, the CLI first prompts for a Zigttp access token
-directly in the terminal. The intended hosted flow is to create that token in
-`zigttp-admin`, then paste it into the CLI. Submit an empty token to fall back
-to browser-based device login. Tokens are stored at `~/.zigttp/credentials`;
-`zigttp logout` clears them. You can also sign in ahead of time with
-`zigttp login` or `zigttp login --token-stdin`. The control plane base URL
-defaults to `https://api.zigttp.dev`; set `ZIGTTP_CONTROL_PLANE_URL` to point
-at a self-hosted instance.
-
-Everything else is auto-detected from the current directory:
-
-- **Handler file**: first match of `handler.ts`, `handler.tsx`,
-  `handler.jsx`, `handler.js`, or the same paths under `src/`.
-- **Service name**: the `name` field in `package.json`, then the basename
-  of the git origin remote, then the current directory name. Slugified to
-  lowercase with dashes.
-- **Runtime environment**: `KEY=value` pairs from `.env` in the current
-  directory, one per line. Missing file is fine; a malformed line aborts
-  the deploy with a `path:line` diagnostic.
-- **Region**: `--region` if given, then the region from the previous
-  deploy of this service, then `us-central`.
-
-Before the CLI requests deploy credentials, it compiles the handler contract and sends that contract plus its canonical SHA-256 to the control plane. A self-hosted control plane can use that to auto-approve safe changes, auto-approve previously granted risky changes, or return a review URL when a deploy needs capability approval before continuing.
-
-```bash
-zigttp deploy --cloud
-zigttp deploy --cloud --region eu-west
-zigttp deploy --cloud --no-wait
-zigttp review <plan-id>
-zigttp review <plan-id> --approve --grant
-zigttp grants
-zigttp revoke-grant <grant-id>
-```
-
-Reconciliation reads `.zigttp/deploy-state.json`, which stores non-secret
-identifiers (scope, region, plan, managed env keys, last image digest)
-from the last successful deploy of each service. A change to scope,
-region, plan, or removal of a previously managed env var is flagged as
-drift; the CLI prints the warning and exits with code 2. Re-run with
-`--confirm` to acknowledge and proceed. Even with `--confirm`, the
-old service is rebound and updated, never deleted.
-
-After the push the CLI polls the provider until the service reports
-ready (120s default). `--no-wait` skips the poll. Exit codes:
-
-- `0` success
-- `2` drift detected, re-run with `--confirm`
-- `3` timed out waiting for the service to report ready
-- `4` service failed to start
-
-OCI image references are content-addressed by the manifest digest, which
-is printed alongside the public URL on success. Identical handlers
-produce identical digests. Proof facts from the handler contract (proof level,
-env var names, egress hosts, cache namespaces, routes, handler
-properties) are encoded as JSON arrays in OCI image labels so
-provenance survives in the registry.
+A hosted control-plane deploy is in development and deferred from
+v0.1.0-beta. The beta path is the self-contained binary that
+`zigttp deploy` produces above - run it anywhere. `zigttp deploy --cloud`
+and the related account commands are not available in this release.
 
 ### `zigttp edge`
 
@@ -608,7 +533,7 @@ same startup command and URL.
 
 Standalone analysis and compilation without starting a server.
 
-`zigts expert` picks its model backend from the environment: `ANTHROPIC_API_KEY` selects the Anthropic provider, `OPENAI_API_KEY` selects the OpenAI provider (non-streaming `chat/completions`), and an unset environment falls back to a fixed-reply stub. The persona, reference material, skill catalog, prompt templates, themes, and compiler metadata are all baked into the binary; there is no runtime plugin surface. The one external input that reaches the system prompt is `AGENTS.md` / `CLAUDE.md`, walked up from cwd to the enclosing `.git/` directory and appended as a labelled read-only project-context section with a 128 KiB cap. Disable with `--no-context-files`. Full pi architecture: [packages/pi/README.md](packages/pi/README.md).
+`zigts expert` picks its model backend from the environment: `ANTHROPIC_API_KEY` selects the Anthropic provider, `OPENAI_API_KEY` selects the OpenAI provider (non-streaming `chat/completions`). An empty value counts as missing; if neither variable is set to a non-empty value, the CLI exits with a setup message instead of launching. The persona, reference material, skill catalog, prompt templates, themes, and compiler metadata are all baked into the binary; there is no runtime plugin surface. The one external input that reaches the system prompt is `AGENTS.md` / `CLAUDE.md`, walked up from cwd to the enclosing `.git/` directory and appended as a labelled read-only project-context section with a 128 KiB cap. Disable with `--no-context-files`. Full pi architecture: [packages/pi/README.md](packages/pi/README.md).
 
 ```bash
 # Interactive REPL
@@ -1094,22 +1019,10 @@ To override auto-derived sandboxing with a stricter or different policy, pass an
 
 Omit a section to leave that capability unrestricted. If a section is present, dynamic access in that category is rejected because zigttp cannot fully enumerate it.
 
-### Hosted Native Deploy
+### Hosted cloud deploy
 
-`zigttp deploy --cloud` consumes the same compiler-proven contract used for
-sandboxing and verification, then ships the handler through the zigttp
-control plane in one command. The full flow lives in
-[docs/deploy-tutorial.md](docs/deploy-tutorial.md); the short version is
-above under [`zigttp deploy --cloud` (hosted, preview)](#zigttp-deploy---cloud-hosted-preview).
-
-Proof facts from the contract are encoded as JSON arrays in OCI image
-labels (`zigttp.proof-level`, `zigttp.env-vars`, `zigttp.egress-hosts`,
-`zigttp.cache-namespaces`, `zigttp.routes`, plus boolean labels for
-`retry-safe`, `read-only`, `idempotent`, and so on) so registries and
-downstream tooling can audit what the binary is allowed to do without
-running it. Proof levels: `complete` (all checks pass, no dynamic
-flags), `partial` (some verification but dynamic access detected),
-`none` (no verification ran).
+Deferred from v0.1.0-beta. The beta deploy path is the self-contained
+binary `zigttp deploy` produces; see [`zigttp deploy`](#zigttp-deploy).
 
 ### Deterministic Replay (`--trace` / `--replay` / `-Dreplay`)
 
@@ -1349,8 +1262,8 @@ repo:
 
 - [v1 Public Release](docs/roadmap/v1-public-release.md) - the release contract
   and gates for the first public release, built around one showcase flow:
-  `init` -> `dev` -> `check` -> `build` -> `deploy`. Deploy is local by default
-  for v1; hosted deploy stays preview-only behind `--cloud`.
+  `init` -> `dev` -> `check` -> `build` -> `deploy`. Deploy produces a
+  self-contained local binary; a hosted path is deferred past v0.1.0-beta.
 - [Frontier](docs/roadmap/frontier.md) - the strategic thesis: a proof-aware
   TypeScript execution platform where the execution model is compiler-visible,
   effects are explicit imports, and contracts are first-class artifacts that

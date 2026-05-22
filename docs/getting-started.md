@@ -2,7 +2,7 @@
 
 This guide takes a new zigttp project from an empty directory to a verified
 local deploy using the five commands you need: `init`, `dev`, `test`, `expert`,
-and `deploy`. The hosted deploy path is optional and marked preview.
+and `deploy`.
 
 ## The Five Commands
 
@@ -116,18 +116,6 @@ zigttp test
 
 The generated `zigttp.json` points at `src/handler.tsx`, so `test`, `dev`, and
 `deploy` all use the TSX stripping path.
-
-## 8. Optional Hosted Deploy
-
-The hosted control-plane path is explicit:
-
-```bash
-zigttp deploy --cloud
-```
-
-If credentials are missing, the CLI prompts for a Zigttp access token or falls
-back to device login. See [Deploy](deploy-tutorial.md) for regions, readiness
-waiting, drift checks, and review approvals.
 
 ## Common Next Steps
 

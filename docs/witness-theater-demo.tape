@@ -4,6 +4,10 @@
 #   ./scripts/witness-theater-demo-prep.sh   # stages handler + autoloop session
 #   vhs docs/witness-theater-demo.tape       # writes docs/witness-theater-demo.gif
 #
+# Requires ANTHROPIC_API_KEY (or OPENAI_API_KEY) in the recorder's env both
+# for the prep autoloop and for `zigts expert --resume` below: the CLI now
+# exits with a setup message when no backend is configured.
+#
 # The prep script runs the autoloop ahead of time so the GIF stays under
 # 30s. The tape opens the resulting persisted session in the TUI and
 # walks the witness pane: select, replay, mint.

@@ -439,7 +439,25 @@ fn injectDriftNote(
 
 fn envVar(name_z: [:0]const u8) ?[]const u8 {
     const raw = std.c.getenv(name_z) orelse return null;
-    return std.mem.sliceTo(raw, 0);
+    const value = std.mem.sliceTo(raw, 0);
+    // Treat a set-but-blank variable as absent. An empty or whitespace-only
+    // API key is never a legitimate credential, so callers (the `expert`
+    // fail-fast and `initFromEnvWithSessionConfig`) should both fall through
+    // to the missing-backend path rather than build a client that 401s on
+    // first request. Trimming is also how a .env loader's accidental
+    // padding (e.g. `KEY = "..."`) would otherwise sneak through.
+    const trimmed = std.mem.trim(u8, value, " \t\n\r");
+    if (trimmed.len == 0) return null;
+    return trimmed;
+}
+
+/// True when a live model backend can be built from the environment. The
+/// `zigttp expert` entry point checks this before launching the interactive
+/// session so a missing key fails fast with setup guidance instead of
+/// dropping into the offline stub. Single source of truth for the env-var
+/// names matched by `initFromEnvWithSessionConfig`.
+pub fn envHasModelBackend() bool {
+    return envVar("ANTHROPIC_API_KEY") != null or envVar("OPENAI_API_KEY") != null;
 }
 
 fn nowUnixMs() i64 {
@@ -746,6 +764,33 @@ test "modelClient returns an anthropic client vtable when backend is anthropic" 
 
     const mc = session.modelClient();
     try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&session.backend.anthropic)));
+}
+
+test "envHasModelBackend: empty env var is treated as absent" {
+    const allocator = testing.allocator;
+    var anth = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "");
+    defer anth.restore(allocator);
+    var oai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "");
+    defer oai.restore(allocator);
+    try testing.expect(!envHasModelBackend());
+}
+
+test "envHasModelBackend: whitespace-only env var is treated as absent" {
+    const allocator = testing.allocator;
+    var anth = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "   ");
+    defer anth.restore(allocator);
+    var oai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "\t\n");
+    defer oai.restore(allocator);
+    try testing.expect(!envHasModelBackend());
+}
+
+test "envHasModelBackend: a non-empty env var is detected" {
+    const allocator = testing.allocator;
+    var oai = try EnvOverride.unset(allocator, "OPENAI_API_KEY");
+    defer oai.restore(allocator);
+    var anth = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-fixture-key");
+    defer anth.restore(allocator);
+    try testing.expect(envHasModelBackend());
 }
 
 test "compact: empty transcript returns early message" {

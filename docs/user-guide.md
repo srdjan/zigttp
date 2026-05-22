@@ -115,9 +115,8 @@ zigttp deploy
 
 `deploy` verifies the handler, emits the self-contained binary at
 `.zigttp/deploy/<project-name>`, and appends a `kind=deploy` row to
-`.zigttp/proofs.jsonl`. No cloud credentials, no Docker, no network access. See
-[docs/deploy-tutorial.md](deploy-tutorial.md) for the hosted-control-plane
-preview path.
+`.zigttp/proofs.jsonl`. No credentials, no Docker, no network access. See
+[docs/deploy-tutorial.md](deploy-tutorial.md) for the full deploy flow.
 
 Attestation is default-on (slice 2). The build signs the contract and bytecode hashes into a JWS embedded in the binary, using the persistent identity at `~/.zigttp/attest/keypair.bin`. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request and serves `GET /.well-known/zigttp-attest` as cacheable JSON. `zigttp verify <url>` validates the signature from any third-party machine. Pass `--no-attest` to skip signing for a specific build. Full design: [docs/roadmap/attest-slice-2.md](roadmap/attest-slice-2.md).
 
@@ -159,13 +158,12 @@ zigttp init <name> [--template basic|api|htmx]
 zigttp dev [options] [handler.ts]
 zigttp test [tests.jsonl]
 zigttp expert
-zigttp deploy [--local|--cloud] [--no-attest]
+zigttp deploy [--no-attest]
 ```
 
 Run `zigttp help --all` for the advanced commands - the analyzer commands
 (`check`, `prove`, `mock`, `link`, `gen-tests`), `serve`, `build`, `compile`,
-`doctor`, `studio`, `edge`, `proofs`, `verify`, and the cloud-deploy set
-(`login`, `logout`, `review`, `grants`, `revoke-grant`). Each keeps its own
+`doctor`, `studio`, `edge`, `proofs`, and `verify`. Each keeps its own
 `zigttp <command> --help`.
 
 Project commands discover `zigttp.json` from the current directory or any
@@ -205,7 +203,7 @@ Common `dev` options:
 ```
 zigttp test [tests.jsonl]
 zigttp expert
-zigttp deploy [--local|--cloud] [--no-attest]
+zigttp deploy [--no-attest]
 ```
 
 `test` verifies first, then runs declarative request fixtures through the local
@@ -1704,81 +1702,13 @@ const config = ServerConfig{
 ./zig-out/bin/zigttp serve -q -h 0.0.0.0 -p 8080 handler.js
 ```
 
-#### Hosted Native Deploy CLI
+#### Hosted cloud deploy
 
-`zigttp deploy --cloud` cross-compiles the handler to a Linux musl binary,
-packages it as an OCI image, pushes it through the zigttp control plane,
-and provisions the service. The control plane mints short-lived registry
-credentials per deploy and forwards the image to the upstream provider,
-so there is no account to create, no registry to configure, and no API
-token to manage on the client. The only external tool invoked is `zig`,
-for cross-compilation.
-
-```bash
-zigttp deploy --cloud
-zigttp deploy --cloud --region eu-west
-zigttp deploy --cloud --no-wait
-zigttp deploy --cloud --confirm   # acknowledge drift after a warning
-```
-
-Flags (all optional):
-
-- `--region <name>` overrides the deployment region for this run.
-- `--confirm` acknowledges drift detected in `.zigttp/deploy-state.json` and
-  proceeds with a replace-like update.
-- `--wait` (default) blocks until the service reports ready.
-- `--no-wait` returns immediately after the deploy is accepted.
-- `-h` / `--help` prints usage.
-
-If credentials are missing, the CLI first prompts for a Zigttp access
-token directly in the terminal. The intended hosted flow is to create
-that token in `zigttp-admin`, then paste it into the CLI. Submit an
-empty token to fall back to browser-based device login. Tokens are
-stored at `~/.zigttp/credentials`; `zigttp logout` clears them. You can
-also sign in ahead of time with `zigttp login` or
-`zigttp login --token-stdin`. Set `ZIGTTP_CONTROL_PLANE_URL` to point
-at a self-hosted control plane; the default is
-`https://api.zigttp.dev`.
-
-Auto-detection from the current directory:
-
-- **Handler file**: first match of `handler.ts`, `handler.tsx`,
-  `handler.jsx`, `handler.js`, or the same paths under `src/`.
-- **Service name**: the `name` field in `package.json`, then the
-  basename of the git origin remote, then the current directory name.
-  Slugified to lowercase with dashes.
-- **Runtime environment**: `KEY=value` pairs from `.env` in the
-  current directory, one per line. Missing file is fine; a malformed
-  line aborts the deploy with a `path:line` diagnostic.
-- **Region**: `--region` if given, then the previous deploy's region,
-  then `us-central`.
-
-Image references are content-addressed by the manifest digest, which
-is printed alongside the public URL on success. Identical handlers
-produce identical digests.
-
-Reconciliation reads `.zigttp/deploy-state.json`, which stores non-secret
-identifiers (`service_id`, `scope_id`, `plan_id`, `region`,
-`managed_env_keys`, `last_image_digest`) from the last successful
-deploy. A second run for the same service reuses the stored service
-id and patches in place. A change to scope, region, plan, or removal
-of a previously managed env var raises a drift warning; the CLI
-prints it and exits with code 2 unless `--confirm` is passed. Even
-with `--confirm`, the old service is rebound and updated, never
-deleted.
-
-After the push the CLI polls the provider until the service reports
-ready (120s default). Exit codes:
-
-- `0` success
-- `2` drift detected, re-run with `--confirm`
-- `3` timed out waiting for the service to report ready
-- `4` service failed to start
-
-The same compiler-proven contract used for sandboxing drives the
-deploy. Proof facts (proof level, env var names, egress hosts, cache
-namespaces, routes, handler properties) are encoded as JSON arrays in
-OCI image labels so provenance survives in the registry.
+A hosted control-plane deploy is in development and deferred from
+v0.1.0-beta. `zigttp deploy --cloud` and the related account commands
+(`login`, `logout`, `review`, `grants`, `revoke-grant`) are not
+available in this release. The supported deploy path is the
+self-contained binary `zigttp deploy` produces.
 
 #### Docker Container
 

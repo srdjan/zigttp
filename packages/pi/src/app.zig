@@ -53,6 +53,10 @@ const ratchet_tool = @import("tools/zigts_expert_ratchet.zig");
 pub const witness_replay = @import("witness_replay.zig");
 pub const demo_passport = @import("demo_passport.zig");
 
+/// Re-exported so the `zigttp expert` CLI dispatch can fail fast when no
+/// model backend is configured, without reaching into `agent.zig` directly.
+pub const envHasModelBackend = agent.envHasModelBackend;
+
 const Registry = registry_mod.Registry;
 
 pub fn buildMinimalRegistry(allocator: std.mem.Allocator) !Registry {

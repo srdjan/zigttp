@@ -39,6 +39,9 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Changed
 
+- `zigttp expert` and `zigts expert` now fail fast when no model backend is configured. With neither `ANTHROPIC_API_KEY` nor `OPENAI_API_KEY` set to a non-empty value, the CLI prints setup guidance and exits non-zero instead of launching the agent UI on the offline stub. This is a v1 semantic change to the contract published in `docs/internals/zigts-expert-contract.md`; the prior stub fallback for an unset environment is no longer reachable from either CLI, including the `--print --mode json` event stream.
+- Hosted cloud deploy is deferred from v0.1.0-beta. `zigttp deploy --cloud`, `login`, `logout`, `review`, `grants`, and `revoke-grant` are gated at the CLI boundary and reject with a "not in this beta" message; they are dropped from `zigttp help --all`. The control-plane code stays in `packages/runtime/src/deploy/`, ready to re-enable once the path has CI smoke coverage.
+- The experimental `assert-intent` command is hidden from `zigttp help --all`; it still dispatches for callers that invoke it directly.
 - `docs/rollout.md` reframed as a historical appendix for the v0.14-v0.15 rule review rollout; active changes now land here.
 - `AGENTS.md` documentation index now covers the full `docs/` directory.
 - `scripts/test-examples.sh` runs `zig build` up-front so CI fails fast on a broken runtime rather than emitting N cryptic per-suite errors.
