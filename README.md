@@ -70,7 +70,7 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 
 ### Numbers
 
-3ms runtime init. 1.2MB binary. 4MB memory baseline. Pre-warmed handler pool with per-request isolation. See [performance docs](docs/performance.md) for cold start breakdowns and deployment patterns.
+~3ms runtime-init floor, ~7-15ms typical cold start. 4.8MB deployed binary. ~13MB memory baseline. Pre-warmed handler pool with per-request isolation. See [performance docs](docs/performance.md) for the cold-start distribution and the Node/Deno throughput comparison.
 
 ## Install
 
@@ -1341,6 +1341,24 @@ zigts implements ES5 with select ES6+ extensions:
 
 See [Language Subset](docs/language-subset.md) and
 [User Guide](docs/user-guide.md#javascript-subset-reference) for full details.
+
+## Roadmap
+
+zigttp is at v0.1.0-beta. Direction is set by two documents kept current in the
+repo:
+
+- [v1 Public Release](docs/roadmap/v1-public-release.md) - the release contract
+  and gates for the first public release, built around one showcase flow:
+  `init` -> `dev` -> `check` -> `build` -> `deploy`. Deploy is local by default
+  for v1; hosted deploy stays preview-only behind `--cloud`.
+- [Frontier](docs/roadmap/frontier.md) - the strategic thesis: a proof-aware
+  TypeScript execution platform where the execution model is compiler-visible,
+  effects are explicit imports, and contracts are first-class artifacts that
+  deploy and rollout decisions consume.
+
+Further roadmap notes - attestation slices, the property-goal autoloop,
+proofable third-party modules, the hosted proof dashboard - live in
+[docs/roadmap/](docs/roadmap/).
 
 ## License
 

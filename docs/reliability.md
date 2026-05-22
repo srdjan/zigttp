@@ -11,11 +11,11 @@ limit is fixed in the binary that is called out.
 The HTTP server caps request bodies at **1 MB** (`max_body_size`, 1,048,576
 bytes). The limit is fixed in the binary - there is no CLI flag to change it.
 
-When a request body exceeds the cap the server **closes the connection without
-sending an HTTP response**. The accept path logs the rejected request to
-stderr. Clients see a dropped connection, not a `413 Payload Too Large`.
-Returning `413` is the conventional behavior and is tracked as a gap; until it
-lands, treat a closed connection on a large upload as the body-size limit.
+When a request's `Content-Length` exceeds the cap the server responds
+**`413 Payload Too Large`** and closes the connection. The oversized body is
+never read into memory - the limit is enforced from the header value alone,
+before the body is buffered. Both server backends (the threaded pool and the
+event-loop path) return the `413`.
 
 ### JavaScript runtime memory - `-m` / `--memory`
 

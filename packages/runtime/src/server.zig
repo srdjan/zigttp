@@ -459,6 +459,10 @@ const ConnectionPool = struct {
                 self.sendErrorSync(fd, 501, "Not Implemented") catch {};
                 return .close;
             }
+            if (err == error.FileTooBig) {
+                self.sendErrorSync(fd, 413, "Payload Too Large") catch {};
+                return .close;
+            }
             return err;
         };
         var request = self.server.parseRequestFromBuffer(req_allocator, request_data) catch return .close;
@@ -1839,6 +1843,10 @@ pub const Server = struct {
                 self.sendErrorResponse(stream, io, 501, "Not Implemented") catch {};
                 return false;
             }
+            if (err == error.FileTooBig) {
+                self.sendErrorResponse(stream, io, 413, "Payload Too Large") catch {};
+                return false;
+            }
             return err;
         };
         defer request.deinit(req_allocator);
@@ -2743,6 +2751,7 @@ fn getStatusText(status: u16) []const u8 {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Payload Too Large",
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
@@ -3053,6 +3062,39 @@ test "threaded readRequestData handles partial headers" {
     defer request.deinit(allocator);
     try std.testing.expect(request.body != null);
     try std.testing.expectEqualStrings("hello", request.body.?);
+}
+
+test "threaded handleSingleRequestSync returns 413 for oversized body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &server,
+        .allocator = allocator,
+    };
+
+    const fds = try createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    // Content-Length far above the 1024-byte cap. The body itself is not sent:
+    // readRequestData rejects on the header value alone.
+    try writeAllFd(fds[1], "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5000\r\n\r\n");
+
+    const outcome = try pool.handleSingleRequestSync(fds[0], 0, allocator);
+    try std.testing.expectEqual(ConnectionPool.RequestOutcome.close, outcome);
+
+    // The oversized request gets a real 413 response, not a silent connection drop.
+    var buf: [256]u8 = undefined;
+    const n = try std.posix.read(fds[1], &buf);
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "HTTP/1.1 413 Payload Too Large\r\n"));
 }
 
 test "parseRequestFromBuffer rejects duplicate content length" {

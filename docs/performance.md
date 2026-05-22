@@ -21,69 +21,48 @@ zigts outperforms QuickJS in historical benchmark runs (QuickJS as external base
 
 Run Zig-native benchmarks with: `zig build bench`
 
-### HTTP Throughput (Deno baseline)
+### HTTP Throughput
 
-| Endpoint         | zigttp RPS | Deno Baseline | Ratio |
-| ---------------- | ---------- | ------------- | ----- |
-| /api/health      | 79,743     | 104,672       | 0.76x |
-| /api/echo        | 79,409     | 63,726        | 1.25x |
-| /api/greet/world | 80,030     | 105,016       | 0.76x |
+Trivial JSON handler, `hey -n 300000 -c 50` on loopback, Apple M4 Pro / macOS 26,
+each runtime in its default configuration (measured 2026-05-22):
+
+| Runtime | Req/sec | p50 latency | p99 latency |
+| ------- | ------- | ----------- | ----------- |
+| zigttp  | 112,393 | 0.20 ms     | 2.00 ms     |
+| Deno    | 113,058 | 0.40 ms     | 0.90 ms     |
+| Node.js | 86,927  | 0.60 ms     | 1.20 ms     |
+
+zigttp runs at parity with Deno and roughly 30% ahead of Node.js on this
+workload. Full methodology and raw results:
+[v0.1.0-beta benchmarks](releases/v0.1.0-beta-benchmarks.md).
 
 JIT compilation is enabled by default for hot functions (after `JIT_THRESHOLD` executions).
 
 ## Cold Start Performance
 
-### Baseline (Runtime Handler Loading)
+Cold start is wall time from process launch to the first complete HTTP
+response, measured with `zigttp serve -e <handler>` on Apple M4 Pro, macOS 26,
+ReleaseFast (2026-05-22):
 
-```bash
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zigttp serve handler.js
-```
+| Measure | Value |
+|---------|-------|
+| Floor (best case) | ~3.5 ms |
+| Typical (p50) | ~7-15 ms, depending on host load |
+| Tail (p95 to max) | up to ~60 ms under host scheduling contention |
 
-Cold start: ~83ms (process spawn to first HTTP response)
+Cold start is variance-dominated. The floor is runtime initialization itself -
+roughly 3 ms to load or parse the handler, start the I/O backend, build the
+handler pool, and bind the listener. The spread above the floor is host
+scheduling jitter, not work zigttp performs: a quiet host lands near the floor,
+a busy host stretches the tail. Treat cold start as a distribution - cite the
+floor and the p50, not a single figure.
 
-Breakdown:
-- Process spawn: 10-15ms (kernel overhead)
-- Dynamic linker (dyld): 15-20ms (system library loading)
-- I/O backend init: 5ms (kqueue/io_uring setup)
-- Handler parsing: 8ms
-- Handler compilation: 4ms
-- Bytecode caching: 1ms
-- Connection pool: 5ms
-- Network listener: 3ms
+Embedding the handler bytecode at build time (`zig build -Dhandler=...` or
+`zigttp build`) removes handler parsing and compilation from the floor; the
+self-extracting binary loads bytecode directly from memory.
 
-### Optimized (Embedded Bytecode)
-
-```bash
-zig build -Doptimize=ReleaseFast -Dhandler=handler.js
-./zig-out/bin/zigttp serve  # No handler file argument needed
-```
-
-Cold start: ~71ms (16% improvement). Parsing, compilation, and caching steps are eliminated entirely - bytecode loads from memory.
-
-### Platform Comparison
-
-| Configuration | Cold Start | Notes |
-|--------------|------------|-------|
-| macOS baseline | ~83ms | Runtime parsing |
-| macOS optimized | ~71ms | Embedded bytecode |
-| macOS profiled (flamegraph) | ~103ms | dyld dominates (80-90ms) |
-| Deno 2.6.7 | 150-200ms | V8 snapshot deserialization |
-
-Runtime initialization itself is only ~3ms. The macOS dynamic linker (dyld) accounts for 80-90ms and is unavoidable.
-
-### Linux Target (Planned)
-
-Static linking with musl libc would eliminate the dynamic linker overhead:
-
-| Phase | macOS | Linux Static (estimated) |
-|-------|-------|--------------------------|
-| dyld/ld.so | 80-90ms | 5-10ms |
-| Runtime init | 3ms | 3ms |
-| Network + HTTP | 10-20ms | 10-20ms |
-| **Total** | **103ms** | **18-33ms** |
-
-Blocked on JIT cross-compilation architecture issues.
+Raw measurements, the harness, and the full run-to-run distribution are in the
+[v0.1.0-beta benchmarks](releases/v0.1.0-beta-benchmarks.md).
 
 ## FaaS Optimizations
 
@@ -246,7 +225,9 @@ EXPOSE 8080
 ENTRYPOINT ["/zigttp", "serve", "-q", "-h", "0.0.0.0", "/handler.js"]
 ```
 
-Container size: ~1.2MB with embedded handler (single binary, no handler file needed).
+Binary size: ~4.8 MB with embedded handler (single self-contained binary, no
+handler file needed); the developer CLI is ~9.1 MB. Both ReleaseFast, measured
+2026-05-22.
 
 ### FaaS Deployment
 

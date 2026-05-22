@@ -36,6 +36,16 @@ pub fn build(b: *std.Build) void {
         .optimize = bench_optimize,
         .perf_histogram = perf_histogram_enabled,
     });
+    // The benchmark exe is built ReleaseFast. Its embedded_handler import must
+    // resolve `zigts` to the matching ReleaseFast module - wiring the Debug
+    // `zigts` here collides the module graph (file exists in modules zigts and
+    // zigts0) and breaks `zig build bench` on a Debug-default toolchain.
+    const zigts_bench_dep = b.dependency("zigts", .{
+        .target = target,
+        .optimize = bench_optimize,
+        .perf_histogram = perf_histogram_enabled,
+    });
+    const zigts_bench_mod = zigts_bench_dep.module("zigts");
 
     const pi_dep = b.dependency("zigttp_pi", .{
         .target = target,
@@ -579,9 +589,9 @@ pub fn build(b: *std.Build) void {
         .root_module = runtime_bench_dep.module("benchmark"),
     });
     bench_exe.root_module.addAnonymousImport("embedded_handler", .{
-        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
+        .root_source_file = runtime_bench_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
-            .{ .name = "zigts", .module = zigts_mod },
+            .{ .name = "zigts", .module = zigts_bench_mod },
         },
     });
     // Bench is not installed by default. `zig build bench` still builds and
