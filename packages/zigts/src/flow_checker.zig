@@ -1908,3 +1908,43 @@ test "setExternalLabels registers short form from qualified name" {
     try std.testing.expectEqualStrings("PII field", checker.external_reasons.get("email").?);
     try std.testing.expectEqualStrings("token data", checker.external_reasons.get("plainField").?);
 }
+
+test "propertyTagForKind: every DiagnosticKind maps to the expected PropertyTag" {
+    // Lock the current mapping. If a future change re-routes a flow-sink
+    // category to a different property bucket, this assertion forces a
+    // conscious update — without it, a silent mis-routing would weaken
+    // the proven-property set in ways the existing flow tests would not
+    // catch.
+    try std.testing.expectEqual(
+        @as(?counterexample.PropertyTag, .no_secret_leakage),
+        propertyTagForKind(.secret_in_response),
+    );
+    try std.testing.expectEqual(
+        @as(?counterexample.PropertyTag, .no_secret_leakage),
+        propertyTagForKind(.secret_in_log),
+    );
+    try std.testing.expectEqual(
+        @as(?counterexample.PropertyTag, .no_secret_leakage),
+        propertyTagForKind(.secret_in_egress_url),
+    );
+    try std.testing.expectEqual(
+        @as(?counterexample.PropertyTag, .no_secret_leakage),
+        propertyTagForKind(.secret_in_egress_body),
+    );
+    try std.testing.expectEqual(
+        @as(?counterexample.PropertyTag, .no_credential_leakage),
+        propertyTagForKind(.credential_in_response),
+    );
+    try std.testing.expectEqual(
+        @as(?counterexample.PropertyTag, .no_credential_leakage),
+        propertyTagForKind(.credential_in_log),
+    );
+    try std.testing.expectEqual(
+        @as(?counterexample.PropertyTag, .no_credential_leakage),
+        propertyTagForKind(.credential_in_egress_url),
+    );
+    try std.testing.expectEqual(
+        @as(?counterexample.PropertyTag, .injection_safe),
+        propertyTagForKind(.unvalidated_input_in_egress),
+    );
+}

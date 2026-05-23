@@ -222,3 +222,78 @@ fn encodeBase64url(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     return buf;
 }
 
+// ---------------------------------------------------------------------------
+// Tests for the pure helpers. The runtime-coupled paths (jwtVerify,
+// jwtSign, parseBearer, etc.) interact with sdk.extractString and
+// sdk.parseJson, which are no-op stubs in the test_shim — those need
+// handler-level integration coverage, not unit tests.
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "constTimeEqlSlice: equality, inequality, length mismatch" {
+    try testing.expect(constTimeEqlSlice("abc", "abc"));
+    try testing.expect(!constTimeEqlSlice("abc", "abd"));
+    try testing.expect(!constTimeEqlSlice("abc", "ab"));
+    try testing.expect(!constTimeEqlSlice("", "x"));
+    try testing.expect(constTimeEqlSlice("", ""));
+
+    // Differs only in the last byte — must still return false (catches an
+    // accidental early-return optimisation that would re-introduce a
+    // timing oracle).
+    const a = "0123456789abcdef0123456789abcdee";
+    const b = "0123456789abcdef0123456789abcdef";
+    try testing.expect(!constTimeEqlSlice(a, b));
+}
+
+test "trimTrailingPadding strips one or more `=` characters" {
+    try testing.expectEqualStrings("abc", trimTrailingPadding("abc"));
+    try testing.expectEqualStrings("abc", trimTrailingPadding("abc="));
+    try testing.expectEqualStrings("abc", trimTrailingPadding("abc=="));
+    try testing.expectEqualStrings("", trimTrailingPadding("===="));
+    try testing.expectEqualStrings("a=b", trimTrailingPadding("a=b"));
+    try testing.expectEqualStrings("a=b", trimTrailingPadding("a=b="));
+}
+
+test "base64url encode/decode round-trip for arbitrary bytes" {
+    const allocator = testing.allocator;
+    const inputs = [_][]const u8{
+        "",
+        "f",
+        "fo",
+        "foo",
+        "foob",
+        "fooba",
+        "foobar",
+        "Many hands make light work.",
+    };
+    for (inputs) |input| {
+        const encoded = try encodeBase64url(allocator, input);
+        defer allocator.free(encoded);
+
+        // base64url uses `-` and `_` instead of `+` and `/`, and no `=`.
+        for (encoded) |c| {
+            try testing.expect(c != '+' and c != '/' and c != '=');
+        }
+
+        const decoded = try decodeBase64url(allocator, encoded);
+        defer allocator.free(decoded);
+        try testing.expectEqualSlices(u8, input, decoded);
+    }
+}
+
+test "decodeBase64url tolerates trailing `=` padding the encoder never emits" {
+    // Some JWT libraries still emit padded base64url. The decoder must
+    // accept both forms, otherwise we'd reject valid third-party tokens.
+    const allocator = testing.allocator;
+    const padded = "Zm9v"; // canonical, no padding
+    const decoded = try decodeBase64url(allocator, padded);
+    defer allocator.free(decoded);
+    try testing.expectEqualStrings("foo", decoded);
+
+    const padded_with_eq = "Zm9v==";
+    const decoded2 = try decodeBase64url(allocator, padded_with_eq);
+    defer allocator.free(decoded2);
+    try testing.expectEqualStrings("foo", decoded2);
+}
+
