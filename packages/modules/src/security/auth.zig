@@ -87,9 +87,25 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     const second_dot = std.mem.indexOfScalar(u8, rest, '.') orelse
         return sdk.resultErr(handle, "invalid token format");
 
+    const header_b64 = token_str[0..first_dot];
     const payload_b64 = rest[0..second_dot];
     const signature_b64 = rest[second_dot + 1 ..];
     const signing_input = token_str[0 .. first_dot + 1 + second_dot];
+
+    const allocator = sdk.getAllocator(handle);
+
+    // Reject tokens whose header does not advertise the algorithm we verify
+    // against. Without this check the HMAC would still match a forged token
+    // that supplied a different `alg` (e.g. "none", "HS512", or omitted),
+    // because downstream code never reads the header. Per RFC 7519 §5.1 and
+    // RFC 8725 §3, the verifier MUST reject any algorithm it did not expect.
+    validateHs256Header(allocator, header_b64) catch |err| return sdk.resultErr(handle, switch (err) {
+        error.HeaderTooLong => "jwt header too long",
+        error.InvalidBase64 => "invalid header encoding",
+        error.InvalidJson => "invalid header JSON",
+        error.MissingAlg => "missing alg header",
+        error.UnsupportedAlg => "unsupported alg",
+    });
 
     var expected_mac: sdk.HmacSha256Mac = undefined;
     try sdk.hmacSha256(handle, signing_input, secret, &expected_mac);
@@ -107,7 +123,6 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     if (!constTimeEqlSlice(&sig_decoded, &expected_mac))
         return sdk.resultErr(handle, "invalid signature");
 
-    const allocator = sdk.getAllocator(handle);
     const payload_bytes = decodeBase64url(allocator, payload_b64) catch
         return sdk.resultErr(handle, "invalid payload encoding");
     defer allocator.free(payload_bytes);
@@ -222,6 +237,57 @@ fn encodeBase64url(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     return buf;
 }
 
+const JwtHeaderError = error{
+    HeaderTooLong,
+    InvalidBase64,
+    InvalidJson,
+    MissingAlg,
+    UnsupportedAlg,
+};
+
+/// Largest JWT header we will parse. Real-world JWT headers carry `alg`,
+/// `typ`, and occasionally `kid` or `cty` — well under 256 bytes encoded.
+/// A 1 KiB ceiling rejects any obvious DoS via attacker-controlled headers
+/// while leaving room for legitimate metadata.
+const MAX_JWT_HEADER_LEN = 1024;
+
+/// Validate that a base64url-encoded JWT header advertises the algorithm
+/// we will verify against (HS256, the only `alg` the matching `jwtSign`
+/// emits). Without this check the verifier would HMAC whatever it received
+/// and accept tokens whose header claimed `none`, `HS512`, `RS256`, or
+/// nothing at all — every classical JWT algorithm-confusion class begins
+/// with the verifier failing to enforce the expected `alg`. See RFC 7519
+/// §5.1 ("the `alg` Header Parameter") and RFC 8725 §3 ("Perform Algorithm
+/// Verification").
+fn validateHs256Header(allocator: std.mem.Allocator, header_b64: []const u8) JwtHeaderError!void {
+    if (header_b64.len > MAX_JWT_HEADER_LEN) return error.HeaderTooLong;
+
+    const clean = trimTrailingPadding(header_b64);
+    const decoded_len = base64url.Decoder.calcSizeForSlice(clean) catch return error.InvalidBase64;
+    if (decoded_len > MAX_JWT_HEADER_LEN) return error.HeaderTooLong;
+
+    const decoded = allocator.alloc(u8, decoded_len) catch return error.InvalidBase64;
+    defer allocator.free(decoded);
+    base64url.Decoder.decode(decoded, clean) catch return error.InvalidBase64;
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, decoded, .{}) catch
+        return error.InvalidJson;
+    defer parsed.deinit();
+
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.InvalidJson,
+    };
+
+    const alg_value = obj.get("alg") orelse return error.MissingAlg;
+    const alg_str = switch (alg_value) {
+        .string => |s| s,
+        else => return error.UnsupportedAlg,
+    };
+
+    if (!std.mem.eql(u8, alg_str, "HS256")) return error.UnsupportedAlg;
+}
+
 // ---------------------------------------------------------------------------
 // Tests for the pure helpers. The runtime-coupled paths (jwtVerify,
 // jwtSign, parseBearer, etc.) interact with sdk.extractString and
@@ -295,5 +361,102 @@ test "decodeBase64url tolerates trailing `=` padding the encoder never emits" {
     const decoded2 = try decodeBase64url(allocator, padded_with_eq);
     defer allocator.free(decoded2);
     try testing.expectEqualStrings("foo", decoded2);
+}
+
+// ---------------------------------------------------------------------------
+// validateHs256Header — guards against JWT algorithm-confusion bugs. The
+// previous jwtVerifyImpl never read the header and would HMAC any token
+// whose three dot-separated segments parsed, so a forged header that
+// claimed `alg=none`, `alg=HS512`, or omitted `alg` slipped through as
+// long as the signature happened to match the supplied secret. These
+// tests pin the verifier to HS256 explicitly.
+// ---------------------------------------------------------------------------
+
+fn headerForTest(allocator: std.mem.Allocator, json: []const u8) ![]u8 {
+    return encodeBase64url(allocator, json);
+}
+
+test "validateHs256Header accepts a real HS256 header" {
+    const allocator = testing.allocator;
+    const header = try headerForTest(allocator, "{\"alg\":\"HS256\",\"typ\":\"JWT\"}");
+    defer allocator.free(header);
+    try validateHs256Header(allocator, header);
+}
+
+test "validateHs256Header accepts the canonical jwtSign header verbatim" {
+    // jwtSign emits HEADER_HS256_B64 verbatim; the verifier must accept it.
+    try validateHs256Header(testing.allocator, HEADER_HS256_B64);
+}
+
+test "validateHs256Header rejects alg=none" {
+    const allocator = testing.allocator;
+    const header = try headerForTest(allocator, "{\"alg\":\"none\"}");
+    defer allocator.free(header);
+    try testing.expectError(error.UnsupportedAlg, validateHs256Header(allocator, header));
+}
+
+test "validateHs256Header rejects alg=HS512" {
+    const allocator = testing.allocator;
+    const header = try headerForTest(allocator, "{\"alg\":\"HS512\"}");
+    defer allocator.free(header);
+    try testing.expectError(error.UnsupportedAlg, validateHs256Header(allocator, header));
+}
+
+test "validateHs256Header rejects alg=RS256 (would otherwise enable HMAC-with-public-key confusion downstream)" {
+    const allocator = testing.allocator;
+    const header = try headerForTest(allocator, "{\"alg\":\"RS256\"}");
+    defer allocator.free(header);
+    try testing.expectError(error.UnsupportedAlg, validateHs256Header(allocator, header));
+}
+
+test "validateHs256Header rejects missing alg" {
+    const allocator = testing.allocator;
+    const header = try headerForTest(allocator, "{\"typ\":\"JWT\"}");
+    defer allocator.free(header);
+    try testing.expectError(error.MissingAlg, validateHs256Header(allocator, header));
+}
+
+test "validateHs256Header rejects non-string alg" {
+    const allocator = testing.allocator;
+    const header = try headerForTest(allocator, "{\"alg\":42}");
+    defer allocator.free(header);
+    try testing.expectError(error.UnsupportedAlg, validateHs256Header(allocator, header));
+}
+
+test "validateHs256Header rejects non-object JSON" {
+    const allocator = testing.allocator;
+    const header = try headerForTest(allocator, "\"not an object\"");
+    defer allocator.free(header);
+    try testing.expectError(error.InvalidJson, validateHs256Header(allocator, header));
+}
+
+test "validateHs256Header rejects malformed JSON inside the base64" {
+    const allocator = testing.allocator;
+    const header = try headerForTest(allocator, "{not json");
+    defer allocator.free(header);
+    try testing.expectError(error.InvalidJson, validateHs256Header(allocator, header));
+}
+
+test "validateHs256Header rejects invalid base64url" {
+    // The character `!` is not in the base64url alphabet.
+    try testing.expectError(error.InvalidBase64, validateHs256Header(testing.allocator, "!!!!"));
+}
+
+test "validateHs256Header rejects oversized headers" {
+    // 2 KiB of `A`s — past the 1 KiB ceiling.
+    const allocator = testing.allocator;
+    const huge = try allocator.alloc(u8, MAX_JWT_HEADER_LEN + 1);
+    defer allocator.free(huge);
+    @memset(huge, 'A');
+    try testing.expectError(error.HeaderTooLong, validateHs256Header(allocator, huge));
+}
+
+test "validateHs256Header is case-sensitive on alg value" {
+    // RFC 7518 §3.1 defines `alg` values as case-sensitive strings; "hs256"
+    // is not a valid alias for "HS256".
+    const allocator = testing.allocator;
+    const header = try headerForTest(allocator, "{\"alg\":\"hs256\"}");
+    defer allocator.free(header);
+    try testing.expectError(error.UnsupportedAlg, validateHs256Header(allocator, header));
 }
 
