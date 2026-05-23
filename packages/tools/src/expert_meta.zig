@@ -36,6 +36,13 @@ pub const category_counts: Categories = blk: {
             .verifier => v += 1,
             .policy => p += 1,
             .property => pr += 1,
+            // The v1 `zigts meta` envelope closes `categories` on three keys
+            // (see docs/internals/zigts-expert-contract.md line 102: "new
+            // categories would be a v2 change"). FlowChecker rules carry the
+            // `.flow` registry tag but project into the `property` bucket so
+            // the v1 invariant `rule_count == verifier + policy + property`
+            // holds. Surface `flow` as a distinct key only as part of a v2
+            // contract bump, alongside the tripwire tests in expert.zig.
             .flow => pr += 1,
         }
     }
