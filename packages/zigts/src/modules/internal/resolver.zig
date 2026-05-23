@@ -160,11 +160,19 @@ fn shouldWrapExport(comptime binding: mb.ModuleBinding, comptime func_binding: m
 }
 
 fn wrappedExportFn(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) object.NativeFn {
+    // Both branches install the active-module context so `sdk.requireCapability`
+    // sees the binding's declared `required_capabilities`. Skipping the wrap on
+    // the `module_func` path would silently leave every sandbox SDK call with
+    // an empty active context — that was the gap from Wave 1B/2D P0 #3 in the
+    // 2026-05-23 review.
     if (func_binding.func) |native_fn| {
         if (binding.required_capabilities.len == 0) return native_fn;
         return comptime mb.wrapNativeFnWithCapabilities(native_fn, binding.specifier, binding.required_capabilities);
     }
-    return func_binding.getNativeFn();
+    if (func_binding.module_func) |module_fn| {
+        return comptime mb.wrapModuleFnWithCapabilities(module_fn, binding.specifier, binding.required_capabilities);
+    }
+    @compileError("FunctionBinding must set either func or module_func: " ++ func_binding.name);
 }
 
 /// Validate that all import specifiers from a module are actually exported.
@@ -200,4 +208,71 @@ test "validateImports reports first missing export" {
     const names = [_][]const u8{ "env", "missing" };
     const missing = validateImports(binding, &names) orelse return error.ExpectedMissingExport;
     try std.testing.expectEqualStrings("missing", missing);
+}
+
+// ---------------------------------------------------------------------------
+// wrappedExportFn — capability propagation on the module_func path.
+//
+// Wave 1B/2D P0 #3 (2026-05-23 review) flagged that this branch previously
+// short-circuited through `getNativeFn()`, which wraps with empty
+// `required_capabilities`. Any sandbox module declaring caps would then run
+// with an empty active-module context, so every `sdk.requireCapability` call
+// — including the ones inside `sdk.hmacSha256`, `sdk.fillRandom`, and the
+// JWT verifier — would refuse the operation. The test below pins the fixed
+// shape: a `module_func` binding with `.crypto` declared in its parent
+// `ModuleBinding` must observe `.crypto` in the active context.
+// ---------------------------------------------------------------------------
+
+const value = @import("../../value.zig");
+
+test "wrappedExportFn propagates required_capabilities through module_func" {
+    const probe = struct {
+        fn run(_: *mb.ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            // Asserts execute against the active context installed by the
+            // resolver's wrapper, not the test's outer scope.
+            const fake_handle: *mb.ModuleHandle = @ptrFromInt(0x1);
+            if (!mb.hasCapability(fake_handle, .crypto)) return error.MissingCrypto;
+            if (mb.hasCapability(fake_handle, .clock)) return error.UnexpectedClock;
+            return value.JSValue.true_val;
+        }
+    }.run;
+
+    const fb = mb.FunctionBinding{
+        .name = "probe",
+        .module_func = probe,
+        .arg_count = 0,
+    };
+    const binding = mb.ModuleBinding{
+        .specifier = "zigttp:test-cap-probe",
+        .name = "test-cap-probe",
+        .required_capabilities = &.{.crypto},
+        .exports = &.{fb},
+    };
+
+    const wrapped = comptime wrappedExportFn(binding, fb);
+    const result = try wrapped(@ptrFromInt(0x1), value.JSValue.undefined_val, &.{});
+    try std.testing.expect(result.isTrue());
+}
+
+test "wrappedExportFn leaves func path unwrapped when no capabilities declared" {
+    const native = struct {
+        fn run(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.true_val;
+        }
+    }.run;
+
+    const fb = mb.FunctionBinding{
+        .name = "bare",
+        .func = native,
+        .arg_count = 0,
+    };
+    const binding = mb.ModuleBinding{
+        .specifier = "zigttp:test-bare",
+        .name = "test-bare",
+        .exports = &.{fb},
+    };
+
+    const wrapped = comptime wrappedExportFn(binding, fb);
+    // No wrapping means the wrapped pointer is literally the original.
+    try std.testing.expectEqual(@as(object.NativeFn, native), wrapped);
 }
