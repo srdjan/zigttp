@@ -219,8 +219,13 @@ fn buildServiceTypeContextFromContracts(
             }
 
             var responses = try allocator.alloc(ServiceResponseVariant, api_route.responses.items.len);
+            // `alloc` returns uninitialized memory; the outer errdefer would
+            // call `deinit` on garbage variant fields if any populate step
+            // below failed. Track how many slots actually hold a constructed
+            // ResponseVariant and walk only that prefix on the unwind path.
+            var responses_initialized: usize = 0;
             errdefer {
-                for (responses) |*response| response.deinit(allocator);
+                for (responses[0..responses_initialized]) |*response| response.deinit(allocator);
                 allocator.free(responses);
             }
             for (api_route.responses.items, 0..) |response, response_idx| {
@@ -235,27 +240,65 @@ fn buildServiceTypeContextFromContracts(
                     null;
                 errdefer if (schema_json) |owned| allocator.free(owned);
 
+                const content_type_dup: ?[]const u8 = if (response.content_type) |content_type|
+                    try allocator.dupe(u8, content_type)
+                else if (api_route.response_content_type) |content_type|
+                    try allocator.dupe(u8, content_type)
+                else
+                    null;
+                errdefer if (content_type_dup) |owned| allocator.free(owned);
+
                 responses[response_idx] = .{
                     .status = response.status orelse api_route.response_status orelse 200,
-                    .content_type = if (response.content_type) |content_type|
-                        try allocator.dupe(u8, content_type)
-                    else if (api_route.response_content_type) |content_type|
-                        try allocator.dupe(u8, content_type)
-                    else
-                        null,
+                    .content_type = content_type_dup,
                     .schema_json = schema_json,
                     .dynamic = response.schema.isDynamic(),
                 };
+                responses_initialized = response_idx + 1;
+            }
+
+            // Stage every owning allocation into a local with its own
+            // errdefer before assembling the struct literal. Inline
+            // `try allocator.dupe(...)` inside a struct literal leaks the
+            // prior fields on a later failure because Zig has no way to
+            // walk back through completed struct-field expressions, and the
+            // outer routes errdefer only covers slots whose `out_index` has
+            // been bumped. `toOwnedSlice` consumes the ArrayList, so its
+            // outer `errdefer ...deinit` becomes a no-op once it succeeds —
+            // the buffer must be freed by an explicit errdefer below.
+            const service_name_dup = try allocator.dupe(u8, entry.name);
+            errdefer allocator.free(service_name_dup);
+            const handler_path_dup = try allocator.dupe(u8, entry.path);
+            errdefer allocator.free(handler_path_dup);
+            const method_dup = try allocator.dupe(u8, api_route.method);
+            errdefer allocator.free(method_dup);
+            const path_dup = try allocator.dupe(u8, api_route.path);
+            errdefer allocator.free(path_dup);
+
+            const path_params_slice = try required_path_params.toOwnedSlice(allocator);
+            errdefer {
+                for (path_params_slice) |name| allocator.free(name);
+                allocator.free(path_params_slice);
+            }
+            const query_params_slice = try required_query_params.toOwnedSlice(allocator);
+            errdefer {
+                for (query_params_slice) |name| allocator.free(name);
+                allocator.free(query_params_slice);
+            }
+            const header_params_slice = try required_header_params.toOwnedSlice(allocator);
+            errdefer {
+                for (header_params_slice) |name| allocator.free(name);
+                allocator.free(header_params_slice);
             }
 
             routes[out_index] = .{
-                .service_name = try allocator.dupe(u8, entry.name),
-                .handler_path = try allocator.dupe(u8, entry.path),
-                .method = try allocator.dupe(u8, api_route.method),
-                .path = try allocator.dupe(u8, api_route.path),
-                .required_path_params = try required_path_params.toOwnedSlice(allocator),
-                .required_query_params = try required_query_params.toOwnedSlice(allocator),
-                .required_header_params = try required_header_params.toOwnedSlice(allocator),
+                .service_name = service_name_dup,
+                .handler_path = handler_path_dup,
+                .method = method_dup,
+                .path = path_dup,
+                .required_path_params = path_params_slice,
+                .required_query_params = query_params_slice,
+                .required_header_params = header_params_slice,
                 .request_dynamic = api_route.request_schema_dynamic or api_route.query_params_dynamic or api_route.header_params_dynamic or api_route.request_bodies_dynamic,
                 .response_dynamic = api_route.responses_dynamic,
                 .requires_body = api_route.request_bodies.items.len > 0,
@@ -4066,6 +4109,76 @@ test "compileHandler sets result_safe and optional_safe when verification passes
     const props = contract.properties orelse return error.MissingProperties;
     try std.testing.expect(props.result_safe);
     try std.testing.expect(props.optional_safe);
+}
+
+test "buildServiceTypeContextFromContracts: errdefer ladder closes every failure path" {
+    // Walk FailingAllocator.fail_index forward through the function's
+    // allocation sequence. testing.allocator catches any leak and Zig's
+    // runtime safety catches the original bug (deinit called on
+    // uninitialized ServiceResponseVariant slots when the populate loop
+    // failed past index 0). Mirrors the Runtime.create equivalent in
+    // `packages/zigts/src/pool.zig`.
+    const allocator = std.testing.allocator;
+
+    // Build a minimal HandlerContract with one route carrying TWO responses.
+    // Two responses is the smallest input that exposes the bug: a failure
+    // while populating responses[1] leaves responses[1] uninitialized but
+    // responses[0] live, so the unwind path has to distinguish them.
+    var contract = handler_contract.emptyContract(try allocator.dupe(u8, "h.ts"));
+    defer contract.deinit(allocator);
+
+    var route: handler_contract.ApiRouteInfo = .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/items"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+    };
+    try route.responses.append(allocator, .{
+        .status = 200,
+        .content_type = try allocator.dupe(u8, "application/json"),
+        .schema = .{ .inline_json = try allocator.dupe(u8, "{}") },
+    });
+    try route.responses.append(allocator, .{
+        .status = 500,
+        .content_type = try allocator.dupe(u8, "text/plain"),
+        .schema = .none,
+    });
+    try contract.api.routes.append(allocator, route);
+
+    var handlers = try allocator.alloc(system_linker.SystemConfig.HandlerEntry, 1);
+    handlers[0] = .{
+        .name = try allocator.dupe(u8, "svc"),
+        .path = try allocator.dupe(u8, "h.ts"),
+        .base_url = try allocator.dupe(u8, "http://localhost"),
+    };
+    var config: system_linker.SystemConfig = .{ .version = 1, .handlers = handlers };
+    defer config.deinit(allocator);
+
+    var contracts_arr = [_]HandlerContract{contract};
+    const contracts: []const HandlerContract = &contracts_arr;
+
+    // Find the ceiling allocation count via a successful run.
+    var ceiling: usize = 0;
+    {
+        var probe = std.testing.FailingAllocator.init(allocator, .{ .fail_index = std.math.maxInt(usize) });
+        var ctx = try buildServiceTypeContextFromContracts(probe.allocator(), &config, contracts);
+        ceiling = probe.alloc_index;
+        ctx.deinit(probe.allocator());
+    }
+
+    var fail_at: usize = 0;
+    while (fail_at < ceiling) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_at });
+        const result = buildServiceTypeContextFromContracts(failing.allocator(), &config, contracts);
+        if (result) |ok| {
+            var ok_mut = ok;
+            ok_mut.deinit(failing.allocator());
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+        }
+    }
 }
 
 test {
