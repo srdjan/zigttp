@@ -345,6 +345,59 @@ fn applyPreparedEdit(
     try file_io.writeFile(allocator, prepared.resolved_path, prepared.edit.content);
 }
 
+/// One post-apply tool check. The tool name + args + diagnostic prefix +
+/// summary text all vary per check; the surrounding "lookup, invoke,
+/// transcribe on failure, update report" ceremony is identical. Bundling
+/// here so the two checks in `postApplyCheck` stay one-call-site each
+/// instead of two ~25-line nested blocks.
+const PostCheckSpec = struct {
+    tool_name: []const u8,
+    args_json: []const u8,
+    note_prefix: []const u8,
+    summary: []const u8,
+    /// `true` for the review-patch check, which is meant to override an
+    /// earlier `verify_paths regressed` summary because the review's
+    /// finding is more specific. `false` for verify_paths, which only
+    /// sets the summary if nothing has set it yet.
+    overwrite_summary: bool,
+};
+
+fn runPostApplyTool(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    registry: *const registry_mod.Registry,
+    transcript: *transcript_mod.Transcript,
+    report: *PostApplyReport,
+    spec: PostCheckSpec,
+) !void {
+    if (registry.findByName(spec.tool_name) == null) return;
+
+    // Note: invokeJson errors are propagated up to postApplyCheck which
+    // catches them and returns the report-so-far — preserving the
+    // original `catch return report` short-circuit semantics.
+    var result = try registry.invokeJson(arena, spec.tool_name, spec.args_json);
+    defer result.deinit(arena);
+    if (result.ok) return;
+
+    const note = try std.fmt.allocPrint(allocator, "{s}{s}", .{ spec.note_prefix, result.llm_text });
+    defer allocator.free(note);
+    try transcript.append(allocator, .{ .diagnostic_box = .{
+        .llm_text = note,
+        .ui_payload = if (result.ui_payload) |payload|
+            try payload.clone(allocator)
+        else
+            null,
+    } });
+
+    report.ok = false;
+    if (spec.overwrite_summary) {
+        if (report.summary) |s| allocator.free(s);
+        report.summary = try allocator.dupe(u8, spec.summary);
+    } else if (report.summary == null) {
+        report.summary = try allocator.dupe(u8, spec.summary);
+    }
+}
+
 fn postApplyCheck(
     allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -355,61 +408,32 @@ fn postApplyCheck(
     var report: PostApplyReport = .{ .ok = true, .summary = null };
     errdefer if (report.summary) |s| allocator.free(s);
 
-    if (registry.findByName("zigts_expert_verify_paths") != null) {
-        const args_json = try std.fmt.allocPrint(
-            arena,
-            "{{\"paths\":[\"{s}\"]}}",
-            .{prepared.edit.file},
-        );
-        var vr = registry.invokeJson(arena, "zigts_expert_verify_paths", args_json) catch return report;
-        defer vr.deinit(arena);
-        if (!vr.ok) {
-            const note = try std.fmt.allocPrint(
-                allocator,
-                "post-apply regression: verify_paths found violations\n{s}",
-                .{vr.llm_text},
-            );
-            defer allocator.free(note);
-            try transcript.append(allocator, .{ .diagnostic_box = .{
-                .llm_text = note,
-                .ui_payload = if (vr.ui_payload) |payload|
-                    try payload.clone(allocator)
-                else
-                    null,
-            } });
-            report.ok = false;
-            if (report.summary == null) {
-                report.summary = try allocator.dupe(u8, "verify_paths regressed");
-            }
-        }
-    }
+    const verify_paths_args = try std.fmt.allocPrint(
+        arena,
+        "{{\"paths\":[\"{s}\"]}}",
+        .{prepared.edit.file},
+    );
+    runPostApplyTool(allocator, arena, registry, transcript, &report, .{
+        .tool_name = "zigts_expert_verify_paths",
+        .args_json = verify_paths_args,
+        .note_prefix = "post-apply regression: verify_paths found violations\n",
+        .summary = "verify_paths regressed",
+        .overwrite_summary = false,
+    }) catch return report;
 
-    if (prepared.edit.before != null and registry.findByName("zigts_expert_review_patch") != null) {
-        const args_json = try std.fmt.allocPrint(
+    if (prepared.edit.before != null) {
+        const review_args = try std.fmt.allocPrint(
             arena,
             "{{\"file\":\"{s}\",\"diff_only\":true}}",
             .{prepared.edit.file},
         );
-        var rr = registry.invokeJson(arena, "zigts_expert_review_patch", args_json) catch return report;
-        defer rr.deinit(arena);
-        if (!rr.ok) {
-            const note = try std.fmt.allocPrint(
-                allocator,
-                "post-apply diff review: new violations found\n{s}",
-                .{rr.llm_text},
-            );
-            defer allocator.free(note);
-            try transcript.append(allocator, .{ .diagnostic_box = .{
-                .llm_text = note,
-                .ui_payload = if (rr.ui_payload) |payload|
-                    try payload.clone(allocator)
-                else
-                    null,
-            } });
-            report.ok = false;
-            if (report.summary) |s| allocator.free(s);
-            report.summary = try allocator.dupe(u8, "review_patch flagged new violations");
-        }
+        runPostApplyTool(allocator, arena, registry, transcript, &report, .{
+            .tool_name = "zigts_expert_review_patch",
+            .args_json = review_args,
+            .note_prefix = "post-apply diff review: new violations found\n",
+            .summary = "review_patch flagged new violations",
+            .overwrite_summary = true,
+        }) catch return report;
     }
 
     return report;
