@@ -452,11 +452,30 @@ pub const OPTIMIZED_LOOP_THRESHOLD: u32 = 5000;
 /// Global counter for generating unique guard IDs
 var guard_id_counter: u64 = 1;
 
-/// Generate a new unique guard ID for a function
+/// Generate a new unique guard ID for a function.
+///
+/// The returned ID is stored verbatim in `JSObject.inline_slots[FUNC_GUARD_ID]`
+/// (see `object.zig:createBytecodeFunction` and `createClosure`), and the GC
+/// walks every inline slot as a `JSValue` via `markValue` -> `isPtr`. A bare
+/// counter value whose top 16 bits happened to land in the NaN-box pointer
+/// prefix range (`0xFFFC_xxxx_xxxx_xxxx`) would be misclassified as a heap
+/// pointer and dereferenced, so we embed the integer-prefix tag in the ID
+/// itself. The JIT loads the slot as a raw `u64` (`movRegMem` /
+/// `OBJ_FUNC_GUARD_ID_OFF`) and compares against `callee.guard_id`, also a
+/// raw `u64`; both sides carry the same prefix bits so the equality check
+/// still passes byte-for-byte. The 48-bit payload space is sufficient for
+/// any plausible workload (~281 trillion functions before wrap).
 pub fn nextGuardId() u64 {
-    const id = guard_id_counter;
-    guard_id_counter +%= 1;
-    return id;
+    const payload_mask = value.JSValue.PAYLOAD_MASK;
+    const int_prefix = value.JSValue.INT_PREFIX;
+
+    // Step the counter through the 48-bit payload space, skipping 0 so the
+    // unset sentinel in `FunctionBytecode.guard_id` stays distinguishable.
+    var payload = guard_id_counter & payload_mask;
+    if (payload == 0) payload = 1;
+    guard_id_counter = payload +% 1;
+
+    return int_prefix | payload;
 }
 
 /// Function bytecode structure
@@ -839,6 +858,57 @@ test "BytecodeHeader" {
     const header = BytecodeHeader{};
     try std.testing.expectEqual(MAGIC, header.magic);
     try std.testing.expectEqual(VERSION_MAJOR, header.version_major);
+}
+
+test "nextGuardId carries INT_PREFIX so the GC cannot mark the slot as a heap pointer" {
+    // FUNC_GUARD_ID is stored verbatim into JSObject.inline_slots[], which
+    // the GC walks via `markValue` -> `isPtr`. A bare counter that happened
+    // to land in the 0xFFFC… pointer prefix range would be dereferenced as
+    // a heap pointer; embedding INT_PREFIX is what prevents that.
+    const PREFIX_MASK = value.JSValue.PREFIX_MASK;
+    const PTR_PREFIX = value.JSValue.PTR_PREFIX;
+    const INT_PREFIX = value.JSValue.INT_PREFIX;
+
+    var seen = std.AutoHashMap(u64, void).init(std.testing.allocator);
+    defer seen.deinit();
+
+    var i: usize = 0;
+    while (i < 1024) : (i += 1) {
+        const id = nextGuardId();
+        // Must never collide with the pointer prefix the GC scans for.
+        try std.testing.expect((id & PREFIX_MASK) != PTR_PREFIX);
+        // Must carry the integer-prefix tag the helper documents.
+        try std.testing.expectEqual(INT_PREFIX, id & PREFIX_MASK);
+        // Must never be the zero sentinel that `ensureGuardId` interprets
+        // as "not yet assigned" — wrap-around behavior must still skip 0.
+        try std.testing.expect(id != 0);
+        // Uniqueness: 1024 consecutive draws all distinct.
+        try std.testing.expect(!seen.contains(id));
+        try seen.put(id, {});
+    }
+}
+
+test "guard_id stored in FUNC_GUARD_ID slot is GC-safe under isPtr" {
+    // End-to-end check: take a fresh FunctionBytecode, run the same path
+    // that `object.zig:createBytecodeFunction` and `createClosure` use to
+    // populate the slot, and confirm the resulting JSValue.raw is not
+    // pointer-typed from the GC's perspective.
+    var bc = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 0,
+        .flags = .{},
+        .code = &.{},
+        .constants = &.{},
+        .source_map = null,
+    };
+    bc.ensureGuardId();
+
+    const slot_value: value.JSValue = .{ .raw = bc.guard_id };
+    try std.testing.expect(!slot_value.isPtr());
+    try std.testing.expect(!slot_value.isExternPtr());
 }
 
 test "FunctionBytecodeCompact creation and access" {
