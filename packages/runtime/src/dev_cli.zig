@@ -3926,3 +3926,62 @@ test "prepareProjectArtifact returns NoProjectConfig when no zigttp.json on or a
     // No zigttp.json present anywhere up the tree from this tmp dir.
     try testing.expectError(error.NoProjectConfig, prepareProjectArtifact(testing.allocator, io, "build", null));
 }
+
+// ---------------------------------------------------------------------------
+// compileCommand / buildCommand argv-parsing error paths. The happy paths
+// reach buildArtifact, which requires a real handler on disk and a runtime
+// binary alongside the test executable — out of scope for unit tests. The
+// argv parser is the part the user trips on most often, and it's testable
+// in isolation.
+// ---------------------------------------------------------------------------
+
+test "compileCommand requires a handler positional" {
+    const testing = std.testing;
+    try testing.expectError(error.MissingArgument, compileCommand(testing.allocator, &.{}));
+    try testing.expectError(
+        error.MissingArgument,
+        compileCommand(testing.allocator, &.{ "-o", "out.bin" }),
+    );
+}
+
+test "compileCommand requires -o" {
+    const testing = std.testing;
+    // Handler positional present, but -o missing.
+    try testing.expectError(
+        error.MissingArgument,
+        compileCommand(testing.allocator, &.{"handler.ts"}),
+    );
+}
+
+test "compileCommand rejects bare -o without a follow-up path" {
+    const testing = std.testing;
+    // `-o` is the last token; the inner `i += 1; if (i >= argv.len)` guard
+    // must fire as MissingArgument rather than silently leaving output null.
+    try testing.expectError(
+        error.MissingArgument,
+        compileCommand(testing.allocator, &.{ "handler.ts", "-o" }),
+    );
+}
+
+test "buildCommand rejects bare -o without a follow-up path" {
+    const testing = std.testing;
+    try testing.expectError(
+        error.MissingArgument,
+        buildCommand(testing.allocator, &.{"-o"}),
+    );
+}
+
+test "buildCommand rejects unknown flags as UnknownOption" {
+    const testing = std.testing;
+    // Anything past the known set (`-o`, `--no-attest`, legacy `--attest`,
+    // `--help`) hits the catch-all branch and exits with UnknownOption so
+    // the user knows their flag was not recognised.
+    try testing.expectError(
+        error.UnknownOption,
+        buildCommand(testing.allocator, &.{"--unknown-flag"}),
+    );
+    try testing.expectError(
+        error.UnknownOption,
+        buildCommand(testing.allocator, &.{"unexpected_positional"}),
+    );
+}
