@@ -1111,8 +1111,8 @@ pub const ContractBuilder = struct {
                 if (binding.kind == .undeclared_global) {
                     const name = self.resolveAtomName(binding.slot) orelse continue;
                     if (std.mem.eql(u8, name, "fetchSync")) {
-                        try self.extractLiteralArg(call, &self.egress_hosts, &self.egress_dynamic, &extractHost);
-                        try self.extractLiteralArg(call, &self.egress_urls, &self.egress_dynamic, null);
+                        try self.extractLiteralArg(call, .{ .list = &self.egress_hosts, .dynamic = &self.egress_dynamic }, &extractHost);
+                        try self.extractLiteralArg(call, .{ .list = &self.egress_urls, .dynamic = &self.egress_dynamic }, null);
                         continue;
                     }
                 }
@@ -1144,7 +1144,7 @@ pub const ContractBuilder = struct {
                                             .extract_host => &extractHost,
                                             .identity => null,
                                         } else null;
-                                    try self.extractLiteralArgAt(call, ext.arg_position, target.list, target.dynamic, transform);
+                                    try self.extractLiteralArgAt(call, ext.arg_position, target, transform);
                                 }
                             },
                         }
@@ -1202,11 +1202,10 @@ pub const ContractBuilder = struct {
     fn extractLiteralArg(
         self: *ContractBuilder,
         call: Node.CallExpr,
-        target: *std.ArrayList([]const u8),
-        dynamic_flag: *bool,
+        target: CategoryTarget,
         transform: ?*const fn ([]const u8) []const u8,
     ) !void {
-        try self.extractLiteralArgAt(call, 0, target, dynamic_flag, transform);
+        try self.extractLiteralArgAt(call, 0, target, transform);
     }
 
     /// Apply one partner-declared extraction rule to a partner-module call
@@ -1231,13 +1230,13 @@ pub const ContractBuilder = struct {
         switch (rule.category) {
             .fetch_host => {
                 // Per-extension copy AND top-level mirror.
-                try self.extractLiteralArgAt(call, rule.arg_position, &bucket.egress_hosts, &bucket.egress_dynamic, transform);
-                try self.extractLiteralArgAt(call, rule.arg_position, &self.egress_hosts, &self.egress_dynamic, transform);
+                try self.extractLiteralArgAt(call, rule.arg_position, .{ .list = &bucket.egress_hosts, .dynamic = &bucket.egress_dynamic }, transform);
+                try self.extractLiteralArgAt(call, rule.arg_position, .{ .list = &self.egress_hosts, .dynamic = &self.egress_dynamic }, transform);
             },
             .extension_specific => {
                 const tag = rule.extension_category orelse return;
                 const cat_bucket = try self.getOrCreateCategoryBucket(bucket, tag);
-                try self.extractLiteralArgAt(call, rule.arg_position, &cat_bucket.literals, &cat_bucket.dynamic, transform);
+                try self.extractLiteralArgAt(call, rule.arg_position, .{ .list = &cat_bucket.literals, .dynamic = &cat_bucket.dynamic }, transform);
             },
             else => {
                 // Other built-in categories from partners route under a
@@ -1247,7 +1246,7 @@ pub const ContractBuilder = struct {
                 // through built-in policy.
                 const tag = @tagName(rule.category);
                 const cat_bucket = try self.getOrCreateCategoryBucket(bucket, tag);
-                try self.extractLiteralArgAt(call, rule.arg_position, &cat_bucket.literals, &cat_bucket.dynamic, transform);
+                try self.extractLiteralArgAt(call, rule.arg_position, .{ .list = &cat_bucket.literals, .dynamic = &cat_bucket.dynamic }, transform);
             },
         }
     }
@@ -1305,8 +1304,7 @@ pub const ContractBuilder = struct {
         self: *ContractBuilder,
         call: Node.CallExpr,
         arg_pos: u8,
-        target: *std.ArrayList([]const u8),
-        dynamic_flag: *bool,
+        target: CategoryTarget,
         transform: ?*const fn ([]const u8) []const u8,
     ) !void {
         if (call.args_count <= arg_pos) return;
@@ -1314,22 +1312,29 @@ pub const ContractBuilder = struct {
         const arg_idx = self.ir_view.getListIndex(call.args_start, arg_pos);
         const arg_tag = self.ir_view.getTag(arg_idx) orelse return;
 
-        if (arg_tag == .lit_string) {
-            const str_idx = self.ir_view.getStringIdx(arg_idx) orelse return;
-            const raw = self.ir_view.getString(str_idx) orelse return;
-            const value = if (transform) |t| t(raw) else raw;
-            if (value.len > 0) {
-                if (!containsString(target.items, value)) {
-                    const duped = try self.allocator.dupe(u8, value);
-                    errdefer self.allocator.free(duped);
-                    try target.append(self.allocator, duped);
-                }
-            } else {
-                dynamic_flag.* = true;
-            }
-        } else {
-            dynamic_flag.* = true;
+        // Non-string arg -> dynamic; the value cannot be proven at
+        // build time. Early-return keeps the literal happy path flat.
+        if (arg_tag != .lit_string) {
+            target.dynamic.* = true;
+            return;
         }
+
+        const str_idx = self.ir_view.getStringIdx(arg_idx) orelse return;
+        const raw = self.ir_view.getString(str_idx) orelse return;
+        const value = if (transform) |t| t(raw) else raw;
+
+        // Empty post-transform (e.g. extractHost on a URL with no host)
+        // is also a dynamic signal.
+        if (value.len == 0) {
+            target.dynamic.* = true;
+            return;
+        }
+
+        if (containsString(target.list.items, value)) return;
+
+        const duped = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(duped);
+        try target.list.append(self.allocator, duped);
     }
 
     // -----------------------------------------------------------------
@@ -2575,7 +2580,7 @@ pub const ContractBuilder = struct {
                         const is_decode_query = fn_name != null and std.mem.eql(u8, fn_name.?, "decodeQuery");
 
                         if (!is_decode_query) {
-                            try self.extractLiteralArg(call, &route.request_schema_refs, &route.request_schema_dynamic, null);
+                            try self.extractLiteralArg(call, .{ .list = &route.request_schema_refs, .dynamic = &route.request_schema_dynamic }, null);
                         }
 
                         if (call.args_count > 0) {
