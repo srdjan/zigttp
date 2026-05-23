@@ -36,6 +36,7 @@ pub const category_counts: Categories = blk: {
             .verifier => v += 1,
             .policy => p += 1,
             .property => pr += 1,
+            .flow => pr += 1,
         }
     }
     break :blk .{ .verifier = v, .policy = p, .property = pr };
