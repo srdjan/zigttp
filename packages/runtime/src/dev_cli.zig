@@ -1997,6 +1997,15 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
             return;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             handler_path = arg;
+        } else {
+            // Reject unknown `-`-prefixed flags rather than silently
+            // dropping them. Symmetric with buildCommand at :2106-2110.
+            // Without this branch, a typo like `--ouptut` was swallowed
+            // and the build proceeded against the wrong (or default)
+            // state with no diagnostic.
+            std.log.err("Unknown argument: {s}", .{arg});
+            printCompileHelp();
+            return error.UnknownOption;
         }
     }
 
@@ -3983,5 +3992,22 @@ test "buildCommand rejects unknown flags as UnknownOption" {
     try testing.expectError(
         error.UnknownOption,
         buildCommand(testing.allocator, &.{"unexpected_positional"}),
+    );
+}
+
+test "compileCommand rejects unknown -prefixed flags symmetrically with buildCommand" {
+    const testing = std.testing;
+    // The argv loop used to silently drop `-`-prefixed unknowns via the
+    // non-matching path between `--help` and the `!startsWith("-")`
+    // positional branch. A typo like `--ouptut` would be ignored and the
+    // build would proceed with the default state. The new else arm
+    // returns UnknownOption — same behaviour as buildCommand.
+    try testing.expectError(
+        error.UnknownOption,
+        compileCommand(testing.allocator, &.{ "--ouptut", "out.bin", "handler.ts" }),
+    );
+    try testing.expectError(
+        error.UnknownOption,
+        compileCommand(testing.allocator, &.{ "--json", "handler.ts", "-o", "out.bin" }),
     );
 }
