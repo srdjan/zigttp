@@ -3,9 +3,11 @@
 //! Mirrors `zigttp ratchet show` from the expert side. The compiler already
 //! infers every handler's property set and writes it to contract.json under
 //! `provenSpecs`. The expert uses this tool to surface the current proven
-//! set and, paired with a baseline file passed as the optional `baseline`
-//! field, the cross-build delta — so a `/ratchet` or `/tighten` prompt can
-//! anchor in compiler facts instead of LLM speculation.
+//! set so a `/ratchet` or `/tighten` prompt can anchor in compiler facts
+//! instead of LLM speculation. Cross-build deltas are derived from the
+//! handler's own `Spec<...>` declarations — there is no baseline file to
+//! pass — so this tool intentionally exposes only the `path` field; the
+//! delta belongs to the corresponding CLI surface (`zigttp ratchet check`).
 
 const std = @import("std");
 const zigts = @import("zigts");

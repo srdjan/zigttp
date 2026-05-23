@@ -28,9 +28,13 @@ After slice 4:
   builds (struct-field declaration order); the JWS payload covers it
   automatically because the JWS is computed over the contract bytes.
 - `zigttp ratchet show <handler.ts>` compiles the handler and prints the
-  current proven set. `zigttp ratchet check --baseline <old.json>
-  <handler.ts>` compiles the current handler, parses the baseline contract,
-  and exits 1 if any property in the baseline is no longer proven.
+  current proven set. `zigttp ratchet check <handler.ts>` compiles the
+  current handler, reads the `Spec<...>` obligations declared on the
+  return type as the baseline, and exits 1 if any declared spec is not
+  proven. The hand-maintained `--baseline <old.json>` file from the
+  initial slice has been retired — the obligation set now lives in
+  source next to the handler that owes it. Handlers that declare no
+  `Spec<...>` exit clean.
 - `zigts_expert_ratchet` is a new compiler-grounded tool that lets the
   expert read the current set programmatically before proposing edits.
 - Existing `Spec<...>` author declarations are unchanged; the ratchet is
@@ -38,10 +42,11 @@ After slice 4:
   obligation is broken. The ratchet adds a parallel rail for the
   *inferred* set so the entire property surface is monotonic by default.
 
-Success metric for the initial slice: a regression that strips
-`validateJson` from a handler causes `zigttp ratchet check` to exit 1 with
-the lost property named in stderr, even though the same edit produces a
-binary that runs and still signs a JWS.
+Success metric for the initial slice: a handler that declares
+`Spec<"injection_safe">` on its return type but no longer calls
+`validateJson` causes `zigttp ratchet check` to exit 1 with
+`injection_safe` named under "unmet", even though the same edit produces
+a binary that runs and still signs a JWS.
 
 ## Architecture Decisions
 
@@ -107,13 +112,14 @@ What landed in this slice:
 - `packages/zigts/src/contract_json_parser.zig`
   - No change required; unknown fields are already skipped, and the array
     is derivable from `properties`, so round-trip is preserved.
-- `packages/runtime/src/ratchet_command.zig` (new)
-  - Implements `zigttp ratchet show <handler.ts>` and `zigttp ratchet check
-    --baseline <old.json> <handler.ts>`. The check loads the baseline,
-    extracts proven names from either the explicit `provenSpecs` array
-    (current builds) or the `properties` object (legacy contracts via a
-    camelCase-to-snake_case helper), and reports gained/lost names. Exits
-    1 on any loss.
+- `packages/runtime/src/ratchet_command.zig`
+  - Implements `zigttp ratchet show <handler.ts>` and `zigttp ratchet
+    check <handler.ts>`. The check compiles once, reads the proven set
+    from `HandlerProperties.provenSpecNames` and the declared set from
+    `contract.declared_specs` (populated from `Spec<...>` on the
+    handler's return type), and exits 1 if any declared spec is not
+    proven. The `--baseline <old.json>` flag from the initial slice has
+    been retired; invoking it now prints a migration message and exits 1.
 - `packages/runtime/src/dev_cli.zig`
   - Dispatches `zigttp ratchet ...` to the new module.
 - `packages/pi/src/tools/zigts_expert_ratchet.zig` (new)
@@ -137,15 +143,23 @@ What did not land in this slice and is deferred:
 
 Demo flow that proves the slice:
 
-1. Write a handler that proves `injection_safe` (uses `validateJson`).
-   Compile with `zigttp ratchet show <handler.ts>` and confirm
-   `injection_safe` appears.
-2. Capture the contract: redirect `zigts check --json <handler.ts>` or use
-   the `.zigttp/build/.../contract.json` that compile already produces.
-3. Edit the handler to drop the `validateJson` call. Run `zigttp ratchet
-   check --baseline <old-contract.json> <handler.ts>`. Confirm exit code
-   1 and a stderr line naming `injection_safe` under "lost".
+1. Write a handler that declares `Spec<"injection_safe">` on its return
+   type and uses `validateJson` so the property holds. Run
+   `zigttp ratchet show <handler.ts>` and confirm `injection_safe`
+   appears in the proven set.
+2. Run `zigttp ratchet check <handler.ts>` and confirm exit 0 with
+   "ratchet held".
+3. Edit the handler to drop the `validateJson` call but leave
+   `Spec<"injection_safe">` on the return type. Re-run
+   `zigttp ratchet check <handler.ts>`. Confirm exit 1 with
+   `injection_safe` named under "unmet (declared but not proven)".
 4. Restore `validateJson`. Re-run check. Confirm exit 0 and "ratchet held".
+
+Regression guard: invoking `zigttp ratchet check --baseline anything.json
+<handler.ts>` (any form: bare flag, `--baseline=anything.json`, typo'd
+`--basline`, an unknown flag, or a second positional path) must exit 1
+with a loud error. Silent acceptance of stale invocations would re-open
+the very gap this slice exists to close.
 
 Out-of-scope demo (slice 4.2):
 

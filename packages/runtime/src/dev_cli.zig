@@ -274,7 +274,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (std.mem.eql(u8, command, "ratchet")) {
         ratchet_command.run(allocator, user_args[1..]) catch |err| switch (err) {
-            error.MissingArgument, error.UnknownSubcommand, error.MissingBaseline => std.process.exit(1),
+            error.MissingArgument,
+            error.UnknownSubcommand,
+            error.UnknownFlag,
+            error.TooManyArguments,
+            error.BaselineFlagRemoved,
+            error.NonRatchetableSpec,
+            => std.process.exit(1),
             error.HandlerCompileFailed, error.Regression => std.process.exit(1),
             else => return err,
         };

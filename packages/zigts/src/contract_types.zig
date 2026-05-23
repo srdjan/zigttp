@@ -656,18 +656,6 @@ pub const HandlerProperties = struct {
         return null;
     }
 
-    /// Inverse of `camelKeyFor`: map a camelCase JSON key back to the
-    /// snake_case field name. Lets baseline-contract loaders rebuild the
-    /// proven set from legacy `properties`-object payloads without
-    /// hand-rolling a translation table.
-    pub fn snakeKeyFor(camel_json_key: []const u8) ?[]const u8 {
-        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
-            if (std.mem.eql(u8, camel_json_key, comptime snakeToCamel(field.name))) {
-                return field.name;
-            }
-        }
-        return null;
-    }
 };
 
 fn isMonotonicProvenSpec(comptime field_name: []const u8) bool {

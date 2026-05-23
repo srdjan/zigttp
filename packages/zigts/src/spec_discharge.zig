@@ -25,6 +25,10 @@ pub const v1_specs = [_]V1Spec{
     .{ .name = "idempotent", .field = .idempotent, .cause_only = true },
     .{ .name = "state_isolated", .field = .state_isolated, .cause_only = true },
     .{ .name = "fault_covered", .field = .fault_covered, .cause_only = true },
+    .{ .name = "pure", .field = .pure, .cause_only = true },
+    .{ .name = "stateless", .field = .stateless, .cause_only = true },
+    .{ .name = "result_safe", .field = .result_safe, .cause_only = true },
+    .{ .name = "optional_safe", .field = .optional_safe, .cause_only = true },
     .{ .name = "no_secret_leakage", .field = .no_secret_leakage, .cause_only = false },
     .{ .name = "no_credential_leakage", .field = .no_credential_leakage, .cause_only = false },
     .{ .name = "input_validated", .field = .input_validated, .cause_only = false },
@@ -48,6 +52,10 @@ pub const PropertyField = enum {
     idempotent,
     state_isolated,
     fault_covered,
+    pure,
+    stateless,
+    result_safe,
+    optional_safe,
     no_secret_leakage,
     no_credential_leakage,
     input_validated,
@@ -62,6 +70,10 @@ pub const PropertyField = enum {
             .idempotent => properties.idempotent,
             .state_isolated => properties.state_isolated,
             .fault_covered => properties.fault_covered,
+            .pure => properties.pure,
+            .stateless => properties.stateless,
+            .result_safe => properties.result_safe,
+            .optional_safe => properties.optional_safe,
             .no_secret_leakage => properties.no_secret_leakage,
             .no_credential_leakage => properties.no_credential_leakage,
             .input_validated => properties.input_validated,
@@ -102,6 +114,18 @@ pub fn suggestionFor(name: []const u8) ?[]const u8 {
     }
     if (std.mem.eql(u8, name, "fault_covered")) {
         return "add an explicit failure path for every critical I/O call site.";
+    }
+    if (std.mem.eql(u8, name, "pure")) {
+        return "remove side effects (virtual-module calls, Date.now, Math.random) from the handler body.";
+    }
+    if (std.mem.eql(u8, name, "stateless")) {
+        return "move module-scope mutable state into the handler body or behind zigttp:cache.";
+    }
+    if (std.mem.eql(u8, name, "result_safe")) {
+        return "match every Result before unwrapping (no `.value` on an unchecked Result).";
+    }
+    if (std.mem.eql(u8, name, "optional_safe")) {
+        return "guard every optional access with `?? fallback` or an explicit `if (x != undefined)` check.";
     }
     return null;
 }
@@ -731,6 +755,46 @@ test "suggestionFor covers all cause-only specs" {
         if (spec.cause_only) {
             try std.testing.expect(suggestionFor(spec.name) != null);
         }
+    }
+}
+
+test "dischargeSpecs recognises pure/stateless/result_safe/optional_safe" {
+    // Regression guard for the v1_specs/HandlerProperties drift fix.
+    // Before this change, dischargeSpecs would emit ZTS502 unknown_name
+    // for every name below — yet ratchet treated them as real
+    // obligations, and the README told authors to write `Spec<"pure">`.
+    // Now each name resolves to its HandlerProperties field and follows
+    // the standard ZTS500 not_discharged path when the property is false.
+    const allocator = std.testing.allocator;
+
+    const props_all_false = HandlerProperties{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = false,
+        .has_egress = false,
+        .idempotent = false,
+        .state_isolated = false,
+        .fault_covered = false,
+        .injection_safe = false,
+        .result_safe = false,
+        .optional_safe = false,
+    };
+    const declared: [4][]const u8 = .{ "pure", "stateless", "result_safe", "optional_safe" };
+    const modules: [0][]const u8 = .{};
+
+    var diags = try dischargeSpecs(allocator, &declared, props_all_false, &modules);
+    defer {
+        for (diags.items) |*d| @constCast(d).deinit(allocator);
+        diags.deinit(allocator);
+    }
+
+    // Four declared names, four not_discharged diagnostics — no unknown_name.
+    try std.testing.expectEqual(@as(usize, 4), diags.items.len);
+    for (diags.items) |d| {
+        try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, d.kind);
+        try std.testing.expect(d.suggestion != null);
     }
 }
 
