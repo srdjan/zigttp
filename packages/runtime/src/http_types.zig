@@ -140,6 +140,16 @@ pub const HttpResponse = struct {
     }
 
     fn putHeaderInternal(self: *HttpResponse, key: []const u8, val: []const u8, owned: bool) !void {
+        // Reject CR, LF, and NUL in header names and values. Any of these
+        // would let a handler smuggle a header break into the response and
+        // forge a second response body (CWE-113). The check runs before
+        // allocation so a forged value never reaches the wire and never
+        // costs a dupe. Inbound request parsing terminates on CRLF, so the
+        // only attacker-reachable path is handler-supplied header values
+        // routed through `putHeader*`.
+        if (containsHeaderControl(key) or containsHeaderControl(val)) {
+            return error.InvalidHeaderValue;
+        }
         const final_key = if (owned) try self.allocator.dupe(u8, key) else key;
         errdefer if (owned) self.allocator.free(final_key);
         const final_val = if (owned) try self.allocator.dupe(u8, val) else val;
@@ -178,3 +188,76 @@ pub const HttpResponse = struct {
         self.requires_runtime = true;
     }
 };
+
+fn containsHeaderControl(s: []const u8) bool {
+    for (s) |c| {
+        if (c == '\r' or c == '\n' or c == 0) return true;
+    }
+    return false;
+}
+
+test "putHeader rejects CRLF in value (response splitting guard)" {
+    const allocator = std.testing.allocator;
+    var response = HttpResponse.init(allocator);
+    defer response.deinit();
+
+    try std.testing.expectError(
+        error.InvalidHeaderValue,
+        response.putHeader("X-User", "ok\r\nSet-Cookie: stolen=1"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), response.headers.items.len);
+}
+
+test "putHeader rejects bare LF in value" {
+    const allocator = std.testing.allocator;
+    var response = HttpResponse.init(allocator);
+    defer response.deinit();
+
+    try std.testing.expectError(
+        error.InvalidHeaderValue,
+        response.putHeader("X-User", "ok\nSet-Cookie: stolen=1"),
+    );
+}
+
+test "putHeader rejects CR in key" {
+    const allocator = std.testing.allocator;
+    var response = HttpResponse.init(allocator);
+    defer response.deinit();
+
+    try std.testing.expectError(
+        error.InvalidHeaderValue,
+        response.putHeader("X-Bad\rKey", "value"),
+    );
+}
+
+test "putHeader rejects NUL in value" {
+    const allocator = std.testing.allocator;
+    var response = HttpResponse.init(allocator);
+    defer response.deinit();
+
+    try std.testing.expectError(
+        error.InvalidHeaderValue,
+        response.putHeader("X-User", "ok\x00rest"),
+    );
+}
+
+test "putHeaderBorrowed rejects CRLF (validation runs before ownership check)" {
+    const allocator = std.testing.allocator;
+    var response = HttpResponse.init(allocator);
+    defer response.deinit();
+
+    try std.testing.expectError(
+        error.InvalidHeaderValue,
+        response.putHeaderBorrowed("X-User", "ok\r\nEvil: 1"),
+    );
+}
+
+test "putHeader accepts normal values" {
+    const allocator = std.testing.allocator;
+    var response = HttpResponse.init(allocator);
+    defer response.deinit();
+
+    try response.putHeader("Content-Type", "application/json; charset=utf-8");
+    try response.putHeader("X-Custom", "value with spaces and 1234");
+    try std.testing.expectEqual(@as(usize, 2), response.headers.items.len);
+}
