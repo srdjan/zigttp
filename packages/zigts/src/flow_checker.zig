@@ -1948,3 +1948,25 @@ test "propertyTagForKind: every DiagnosticKind maps to the expected PropertyTag"
         propertyTagForKind(.unvalidated_input_in_egress),
     );
 }
+
+test "propertyTagForKind: every DiagnosticKind variant maps to a non-null PropertyTag" {
+    // Exhaustiveness lock. The per-variant assertions above pin the
+    // current mapping; this test pins the more important invariant that
+    // EVERY variant maps to something. Without it, a future maintainer
+    // adding a new DiagnosticKind can satisfy Zig's switch exhaustiveness
+    // with `else => null,` — both the compiler and the per-variant test
+    // stay green while the new variant silently disappears from the
+    // proven-property surface (callers like proof_trace and
+    // pi_repair_plan all use `orelse continue`).
+    inline for (@typeInfo(DiagnosticKind).@"enum".fields) |field| {
+        const kind: DiagnosticKind = @enumFromInt(field.value);
+        const tag = propertyTagForKind(kind);
+        std.testing.expect(tag != null) catch |err| {
+            std.log.err(
+                "DiagnosticKind.{s} has no PropertyTag mapping; add an arm to propertyTagForKind",
+                .{field.name},
+            );
+            return err;
+        };
+    }
+}
