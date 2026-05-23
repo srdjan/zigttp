@@ -2011,7 +2011,11 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
         return error.MissingArgument;
     }
 
-    try buildArtifact(allocator, handler_path.?, output_path.?, null, attest_requested);
+    try buildArtifact(allocator, .{
+        .handler_path = handler_path.?,
+        .output_path = output_path.?,
+        .attest_requested = attest_requested,
+    });
 }
 
 const ProjectArtifact = struct {
@@ -2112,7 +2116,11 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var artifact = try prepareProjectArtifact(allocator, io_backend.io(), "build", output_override);
     defer artifact.deinit(allocator);
 
-    try buildArtifact(allocator, artifact.handler_path, artifact.output_path, null, attest_requested);
+    try buildArtifact(allocator, .{
+        .handler_path = artifact.handler_path,
+        .output_path = artifact.output_path,
+        .attest_requested = attest_requested,
+    });
 
     std.debug.print(
         \\
@@ -2162,7 +2170,12 @@ fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
     // surface, not silently warn.
     try std.Io.Threaded.chdir(artifact.project.root_dir);
 
-    try buildArtifact(allocator, artifact.handler_path, artifact.output_path, artifact.project_name, attest_requested);
+    try buildArtifact(allocator, .{
+        .handler_path = artifact.handler_path,
+        .output_path = artifact.output_path,
+        .ledger_service_name = artifact.project_name,
+        .attest_requested = attest_requested,
+    });
 
     std.debug.print(
         \\
@@ -2190,13 +2203,26 @@ fn buildAttestationJws(
     return try attest_build_receipt.buildJws(allocator, contract_json, bytecode, contract);
 }
 
-fn buildArtifact(
-    allocator: std.mem.Allocator,
+/// Inputs to `buildArtifact`. Bundled so the three call sites
+/// (`compileCommand`, `buildCommand`, `localDeployCommand`) name what they
+/// pass rather than relying on positional order across a 5-param signature.
+const ArtifactBuildInput = struct {
     handler_path: []const u8,
     output_path: []const u8,
-    ledger_service_name: ?[]const u8,
+    /// Service name to record in the proof ledger entry. Null when the
+    /// build is not part of a named project (`compile`/`build` paths);
+    /// set to the project name on the `deploy --local` path.
+    ledger_service_name: ?[]const u8 = null,
+    /// Whether the caller asked for an embedded attestation JWS.
     attest_requested: bool,
-) !void {
+};
+
+fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void {
+    const handler_path = input.handler_path;
+    const output_path = input.output_path;
+    const ledger_service_name = input.ledger_service_name;
+    const attest_requested = input.attest_requested;
+
     const source = zigts.file_io.readFile(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
         std.log.err("Failed to read handler '{s}': {}", .{ handler_path, err });
         return err;
