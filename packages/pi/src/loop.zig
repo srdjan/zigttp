@@ -391,7 +391,17 @@ fn runPostApplyTool(
 
     report.ok = false;
     if (spec.overwrite_summary) {
-        if (report.summary) |s| allocator.free(s);
+        // Null the field BEFORE the free, then re-assign. If `dupe` later
+        // OOMs the field is null rather than dangling — otherwise the
+        // caller's `runPostApplyTool(...) catch return report` would
+        // swallow the error and the outer call site's
+        // `defer if (post_apply.summary) |s| allocator.free(s);` would
+        // free the already-freed pointer. Guards against the regression
+        // verified in the prior code review (CONFIRMED at loop.zig:393).
+        if (report.summary) |s| {
+            report.summary = null;
+            allocator.free(s);
+        }
         report.summary = try allocator.dupe(u8, spec.summary);
     } else if (report.summary == null) {
         report.summary = try allocator.dupe(u8, spec.summary);
