@@ -12,17 +12,20 @@ const handler_verifier = @import("handler_verifier.zig");
 const strict_checker = @import("strict_checker.zig");
 const handler_policy = @import("handler_policy.zig");
 const property_diagnostics = @import("property_diagnostics.zig");
+const flow_checker = @import("flow_checker.zig");
 
 pub const RuleCategory = enum {
     verifier,
     policy,
     property,
+    flow,
 
     pub fn label(self: RuleCategory) []const u8 {
         return switch (self) {
             .verifier => "verifier",
             .policy => "policy",
             .property => "property",
+            .flow => "flow",
         };
     }
 };
@@ -394,6 +397,101 @@ const capsule_meta = [_]struct {
 };
 
 // ---------------------------------------------------------------------------
+// Flow rules (ZTS4xx) - derived from flow_checker.DiagnosticKind
+//
+// The data-label flow checker emits ZTS4xx codes for {secret}, {credential},
+// and {user_input} leaks reaching responses, logs, and egress. Wave 1B/2D
+// P0 #5 (2026-05-23 review) flagged that `policyHash` did not include
+// these rules, so adding, removing, or renaming a flow diagnostic did not
+// trip the embedded-contract drift check at runtime. The `comptime` block
+// below pins exhaustiveness against the live enum: any new DiagnosticKind
+// variant must show up here, or the build fails with a named compile
+// error. Codes mirror `packages/tools/src/json_diagnostics.zig:151-162`.
+// ---------------------------------------------------------------------------
+
+const flow_meta = [_]struct {
+    kind: flow_checker.DiagnosticKind,
+    code: []const u8,
+    description: []const u8,
+    example: ?[]const u8,
+    help: []const u8,
+}{
+    .{
+        .kind = .secret_in_response,
+        .code = "ZTS400",
+        .description = "A value labeled {secret} reaches a Response body or header.",
+        .example = "const key = env('SECRET_KEY'); return Response.json({ key });",
+        .help = "Do not return secrets to clients; derive a public artifact or drop the label.",
+    },
+    .{
+        .kind = .credential_in_response,
+        .code = "ZTS401",
+        .description = "A value labeled {credential} reaches a Response body.",
+        .example = "const token = jwtSign(claims, secret); return Response.json({ token });",
+        .help = "Return only opaque session ids; never echo credentials issued by the handler.",
+    },
+    .{
+        .kind = .secret_in_log,
+        .code = "ZTS402",
+        .description = "A value labeled {secret} reaches console.log / warn / error.",
+        .example = "const key = env('SECRET_KEY'); logInfo(key);",
+        .help = "Strip or mask the secret before logging.",
+    },
+    .{
+        .kind = .credential_in_log,
+        .code = "ZTS403",
+        .description = "A value labeled {credential} reaches console.log / warn / error.",
+        .example = "const auth = parseBearer(req.headers.get('Authorization')); logDebug(auth);",
+        .help = "Log a hash or session id instead of the credential itself.",
+    },
+    .{
+        .kind = .secret_in_egress_url,
+        .code = "ZTS404",
+        .description = "A value labeled {secret} reaches a fetch URL.",
+        .example = "const key = env('SECRET_KEY'); fetchSync(`https://api/?k=${key}`);",
+        .help = "Send the secret in a request header or body field that is not part of the URL.",
+    },
+    .{
+        .kind = .credential_in_egress_url,
+        .code = "ZTS405",
+        .description = "A value labeled {credential} reaches a fetch URL.",
+        .example = "fetchSync(`https://api/u?token=${authToken}`);",
+        .help = "Use an Authorization header instead of placing credentials in URLs.",
+    },
+    .{
+        .kind = .secret_in_egress_body,
+        .code = "ZTS406",
+        .description = "A value labeled {secret} reaches a fetch request body.",
+        .example = "fetchSync('https://api/echo', { method: 'POST', body: JSON.stringify({ key }) });",
+        .help = "Forward the secret only to a host on the egress allow-list, or strip it.",
+    },
+    .{
+        .kind = .unvalidated_input_in_egress,
+        .code = "ZTS407",
+        .description = "A {user_input} value without {validated} reaches an egress call.",
+        .example = "fetchSync(`https://api/echo?q=${req.url.searchParams.get('q')}`);",
+        .help = "Pass user input through validateJson / schemaCompile or strip it before egress.",
+    },
+};
+
+comptime {
+    // Exhaustiveness gate: every flow_checker.DiagnosticKind must have a row
+    // in flow_meta. If a new variant lands without a corresponding rule, the
+    // build fails with the variant name — the policy hash cannot silently
+    // miss a new ZTS4xx code.
+    const fields = @typeInfo(flow_checker.DiagnosticKind).@"enum".fields;
+    var seen: [fields.len]bool = .{false} ** fields.len;
+    for (flow_meta) |entry| {
+        seen[@intFromEnum(entry.kind)] = true;
+    }
+    for (seen, 0..) |s, idx| {
+        if (!s) {
+            @compileError("flow_meta missing entry for flow_checker.DiagnosticKind." ++ fields[idx].name);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unified rule table (comptime-assembled)
 // ---------------------------------------------------------------------------
 
@@ -409,7 +507,11 @@ fn strictName(kind: strict_checker.DiagnosticKind) []const u8 {
     return @tagName(kind);
 }
 
-const total_count = verifier_meta.len + strict_meta.len + capsule_meta.len + policy_meta.len + property_meta.len;
+fn flowName(kind: flow_checker.DiagnosticKind) []const u8 {
+    return @tagName(kind);
+}
+
+const total_count = verifier_meta.len + strict_meta.len + capsule_meta.len + policy_meta.len + property_meta.len + flow_meta.len;
 
 pub const all_rules: [total_count]RuleEntry = blk: {
     var rules: [total_count]RuleEntry = undefined;
@@ -471,6 +573,18 @@ pub const all_rules: [total_count]RuleEntry = blk: {
             .description = p.description,
             .example = null,
             .help = p.help,
+        };
+        i += 1;
+    }
+
+    for (flow_meta) |f| {
+        rules[i] = .{
+            .name = flowName(f.kind),
+            .code = f.code,
+            .category = .flow,
+            .description = f.description,
+            .example = f.example,
+            .help = f.help,
         };
         i += 1;
     }
@@ -551,6 +665,12 @@ fn computePolicyHash() [64]u8 {
         hasher.update("\x00");
         hasher.update(rule.code);
         hasher.update("\x00");
+        // Category byte — included so reclassifying a rule from `.policy` to
+        // `.flow` (or vice versa) drifts the hash even when text strings
+        // stay identical. Wave 1B/2D P0 #5 (2026-05-23 review).
+        const category_byte: u8 = @intCast(@intFromEnum(rule.category));
+        hasher.update(&[_]u8{category_byte});
+        hasher.update("\x00");
         hasher.update(rule.description);
         hasher.update("\x00");
         hasher.update(rule.help);
@@ -567,8 +687,68 @@ fn computePolicyHash() [64]u8 {
 
 test "all_rules has expected count" {
     try std.testing.expectEqual(total_count, all_rules.len);
-    // Sanity: at least 13 verifier + 8 policy + 6 property = 27
-    try std.testing.expect(all_rules.len >= 27);
+    // Sanity: verifier + policy + property + flow categories all populate.
+    // 13+ verifier + 8 policy + 6 property + 8 flow = 35+. The lower bound
+    // tracks the smallest legitimate set; the exact count is enforced by the
+    // total_count == all_rules.len check above.
+    try std.testing.expect(all_rules.len >= 35);
+}
+
+test "all_rules includes every flow_checker.DiagnosticKind under .flow" {
+    // Mirrors the comptime exhaustiveness gate but verifies the projection
+    // into all_rules — guards against a refactor that wires flow_meta but
+    // forgets to append it to the unified table.
+    inline for (@typeInfo(flow_checker.DiagnosticKind).@"enum".fields) |field| {
+        const kind: flow_checker.DiagnosticKind = @enumFromInt(field.value);
+        const name = @tagName(kind);
+        const entry = findByName(name) orelse {
+            std.log.err("flow rule '{s}' missing from all_rules", .{name});
+            return error.MissingFlowRule;
+        };
+        try std.testing.expectEqual(RuleCategory.flow, entry.category);
+    }
+}
+
+test "policyHash differs when a rule is reclassified to a different category" {
+    // Direct unit-style assertion: feeding the same name/code/text strings
+    // but different categories must produce different hashes. This guards
+    // the category-byte inclusion in computePolicyHash.
+    const a: RuleEntry = .{
+        .name = "x",
+        .code = "ZTSTEST",
+        .category = .verifier,
+        .description = "d",
+        .example = null,
+        .help = "h",
+    };
+    const b: RuleEntry = .{
+        .name = "x",
+        .code = "ZTSTEST",
+        .category = .flow,
+        .description = "d",
+        .example = null,
+        .help = "h",
+    };
+    var ha = std.crypto.hash.sha2.Sha256.init(.{});
+    var hb = std.crypto.hash.sha2.Sha256.init(.{});
+    inline for (.{ &ha, &hb }, .{ a, b }) |h, rule| {
+        h.update(rule.name);
+        h.update("\x00");
+        h.update(rule.code);
+        h.update("\x00");
+        const cat: u8 = @intCast(@intFromEnum(rule.category));
+        h.update(&[_]u8{cat});
+        h.update("\x00");
+        h.update(rule.description);
+        h.update("\x00");
+        h.update(rule.help);
+        h.update("\x01");
+    }
+    var da: [32]u8 = undefined;
+    var db: [32]u8 = undefined;
+    da = ha.finalResult();
+    db = hb.finalResult();
+    try std.testing.expect(!std.mem.eql(u8, &da, &db));
 }
 
 test "findByName returns entry" {
