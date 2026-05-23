@@ -79,16 +79,32 @@ pub const LockFreePool = struct {
             const heap_state = try allocator.create(heap.Heap);
             errdefer allocator.destroy(heap_state);
             heap_state.* = heap.Heap.init(allocator, .{});
+            errdefer heap_state.deinit();
             gc_state.setHeap(heap_state);
 
-            // Initialize request arena if hybrid allocation enabled
+            // Initialize request arena if hybrid allocation enabled.
+            //
+            // Zig's `errdefer` is scope-bound: an `errdefer arena.deinit()`
+            // placed inside the `if` block only fires when the function
+            // exits via error *while still inside that block*. Once the
+            // block has exited normally, a later failure in
+            // `context.Context.init` or `builtins.initBuiltins` would leak
+            // the arena's backing buffer (up to 4 MiB per call). The
+            // function-scope errdefer below catches that path via the
+            // captured `request_arena` pointer.
             var request_arena: ?*arena_mod.Arena = null;
             var hybrid: ?arena_mod.HybridAllocator = null;
+            errdefer if (request_arena) |a| {
+                a.deinit();
+                allocator.destroy(a);
+            };
 
             if (config.use_hybrid_allocation) {
                 const arena_ptr = try allocator.create(arena_mod.Arena);
                 errdefer allocator.destroy(arena_ptr);
                 arena_ptr.* = try arena_mod.Arena.init(allocator, config.arena_config);
+                // From here on, ownership is transferred to `request_arena`
+                // and the function-scope errdefer above handles cleanup.
                 request_arena = arena_ptr;
 
                 hybrid = arena_mod.HybridAllocator{
@@ -98,6 +114,7 @@ pub const LockFreePool = struct {
             }
 
             const ctx = try context.Context.init(allocator, gc_state, config.ctx_config);
+            errdefer ctx.deinit();
 
             // Install builtins before hybrid allocator is attached so they persist across arena resets.
             try builtins.initBuiltins(ctx);
@@ -490,4 +507,38 @@ test "pool acquire and release" {
     const rt2 = try pool.acquire();
     try std.testing.expectEqual(rt, rt2);
     pool.release(rt2);
+}
+
+test "Runtime.create errdefer ladder closes every failure path" {
+    // Walk FailingAllocator.fail_index forward through Runtime.create's
+    // allocation sequence. testing.allocator catches any leak on the
+    // failure path; an incomplete errdefer ladder (e.g. arena_ptr.deinit
+    // missing after arena_mod.Arena.init succeeds and a later allocation
+    // fails) trips the leak detector on the *first* fail_index that lands
+    // past that point. The success path is identical to the existing
+    // Runtime tests above — this exercises the rollback side only.
+    const child = std.testing.allocator;
+
+    var fail_at: usize = 0;
+    const max_steps: usize = 4096;
+    while (fail_at < max_steps) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(child, .{ .fail_index = fail_at });
+        const result = LockFreePool.Runtime.create(failing.allocator(), .{});
+        if (result) |rt| {
+            // We've exceeded the allocation count of a successful create();
+            // destroy and stop walking.
+            rt.destroy(failing.allocator());
+            break;
+        } else |err| {
+            // Any non-OOM error means our injected failure is being masked
+            // by a different error class — the test would no longer be
+            // exercising what it claims to.
+            try std.testing.expectEqual(error.OutOfMemory, err);
+        }
+    } else {
+        // Ran the loop to completion without ever succeeding. Either the
+        // runtime got dramatically heavier or the bound is too tight; fail
+        // loud rather than silently passing.
+        return error.RuntimeCreateAllocationCountExceededTestBound;
+    }
 }
