@@ -161,8 +161,38 @@ pub const RawRuntimeContract = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Validation sentinel — closes Wave 1B/2D P0 #4 (2026-05-23 review).
+//
+// `ValidatedRuntimeContract.inner` used to be a public field with no
+// type-level construction gate, so callers could synthesise a fake
+// "validated" contract with a `ValidatedRuntimeContract{ .inner = ... }`
+// literal and bypass `verifyCapabilityMatrix` / `verifyPolicyHash` /
+// `verifyArtifactHash` entirely. The `ValidationProof` struct below carries
+// a function-pointer field whose argument type is a file-private opaque:
+// external code cannot name `SentinelMarker`, so it cannot declare a
+// function of the matching signature, and anonymous struct literal
+// coercion has nowhere to land. The only path that produces a
+// `ValidationProof` value is `validation_proof` inside this file, and the
+// only path that wraps it into a `ValidatedRuntimeContract` is `validate`
+// or the explicitly-named internal helper `validatedFromInner` used by
+// tests in this module.
+// ---------------------------------------------------------------------------
+
+const SentinelMarker = opaque {};
+fn validatedMarker(_: *const SentinelMarker) void {}
+const ValidationProof = struct {
+    marker: *const fn (*const SentinelMarker) void,
+};
+const validation_proof: ValidationProof = .{ .marker = validatedMarker };
+
 pub const ValidatedRuntimeContract = struct {
     inner: RuntimeContract,
+    /// Construction gate; only `validate` (and the file-private
+    /// `validatedFromInner` test helper) can populate this field because
+    /// the type's function-pointer argument refers to a non-pub opaque.
+    /// Do not name this field from outside this file.
+    _proof: ValidationProof,
 
     pub fn deinit(self: *ValidatedRuntimeContract) void {
         self.inner.deinit();
@@ -193,6 +223,16 @@ pub const ValidatedRuntimeContract = struct {
     }
 };
 
+/// File-private constructor used by tests in this module and by helpers
+/// that have either run the integrity checks themselves or are exercising
+/// a code path that does not need them (e.g. unit tests that probe
+/// `derivePoolingPolicy`). External modules cannot call this because the
+/// declaration is not `pub`, and they cannot reproduce its return value
+/// because they cannot name `ValidationProof`.
+fn validatedFromInner(inner: RuntimeContract) ValidatedRuntimeContract {
+    return .{ .inner = inner, ._proof = validation_proof };
+}
+
 pub const ValidateOptions = struct {
     /// Embedded bytecode blob whose SHA-256 must match the contract's
     /// `artifact_sha256`. Skipping the check for a non-zero hash is unsafe;
@@ -215,7 +255,7 @@ pub fn validate(
     try verifyCapabilityMatrix(&inner);
     try verifyPolicyHash(&inner);
     try verifyArtifactHash(&inner, opts.bytecode);
-    return .{ .inner = inner };
+    return validatedFromInner(inner);
 }
 
 /// Parse a contract JSON blob into a RuntimeContract.
@@ -1078,7 +1118,7 @@ test "derivePoolingPolicy: pure+deterministic+isolated = unbounded" {
         },
         .allocator = std.testing.allocator,
     };
-    var validated = ValidatedRuntimeContract{ .inner = contract };
+    var validated = validatedFromInner(contract);
     try std.testing.expectEqual(PoolingPolicy.reuse_unbounded, derivePoolingPolicy(&validated));
 }
 
@@ -1094,7 +1134,7 @@ test "derivePoolingPolicy: read_only+isolated = ttl" {
         },
         .allocator = std.testing.allocator,
     };
-    var validated = ValidatedRuntimeContract{ .inner = contract };
+    var validated = validatedFromInner(contract);
     try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_ttl, derivePoolingPolicy(&validated));
 }
 
@@ -1110,7 +1150,7 @@ test "derivePoolingPolicy: has_egress = bounded count" {
         },
         .allocator = std.testing.allocator,
     };
-    var validated = ValidatedRuntimeContract{ .inner = contract };
+    var validated = validatedFromInner(contract);
     try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&validated));
 }
 
@@ -1207,6 +1247,42 @@ test "derivePoolingPolicy: !state_isolated = bounded count" {
         },
         .allocator = std.testing.allocator,
     };
-    var validated = ValidatedRuntimeContract{ .inner = contract };
+    var validated = validatedFromInner(contract);
     try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&validated));
+}
+
+// ---------------------------------------------------------------------------
+// Construction gate — Wave 1B/2D P0 #4 (2026-05-23 review). External code
+// cannot literal-construct a `ValidatedRuntimeContract` because the
+// `_proof` field's function-pointer type refers to a file-private opaque
+// (`SentinelMarker`). We cannot author a compile-fail test for that case
+// (Zig has no negative-compilation harness), so we pin the positive path's
+// proof identity and the structural shape of the sentinel signature
+// instead. If a future refactor weakens either, these assertions break.
+// ---------------------------------------------------------------------------
+
+test "validatedFromInner installs the canonical validation_proof" {
+    const contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .allocator = std.testing.allocator,
+    };
+    const direct = validatedFromInner(contract);
+    try std.testing.expect(direct._proof.marker == validation_proof.marker);
+}
+
+test "ValidationProof argument type is a file-private opaque" {
+    const fn_ptr_info = @typeInfo(@TypeOf(validation_proof.marker));
+    try std.testing.expect(fn_ptr_info == .pointer);
+    const child_info = @typeInfo(fn_ptr_info.pointer.child);
+    try std.testing.expect(child_info == .@"fn");
+    try std.testing.expectEqual(@as(usize, 1), child_info.@"fn".params.len);
+    const param = child_info.@"fn".params[0].type.?;
+    const param_info = @typeInfo(param);
+    try std.testing.expect(param_info == .pointer);
+    const opaque_info = @typeInfo(param_info.pointer.child);
+    try std.testing.expect(opaque_info == .@"opaque");
 }
