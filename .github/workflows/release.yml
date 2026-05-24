@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  ZIG_VERSION: '0.16.0-dev.3073+28ae5d415'
+  ZIG_VERSION: '0.16.0'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   PROOF_LEDGER_PATH: ${{ vars.PROOF_LEDGER_PATH || '' }}
   PROOF_LEDGER_ONTO: ${{ vars.PROOF_LEDGER_ONTO || 'HEAD' }}

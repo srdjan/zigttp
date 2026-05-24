@@ -4,7 +4,7 @@ How to build, how to test, and the conventions a PR must respect before merge. F
 
 ## Toolchain
 
-Validated on Zig `0.16.0-dev.3073+28ae5d415`. Newer nightlies are best-effort until revalidated. Use the exact version in `build.zig.zon`'s `minimum_zig_version` if you hit confusing build errors.
+Validated on Zig `0.16.0` stable. Use the exact version in `build.zig.zon`'s `minimum_zig_version` if you hit confusing build errors.
 
 ## Build
 

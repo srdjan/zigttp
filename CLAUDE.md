@@ -6,7 +6,7 @@ Serverless JavaScript runtime for FaaS, powered by zigts (pure Zig JS engine). T
 
 ## Build & Run
 
-Validated on Zig 0.16.0-dev.3073+28ae5d415. Newer nightlies are best-effort until revalidated.
+Validated on Zig 0.16.0 stable.
 
 The build produces three binaries:
 

@@ -40,5 +40,5 @@ attached below.
 
 ## Verification
 
-- Toolchain: Zig `0.16.0-dev.3073+28ae5d415`
+- Toolchain: Zig `0.16.0`
 - Policy hash: `<output of zigts describe-rule --hash>`

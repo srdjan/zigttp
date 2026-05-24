@@ -291,7 +291,7 @@ drops in jsonOps/objectCreate/gcPressure sit inside the ±5% noise band
 the microbench harness exhibits on a quiet machine and do not trip the
 bench-check gate (8% per-bench, 3% geomean).
 
-Hardware: Apple Darwin 25.3.0 arm64. Zig 0.16.0-dev.3073+28ae5d415.
+Hardware: Apple Darwin 25.3.0 arm64. Zig 0.16.0.
 Commit range: `10684c0` (pre-plan tip) through the post-Phase-7
 baseline commit.
 

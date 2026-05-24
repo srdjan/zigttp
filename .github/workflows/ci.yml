@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ZIG_VERSION: '0.16.0-dev.3073+28ae5d415'
+  ZIG_VERSION: '0.16.0'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
