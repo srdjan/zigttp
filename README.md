@@ -1,76 +1,32 @@
 <p align="center">
   <img src="docs/zigttp-logo.jpg" alt="zigttp" width="600">
-  <p align="center"><a href="https://zigttp.timok.deno.net/">🌐 Web Site</a></p>
+  <p align="center"><a href="https://zigttp.timok.deno.net/">Website</a> - <a href="docs/README.md">Documentation</a></p>
 </p>
 
-# Compile-time proof you can see.
+# Compile-time proof you can see
 
-**Edit your handler. Watch the proof flip live.** Every save is recompiled and proven. The terminal proof card shows your handler's declared `Spec<...>` obligations - `deterministic`, `no_secret_leakage`, `injection_safe`, `idempotent` - discharged in real time. Drop a `Date.now()` into the body and `-deterministic` lights up red with a `Why:` row pointing at the source line. Wrap it in `step("ts", () => Date.now())` from `zigttp:durable` and the chip flips back green. Press `Tab` in the HUD to rotate the proof card through three lenses: `Properties` (the default), `Trade` (each proof paired with the substrate restrictions that earned it), and `Handover` (an AI proof certificate suitable for copy-pasting into a coding agent).
+zigttp is a pure-Zig JavaScript engine plus a serverless runtime. One
+binary, no dependencies, instant cold starts. The compiler is the
+whole product: every JavaScript restriction (no `var`, no `while`, no
+`class`, no `try/catch`) buys a specific compile-time proof. Your
+handler code is the spec.
 
-<!-- Screencast lives at docs/proof-hud-demo.mov once recorded; same asset embeds in the website hero. -->
-<p align="center"><em>First-touch loop: <code>zigttp init</code> -> <code>zigttp dev</code> -> save -> red chip -> wrap -> green chip. The same proof card can be mirrored in Studio at <code>/_zigttp/studio</code>.</em></p>
-
-zigttp is a pure-Zig JS engine plus a serverless runtime. One binary, no dependencies, instant cold starts. The compiler is the whole product: every JavaScript restriction (no `var`, no `while`, no `class`, no `try/catch`) buys a specific compile-time proof. **Your handler code is the spec.** See [`zigts restrictions`](docs/restrictions-to-proofs.md) for the cut-to-proof map and [`examples/README.md`](examples/README.md) for the curated reading order.
+**Edit your handler. Watch the proof flip live.** Every save is
+recompiled and proven. The terminal proof card shows your handler's
+declared `Spec<...>` obligations - `deterministic`,
+`no_secret_leakage`, `injection_safe`, `idempotent` - discharged in
+real time. Drop a `Date.now()` into the body and `-deterministic`
+lights up red with a `Why:` row pointing at the source line. Wrap it
+in `step("ts", () => Date.now())` from `zigttp:durable` and the chip
+flips back green.
 
 ```bash
 zigttp init my-app && cd my-app && zigttp dev
 ```
 
-Validated release target: Zig `0.16.0`. The build produces three binaries: `zigttp` (the developer CLI and local runtime entrypoint), `zigttp-runtime` (the internal runtime template used for self-contained outputs), and `zigts` (the compiler/analyzer plus interactive coding-agent CLI).
-
-### What makes it different
-
-**Opinionated language subset.** TypeScript with the footguns removed. No classes, no `this`, no `var`, no `while` loops, no `switch` - just functions, `let`/`const`, arrow functions, destructuring, `for...of`, `match` expressions, and `assert` statements. Unsupported features fail at parse time with a suggested alternative, not at runtime with a cryptic stack trace. The payoff: each restriction enables a compiler guarantee that would be impossible with general JavaScript.
-
-**JSX as a first-class primitive.** The parser handles JSX directly - no Babel, no build step. Write TSX handlers that return server-rendered HTML.
-
-**Compile-time verification.** `-Dverify` proves your handler correct at build time: every code path returns a Response, Result values are checked before access, no unreachable code. The IR tree is the control flow graph: no back-edges, no exceptions. `break` and `continue` within `for-of` are forward jumps only and don't compromise this property. See [verification docs](docs/verification.md).
-
-**Sound mode.** The compiler uses type inference to catch bugs across all operators at compile time, not just in boolean contexts. Arithmetic on non-numeric types is rejected (`"hello" - 1`, `true * 5`, `env("X") / 2`). Mixed-type `+` is an error - use template literals. Tautological comparisons (`typeof x === "number"` when x is provably number) emit warnings. In boolean contexts, types with unambiguous falsy states are accepted (`if (count)`, `if (name)`), while objects and functions are rejected (always truthy). Values the static checker cannot prove are caught by runtime VM assertions. When types are statically proven, the compiler emits specialized opcodes (`add_num`, `lt_num`, etc.) that skip runtime type dispatch. See [sound mode docs](docs/sound-mode.md).
-
-**Compile-time evaluation.** `comptime()` folds expressions at load time, modeled after Zig's comptime. Hash a version string, uppercase a constant, precompute a config value - all before the handler runs.
-
-**Automatic runtime sandboxing.** Every precompiled handler is sandboxed by default. The compiler extracts a contract of what the handler does (env vars, outbound hosts, cache namespaces, SQL query names) and derives a least-privilege policy that restricts runtime access to exactly the proven values. No configuration required. `-Dcontract` additionally emits a `contract.json` manifest. `-Dpolicy=policy.json` overrides auto-derived sandboxing with an explicit policy. Non-literal arguments honestly report `"dynamic": true`. Self-extracting binaries parse the embedded contract at startup: proven env vars are validated (missing vars fail fast instead of causing a 500 on first request), proven routes reject non-matching requests at the HTTP layer before entering JS, and proven handler properties are logged for operator visibility.
-
-**Handler effect classification.** Every virtual module function carries a compile-time effect annotation (read, write, or none). During contract extraction, the compiler folds those calls into a small internal effect summary and derives handler-level properties: pure, read-only, stateless, retry-safe, deterministic, idempotent (safe for at-least-once delivery), injection-safe (no unvalidated input in sinks), and state-isolated (no cross-request data leakage). The I/O depth bound (max virtual module calls per request) enables compile-time Lambda timeout derivation. These properties flow into deployment manifests, OWASP compliance mapping, and the build report with no extra annotations. Handlers proven `deterministic` and `read_only` also have their GET/HEAD responses cached at runtime and served from Zig memory without entering JS. The `X-Zigttp-Proof-Cache: hit` response header confirms a cache hit.
-
-**Full TypeScript type checking.** The compiler checks type annotations, not just strips them. Variable types, function argument types, return types, property access on records, and virtual module function signatures are validated at build time. Generic type aliases (`type Result<T> = { ok: boolean; value: T }`) are instantiated when used in annotations. Object literals are structurally matched against declared interface and type alias return types. Optional types from virtual modules (`env()`, `cacheGet()`, `parseBearer()`) are narrowed in if-guards: `if (x)`, `if (!x) return`, and `if (x !== undefined)` all narrow nullable bindings to their inner type. Discriminated unions narrow in if-conditions: `if (r.kind === "err") { return; }` narrows `r` to the remaining member afterward. Type guard functions (`x is T`) narrow in both if-branches and after `assert` statements. `distinct type UserId = string` creates nominal types that prevent cross-type assignment while unwrapping for operations. `readonly` fields reject assignment at compile time. Template literal types (`` `/api/${string}` ``) validate string patterns at build time. `const` bindings preserve literal types; `: Type` annotations validate assignability without widening. `let` bindings widen literals so reassignment works. Interface declarations with all-function members are nominal to prevent structural forgery.
-
-**Structured concurrent I/O.** `parallel()` and `race()` from `zigttp:io` overlap outbound HTTP without async/await or Promises. Handler code stays synchronous and linear; concurrency happens in the I/O layer using OS threads. Three API calls at 50ms each complete in ~50ms total.
-
-**One-command deploy.** `zigttp deploy` produces a self-contained binary at `.zigttp/deploy/<your-app>` and appends a `kind=deploy` row to `.zigttp/proofs.jsonl`. No credentials, Docker, or network: run the binary anywhere. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
-
-**Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state. Handlers become deterministic pure functions of (Request, VirtualModuleResponses).
-
-**Durable execution.** `--durable <dir>` enables crash recovery and long-running workflows via write-ahead oplog. Wrap work in `run(key, fn)` from `zigttp:durable` with an idempotency key; each I/O call is persisted before returning to the handler. On crash recovery, recorded results are replayed without touching the network. Completed runs are deduplicated by key. Durable runs can suspend with `sleep(ms)`, `sleepUntil(unixMs)`, or `waitSignal(name)` and resume when the timer fires or a signal arrives via `signal(key, name, payload)`. A background scheduler polls for ready timers and signals using the same replay-safe recovery path.
-
-**Guard composition.** `guard()` from `zigttp:compose` combined with the pipe operator (`|>`) composes handlers with pre/post guards at compile time. The parser desugars `guard(auth) |> guard(log) |> handler |> guard(cors)` into a single flat function with sequential if-checks - zero runtime overhead.
-
-**Behavioral contract.** `-Dcontract` enumerates every execution path through the handler and embeds them in contract.json as structured `behaviors`. Each path records the route, branching conditions (which I/O calls succeed or fail), the I/O sequence, and the resulting HTTP status. The restricted JS subset has no back-edges and no exceptions, so path enumeration is finite and exhaustive. Comparing two behavioral contracts shows which paths were preserved, which changed response codes, which were removed, and which are new.
-
-**Proven evolution.** `-Dprove=contract.json:traces.jsonl` compares two handler versions by diffing their contracts (surface and behavior) and replaying recorded traces. The upgrade verifier produces a four-value verdict: `safe`, `safe_with_additions`, `breaking`, or `needs_review`. It factors in behavioral path changes, property regressions with severity (critical/warning/info), and trace coverage gaps. Output: `proof.json`, `proof-report.txt`, and `upgrade-manifest.json`. The standalone `zigts prove old.json new.json` CLI compares contracts without rebuilding (exit 0 for safe, 1 for breaking, 2 for needs_review).
-
-**Proven live reload.** `--watch --prove` watches handler files and hot-swaps them in-process on every save. The server recompiles the handler, extracts its behavioral contract, diffs it against the running version, and applies the change only when the upgrade verdict is `safe` or `safe_with_additions`. Breaking changes (removed routes, lost critical properties) block the swap and print the diff. `--force-swap` overrides the block. Without `--prove`, `--watch` hot-reloads without contract proof. Compilation errors keep the old handler running. Durable handlers refuse live swap because replay state depends on handler identity.
-
-**Proof ledger.** Every successful `zigttp deploy` and every `dev --watch --prove` swap appends one row to `.zigttp/proofs.jsonl` with the proven facts (env keys, egress hosts, cache namespaces, routes, capabilities, properties), the contract sha, and a verdict against the prior entry. The verdict words match the deploy card and the live-reload diff. `zigttp proofs list` browses the timeline, `proofs show <ref>` re-renders any past entry, `proofs diff <a> <b>` derives the delta between two entries, `proofs watch` tails new ones, and `proofs export --format md|html|svg` produces a markdown receipt, HTML doc, or SVG verdict badge. Refs accept `HEAD`, `HEAD~N`, or a contract sha prefix. The ledger persists only contract-derived identifiers; no env values, tokens, or PII.
-
-**Proof receipts.** Default-on across the deploy boundary. Every fresh `zigttp deploy` signs the contract, bytecode, and rule-registry hashes with the persistent Ed25519 identity at `~/.zigttp/attest/keypair.bin` (generated on first use; verifiers pin once and trust every future deploy from that origin). The running server precomputes two response headers once at startup: `Zigttp-Proofs: pure, read_only, injection_safe, ...` (the human-readable chip list) and `Zigttp-Attest: <compact JWS>` (the signed envelope). `GET /.well-known/zigttp-attest` serves the same JWS plus the full embedded contract as cacheable JSON (ETag, `Cache-Control: max-age=3600`, 304 on `If-None-Match`), so security scanners and registry crawlers can fetch the proof without calling every handler route. Any third party can run `zigttp verify <url>` to validate the signature against the embedded public key and print the proven claims. Optional `--trust-key <hex>` pins an expected key fingerprint; `--json` emits structured output for CI. Pass `--no-attest` to suppress for a specific build. Specs and trust model: [docs/roadmap/attest-slice-1.md](docs/roadmap/attest-slice-1.md), [docs/roadmap/attest-slice-2.md](docs/roadmap/attest-slice-2.md).
-
-**Property ratchet.** Slice 4 of the attest program closes the cross-build gap. Every contract.json now carries a top-level `provenSpecs` array (the canonical, ordered list of properties the compiler proves true) alongside the existing `properties` object, plus a `declaredSpecs` array sourced from `Spec<...>` on the handler's return type. Both ride inside the signed JWS payload, so a third party can diff two builds and see exactly which property moved. `zigttp ratchet show <handler.ts>` compiles the handler and prints the current proven set; `zigttp ratchet check <handler.ts>` compiles the source, diffs the declared `Spec<...>` obligations against the proven set, and exits 1 if any declared spec is not proven. The obligation set lives in source next to the handler that owes it — no hand-maintained baseline file. Handlers that declare no `Spec<...>` exit clean (nothing to ratchet against). Spec and follow-up backlog: [docs/roadmap/attest-slice-4.md](docs/roadmap/attest-slice-4.md).
-
-**Contract-driven mock server.** `zigts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
-
-**Generated tests.** `zigts gen-tests handler.ts -o handler.test.jsonl` writes a JSONL test file from the same behavioral path enumeration the compiler uses internally. Each proven execution path becomes one runnable test case: synthesized request, ordered I/O stubs, expected status. The output runs immediately via `--test` or `zigts mock`. The `zigts expert` agent calls this automatically after edits so the test suite stays in sync with the proof.
-
-**Proof-first Route Forge.** `zigts expert` can author new routes through the compiler instead of free-form codegen. `/forge route file=handler.ts method=GET path=/health` synthesizes the route, proves the candidate in memory, shows the diff and proof summary, and only writes after explicit approval through the same compiler veto that guards normal edits. Every accepted forge lands as a `verified_patch` in the session ledger.
-
-**Author-declared specs (`Spec<...>`).** Declare which compiler-proven properties your handler must satisfy directly in the return type. `import type { Spec } from "zigttp:types"`, alias the obligations as `type Guardrails = Spec<"idempotent" | "deterministic" | "no_secret_leakage">`, and intersect them on the handler: `function handler(req: Request): Response & Guardrails`. The verifier discharges each spec against the inferred `HandlerProperties`; failures emit ZTS500 with a per-property suggestion, ZTS501 for spec-vs-import contradictions, and ZTS502 for unknown names. The proof HUD, proof ledger, and `zigts expert`'s `pi_specs_status` tool all read the active spec set straight from source - your handler is the obligation contract. Helpers carry the companion `Proof<T, "...">` capsule - the compiler discharges `total`, `pure`, `read_only`, and `deterministic` against each helper's own body, so a handler's proof composes across call boundaries instead of dying at the first helper (an unproven effectful helper that breaks a demanded property fails with ZTS606). The capability dual, `Effects<T, "...">`, declares a least-privilege ceiling on a function's effect row - checked `inferred ⊆ declared` - and on the handler's return type becomes a budget that bounds every reachable helper (ZTS503-ZTS508, ZTS607).
-
-**Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead. Each module binding declares what runtime capabilities its implementation uses (clock, crypto, stderr, etc.); checked helpers enforce the declarations at call time, so implementation drift panics instead of silently misbehaving.
-
-### Numbers
-
-~3.5ms cold-start floor, ~7-15ms typical cold start. 4.8MB deployed binary. ~13MB memory baseline. Pre-warmed handler pool with per-request isolation. See [performance docs](docs/performance.md) for the measured cold-start distribution and the Node/Deno throughput comparison.
+See [`zigts restrictions`](docs/restrictions-to-proofs.md) for the
+cut-to-proof map and [`examples/README.md`](examples/README.md) for
+the curated reading order.
 
 ## Install
 
@@ -91,45 +47,24 @@ zig build -Doptimize=ReleaseFast
 
 ## Quick Start
 
-The v1 user flow is `init` -> `dev` -> edit -> `test` -> `deploy`. Each command
-auto-detects the project from `zigttp.json` so most steps take no arguments.
-Local deploy is the default; `--local` is accepted when you want the target to
-be explicit.
-
-Day-to-day use is five commands: `init`, `dev`, `test`, `expert`, `deploy`.
-Everything else stays in the background until you need it - run
-`zigttp help --all` to see the advanced commands.
+Day-to-day use is five commands: `init`, `dev`, `test`, `expert`,
+`deploy`. Each auto-detects the project from `zigttp.json`, so most
+steps take no arguments. Everything else stays in the background until
+you need it; run `zigttp help --all` for the full list.
 
 ```bash
-# 1. Scaffold a new project
-zigttp init my-app && cd my-app
-
-# 2. Start proof-aware live reload (runs the analyzer, then watches)
-zigttp dev
-
-# 3. Edit src/handler.ts in your editor.
-#    HTMX projects use src/handler.tsx.
-#    The HUD re-verifies on save and names the failing stage on errors.
-
-# 4. Run the starter fixture
-zigttp test
-
-# 5. Build, prove, and deploy locally (writes .zigttp/proofs.jsonl)
-zigttp deploy
+zigttp init my-app && cd my-app   # scaffold a new project
+zigttp dev                        # proof-aware live reload
+# ... edit src/handler.ts (HTMX projects use src/handler.tsx)
+zigttp test                       # run the starter fixture
+zigttp deploy                     # self-contained signed binary
 ./.zigttp/deploy/my-app
 ```
 
-Test it:
-
-```bash
-curl http://localhost:3000/
-```
-
-`zigttp expert` opens the interactive compiler-in-the-loop agent.
-
-For the full first project path, see [Getting Started](docs/getting-started.md).
-That guide is covered by `zig build smoke-getting-started`. To read the verdict
-`dev` and `test` print on every save, see [Reading the Proof Card](docs/proof-card.md).
+For the full first project path, see
+[Getting Started](docs/getting-started.md). For the verdict that `dev`
+and `test` print on every save, see
+[Reading the Proof Card](docs/proof-card.md).
 
 ## Handler Example
 
@@ -137,13 +72,8 @@ That guide is covered by `zig build smoke-getting-started`. To read the verdict
 function HomePage() {
     return (
         <html>
-            <head>
-                <title>Hello World</title>
-            </head>
-            <body>
-                <h1>Hello World</h1>
-                <p>Welcome to zigttp!</p>
-            </body>
+            <head><title>Hello World</title></head>
+            <body><h1>Hello World</h1></body>
         </html>
     );
 }
@@ -152,1131 +82,116 @@ function handler(request) {
     if (request.url === "/") {
         return Response.html(renderToString(<HomePage />));
     }
-
     if (request.url === "/api/echo") {
-        return Response.json({
-            method: request.method,
-            url: request.url,
-            body: request.body,
-        });
+        return Response.json({ method: request.method, url: request.url });
     }
-
     return Response.text("Not Found", { status: 404 });
 }
 ```
 
-## HTMX Example
-
-zigttp includes native support for HTMX attributes in JSX:
-
-```jsx
-function TodoForm() {
-    return (
-        <form
-            hx-post="/todos"
-            hx-target="#todo-list"
-            hx-swap="beforeend">
-            <input type="text" name="text" required />
-            <button type="submit">Add Todo</button>
-        </form>
-    );
-}
-
-function handler(request) {
-    if (request.url === "/" && request.method === "GET") {
-        return Response.html(renderToString(<TodoForm />));
-    }
-
-    if (request.url === "/todos" && request.method === "POST") {
-        // Parse form data, create todo item
-        const todoHtml = renderToString(
-            <div class="todo-item">New todo item</div>
-        );
-        return Response.html(todoHtml);
-    }
-
-    return Response.text("Not Found", { status: 404 });
-}
-```
-
-See [examples/htmx-todo/](examples/htmx-todo/) for a complete HTMX application.
-
-## Virtual Modules
-
-zigttp exposes native Zig modules through `import { ... } from "zigttp:*"`.
-They provide common handler needs such as env access, crypto, validation,
-SQLite, cache, outbound fetch, durable workflows, WebSockets, and structured
-concurrent I/O.
-
-The canonical module index is [docs/virtual-modules/README.md](docs/virtual-modules/README.md).
-It links to each per-module API page and records the effect classification used
-by contract extraction. The implementation registry lives in
-`packages/zigts/src/builtin_modules.zig`; public module specs live under
-`packages/modules/module-specs/`.
-
-### Auth Example
-
-```typescript
-import { parseBearer, jwtVerify, jwtSign } from "zigttp:auth";
-
-function handler(req: Request): Response {
-    const token = parseBearer(req.headers["authorization"]);
-    if (token === undefined) return Response.json({ error: "unauthorized" }, { status: 401 });
-
-    const result = jwtVerify(token, "my-secret");
-    if (!result.ok) return Response.json({ error: result.error }, { status: 401 });
-
-    return Response.json({ user: result.value });
-}
-```
-
-### Validation Example
-
-```typescript
-import { schemaCompile } from "zigttp:validate";
-import { decodeJson } from "zigttp:decode";
-
-schemaCompile("user", JSON.stringify({
-    type: "object",
-    required: ["name", "email"],
-    properties: {
-        name: { type: "string", minLength: 1, maxLength: 100 },
-        email: { type: "string", minLength: 5 },
-        age: { type: "integer", minimum: 0, maximum: 200 }
-    }
-}));
-
-function handler(req: Request): Response {
-    if (req.method === "POST") {
-        const result = decodeJson("user", req.body ?? "{}");
-        if (!result.ok) return Response.json({ errors: result.errors }, { status: 400 });
-        return Response.json({ user: result.value }, { status: 201 });
-    }
-    return Response.json({ ok: true });
-}
-```
-
-Use `decodeJson`, `decodeForm`, and `decodeQuery` as the default request-ingress helpers when the payload shape is schema-backed. `validateJson` and `coerceJson` remain available for lower-level validation flows.
-
-### Cache Example
-
-```typescript
-import { cacheGet, cacheSet, cacheStats } from "zigttp:cache";
-
-function handler(req: Request): Response {
-    const cached = cacheGet("api", req.url);
-    if (cached !== undefined) return Response.json(JSON.parse(cached));
-
-    const data = { message: "computed", path: req.url };
-    cacheSet("api", req.url, JSON.stringify(data), 60); // TTL: 60 seconds
-
-    return Response.json(data);
-}
-```
-
-### Concurrent I/O Example
-
-```typescript
-import { parallel, race } from "zigttp:io";
-
-function handler(req: Request): Response {
-    // Three API calls in ~50ms instead of ~150ms
-    const [user, orders, inventory] = parallel([
-        () => fetchSync("https://users.internal/api/v1/123"),
-        () => fetchSync("https://orders.internal/api/v1?user=123"),
-        () => fetchSync("https://inventory.internal/api/v1/789")
-    ]);
-
-    return Response.json({
-        user: user.json(),
-        orders: orders.json(),
-        inventory: inventory.json()
-    });
-}
-```
-
-See [examples/modules/modules_all.ts](examples/modules/modules_all.ts) for an integration example using all modules together.
-
-### SQL Example
-
-```typescript
-import { sql, sqlMany, sqlExec } from "zigttp:sql";
-
-sql("listTodos", "SELECT id, title, done FROM todos ORDER BY id ASC");
-sql("createTodo", "INSERT INTO todos (title, done) VALUES (:title, 0)");
-
-function handler(req: Request): Response {
-    if (req.method === "GET") {
-        return Response.json({ items: sqlMany("listTodos") });
-    }
-
-    const body = JSON.parse(req.body);
-    return Response.json(sqlExec("createTodo", { title: body.title }), { status: 201 });
-}
-```
-
-Build-time validation requires a schema snapshot:
-
-```bash
-zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sql
-```
-
-## CLI Options
-
-Five commands cover day-to-day use:
-
-```bash
-zigttp init <name> [--template basic|api|htmx]
-zigttp dev [options] [handler.ts]
-zigttp test [tests.jsonl]
-zigttp expert
-zigttp deploy [--no-attest]
-```
-
-Everything else is advanced and stays out of the default help. Run
-`zigttp help --all` for the full list - the analyzer commands (`check`,
-`prove`, `mock`, `link`, `gen-tests`), `serve`, `build`, `compile`, `doctor`,
-`studio`, `proofs`, and more. Each keeps its own
-`zigttp <command> --help`.
-
-Project commands auto-detect `zigttp.json` from the current directory or a
-parent. The advanced `serve` command is the lower-level path for one-off
-handlers and self-contained binaries; scaffolded projects set `"port": 3000`,
-while raw `serve` defaults to 8080 unless a project manifest is discovered.
-
-Common `dev` / `serve` options:
-
-```bash
-zigttp dev [options] [handler.ts]
-zigttp serve [options] [handler.ts]
-
-Options:
-  -p, --port <PORT>     Port (project default: 3000; raw serve: 8080)
-  -h, --host <HOST>     Host (default: 127.0.0.1)
-  -e, --eval <CODE>     Inline JavaScript handler
-  -m, --memory <SIZE>   JS runtime memory limit (default: 0 = no limit)
-  -n, --pool <N>        Runtime pool size (default: auto)
-  -q, --quiet           Disable request logging
-  --cors                Enable CORS headers
-  --static <DIR>        Serve static files
-  --outbound-http       Enable native outbound bridge (fetchSync/httpRequest)
-  --outbound-host <H>   Restrict outbound bridge to exact host H
-  --outbound-timeout-ms Connect timeout for outbound bridge (ms)
-  --outbound-max-response <SIZE>
-  --watch               Watch handler files and hot-swap on change
-  --prove               With --watch: diff behavioral contracts before swapping
-  --force-swap          With --watch --prove: apply breaking changes anyway
-  --trace <FILE>        Record handler I/O traces to JSONL file
-  --replay <FILE>       Replay recorded traces and verify handler output
-  --test <FILE>         Run declarative handler tests from JSONL file
-  --sqlite <FILE>       SQLite database path for zigttp:sql
-  --durable <DIR>       Enable durable execution with write-ahead oplog
-  --system <FILE>       System registry for zigttp:service
-  --security-log <FILE> Append security events (policy denies, panics) to FILE
-  --lifecycle <MODE>    Runtime lifecycle: ephemeral | bounded | reuse
-  --no-env-check        Skip startup env var validation (development use)
-```
-
-Every command keeps its own `--help` (`zigttp dev --help`,
-`zigttp deploy --help`, and so on), including the advanced ones.
-
-### `zigttp deploy`
-
-The v1 deploy path. Verifies the handler in the current project, emits a
-self-contained binary at `.zigttp/deploy/<project-name>`, and appends a
-`kind=deploy` row to `.zigttp/proofs.jsonl`. No cloud credentials, no
-Docker, no registry, no network access.
-
-```bash
-zigttp deploy
-./.zigttp/deploy/<project-name>
-```
-
-`zigttp deploy --local` and `zigttp deploy --target local` are explicit
-aliases for the same path.
-
-Attestation is default-on: the build signs a JWS that the running
-server emits on every response as `Zigttp-Attest` and serves at
-`GET /.well-known/zigttp-attest` as JSON. The signing key is the
-persistent identity at `~/.zigttp/attest/keypair.bin`, so multiple
-deploys from the same operator share one verifiable fingerprint. Pass
-`--no-attest` to skip signing for one build. See the `zigttp verify`
-section below and
-[docs/roadmap/attest-slice-2.md](docs/roadmap/attest-slice-2.md) for
-the full design and trust model.
-
-### Hosted cloud deploy
-
-A hosted control-plane deploy is in development and deferred from
-v0.1.0-beta. The beta path is the self-contained binary that
-`zigttp deploy` produces above - run it anywhere. `zigttp deploy --cloud`
-and the related account commands are not available in this release.
-
-### `zigttp edge`
-
-In-process edge runtime. Loads multiple handler pools and routes incoming
-requests by host, method, and path prefix to a named target. Useful when
-several handlers share one listener (multitenant edge, A/B routing, or
-internal request fan-out).
-
-```bash
-zigttp edge --config zigttp.edge.json
-zigttp edge -c custom.edge.json
-```
-
-Config is a JSON file with three sections - listener, handlers, routes:
-
-```json
-{
-    "listener": { "host": "127.0.0.1", "port": 8080, "protocol": "http" },
-    "handlers": [{ "name": "api", "entry": "src/handler.ts", "pool": 8 }],
-    "routes": [{ "host": "*", "method": "*", "pathPrefix": "/", "target": "api" }]
-}
-```
-
-Each handler entry is verified at load time. Routes match on host +
-method + path-prefix in declaration order; routes with multiple targets
-distribute via least-busy or weighted round-robin. TLS termination is
-post-v1 roadmap, so run behind a trusted front proxy for HTTPS today.
-See [docs/edge.md](docs/edge.md) for the full config reference.
-
-### `zigttp proofs`
-
-Browse the local proof ledger at `.zigttp/proofs.jsonl`. `zigttp deploy`
-and `dev --watch --prove` swaps append rows; `proofs` itself never
-writes. Each row carries a verdict (`safe`, `safe_with_additions`,
-`breaking`) computed against the prior row.
-
-```bash
-zigttp proofs                              # last 10 entries, newest last
-zigttp proofs list                         # explicit form
-zigttp proofs show <ref>                   # re-render the review card from a past entry
-zigttp proofs diff <a> <b>                 # render the card for <b> using <a> as baseline
-zigttp proofs watch                        # tail new entries as they land (Ctrl+C to exit)
-zigttp proofs export                       # markdown receipt to stdout (defaults: --ref HEAD, --format md)
-zigttp proofs export --format html         # self-contained HTML doc
-zigttp proofs export --format svg          # verdict badge for a README
-zigttp proofs export --ref HEAD~2 --format md
-zigttp proofs bundle --contract PATH --out DIR [--binary PATH] [--replay PATH]
-zigttp proofs verify <bundle-dir>          # re-check every component sha256
-```
-
-Refs may be `HEAD`, `HEAD~N`, or a contract sha prefix. The exporter
-prints to stdout; redirect to commit a receipt or badge alongside the
-PR description. `bundle` packages a contract (and optional binary plus
-replay artifacts) into a directory layout with a reproducible
-`bundle.json` manifest; `verify` re-checks every sha256 in the manifest
-against the actual file bytes. The bundle carries no env values,
-secrets, or tokens; only contract-derived identifiers and explicitly
-supplied replay artifacts.
-
-### `zigttp verify`
-
-Third-party proof-receipt verifier. Fetches a deployed URL, reads its
-`Zigttp-Attest` response header, validates the embedded Ed25519
-signature, and prints the proven claims. This is the consumer-facing
-half of `--attest`: a CI pipeline, security scanner, partner
-integration, or MCP host can run it from any machine without prior
-coordination with the build that produced the binary.
-
-```bash
-zigttp verify <url>                           # human-readable claims
-zigttp verify <url> --json                    # one-line JSON for CI
-zigttp verify <url> --trust-key <hex>         # pin an expected fingerprint
-```
-
-`--trust-key` takes the 64-character SHA-256 fingerprint of the
-expected public key and exits non-zero on mismatch. Exit codes:
-`0` verified, `1` argument error, `2` endpoint did not return the
-header, `3` signature invalid, `4` fingerprint mismatch, `5`
-HTTP-level error.
-
-`zigttp verify <url>` is distinct from `zigttp proofs verify
-<bundle-dir>`: the first checks a live endpoint over HTTP, the second
-re-hashes the components of a locally-stored proof bundle. Both belong
-to the same proof-receipt family. The well-known doc at
-`/.well-known/zigttp-attest` carries the same JWS plus the full
-contract surface for offline inspection; verifiers can pin the key
-fingerprint with `--trust-key <hex>` once and trust every future
-deploy from the same operator.
-
-### `zigttp studio`
-
-Start the browser proof workbench for a handler:
-
-```bash
-zigttp studio examples/handler/handler.ts
-```
-
-Studio runs the handler with `--watch --prove` and serves
-`/_zigttp/studio`. The workbench opens with a terminal mirror: the
-same ASCII proof card frame the HUD writes to stderr, rendered
-byte-for-byte in the browser. Below it sit release readiness, declared
-`Spec<...>` status, proven properties, surface deltas, the witness
-corpus, a verdict timeline of recent rebuilds, and next actions that
-link the compiler-backed CLI and `zigts expert` flows. A `Properties /
-Trade / Handover` tab bar above the verdict pane mirrors the TUI's
-`Tab`-rotated lens: `Properties` is the default pill grid, `Trade`
-pairs each proven property with the substrate restrictions that earned
-it, and `Handover` shows the full AI proof certificate with a one-click
-Copy button. The active lens persists across reloads. Failing spec
-pills expand inline to the matching ZTS500/501/502 diagnostic with
-source line and snippet; witness rows expand to show the falsifying
-request, expected vs got, and IO stubs without a CLI hop. Generated
-path tests download with a one-click link. The terminal HUD prints a
-one-line `Studio mirror: http://...` footer beneath each proof card
-frame, wrapped in an OSC 8 hyperlink so modern terminals make it
-click-to-open. In the expert REPL, `/studio <handler.ts>` prints the
-same startup command and URL.
-
-### zigts CLI (compiler and analyzer)
-
-Standalone analysis and compilation without starting a server.
-
-`zigts expert` picks its model backend from the environment: `ANTHROPIC_API_KEY` selects the Anthropic provider, `OPENAI_API_KEY` selects the OpenAI provider (non-streaming `chat/completions`). An empty value counts as missing; if neither variable is set to a non-empty value, the CLI exits with a setup message instead of launching. The persona, reference material, skill catalog, prompt templates, themes, and compiler metadata are all baked into the binary; there is no runtime plugin surface. The one external input that reaches the system prompt is `AGENTS.md` / `CLAUDE.md`, walked up from cwd to the enclosing `.git/` directory and appended as a labelled read-only project-context section with a 128 KiB cap. Disable with `--no-context-files`. Full pi architecture: [packages/pi/README.md](packages/pi/README.md).
-
-```bash
-# Interactive REPL
-zigts expert
-zigts expert --resume                    # resume newest session for this cwd
-zigts expert --continue                  # alias for --resume
-zigts expert --session-id <id>           # named or resumed session
-zigts expert --fork <session-id>         # branch from an existing session
-zigts expert --yes                       # auto-approve all verified edits
-zigts expert --no-edit                   # auto-reject all verified edits
-zigts expert --no-context-files          # skip AGENTS.md / CLAUDE.md load
-zigts expert --tools minimal             # workspace-read-only tool preset
-zigts expert --tools full                # full compiler tool preset (default)
-
-# Non-interactive (one turn and exit)
-zigts expert --print "add a GET /health route"
-zigts expert --print "..." --mode json   # NDJSON event stream to stdout
-
-# Line-delimited JSON-RPC 2.0 over stdio (long-lived session)
-zigts expert --mode rpc
-
-# Property-goal autoloop (compiler drives convergence; LLM is not in the loop)
-zigts expert --handler handler.ts --goal no_secret_leakage,injection_safe
-zigts expert --handler handler.ts --goal no_secret_leakage --max-iters 4
-```
-
-In `--mode json`, each event is `{"v":1,"k":"<kind>","d":<payload>}`. Kinds: `user_text`, `model_text`, `tool_use`, `tool_result`, `proof_card`, `diagnostic_box`, `verified_patch`, `system_note`, `autoloop_outcome`, `end`. Persisted `events.jsonl` lines use the same envelope for transcript events, but `end` is a live-stream-only sentinel emitted last on success. Errored runs may terminate without `end`, and session files do not persist it.
-
-In `--mode rpc`, each stdin line is a JSON-RPC 2.0 request; each stdout response line is a result or error keyed by `id`. Methods: `turn`, `compact`, `session.info`, `tools.list`, `tools.invoke`, `skills.list`, `templates.{list,expand}`, `model.{list,set}`, `shutdown`. During a `turn`, each new transcript entry emits as a notification with method `"event"` before the final result lands.
-
-The interactive REPL accepts slash commands alongside natural language:
-
-```
-/compact                       collapse the session transcript into a summary
-/fork                          branch the current session into a new directory
-/tree                          list all sessions for this workspace
-/resume  /continue             reload the newest session for this cwd
-/new                           start a fresh session
-/model                         show the active model and available IDs
-/model <id>                    switch to a different model mid-session
-/skills                        list available skill shortcuts
-/skill:<name>                  send the named skill body as a prompt
-/templates                     list available prompt templates
-/template:<name> [args...]     expand a template and send it as a prompt
-/settings                      show compile-time defaults (model, token limits)
-/settings theme                list available TUI themes
-/settings theme <name>         switch the session's TUI theme
-/studio <handler.ts>           show the browser proof workbench command
-/feature route file=<handler.ts> method=<VERB> path=</path>
-                                preview a compiler-native route plan
-/forge route file=<handler.ts> method=<VERB> path=</path>
-                                synthesize and prove a route candidate
-/hotkeys                       list keyboard shortcuts
-/changelog                     recent expert subsystem additions
-```
-
-After each model turn the REPL prints cumulative token use for the session: `[tokens: in=N cache_r=N cache_w=N out=N]`. The totals reset when you start a new session or reload with `/new` or `/resume`.
-
-#### Route Forge
-
-Route Forge is the compiler-native path for adding handler routes with `zigts expert`.
-
-```bash
-# Preview only: typed plan, candidate source, diff, and verification summary
-/feature route file=handler.ts method=GET path=/health
-
-# Closed-loop forge: synthesize, prove, attempt a verifier repair if needed
-/forge route file=handler.ts method=POST path=/todos body=todo status=201
-```
-
-`/feature` never writes. `/forge` returns an inspectable candidate and marks it ready only when it introduces zero new compiler violations. In the TUI, press `A` on the selected forge result to apply it; the apply tool reruns the compiler veto against the current file and records the accepted change as a `verified_patch`.
-
-#### Property-goal autoloop
-
-`--goal <csv> --handler <path>` short-circuits the conversational run. The compiler drives a fixed `pi_goal_check → pi_repair_plan → pi_apply_repair_plan` cycle until every requested property flips green or a budget trips. The LLM is not in the loop here; only the compiler. Each successful apply lands a chained `verified_patch` event with its full witness diff (counterexamples the patch closed and any new ones it introduced), and every exit path emits a durable `autoloop_outcome` event with the verdict, iteration count, per-goal met/unmet lists, and the final patch hash. The run persists a session; the verdict line is followed by a `session: <id> (resume with \`zigts expert --resume\`)` hint so a follow-up TUI run opens the witnesses tab on the patches the autoloop produced. Verdicts: `achieved`, `exhausted_iters`, `exhausted_time`, `stalled`, `regression_blocked`, `tool_failed`. A patch that demotes a previously-green property is rolled back and the session exits `regression_blocked`. Supported goals are the five flow-oriented PropertyTags: `no_secret_leakage`, `no_credential_leakage`, `input_validated`, `pii_contained`, `injection_safe`. Full reference: [docs/roadmap/autoloop.md](docs/roadmap/autoloop.md).
-
-#### Proof Delta Card
-
-In the interactive TUI's ledger view (default), each `verified_patch` opens to a Proof Delta Card showing property-change badges (`+retry_safe`, `-pure`), violations before → after, witness defeated/new counts, and the chain header (`patch <short> <- parent <short>`). The diff is collapsed by default; press `Enter` to expand. Single-key `A` approves the selected patch when the witness gate is clean (no pending or new witnesses), emitting an `approved <short-hash> for <file>` system note as the audit receipt. Tab cycles through the detail panes (Delta, Diff, Properties, Violations, Prove, System, Citations, Witnesses) for line-level inspection.
-
-The Witnesses tab carries the full counterexample body for every witness the patch defeated or introduced: request method + URL, IO stub script, source spans, property tag, stable digest. Press `w` from anywhere to jump to it. On the selected witness, `r` replays it against the post-patch handler and renders the verdict inline (`PASS - violation reproduced`, `FIXED - violation no longer reproduces`, or `ERROR`). `g` runs the autoloop scoped to that one witness's stable key, ending the moment that specific witness is gone. `m` mints the witness as a regression test in `<handler-dir>/witness-regressions.jsonl` so future `zig build -Dhandler=... -Dtest-file=witness-regressions.jsonl` builds catch a re-introduction. Each verified patch also emits an `auto-replay` system note that records how the witness diff held up against the post-patch handler.
-
-The interactive surface runs as a bottom-anchored TUI: the status line (session, model, token totals) and input line stay pinned at the bottom while scrollback flows above. Redraws wrap in CSI `?2026h` / `?2026l` synchronized-output sequences so supporting terminals render each frame atomically. The full-screen view uses themed Workbench-style pane headers, row selection, tab accents, proof badges, witness verdicts, and modal chrome. Two themes ship (`default`, `solarized-dark`); swap mid-session with `/settings theme <name>`.
-
-On resume, the session's `meta.json` carries the `policy_hash` it was created under. If the current binary's hash differs, the REPL prepends a `[policy drift]` system note to the transcript so the model knows prior rule citations may be stale against today's compiler.
-
-```bash
-zigts check [handler.ts] [options]    # Verify handler, show proof card
-zigts compile [--system path] <handler.ts> <out.zig>  # Compile to embedded bytecode
-zigts prove <old.json> <new.json>     # Compare contracts (exit 0=safe, 1=breaking)
-zigts mock <tests.jsonl> [--port N]   # Mock server from test cases
-zigts link <system.json>              # Cross-handler contract linking
-zigts rollout <old-system.json> <new-system.json>  # Plan safe multi-handler rollout
-zigts features [--json]               # List allowed/blocked language features (with reason and proof unlocked)
-zigts modules [--json]                # List virtual modules and exports
-zigts restrictions [--json] [--by proof|class]  # Language cuts mapped to the proofs they unlock
-zigts meta [--json]                   # Policy metadata (version, hash, rule count)
-zigts gen-tests [handler.ts] [-o output.jsonl]  # Generate tests from proven paths
-zigts verify-paths <f>... [--json]    # Full analysis on files (includes flow-checker)
-zigts verify-modules --builtins --strict --json  # Governance audit
-zigts edit-simulate [handler.ts] [--before old.ts]  # Report violations an edit would introduce
-zigts describe-rule [name|code] [--json] [--hash]   # Inspect diagnostic rules
-zigts search <keyword> [--json]       # Find rules by keyword
-zigts review-patch <file> [--before <old>] [--diff-only]  # Surface only new violations
-zigts verify-module-manifest <manifest.json> [--json]  # Validate a partner zigttp-module.json
-zigts extension-status --module-manifest <path>... [--json]  # Report registered partner manifests
-zigts ledger export --session <id> --out <path>  # Export proof-carrying patches from an expert session
-zigts ledger replay --input <path> --onto <git-ref>  # Re-apply a ledger onto a base revision
-```
-
-#### Structured JSON output
-
-`zigts check --json handler.ts` writes machine-readable diagnostics to stdout. Add `--system system.json` when the handler uses `serviceCall()` and you want compile-time typing for internal service responses and request-shape validation.
-
-```json
-{
-  "success": false,
-  "diagnostics": [{
-    "code": "ZTS001",
-    "severity": "error",
-    "message": "'try/catch' is not supported",
-    "file": "handler.ts",
-    "line": 23,
-    "column": 3,
-    "suggestion": "use Result types for error handling"
-  }]
-}
-```
-
-On success, the output includes a proof summary: env vars, outbound hosts, virtual modules, and handler properties.
-
-Code ranges: ZTS0xx (parser), ZTS1xx (sound mode), ZTS2xx (type checker), ZTS3xx (handler verifier), ZTS4xx (flow checker), ZTS5xx (author-declared specs), ZTS6xx (strict ZigTS profile).
-
-## Key Features
-
-**Performance**: Type-prefix NaN-boxing (single-instruction type checks), index-based hidden classes with SoA layout and O(1) transition lookups, polymorphic inline cache (PIC), generational GC, hybrid arena allocation for request-scoped workloads.
-
-**HTTP/FaaS Optimizations**: Shape preallocation for Request/Response objects, pre-interned HTTP atoms, HTTP string caching, LockFreePool handler isolation, zero-copy response mode.
-
-**Compile-Time Analysis**: Handler verification (`-Dverify`) proves correctness at build time. Contract extraction with behavioral paths and auto-sandboxing restrict runtime capabilities to proven values. Proven properties also control runtime behavior: deterministic+read_only handlers have their responses cached and served without JS execution. `zigttp:sql` queries are prepared against a build-time schema snapshot via `-Dsql-schema=...`. Sound mode rejects non-numeric arithmetic, mixed-type `+`, and tautological comparisons at compile time, and emits type-specialized opcodes when types are proven. TypeScript type checking validates annotations, narrows optionals through if-guards, and structurally matches object literals against declared types.
-
-**Structured Concurrency**: `parallel()` and `race()` overlap outbound HTTP using OS threads. No async/await, no event loop - handler code stays synchronous and linear.
-
-**Deployment Pipeline**: Contract manifests with behavioral paths (`-Dcontract`), one-command runtime deploy (`zigttp deploy`), auto-derived runtime sandboxing, deterministic replay (`--trace`/`--replay`/`-Dreplay`), proven evolution with upgrade verdicts (`-Dprove`), proven live reload (`--watch --prove`), and durable execution (`--durable`) form a pipeline from source analysis to production deployment with crash recovery.
-
-**Language Support**: ES5 + select ES6 features (for...of with break/continue, typed arrays, exponentiation, pipe operator, compound assignments), native TypeScript/TSX stripping with type checking, compile-time evaluation with `comptime()`, direct JSX parsing, `match` expression, `assert` statement, `distinct type`, `readonly` fields, template literal types, type guards (`x is T`).
-
-**JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
-
-**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema registry), `zigttp:decode` (typed request ingress), `zigttp:cache` (TTL/LRU key-value store), `zigttp:service` (named internal service calls), `zigttp:io` (structured concurrent I/O), `zigttp:scope` (deterministic cleanup tied to lexical scope), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery, timers, signals), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`. Module bindings declare runtime capabilities (clock, crypto, stderr, etc.) enforced by shared checked helpers, with a comptime short-circuit that skips the wrapper for modules declaring no capabilities.
-
-**Developer Experience**: Fetch-like HTTP surface (`Response.*`, `Response(body, init?)`, `Request(url, init?)`, `Headers(init?)`, `request.text()`, `request.json()`, `headers.get()`, `fetchSync()`), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
-
-## Native Outbound Bridge
-
-When enabled with `--outbound-http`, handlers can call the higher-level `fetchSync()` helper:
-
-```javascript
-const resp = fetchSync("http://127.0.0.1:8787/v1/ops?view=state", {
-  method: "GET",
-  headers: { Authorization: "Bearer ..." }
-});
-
-const data = resp.json();
-```
-
-`fetchSync()` returns a response-shaped object with `status`, `ok`, `headers.get(name)`, `text()`, and `json()`.
-
-Current helper semantics:
-- `headers.get(name)` is case-insensitive and returns the last observed value for that header name, or `null`.
-- `Headers(init?)`, `Request(url, init?)`, and `Response(body, init?)` are available as factory-style HTTP types. `new` is not supported by the parser, so call them as plain functions.
-- `Headers` instances support `get(name)`, `set(name, value)`, `append(name, value)`, `has(name)`, and `delete(name)`.
-- `text()` returns the raw body string, or `""` when no body is present.
-- `json()` returns parsed JSON, or `undefined` when the body is empty or invalid JSON.
-- Body readers are single-use. Once `text()` or `json()` is called on a request/response object, subsequent body reads throw. Use `request.body` if you need the raw body string without consuming it.
-- Validation, allowlist, network, timeout, and size-limit failures do not throw into handler code; `fetchSync()` returns a `599` response with a JSON body containing `error` and `details`.
-
-The lower-level `httpRequest(jsonString)` bridge remains available:
-
-```javascript
-const raw = httpRequest(JSON.stringify({
-  url: "http://127.0.0.1:8787/v1/ops?view=state",
-  method: "GET",
-  headers: { Authorization: "Bearer ..." }
-}));
-```
-
-`httpRequest` returns JSON with either `{ ok: true, status, reason, body, content_type? }` or `{ ok: false, error, details }`.
-Use `--outbound-host` to restrict egress to a single host.
-
-## Internal Service Calls
-
-For internal zigttp-to-zigttp calls, prefer `serviceCall()` from `zigttp:service` over hard-coded internal URLs:
-
-```typescript
-import { serviceCall } from "zigttp:service";
-
-function handler(req: Request): Response {
-  const user = serviceCall("users", "GET /api/users/:id", {
-    params: { id: "123" },
-  });
-
-  if (user.status !== 200) {
-    return Response.json({ error: "user service unavailable" }, { status: 502 });
-  }
-
-  return Response.json(user.json());
-}
-```
-
-`serviceCall(serviceName, "METHOD /path", init?)` resolves through `system.json`, lowers to the existing outbound bridge, and gives `zigts link` a first-class internal edge to verify.
-
-With `zigts check --system <FILE>` or `zigts compile --system <FILE>`, literal `serviceCall()` sites also become payload-aware at compile time:
-
-- `status` narrows to the target route's proven status codes
-- `.json()` returns the target route's proven JSON type when there is a single compatible response schema
-- if different status codes produce different schemas, narrow on `resp.status` before calling `.json()`
-- required path/query/header/body inputs are validated against the target route contract during type checking
-
-`init` supports:
-
-- `params` for `:path` placeholders
-- `query` for query string keys
-- `headers` for request headers
-- `body` for string request bodies
-
-Run handlers that use `zigttp:service` with `--system <FILE>`:
-
-```bash
-zigttp serve --system examples/system/system.json examples/system/gateway.ts
-```
-
-`system.json` now requires a stable `name` for each handler:
-
-```json
-{
-  "version": 1,
-  "handlers": [
-    { "name": "gateway", "path": "examples/system/gateway.ts", "baseUrl": "https://gateway.internal" },
-    { "name": "users", "path": "examples/system/users.ts", "baseUrl": "https://users.internal" }
-  ]
-}
-```
-
-`zigts link <system.json>` uses those names and routes to prove internal service composition. Raw `fetchSync("https://users.internal/...")` still works, but named service calls produce stronger linking and clearer diagnostics.
-
-The linker now reports payload proof separately from route proof. `proofLevel` keeps its current meaning, while `system-contract.json` and `system-report.txt` add explicit payload fields:
-
-- `payloadProven`
-- `payloadCompatible`
-- `payloadDetail`
-
-`zigts rollout <old-system.json> <new-system.json>` extends the same proof pipeline across time. It compiles and links both systems, checks mixed-version states, and emits `rollout-plan.json` plus `rollout-report.txt` with the smallest rollout phases it can prove. If a change only becomes safe when multiple handlers move together, the planner collapses them into one coordinated phase instead of pretending they can deploy independently.
-
-## Compile-Time Toolchain
-
-zigttp's compile-time toolchain goes beyond precompilation. It verifies correctness, checks types, extracts a capability contract, auto-derives a runtime sandbox, and can generate platform-specific deployment configs - all at build time.
-
-```bash
-# Development build (runtime handler loading)
-zig build -Doptimize=ReleaseFast
-
-# Production build (embedded bytecode, auto-sandboxed, 16% faster cold starts)
-zig build -Doptimize=ReleaseFast -Dhandler=examples/handler/handler.ts
-
-# Verify handler correctness at compile time
-zig build -Dhandler=handler.ts -Dverify
-
-# Emit contract manifest (what the handler is allowed to do)
-zig build -Dhandler=handler.ts -Dcontract
-
-# Validate zigttp:sql queries against a schema snapshot
-zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sql
-
-# Override auto-derived sandbox with an explicit capability policy
-zig build -Dhandler=handler.ts -Dpolicy=policy.json
-
-# Replay-verify handler against recorded traces before embedding
-zig build -Dhandler=handler.ts -Dreplay=traces.jsonl
-
-# Compare handler versions (equivalent, additive, or breaking)
-zig build -Dhandler=handler.ts -Dprove=old-contract.json:traces.jsonl
-
-# Plan a safe multi-handler rollout between two system definitions
-./zig-out/bin/zigts rollout old/system.json new/system.json
-
-# Combine build-time verification passes
-zig build -Doptimize=ReleaseFast -Dhandler=handler.ts -Dverify -Dcontract
-
-# External enrichment flags (optional, for code generator integration)
-zig build -Dhandler=handler.ts -Dmanifest=governance-manifest.json
-zig build -Dhandler=handler.ts -Dexpect-properties=properties.json
-zig build -Dhandler=handler.ts -Ddata-labels=data-labels.json
-zig build -Dhandler=handler.ts -Dfault-severity=fault-severity.json
-zig build -Dhandler=handler.ts -Dreport=json
-```
-
-### Handler Verification (`-Dverify`)
-
-The verifier statically proves seven properties of your handler at compile time:
-
-1. **Every code path returns a Response.** Missing `else` branches and paths that fall through without returning are caught.
-2. **Result values are checked before access.** Calls like `jwtVerify`, `decodeJson`, and `decodeQuery` return Result objects. The verifier ensures `.ok` is checked before `.value` is accessed.
-3. **No unreachable code.** Statements after an unconditional return produce a warning.
-4. **No unused variables.** Declared variables that are never referenced produce a warning. Suppress with an underscore prefix (`_unused`).
-5. **Match expressions have default arms.** A `match` without a default arm produces a warning.
-6. **Optional values are checked before use.** Values from `env()`, `cacheGet()`, `parseBearer()`, and `routerMatch()` must be narrowed via `if (val)`, `val !== undefined`, `val ?? default`, or reassignment before use in expressions.
-7. **No cross-request state leakage.** Module-scope variables must not be mutated inside the handler body. This prevents one request from affecting another through shared mutable state.
-
-zigttp's JS subset eliminates back-edges: no `while`, no `switch`, no `try/catch`, no exceptions. `break` and `continue` are allowed within `for-of` (forward jumps only). The IR tree is the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
-
-```
-$ zig build -Dhandler=handler.ts -Dverify
-
-verify error: not all code paths return a Response
-  --> handler.ts:2:17
-   |
-  2 | function handler(req) {
-   |                 ^
-   = help: ensure every branch (if/else) ends with a return statement
-```
-
-See [docs/verification.md](docs/verification.md) for the full specification.
-
-### Contract Manifest and Auto-Sandboxing
-
-Every precompilation automatically extracts a contract from the handler's IR. The contract describes what your handler does before it runs and is used to derive the runtime sandbox. Add `-Dcontract` to also emit it as `contract.json`. It extracts:
-
-- **Virtual modules** imported and which functions are used
-- **Environment variables** accessed via `env("NAME")` - literal names are enumerated, dynamic access is flagged
-- **Outbound hosts** called via `fetchSync("https://...")` - hosts are extracted from URL literals
-- **Internal service calls** made via `serviceCall("name", "METHOD /path", init)` - service names, route signatures, and statically proven params/query/header/body keys are captured
-- **System-linked payload facts** for named internal edges - target response statuses, JSON payload proof, and payload-proof gaps are reported in system-level output
-- **Cache namespaces** used by `cacheGet`/`cacheSet`/etc.
-- **SQL queries** registered with `sql("name", "...")` - names, statement kinds, and touched tables are captured after schema validation
-- **Scope usage** from `scope("name", fn)` - literal scope names, whether scope callbacks stay dynamic, and the maximum nested scope depth are captured
-- **API surface** from proven routes: method/path, path/query/header params, JSON request bodies, response variants, and bearer auth metadata
-- **Handler properties** derived from the internal effect summary of virtual module calls, cache reads, scope usage, egress, and nondeterministic builtins (pure, read_only, stateless, retry_safe, deterministic)
-- **Behavioral paths** - every execution path through the handler with route, branching conditions, I/O sequence, and response status (exhaustive when the path count stays below 1024)
-- **Verification results** (when combined with `-Dverify`)
-- **Route patterns** (when combined with `-Daot`)
-
-```json
-{
-  "version": 12,
-  "modules": ["zigttp:auth", "zigttp:cache", "zigttp:scope"],
-  "functions": {
-    "zigttp:auth": ["jwtVerify", "parseBearer"],
-    "zigttp:cache": ["cacheGet", "cacheSet"],
-    "zigttp:scope": ["scope", "ensure"]
-  },
-  "env": { "literal": ["JWT_SECRET"], "dynamic": false },
-  "egress": { "hosts": ["api.example.com"], "dynamic": false },
-  "cache": { "namespaces": ["sessions"], "dynamic": false },
-  "scope": {
-    "used": true,
-    "names": ["request", "enrich-user"],
-    "dynamic": false,
-    "maxDepth": 2
-  },
-  "sql": {
-    "backend": "sqlite",
-    "queries": [
-      { "name": "listTodos", "operation": "select", "tables": ["todos"] }
-    ],
-    "dynamic": false
-  },
-  "properties": {
-    "pure": false,
-    "readOnly": false,
-    "stateless": false,
-    "retrySafe": false,
-    "deterministic": true,
-    "hasEgress": true
-  },
-  "behaviors": [
-    {
-      "method": "GET",
-      "pattern": "/users/:id",
-      "status": 200,
-      "ioDepth": 2,
-      "failurePath": false,
-      "conditions": [
-        {"kind": "io_ok", "module": "auth", "func": "jwtVerify"},
-        {"kind": "io_ok", "module": "cache", "func": "cacheGet"}
-      ],
-      "ioSequence": [
-        {"module": "auth", "func": "jwtVerify"},
-        {"module": "cache", "func": "cacheGet"}
-      ]
-    },
-    {
-      "method": "GET",
-      "pattern": "/users/:id",
-      "status": 401,
-      "ioDepth": 1,
-      "failurePath": true,
-      "conditions": [
-        {"kind": "io_fail", "module": "auth", "func": "jwtVerify"}
-      ],
-      "ioSequence": [
-        {"module": "auth", "func": "jwtVerify"}
-      ]
-    }
-  ],
-  "behaviorsExhaustive": true
-}
-```
-
-The `"dynamic": false` fields are the key signal. They mean "we can enumerate every value statically." When a handler uses a variable instead of a string literal (`env(someVar)` instead of `env("JWT_SECRET")`), the contract honestly reports `"dynamic": true`.
-
-### OpenAPI and TypeScript SDK
-
-The same proven route facts can also be emitted as OpenAPI and as a generated TypeScript client:
-
-```bash
-zig build -Dhandler=examples/routing/api-surface.ts -Dcontract -Dopenapi -Dsdk=ts
-```
-
-This writes three sibling artifacts in `src/generated/`:
-
-- `contract.json`
-- `openapi.json`
-- `client.ts`
-
-The current API emitters include facts the compiler can prove without guessing:
-
-- route method and path
-- path, query, and header params reached through literal access
-- proven JSON request bodies from `validateJson(...)`, `coerceJson(...)`, and `decodeJson(...)`
-- proven form request bodies from `decodeForm(...)`
-- typed query params from `decodeQuery(...)`
-- proven response variants, including multiple status codes when statically visible
-- bearer auth metadata
-- `x-zigttp-*` hints whenever part of the surface stays dynamic
-
-The generated SDK only exposes typed helpers for routes it can prove end to end. Everything else remains available through `requestRaw()` and is listed in `skippedOperations`.
-A fully proven route can be consumed like this:
-
-```ts
-import { createClient } from "./src/generated/client";
-
-const api = createClient({ baseUrl: "https://api.example.com" });
-
-const result = await api.postProfilesId({
-    params: { id: "user_123" },
-    query: { verbose: true },
-    body: { displayName: "Ada" },
-    headers: { "x-client-id": "cli-42" },
-});
-
-console.log(result.data.displayName);
-```
-
-**Auto-sandboxing**: The contract is used to derive a `RuntimePolicy` embedded in the binary. Sections with `dynamic: false` are restricted to exactly the proven literals. Sections with `dynamic: true` remain unrestricted. The build reports what was proven:
-
-```
-Sandbox: complete (all access statically proven)
-  env: restricted to [JWT_SECRET] (1 proven, no dynamic access)
-  egress: restricted to [api.example.com] (1 proven, no dynamic access)
-  cache: restricted to [sessions] (1 proven, no dynamic access)
-  sql: restricted to [listTodos] (1 proven, no dynamic access)
-Handler Properties:
-  ---    pure            handler is a deterministic function of the request
-  ---    read_only       no state mutations via virtual modules
-  ---    stateless       independent of mutable state
-  ---    retry_safe      disabled when scope-managed cleanup or bare writes are present
-  PROVEN deterministic   no Date.now() or Math.random()
-```
-
-### Explicit Policy Override (`-Dpolicy`)
-
-To override auto-derived sandboxing with a stricter or different policy, pass an explicit policy file. The policy is validated against the contract at build time and enforced at runtime. Local file-import handlers are covered: capability usage is aggregated across the module graph before validation.
-
-```json
-{
-  "env": { "allow": ["JWT_SECRET"] },
-  "egress": { "allow_hosts": ["api.example.com"] },
-  "cache": { "allow_namespaces": ["sessions"] },
-  "sql": { "allow_queries": ["listTodos"] }
-}
-```
-
-Omit a section to leave that capability unrestricted. If a section is present, dynamic access in that category is rejected because zigttp cannot fully enumerate it.
-
-### Hosted cloud deploy
-
-Deferred from v0.1.0-beta. The beta deploy path is the self-contained
-binary `zigttp deploy` produces; see [`zigttp deploy`](#zigttp-deploy).
-
-### Deterministic Replay (`--trace` / `--replay` / `-Dreplay`)
-
-zigttp's restricted JS subset (no async, no exceptions, no side-effecting builtins) makes handlers deterministic pure functions of their request and virtual module responses. The replay system exploits this property.
-
-**Record** traces during normal operation:
-
-```bash
-zigttp serve handler.ts --trace traces.jsonl
-```
-
-Every virtual module call, `fetchSync` response, `Date.now()` timestamp, and `Math.random()` value is recorded alongside the request and response.
-
-**Replay** traces against a modified handler to detect regressions:
-
-```bash
-zigttp serve --replay traces.jsonl handler-v2.ts
-```
-
-Reports identical, status-changed, and body-changed results with structured diffs.
-
-**Build-time replay** fails the build if regressions are detected:
-
-```bash
-zig build -Dhandler=handler-v2.ts -Dreplay=traces.jsonl
-```
-
-### Durable Execution (`--durable`)
-
-Enable crash recovery with a write-ahead oplog:
-
-```bash
-zigttp serve handler.ts --durable ./oplogs
-```
-
-Handlers opt into durability via the `zigttp:durable` virtual module:
-
-```typescript
-import { run, step, stepWithTimeout, sleep, waitSignal, signal } from "zigttp:durable";
-
-function handler(req: Request): Response {
-    // Deliver a signal to a waiting run
-    if (req.url === "/approve") {
-        signal("order:42", "approved", { by: "admin" });
-        return Response.json({ ok: true });
-    }
-
-    // Durable workflow with steps, timers, and signals
-    return run("order:42", () => {
-        const order = step("create", () =>
-            fetchSync("https://api.internal/orders", { method: "POST", body: "{}" }));
-        sleep(5000);
-        const approval = waitSignal("approved");
-        const confirmed = step("confirm", () =>
-            fetchSync("https://api.internal/orders/42/confirm", {
-                method: "POST", body: JSON.stringify(approval)
-            }));
-        return Response.json(confirmed.json());
-    });
-}
-```
-
-`run(key, fn)` wraps a unit of work with an idempotency key. Each `step(name, fn)` persists its result to the oplog before returning to the handler. `sleep(ms)` and `sleepUntil(unixMs)` suspend the run until a timer fires. `waitSignal(name)` suspends until a signal arrives via `signal(key, name, payload)` or `signalAt(key, name, unixMs, payload)`. Pending runs return `202 Accepted` with a JSON body describing the wait. On crash recovery, recorded results are replayed without touching the network. A background scheduler polls for ready timers and signals. Completed runs are deduplicated by key. `stepWithTimeout(name, timeoutMs, fn)` executes a step with a deadline - returns `{ ok: true, value }` on completion or `{ ok: false, error: "timeout" }` if the deadline is exceeded.
-
-The runtime no longer exposes admin routes. Use the sibling `zigttp-admin`
-service to inspect runs and enqueue signals against the same durable directory:
-
-- `GET /`
-- `GET /runs/:key`
-- `GET /contract`
-- `GET /_zigttp/durable/contract`
-- `GET /_zigttp/durable/runs`
-- `GET /_zigttp/durable/runs/:key`
-- `POST /_zigttp/durable/runs/:key/signals/:name`
-
-The durable section of `contract.json` also includes a workflow graph with
-`workflowId`, `proofLevel`, `nodes`, and `edges`.
-
-```bash
-cd ../zigttp-admin
-deno task start --durable-dir ../zigttp/.zigttp-durable --contract ../zigttp/contract.json
-
-curl http://127.0.0.1:8787/_zigttp/durable/contract
-curl http://127.0.0.1:8787/_zigttp/durable/runs
-curl -X POST \
-  http://127.0.0.1:8787/_zigttp/durable/runs/order%3A42/signals/approved \
-  -H 'content-type: application/json' \
-  -d '{"approvedBy":"ops"}'
-```
-
-### Proven Evolution (`-Dprove`)
-
-Compare two handler versions and classify the upgrade:
-
-```bash
-zig build -Dhandler=handler-v2.ts -Dprove=old-contract.json:traces.jsonl
-```
-
-Two diff levels run against the old and new contracts. The surface diff compares I/O capabilities (env vars, egress hosts, cache namespaces, SQL query names, routes). The behavioral diff compares every execution path, matching by route and branching conditions, then classifying each as preserved, response-changed, removed, or added.
-
-Property regressions carry severity. Losing `retry_safe` or `injection_safe` is critical. Losing `deterministic` or `idempotent` is a warning. Losing `pure` is informational.
-
-The upgrade verdict combines these signals:
-
-- **safe**: Identical behavior, no property regressions
-- **safe_with_additions**: New paths or capabilities added, existing behavior preserved
-- **breaking**: Paths removed, responses changed, or critical property lost
-- **needs_review**: Structurally OK but warning-level regressions or significant coverage gaps
-
-Output: `proof.json` (machine-readable certificate), `proof-report.txt` (human-readable), and `upgrade-manifest.json` (verdict with full breakdown).
-
-### Guard Composition (`zigttp:compose`)
-
-Compose handlers with pre/post guards using the pipe operator:
-
-```typescript
-import { guard } from "zigttp:compose";
-
-const withAuth = guard((req: Request): Response | undefined => {
-    if (req.headers["authorization"] === undefined)
-        return Response.json({ error: "unauthorized" }, { status: 401 });
-    return undefined;
-});
-
-const withCors = guard((res: Response): Response | undefined => {
-    return Response.json(res.body, {
-        status: res.status,
-        headers: { "access-control-allow-origin": "*" }
-    });
-});
-
-const handler = withAuth |> mainHandler |> withCors;
-```
-
-The parser desugars the pipe chain into a single flat function with sequential if-checks at compile time. Pre-guards receive the request and short-circuit on non-undefined return. Post-guards receive the response and can replace it. Exactly one non-guard handler is required.
-
-### External Enrichment Flags
-
-Five optional build flags accept external JSON files for cross-referencing against compiler-proven contracts. These work with any code generator or hand-written files - no specific tooling required.
-
-- `-Dmanifest=<path>`: Cross-references a declared manifest (routes, SQL tables, env vars) against the handler contract. Errors on declared items missing from code, warns on undeclared items found in code. Emits `manifest-alignment.json`.
-- `-Dexpect-properties=<path>`: Verifies handler-derived properties (state_isolated, injection_safe, read_only, etc.) match external expectations. Build fails on mismatches.
-- `-Ddata-labels=<path>`: Merges externally declared data sensitivity labels (secret, credential, etc.) with the flow checker's heuristic labels. Violations of declared labels become build errors.
-- `-Dfault-severity=<path>`: Overrides fault severity classification at the route level. A route declared "critical" elevates all failable calls within it to critical severity for fault coverage diagnostics.
-- `-Dreport=json`: Emits a structured JSON build report aggregating verification, properties, fault coverage, flow analysis, manifest alignment, and property expectations into `report.json`.
-
-All flags are optional and additive. Without them, nothing changes.
-
-### Precompiled Bytecode
-
-**Cold Start Performance**:
-
-| Measure | Value | Evidence |
-|---------|-------|----------|
-| Floor (best case) | ~3.5ms | Apple M4 Pro, macOS 26, ReleaseFast |
-| Typical (p50) | ~7-15ms | depends on host load |
-| Tail | up to ~60ms | under scheduling contention |
-
-Cold start is variance-dominated. The beta evidence measures wall time from
-process launch to the first complete HTTP response; cite the measured
-distribution in [`docs/performance.md`](docs/performance.md), not the older
-single-number estimates.
-
-Linux and macOS release binaries are built for x86-64 and ARM64. Linux-specific
-cold-start claims need a separate measured pass before they appear in public
-copy.
-
-**Embedded Bytecode Optimization** (recommended for all platforms):
-```bash
-zig build -Doptimize=ReleaseFast -Dhandler=path/to/handler.js
-```
-
-Eliminates runtime parsing and compilation. Single binary, smaller container image, lower memory baseline.
-
-**Platform Strategy**:
-- **macOS**: supported release target with measured beta cold-start evidence
-- **Linux**: supported release target; publish Linux-specific numbers only after a measured pass
-- **Pre-fork/daemon**: Alternative for sub-millisecond response times
-
-See [Performance](docs/performance.md) for detailed profiling analysis and deployment patterns.
-
-## Compiler Revalidation
-
-When revalidating against a newer Zig compiler, run:
-
-```bash
-zig version
-zig build
-zig build test
-zig build test-zigts
-zig build test-zruntime
-bash scripts/test-examples.sh
-ZTS_RUN_STRESS_TESTS=1 zig build test-zruntime
-ZTS_RUN_FLAKY_IO_TESTS=1 zig build test -- --test-filter "parseRequest rejects long header"
-```
-
-Then update the validated compiler version in this README and `docs/user-guide.md`.
-
-For faster local edit/build loops on ELF targets, keep incremental and new-linker usage opt-in:
-
-```bash
-zig build -fincremental --error-style=minimal_clear
-zig build -Doptimize=Debug -fincremental --error-style=minimal_clear
-```
-
-`zigttp` does not enable these by default because Zig `0.16.0` still documents incremental compilation as experimental and the new ELF linker as not yet feature-complete.
+See [examples/](examples/) for HTMX, SQL, auth, durable workflows,
+and more.
+
+## What makes it different
+
+- **Opinionated language subset.** TypeScript with the footguns
+  removed. Each restriction buys a specific compiler guarantee.
+  [Language subset](docs/language-subset.md) - [Restrictions to
+  proofs](docs/restrictions-to-proofs.md).
+- **Compile-time verification.** Every code path returns a Response,
+  Result values are checked before access, no unreachable code, no
+  cross-request state leakage. [Verification](docs/verification.md).
+- **Sound mode.** Type-directed analysis catches non-numeric
+  arithmetic, mixed-type `+`, and tautological comparisons at compile
+  time. [Sound mode](docs/sound-mode.md).
+- **Automatic runtime sandboxing.** The compiler extracts a contract
+  and derives a least-privilege runtime policy from it. No config
+  required. [Contracts and sandboxing](docs/contracts-and-sandboxing.md).
+- **Author-declared specs.** Declare which proven properties your
+  handler must satisfy directly in the return type:
+  `Response & Spec<"idempotent" | "deterministic">`. [Spec
+  reference](docs/contracts-and-sandboxing.md#author-declared-specs-spec).
+- **Proof receipts (default-on).** Every `zigttp deploy` signs a JWS
+  over `(bytecode, contract, policy)` with a persistent Ed25519
+  identity. `zigttp verify <url>` validates from any machine.
+  [Attestation](docs/roadmap/attest-slice-2.md).
+- **Deterministic replay and proven evolution.** Record I/O with
+  `--trace`, replay with `--replay`, compare contracts across
+  versions with `-Dprove`. [Replay and
+  evolution](docs/contracts-and-sandboxing.md#deterministic-replay---trace---replay--dreplay).
+- **Durable execution.** `run(key, fn)`, `step(name, fn)`,
+  `sleep(ms)`, `waitSignal(name)` from `zigttp:durable` with
+  write-ahead oplog and crash recovery.
+  [zigttp:durable](docs/virtual-modules/workflow/durable.md).
+- **Structured concurrent I/O.** `parallel()` and `race()` from
+  `zigttp:io` overlap outbound HTTP without async/await or Promises.
+  [zigttp:io](docs/virtual-modules/workflow/io.md).
+- **Native virtual modules.** JWT, JSON Schema, cache, SQL, fetch,
+  WebSocket, durable, scope - implemented in Zig with capability
+  declarations enforced at call time.
+  [Virtual modules index](docs/virtual-modules/README.md).
+- **`zigts expert` interactive agent.** Compiler-in-the-loop coding
+  agent with a property-goal autoloop where the compiler (not the
+  LLM) drives convergence. [CLI reference](docs/cli.md#zigts-expert-interactive-agent),
+  [autoloop](docs/roadmap/autoloop.md).
+
+## Numbers
+
+~3.5ms cold-start floor, ~7-15ms typical cold start. 4.8MB deployed
+binary. ~13MB memory baseline. Pre-warmed handler pool with
+per-request isolation. See [performance docs](docs/performance.md)
+for the measured cold-start distribution and the Node/Deno throughput
+comparison.
 
 ## Documentation
 
-- [Documentation Index](docs/README.md) - Maintained entry point for guides, references, internals, and roadmap notes
-- [User Guide](docs/user-guide.md) - Handler API, routing patterns, examples
-- [Verification](docs/verification.md) - Compile-time handler verification: checks, diagnostics, examples
-- [Sound Mode](docs/sound-mode.md) - Type-directed analysis: arithmetic safety, `+` safety, tautology detection, truthiness, type-specialized codegen
-- [JSX Guide](docs/jsx-guide.md) - JSX/TSX usage and server-side rendering
-- [TypeScript](docs/typescript.md) - Type stripping, compile-time evaluation
-- [Performance](docs/performance.md) - Benchmarks, cold starts, optimizations, concurrent I/O
-- [Feature Detection](docs/feature-detection.md) - Unsupported feature detection matrix
-- [Architecture](docs/internals/architecture.md) - System design, runtime model, concurrency, project structure
+Start at the [Documentation Index](docs/README.md). High-traffic
+pages:
 
-## JavaScript Subset
-
-zigts implements ES5 with select ES6+ extensions:
-
-**Supported**: Strict mode, let/const, arrow functions, template literals, destructuring, spread operator, for...of (arrays) with `break`/`continue`, optional chaining, nullish coalescing, typed arrays, exponentiation operator, compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, bitwise), pipe operator (`|>`), array higher-order methods (`.map()`, `.filter()`, `.reduce()`, `.find()`, `.findIndex()`, `.some()`, `.every()`, `.forEach()`), `Object.keys()` / `.values()` / `.entries()`, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range()`, `match` expression (pattern matching).
-
-**Not Supported**: Classes, async/await, Promises, `var`, `while`/`do-while` loops, `this`, `new`, `try/catch`, `null`, regular expressions, labeled `break`/`continue`, `as`/`satisfies` type assertions. All unsupported features are detected at parse time with helpful error messages suggesting alternatives. Use `undefined` as the sole absent-value sentinel.
-
-See [Language Subset](docs/language-subset.md) and
-[User Guide](docs/user-guide.md#javascript-subset-reference) for full details.
+- [User Guide](docs/user-guide.md) - handler API, routing, JSON,
+  tests, troubleshooting
+- [CLI Reference](docs/cli.md) - every `zigttp` and `zigts`
+  subcommand, the expert REPL, edge, proofs, verify, studio
+- [Contracts and Auto-Sandboxing](docs/contracts-and-sandboxing.md) -
+  contract extraction, policy, OpenAPI/SDK emit, replay, evolution,
+  `Spec<...>`
+- [Virtual Modules](docs/virtual-modules/README.md) - canonical module
+  index and per-module API pages
+- [Verification](docs/verification.md), [Sound
+  Mode](docs/sound-mode.md), [TypeScript](docs/typescript.md), [JSX
+  Guide](docs/jsx-guide.md)
+- [Performance](docs/performance.md), [Reliability and
+  Limits](docs/reliability.md)
+- [Architecture](docs/internals/architecture.md)
 
 ## Roadmap
 
-zigttp is at v0.1.0-beta. Direction is set by two documents kept current in the
-repo:
+zigttp is at v0.1.0-beta. Direction is set by two documents kept
+current in the repo:
 
-- [v1 Public Release](docs/roadmap/v1-public-release.md) - the release contract
-  and gates for the first public release, built around one showcase flow:
-  `init` -> `dev` -> `check` -> `build` -> `deploy`. Deploy produces a
-  self-contained local binary; a hosted path is deferred past v0.1.0-beta.
-- [Frontier](docs/roadmap/frontier.md) - the strategic thesis: a proof-aware
-  TypeScript execution platform where the execution model is compiler-visible,
-  effects are explicit imports, and contracts are first-class artifacts that
-  deploy and rollout decisions consume.
+- [v1 Public Release](docs/roadmap/v1-public-release.md) - release
+  contract and gates for the first public release.
+- [Frontier](docs/roadmap/frontier.md) - strategic thesis: a
+  proof-aware TypeScript execution platform where the execution model
+  is compiler-visible, effects are explicit imports, and contracts
+  are first-class artifacts.
 
-Further roadmap notes - attestation slices, the property-goal autoloop,
-proofable third-party modules, the hosted proof dashboard - live in
+Further notes (attestation slices, autoloop, proofable third-party
+modules, hosted proof dashboard) live in
 [docs/roadmap/](docs/roadmap/).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build, test, and the
+conventions a PR must respect. Security disclosure policy:
+[SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT licensed.
+MIT.
 
 ## Credits
 
-- **zigts** - Pure Zig JavaScript engine (part of this project)
+- **zigts** - pure Zig JavaScript engine (part of this project)
 - [Zig](https://ziglang.org/) programming language
-- Codex & Claude
+- Codex and Claude

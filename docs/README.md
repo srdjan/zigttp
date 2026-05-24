@@ -22,6 +22,12 @@ notes document design contracts, governance, and roadmap work.
 
 ## Reference
 
+- [CLI Reference](cli.md) - every `zigttp` and `zigts` subcommand, the
+  expert REPL, edge, proofs ledger, verify, studio.
+- [Contracts and Auto-Sandboxing](contracts-and-sandboxing.md) -
+  contract extraction, runtime sandboxing, policy override, OpenAPI
+  and TypeScript SDK emit, deterministic replay, proven evolution,
+  `Spec<...>`, external enrichment flags.
 - [Virtual Modules](virtual-modules/README.md) - canonical module index and
   per-module API pages.
 - [Verification](verification.md) - compile-time handler checks and generated
