@@ -65,7 +65,7 @@ fn execute(
 
     const output_path: []const u8 = if (has_explicit_output) args[1] else blk: {
         const ext = std.fs.path.extension(relative);
-        const stem = relative[0..relative.len - ext.len];
+        const stem = relative[0 .. relative.len - ext.len];
         const owned = try std.fmt.allocPrint(allocator, "{s}.test.jsonl", .{stem});
         output_path_owned = owned;
         break :blk owned;

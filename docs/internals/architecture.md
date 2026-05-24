@@ -487,6 +487,12 @@ After the push the orchestrator polls `northflank_adapter.waitForReadyDefault` u
 
 Proof facts from the contract (proof level, env var names, egress hosts, cache namespaces, routes, handler properties, OWASP Top 10 coverage) are encoded as JSON arrays in OCI image labels on the config blob, so provenance survives in the registry. The portable extraction logic is reused from `packages/tools/src/deploy_manifest.zig`; the live orchestration lives under `packages/runtime/src/deploy/`. The legacy `DeployPlan` value type and `--dry-run --json` output have been removed; the runtime CLI is the only supported deployment path.
 
+### Self-Extracting Binary Trailer
+
+`zigttp deploy --local` (and the legacy `compile` / `build` paths) emit a single executable that starts with the `zigttp-runtime` template and appends a payload: bytecode, contract JSON, runtime policy, and an Ed25519-signed JWS attestation. The format ends in a 32-byte trailer with magic `ZTPBC1\0\0`, payload offset, payload size, format version, flag bits (has_contract, has_attestation), and a CRC-32 over the payload. `self_extract.detect()` reads the executable, validates the magic and CRC, and parses out the embedded sections.
+
+The CRC-32 is a corruption check, not a security check. It guards against bit-flips and truncated downloads, nothing more. The actual integrity boundary is the JWS attestation: it signs the SHA-256 hashes of bytecode, contract, and policy (`packages/runtime/src/attest/envelope.zig`). A forged trailer with a valid CRC and stripped JWS results in a binary that loads but cannot be attested - `zigttp verify` rejects it, and a runtime configured to require attestation refuses to serve. CRC-32 has no collision resistance against an adversarial editor, but does not need to: tampering shows up at the JWS verify step.
+
 ## Deployment Patterns
 
 ### Single Instance (Lambda-style)
@@ -499,7 +505,7 @@ Each instance handles one request at a time for isolation.
 
 ### Multiple Instances Behind Load Balancer
 
-For high-throughput scenarios, deploy multiple instances. The small binary size (~500KB) and instant cold starts make horizontal scaling efficient.
+For high-throughput scenarios, deploy multiple instances. The beta release binary is ~4.8MB and the measured cold-start distribution is documented in [Performance](../performance.md), so horizontal scaling remains the intended deployment model.
 
 ### Container Deployment
 

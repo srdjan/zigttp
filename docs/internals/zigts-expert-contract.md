@@ -85,11 +85,11 @@ Emits compiler and policy metadata. Use it to record which policy a session or C
   "policy_version": "2026.04.2",
   "policy_hash": "<hex>",
   "module_registry_hash": "<hex>",
-  "rule_count": 36,
+  "rule_count": 52,
   "categories": {
-    "verifier": 22,
+    "verifier": 30,
     "policy": 8,
-    "property": 6
+    "property": 14
   },
   "mode": "embedded"
 }

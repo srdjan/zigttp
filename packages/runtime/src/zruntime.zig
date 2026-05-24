@@ -2332,7 +2332,6 @@ pub const Runtime = struct {
         self.consumed_body_objects.clearRetainingCapacity();
         self.last_request_body_len = 0;
     }
-
 };
 
 // ============================================================================
@@ -2749,12 +2748,41 @@ const FetchArgs = struct {
     init_obj: ?*zq.JSObject,
 };
 
-/// Parse and validate the (url, init?) arguments common to all fetch call sites.
-/// Returns a JS error response (status 599) on validation failure.
-fn parseFetchArgs(rt: *Runtime, pool: *const zq.HiddenClassPool, args: []const zq.JSValue) !union(enum) {
+const FetchArgsResult = union(enum) {
     ok: FetchArgs,
     err: zq.JSValue,
-} {
+};
+
+const FetchInitOptions = struct {
+    method: std.http.Method = .GET,
+    body: ?[]const u8 = null,
+    max_response_bytes: usize,
+    headers: std.ArrayList(std.http.Header) = .empty,
+
+    fn deinit(self: *FetchInitOptions, allocator: std.mem.Allocator) void {
+        self.headers.deinit(allocator);
+    }
+};
+
+const FetchInitResult = union(enum) {
+    ok: FetchInitOptions,
+    err: zq.JSValue,
+};
+
+fn fetchInitError(
+    rt: *Runtime,
+    allocator: std.mem.Allocator,
+    options: *FetchInitOptions,
+    code: []const u8,
+    details: []const u8,
+) !FetchInitResult {
+    options.deinit(allocator);
+    return .{ .err = try createFetchErrorResponse(rt, code, details) };
+}
+
+/// Parse and validate the (url, init?) arguments common to all fetch call sites.
+/// Returns a JS error response (status 599) on validation failure.
+fn parseFetchArgs(rt: *Runtime, pool: *const zq.HiddenClassPool, args: []const zq.JSValue) !FetchArgsResult {
     if (args.len == 0) {
         return .{ .err = try createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object") };
     }
@@ -2800,6 +2828,85 @@ fn parseFetchArgs(rt: *Runtime, pool: *const zq.HiddenClassPool, args: []const z
     return .{ .ok = .{ .url = url, .uri = uri, .init_obj = init_obj } };
 }
 
+fn parseFetchInitOptions(
+    rt: *Runtime,
+    allocator: std.mem.Allocator,
+    pool: *const zq.HiddenClassPool,
+    init_obj: ?*zq.JSObject,
+) !FetchInitResult {
+    var options = FetchInitOptions{
+        .max_response_bytes = @max(@as(usize, 1), rt.config.outbound_max_response_bytes),
+    };
+
+    const init = init_obj orelse return .{ .ok = options };
+
+    if (getObjectProperty(rt.ctx, init, pool, zq.Atom.method, "method")) |method_val| {
+        const method_name = getStringData(method_val) orelse {
+            return fetchInitError(rt, allocator, &options, "InvalidMethod", "method must be string");
+        };
+        options.method = parseHttpMethod(method_name) orelse {
+            return fetchInitError(rt, allocator, &options, "InvalidMethod", method_name);
+        };
+    }
+
+    if (getObjectProperty(rt.ctx, init, pool, zq.Atom.body, "body")) |body_val| {
+        if (body_val.isNull() or body_val.isUndefined()) {
+            options.body = null;
+        } else {
+            options.body = getStringData(body_val) orelse {
+                return fetchInitError(rt, allocator, &options, "InvalidBody", "body must be string|null");
+            };
+        }
+    }
+
+    if (getDynamicProperty(rt.ctx, init, pool, "maxResponseBytes")) |max_val| {
+        if (!max_val.isInt()) {
+            return fetchInitError(rt, allocator, &options, "InvalidMaxResponseBytes", "maxResponseBytes must be integer");
+        }
+        const req_max = std.math.cast(usize, max_val.getInt()) orelse {
+            return fetchInitError(rt, allocator, &options, "InvalidMaxResponseBytes", "maxResponseBytes out of range");
+        };
+        options.max_response_bytes = @min(options.max_response_bytes, @max(@as(usize, 1), req_max));
+    } else if (getDynamicProperty(rt.ctx, init, pool, "max_response_bytes")) |max_val| {
+        if (!max_val.isInt()) {
+            return fetchInitError(rt, allocator, &options, "InvalidMaxResponseBytes", "max_response_bytes must be integer");
+        }
+        const req_max = std.math.cast(usize, max_val.getInt()) orelse {
+            return fetchInitError(rt, allocator, &options, "InvalidMaxResponseBytes", "max_response_bytes out of range");
+        };
+        options.max_response_bytes = @min(options.max_response_bytes, @max(@as(usize, 1), req_max));
+    }
+
+    if (getObjectProperty(rt.ctx, init, pool, zq.Atom.headers, "headers")) |headers_val| {
+        if (!headers_val.isObject()) {
+            return fetchInitError(rt, allocator, &options, "InvalidHeaders", "headers must be object<string,string>");
+        }
+        const headers_obj = headers_val.toPtr(zq.JSObject);
+        const keys = try headers_obj.getOwnEnumerableKeys(allocator, pool);
+        defer allocator.free(keys);
+
+        for (keys) |key_atom| {
+            const key_name = rt.ctx.atoms.getName(key_atom) orelse continue;
+            const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
+            const header_str = getStringData(header_val) orelse {
+                return fetchInitError(rt, allocator, &options, "InvalidHeaders", "header values must be strings");
+            };
+            if (key_name.len == 0) {
+                return fetchInitError(rt, allocator, &options, "InvalidHeaders", "header name must be non-empty");
+            }
+            if (std.mem.indexOfAny(u8, key_name, "\r\n") != null) {
+                return fetchInitError(rt, allocator, &options, "InvalidHeaders", "header name contains newline");
+            }
+            if (std.mem.indexOfAny(u8, header_str, "\r\n") != null) {
+                return fetchInitError(rt, allocator, &options, "InvalidHeaders", "header value contains newline");
+            }
+            try options.headers.append(allocator, .{ .name = key_name, .value = header_str });
+        }
+    }
+
+    return .{ .ok = options };
+}
+
 fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     if (!rt.config.outbound_http_enabled) {
         return createFetchErrorResponse(rt, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
@@ -2824,77 +2931,11 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
         return createFetchErrorResponse(rt, "InvalidUrl", "url host is required");
     };
 
-    var method = std.http.Method.GET;
-    var body: ?[]const u8 = null;
-    var max_response_bytes = @max(@as(usize, 1), rt.config.outbound_max_response_bytes);
-    var headers = std.array_list.Managed(std.http.Header).init(rt.allocator);
-    defer headers.deinit();
-
-    if (init_obj) |init| {
-        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.method, "method")) |method_val| {
-            const method_name = getStringData(method_val) orelse {
-                return createFetchErrorResponse(rt, "InvalidMethod", "method must be string");
-            };
-            method = parseHttpMethod(method_name) orelse {
-                return createFetchErrorResponse(rt, "InvalidMethod", method_name);
-            };
-        }
-
-        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.body, "body")) |body_val| {
-            if (body_val.isNull() or body_val.isUndefined()) {
-                body = null;
-            } else {
-                body = getStringData(body_val) orelse {
-                    return createFetchErrorResponse(rt, "InvalidBody", "body must be string|null");
-                };
-            }
-        }
-
-        if (getDynamicProperty(rt.ctx, init, pool, "maxResponseBytes")) |max_val| {
-            if (!max_val.isInt()) {
-                return createFetchErrorResponse(rt, "InvalidMaxResponseBytes", "maxResponseBytes must be integer");
-            }
-            const req_max = std.math.cast(usize, max_val.getInt()) orelse {
-                return createFetchErrorResponse(rt, "InvalidMaxResponseBytes", "maxResponseBytes out of range");
-            };
-            max_response_bytes = @min(max_response_bytes, @max(@as(usize, 1), req_max));
-        } else if (getDynamicProperty(rt.ctx, init, pool, "max_response_bytes")) |max_val| {
-            if (!max_val.isInt()) {
-                return createFetchErrorResponse(rt, "InvalidMaxResponseBytes", "max_response_bytes must be integer");
-            }
-            const req_max = std.math.cast(usize, max_val.getInt()) orelse {
-                return createFetchErrorResponse(rt, "InvalidMaxResponseBytes", "max_response_bytes out of range");
-            };
-            max_response_bytes = @min(max_response_bytes, @max(@as(usize, 1), req_max));
-        }
-
-        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.headers, "headers")) |headers_val| {
-            if (!headers_val.isObject()) {
-                return createFetchErrorResponse(rt, "InvalidHeaders", "headers must be object<string,string>");
-            }
-            const headers_obj = headers_val.toPtr(zq.JSObject);
-            const keys = try headers_obj.getOwnEnumerableKeys(rt.allocator, pool);
-            defer rt.allocator.free(keys);
-
-            for (keys) |key_atom| {
-                const key_name = rt.ctx.atoms.getName(key_atom) orelse continue;
-                const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
-                const header_str = getStringData(header_val) orelse {
-                    return createFetchErrorResponse(rt, "InvalidHeaders", "header values must be strings");
-                };
-                if (key_name.len == 0) {
-                    return createFetchErrorResponse(rt, "InvalidHeaders", "header name must be non-empty");
-                }
-                if (std.mem.indexOfAny(u8, key_name, "\r\n") != null) {
-                    return createFetchErrorResponse(rt, "InvalidHeaders", "header name contains newline");
-                }
-                if (std.mem.indexOfAny(u8, header_str, "\r\n") != null) {
-                    return createFetchErrorResponse(rt, "InvalidHeaders", "header value contains newline");
-                }
-                try headers.append(.{ .name = key_name, .value = header_str });
-            }
-        }
-    }
+    var options = switch (try parseFetchInitOptions(rt, rt.allocator, pool, init_obj)) {
+        .ok => |parsed_options| parsed_options,
+        .err => |err_val| return err_val,
+    };
+    defer options.deinit(rt.allocator);
 
     var client = std.http.Client{
         .allocator = rt.allocator,
@@ -2921,18 +2962,18 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
         return createFetchErrorResponse(rt, "ConnectFailed", @errorName(err));
     };
 
-    var req = client.request(method, uri, .{
+    var req = client.request(options.method, uri, .{
         .redirect_behavior = .unhandled,
         .keep_alive = false,
         .connection = connection,
-        .extra_headers = headers.items,
+        .extra_headers = options.headers.items,
     }) catch |err| {
         client.connection_pool.release(connection, client.io);
         return createFetchErrorResponse(rt, "RequestInitFailed", @errorName(err));
     };
     defer req.deinit();
 
-    if (body) |payload| {
+    if (options.body) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
         var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
             return createFetchErrorResponse(rt, "RequestSendFailed", @errorName(err));
@@ -2961,7 +3002,7 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
 
     var body_transfer: [64]u8 = undefined;
     var response_reader = response.reader(&body_transfer);
-    const response_body = response_reader.allocRemaining(rt.allocator, std.Io.Limit.limited(max_response_bytes)) catch |err| switch (err) {
+    const response_body = response_reader.allocRemaining(rt.allocator, std.Io.Limit.limited(options.max_response_bytes)) catch |err| switch (err) {
         error.StreamTooLong => return createFetchErrorResponse(rt, "ResponseTooLarge", "response exceeded max_response_bytes"),
         else => return createFetchErrorResponse(rt, "ResponseReadFailed", @errorName(err)),
     };
@@ -3000,55 +3041,26 @@ fn collectFetchForParallel(rt: *Runtime, collector: *zq.modules.io.ParallelColle
     const url = fetch_args.url;
     const init_obj = fetch_args.init_obj;
 
-    var method = std.http.Method.GET;
-    var body: ?[]const u8 = null;
-    var max_response_bytes = @max(@as(usize, 1), rt.config.outbound_max_response_bytes);
-    var headers_list: std.ArrayList(std.http.Header) = .empty;
+    var options = switch (try parseFetchInitOptions(rt, a, pool, init_obj)) {
+        .ok => |parsed_options| parsed_options,
+        .err => |err_val| return err_val,
+    };
+    errdefer options.deinit(a);
 
-    if (init_obj) |init| {
-        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.method, "method")) |method_val| {
-            const method_name = getStringData(method_val) orelse {
-                return createFetchErrorResponse(rt, "InvalidMethod", "method must be string");
-            };
-            method = parseHttpMethod(method_name) orelse {
-                return createFetchErrorResponse(rt, "InvalidMethod", method_name);
-            };
-        }
-        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.body, "body")) |body_val| {
-            if (!body_val.isNull() and !body_val.isUndefined()) {
-                body = getStringData(body_val);
-            }
-        }
-        if (getDynamicProperty(rt.ctx, init, pool, "maxResponseBytes")) |max_val| {
-            if (max_val.isInt()) {
-                if (std.math.cast(usize, max_val.getInt())) |req_max| {
-                    max_response_bytes = @min(max_response_bytes, @max(@as(usize, 1), req_max));
-                }
-            }
-        }
-        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.headers, "headers")) |headers_val| {
-            if (headers_val.isObject()) {
-                const headers_obj = headers_val.toPtr(zq.JSObject);
-                const keys = try headers_obj.getOwnEnumerableKeys(a, pool);
-                defer a.free(keys);
-                for (keys) |key_atom| {
-                    const key_name = rt.ctx.atoms.getName(key_atom) orelse continue;
-                    const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
-                    const header_str = getStringData(header_val) orelse continue;
-                    try headers_list.append(a, .{ .name = key_name, .value = header_str });
-                }
-            }
-        }
-    }
+    const owned_url = try a.dupe(u8, url);
+    errdefer a.free(owned_url);
+
+    const owned_body = if (options.body) |b| try a.dupe(u8, b) else null;
+    errdefer if (owned_body) |b| a.free(b);
 
     // Store descriptor
     const idx = collector.count;
     collector.descriptors[idx] = .{
-        .url = try a.dupe(u8, url),
-        .method = method,
-        .body = if (body) |b| try a.dupe(u8, b) else null,
-        .headers = headers_list,
-        .max_response_bytes = max_response_bytes,
+        .url = owned_url,
+        .method = options.method,
+        .body = owned_body,
+        .headers = options.headers,
+        .max_response_bytes = options.max_response_bytes,
     };
     collector.count += 1;
 
@@ -5674,6 +5686,8 @@ test "fetchSync returns structured errors for invalid init and allowlist failure
         \\    badHeadersError: badHeaders.error,
         \\    badMethodError: fetchSync({ url: "http://localhost", method: "BOGUS" }).json().error,
         \\    badBodyError: fetchSync("http://localhost", { body: 42 }).json().error,
+        \\    badCamelMaxError: fetchSync("http://localhost", { maxResponseBytes: "large" }).json().error,
+        \\    badSnakeMaxError: fetchSync("http://localhost", { max_response_bytes: "large" }).json().error,
         \\    missingUrlError: fetchSync({ method: "GET" }).json().error,
         \\    hostBlockedError: fetchSync("http://example.com").json().error,
         \\  });
@@ -5701,6 +5715,8 @@ test "fetchSync returns structured errors for invalid init and allowlist failure
     try std.testing.expectEqualStrings("InvalidHeaders", obj.get("badHeadersError").?.string);
     try std.testing.expectEqualStrings("InvalidMethod", obj.get("badMethodError").?.string);
     try std.testing.expectEqualStrings("InvalidBody", obj.get("badBodyError").?.string);
+    try std.testing.expectEqualStrings("InvalidMaxResponseBytes", obj.get("badCamelMaxError").?.string);
+    try std.testing.expectEqualStrings("InvalidMaxResponseBytes", obj.get("badSnakeMaxError").?.string);
     try std.testing.expectEqualStrings("InvalidUrl", obj.get("missingUrlError").?.string);
     try std.testing.expectEqualStrings("HostNotAllowed", obj.get("hostBlockedError").?.string);
 }

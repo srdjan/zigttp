@@ -2038,8 +2038,12 @@ fn compileMultiModule(
     // Serialize each module and collect dependency bytecodes
     const mod_count = compile_result.modules.len;
     var dep_bytecodes = try allocator.alloc([]const u8, mod_count - 1);
+    // `alloc` returns uninitialized slices; freeing garbage pointers would
+    // crash. Walk only the populated prefix on the unwind path (same idiom
+    // as b8f0bbb).
+    var dep_bytecodes_initialized: usize = 0;
     errdefer {
-        for (dep_bytecodes) |d| allocator.free(d);
+        for (dep_bytecodes[0..dep_bytecodes_initialized]) |d| allocator.free(d);
         allocator.free(dep_bytecodes);
     }
 
@@ -2060,6 +2064,7 @@ fn compileMultiModule(
         };
 
         dep_bytecodes[i] = try allocator.dupe(u8, writer.getWritten());
+        dep_bytecodes_initialized = i + 1;
     }
 
     // Serialize entry module (last in execution order)

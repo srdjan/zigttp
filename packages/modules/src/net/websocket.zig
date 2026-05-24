@@ -29,7 +29,9 @@ pub const WebSocketCallbacks = struct {
 pub const binding = sdk.ModuleBinding{
     .specifier = "zigttp:websocket",
     .name = "websocket",
-    .required_capabilities = &.{ .clock, .runtime_callback, .filesystem, .policy_check, .websocket },
+    // .network: send/close write to the peer socket via the runtime callback.
+    // .filesystem: attachment serialization may persist hibernation state.
+    .required_capabilities = &.{ .clock, .runtime_callback, .network, .filesystem, .policy_check, .websocket },
     .stateful = true,
     .exports = &.{
         .{ .name = "send", .module_func = sendImpl, .arg_count = 2, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .string } },

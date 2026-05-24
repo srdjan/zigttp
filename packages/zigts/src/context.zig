@@ -143,10 +143,18 @@ pub const SmallIntStringCache = struct {
 
     pub fn init(allocator: std.mem.Allocator) !SmallIntStringCache {
         var cache: SmallIntStringCache = undefined;
+        var initialized: usize = 0;
+        errdefer {
+            for (cache.strings[0..initialized]) |str| {
+                string.freeString(allocator, str);
+            }
+        }
+
         var buf: [4]u8 = undefined;
         for (0..1000) |i| {
             const slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
             cache.strings[i] = try string.createString(allocator, slice);
+            initialized += 1;
         }
         return cache;
     }
@@ -341,6 +349,14 @@ pub const Context = struct {
             .module_state = .{null} ** MAX_MODULE_STATE_SLOTS,
             .capability_policy = .{},
         };
+        errdefer {
+            ctx.literal_shapes.deinit(allocator);
+            ctx.bytecode_functions.deinit(allocator);
+            ctx.builtin_objects.deinit(allocator);
+            ctx.render_writer.deinit();
+            ctx.json_writer.deinit();
+            ctx.atoms.deinit();
+        }
 
         if (config.use_http_shape_cache) {
             try ctx.initHttpShapes();
@@ -1753,12 +1769,14 @@ pub const AtomTable = struct {
         }
 
         const atom: object.Atom = @enumFromInt(self.next_id);
-        self.next_id += 1;
-
-        // Copy string for storage
         const key = try self.allocator.dupe(u8, s);
+        errdefer self.allocator.free(key);
+
         try self.strings.put(key, atom);
-        try self.reverse.put(atom, key); // Populate reverse map
+        errdefer _ = self.strings.remove(key);
+
+        try self.reverse.put(atom, key);
+        self.next_id += 1;
 
         return atom;
     }

@@ -244,19 +244,22 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
     errdefer allocator.destroy(schema);
     schema.* = .{};
 
+    // Schema root must be an object. Returning a permissive empty schema
+    // here would silently accept any input against this name; fail closed
+    // so `schemaCompileImpl` reports compilation failure to the caller.
     const obj = switch (json_val) {
         .object => |o| o,
-        else => return schema,
+        else => return error.InvalidSchema,
     };
 
     if (obj.get("type")) |type_val| switch (type_val) {
-        .string => |s| schema.schema_type = parseSchemaType(s),
-        else => {},
+        .string => |s| schema.schema_type = parseSchemaType(s) orelse return error.InvalidSchema,
+        else => return error.InvalidSchema,
     };
-    if (obj.get("minLength")) |v| schema.min_length = jsonToU32(v);
-    if (obj.get("maxLength")) |v| schema.max_length = jsonToU32(v);
-    if (obj.get("minimum")) |v| schema.minimum = jsonToF64(v);
-    if (obj.get("maximum")) |v| schema.maximum = jsonToF64(v);
+    if (obj.get("minLength")) |v| schema.min_length = jsonToU32(v) orelse return error.InvalidSchema;
+    if (obj.get("maxLength")) |v| schema.max_length = jsonToU32(v) orelse return error.InvalidSchema;
+    if (obj.get("minimum")) |v| schema.minimum = jsonToF64(v) orelse return error.InvalidSchema;
+    if (obj.get("maximum")) |v| schema.maximum = jsonToF64(v) orelse return error.InvalidSchema;
 
     if (obj.get("required")) |req_val| switch (req_val) {
         .array => |arr| {
@@ -267,11 +270,11 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
             }
             for (arr.items) |item| switch (item) {
                 .string => |s| try list.append(allocator, try allocator.dupe(u8, s)),
-                else => {},
+                else => return error.InvalidSchema,
             };
             schema.required = try list.toOwnedSlice(allocator);
         },
-        else => {},
+        else => return error.InvalidSchema,
     };
 
     if (obj.get("properties")) |props_val| switch (props_val) {
@@ -294,7 +297,7 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
             }
             schema.properties = props;
         },
-        else => {},
+        else => return error.InvalidSchema,
     };
 
     if (obj.get("items")) |items_val| {
@@ -309,17 +312,17 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
                 list.deinit(allocator);
             }
             for (arr.items) |item| {
-                const serialized = jsonValueToString(allocator, item) catch continue;
+                const serialized = try jsonValueToString(allocator, item);
                 try list.append(allocator, serialized);
             }
             schema.enum_values = try list.toOwnedSlice(allocator);
         },
-        else => {},
+        else => return error.InvalidSchema,
     };
 
     if (obj.get("format")) |format_val| switch (format_val) {
-        .string => |s| schema.format = FormatType.fromString(s),
-        else => {},
+        .string => |s| schema.format = FormatType.fromString(s) orelse return error.InvalidSchema,
+        else => return error.InvalidSchema,
     };
 
     return schema;
@@ -362,7 +365,8 @@ fn jsonValueToString(allocator: std.mem.Allocator, val: std.json.Value) ![]const
         .float => |f| try std.fmt.allocPrint(allocator, "{d}", .{f}),
         .bool => |b| try allocator.dupe(u8, if (b) "true" else "false"),
         .null => try allocator.dupe(u8, "null"),
-        else => error.OutOfMemory,
+        // Objects/arrays are not valid scalar enum members.
+        else => error.InvalidSchema,
     };
 }
 
@@ -656,6 +660,41 @@ fn parseNumberString(str: []const u8) sdk.JSValue {
 // ============================================================================
 // Tests (pure — no runtime needed)
 // ============================================================================
+
+test "schema compilation rejects non-object root" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "\"not-a-schema\"", .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidSchema, compileSchemaFromJson(allocator, parsed.value));
+}
+
+test "schema compilation rejects non-string type field" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":42}", .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidSchema, compileSchemaFromJson(allocator, parsed.value));
+}
+
+test "schema compilation rejects unknown type" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"unknown\"}", .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidSchema, compileSchemaFromJson(allocator, parsed.value));
+}
+
+test "schema compilation rejects non-array required" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"object\",\"required\":\"name\"}", .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidSchema, compileSchemaFromJson(allocator, parsed.value));
+}
+
+test "schema compilation rejects unknown format" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"string\",\"format\":\"hostname\"}", .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidSchema, compileSchemaFromJson(allocator, parsed.value));
+}
 
 test "schema compilation: basic types" {
     const allocator = std.testing.allocator;

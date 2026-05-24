@@ -226,4 +226,3 @@ test "lastPatchHash returns null when only legacy patches exist" {
 
     try testing.expect(lastPatchHash(&tr, "handler.ts") == null);
 }
-

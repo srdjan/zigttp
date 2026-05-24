@@ -353,7 +353,6 @@ fn checkEnvVars(
 // -------------------------------------------------------------------------
 
 /// Normalize a route pattern segment for comparison.
-
 fn routeExistsInContract(manifest_path: []const u8, contract: *const HandlerContract) bool {
     for (contract.routes.items) |route| {
         if (routePatternsMatch(manifest_path, route.pattern)) return true;

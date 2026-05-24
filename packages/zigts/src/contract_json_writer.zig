@@ -937,4 +937,3 @@ fn writeBooleanProperties(p: contract_types.HandlerProperties, writer: anytype) 
         }
     }
 }
-

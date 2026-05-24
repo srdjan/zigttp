@@ -2271,7 +2271,6 @@ pub const Interpreter = struct {
         }
         return try string.createString(self.ctx.allocator, s);
     }
-
 };
 
 test "Interpreter basic arithmetic" {
@@ -3299,9 +3298,9 @@ test "call_ic: operational parity with .call and feedback is recorded" {
 
     // Caller: push_const callee; call_ic argc=0 cache_idx=0; ret
     const caller_code = [_]u8{
-        @intFromEnum(bytecode.Opcode.push_const), 0, 0,
-        @intFromEnum(bytecode.Opcode.call_ic),    0, 0, 0,
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.push_const), 0,                                 0,
+        @intFromEnum(bytecode.Opcode.call_ic),    0,                                 0,
+        0,                                        @intFromEnum(bytecode.Opcode.ret),
     };
 
     var caller_func = bytecode.FunctionBytecode{
@@ -5397,4 +5396,3 @@ test "JIT integration: unsupported opcodes stay interpreted" {
     try std.testing.expectEqual(bytecode.CompilationTier.interpreted, func.tier);
     try std.testing.expect(func.compiled_code == null);
 }
-

@@ -431,6 +431,10 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             i += 1;
             if (i >= argv.len) return error.MissingMemoryValue;
             config.runtime_config.memory_limit = shared.parseSize(argv[i]) catch return error.InvalidMemorySize;
+        } else if (std.mem.eql(u8, arg, "--max-body-size")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingMaxBodySize;
+            config.max_body_size = shared.parseSize(argv[i]) catch return error.InvalidMaxBodySize;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--pool")) {
             i += 1;
             if (i >= argv.len) return error.MissingPoolValue;

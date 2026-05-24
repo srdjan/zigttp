@@ -200,7 +200,7 @@ fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void 
         \\  routes count:     {d}
         \\  proven chips:     {s}
         \\
-        ,
+    ,
         .{
             url,
             &result.fingerprint_hex,

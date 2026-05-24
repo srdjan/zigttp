@@ -81,6 +81,42 @@ pub const stringSlice = string_builtins.stringSlice;
 pub const numberParseInt = number.numberParseInt;
 pub const numberParseFloat = number.numberParseFloat;
 
+fn trackBuiltinObject(ctx: *context.Context, obj: *object.JSObject) !*object.JSObject {
+    errdefer obj.destroyFull(ctx.allocator);
+    try ctx.builtin_objects.append(ctx.allocator, obj);
+    return obj;
+}
+
+fn createBuiltinObject(ctx: *context.Context, pool: *object.HiddenClassPool, root_class_idx: object.HiddenClassIndex) !*object.JSObject {
+    const obj = try object.JSObject.create(ctx.allocator, root_class_idx, null, pool);
+    return trackBuiltinObject(ctx, obj);
+}
+
+fn createBuiltinNativeFunction(
+    ctx: *context.Context,
+    pool: *object.HiddenClassPool,
+    root_class_idx: object.HiddenClassIndex,
+    func: object.NativeFn,
+    name: object.Atom,
+    arg_count: u8,
+) !*object.JSObject {
+    const obj = try object.JSObject.createNativeFunction(ctx.allocator, pool, root_class_idx, func, name, arg_count);
+    return trackBuiltinObject(ctx, obj);
+}
+
+fn createBuiltinNativeFunctionWithId(
+    ctx: *context.Context,
+    pool: *object.HiddenClassPool,
+    root_class_idx: object.HiddenClassIndex,
+    func: object.NativeFn,
+    name: object.Atom,
+    arg_count: u8,
+    builtin_id: object.BuiltinId,
+) !*object.JSObject {
+    const obj = try object.JSObject.createNativeFunctionWithId(ctx.allocator, pool, root_class_idx, func, name, arg_count, builtin_id);
+    return trackBuiltinObject(ctx, obj);
+}
+
 /// Initialize all built-in objects on global
 pub fn initBuiltins(ctx: *context.Context) !void {
     const allocator = ctx.allocator;
@@ -88,13 +124,12 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const root_class_idx = ctx.root_class_idx;
 
     // Create console object
-    const console_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const console_obj = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethod(ctx, allocator, pool, console_obj, root_class_idx, .log, wrap(console.consoleLog), 0);
-    try ctx.builtin_objects.append(allocator, console_obj);
     try ctx.setGlobal(.console, console_obj.toValue());
 
     // Create Math object - hot methods use fast dispatch IDs
-    const math_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const math_obj = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodWithId(ctx, allocator, pool, math_obj, root_class_idx, .abs, wrap(math.mathAbs), 1, .math_abs);
     try addMethodWithId(ctx, allocator, pool, math_obj, root_class_idx, .floor, wrap(math.mathFloor), 1, .math_floor);
     try addMethodWithId(ctx, allocator, pool, math_obj, root_class_idx, .ceil, wrap(math.mathCeil), 1, .math_ceil);
@@ -113,59 +148,50 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Add Math constants as properties (NaN-boxing: no allocation needed)
     try ctx.setPropertyChecked(math_obj, @enumFromInt(ctx.atoms.next_id), value.JSValue.fromFloat(math.math_constants.PI));
-    try ctx.builtin_objects.append(allocator, math_obj);
     try ctx.setGlobal(.Math, math_obj.toValue());
 
     // Create JSON object - parse and stringify are hot builtins with fast dispatch
-    const json_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const json_obj = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodWithId(ctx, allocator, pool, json_obj, root_class_idx, .parse, wrap(json.jsonParse), 1, .json_parse);
     try addMethod(ctx, allocator, pool, json_obj, root_class_idx, .tryParse, wrap(json.jsonTryParse), 1);
     try addMethodWithId(ctx, allocator, pool, json_obj, root_class_idx, .stringify, wrap(json.jsonStringify), 1, .json_stringify);
-    try ctx.builtin_objects.append(allocator, json_obj);
     try ctx.setGlobal(.JSON, json_obj.toValue());
 
     // Create Object constructor with static methods
-    const object_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const object_obj = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, object_obj, "keys", wrap(object_builtins.objectKeys), 1);
     try addMethodDynamic(ctx, object_obj, "values", wrap(object_builtins.objectValues), 1);
     try addMethodDynamic(ctx, object_obj, "entries", wrap(object_builtins.objectEntries), 1);
     try addMethodDynamic(ctx, object_obj, "hasOwn", wrap(object_builtins.objectHasOwn), 2);
-    try ctx.builtin_objects.append(allocator, object_obj);
     try ctx.setGlobal(.Object, object_obj.toValue());
 
     // Create Error prototype with toString method
-    const error_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const error_proto = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, error_proto, "toString", wrap(err.errorToString), 0);
-    try ctx.builtin_objects.append(allocator, error_proto);
 
     // Error constructors
-    const error_ctor_func = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(err.errorConstructor), .Error, 1);
+    const error_ctor_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(err.errorConstructor), .Error, 1);
     try ctx.setPropertyChecked(error_ctor_func, .prototype, error_proto.toValue());
-    try ctx.builtin_objects.append(allocator, error_ctor_func);
     try ctx.setGlobal(.Error, error_ctor_func.toValue());
 
-    const type_error_ctor = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(err.typeErrorConstructor), .TypeError, 1);
+    const type_error_ctor = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(err.typeErrorConstructor), .TypeError, 1);
     try ctx.setPropertyChecked(type_error_ctor, .prototype, error_proto.toValue());
-    try ctx.builtin_objects.append(allocator, type_error_ctor);
     try ctx.setGlobal(.TypeError, type_error_ctor.toValue());
 
-    const range_error_ctor = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(err.rangeErrorConstructor), .RangeError, 1);
+    const range_error_ctor = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(err.rangeErrorConstructor), .RangeError, 1);
     try ctx.setPropertyChecked(range_error_ctor, .prototype, error_proto.toValue());
-    try ctx.builtin_objects.append(allocator, range_error_ctor);
     try ctx.setGlobal(.RangeError, range_error_ctor.toValue());
 
-    const syntax_error_ctor = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(err.syntaxErrorConstructor), .SyntaxError, 1);
+    const syntax_error_ctor = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(err.syntaxErrorConstructor), .SyntaxError, 1);
     try ctx.setPropertyChecked(syntax_error_ctor, .prototype, error_proto.toValue());
-    try ctx.builtin_objects.append(allocator, syntax_error_ctor);
     try ctx.setGlobal(.SyntaxError, syntax_error_ctor.toValue());
 
-    const ref_error_ctor = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(err.referenceErrorConstructor), .ReferenceError, 1);
+    const ref_error_ctor = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(err.referenceErrorConstructor), .ReferenceError, 1);
     try ctx.setPropertyChecked(ref_error_ctor, .prototype, error_proto.toValue());
-    try ctx.builtin_objects.append(allocator, ref_error_ctor);
     try ctx.setGlobal(.ReferenceError, ref_error_ctor.toValue());
 
     // Create Number object with static methods
-    const number_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const number_obj = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, number_obj, "isInteger", wrap(number.numberIsInteger), 1);
     try addMethodDynamic(ctx, number_obj, "isNaN", wrap(number.numberIsNaN), 1);
     try addMethodDynamic(ctx, number_obj, "isFinite", wrap(number.numberIsFinite), 1);
@@ -183,112 +209,92 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setPropertyChecked(number_obj, pos_inf_atom, value.JSValue.fromFloat(std.math.inf(f64)));
     const neg_inf_atom = try ctx.atoms.intern("NEGATIVE_INFINITY");
     try ctx.setPropertyChecked(number_obj, neg_inf_atom, value.JSValue.fromFloat(-std.math.inf(f64)));
-    try ctx.builtin_objects.append(allocator, number_obj);
     try ctx.setGlobal(.Number, number_obj.toValue());
 
     // Global parseFloat/parseInt
     const global_parse_float_atom = try ctx.atoms.intern("parseFloat");
-    const parse_float_func = try object.JSObject.createNativeFunctionWithId(allocator, pool, root_class_idx, wrap(number.numberParseFloat), global_parse_float_atom, 1, .parse_float);
-    try ctx.builtin_objects.append(allocator, parse_float_func);
+    const parse_float_func = try createBuiltinNativeFunctionWithId(ctx, pool, root_class_idx, wrap(number.numberParseFloat), global_parse_float_atom, 1, .parse_float);
     try ctx.setGlobal(global_parse_float_atom, parse_float_func.toValue());
 
     const global_parse_int_atom = try ctx.atoms.intern("parseInt");
-    const parse_int_func = try object.JSObject.createNativeFunctionWithId(allocator, pool, root_class_idx, wrap(number.numberParseInt), global_parse_int_atom, 2, .parse_int);
-    try ctx.builtin_objects.append(allocator, parse_int_func);
+    const parse_int_func = try createBuiltinNativeFunctionWithId(ctx, pool, root_class_idx, wrap(number.numberParseInt), global_parse_int_atom, 2, .parse_int);
     try ctx.setGlobal(global_parse_int_atom, parse_int_func.toValue());
 
     // Global isNaN/isFinite
     const global_is_nan_atom = try ctx.atoms.intern("isNaN");
-    const global_is_nan_func = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(number.globalIsNaN), global_is_nan_atom, 1);
-    try ctx.builtin_objects.append(allocator, global_is_nan_func);
+    const global_is_nan_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalIsNaN), global_is_nan_atom, 1);
     try ctx.setGlobal(global_is_nan_atom, global_is_nan_func.toValue());
 
     const global_is_finite_atom = try ctx.atoms.intern("isFinite");
-    const global_is_finite_func = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(number.globalIsFinite), global_is_finite_atom, 1);
-    try ctx.builtin_objects.append(allocator, global_is_finite_func);
+    const global_is_finite_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalIsFinite), global_is_finite_atom, 1);
     try ctx.setGlobal(global_is_finite_atom, global_is_finite_func.toValue());
 
     // Global range()
     const range_atom = try ctx.atoms.intern("range");
-    const range_func = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(number.globalRange), range_atom, 1);
-    try ctx.builtin_objects.append(allocator, range_func);
+    const range_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalRange), range_atom, 1);
     try ctx.setGlobal(range_atom, range_func.toValue());
 
     // Global _processRequest
     const process_req_atom = try ctx.atoms.intern("_processRequest");
-    const process_req_func = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(number.globalProcessRequest), process_req_atom, 3);
-    try ctx.builtin_objects.append(allocator, process_req_func);
+    const process_req_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalProcessRequest), process_req_atom, 3);
     try ctx.setGlobal(process_req_atom, process_req_func.toValue());
 
     // Map
-    const map_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const map_proto = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, map_proto, "set", wrap(map.mapSet), 2);
     try addMethodDynamic(ctx, map_proto, "get", wrap(map.mapGet), 1);
     try addMethodDynamic(ctx, map_proto, "has", wrap(map.mapHas), 1);
     try addMethodDynamic(ctx, map_proto, "delete", wrap(map.mapDelete), 1);
     try addMethodDynamic(ctx, map_proto, "clear", wrap(map.mapClear), 0);
-    try ctx.builtin_objects.append(allocator, map_proto);
-    const map_ctor = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(map.mapConstructor), .Map, 0);
+    const map_ctor = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(map.mapConstructor), .Map, 0);
     try ctx.setPropertyChecked(map_ctor, .prototype, map_proto.toValue());
-    try ctx.builtin_objects.append(allocator, map_ctor);
     try ctx.setGlobal(.Map, map_ctor.toValue());
 
     // Set
-    const set_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const set_proto = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, set_proto, "add", wrap(set.setAdd), 1);
     try addMethodDynamic(ctx, set_proto, "has", wrap(set.setHas), 1);
     try addMethodDynamic(ctx, set_proto, "delete", wrap(set.setDelete), 1);
     try addMethodDynamic(ctx, set_proto, "clear", wrap(set.setClear), 0);
-    try ctx.builtin_objects.append(allocator, set_proto);
-    const set_ctor = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(set.setConstructor), .Set, 0);
+    const set_ctor = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(set.setConstructor), .Set, 0);
     try ctx.setPropertyChecked(set_ctor, .prototype, set_proto.toValue());
-    try ctx.builtin_objects.append(allocator, set_ctor);
     try ctx.setGlobal(.Set, set_ctor.toValue());
 
     // Response constructor with static methods
-    const response_ctor = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, http.responseConstructor, .Response, 2);
+    const response_ctor = try createBuiltinNativeFunction(ctx, pool, root_class_idx, http.responseConstructor, .Response, 2);
     const json_atom: object.Atom = .json;
     const text_atom: object.Atom = .text;
     const html_atom: object.Atom = .html;
     const redirect_atom = try ctx.atoms.intern("redirect");
-    const json_fn = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, http.responseJson, json_atom, 1);
-    try ctx.setPropertyChecked(response_ctor, json_atom, json_fn.toValue());
-    const text_fn = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, http.responseText, text_atom, 1);
-    try ctx.setPropertyChecked(response_ctor, text_atom, text_fn.toValue());
-    const html_fn = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, http.responseHtml, html_atom, 1);
-    try ctx.setPropertyChecked(response_ctor, html_atom, html_fn.toValue());
-    const redirect_fn = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, http.responseRedirect, redirect_atom, 1);
-    try ctx.setPropertyChecked(response_ctor, redirect_atom, redirect_fn.toValue());
-    const rawjson_fn = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, http.responseRawJson, .rawJson, 1);
-    try ctx.setPropertyChecked(response_ctor, .rawJson, rawjson_fn.toValue());
-    try ctx.builtin_objects.append(allocator, response_ctor);
+    try addMethod(ctx, allocator, pool, response_ctor, root_class_idx, json_atom, http.responseJson, 1);
+    try addMethod(ctx, allocator, pool, response_ctor, root_class_idx, text_atom, http.responseText, 1);
+    try addMethod(ctx, allocator, pool, response_ctor, root_class_idx, html_atom, http.responseHtml, 1);
+    try addMethod(ctx, allocator, pool, response_ctor, root_class_idx, redirect_atom, http.responseRedirect, 1);
+    try addMethod(ctx, allocator, pool, response_ctor, root_class_idx, .rawJson, http.responseRawJson, 1);
     try ctx.setGlobal(.Response, response_ctor.toValue());
 
     // JSX: h(), renderToString(), Fragment
     const h_atom: object.Atom = .h;
-    const h_fn = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, http.h, h_atom, 2);
-    try ctx.builtin_objects.append(allocator, h_fn);
+    const h_fn = try createBuiltinNativeFunction(ctx, pool, root_class_idx, http.h, h_atom, 2);
     try ctx.setGlobal(h_atom, h_fn.toValue());
     const render_atom: object.Atom = .renderToString;
-    const render_fn = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, http.renderToString, render_atom, 1);
-    try ctx.builtin_objects.append(allocator, render_fn);
+    const render_fn = try createBuiltinNativeFunction(ctx, pool, root_class_idx, http.renderToString, render_atom, 1);
     try ctx.setGlobal(render_atom, render_fn.toValue());
     const fragment_atom: object.Atom = .Fragment;
     try ctx.setGlobal(fragment_atom, value.JSValue.undefined_val);
 
     // Date and performance
-    const date_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const date_obj = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, date_obj, "now", wrap(date.dateNow), 0);
-    try ctx.builtin_objects.append(allocator, date_obj);
     try ctx.setGlobal(.Date, date_obj.toValue());
-    const performance_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const performance_obj = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, performance_obj, "now", wrap(date.performanceNow), 0);
-    try ctx.builtin_objects.append(allocator, performance_obj);
     const performance_atom = try ctx.atoms.intern("performance");
     try ctx.setGlobal(performance_atom, performance_obj.toValue());
 
     // Array.prototype
     const array_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    ctx.array_prototype = array_proto;
     try addMethodDynamic(ctx, array_proto, "push", wrap(array.arrayPush), 1);
     try addMethodDynamic(ctx, array_proto, "pop", wrap(array.arrayPop), 0);
     try addMethodDynamic(ctx, array_proto, "shift", wrap(array.arrayShift), 0);
@@ -309,16 +315,15 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, array_proto, "findIndex", wrap(array.arrayFindIndex), 1);
     try addMethodDynamic(ctx, array_proto, "toSorted", wrap(array.arrayToSorted), 1);
     try addMethodDynamic(ctx, array_proto, "toReversed", wrap(array.arrayToReversed), 0);
-    ctx.array_prototype = array_proto;
-    const array_ctor = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const array_ctor = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, array_ctor, "isArray", wrap(array.arrayIsArray), 1);
     try addMethodDynamic(ctx, array_ctor, "from", wrap(array.arrayFrom), 1);
     try addMethodDynamic(ctx, array_ctor, "of", wrap(array.arrayOf), 0);
-    try ctx.builtin_objects.append(allocator, array_ctor);
     try ctx.setGlobal(.Array, array_ctor.toValue());
 
     // String.prototype
     const string_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    ctx.string_prototype = string_proto;
     try addMethodDynamic(ctx, string_proto, "charAt", wrap(string_builtins.stringCharAt), 1);
     try addMethodDynamic(ctx, string_proto, "charCodeAt", wrap(string_builtins.stringCharCodeAt), 1);
     try addMethodDynamicWithId(ctx, string_proto, "indexOf", wrap(string_builtins.stringIndexOf), 1, .string_index_of);
@@ -340,14 +345,13 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, string_proto, "concat", wrap(string_builtins.stringConcat), 1);
     try addMethodDynamic(ctx, string_proto, "replace", wrap(string_builtins.stringReplace), 2);
     try addMethodDynamic(ctx, string_proto, "replaceAll", wrap(string_builtins.stringReplaceAll), 2);
-    ctx.string_prototype = string_proto;
-    const string_ctor = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const string_ctor = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, string_ctor, "fromCharCode", wrap(string_builtins.stringFromCharCode), 1);
-    try ctx.builtin_objects.append(allocator, string_ctor);
     try ctx.setGlobal(.String, string_ctor.toValue());
 
     // Result type
     const result_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    ctx.result_prototype = result_proto;
     try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .isOk, wrap(result.resultIsOk), 0);
     try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .isErr, wrap(result.resultIsErr), 0);
     try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .unwrap, wrap(result.resultUnwrap), 0);
@@ -357,13 +361,11 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .mapErr, wrap(result.resultMapErr), 1);
     try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .andThen, wrap(result.resultAndThen), 1);
     try addMethodDynamic(ctx, result_proto, "match", wrap(result.resultMatch), 1);
-    const result_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
+    const result_obj = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethod(ctx, allocator, pool, result_obj, root_class_idx, .ok, wrap(result.resultOk), 1);
     try addMethod(ctx, allocator, pool, result_obj, root_class_idx, .err, wrap(result.resultErr), 1);
     try ctx.setPropertyChecked(result_obj, .prototype, result_proto.toValue());
-    try ctx.builtin_objects.append(allocator, result_obj);
     try ctx.setGlobal(.Result, result_obj.toValue());
-    ctx.result_prototype = result_proto;
 }
 
 // Run all sub-module tests

@@ -5,6 +5,7 @@
   "requiredCapabilities": [
     "clock",
     "runtime_callback",
+    "network",
     "filesystem",
     "policy_check",
     "websocket"

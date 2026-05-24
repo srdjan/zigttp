@@ -3,6 +3,7 @@
   "specifier": "zigttp:service",
   "source": "packages/zigts/src/modules/service.zig",
   "requiredCapabilities": [
+    "network",
     "filesystem",
     "runtime_callback"
   ],

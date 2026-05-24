@@ -238,11 +238,13 @@ pub fn addMethodDynamicWithId(
     const root_class_idx = ctx.root_class_idx;
     if (object.lookupPredefinedAtom(name)) |atom| {
         const func_obj = try object.JSObject.createNativeFunctionWithId(allocator, pool, root_class_idx, func, atom, arg_count, builtin_id);
+        errdefer func_obj.destroyFull(allocator);
         try ctx.setPropertyChecked(obj, atom, func_obj.toValue());
         return;
     }
     const atom = try ctx.atoms.intern(name);
     const func_obj = try object.JSObject.createNativeFunctionWithId(allocator, pool, root_class_idx, func, atom, arg_count, builtin_id);
+    errdefer func_obj.destroyFull(allocator);
     try ctx.setPropertyChecked(obj, atom, func_obj.toValue());
 }
 
@@ -258,6 +260,7 @@ pub fn addMethod(
     arg_count: u8,
 ) !void {
     const func_obj = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, func, name, arg_count);
+    errdefer func_obj.destroyFull(allocator);
     try ctx.setPropertyChecked(obj, name, func_obj.toValue());
 }
 
@@ -274,5 +277,6 @@ pub fn addMethodWithId(
     builtin_id: object.BuiltinId,
 ) !void {
     const func_obj = try object.JSObject.createNativeFunctionWithId(allocator, pool, root_class_idx, func, name, arg_count, builtin_id);
+    errdefer func_obj.destroyFull(allocator);
     try ctx.setPropertyChecked(obj, name, func_obj.toValue());
 }

@@ -72,8 +72,12 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
     std.debug.print("System: {d} handlers\n", .{config.handlers.len});
 
     var contracts = try allocator.alloc(handler_contract.HandlerContract, config.handlers.len);
+    // `alloc` returns uninitialized memory; walk only the populated prefix
+    // on cleanup so a partial-fill failure does not deinit garbage. Same
+    // idiom as `precompile.zig` after b8f0bbb.
+    var contracts_initialized: usize = 0;
     defer {
-        for (contracts) |*c| c.deinit(allocator);
+        for (contracts[0..contracts_initialized]) |*c| c.deinit(allocator);
         allocator.free(contracts);
     }
 
@@ -88,6 +92,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
             // Initialize a minimal contract so we can continue
             const path_dupe = try allocator.dupe(u8, entry.path);
             contracts[idx] = handler_contract.emptyContract(path_dupe);
+            contracts_initialized = idx + 1;
             continue;
         };
 
@@ -106,6 +111,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
             const path_dupe = try allocator.dupe(u8, entry.path);
             contracts[idx] = handler_contract.emptyContract(path_dupe);
         }
+        contracts_initialized = idx + 1;
 
         result.deinit(allocator);
     }

@@ -59,7 +59,7 @@ zig build
 
 ### Deployment Package
 
-The resulting binary (~500KB) has zero runtime dependencies and can be deployed
+The resulting release binary is ~4.8MB, has zero runtime dependencies, and can be deployed
 directly to FaaS platforms or container environments.
 
 ---
@@ -1631,8 +1631,8 @@ in `packages/zigts/src/` but are not enabled by default.
 
 zigttp is optimized for FaaS cold starts:
 
-- Binary initialization: < 1ms
-- Handler loading: typically < 5ms
+- Cold-start floor: ~3.5ms in the v0.1.0-beta benchmark pass
+- Typical cold start: ~7-15ms, depending on host load
 - No JIT warm-up required by default
 
 ### Hybrid Arena Allocation

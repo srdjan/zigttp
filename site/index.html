@@ -44,16 +44,16 @@
 
       <div class="identity__stats">
         <div class="identity__stat">
-          <data value="71" class="identity__stat-value">~71ms</data>
-          <span class="identity__stat-label">Cold start</span>
+          <data value="7" class="identity__stat-value">~7-15ms</data>
+          <span class="identity__stat-label">Typical cold start</span>
         </div>
         <div class="identity__stat">
-          <data value="1.2" class="identity__stat-value">~1.2MB</data>
-          <span class="identity__stat-label">Binary size</span>
+          <data value="4.8" class="identity__stat-value">4.8MB</data>
+          <span class="identity__stat-label">Release binary</span>
         </div>
         <div class="identity__stat">
-          <data value="3" class="identity__stat-value">3ms</data>
-          <span class="identity__stat-label">Runtime init</span>
+          <data value="3.5" class="identity__stat-value">~3.5ms</data>
+          <span class="identity__stat-label">Cold-start floor</span>
         </div>
       </div>
 
@@ -303,20 +303,20 @@
               </thead>
               <tbody>
                 <tr>
-                  <td>zigttp (embedded bytecode)</td>
-                  <td>~71ms</td>
+                  <td>zigttp floor</td>
+                  <td>~3.5ms</td>
                 </tr>
                 <tr>
-                  <td>zigttp (runtime parsing)</td>
-                  <td>~83ms</td>
+                  <td>zigttp typical p50</td>
+                  <td>~7-15ms</td>
                 </tr>
                 <tr>
-                  <td>Deno 2.6.7</td>
-                  <td>150-200ms</td>
+                  <td>zigttp tail under load</td>
+                  <td>up to ~60ms</td>
                 </tr>
                 <tr>
-                  <td>zigttp (Linux static, est.)</td>
-                  <td>18-33ms</td>
+                  <td>Methodology</td>
+                  <td><a href="docs/releases/v0.1.0-beta-benchmarks.md">beta benchmarks</a></td>
                 </tr>
               </tbody>
             </table>
@@ -326,12 +326,12 @@
             <h3>Runtime characteristics</h3>
             <dl class="stat-list">
               <div class="stat-list__item">
-                <dt class="stat-list__label">Runtime initialization</dt>
-                <dd class="stat-list__value">3ms</dd>
+                <dt class="stat-list__label">Cold-start floor</dt>
+                <dd class="stat-list__value">~3.5ms</dd>
               </div>
               <div class="stat-list__item">
-                <dt class="stat-list__label">Container image</dt>
-                <dd class="stat-list__value">~1.2MB</dd>
+                <dt class="stat-list__label">Release binary</dt>
+                <dd class="stat-list__value">4.8MB</dd>
               </div>
               <div class="stat-list__item">
                 <dt class="stat-list__label">Pool slot acquisition</dt>

@@ -57,7 +57,9 @@ pub const ServiceState = struct {
 pub const binding = sdk.ModuleBinding{
     .specifier = "zigttp:service",
     .name = "service",
-    .required_capabilities = &.{ .filesystem, .runtime_callback },
+    // .network: serviceCall dispatches via the runtime's fetch path (HTTP).
+    // .filesystem: install-time read of system.json for service registry.
+    .required_capabilities = &.{ .network, .filesystem, .runtime_callback },
     .stateful = true,
     .exports = &.{
         .{

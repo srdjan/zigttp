@@ -448,7 +448,6 @@ pub fn responseConstructor(ctx_ptr: *anyopaque, _: value.JSValue, args: []const 
 /// Fragment is represented as a null tag value in vnodes.
 /// Both <> shorthand (codegen push_null) and <Fragment> (global = null)
 /// produce null tags, detected via O(1) isNull() check in renderNode.
-
 fn appendChild(
     ctx: *context.Context,
     children_arr: *object.JSObject,

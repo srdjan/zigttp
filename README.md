@@ -70,7 +70,7 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 
 ### Numbers
 
-~3ms runtime-init floor, ~7-15ms typical cold start. 4.8MB deployed binary. ~13MB memory baseline. Pre-warmed handler pool with per-request isolation. See [performance docs](docs/performance.md) for the cold-start distribution and the Node/Deno throughput comparison.
+~3.5ms cold-start floor, ~7-15ms typical cold start. 4.8MB deployed binary. ~13MB memory baseline. Pre-warmed handler pool with per-request isolation. See [performance docs](docs/performance.md) for the measured cold-start distribution and the Node/Deno throughput comparison.
 
 ## Install
 
@@ -1175,22 +1175,20 @@ All flags are optional and additive. Without them, nothing changes.
 
 **Cold Start Performance**:
 
-| Platform | Cold Start | Runtime Init | Status |
-|----------|------------|--------------|--------|
-| **macOS** (development) | ~103ms | 3ms | Current |
-| **Linux** (production) | ~18-33ms (planned) | 3ms | Planned |
+| Measure | Value | Evidence |
+|---------|-------|----------|
+| Floor (best case) | ~3.5ms | Apple M4 Pro, macOS 26, ReleaseFast |
+| Typical (p50) | ~7-15ms | depends on host load |
+| Tail | up to ~60ms | under scheduling contention |
 
-**macOS Performance** (development environment):
-- Total cold start: ~103ms (2-3x faster than Deno)
-- Runtime initialization: 3ms
-- dyld overhead: 80-90ms (unavoidable on macOS, affects all binaries)
-- Acceptable for development; not suitable for latency-sensitive production
+Cold start is variance-dominated. The beta evidence measures wall time from
+process launch to the first complete HTTP response; cite the measured
+distribution in [`docs/performance.md`](docs/performance.md), not the older
+single-number estimates.
 
-**Linux Target** (future production optimization):
-- Static linking with musl libc
-- Expected cold start: 18-33ms (70-85ms faster than macOS)
-- Zero dynamic dependencies
-- Requires fixing JIT cross-compilation issues
+Linux and macOS release binaries are built for x86-64 and ARM64. Linux-specific
+cold-start claims need a separate measured pass before they appear in public
+copy.
 
 **Embedded Bytecode Optimization** (recommended for all platforms):
 ```bash
@@ -1200,8 +1198,8 @@ zig build -Doptimize=ReleaseFast -Dhandler=path/to/handler.js
 Eliminates runtime parsing and compilation. Single binary, smaller container image, lower memory baseline.
 
 **Platform Strategy**:
-- **macOS**: Development only (~100ms is acceptable)
-- **Linux**: Production target (sub-10ms goal via static linking)
+- **macOS**: supported release target with measured beta cold-start evidence
+- **Linux**: supported release target; publish Linux-specific numbers only after a measured pass
 - **Pre-fork/daemon**: Alternative for sub-millisecond response times
 
 See [Performance](docs/performance.md) for detailed profiling analysis and deployment patterns.

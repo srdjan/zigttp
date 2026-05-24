@@ -459,4 +459,3 @@ test "validateHs256Header is case-sensitive on alg value" {
     defer allocator.free(header);
     try testing.expectError(error.UnsupportedAlg, validateHs256Header(allocator, header));
 }
-

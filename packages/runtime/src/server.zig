@@ -148,6 +148,91 @@ fn formatStaticOkHeader(
     );
 }
 
+const DynamicHeaderOrder = enum {
+    /// Historical threaded path order: handler headers, attestation,
+    /// Content-Length, then Connection.
+    sync,
+    /// Historical evented path order: Content-Length, Connection,
+    /// filtered handler headers, then attestation.
+    evented,
+};
+
+fn appendStatusLine(buf: []u8, pos: *usize, status: u16, prefer_precomputed: bool) !void {
+    if (prefer_precomputed) {
+        if (getStatusLine(status)) |precomputed| {
+            if (pos.* + precomputed.len > buf.len) return error.BufferOverflow;
+            @memcpy(buf[pos.*..][0..precomputed.len], precomputed);
+            pos.* += precomputed.len;
+            return;
+        }
+    }
+
+    const status_line = std.fmt.bufPrint(
+        buf[pos.*..],
+        "HTTP/1.1 {d} {s}\r\n",
+        .{ status, getStatusText(status) },
+    ) catch return error.BufferOverflow;
+    pos.* += status_line.len;
+}
+
+fn appendHeaderLine(buf: []u8, pos: *usize, key: []const u8, value: []const u8) !void {
+    const line = std.fmt.bufPrint(buf[pos.*..], "{s}: {s}\r\n", .{ key, value }) catch return error.BufferOverflow;
+    pos.* += line.len;
+}
+
+fn appendContentLengthHeader(buf: []u8, pos: *usize, body_len: usize) !void {
+    const line = std.fmt.bufPrint(buf[pos.*..], "Content-Length: {d}\r\n", .{body_len}) catch return error.BufferOverflow;
+    pos.* += line.len;
+}
+
+fn appendConnectionHeader(buf: []u8, pos: *usize, keep_alive: bool) !void {
+    const line = if (keep_alive) "Connection: keep-alive\r\n" else "Connection: close\r\n";
+    if (pos.* + line.len > buf.len) return error.BufferOverflow;
+    @memcpy(buf[pos.*..][0..line.len], line);
+    pos.* += line.len;
+}
+
+fn appendHeaderTerminator(buf: []u8, pos: *usize) !void {
+    if (pos.* + 2 > buf.len) return error.BufferOverflow;
+    @memcpy(buf[pos.*..][0..2], "\r\n");
+    pos.* += 2;
+}
+
+fn buildDynamicResponseHeader(
+    buf: []u8,
+    response: *const HttpResponse,
+    keep_alive: bool,
+    attestation_headers: ?attest_header_strings.HeaderStrings,
+    order: DynamicHeaderOrder,
+) !usize {
+    var pos: usize = 0;
+    try appendStatusLine(buf, &pos, response.status, order == .sync);
+
+    switch (order) {
+        .sync => {
+            for (response.headers.items) |header| {
+                try appendHeaderLine(buf, &pos, header.key, header.value);
+            }
+            pos = try appendAttestationHeaders(attestation_headers, buf, pos);
+            try appendContentLengthHeader(buf, &pos, response.body.len);
+            try appendConnectionHeader(buf, &pos, keep_alive);
+        },
+        .evented => {
+            try appendContentLengthHeader(buf, &pos, response.body.len);
+            try appendConnectionHeader(buf, &pos, keep_alive);
+            for (response.headers.items) |header| {
+                if (std.ascii.eqlIgnoreCase(header.key, "Content-Length")) continue;
+                if (std.ascii.eqlIgnoreCase(header.key, "Connection")) continue;
+                try appendHeaderLine(buf, &pos, header.key, header.value);
+            }
+            pos = try appendAttestationHeaders(attestation_headers, buf, pos);
+        },
+    }
+
+    try appendHeaderTerminator(buf, &pos);
+    return pos;
+}
+
 /// Populate `response` for a `/_zigttp/studio*` path. Returns true if the
 /// caller should send `response`, false if the path didn't match any
 /// studio route. Studio-disabled and witness-not-found are populated as
@@ -738,37 +823,13 @@ const ConnectionPool = struct {
 
         // Increased buffer to 8KB to fit headers + most response bodies in single write
         var header_buf: [8192]u8 = undefined;
-        var pos: usize = 0;
-
-        // Write status line - use pre-computed for common codes (avoids fmt.bufPrint)
-        if (getStatusLine(response.status)) |precomputed| {
-            @memcpy(header_buf[0..precomputed.len], precomputed);
-            pos = precomputed.len;
-        } else {
-            const status_line = std.fmt.bufPrint(header_buf[pos..], "HTTP/1.1 {d} {s}\r\n", .{ response.status, getStatusText(response.status) }) catch return error.BufferOverflow;
-            pos += status_line.len;
-        }
-
-        // Write headers
-        for (response.headers.items) |h| {
-            const header_line = std.fmt.bufPrint(header_buf[pos..], "{s}: {s}\r\n", .{ h.key, h.value }) catch return error.BufferOverflow;
-            pos += header_line.len;
-        }
-
-        pos = try appendAttestationHeaders(self.server.attestation_headers, &header_buf, pos);
-
-        // Content-Length and Connection
-        const content_len = std.fmt.bufPrint(header_buf[pos..], "Content-Length: {d}\r\n", .{response.body.len}) catch return error.BufferOverflow;
-        pos += content_len.len;
-
-        const conn_header = if (keep_alive) "Connection: keep-alive\r\n" else "Connection: close\r\n";
-        if (pos + conn_header.len + 2 > header_buf.len) return error.BufferOverflow;
-        @memcpy(header_buf[pos..][0..conn_header.len], conn_header);
-        pos += conn_header.len;
-
-        // End of headers
-        @memcpy(header_buf[pos..][0..2], "\r\n");
-        pos += 2;
+        var pos = try buildDynamicResponseHeader(
+            &header_buf,
+            response,
+            keep_alive,
+            self.server.attestation_headers,
+            .sync,
+        );
 
         // OPTIMIZATION: Combine headers + body in single syscall
         if (response.body.len > 0 and pos + response.body.len <= header_buf.len) {
@@ -2209,55 +2270,17 @@ pub const Server = struct {
 
         // Build headers into a single buffer to reduce tiny writes.
         var header_buf: [4096]u8 = undefined;
-        var header_len: usize = 0;
         const status_text = getStatusText(response.status);
 
-        const header_ok = blk: {
-            const line = std.fmt.bufPrint(
-                header_buf[header_len..],
-                "HTTP/1.1 {d} {s}\r\n",
-                .{ response.status, status_text },
-            ) catch break :blk false;
-            header_len += line.len;
-
-            const cl = std.fmt.bufPrint(
-                header_buf[header_len..],
-                "Content-Length: {d}\r\n",
-                .{response.body.len},
-            ) catch break :blk false;
-            header_len += cl.len;
-
-            const conn_line = if (keep_alive)
-                "Connection: keep-alive\r\n"
-            else
-                "Connection: close\r\n";
-            if (header_len + conn_line.len > header_buf.len) break :blk false;
-            @memcpy(header_buf[header_len..][0..conn_line.len], conn_line);
-            header_len += conn_line.len;
-
-            for (response.headers.items) |header| {
-                if (std.ascii.eqlIgnoreCase(header.key, "Content-Length")) continue;
-                if (std.ascii.eqlIgnoreCase(header.key, "Connection")) continue;
-                const hdr = std.fmt.bufPrint(
-                    header_buf[header_len..],
-                    "{s}: {s}\r\n",
-                    .{ header.key, header.value },
-                ) catch break :blk false;
-                header_len += hdr.len;
-            }
-
-            header_len = appendAttestationHeaders(self.attestation_headers, &header_buf, header_len) catch break :blk false;
-
-            if (header_len + 2 > header_buf.len) break :blk false;
-            header_buf[header_len] = '\r';
-            header_buf[header_len + 1] = '\n';
-            header_len += 2;
-            break :blk true;
-        };
-
-        if (header_ok) {
+        if (buildDynamicResponseHeader(
+            &header_buf,
+            response,
+            keep_alive,
+            self.attestation_headers,
+            .evented,
+        )) |header_len| {
             try out.writeAll(header_buf[0..header_len]);
-        } else {
+        } else |_| {
             // Fallback: stream headers directly if buffer is too small.
             try out.print("HTTP/1.1 {d} {s}\r\n", .{ response.status, status_text });
             try out.print("Content-Length: {d}\r\n", .{response.body.len});
@@ -2786,6 +2809,11 @@ fn isPathSafe(path: []const u8) bool {
     // Reject empty paths
     if (path.len == 0) return false;
 
+    // Reject NUL bytes anywhere in the path. Matches the CRLF/NUL guard
+    // for header names/values (commit 6e65bb7); a NUL byte is never
+    // legitimately part of a static-file URL path.
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
+
     // Reject absolute paths (Unix and Windows)
     if (path[0] == '/' or path[0] == '\\') return false;
 
@@ -2987,6 +3015,27 @@ test "path safety validation" {
 
     // Unsafe: empty path
     try std.testing.expect(!isPathSafe(""));
+
+    // Unsafe: NUL byte anywhere in the path (matches CRLF/NUL header guard
+    // from commit 6e65bb7; defense in depth at the filesystem boundary).
+    try std.testing.expect(!isPathSafe("ok\x00/etc/passwd"));
+
+    // Unsafe: mixed separators with traversal
+    try std.testing.expect(!isPathSafe("foo\\..\\bar"));
+    try std.testing.expect(!isPathSafe("..\\windows"));
+
+    // Unsafe: traversal at non-leading positions
+    try std.testing.expect(!isPathSafe("a/b/../../etc/passwd"));
+    try std.testing.expect(!isPathSafe("a/b/c/.."));
+
+    // Note on URL encoding: `..%2f..%2fetc/passwd` is NOT caught here
+    // because isPathSafe splits on the literal `/` and `\\` only, and
+    // %2f survives as a literal sub-string. The defense in depth is
+    // isCanonicalPathInsideRoot + openFile resolving the literal path
+    // name `..%2fetc..`, which does not exist on disk. This test pins
+    // the current contract: pre-decoded traversal must be caught here,
+    // post-decoded traversal relies on the filesystem layer.
+    try std.testing.expect(isPathSafe("..%2fetc/passwd"));
 }
 
 test "splitHeaderLine accepts no-space colon" {
@@ -3114,6 +3163,34 @@ test "parseRequestFromBuffer rejects duplicate content length" {
         "hello";
 
     try std.testing.expectError(error.DuplicateContentLength, server.parseRequestFromBuffer(allocator, data));
+}
+
+test "buildDynamicResponseHeader preserves backend header layouts" {
+    const allocator = std.testing.allocator;
+    var response = HttpResponse.init(allocator);
+    defer response.deinit();
+
+    response.status = 201;
+    response.body = "created";
+    try response.putHeader("X-Test", "one");
+    try response.putHeader("Content-Length", "999");
+    try response.putHeader("Connection", "close");
+
+    const attestation = attest_header_strings.HeaderStrings{
+        .proofs_value = "pure",
+        .attest_value = "jws",
+    };
+
+    var sync_buf: [512]u8 = undefined;
+    const sync_len = try buildDynamicResponseHeader(&sync_buf, &response, true, attestation, .sync);
+    const sync = sync_buf[0..sync_len];
+    try std.testing.expect(std.mem.startsWith(u8, sync, "HTTP/1.1 201 Created\r\nX-Test: one\r\nContent-Length: 999\r\nConnection: close\r\nZigttp-Proofs: pure\r\nZigttp-Attest: jws\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\n"));
+
+    var evented_buf: [512]u8 = undefined;
+    const evented_len = try buildDynamicResponseHeader(&evented_buf, &response, false, attestation, .evented);
+    const evented = evented_buf[0..evented_len];
+    try std.testing.expect(std.mem.startsWith(u8, evented, "HTTP/1.1 201 Created\r\nContent-Length: 7\r\nConnection: close\r\nX-Test: one\r\nZigttp-Proofs: pure\r\nZigttp-Attest: jws\r\n\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, evented, "Content-Length: 999") == null);
 }
 
 test "parseRequestFromBuffer rejects invalid content length" {

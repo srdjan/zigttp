@@ -655,7 +655,6 @@ pub const HandlerProperties = struct {
         }
         return null;
     }
-
 };
 
 fn isMonotonicProvenSpec(comptime field_name: []const u8) bool {

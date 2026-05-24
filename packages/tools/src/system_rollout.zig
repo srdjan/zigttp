@@ -678,10 +678,17 @@ fn phaseNames(
 
 fn dupeNames(allocator: std.mem.Allocator, names: []const []const u8) ![]const []const u8 {
     var out = try allocator.alloc([]const u8, names.len);
-    errdefer allocator.free(out);
+    // Free the populated prefix on failure; the outer `free(out)` only
+    // releases the backing array, not the duped strings.
+    var out_initialized: usize = 0;
+    errdefer {
+        for (out[0..out_initialized]) |s| allocator.free(s);
+        allocator.free(out);
+    }
 
     for (names, 0..) |name, idx| {
         out[idx] = try allocator.dupe(u8, name);
+        out_initialized = idx + 1;
     }
     return out;
 }

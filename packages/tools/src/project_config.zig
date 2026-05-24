@@ -224,11 +224,18 @@ fn dupStringArrayField(
     if (value != .array) return error.InvalidProjectConfig;
 
     const items = try allocator.alloc([]const u8, value.array.items.len);
-    errdefer allocator.free(items);
+    // Free the populated prefix on failure; the outer `free(items)` only
+    // releases the backing array, not the duped strings.
+    var items_initialized: usize = 0;
+    errdefer {
+        for (items[0..items_initialized]) |s| allocator.free(s);
+        allocator.free(items);
+    }
 
     for (value.array.items, 0..) |item, i| {
         if (item != .string) return error.InvalidProjectConfig;
         items[i] = try allocator.dupe(u8, item.string);
+        items_initialized = i + 1;
     }
     return items;
 }

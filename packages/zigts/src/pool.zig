@@ -517,23 +517,29 @@ test "Runtime.create errdefer ladder closes every failure path" {
     // fails) trips the leak detector on the *first* fail_index that lands
     // past that point. The success path is identical to the existing
     // Runtime tests above — this exercises the rollback side only.
-    const child = std.testing.allocator;
-
     var fail_at: usize = 0;
     const max_steps: usize = 4096;
     while (fail_at < max_steps) : (fail_at += 1) {
+        var leak_detector: std.heap.DebugAllocator(.{ .stack_trace_frames = 0 }) = .init;
+        const child = leak_detector.allocator();
         var failing = std.testing.FailingAllocator.init(child, .{ .fail_index = fail_at });
         const result = LockFreePool.Runtime.create(failing.allocator(), .{});
         if (result) |rt| {
             // We've exceeded the allocation count of a successful create();
             // destroy and stop walking.
             rt.destroy(failing.allocator());
+            const leak_check = leak_detector.deinit();
+            if (leak_check == .leak) std.debug.print("Runtime.create leaked on success after fail_at={d}\n", .{fail_at});
+            try std.testing.expectEqual(std.heap.Check.ok, leak_check);
             break;
         } else |err| {
             // Any non-OOM error means our injected failure is being masked
             // by a different error class — the test would no longer be
             // exercising what it claims to.
             try std.testing.expectEqual(error.OutOfMemory, err);
+            const leak_check = leak_detector.deinit();
+            if (leak_check == .leak) std.debug.print("Runtime.create leaked on fail_at={d}\n", .{fail_at});
+            try std.testing.expectEqual(std.heap.Check.ok, leak_check);
         }
     } else {
         // Ran the loop to completion without ever succeeding. Either the

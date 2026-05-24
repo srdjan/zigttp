@@ -281,7 +281,13 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
                 if (literal_val == .array) {
                     for (literal_val.array.items) |item| {
                         if (item == .string) {
-                            try env_vars.append(allocator, try allocator.dupe(u8, item.string));
+                            // Stage the dupe so a failing append() does not
+                            // leak it; ownership transfers to env_vars on
+                            // successful append, and the outer errdefer
+                            // walks env_vars.items.
+                            const duped = try allocator.dupe(u8, item.string);
+                            errdefer allocator.free(duped);
+                            try env_vars.append(allocator, duped);
                         }
                     }
                 }
@@ -316,10 +322,13 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
                         const method_val = route_obj.get("method") orelse continue;
                         const path_val = route_obj.get("path") orelse continue;
                         if (method_val != .string or path_val != .string) continue;
-                        try routes.append(allocator, .{
-                            .method = try allocator.dupe(u8, method_val.string),
-                            .path = try allocator.dupe(u8, path_val.string),
-                        });
+                        // Stage both dupes so a failure on the second one
+                        // (or on append) does not leak the first.
+                        const method = try allocator.dupe(u8, method_val.string);
+                        errdefer allocator.free(method);
+                        const path = try allocator.dupe(u8, path_val.string);
+                        errdefer allocator.free(path);
+                        try routes.append(allocator, .{ .method = method, .path = path });
                     }
                 }
             }
@@ -362,7 +371,9 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
         if (mods_val == .array) {
             for (mods_val.array.items) |item| {
                 if (item != .string) continue;
-                try modules.append(allocator, try allocator.dupe(u8, item.string));
+                const duped = try allocator.dupe(u8, item.string);
+                errdefer allocator.free(duped);
+                try modules.append(allocator, duped);
             }
         }
     }
@@ -504,7 +515,9 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         env_vars.deinit(allocator);
     }
     for (hc.env.literal.items) |s| {
-        try env_vars.append(allocator, try allocator.dupe(u8, s));
+        const duped = try allocator.dupe(u8, s);
+        errdefer allocator.free(duped);
+        try env_vars.append(allocator, duped);
     }
 
     // Copy API routes (method + path)
@@ -517,10 +530,11 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         routes.deinit(allocator);
     }
     for (hc.api.routes.items) |api_route| {
-        try routes.append(allocator, .{
-            .method = try allocator.dupe(u8, api_route.method),
-            .path = try allocator.dupe(u8, api_route.path),
-        });
+        const method = try allocator.dupe(u8, api_route.method);
+        errdefer allocator.free(method);
+        const path = try allocator.dupe(u8, api_route.path);
+        errdefer allocator.free(path);
+        try routes.append(allocator, .{ .method = method, .path = path });
     }
 
     // Convert properties
@@ -539,7 +553,9 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         modules.deinit(allocator);
     }
     for (hc.modules.items) |m| {
-        try modules.append(allocator, try allocator.dupe(u8, m));
+        const duped = try allocator.dupe(u8, m);
+        errdefer allocator.free(duped);
+        try modules.append(allocator, duped);
     }
 
     return .{ .inner = .{
@@ -1285,4 +1301,62 @@ test "ValidationProof argument type is a file-private opaque" {
     try std.testing.expect(param_info == .pointer);
     const opaque_info = @typeInfo(param_info.pointer.child);
     try std.testing.expect(opaque_info == .@"opaque");
+}
+
+test "parseContractJson: errdefer ladders close every failure path" {
+    // Walk FailingAllocator.fail_index forward through the function's
+    // allocation sequence. testing.allocator catches leaks on the unwind
+    // path so any errdefer that forgets a prior allocation surfaces here.
+    // Same idiom as `precompile.zig` test
+    // "buildServiceTypeContextFromContracts: errdefer ladder closes every
+    // failure path" and `pool.zig` Runtime.create.
+    const allocator = std.testing.allocator;
+
+    // Minimal input that exercises env literals (the largest dynamically
+    // populated array in the minimal parse path). Two entries is enough
+    // to expose a partial-fill leak.
+    const source =
+        \\{
+        \\  "version": 10,
+        \\  "handler": {"path": "h.ts", "line": 1, "column": 0},
+        \\  "routes": [],
+        \\  "modules": [],
+        \\  "functions": {},
+        \\  "env": {"literal": ["JWT_SECRET", "DB_URL"], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "serviceCalls": [],
+        \\  "cache": {"namespaces": [], "dynamic": false},
+        \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
+        \\  "durable": {"used": false, "keys": {"literal": [], "dynamic": false}, "steps": [], "timers": false, "signals": {"literal": [], "dynamic": false}, "producerKeys": {"literal": [], "dynamic": false}},
+        \\  "api": {"schemas": [], "requests": {"schemaRefs": [], "dynamic": false}, "auth": {"bearer": false, "jwt": false}, "routes": [], "schemasDynamic": false, "routesDynamic": false},
+        \\  "verification": null,
+        \\  "aot": null,
+        \\  "faultCoverage": null,
+        \\  "rateLimiting": null,
+        \\  "properties": null,
+        \\  "behaviors": [],
+        \\  "behaviorsExhaustive": false
+        \\}
+    ;
+
+    // Find the ceiling allocation count via a successful run.
+    var ceiling: usize = 0;
+    {
+        var probe = std.testing.FailingAllocator.init(allocator, .{ .fail_index = std.math.maxInt(usize) });
+        var raw = try parseContractJson(probe.allocator(), source);
+        ceiling = probe.alloc_index;
+        raw.deinit();
+    }
+
+    var fail_at: usize = 0;
+    while (fail_at < ceiling) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_at });
+        const result = parseContractJson(failing.allocator(), source);
+        if (result) |ok| {
+            var ok_mut = ok;
+            ok_mut.deinit();
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+        }
+    }
 }
