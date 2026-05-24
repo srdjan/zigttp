@@ -1973,10 +1973,48 @@ fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     try runtime_cli.serveCommand(serve_arena.allocator(), &serve_args);
 }
 
-fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+const CompileCommandOptions = struct {
+    handler_path: []const u8,
+    output_path: []const u8,
+    attest_requested: bool,
+    legacy_attest_seen: bool,
+};
+
+const BuildCommandOptions = struct {
+    output_override: ?[]const u8,
+    attest_requested: bool,
+    legacy_attest_seen: bool,
+};
+
+const CommandArgError = union(enum) {
+    missing_output_value,
+    missing_handler_path,
+    missing_output_flag,
+    unknown_arg: []const u8,
+};
+
+const CommandArgFailure = struct {
+    err: CommandArgError,
+    legacy_attest_seen: bool,
+};
+
+const CompileCommandParse = union(enum) {
+    help: bool,
+    ok: CompileCommandOptions,
+    err: CommandArgFailure,
+};
+
+const BuildCommandParse = union(enum) {
+    help: bool,
+    ok: BuildCommandOptions,
+    err: CommandArgFailure,
+};
+
+fn parseCompileCommandArgs(argv: []const []const u8) CompileCommandParse {
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
     var attest_requested = true;
+    var legacy_attest_seen = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -1984,17 +2022,17 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
             i += 1;
             if (i >= argv.len) {
-                std.log.err("-o requires an output path", .{});
-                return error.MissingArgument;
+                return .{ .err = .{ .err = .missing_output_value, .legacy_attest_seen = legacy_attest_seen } };
             }
             output_path = argv[i];
         } else if (std.mem.eql(u8, arg, attest_flag_legacy)) {
-            warnAttestLegacyOnce();
+            // Kept as a no-op for parsing. The command emits the legacy warning
+            // after parse succeeds, so parse-only tests stay side-effect free.
+            legacy_attest_seen = true;
         } else if (std.mem.eql(u8, arg, no_attest_flag)) {
             attest_requested = false;
         } else if (std.mem.eql(u8, arg, "--help")) {
-            printCompileHelp();
-            return;
+            return .{ .help = legacy_attest_seen };
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             handler_path = arg;
         } else {
@@ -2003,27 +2041,69 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
             // Without this branch, a typo like `--ouptut` was swallowed
             // and the build proceeded against the wrong (or default)
             // state with no diagnostic.
-            std.log.err("Unknown argument: {s}", .{arg});
-            printCompileHelp();
-            return error.UnknownOption;
+            return .{ .err = .{ .err = .{ .unknown_arg = arg }, .legacy_attest_seen = legacy_attest_seen } };
         }
     }
 
     if (handler_path == null) {
-        std.log.err("handler file path required", .{});
-        printCompileHelp();
-        return error.MissingArgument;
+        return .{ .err = .{ .err = .missing_handler_path, .legacy_attest_seen = legacy_attest_seen } };
     }
     if (output_path == null) {
-        std.log.err("-o <output> required", .{});
-        printCompileHelp();
-        return error.MissingArgument;
+        return .{ .err = .{ .err = .missing_output_flag, .legacy_attest_seen = legacy_attest_seen } };
     }
 
-    try buildArtifact(allocator, .{
+    return .{ .ok = .{
         .handler_path = handler_path.?,
         .output_path = output_path.?,
         .attest_requested = attest_requested,
+        .legacy_attest_seen = legacy_attest_seen,
+    } };
+}
+
+fn failCompileCommandArgs(err: CommandArgError) !void {
+    switch (err) {
+        .missing_output_value => {
+            std.log.err("-o requires an output path", .{});
+            return error.MissingArgument;
+        },
+        .missing_handler_path => {
+            std.log.err("handler file path required", .{});
+            printCompileHelp();
+            return error.MissingArgument;
+        },
+        .missing_output_flag => {
+            std.log.err("-o <output> required", .{});
+            printCompileHelp();
+            return error.MissingArgument;
+        },
+        .unknown_arg => |arg| {
+            std.log.err("Unknown argument: {s}", .{arg});
+            printCompileHelp();
+            return error.UnknownOption;
+        },
+    }
+}
+
+fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    const opts = switch (parseCompileCommandArgs(argv)) {
+        .help => |legacy_attest_seen| {
+            if (legacy_attest_seen) warnAttestLegacyOnce();
+            printCompileHelp();
+            return;
+        },
+        .ok => |opts| opts,
+        .err => |failure| {
+            if (failure.legacy_attest_seen) warnAttestLegacyOnce();
+            return failCompileCommandArgs(failure.err);
+        },
+    };
+
+    if (opts.legacy_attest_seen) warnAttestLegacyOnce();
+
+    try buildArtifact(allocator, .{
+        .handler_path = opts.handler_path,
+        .output_path = opts.output_path,
+        .attest_requested = opts.attest_requested,
     });
 }
 
@@ -2091,9 +2171,10 @@ fn prepareProjectArtifact(
     };
 }
 
-fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+fn parseBuildCommandArgs(argv: []const []const u8) BuildCommandParse {
     var output_override: ?[]const u8 = null;
     var attest_requested = true;
+    var legacy_attest_seen = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -2101,34 +2182,72 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
             i += 1;
             if (i >= argv.len) {
-                std.log.err("-o requires an output path", .{});
-                return error.MissingArgument;
+                return .{ .err = .{ .err = .missing_output_value, .legacy_attest_seen = legacy_attest_seen } };
             }
             output_override = argv[i];
         } else if (std.mem.eql(u8, arg, attest_flag_legacy)) {
-            warnAttestLegacyOnce();
+            // Kept as a no-op for parsing. The command emits the legacy warning
+            // after parse succeeds, so parse-only tests stay side-effect free.
+            legacy_attest_seen = true;
         } else if (std.mem.eql(u8, arg, no_attest_flag)) {
             attest_requested = false;
         } else if (std.mem.eql(u8, arg, "--help")) {
-            printBuildHelp();
-            return;
+            return .{ .help = legacy_attest_seen };
         } else {
+            return .{ .err = .{ .err = .{ .unknown_arg = arg }, .legacy_attest_seen = legacy_attest_seen } };
+        }
+    }
+
+    return .{ .ok = .{
+        .output_override = output_override,
+        .attest_requested = attest_requested,
+        .legacy_attest_seen = legacy_attest_seen,
+    } };
+}
+
+fn failBuildCommandArgs(err: CommandArgError) !void {
+    switch (err) {
+        .missing_output_value => {
+            std.log.err("-o requires an output path", .{});
+            return error.MissingArgument;
+        },
+        .unknown_arg => |arg| {
             std.log.err("Unknown argument: {s}", .{arg});
             printBuildHelp();
             return error.UnknownOption;
-        }
+        },
+        .missing_handler_path,
+        .missing_output_flag,
+        => unreachable,
     }
+}
+
+fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    const opts = switch (parseBuildCommandArgs(argv)) {
+        .help => |legacy_attest_seen| {
+            if (legacy_attest_seen) warnAttestLegacyOnce();
+            printBuildHelp();
+            return;
+        },
+        .ok => |opts| opts,
+        .err => |failure| {
+            if (failure.legacy_attest_seen) warnAttestLegacyOnce();
+            return failBuildCommandArgs(failure.err);
+        },
+    };
+
+    if (opts.legacy_attest_seen) warnAttestLegacyOnce();
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
 
-    var artifact = try prepareProjectArtifact(allocator, io_backend.io(), "build", output_override);
+    var artifact = try prepareProjectArtifact(allocator, io_backend.io(), "build", opts.output_override);
     defer artifact.deinit(allocator);
 
     try buildArtifact(allocator, .{
         .handler_path = artifact.handler_path,
         .output_path = artifact.output_path,
-        .attest_requested = attest_requested,
+        .attest_requested = opts.attest_requested,
     });
 
     std.debug.print(
@@ -3946,19 +4065,19 @@ test "prepareProjectArtifact returns NoProjectConfig when no zigttp.json on or a
 
 test "compileCommand requires a handler positional" {
     const testing = std.testing;
-    try testing.expectError(error.MissingArgument, compileCommand(testing.allocator, &.{}));
-    try testing.expectError(
-        error.MissingArgument,
-        compileCommand(testing.allocator, &.{ "-o", "out.bin" }),
+    try testing.expectEqual(CommandArgError.missing_handler_path, parseCompileCommandArgs(&.{}).err.err);
+    try testing.expectEqual(
+        CommandArgError.missing_handler_path,
+        parseCompileCommandArgs(&.{ "-o", "out.bin" }).err.err,
     );
 }
 
 test "compileCommand requires -o" {
     const testing = std.testing;
     // Handler positional present, but -o missing.
-    try testing.expectError(
-        error.MissingArgument,
-        compileCommand(testing.allocator, &.{"handler.ts"}),
+    try testing.expectEqual(
+        CommandArgError.missing_output_flag,
+        parseCompileCommandArgs(&.{"handler.ts"}).err.err,
     );
 }
 
@@ -3966,17 +4085,17 @@ test "compileCommand rejects bare -o without a follow-up path" {
     const testing = std.testing;
     // `-o` is the last token; the inner `i += 1; if (i >= argv.len)` guard
     // must fire as MissingArgument rather than silently leaving output null.
-    try testing.expectError(
-        error.MissingArgument,
-        compileCommand(testing.allocator, &.{ "handler.ts", "-o" }),
+    try testing.expectEqual(
+        CommandArgError.missing_output_value,
+        parseCompileCommandArgs(&.{ "handler.ts", "-o" }).err.err,
     );
 }
 
 test "buildCommand rejects bare -o without a follow-up path" {
     const testing = std.testing;
-    try testing.expectError(
-        error.MissingArgument,
-        buildCommand(testing.allocator, &.{"-o"}),
+    try testing.expectEqual(
+        CommandArgError.missing_output_value,
+        parseBuildCommandArgs(&.{"-o"}).err.err,
     );
 }
 
@@ -3985,14 +4104,8 @@ test "buildCommand rejects unknown flags as UnknownOption" {
     // Anything past the known set (`-o`, `--no-attest`, legacy `--attest`,
     // `--help`) hits the catch-all branch and exits with UnknownOption so
     // the user knows their flag was not recognised.
-    try testing.expectError(
-        error.UnknownOption,
-        buildCommand(testing.allocator, &.{"--unknown-flag"}),
-    );
-    try testing.expectError(
-        error.UnknownOption,
-        buildCommand(testing.allocator, &.{"unexpected_positional"}),
-    );
+    try testing.expectEqualStrings("--unknown-flag", parseBuildCommandArgs(&.{"--unknown-flag"}).err.err.unknown_arg);
+    try testing.expectEqualStrings("unexpected_positional", parseBuildCommandArgs(&.{"unexpected_positional"}).err.err.unknown_arg);
 }
 
 test "compileCommand rejects unknown -prefixed flags symmetrically with buildCommand" {
@@ -4002,12 +4115,6 @@ test "compileCommand rejects unknown -prefixed flags symmetrically with buildCom
     // positional branch. A typo like `--ouptut` would be ignored and the
     // build would proceed with the default state. The new else arm
     // returns UnknownOption — same behaviour as buildCommand.
-    try testing.expectError(
-        error.UnknownOption,
-        compileCommand(testing.allocator, &.{ "--ouptut", "out.bin", "handler.ts" }),
-    );
-    try testing.expectError(
-        error.UnknownOption,
-        compileCommand(testing.allocator, &.{ "--json", "handler.ts", "-o", "out.bin" }),
-    );
+    try testing.expectEqualStrings("--ouptut", parseCompileCommandArgs(&.{ "--ouptut", "out.bin", "handler.ts" }).err.err.unknown_arg);
+    try testing.expectEqualStrings("--json", parseCompileCommandArgs(&.{ "--json", "handler.ts", "-o", "out.bin" }).err.err.unknown_arg);
 }

@@ -541,6 +541,10 @@ pub fn build(b: *std.Build) void {
     // dependencies (deploy, pi_app wiring, zigts_cli delegation).
     const cli_tests = b.addTest(.{
         .root_module = runtime_dep.module("cli_main_tests"),
+        .test_runner = .{
+            .path = runtime_dep.path("src/cli_test_runner.zig"),
+            .mode = .simple,
+        },
     });
     cli_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
