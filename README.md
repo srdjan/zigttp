@@ -169,6 +169,8 @@ pages:
 zigttp is at v0.1.0-beta. Direction is set by two documents kept
 current in the repo:
 
+- [v0.1.0 Scope](docs/releases/v0.1.0-scope.md) - what's in this tag
+  and what is deliberately deferred.
 - [v1 Public Release](docs/roadmap/v1-public-release.md) - release
   contract and gates for the first public release.
 - [Frontier](docs/roadmap/frontier.md) - strategic thesis: a

@@ -7,9 +7,9 @@ For the strategic direction beyond the current implementation, see
 
 ## Design Philosophy
 
-**Goal**: Instant cold starts, small deployment package, request isolation, zero external dependencies.
+**Goal**: Instant cold starts, small deployment package, request isolation, and a self-contained runtime graph with vendored native dependencies.
 
-**Trade-offs for FaaS**: Single-threaded sequential processing (one request per instance), compile-time configuration, ES5 JavaScript subset with select ES6 features.
+**Trade-offs for FaaS**: Threaded HTTP/1.1 with per-request runtime isolation, compile-time configuration, and an intentionally restricted JavaScript/TypeScript subset.
 
 ## System Architecture
 
@@ -19,7 +19,7 @@ For the strategic direction beyond the current implementation, see
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │ HTTP Server │──│ HandlerPool │──│  Builtins/HTTP     │  │
-│  │  (std.net)  │  │  (contexts) │  │  (Response, h())   │  │
+│  │  (std.Io)   │  │  (contexts) │  │  (Response, h())   │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
 │                    zigts (Pure Zig)                      │
@@ -381,7 +381,7 @@ All allocations use `errdefer` for cleanup on failure paths. Header strings are 
 
 **Handler Precompilation** (`packages/tools/src/precompile.zig`, `build.zig`): The `-Dhandler=<path>` build option compiles JavaScript handlers at build time. Bytecode is embedded directly into the binary, eliminating runtime parsing entirely.
 
-Build flow: `packages/tools/src/precompile.zig` uses full zigts engine to compile, serialize bytecode with atoms and shapes, and generate `packages/runtime/src/generated/embedded_handler.zig`. The server loads this bytecode directly via `loadFromCachedBytecode()`.
+Build flow: `packages/tools/src/precompile.zig` uses full zigts engine to compile, serialize bytecode with atoms and shapes, and generate `packages/runtime/generated/embedded_handler.zig`. The server loads this bytecode directly via `loadFromCachedBytecode()`.
 
 ### Compiler-Derived Sandboxing
 

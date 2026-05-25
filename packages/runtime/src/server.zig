@@ -2206,6 +2206,8 @@ pub const Server = struct {
             &line_iter,
         );
 
+        if (fast_slots.has_chunked_encoding) return error.UnsupportedTransferEncoding;
+
         // Extract body if present
         var body: ?[]u8 = null;
         if (fast_slots.content_length) |len| {
@@ -3177,6 +3179,24 @@ test "parseRequestFromBuffer rejects duplicate content length" {
         "hello";
 
     try std.testing.expectError(error.DuplicateContentLength, server.parseRequestFromBuffer(allocator, data));
+}
+
+test "parseRequestFromBuffer rejects chunked transfer encoding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    const data =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Transfer-Encoding: chunked\r\n" ++
+        "\r\n" ++
+        "5\r\nhello\r\n0\r\n\r\n";
+
+    try std.testing.expectError(error.UnsupportedTransferEncoding, server.parseRequestFromBuffer(allocator, data));
 }
 
 test "buildDynamicResponseHeader preserves backend header layouts" {

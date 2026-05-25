@@ -116,7 +116,7 @@ When the compile-time contract proves a handler is `pure` or `deterministic`+`re
 - **TTL**: configurable per-entry expiry (default 5 minutes). Expired entries are lazily evicted.
 - **Max body**: responses larger than 256KB (default) are not cached.
 - **Visibility**: cached responses carry `X-Zigttp-Proof-Cache: hit` header.
-- **Implementation**: `packages/runtime/src/proof_adapter.zig`, integrated into `packages/runtime/src/server.zig` on both threaded and evented I/O paths.
+- **Implementation**: `packages/runtime/src/proof_adapter.zig`, integrated into `packages/runtime/src/server.zig` on the supported threaded HTTP path.
 
 ### Pool and Request Optimizations
 
@@ -152,7 +152,7 @@ These opcodes also omit type feedback recording, providing faster cold-start exe
 
 **Handler Precompilation** (`packages/tools/src/precompile.zig`, `build.zig`): `-Dhandler=<path>` compiles handlers at build time. Bytecode embedded in binary, eliminating runtime parsing.
 
-Build flow: `precompile.zig` compiles handler, serializes bytecode with atoms and shapes, generates `src/generated/embedded_handler.zig`. Server loads via `loadFromCachedBytecode()`.
+Build flow: `precompile.zig` compiles handler, serializes bytecode with atoms and shapes, generates `packages/runtime/generated/embedded_handler.zig`. Server loads via `loadFromCachedBytecode()`.
 
 The precompile pipeline also supports:
 - `-Dverify` - compile-time handler verification (see [verification.md](verification.md))

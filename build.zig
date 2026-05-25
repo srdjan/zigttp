@@ -251,6 +251,10 @@ pub fn build(b: *std.Build) void {
     const capability_audit_step = b.step("test-capability-audit", "Run capability helper audit");
     capability_audit_step.dependOn(&capability_audit.step);
 
+    const docs_drift = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-docs-drift.sh" });
+    const docs_drift_step = b.step("test-docs-drift", "Check docs against current registry and build paths");
+    docs_drift_step.dependOn(&docs_drift.step);
+
     // Internal precompile tool used by build steps and the zigts CLI.
     const precompile_exe = b.addExecutable(.{
         .name = "precompile",
@@ -566,6 +570,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pi_tests.step);
     test_step.dependOn(&run_deploy_manifest_tests.step);
     test_step.dependOn(&capability_audit.step);
+    test_step.dependOn(&docs_drift.step);
     test_step.dependOn(&run_module_governance.step);
     test_step.dependOn(&run_zigts_tests.step);
     test_step.dependOn(&run_sdk_tests.step);
