@@ -8,7 +8,7 @@ The v1 surface is the minimum set of shapes needed to drive a compiler-in-the-lo
 
 Three identifiers appear in almost every response:
 
-- `compiler_version` — the embedded zigts compiler version. Currently `"0.16.0"` (see `packages/tools/src/expert_meta.zig`).
+- `compiler_version` — the embedded zigts compiler version. Currently `"0.1.0-beta"` (see `packages/tools/src/expert_meta.zig`).
 - `policy_version` — the rule-set calendar version. Currently `"2026.04.2"` (see `packages/tools/src/expert_meta.zig`).
 - `policy_hash` — a content hash over the full rule registry, computed at startup from `zigts.rule_registry.policyHash()`. Stable across runs of the same binary; changes when rules are added, removed, or edited.
 - `module_registry_hash` — a content hash over the accepted virtual-module registry metadata. This is additive in v1 and lets clients detect proof metadata changes independently of rule text.
@@ -81,7 +81,7 @@ Emits compiler and policy metadata. Use it to record which policy a session or C
 
 ```json
 {
-  "compiler_version": "0.16.0",
+  "compiler_version": "0.1.0-beta",
   "policy_version": "2026.04.2",
   "policy_hash": "<hex>",
   "module_registry_hash": "<hex>",

@@ -7,7 +7,7 @@ const rule_registry = zigts.rule_registry;
 const builtin_modules = zigts.builtin_modules;
 const module_manifest = zigts.module_manifest;
 
-pub const compiler_version = "0.16.0";
+pub const compiler_version = zigts.version.string;
 pub const policy_version = "2026.04.2";
 pub const mode = "embedded";
 
@@ -103,7 +103,7 @@ pub fn writeText(writer: anytype, info: *const MetaInfo) !void {
 
 test "compute fills all fields" {
     const info = compute();
-    try std.testing.expectEqualStrings("0.16.0", info.compiler_version);
+    try std.testing.expectEqualStrings(zigts.version.string, info.compiler_version);
     try std.testing.expectEqualStrings("2026.04.2", info.policy_version);
     try std.testing.expectEqualStrings("embedded", info.mode);
     try std.testing.expectEqual(@as(usize, 64), info.module_registry_hash.len);
@@ -122,7 +122,7 @@ test "writeJson produces parseable v1 envelope" {
     buf = aw.toArrayList();
     const s = buf.items;
 
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"compiler_version\":\"0.16.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"compiler_version\":\"" ++ zigts.version.string ++ "\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"policy_version\":\"2026.04.2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"module_registry_hash\":\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"mode\":\"embedded\"") != null);
@@ -142,7 +142,7 @@ test "writeText emits the human-readable report with pinned versions" {
     const s = buf.items;
 
     try std.testing.expect(std.mem.indexOf(u8, s, "zigts policy") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "compiler: 0.16.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "compiler: " ++ zigts.version.string) != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "policy:   2026.04.2") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "modules:  ") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "mode:     embedded") != null);

@@ -10,28 +10,28 @@ const WasmInterpreter = @import("interpreter.zig").WasmInterpreter;
 pub const WasmPool = struct {
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, module_bytes: []const u8, pool_size: usize) !WasmPool {
+    pub const Error = error{WasmPolicyUnavailable};
+
+    pub fn init(allocator: std.mem.Allocator, module_bytes: []const u8, pool_size: usize) Error!WasmPool {
         _ = allocator;
         _ = module_bytes;
         _ = pool_size;
-        @panic("phase 2: not implemented");
+        return error.WasmPolicyUnavailable;
     }
 
     pub fn deinit(self: *WasmPool) void {
         _ = self;
-        @panic("phase 2: not implemented");
     }
 
     /// Borrow a pre-instantiated interpreter. Caller must return it via
     /// `release` to avoid starving concurrent requests.
-    pub fn acquire(self: *WasmPool) !*WasmInterpreter {
+    pub fn acquire(self: *WasmPool) Error!*WasmInterpreter {
         _ = self;
-        @panic("phase 2: not implemented");
+        return error.WasmPolicyUnavailable;
     }
 
     pub fn release(self: *WasmPool, interp: *WasmInterpreter) void {
         _ = self;
         _ = interp;
-        @panic("phase 2: not implemented");
     }
 };

@@ -81,12 +81,14 @@ pub const DenyReason = enum {
     unknown_action,
     missing_resource,
     not_in_allowlist,
+    policy_unavailable,
 
     pub fn toString(self: DenyReason) []const u8 {
         return switch (self) {
             .unknown_action => "unknown_action",
             .missing_resource => "missing_resource",
             .not_in_allowlist => "not_in_allowlist",
+            .policy_unavailable => "policy_unavailable",
         };
     }
 };
@@ -134,7 +136,7 @@ pub const WasmPolicyChecker = struct {
     pub fn check(self: WasmPolicyChecker, input: PolicyInput) PolicyResult {
         _ = self;
         _ = input;
-        @panic("phase 2: not implemented");
+        return .{ .deny = .policy_unavailable };
     }
 };
 
@@ -209,6 +211,15 @@ test "checker denies when allowlist excludes" {
         .resource = .{ .kind = "sql_query", .id = "drop_table" },
     });
     try std.testing.expectEqual(DenyReason.not_in_allowlist, result.deny);
+}
+
+test "WasmPolicyChecker fails closed while phase 2 is unavailable" {
+    const checker = WasmPolicyChecker{};
+    const result = checker.check(.{
+        .action = .http_outbound,
+        .resource = .{ .kind = resource_kind_host, .id = "api.example.com" },
+    });
+    try std.testing.expectEqual(DenyReason.policy_unavailable, result.deny);
 }
 
 test "checker is permissive when allowlist section is omitted" {

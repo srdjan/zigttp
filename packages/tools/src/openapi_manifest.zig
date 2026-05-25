@@ -4,14 +4,15 @@
 //! The output only includes routes, schemas, and auth that zigttp can prove.
 
 const std = @import("std");
-const handler_contract = @import("zigts").handler_contract;
+const zigts = @import("zigts");
+const handler_contract = zigts.handler_contract;
 
 const HandlerContract = handler_contract.HandlerContract;
 const ApiRouteInfo = handler_contract.ApiRouteInfo;
 
 pub const RenderOptions = struct {
     title: ?[]const u8 = null,
-    version: []const u8 = "0.16.0",
+    version: []const u8 = zigts.version.string,
 };
 
 pub fn writeOpenApiJson(

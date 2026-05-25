@@ -6,10 +6,12 @@
 
 const std = @import("std");
 
+pub const LoadError = error{WasmPolicyUnavailable};
+
 /// Read raw Wasm bytes from `path`. Caller owns the returned slice and must
 /// free it with `allocator.free`. Later phases layer WIT validation on top.
-pub fn loadWasmArtifact(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+pub fn loadWasmArtifact(allocator: std.mem.Allocator, path: []const u8) LoadError![]const u8 {
     _ = allocator;
     _ = path;
-    @panic("phase 2: not implemented");
+    return error.WasmPolicyUnavailable;
 }

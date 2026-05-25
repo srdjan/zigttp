@@ -707,7 +707,7 @@ fn printVerifyModuleManifestHelp() void {
 // ---------------------------------------------------------------------------
 
 test "v1 contract: compiler_version pinned" {
-    try std.testing.expectEqualStrings("0.16.0", compiler_version);
+    try std.testing.expectEqualStrings(zigts.version.string, compiler_version);
 }
 
 test "v1 contract: policy_version pinned" {

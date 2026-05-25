@@ -43,8 +43,9 @@ The high-level boundaries enforced by zigttp:
 
 ## Related Documents
 
-- [docs/threat-model.md](docs/threat-model.md) - threat model for the rule review system and Claude Code integration
+- [docs/threat-model.md](docs/threat-model.md) - public runtime and tooling threat model
 - [docs/verification.md](docs/verification.md) - compile-time verification invariants
 - [docs/internals/capability-audit.md](docs/internals/capability-audit.md) - per-module capability declaration audit
 - [docs/internals/websocket-audit.md](docs/internals/websocket-audit.md) - RFC 6455 compliance audit
 - [packages/zigts/src/module_binding.zig](packages/zigts/src/module_binding.zig) - capability enforcement surface
+- [docs/design/zigttp_zigts_policy_wasm_spec.md](docs/design/zigttp_zigts_policy_wasm_spec.md) - deferred Wasm policy runtime design
