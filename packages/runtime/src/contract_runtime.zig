@@ -378,17 +378,43 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
         }
     }
 
+    // toOwnedSlice transfers ownership out of the ArrayList, so the outer
+    // errdefers above stop covering the duped strings once each conversion
+    // succeeds. Each conversion gets its own errdefer that walks the new
+    // slice on subsequent failure, otherwise a later toOwnedSlice failure
+    // would leak the strings already moved into earlier slices.
+    const env_vars_slice = try env_vars.toOwnedSlice(allocator);
+    errdefer {
+        for (env_vars_slice) |v| allocator.free(v);
+        allocator.free(env_vars_slice);
+    }
+
+    const routes_slice = try routes.toOwnedSlice(allocator);
+    errdefer {
+        for (routes_slice) |r| {
+            allocator.free(r.method);
+            allocator.free(r.path);
+        }
+        allocator.free(routes_slice);
+    }
+
+    const modules_slice = try modules.toOwnedSlice(allocator);
+    errdefer {
+        for (modules_slice) |m| allocator.free(m);
+        allocator.free(modules_slice);
+    }
+
     return .{ .inner = .{
-        .env_vars = try env_vars.toOwnedSlice(allocator),
+        .env_vars = env_vars_slice,
         .env_dynamic = env_dynamic,
-        .routes = try routes.toOwnedSlice(allocator),
+        .routes = routes_slice,
         .routes_dynamic = routes_dynamic,
         .properties = properties,
         .websocket = websocket,
         .capabilities = capabilities,
         .artifact_sha256 = artifact_sha256,
         .policy_hash = policy_hash,
-        .modules = try modules.toOwnedSlice(allocator),
+        .modules = modules_slice,
         .allocator = allocator,
     } };
 }
@@ -803,6 +829,48 @@ test "parseContractJson with properties and routes" {
     try std.testing.expect(p.fault_covered);
     try std.testing.expect(p.result_safe);
     try std.testing.expect(p.optional_safe);
+}
+
+// Regression: parseContractJson handles allocator failure at every internal
+// allocation point without leaking. The embedded contract is parsed at
+// startup from the self-extracting binary; any leak under memory pressure
+// would degrade subsequent runtime behavior. The test exercises a contract
+// with multiple env vars, routes, and modules so the errdefer ladder on
+// every loop iteration sees both staged-allocation and append-failure paths.
+fn parseContractFailingAlloc(allocator: std.mem.Allocator) !void {
+    const source =
+        \\{
+        \\  "version": 10,
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "routes": [],
+        \\  "modules": ["zigttp:env", "zigttp:crypto"],
+        \\  "functions": {},
+        \\  "env": {"literal": ["JWT_SECRET", "DB_URL", "API_KEY"], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "serviceCalls": [],
+        \\  "cache": {"namespaces": [], "dynamic": false},
+        \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
+        \\  "durable": {"used": false, "keys": {"literal": [], "dynamic": false}, "steps": [], "timers": false, "signals": {"literal": [], "dynamic": false}, "producerKeys": {"literal": [], "dynamic": false}},
+        \\  "api": {"schemas": [], "requests": {"schemaRefs": [], "dynamic": false}, "auth": {"bearer": false, "jwt": false}, "routes": [{"method": "GET", "path": "/a"}, {"method": "POST", "path": "/b"}], "schemasDynamic": false, "routesDynamic": false},
+        \\  "verification": null,
+        \\  "aot": null,
+        \\  "faultCoverage": null,
+        \\  "rateLimiting": null,
+        \\  "properties": null,
+        \\  "behaviors": [],
+        \\  "behaviorsExhaustive": false
+        \\}
+    ;
+    var raw = try parseContractJson(allocator, source);
+    raw.deinit();
+}
+
+test "parseContractJson tolerates allocator failure at every step" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        parseContractFailingAlloc,
+        .{},
+    );
 }
 
 test "matchPath exact" {

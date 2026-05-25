@@ -2612,7 +2612,7 @@ fn requestConstructorNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq
     }
 
     const split = splitPathAndQuery(url.?);
-    const parsed_query = try http_parser.parseQueryString(ctx.allocator, split.query_string);
+    const parsed_query = try http_parser.parseQueryString(ctx.allocator, split.query_string, http_parser.DEFAULT_MAX_QUERY_LENGTH);
     defer if (parsed_query.storage) |storage| ctx.allocator.free(storage);
     defer if (parsed_query.decoded_storage) |storage| ctx.allocator.free(storage);
 

@@ -1929,3 +1929,53 @@ test "wrapNativeFnWithCapabilities activates context for built-in native fns" {
     const result = try wrapped(@ptrFromInt(0x1), value.JSValue.undefined_val, &.{});
     try std.testing.expect(result.isTrue());
 }
+
+// Sandbox invariant: when a NativeFn produced by wrapModuleFnWithCapabilities
+// is invoked through its function pointer (the same path used by both the
+// interpreter's doCall .none branch and the JIT slow-path jitCall), the
+// wrapper's threadlocal active-module-context push must fire before the inner
+// user_fn observes the capability set. The interpreter's hot-builtin bypass
+// in interpreter/call.zig only fires for pure-function BuiltinIds (Math.*,
+// JSON.*, string slice/indexOf, parseInt/parseFloat), none of which consult
+// capabilities. If a future change broke that chain - by inlining a
+// capability-requiring builtin into the bypass switch, or by routing past
+// the wrapped pointer - this test would fail because the inner function would
+// observe an empty active context.
+test "wrapModuleFnWithCapabilities invocation activates threadlocal context" {
+    const Observed = struct {
+        var saw_clock: bool = false;
+        var saw_random: bool = false;
+        var specifier_seen: []const u8 = "";
+    };
+    Observed.saw_clock = false;
+    Observed.saw_random = false;
+    Observed.specifier_seen = "";
+
+    const module_fn: ModuleFn = struct {
+        fn f(_: *ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            Observed.saw_clock = activeContextHasCapability(.clock);
+            Observed.saw_random = activeContextHasCapability(.random);
+            if (active_module_context) |ctx| {
+                Observed.specifier_seen = ctx.specifier;
+            }
+            return value.JSValue.true_val;
+        }
+    }.f;
+
+    const wrapped = comptime wrapModuleFnWithCapabilities(
+        module_fn,
+        "zigttp:invariant-test",
+        &.{.clock},
+    );
+
+    const result = try wrapped(@ptrFromInt(0x1), value.JSValue.undefined_val, &.{});
+    try std.testing.expect(result.isTrue());
+    try std.testing.expect(Observed.saw_clock);
+    try std.testing.expect(!Observed.saw_random);
+    try std.testing.expectEqualStrings("zigttp:invariant-test", Observed.specifier_seen);
+
+    // Threadlocal must be torn down after the wrapped call returns so that
+    // a subsequent call from outside any module context does not inherit
+    // residual capabilities.
+    try std.testing.expect(active_module_context == null);
+}

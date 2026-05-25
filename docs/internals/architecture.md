@@ -57,7 +57,7 @@ Both binaries share the engine (`zigts`), core server/runtime code (`server.zig`
 
 ### Engine Layer (packages/zigts/src/)
 
-Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode).
+Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode) and a tiered JIT (baseline plus type-specialized optimized tier). See the "JIT Compilation" subsection below for the tier policy and sandbox interaction.
 
 **Key Components**:
 
@@ -97,8 +97,14 @@ Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode
 - `effect_inference.zig` - Bottom-up call-graph traversal that infers per-function capability union, determinism, purity, and recursion. Extends the proof boundary across user-defined helpers
 
 #### JIT Compilation
-- `jit/baseline.zig` - Baseline JIT compiler for x86-64 and ARM64
+- `jit/baseline.zig` - Baseline JIT compiler for x86-64 and ARM64 (no specialization, bytecode-to-native)
+- `jit/optimized.zig` - Optimized tier with type specialization, monomorphic call inlining, and feedback-guided emission
+- `jit/x86.zig`, `jit/arm64.zig` - Per-architecture assemblers
+- `interpreter/jit_compile.zig` - Tier-up trigger and dispatch from the interpreter profile counters
+- `interpreter/jit_policy.zig` - Comptime policy hooks (used to disable JIT for tests and freestanding/WASM)
 - `type_feedback.zig` - Call site and value type profiling
+
+The JIT is enabled by default in normal builds. The `analyzer_only` build flag excludes the JIT from compilation entirely so the engine can target freestanding and WASM. Module calls and any builtin that touches a capability go through `interpreter/call.zig::doCall`, which preserves the capability-wrapper threadlocal push; the JIT slow path routes to this same dispatch via `jitCall` in `interpreter/jit_intrinsics.zig`. The hot-builtin bypass in `doCall` only fires for a fixed whitelist of pure functions (`Math.*`, `JSON.*`, string slice/indexOf, parseInt/parseFloat) with zero required capabilities.
 
 ## Request Flow
 

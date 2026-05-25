@@ -1207,6 +1207,16 @@ pub const ServerConfig = struct {
     /// Maximum number of headers per request (DOS protection)
     max_headers: usize = 64,
 
+    /// Maximum URL length in the request line. URLs exceeding this cap are
+    /// rejected with HTTP 414 before any allocation proportional to the URL.
+    max_url_length: usize = http_parser.DEFAULT_MAX_URL_LENGTH,
+
+    /// Maximum query-string length (the part after '?'). Queries exceeding
+    /// this cap are rejected with HTTP 414 before any allocation. Defaults
+    /// match the URL cap; configure larger values only for APIs that
+    /// legitimately require long query strings.
+    max_query_length: usize = http_parser.DEFAULT_MAX_QUERY_LENGTH,
+
     /// Request timeout in milliseconds
     timeout_ms: u32 = 30_000,
 
@@ -1908,6 +1918,10 @@ pub const Server = struct {
                 self.sendErrorResponse(stream, io, 413, "Payload Too Large") catch {};
                 return false;
             }
+            if (err == error.UriTooLong or err == error.QueryTooLong) {
+                self.sendErrorResponse(stream, io, 414, "URI Too Long") catch {};
+                return false;
+            }
             return err;
         };
         defer request.deinit(req_allocator);
@@ -2112,9 +2126,9 @@ pub const Server = struct {
         // Read request line
         const request_line = try reader.readLine();
         request_started.* = true;
-        const parsed_line = try parseRequestLine(string_storage, &storage_offset, request_line);
+        const parsed_line = try parseRequestLine(string_storage, &storage_offset, request_line, self.config.max_url_length);
 
-        const qr = try parseQueryString(allocator, parsed_line.query_string);
+        const qr = try parseQueryString(allocator, parsed_line.query_string, self.config.max_query_length);
         errdefer if (qr.storage) |s| allocator.free(s);
         errdefer if (qr.decoded_storage) |ds| allocator.free(ds);
 
@@ -2176,9 +2190,9 @@ pub const Server = struct {
         // Parse request line
         var lines = std.mem.splitSequence(u8, header_section, "\r\n");
         const request_line = lines.next() orelse return error.InvalidRequest;
-        const parsed_line = try parseRequestLineBorrowed(request_line);
+        const parsed_line = try parseRequestLineBorrowed(request_line, self.config.max_url_length);
 
-        const qr = try parseQueryString(allocator, parsed_line.query_string);
+        const qr = try parseQueryString(allocator, parsed_line.query_string, self.config.max_query_length);
         errdefer if (qr.storage) |s| allocator.free(s);
         errdefer if (qr.decoded_storage) |ds| allocator.free(ds);
 
@@ -2775,6 +2789,7 @@ fn getStatusText(status: u16) []const u8 {
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
+        414 => "URI Too Long",
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",
         500 => "Internal Server Error",

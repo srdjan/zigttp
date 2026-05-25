@@ -6,6 +6,13 @@ const http_types = @import("http_types.zig");
 const HttpHeader = http_types.HttpHeader;
 const QueryParam = http_types.QueryParam;
 
+/// Conservative per-request length caps. The defaults match the shared
+/// 8 KiB request-line / header storage pool so that a request whose URL or
+/// query fits the pool also fits these caps. Callers that need looser or
+/// tighter limits can pass a non-default value.
+pub const DEFAULT_MAX_URL_LENGTH: usize = 8192;
+pub const DEFAULT_MAX_QUERY_LENGTH: usize = 8192;
+
 /// Comptime lookup table for O(1) ASCII lowercase conversion.
 /// Eliminates branch-per-character overhead in header normalization.
 const LowerTable = blk: {
@@ -87,10 +94,17 @@ pub const RequestLine = struct {
     query_string: []const u8,
 };
 
-pub fn parseRequestLine(storage: []u8, offset: *usize, request_line: []const u8) !RequestLine {
+pub fn parseRequestLine(
+    storage: []u8,
+    offset: *usize,
+    request_line: []const u8,
+    max_url_length: usize,
+) !RequestLine {
     var parts = std.mem.splitScalar(u8, request_line, ' ');
     const method_slice = parts.next() orelse return error.InvalidRequest;
     const url_slice = parts.next() orelse return error.InvalidRequest;
+
+    if (url_slice.len > max_url_length) return error.UriTooLong;
 
     const method = try copyToStorage(storage, offset, method_slice);
     const url = try copyToStorage(storage, offset, url_slice);
@@ -107,10 +121,12 @@ pub fn parseRequestLine(storage: []u8, offset: *usize, request_line: []const u8)
     };
 }
 
-pub fn parseRequestLineBorrowed(request_line: []const u8) !RequestLine {
+pub fn parseRequestLineBorrowed(request_line: []const u8, max_url_length: usize) !RequestLine {
     var parts = std.mem.splitScalar(u8, request_line, ' ');
     const method = parts.next() orelse return error.InvalidRequest;
     const url = parts.next() orelse return error.InvalidRequest;
+
+    if (url.len > max_url_length) return error.UriTooLong;
 
     const query_start = std.mem.indexOf(u8, url, "?");
     const path = if (query_start) |idx| url[0..idx] else url;
@@ -218,7 +234,15 @@ fn hexVal(c: u8) ?u4 {
 
 /// Parse query parameters from a query string (the part after '?').
 /// Allocates storage for parameters; caller owns the returned storage.
-pub fn parseQueryString(allocator: std.mem.Allocator, query_string: []const u8) !QueryParseResult {
+/// Returns error.QueryTooLong if the query exceeds max_query_length; this
+/// is a DoS guard so a multi-megabyte query cannot force a proportional
+/// allocation.
+pub fn parseQueryString(
+    allocator: std.mem.Allocator,
+    query_string: []const u8,
+    max_query_length: usize,
+) !QueryParseResult {
+    if (query_string.len > max_query_length) return error.QueryTooLong;
     if (query_string.len == 0) return .{ .storage = null, .params = &.{}, .decoded_storage = null };
 
     // Count parameters first
@@ -425,7 +449,7 @@ test "findHeaderEnd: terminator straddling SIMD/scalar boundary" {
 test "parseRequestLine: GET with query string" {
     var storage: [256]u8 = undefined;
     var offset: usize = 0;
-    const line = try parseRequestLine(&storage, &offset, "GET /api/v1/users?id=42 HTTP/1.1");
+    const line = try parseRequestLine(&storage, &offset, "GET /api/v1/users?id=42 HTTP/1.1", DEFAULT_MAX_URL_LENGTH);
     try testing.expectEqualStrings("GET", line.method);
     try testing.expectEqualStrings("/api/v1/users?id=42", line.url);
     try testing.expectEqualStrings("/api/v1/users", line.path);
@@ -435,7 +459,7 @@ test "parseRequestLine: GET with query string" {
 test "parseRequestLine: no query string yields empty query" {
     var storage: [256]u8 = undefined;
     var offset: usize = 0;
-    const line = try parseRequestLine(&storage, &offset, "POST /submit HTTP/1.1");
+    const line = try parseRequestLine(&storage, &offset, "POST /submit HTTP/1.1", DEFAULT_MAX_URL_LENGTH);
     try testing.expectEqualStrings("POST", line.method);
     try testing.expectEqualStrings("/submit", line.path);
     try testing.expectEqualStrings("", line.query_string);
@@ -444,18 +468,25 @@ test "parseRequestLine: no query string yields empty query" {
 test "parseRequestLine: storage exhaustion errors" {
     var storage: [4]u8 = undefined; // too small for "GET" + "/"
     var offset: usize = 0;
-    try testing.expectError(error.HeaderStorageExhausted, parseRequestLine(&storage, &offset, "GET /path HTTP/1.1"));
+    try testing.expectError(error.HeaderStorageExhausted, parseRequestLine(&storage, &offset, "GET /path HTTP/1.1", DEFAULT_MAX_URL_LENGTH));
 }
 
 test "parseRequestLine: malformed line missing url" {
     var storage: [128]u8 = undefined;
     var offset: usize = 0;
-    try testing.expectError(error.InvalidRequest, parseRequestLine(&storage, &offset, "GET"));
+    try testing.expectError(error.InvalidRequest, parseRequestLine(&storage, &offset, "GET", DEFAULT_MAX_URL_LENGTH));
+}
+
+test "parseRequestLine: rejects URLs exceeding max_url_length with UriTooLong" {
+    var storage: [4096]u8 = undefined;
+    var offset: usize = 0;
+    // URL of length 33 vs limit of 16
+    try testing.expectError(error.UriTooLong, parseRequestLine(&storage, &offset, "GET /aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1", 16));
 }
 
 test "parseRequestLineBorrowed: path and query slices point into input" {
     const input = "DELETE /resource?force=true HTTP/1.1";
-    const line = try parseRequestLineBorrowed(input);
+    const line = try parseRequestLineBorrowed(input, DEFAULT_MAX_URL_LENGTH);
     try testing.expectEqualStrings("DELETE", line.method);
     try testing.expectEqualStrings("/resource?force=true", line.url);
     try testing.expectEqualStrings("/resource", line.path);
@@ -464,8 +495,12 @@ test "parseRequestLineBorrowed: path and query slices point into input" {
     try testing.expect(line.method.ptr == input.ptr);
 }
 
+test "parseRequestLineBorrowed: rejects URLs exceeding max_url_length" {
+    try testing.expectError(error.UriTooLong, parseRequestLineBorrowed("GET /xxxxxxxxxxxxxxxxxxxxxx HTTP/1.1", 8));
+}
+
 test "parseQueryString: empty input returns empty params, no storage" {
-    const result = try parseQueryString(testing.allocator, "");
+    const result = try parseQueryString(testing.allocator, "", DEFAULT_MAX_QUERY_LENGTH);
     defer if (result.storage) |s| testing.allocator.free(s);
     defer if (result.decoded_storage) |s| testing.allocator.free(s);
     try testing.expectEqual(@as(usize, 0), result.params.len);
@@ -473,7 +508,7 @@ test "parseQueryString: empty input returns empty params, no storage" {
 }
 
 test "parseQueryString: simple key=value pairs" {
-    const result = try parseQueryString(testing.allocator, "a=1&b=2&c=3");
+    const result = try parseQueryString(testing.allocator, "a=1&b=2&c=3", DEFAULT_MAX_QUERY_LENGTH);
     defer if (result.storage) |s| testing.allocator.free(s);
     defer if (result.decoded_storage) |s| testing.allocator.free(s);
     try testing.expectEqual(@as(usize, 3), result.params.len);
@@ -484,7 +519,7 @@ test "parseQueryString: simple key=value pairs" {
 }
 
 test "parseQueryString: percent-decoding" {
-    const result = try parseQueryString(testing.allocator, "name=John%20Doe&email=a%40b.com");
+    const result = try parseQueryString(testing.allocator, "name=John%20Doe&email=a%40b.com", DEFAULT_MAX_QUERY_LENGTH);
     defer if (result.storage) |s| testing.allocator.free(s);
     defer if (result.decoded_storage) |s| testing.allocator.free(s);
     try testing.expectEqual(@as(usize, 2), result.params.len);
@@ -493,22 +528,28 @@ test "parseQueryString: percent-decoding" {
 }
 
 test "parseQueryString: plus is decoded as space" {
-    const result = try parseQueryString(testing.allocator, "q=hello+world");
+    const result = try parseQueryString(testing.allocator, "q=hello+world", DEFAULT_MAX_QUERY_LENGTH);
     defer if (result.storage) |s| testing.allocator.free(s);
     defer if (result.decoded_storage) |s| testing.allocator.free(s);
     try testing.expectEqualStrings("hello world", result.params[0].value);
 }
 
+test "parseQueryString: rejects queries exceeding max_query_length with QueryTooLong" {
+    // 4 KiB query string, 1 KiB limit. Must fail before any allocation.
+    const big = "k=" ++ ("v" ** 4094);
+    try testing.expectError(error.QueryTooLong, parseQueryString(testing.allocator, big, 1024));
+}
+
 test "parseQueryString: malformed percent-escape passes through" {
     // %XY is not valid hex; per the implementation, the literal '%' is kept.
-    const result = try parseQueryString(testing.allocator, "k=%XY");
+    const result = try parseQueryString(testing.allocator, "k=%XY", DEFAULT_MAX_QUERY_LENGTH);
     defer if (result.storage) |s| testing.allocator.free(s);
     defer if (result.decoded_storage) |s| testing.allocator.free(s);
     try testing.expectEqualStrings("%XY", result.params[0].value);
 }
 
 test "parseQueryString: pairs without '=' are skipped" {
-    const result = try parseQueryString(testing.allocator, "a=1&orphan&b=2");
+    const result = try parseQueryString(testing.allocator, "a=1&orphan&b=2", DEFAULT_MAX_QUERY_LENGTH);
     defer if (result.storage) |s| testing.allocator.free(s);
     defer if (result.decoded_storage) |s| testing.allocator.free(s);
     try testing.expectEqual(@as(usize, 2), result.params.len);

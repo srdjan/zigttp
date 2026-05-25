@@ -666,7 +666,7 @@ fn parseRequest(allocator: std.mem.Allocator, data: []const u8, max_headers: usi
     const header_section = data[0..header_end];
     var lines = std.mem.splitSequence(u8, header_section, "\r\n");
     const request_line = lines.next() orelse return error.InvalidRequest;
-    const parsed_line = try http_parser.parseRequestLineBorrowed(request_line);
+    const parsed_line = try http_parser.parseRequestLineBorrowed(request_line, http_parser.DEFAULT_MAX_URL_LENGTH);
 
     var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
     errdefer headers.deinit(allocator);
@@ -693,7 +693,7 @@ fn parseRequest(allocator: std.mem.Allocator, data: []const u8, max_headers: usi
 
     const body_start = header_end + 4;
     const body = if (body_start < data.len) data[body_start..] else null;
-    const query = try http_parser.parseQueryString(allocator, parsed_line.query_string);
+    const query = try http_parser.parseQueryString(allocator, parsed_line.query_string, http_parser.DEFAULT_MAX_QUERY_LENGTH);
 
     return .{
         .request = .{

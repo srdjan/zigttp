@@ -53,6 +53,16 @@ pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!vo
     // Native function fast dispatch
     if (func_obj.getNativeFunctionData()) |native_data| {
         // Hot builtins bypass the wrapper to keep the call site monomorphic.
+        //
+        // Sandbox invariant: every BuiltinId enumerated below must be a pure
+        // function with zero required capabilities. Bypassing the wrapper
+        // skips the threadlocal active-module-context push that backs
+        // requireActiveCapability, so any builtin that consults a capability
+        // (clock, crypto, random, env, filesystem, network, stderr, etc.) must
+        // stay on the .none branch which calls the wrapped native_data.func.
+        // The JIT slow path (jit/baseline.zig emitCall, jit/optimized.zig
+        // emitCall) routes through this same dispatch via jitCall, so the
+        // invariant holds for both interpreter and JIT execution.
         const result: value.JSValue = switch (native_data.builtin_id) {
             .json_parse => builtins.jsonParse(self.ctx, this_val, args[0..argc]),
             .json_stringify => builtins.jsonStringify(self.ctx, this_val, args[0..argc]),
