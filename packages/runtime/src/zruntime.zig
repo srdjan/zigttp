@@ -831,6 +831,31 @@ pub const Runtime = struct {
         }
     }
 
+    fn verifyBytecodeRecursive(func: *const zq.FunctionBytecode) !void {
+        const verify_result = zq.BytecodeVerifier.verify(func);
+        if (!verify_result.valid) {
+            if (!builtin.is_test) {
+                std.log.err("Bytecode verification failed at offset {d}: {s}", .{
+                    verify_result.offset,
+                    verify_result.message,
+                });
+            }
+            return error.BytecodeVerificationFailed;
+        }
+
+        for (func.constants) |constant| {
+            const nested_func = bytecodeConstant(constant) orelse continue;
+            try verifyBytecodeRecursive(nested_func);
+        }
+    }
+
+    fn bytecodeConstant(constant: zq.JSValue) ?*const zq.FunctionBytecode {
+        if (!constant.isExternPtr()) return null;
+        const magic = constant.toExternPtr(u32);
+        if (magic.* != zq.bytecode.MAGIC) return null;
+        return constant.toExternPtr(zq.FunctionBytecode);
+    }
+
     fn captureCompilationStats(self: *Self, parser: *const zq.Parser, func: *const zq.FunctionBytecode) void {
         self.last_opt_stats = if (parser.code_gen) |cg| cg.getOptStats() else .{};
         self.last_feedback_summary = .{};
@@ -985,15 +1010,8 @@ pub const Runtime = struct {
             .source_map = null,
         };
 
-        // Bytecode verification: reject malformed bytecode before execution
-        const verify_result = zq.BytecodeVerifier.verify(&func);
-        if (!verify_result.valid) {
-            std.log.err("Bytecode verification failed at offset {d}: {s}", .{
-                verify_result.offset,
-                verify_result.message,
-            });
-            return error.BytecodeVerificationFailed;
-        }
+        // Bytecode verification: reject malformed bytecode before execution.
+        try verifyBytecodeRecursive(&func);
 
         // Serialize for caching if buffer provided (includes atoms for true cache hit)
         var serialized: ?[]const u8 = null;
@@ -1073,21 +1091,29 @@ pub const Runtime = struct {
         var reader = bytecode_cache.SliceReader{ .data = cached_data };
 
         // Deserialize bytecode with atoms and shapes - skips parsing entirely
-        const result = try bytecode_cache.deserializeBytecodeWithAtomsAndShapes(
+        var result = try bytecode_cache.deserializeBytecodeWithAtomsAndShapes(
             &reader,
             &self.ctx.atoms,
             self.allocator,
             self.strings,
         );
+        var keep_bytecode = false;
         // Note: We don't defer result.deinit() because the function and constants
         // need to stay alive. Shapes can be freed after materialization.
         defer {
-            // Free shapes after materialization (they're copied into hidden classes)
-            for (result.shapes) |shape| {
-                self.allocator.free(shape);
+            if (keep_bytecode) {
+                // Free shapes after materialization (they're copied into hidden classes)
+                for (result.shapes) |shape| {
+                    self.allocator.free(shape);
+                }
+                self.allocator.free(result.shapes);
+            } else {
+                result.deinit();
             }
-            self.allocator.free(result.shapes);
         }
+
+        // Verify deserialized bytecode before materialization or execution.
+        try verifyBytecodeRecursive(result.func);
 
         // Materialize object literal shapes before execution
         if (result.shapes.len > 0) {
@@ -1097,6 +1123,7 @@ pub const Runtime = struct {
         }
 
         // Execute the deserialized bytecode
+        keep_bytecode = true;
         _ = try self.interpreter.run(result.func);
         summarizeFeedbackRecursive(&self.last_feedback_summary, result.func);
         if (refresh_handler) {
@@ -6007,6 +6034,103 @@ test "HandlerPool bytecode cache" {
     const hits = pool.cache.hits.load(.monotonic);
     const misses = pool.cache.misses.load(.monotonic);
     try std.testing.expect(hits + misses >= 1);
+}
+
+test "Runtime rejects malformed cached bytecode before execution" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const code = [_]u8{
+        @intFromEnum(zq.Opcode.ret),
+    };
+    const func = zq.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    const no_shapes: []const []const zq.object.Atom = &.{};
+    var buffer: [1024]u8 = undefined;
+    var writer = bytecode_cache.SliceWriter{ .buffer = &buffer };
+    try bytecode_cache.serializeBytecodeWithAtomsAndShapes(
+        &func,
+        &rt.ctx.atoms,
+        no_shapes,
+        &writer,
+        allocator,
+    );
+
+    try std.testing.expectError(
+        error.BytecodeVerificationFailed,
+        rt.loadFromCachedBytecodeNoHandler(writer.getWritten()),
+    );
+}
+
+test "Runtime rejects malformed nested cached bytecode before execution" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const child_code = [_]u8{
+        @intFromEnum(zq.Opcode.ret),
+    };
+    var child = zq.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &child_code,
+        .constants = &.{},
+        .source_map = null,
+    };
+    const constants = [_]zq.JSValue{
+        zq.JSValue.fromExternPtr(&child),
+    };
+    const parent_code = [_]u8{
+        @intFromEnum(zq.Opcode.ret_undefined),
+    };
+    const parent = zq.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &parent_code,
+        .constants = &constants,
+        .source_map = null,
+    };
+
+    const no_shapes: []const []const zq.object.Atom = &.{};
+    var buffer: [2048]u8 = undefined;
+    var writer = bytecode_cache.SliceWriter{ .buffer = &buffer };
+    try bytecode_cache.serializeBytecodeWithAtomsAndShapes(
+        &parent,
+        &rt.ctx.atoms,
+        no_shapes,
+        &writer,
+        allocator,
+    );
+
+    try std.testing.expectError(
+        error.BytecodeVerificationFailed,
+        rt.loadFromCachedBytecodeNoHandler(writer.getWritten()),
+    );
 }
 
 test "HandlerPool handler remains callable across resets" {

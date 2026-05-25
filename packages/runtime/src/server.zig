@@ -1593,30 +1593,9 @@ pub const Server = struct {
             }
         }
 
-        // Initialize runtime pool with embedded bytecode (must be set before prewarm)
-        var pool_timer = engine.Timer.start() catch null;
-        self.pool = try engine.initHandlerPool(
-            self.allocator,
-            self.config.runtime_config,
-            self.handler_code,
-            self.handler_filename,
-            self.config.pool_size,
-            self.config.pool_wait_timeout_ms,
-            self.embedded_bytecode,
-            self.runtime_dep_bytecodes,
-        );
-        if (pool_timer) |*t| {
-            const elapsed_ms = t.read() / std.time.ns_per_ms;
-            const prewarm_count = @min(@as(usize, 2), self.config.pool_size);
-            std.log.info("Pool ready: {d} slots, {d} prewarmed, {d}ms", .{
-                self.config.pool_size, prewarm_count, elapsed_ms,
-            });
-        }
-
-        // Parse embedded contract (if present), then promote to Validated.
-        // Validation enforces capability/policy/artifact integrity at the
-        // type-signature level: the rest of the server only sees a contract
-        // that has cleared those checks.
+        // Parse embedded contract (if present), then promote to Validated before
+        // prewarming the handler pool. This rejects artifact hash drift before
+        // appended bytecode is loaded into any runtime.
         if (self.config.contract_json) |json| {
             const raw_opt: ?contract_runtime.RawRuntimeContract =
                 contract_runtime.parseContractJson(self.allocator, json) catch |err| blk: {
@@ -1644,6 +1623,26 @@ pub const Server = struct {
                     return err;
                 };
             }
+        }
+
+        // Initialize runtime pool with embedded bytecode (must be set before prewarm)
+        var pool_timer = engine.Timer.start() catch null;
+        self.pool = try engine.initHandlerPool(
+            self.allocator,
+            self.config.runtime_config,
+            self.handler_code,
+            self.handler_filename,
+            self.config.pool_size,
+            self.config.pool_wait_timeout_ms,
+            self.embedded_bytecode,
+            self.runtime_dep_bytecodes,
+        );
+        if (pool_timer) |*t| {
+            const elapsed_ms = t.read() / std.time.ns_per_ms;
+            const prewarm_count = @min(@as(usize, 2), self.config.pool_size);
+            std.log.info("Pool ready: {d} slots, {d} prewarmed, {d}ms", .{
+                self.config.pool_size, prewarm_count, elapsed_ms,
+            });
         }
 
         if (self.contract) |*contract| {

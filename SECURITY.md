@@ -41,6 +41,10 @@ The high-level boundaries enforced by zigttp:
 
 6. **Self-extracting binary integrity.** The 32-byte trailer's CRC-32 is a corruption check, not a security check. The actual integrity boundary is the JWS attestation over `(bytecode_sha256, contract_sha256, policy_sha256)`. See [docs/internals/architecture.md - Self-Extracting Binary Trailer](docs/internals/architecture.md#self-extracting-binary-trailer).
 
+7. **Bytecode integrity.** Only bytecode that passes `packages/zigts/src/bytecode_verifier.zig` is dispatched into the VM. The verifier validates opcodes, operand bounds, the constant pool, stack discipline, and jump targets before the first instruction executes. Untrusted bytecode (e.g. a tampered self-extracting payload) is rejected before bytecode execution.
+
+8. **No runtime multipart parser.** `multipart/form-data` request bodies are passed to the handler unparsed. Handlers must parse boundaries themselves and reject malformed inputs; the runtime guarantees only `Content-Length` and total-body-size enforcement (default 1 MiB). Treat handler-side multipart parsing as untrusted-input handling.
+
 ## Related Documents
 
 - [docs/threat-model.md](docs/threat-model.md) - public runtime and tooling threat model
