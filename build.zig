@@ -68,6 +68,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Capture git commit for reproducible build metadata. Failure to read
+    // git is non-fatal: the precompile binary falls back to the sentinel
+    // "unknown", so tarball builds and CI environments without a .git
+    // directory still produce a well-formed `__GIT_COMMIT__` substitution.
+    const git_commit_sha = detectGitCommit(b);
+
     // Handler path option (required for main build)
     const handler_path = b.option([]const u8, "handler", "Handler file to precompile (required)");
     const aot_enabled = b.option(bool, "aot", "Enable native AOT handler generation") orelse false;
@@ -347,6 +353,10 @@ pub fn build(b: *std.Build) void {
         if (report_format) |rf| {
             run_precompile.addArg("--report");
             run_precompile.addArg(rf);
+        }
+        if (git_commit_sha) |sha| {
+            run_precompile.addArg("--git-commit");
+            run_precompile.addArg(sha);
         }
         run_precompile.addArg(path);
         run_precompile.addArg("packages/runtime/generated/embedded_handler.zig");
@@ -684,6 +694,28 @@ pub fn build(b: *std.Build) void {
         const system_step = b.step("system", "Cross-handler contract linking");
         system_step.dependOn(&run_system.step);
     }
+}
+
+/// Run `git rev-parse --short=12 HEAD` once at configure time so the
+/// precompile binary can stamp embedded handlers with a real commit hash.
+/// Returns null on any failure (missing git, detached worktree, snapshot
+/// tarball with no .git directory). The caller treats null as "fall back to
+/// the precompile sentinel" rather than failing the build.
+fn detectGitCommit(b: *std.Build) ?[]const u8 {
+    const result = std.process.run(b.allocator, b.graph.io, .{
+        .argv = &.{ "git", "rev-parse", "--short=12", "HEAD" },
+        .cwd = if (b.build_root.path) |p| .{ .path = p } else .inherit,
+    }) catch return null;
+    defer b.allocator.free(result.stdout);
+    defer b.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| if (code != 0) return null,
+        else => return null,
+    }
+    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return b.allocator.dupe(u8, trimmed) catch null;
 }
 
 fn addExpertGolden(

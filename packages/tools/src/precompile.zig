@@ -599,6 +599,8 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         .generate_tests = generate_tests,
         .system_path = system_path,
         .manifest_registry = registry_ptr,
+        .build_time = opts.build_time,
+        .git_commit = opts.git_commit,
     }) catch |err| {
         debugPrint("Compilation failed: {}\n", .{err});
         return err;
@@ -1318,7 +1320,38 @@ pub const CompileOptions = struct {
     /// Partner virtual-module manifests registered for this compile.
     /// The registry must outlive the call.
     manifest_registry: ?*const zigts.manifest_registry.Registry = null,
+    /// ISO-8601 build timestamp. When null, compileHandler synthesizes one
+    /// from the wall clock so `comptime(__BUILD_TIME__)` is never `undefined`.
+    build_time: ?[]const u8 = null,
+    /// Git commit hash for reproducibility. When null, defaults to "unknown".
+    git_commit: ?[]const u8 = null,
 };
+
+/// Format `seconds_since_epoch` into ISO-8601 (UTC, second precision).
+/// Self-contained — does not depend on the platform/time module which is a
+/// runtime-only path.
+fn formatIsoTimestamp(buf: *[20]u8, seconds_since_epoch: i64) []const u8 {
+    const total_secs: u64 = @intCast(@max(0, seconds_since_epoch));
+    const es = std.time.epoch.EpochSeconds{ .secs = total_secs };
+    const epoch_day = es.getEpochDay();
+    const day_secs = es.getDaySeconds();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        @as(u16, @intCast(year_day.year)),
+        @as(u4, @intFromEnum(month_day.month)),
+        @as(u5, month_day.day_index + 1),
+        day_secs.getHoursIntoDay(),
+        day_secs.getMinutesIntoHour(),
+        day_secs.getSecondsIntoMinute(),
+    }) catch unreachable;
+}
+
+test "formatIsoTimestamp produces ISO-8601 UTC" {
+    var buf: [20]u8 = undefined;
+    const got = formatIsoTimestamp(&buf, 1_700_000_000);
+    try std.testing.expectEqualStrings("2023-11-14T22:13:20Z", got);
+}
 
 pub fn compileHandler(
     allocator: std.mem.Allocator,
@@ -1344,10 +1377,22 @@ pub fn compileHandler(
     const is_tsx = std.mem.endsWith(u8, filename, ".tsx");
 
     if (is_ts or is_tsx) {
-        // Build comptime environment with build metadata
+        // Build comptime environment with build metadata. Callers may pin
+        // build_time / git_commit for reproducible builds; otherwise we fill in
+        // the current wall clock and the sentinel "unknown" so the magic
+        // identifiers documented in docs/typescript.md never evaluate to
+        // `undefined`.
+        var iso_buf: [20]u8 = undefined;
+        const fallback_seconds: i64 = blk: {
+            const ms = zigts.compat.realtimeNowMs() catch break :blk 0;
+            break :blk @divTrunc(ms, 1000);
+        };
+        const build_time_value = opts.build_time orelse formatIsoTimestamp(&iso_buf, fallback_seconds);
+        const git_commit_value = opts.git_commit orelse "unknown";
+
         const comptime_env = zigts.ComptimeEnv{
-            .build_time = null, // TODO: pass actual build time
-            .git_commit = null, // TODO: pass git commit
+            .build_time = build_time_value,
+            .git_commit = git_commit_value,
             .version = zigts.version.string,
             .env_vars = null,
         };

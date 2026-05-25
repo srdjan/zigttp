@@ -205,6 +205,23 @@ For request-scoped workloads, zigts uses a hybrid memory model:
 ./zig-out/bin/zigttp serve -m 64k handler.js
 ```
 
+### JIT Code Cache Lifetime
+
+Native code emitted by the baseline and optimized JIT tiers is allocated per
+`CompiledFunction` through `packages/zigts/src/jit/alloc.zig`. Lifetime follows
+the function object: code is freed when the function is collected, and the
+whole cache is reset on `--watch` hot-swap (`live_reload` rebuilds the handler
+and discards the prior runtime pool).
+
+There is no size-bounded LRU on the JIT cache in v0.1.0. The design assumes
+short-lived processes (FaaS cold-start to N requests to teardown), where the
+working set of compiled functions is bounded by the handler's static call
+graph and tier promotion stops after warmup. For long-running servers with
+many distinct handlers loaded in the same process, code-cache eviction is
+deferred to a future release. If you observe unbounded growth, capture
+`zigttp doctor` output and file a report - the mitigation is currently to
+recycle the process.
+
 ## Deployment Patterns
 
 ### Single Instance (Lambda-style)

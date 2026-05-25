@@ -62,7 +62,7 @@ For detailed architecture: [docs/internals/architecture.md](docs/internals/archi
 
 ## Virtual Modules
 
-Import via `import { fn } from "zigttp:module"`. Implementations in `packages/modules/src/` (peer package). Each module declares a `ModuleBinding` in `packages/zigts/src/module_binding.zig` as single source of truth. Bindings also declare `required_capabilities` (clock, crypto, random, stderr, etc.) enforced at call time by shared checked helpers in `module_binding.zig`. Modules with no capabilities skip the enforcement wrapper at compile time.
+Import via `import { fn } from "zigttp:module"`. Implementations in `packages/modules/src/` (peer package), where each module owns its `pub const binding = sdk.ModuleBinding{...}` declaration next to the implementation file (one per `data/`, `http/`, `net/`, `platform/`, `security/`, `workflow/` module). The `ModuleBinding` type and the shared capability-enforcement helpers live in `packages/zigts/src/module_binding.zig`. Bindings declare `required_capabilities` (clock, crypto, random, stderr, etc.) enforced at call time by those helpers; modules with no capabilities skip the enforcement wrapper at compile time.
 
 | Module | Key Exports |
 |--------|-------------|

@@ -54,3 +54,15 @@ notes: only behavior implemented in this repository is in scope.
 - Runtime policy denies must emit security events.
 - Dev-mode execution is not treated as sandboxed; precompiled and deploy paths
   are the sandboxed surfaces.
+- Only bytecode that passes `packages/zigts/src/bytecode_verifier.zig`
+  (opcode legality, operand bounds, constant pool, stack discipline, jump
+  targets) is dispatched into the VM. Rejected bytecode is dropped before
+  any VM state is allocated.
+
+## Known Footguns
+
+- `multipart/form-data` request bodies are passed to the handler unparsed.
+  The runtime enforces `Content-Length` and total body size (default 1 MiB)
+  but does not parse multipart boundaries. Handlers must validate boundaries
+  and quoted-string handling themselves; treat multipart parsing as
+  untrusted-input handling.

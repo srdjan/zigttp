@@ -34,6 +34,12 @@ pub const PrecompileOptions = struct {
     fault_severity_path: ?[]const u8 = null,
     generator_pack_path: ?[]const u8 = null,
     report_format: ?[]const u8 = null,
+    /// ISO-8601 build timestamp injected as `__BUILD_TIME__` during TS strip.
+    /// When null, compileHandler falls back to the wall clock at compile time.
+    build_time: ?[]const u8 = null,
+    /// Short git commit hash injected as `__GIT_COMMIT__` during TS strip.
+    /// When null, compileHandler falls back to the string "unknown".
+    git_commit: ?[]const u8 = null,
 };
 
 pub fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
@@ -178,6 +184,22 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             };
             continue;
         }
+        if (std.mem.eql(u8, arg, "--build-time")) {
+            index += 1;
+            opts.build_time = if (index < argv.len) argv[index] else {
+                errPrint("Missing value after --build-time\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--git-commit")) {
+            index += 1;
+            opts.git_commit = if (index < argv.len) argv[index] else {
+                errPrint("Missing value after --git-commit\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--module-manifest")) {
             index += 1;
             if (index >= argv.len) {
@@ -269,6 +291,26 @@ pub fn buildManifestRegistryFromPaths(
     }
 
     return registry;
+}
+
+test "parsePrecompileArgSlice captures build_time and git_commit" {
+    const argv = [_][]const u8{
+        "--build-time",
+        "2026-05-25T12:34:56Z",
+        "--git-commit",
+        "abc1234",
+        "handler.ts",
+        "embedded_handler.zig",
+    };
+    const opts = try parsePrecompileArgSlice(&argv);
+    try std.testing.expectEqualStrings("2026-05-25T12:34:56Z", opts.build_time.?);
+    try std.testing.expectEqualStrings("abc1234", opts.git_commit.?);
+    try std.testing.expectEqualStrings("handler.ts", opts.handler_path);
+}
+
+test "parsePrecompileArgSlice rejects missing build_time value" {
+    const argv = [_][]const u8{ "--build-time", "handler.ts", "out.zig", "--build-time" };
+    try std.testing.expectError(error.MissingArgument, parsePrecompileArgSlice(&argv));
 }
 
 test "parsePrecompileArgSlice consumes module manifest flags" {
