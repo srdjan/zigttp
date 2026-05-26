@@ -119,6 +119,25 @@ fn connectionValue(keep_alive: bool) []const u8 {
 }
 
 fn formatStaticError(buf: []u8, status: u16, body: []const u8, keep_alive: bool) ![]const u8 {
+    return formatHttpError(buf, status, body, keep_alive, null);
+}
+
+/// Single source of truth for HTTP error response framing. Callers pick the
+/// sink (buffer, fd, Writer interface) and pass the formatted bytes through.
+fn formatHttpError(
+    buf: []u8,
+    status: u16,
+    body: []const u8,
+    keep_alive: bool,
+    content_type: ?[]const u8,
+) ![]const u8 {
+    if (content_type) |ct| {
+        return std.fmt.bufPrint(
+            buf,
+            "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nConnection: {s}\r\n\r\n{s}",
+            .{ status, getStatusText(status), body.len, ct, connectionValue(keep_alive), body },
+        );
+    }
     return std.fmt.bufPrint(
         buf,
         "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n{s}",
@@ -180,6 +199,13 @@ fn appendHeaderLine(buf: []u8, pos: *usize, key: []const u8, value: []const u8) 
     pos.* += line.len;
 }
 
+/// Handler-supplied response headers must not duplicate framing headers the
+/// server emits itself. Returns false when the header should be relayed.
+fn isFramingHeader(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "Content-Length") or
+        std.ascii.eqlIgnoreCase(name, "Connection");
+}
+
 fn appendContentLengthHeader(buf: []u8, pos: *usize, body_len: usize) !void {
     const line = std.fmt.bufPrint(buf[pos.*..], "Content-Length: {d}\r\n", .{body_len}) catch return error.BufferOverflow;
     pos.* += line.len;
@@ -221,8 +247,7 @@ fn buildDynamicResponseHeader(
             try appendContentLengthHeader(buf, &pos, response.body.len);
             try appendConnectionHeader(buf, &pos, keep_alive);
             for (response.headers.items) |header| {
-                if (std.ascii.eqlIgnoreCase(header.key, "Content-Length")) continue;
-                if (std.ascii.eqlIgnoreCase(header.key, "Connection")) continue;
+                if (isFramingHeader(header.key)) continue;
                 try appendHeaderLine(buf, &pos, header.key, header.value);
             }
             pos = try appendAttestationHeaders(attestation_headers, buf, pos);
@@ -853,7 +878,7 @@ const ConnectionPool = struct {
     fn sendErrorSync(self: *ConnectionPool, fd: std.posix.fd_t, status: u16, message: []const u8) !void {
         _ = self;
         var buf: [512]u8 = undefined;
-        const response = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status, getStatusText(status), message.len, message }) catch return;
+        const response = formatHttpError(&buf, status, message, false, null) catch return;
         try writeAllFd(fd, response);
     }
 
@@ -2305,8 +2330,7 @@ pub const Server = struct {
                 try out.writeAll("Connection: close\r\n");
             }
             for (response.headers.items) |header| {
-                if (std.ascii.eqlIgnoreCase(header.key, "Content-Length")) continue;
-                if (std.ascii.eqlIgnoreCase(header.key, "Connection")) continue;
+                if (isFramingHeader(header.key)) continue;
                 try out.print("{s}: {s}\r\n", .{ header.key, header.value });
             }
             try out.writeAll("\r\n");
@@ -2326,12 +2350,15 @@ pub const Server = struct {
         var writer = stream.writer(io, &out_buf);
         const out = &writer.interface;
 
-        const status_text = getStatusText(status);
-        try out.print("HTTP/1.1 {d} {s}\r\n", .{ status, status_text });
-        try out.print("Content-Length: {d}\r\n", .{message.len});
-        try out.writeAll("Content-Type: text/plain\r\n");
-        try out.writeAll("Connection: close\r\n\r\n");
-        try out.writeAll(message);
+        var fmt_buf: [1024]u8 = undefined;
+        const formatted = formatHttpError(&fmt_buf, status, message, false, "text/plain") catch {
+            // Fallback: degrade to streaming if the message is too large for the stack buffer.
+            try out.print("HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n", .{ status, getStatusText(status), message.len });
+            try out.writeAll(message);
+            try writer.interface.flush();
+            return;
+        };
+        try out.writeAll(formatted);
         try writer.interface.flush();
     }
 
