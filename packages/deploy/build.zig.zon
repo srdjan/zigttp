@@ -1,7 +1,7 @@
 .{
-    .name = .zigttp_runtime,
-    .version = "0.1.0-beta",
-    .fingerprint = 0xb979b001f3d33260,
+    .name = .zigttp_deploy,
+    .version = "0.0.0",
+    .fingerprint = 0x4b12afae2181b6c5,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zigts = .{
@@ -9,12 +9,6 @@
         },
         .zigttp_tools = .{
             .path = "../tools",
-        },
-        .zigttp_pi = .{
-            .path = "../pi",
-        },
-        .zigttp_deploy = .{
-            .path = "../deploy",
         },
     },
     .paths = .{

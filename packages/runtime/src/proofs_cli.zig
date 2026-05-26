@@ -5,8 +5,8 @@
 const std = @import("std");
 const zigts = @import("zigts");
 const proof_ledger = @import("proof_ledger.zig");
-const review = @import("deploy/review.zig");
-const printer_mod = @import("deploy/printer.zig");
+const review = @import("zigttp_deploy").review;
+const printer_mod = @import("zigttp_deploy").printer;
 const bundle_mod = @import("proofs/bundle.zig");
 
 const Subcommand = enum {

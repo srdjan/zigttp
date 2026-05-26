@@ -25,6 +25,9 @@
         .zigttp_pi = .{
             .path = "packages/pi",
         },
+        .zigttp_deploy = .{
+            .path = "packages/deploy",
+        },
     },
     .paths = .{
         "build.zig",

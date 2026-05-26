@@ -16,7 +16,7 @@
 //!     +----------------------------+-------------------+----------------+
 
 const std = @import("std");
-const review = @import("deploy/review.zig");
+const review = @import("zigttp_deploy").review;
 const audit_ring = @import("proof_audit_ring.zig");
 
 /// Which view the left pane of the proof card renders. Only the left

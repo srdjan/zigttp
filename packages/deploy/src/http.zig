@@ -131,7 +131,7 @@ pub fn basicAuthHeader(allocator: std.mem.Allocator, username: []const u8, passw
     defer allocator.free(raw);
     const encoded_len = std.base64.standard.Encoder.calcSize(raw.len);
     const encoded = try allocator.alloc(u8, encoded_len);
-    errdefer allocator.free(encoded);
+    defer allocator.free(encoded);
     _ = std.base64.standard.Encoder.encode(encoded, raw);
     return std.fmt.allocPrint(allocator, "Basic {s}", .{encoded});
 }

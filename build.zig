@@ -161,6 +161,27 @@ pub fn build(b: *std.Build) void {
     const modules_test_step = b.step("test-modules", "Run zigttp-modules tests");
     modules_test_step.dependOn(&run_modules_tests.step);
 
+    // zigttp-deploy tests
+    const deploy_pkg_dep = b.dependency("zigttp_deploy", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const deploy_pkg_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = deploy_pkg_dep.path("src/test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zigts", .module = zigts_dep.module("zigts") },
+                .{ .name = "zigts_cli", .module = zigts_cli_mod },
+            },
+        }),
+    });
+    const run_deploy_pkg_tests = b.addRunArtifact(deploy_pkg_tests);
+    const deploy_pkg_test_step = b.step("test-deploy", "Run zigttp-deploy tests");
+    deploy_pkg_test_step.dependOn(&run_deploy_pkg_tests.step);
+
     const precompile_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = tools_dep.path("src/precompile.zig"),
@@ -585,6 +606,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_zigts_tests.step);
     test_step.dependOn(&run_sdk_tests.step);
     test_step.dependOn(&run_modules_tests.step);
+    test_step.dependOn(&run_deploy_pkg_tests.step);
     test_step.dependOn(expert_golden_step);
 
     // ZRuntime tests (native Zig runtime)
