@@ -27,6 +27,10 @@ const cli_args = @import("cli_args.zig");
 const cli_tour = @import("cli_tour.zig");
 const maybeShowFirstRunTour = cli_tour.maybeShowFirstRunTour;
 const cli_release_check = @import("cli_release_check.zig");
+const cli_paths = @import("cli_paths.zig");
+const resolveDeveloperServeBinary = cli_paths.resolveDeveloperServeBinary;
+const resolveReentryBinaryAfterChdir = cli_paths.resolveReentryBinaryAfterChdir;
+const resolveRuntimeBinary = cli_paths.resolveRuntimeBinary;
 const hasHelpFlag = cli_args.hasHelpFlag;
 const hasLongHelpFlag = cli_args.hasLongHelpFlag;
 const containsString = cli_args.containsString;
@@ -962,56 +966,6 @@ fn extractTemplateFlag(allocator: std.mem.Allocator, argv: []const []const u8) !
     }
     const resized = try allocator.realloc(filtered, n);
     return .{ .template = template, .filtered = resized };
-}
-
-/// `dev` and `studio` need the developer CLI because live reload and Studio
-/// are intentionally not linked into `zigttp-runtime`. Re-entering the same
-/// binary with `serve` is safe: `serve` dispatches directly to runtime_cli.
-fn resolveDeveloperServeBinary(allocator: std.mem.Allocator, program_path: []const u8) ![]const u8 {
-    if (program_path.len > 0) return try allocator.dupe(u8, program_path);
-    return try allocator.dupe(u8, "zigttp");
-}
-
-/// `zigttp demo` changes into the generated workspace before re-entering the
-/// CLI. Keep bare names bare so PATH lookup still works, but resolve
-/// cwd-relative executable paths while the original cwd is still known.
-fn resolveReentryBinaryAfterChdir(
-    allocator: std.mem.Allocator,
-    program_path: []const u8,
-    original_cwd: []const u8,
-) ![]const u8 {
-    if (std.fs.path.isAbsolute(program_path)) return try allocator.dupe(u8, program_path);
-    if (std.fs.path.dirname(program_path) == null) return try allocator.dupe(u8, program_path);
-    return try std.fs.path.resolve(allocator, &.{ original_cwd, program_path });
-}
-
-/// Find the `zigttp` runtime binary.
-/// Strategy: adjacent to this CLI binary (same directory), then PATH fallback.
-fn resolveRuntimeBinary(allocator: std.mem.Allocator, program_path: []const u8) ![]const u8 {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    // program_path may be absolute or cwd-relative depending on how the user
-    // invoked us. Dir.access handles both, so we don't need to canonicalize.
-    const dir_name = std.fs.path.dirname(program_path) orelse ".";
-    const cwd = std.Io.Dir.cwd();
-    const candidates = [_][]const u8{ "zigttp-runtime", "zigttp" };
-    for (candidates) |name| {
-        const candidate = try std.fs.path.join(allocator, &.{ dir_name, name });
-        errdefer allocator.free(candidate);
-        if (std.mem.eql(u8, candidate, program_path)) {
-            allocator.free(candidate);
-            continue;
-        }
-        cwd.access(io, candidate, .{}) catch {
-            allocator.free(candidate);
-            continue;
-        };
-        return candidate;
-    }
-
-    return try allocator.dupe(u8, "zigttp-runtime");
 }
 
 fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
