@@ -1909,6 +1909,63 @@ test "RootSet iterator" {
     try std.testing.expectEqual(@as(usize, 3), roots.len);
 }
 
+test "writeBarrier records tenured-to-nursery store in remembered set" {
+    // Regression: until the v0.1.0 hardening pass, Context.setPropertyChecked
+    // and setIndexChecked did not call this barrier, so a tenured holder that
+    // stored a nursery-tier pointer was missed by minor GC roots. The fix wires
+    // the barrier on every checked store; this test exercises the GC primitive
+    // directly so the barrier behavior itself stays anchored.
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    // Nursery-allocated payload pointer. allocNursery returns 8-byte-aligned
+    // memory inside the nursery region, satisfying both isInNursery and the
+    // JSValue.fromPtr alignment requirement.
+    const nursery_ptr = gc_state.allocNursery(64) orelse return error.NurseryAllocFailed;
+    try std.testing.expect(gc_state.isInNursery(nursery_ptr));
+
+    // Tenured holder: anything outside the nursery counts as tenured per
+    // isInTenured. A stack-allocated u64 sits outside the nursery slab.
+    var holder: u64 align(8) = 0;
+    const holder_ptr: *anyopaque = @ptrCast(&holder);
+    try std.testing.expect(!gc_state.isInNursery(holder_ptr));
+
+    try std.testing.expectEqual(@as(usize, 0), gc_state.remembered_set.entries.items.len);
+    try gc_state.writeBarrier(holder_ptr, value.JSValue.fromPtr(nursery_ptr));
+    try std.testing.expectEqual(@as(usize, 1), gc_state.remembered_set.entries.items.len);
+
+    // Non-pointer values must not pollute the remembered set.
+    try gc_state.writeBarrier(holder_ptr, value.JSValue.fromInt(42));
+    try std.testing.expectEqual(@as(usize, 1), gc_state.remembered_set.entries.items.len);
+
+    // Tenured-to-tenured writes are also skipped (RememberedSet only tracks
+    // cross-generation pointers that minor GC must scan).
+    var other_tenured: u64 align(8) = 0;
+    try gc_state.writeBarrier(holder_ptr, value.JSValue.fromPtr(@ptrCast(&other_tenured)));
+    try std.testing.expectEqual(@as(usize, 1), gc_state.remembered_set.entries.items.len);
+}
+
+test "writeBarrier propagates remembered set allocation failure" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    const nursery_ptr = gc_state.allocNursery(64) orelse return error.NurseryAllocFailed;
+    var holder: u64 align(8) = 0;
+    const holder_ptr: *anyopaque = @ptrCast(&holder);
+
+    gc_state.remembered_set.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    gc_state.remembered_set = RememberedSet.init(failing.allocator());
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        gc_state.writeBarrier(holder_ptr, value.JSValue.fromPtr(nursery_ptr)),
+    );
+    try std.testing.expectEqual(@as(usize, 0), gc_state.remembered_set.entries.items.len);
+}
+
 test "RememberedSet duplicate entries" {
     const allocator = std.testing.allocator;
     var rs = RememberedSet.init(allocator);

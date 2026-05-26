@@ -790,6 +790,12 @@ pub const Context = struct {
             return error.ArenaObjectEscape;
         }
         const pool = self.hidden_class_pool orelse return error.NoHiddenClassPool;
+        // Fail closed: if the remembered-set entry cannot be allocated, do not
+        // install a tenured-to-nursery edge that minor GC cannot see.
+        self.gc_state.writeBarrier(@ptrCast(obj), val) catch |err| {
+            self.throwException(value.JSValue.exception_val);
+            return err;
+        };
         obj.setProperty(self.allocator, pool, name, val) catch |err| {
             self.throwException(value.JSValue.exception_val);
             return err;
@@ -803,6 +809,11 @@ pub const Context = struct {
             self.throwException(value.JSValue.exception_val);
             return error.ArenaObjectEscape;
         }
+        // Same fail-closed barrier as setPropertyChecked.
+        self.gc_state.writeBarrier(@ptrCast(obj), val) catch |err| {
+            self.throwException(value.JSValue.exception_val);
+            return err;
+        };
         obj.setIndex(self.allocator, index, val) catch |err| {
             self.throwException(value.JSValue.exception_val);
             return err;
@@ -1904,6 +1915,58 @@ test "Context exception handling" {
     // Clear exception
     ctx.clearException();
     try std.testing.expect(!ctx.hasException());
+}
+
+test "setPropertyChecked fails before mutating when write barrier cannot allocate" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const pool = ctx.hidden_class_pool.?;
+    var obj = try object.JSObject.create(allocator, ctx.root_class_idx, null, pool);
+    defer obj.destroy(allocator);
+
+    const nursery_ptr = gc_state.allocNursery(64) orelse return error.NurseryAllocFailed;
+    const nursery_val = value.JSValue.fromPtr(nursery_ptr);
+
+    gc_state.remembered_set.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    gc_state.remembered_set = gc.RememberedSet.init(failing.allocator());
+
+    try std.testing.expectError(error.OutOfMemory, ctx.setPropertyChecked(obj, .name, nursery_val));
+    try std.testing.expect(ctx.hasException());
+    try std.testing.expect(!obj.hasOwnProperty(pool, .name));
+    try std.testing.expectEqual(@as(usize, 0), gc_state.remembered_set.entries.items.len);
+}
+
+test "setIndexChecked fails before mutating when write barrier cannot allocate" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
+    defer arr.destroy(allocator);
+
+    const nursery_ptr = gc_state.allocNursery(64) orelse return error.NurseryAllocFailed;
+    const nursery_val = value.JSValue.fromPtr(nursery_ptr);
+
+    gc_state.remembered_set.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    gc_state.remembered_set = gc.RememberedSet.init(failing.allocator());
+
+    try std.testing.expectError(error.OutOfMemory, ctx.setIndexChecked(arr, 0, nursery_val));
+    try std.testing.expect(ctx.hasException());
+    try std.testing.expectEqual(@as(u32, 0), arr.getArrayLength());
+    try std.testing.expect(arr.getIndex(0) == null);
+    try std.testing.expectEqual(@as(usize, 0), gc_state.remembered_set.entries.items.len);
 }
 
 test "Context catch handler" {
