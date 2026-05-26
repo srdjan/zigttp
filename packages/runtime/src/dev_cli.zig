@@ -23,6 +23,16 @@ const demo = @import("demo.zig");
 const pi_app = @import("pi_app");
 const attest_build_receipt = @import("attest/build_receipt.zig");
 const verify_cli = @import("verify_cli.zig");
+const cli_args = @import("cli_args.zig");
+const hasHelpFlag = cli_args.hasHelpFlag;
+const hasLongHelpFlag = cli_args.hasLongHelpFlag;
+const containsString = cli_args.containsString;
+const deployArgsRequestCloud = cli_args.deployArgsRequestCloud;
+const rejectCloudCommand = cli_args.rejectCloudCommand;
+const printNoProjectConfigDiagnostic = cli_args.printNoProjectConfigDiagnostic;
+const handlePreflightError = cli_args.handlePreflightError;
+const cloud_only_deploy_flags = cli_args.cloud_only_deploy_flags;
+const template_choices = cli_args.template_choices;
 
 /// Slice 1 placeholder. Replace with a build-injected constant (short git sha
 /// plus stable tag) when the `build.zig` wiring lands later in slice 1.
@@ -404,99 +414,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.debug.print("Unknown command: {s}\n\n", .{command});
     printHelp();
     std.process.exit(1);
-}
-
-fn hasHelpFlag(argv: []const []const u8) bool {
-    for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help")) return true;
-    }
-    return false;
-}
-
-fn hasLongHelpFlag(argv: []const []const u8) bool {
-    for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "help")) return true;
-    }
-    return false;
-}
-
-fn containsString(haystack: []const []const u8, needle: []const u8) bool {
-    for (haystack) |entry| {
-        if (std.mem.eql(u8, entry, needle)) return true;
-    }
-    return false;
-}
-
-/// Returns the first flag that selects the hosted control-plane deploy, or
-/// null when bare `zigttp deploy` should fall through to the local path.
-/// Cloud-only flags (`--region`, `--confirm`, `--wait`, `--no-wait`) imply
-/// `--cloud` so existing scripts keep working through v1.x. Callers use the
-/// returned literal to label the rejection so the user sees the flag they
-/// actually typed, not a hardcoded `--cloud`.
-fn deployArgsRequestCloud(argv: []const []const u8) ?[]const u8 {
-    for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--cloud")) return "--cloud";
-        if (containsString(&cloud_only_deploy_flags, arg)) return arg;
-    }
-    return null;
-}
-
-/// Hosted cloud deploy (`login`, `logout`, `review`, `grants`, `revoke-grant`,
-/// and `deploy --cloud`) is deferred from v0.1.0-beta. The control-plane code
-/// stays in the tree; only these CLI entry points are gated, so the path is
-/// trivially re-enabled in a later release.
-fn rejectCloudCommand(name: []const u8) noreturn {
-    std.debug.print(
-        "zigttp {s} is part of hosted cloud deploy, which is not available in v0.1.0-beta.\n" ++
-            "`zigttp deploy` builds a self-contained binary you can run anywhere.\n",
-        .{name},
-    );
-    std.process.exit(1);
-}
-
-fn printNoProjectConfigDiagnostic(command: []const u8) void {
-    std.debug.print(
-        \\No zigttp.json found in the current directory or any parent.
-        \\
-        \\Run `zigttp init <name>` to scaffold a new project, then `cd <name>`
-        \\and re-run `zigttp {s}`. Or pass an explicit handler path as an argument.
-        \\
-    , .{command});
-}
-
-/// Convert preflight errors from `dev`/`studio` (which run `zigts check`
-/// before launching the runtime child) into clean exit-1 messages instead
-/// of panic-style stack-trace dumps. The readable line was already printed
-/// upstream by `zigts check` itself.
-///
-/// Returns `true` if the caller should `std.process.exit(1)`.
-fn handlePreflightError(err: anyerror, command: []const u8) bool {
-    if (err == error.NoProjectConfig) {
-        printNoProjectConfigDiagnostic(command);
-        return true;
-    }
-    if (err == error.MissingTemplate) {
-        std.debug.print("--template requires one of: " ++ template_choices ++ ".\n", .{});
-        return true;
-    }
-    if (err == error.InvalidTemplate) {
-        std.debug.print("Unknown template. Choose one of: " ++ template_choices ++ ".\n", .{});
-        return true;
-    }
-    if (err == error.FileNotFound) {
-        // zigts check has already printed `Error reading handler file 'X': error.FileNotFound`.
-        // Add a remediation hint and swallow the stack trace.
-        std.debug.print(
-            \\
-            \\Check the `entry` path in zigttp.json or pass --help for usage.
-            \\
-        , .{});
-        return true;
-    }
-    if (err == error.CheckFailed) {
-        return true;
-    }
-    return false;
 }
 
 fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -2258,10 +2175,6 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     , .{ artifact.output_path, artifact.output_path });
 }
 
-/// `zigttp deploy` flags that opt into hosted cloud deploy. They are
-/// intercepted by `deployArgsRequestCloud` before `localDeployCommand` runs
-/// and rejected while cloud deploy is deferred from the beta.
-const cloud_only_deploy_flags = [_][]const u8{ "--region", "--confirm", "--wait", "--no-wait" };
 const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local", attest_flag_legacy, no_attest_flag };
 
 fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -2810,7 +2723,6 @@ fn printExpertHelp() void {
 }
 
 const Template = enum { basic, api, htmx };
-const template_choices = "basic, api, htmx";
 
 fn handlerPathForTemplate(template: Template) []const u8 {
     return switch (template) {
