@@ -10,13 +10,7 @@ const std = @import("std");
 comptime {
     _ = @import("printer.zig");
     _ = @import("review.zig");
-    // northflank_adapter.zig has one test ("waitForReady returns timed_out
-    // when deadline elapses") whose fetch-call count and sleep-total
-    // assertions disagree with the current loop shape — the loop runs an
-    // extra fetch+sleep pair before observing the deadline. The test was
-    // latent because nothing previously included this file in a test
-    // target. Skip the file here so the deploy package tests stay green;
-    // the impl/test mismatch is filed for v0.2.1.
+    _ = @import("northflank_adapter.zig");
     _ = @import("http.zig");
     _ = @import("state.zig");
     _ = @import("oci/layer.zig");

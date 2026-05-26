@@ -162,9 +162,14 @@ pub fn build(b: *std.Build) void {
     modules_test_step.dependOn(&run_modules_tests.step);
 
     // zigttp-deploy tests
+    // Pass perf_histogram so the build-graph dedups this dep with the one
+    // runtime threads through its own modules. Without it the option-set
+    // hashes diverge and Zig instantiates zigttp_deploy twice, splitting
+    // type identity across the deploy/runtime boundary.
     const deploy_pkg_dep = b.dependency("zigttp_deploy", .{
         .target = target,
         .optimize = optimize,
+        .perf_histogram = perf_histogram_enabled,
     });
     const deploy_pkg_tests = b.addTest(.{
         .root_module = b.createModule(.{

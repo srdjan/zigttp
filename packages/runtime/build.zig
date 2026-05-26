@@ -100,6 +100,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     zruntime.addImport("zigts", zigts_mod);
+    // Threaded for consistency with the other runtime modules. zruntime.zig
+    // and its transitive imports don't reference zigttp_deploy today, but
+    // a future edit that adds one would otherwise break the runtime
+    // template build silently while leaving cli_main green.
+    zruntime.addImport("zigttp_deploy", deploy_mod);
     zruntime.addOptions("runtime_feature_options", runtime_features);
 
     const benchmark = b.addModule("benchmark", .{

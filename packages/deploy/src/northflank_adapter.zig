@@ -185,7 +185,11 @@ pub fn waitForReady(
             .failed => return .failed,
             .pending => {},
         }
-        if (elapsed_ms + poll_interval_ms > deadline_ms) return .timed_out;
+        // `>=` (not `>`) so a sleep that would land on the deadline still
+        // returns timed_out before we initiate it. Otherwise the loop
+        // performs one extra fetch+sleep cycle past the user's deadline,
+        // which the surrounding CI job budget is sized against.
+        if (elapsed_ms + poll_interval_ms >= deadline_ms) return .timed_out;
         sleeper.sleep(poll_interval_ms);
         elapsed_ms += poll_interval_ms;
     }
