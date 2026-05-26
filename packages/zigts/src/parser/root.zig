@@ -101,7 +101,7 @@ pub fn parse(
     source: []const u8,
     options: ParseOptions,
 ) !ParseResult {
-    var p = JsParser.init(allocator, source);
+    var p = try JsParser.initFallible(allocator, source);
 
     // Apply options
     if (options.jsx_enabled) {
@@ -167,10 +167,19 @@ pub const Parser = struct {
         strings: *string.StringTable,
         atoms: ?*context.AtomTable,
     ) Parser {
+        return initFallible(allocator, source, strings, atoms) catch unreachable;
+    }
+
+    pub fn initFallible(
+        allocator: std.mem.Allocator,
+        source: []const u8,
+        strings: *string.StringTable,
+        atoms: ?*context.AtomTable,
+    ) !Parser {
         var p = Parser{
             .allocator = allocator,
             .source = source,
-            .js_parser = JsParser.init(allocator, source),
+            .js_parser = try JsParser.initFallible(allocator, source),
             .code_gen = null,
             .max_local_count = 0,
             .constants = .{ .items = &.{} },

@@ -419,22 +419,31 @@ pub const Runtime = struct {
         const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
         const request_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
+        var request_proto_unowned = true;
+        errdefer if (request_proto_unowned) request_proto.destroyBuiltin(self.allocator, pool);
+        try self.ctx.builtin_objects.append(self.allocator, request_proto);
+        request_proto_unowned = false;
         try self.addDynamicMethod(request_proto, "text", runtime_builtins.bodyTextNative, 0);
         try self.addDynamicMethod(request_proto, "json", runtime_builtins.bodyJsonNative, 0);
-        try self.ctx.builtin_objects.append(self.allocator, request_proto);
 
         const response_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
+        var response_proto_unowned = true;
+        errdefer if (response_proto_unowned) response_proto.destroyBuiltin(self.allocator, pool);
+        try self.ctx.builtin_objects.append(self.allocator, response_proto);
+        response_proto_unowned = false;
         try self.addDynamicMethod(response_proto, "text", runtime_builtins.bodyTextNative, 0);
         try self.addDynamicMethod(response_proto, "json", runtime_builtins.bodyJsonNative, 0);
-        try self.ctx.builtin_objects.append(self.allocator, response_proto);
 
         const headers_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
+        var headers_proto_unowned = true;
+        errdefer if (headers_proto_unowned) headers_proto.destroyBuiltin(self.allocator, pool);
+        try self.ctx.builtin_objects.append(self.allocator, headers_proto);
+        headers_proto_unowned = false;
         try self.addDynamicMethod(headers_proto, "get", headersGetNative, 1);
         try self.addDynamicMethod(headers_proto, "set", headersSetNative, 2);
         try self.addDynamicMethod(headers_proto, "append", headersAppendNative, 2);
         try self.addDynamicMethod(headers_proto, "has", headersHasNative, 1);
         try self.addDynamicMethod(headers_proto, "delete", headersDeleteNative, 1);
-        try self.ctx.builtin_objects.append(self.allocator, headers_proto);
 
         const headers_ctor_atom = try self.ctx.atoms.intern("Headers");
         const headers_ctor = try zq.JSObject.createNativeFunction(
@@ -445,8 +454,11 @@ pub const Runtime = struct {
             headers_ctor_atom,
             1,
         );
+        var headers_ctor_unowned = true;
+        errdefer if (headers_ctor_unowned) headers_ctor.destroyBuiltin(self.allocator, pool);
         try self.ctx.setPropertyChecked(headers_ctor, .prototype, headers_proto.toValue());
         try self.ctx.builtin_objects.append(self.allocator, headers_ctor);
+        headers_ctor_unowned = false;
         try self.ctx.setGlobal(headers_ctor_atom, headers_ctor.toValue());
 
         const request_ctor_atom = try self.ctx.atoms.intern("Request");
@@ -458,8 +470,11 @@ pub const Runtime = struct {
             request_ctor_atom,
             2,
         );
+        var request_ctor_unowned = true;
+        errdefer if (request_ctor_unowned) request_ctor.destroyBuiltin(self.allocator, pool);
         try self.ctx.setPropertyChecked(request_ctor, .prototype, request_proto.toValue());
         try self.ctx.builtin_objects.append(self.allocator, request_ctor);
+        request_ctor_unowned = false;
         try self.ctx.setGlobal(request_ctor_atom, request_ctor.toValue());
 
         const response_ctor = try zq.JSObject.createNativeFunction(
@@ -470,6 +485,8 @@ pub const Runtime = struct {
             .Response,
             2,
         );
+        var response_ctor_unowned = true;
+        errdefer if (response_ctor_unowned) response_ctor.destroyBuiltin(self.allocator, pool);
         try self.ctx.setPropertyChecked(response_ctor, .prototype, response_proto.toValue());
         try self.addMethod(response_ctor, .json, responseJsonStaticNative, 1);
         try self.addMethod(response_ctor, .text, responseTextStaticNative, 1);
@@ -477,6 +494,7 @@ pub const Runtime = struct {
         try self.addDynamicMethod(response_ctor, "redirect", responseRedirectStaticNative, 1);
         try self.addMethod(response_ctor, .rawJson, responseRawJsonStaticNative, 1);
         try self.ctx.builtin_objects.append(self.allocator, response_ctor);
+        response_ctor_unowned = false;
         try self.ctx.setGlobal(.Response, response_ctor.toValue());
 
         self.request_prototype = request_proto;
@@ -494,6 +512,7 @@ pub const Runtime = struct {
             atom,
             arg_count,
         );
+        errdefer fn_obj.destroyFull(self.allocator);
         try self.ctx.setPropertyChecked(obj, atom, fn_obj.toValue());
     }
 
@@ -503,74 +522,21 @@ pub const Runtime = struct {
     }
 
     fn installConsole(self: *Self) !void {
-        const root_class_idx = self.ctx.root_class_idx;
         const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
         // Create console object
+        const root_class_idx = self.ctx.root_class_idx;
         const console_obj = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
-
-        // Add console.log
-        const log_atom: zq.Atom = .log;
-        const log_func = try zq.JSObject.createNativeFunction(
-            self.allocator,
-            pool,
-            root_class_idx,
-            consoleLog,
-            log_atom,
-            0,
-        );
-        try console_obj.setProperty(self.allocator, pool, log_atom, log_func.toValue());
-
-        // Add console.error
-        const error_atom = try self.ctx.atoms.intern("error");
-        const error_func = try zq.JSObject.createNativeFunction(
-            self.allocator,
-            pool,
-            root_class_idx,
-            consoleError,
-            error_atom,
-            0,
-        );
-        try console_obj.setProperty(self.allocator, pool, error_atom, error_func.toValue());
-
-        // Add console.warn (aliases to stderr like console.error)
-        const warn_atom = try self.ctx.atoms.intern("warn");
-        const warn_func = try zq.JSObject.createNativeFunction(
-            self.allocator,
-            pool,
-            root_class_idx,
-            consoleError,
-            warn_atom,
-            0,
-        );
-        try console_obj.setProperty(self.allocator, pool, warn_atom, warn_func.toValue());
-
-        // Add console.info (aliases to console.log)
-        const info_atom = try self.ctx.atoms.intern("info");
-        const info_func = try zq.JSObject.createNativeFunction(
-            self.allocator,
-            pool,
-            root_class_idx,
-            consoleLog,
-            info_atom,
-            0,
-        );
-        try console_obj.setProperty(self.allocator, pool, info_atom, info_func.toValue());
-
-        // Add console.debug (aliases to console.log)
-        const debug_atom = try self.ctx.atoms.intern("debug");
-        const debug_func = try zq.JSObject.createNativeFunction(
-            self.allocator,
-            pool,
-            root_class_idx,
-            consoleLog,
-            debug_atom,
-            0,
-        );
-        try console_obj.setProperty(self.allocator, pool, debug_atom, debug_func.toValue());
-
-        // Track for cleanup in Context.deinit
+        var console_obj_unowned = true;
+        errdefer if (console_obj_unowned) console_obj.destroyBuiltin(self.allocator, pool);
         try self.ctx.builtin_objects.append(self.allocator, console_obj);
+        console_obj_unowned = false;
+
+        try self.addMethod(console_obj, .log, consoleLog, 0);
+        try self.addDynamicMethod(console_obj, "error", consoleError, 0);
+        try self.addDynamicMethod(console_obj, "warn", consoleError, 0);
+        try self.addDynamicMethod(console_obj, "info", consoleLog, 0);
+        try self.addDynamicMethod(console_obj, "debug", consoleLog, 0);
 
         // Register on global
         try self.ctx.setGlobal(.console, console_obj.toValue());
@@ -589,7 +555,10 @@ pub const Runtime = struct {
             fn_atom,
             1,
         );
+        var fn_obj_unowned = true;
+        errdefer if (fn_obj_unowned) fn_obj.destroyBuiltin(self.allocator, pool);
         try self.ctx.builtin_objects.append(self.allocator, fn_obj);
+        fn_obj_unowned = false;
         try self.ctx.setGlobal(fn_atom, fn_obj.toValue());
     }
 
@@ -616,7 +585,10 @@ pub const Runtime = struct {
             fn_atom,
             1,
         );
+        var fn_obj_unowned = true;
+        errdefer if (fn_obj_unowned) fn_obj.destroyBuiltin(self.allocator, pool);
         try self.ctx.builtin_objects.append(self.allocator, fn_obj);
+        fn_obj_unowned = false;
         try self.ctx.setGlobal(fn_atom, fn_obj.toValue());
     }
 
@@ -909,7 +881,7 @@ pub const Runtime = struct {
         }
 
         // Parse the source code
-        var p = zq.Parser.init(self.allocator, source_to_parse, self.strings, &self.ctx.atoms);
+        var p = try zq.Parser.initFallible(self.allocator, source_to_parse, self.strings, &self.ctx.atoms);
         defer p.deinit();
 
         // Enable JSX mode for .jsx and .tsx files
@@ -7059,16 +7031,72 @@ test "reloadHandler clears bytecode cache" {
 // (when configured) trace mutex creation — a long errdefer chain.
 //
 // First run of this harness found a real leak: when prewarm's
-// installHttpConstructors fails inside addDynamicMethod (NativeFunctionData
-// OOM), the just-created request_proto / response_proto / headers_proto
-// JSObjects are orphaned because the failing call interrupts the path
-// BEFORE the proto is appended to ctx.builtin_objects (the only owner
-// reached during ctx.deinit). The fix is structural — either append the
-// proto to ctx.builtin_objects immediately after create with a guarded
-// errdefer, or run installHttpConstructors and its siblings under an arena
-// — and is deferred to v0.2.0. Keeping the test as SkipZigTest documents
-// the gap and pins the harness wiring so the fix slots in cleanly: once
-// installBindings is OOM-safe, remove the skip and this test passes.
+// installHttpConstructors failed inside addDynamicMethod, the just-created
+// prototype objects were not yet registered in ctx.builtin_objects, and native
+// function objects created by addMethod had no errdefer owner before property
+// installation. The allocator walk keeps those ownership edges transactional.
 test "HandlerPool init under FailingAllocator never leaks" {
-    return error.SkipZigTest;
+    const handler_code = "function handler(req) { return Response.text('ok'); }";
+
+    const Probe = struct {
+        fn run(handler: []const u8, fail_at: usize) !bool {
+            var leak_detector: std.heap.DebugAllocator(.{ .stack_trace_frames = 0 }) = .init;
+            const child = leak_detector.allocator();
+            var failing = std.testing.FailingAllocator.init(child, .{ .fail_index = fail_at });
+
+            const result = HandlerPool.init(failing.allocator(), .{}, handler, "<handler>", 1, 0);
+            if (result) |pool| {
+                var pool_mut = pool;
+                pool_mut.deinit();
+                const leak_check = leak_detector.deinit();
+                if (leak_check == .leak) std.debug.print("HandlerPool.init leaked on success after fail_at={d}\n", .{fail_at});
+                try std.testing.expectEqual(std.heap.Check.ok, leak_check);
+                return true;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                const leak_check = leak_detector.deinit();
+                if (leak_check == .leak) std.debug.print("HandlerPool.init leaked on fail_at={d}\n", .{fail_at});
+                try std.testing.expectEqual(std.heap.Check.ok, leak_check);
+                return false;
+            }
+        }
+    };
+
+    const regression_fail_points = [_]usize{
+        0,
+        1,
+        // Prototype/console/native module ownership failures found while
+        // unskipping this test for v0.2.0.
+        1489,
+        1535,
+        // Parser scope initialization previously panicked instead of
+        // returning OutOfMemory on this part of prewarm.
+        2048,
+    };
+    for (regression_fail_points) |fail_at| {
+        _ = try Probe.run(handler_code, fail_at);
+    }
+
+    {
+        var leak_detector: std.heap.DebugAllocator(.{ .stack_trace_frames = 0 }) = .init;
+        const child = leak_detector.allocator();
+        var probe = std.testing.FailingAllocator.init(child, .{ .fail_index = std.math.maxInt(usize) });
+
+        var pool = try HandlerPool.init(probe.allocator(), .{}, handler_code, "<handler>", 1, 0);
+        pool.deinit();
+        const leak_check = leak_detector.deinit();
+        if (leak_check == .leak) std.debug.print("HandlerPool.init leaked on success probe\n", .{});
+        try std.testing.expectEqual(std.heap.Check.ok, leak_check);
+    }
+
+    if (std.c.getenv("ZTS_RUN_OOM_SWEEP") != null) {
+        var fail_at: usize = 0;
+        const max_steps: usize = 8192;
+        while (fail_at < max_steps) : (fail_at += 1) {
+            if (try Probe.run(handler_code, fail_at)) break;
+        } else {
+            std.debug.print("HandlerPool.init did not succeed within {d} injected allocation failures\n", .{max_steps});
+            return error.TestExpectedSuccess;
+        }
+    }
 }

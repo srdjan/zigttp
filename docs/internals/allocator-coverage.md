@@ -41,9 +41,12 @@ The errdefer on `duped` is scoped to the loop iteration. On a failing append, it
 
 Five sites fixed across `parseContractJson` (lines 284, 319, 365) and `fromHandlerContract` (lines 517, 530, 552). Three different shapes: single-field append, two-field route literal, and module-list append.
 
+## Active coverage
+
+- **`HandlerPool.init`** (`runtime_pool.zig`). Calls `LockFreePool.init`, `BytecodeCache.init`, optional trace-file plumbing, and `prewarm()`. The active zruntime test "HandlerPool init under FailingAllocator never leaks" now covers the concrete OOM points found in native binding installation and parser setup, plus a successful initialization probe. Set `ZTS_RUN_OOM_SWEEP=1` when a local run needs the slower full fail-index walk.
+
 ## Deferred targets
 
-- **`HandlerPool.init`** (`runtime_pool.zig`). Calls `LockFreePool.init`, `BytecodeCache.init`, optional trace-file plumbing, and `prewarm()`. Driving it under `FailingAllocator` requires faking enough of the embedded-handler bytecode path that the test setup dominates the test value. The `errdefer self.deinit()` at line 180 is the safety net; a targeted test of just that ladder is feasible but lower leverage than what was found in `parseContractJson`.
 - **`ContractBuilder`** (`contract_builder.zig`). Streaming accumulator used during parse; not a single-call surface. Would need a parser harness to drive realistic allocation sequences.
 
-Both remain valuable but did not land in this slice. The same pattern applies when they do.
+The same pattern applies when the remaining target lands.

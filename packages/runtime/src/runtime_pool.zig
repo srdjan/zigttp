@@ -165,6 +165,7 @@ pub const HandlerPool = struct {
             .trace_file = null,
             .trace_mutex = null,
         };
+        errdefer self.deinit();
 
         // Open shared trace file if configured
         if (config.trace_file_path) |trace_path| {
@@ -177,7 +178,6 @@ pub const HandlerPool = struct {
             self.trace_mutex = mutex;
         }
 
-        errdefer self.deinit();
         try self.prewarm();
         return self;
     }

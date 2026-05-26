@@ -148,6 +148,10 @@ pub const ScopeAnalyzer = struct {
     next_scope_id: ScopeId,
 
     pub fn init(allocator: std.mem.Allocator) ScopeAnalyzer {
+        return initFallible(allocator) catch unreachable;
+    }
+
+    pub fn initFallible(allocator: std.mem.Allocator) !ScopeAnalyzer {
         var analyzer = ScopeAnalyzer{
             .allocator = allocator,
             .scopes = .empty,
@@ -156,7 +160,7 @@ pub const ScopeAnalyzer = struct {
         };
 
         // Create global scope
-        _ = analyzer.pushScopeInternal(.global, 0) catch unreachable;
+        _ = try analyzer.pushScopeInternal(.global, 0);
 
         return analyzer;
     }

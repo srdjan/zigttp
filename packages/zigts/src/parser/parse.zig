@@ -99,13 +99,17 @@ pub const Parser = struct {
     pipe_binding_slot: ?u16 = null,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Parser {
+        return initFallible(allocator, source) catch unreachable;
+    }
+
+    pub fn initFallible(allocator: std.mem.Allocator, source: []const u8) !Parser {
         var parser = Parser{
             .allocator = allocator,
             .tokenizer = Tokenizer.init(source),
             .source = source,
             .nodes = IRStore.init(allocator),
             .constants = ConstantPool.init(allocator),
-            .scopes = ScopeAnalyzer.init(allocator),
+            .scopes = try ScopeAnalyzer.initFallible(allocator),
             .errors = ErrorList.init(allocator, source),
             .current = undefined,
             .previous = undefined,

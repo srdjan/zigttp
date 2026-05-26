@@ -70,16 +70,7 @@ pub fn registerVirtualModule(comptime binding: mb.ModuleBinding, ctx: *context.C
     inline for (binding.exports) |exp| {
         const base_func = comptime wrappedExportFn(binding, exp);
         const name_atom = try ctx.atoms.intern(exp.name);
-        const fn_obj = try object.JSObject.createNativeFunction(
-            allocator,
-            pool,
-            ctx.root_class_idx,
-            base_func,
-            name_atom,
-            exp.arg_count,
-        );
-        try ctx.builtin_objects.append(allocator, fn_obj);
-        try ctx.setGlobal(name_atom, fn_obj.toValue());
+        try registerNativeExport(ctx, allocator, pool, name_atom, base_func, exp.arg_count);
     }
 }
 
@@ -94,16 +85,7 @@ pub fn registerVirtualModuleTraced(comptime binding: mb.ModuleBinding, ctx: *con
         else
             base_func;
         const name_atom = try ctx.atoms.intern(exp.name);
-        const fn_obj = try object.JSObject.createNativeFunction(
-            allocator,
-            pool,
-            ctx.root_class_idx,
-            func,
-            name_atom,
-            exp.arg_count,
-        );
-        try ctx.builtin_objects.append(allocator, fn_obj);
-        try ctx.setGlobal(name_atom, fn_obj.toValue());
+        try registerNativeExport(ctx, allocator, pool, name_atom, func, exp.arg_count);
     }
 }
 
@@ -118,16 +100,7 @@ pub fn registerVirtualModuleReplay(comptime binding: mb.ModuleBinding, ctx: *con
         else
             base_func;
         const name_atom = try ctx.atoms.intern(exp.name);
-        const fn_obj = try object.JSObject.createNativeFunction(
-            allocator,
-            pool,
-            ctx.root_class_idx,
-            func,
-            name_atom,
-            exp.arg_count,
-        );
-        try ctx.builtin_objects.append(allocator, fn_obj);
-        try ctx.setGlobal(name_atom, fn_obj.toValue());
+        try registerNativeExport(ctx, allocator, pool, name_atom, func, exp.arg_count);
     }
 }
 
@@ -142,17 +115,31 @@ pub fn registerVirtualModuleDurable(comptime binding: mb.ModuleBinding, ctx: *co
         else
             base_func;
         const name_atom = try ctx.atoms.intern(exp.name);
-        const fn_obj = try object.JSObject.createNativeFunction(
-            allocator,
-            pool,
-            ctx.root_class_idx,
-            func,
-            name_atom,
-            exp.arg_count,
-        );
-        try ctx.builtin_objects.append(allocator, fn_obj);
-        try ctx.setGlobal(name_atom, fn_obj.toValue());
+        try registerNativeExport(ctx, allocator, pool, name_atom, func, exp.arg_count);
     }
+}
+
+fn registerNativeExport(
+    ctx: *context.Context,
+    allocator: std.mem.Allocator,
+    pool: *object.HiddenClassPool,
+    name_atom: object.Atom,
+    func: object.NativeFn,
+    arg_count: u8,
+) !void {
+    const fn_obj = try object.JSObject.createNativeFunction(
+        allocator,
+        pool,
+        ctx.root_class_idx,
+        func,
+        name_atom,
+        arg_count,
+    );
+    var fn_obj_unowned = true;
+    errdefer if (fn_obj_unowned) fn_obj.destroyBuiltin(allocator, pool);
+    try ctx.builtin_objects.append(allocator, fn_obj);
+    fn_obj_unowned = false;
+    try ctx.setGlobal(name_atom, fn_obj.toValue());
 }
 
 fn shouldWrapExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) bool {
