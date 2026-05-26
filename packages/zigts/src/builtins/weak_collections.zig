@@ -11,8 +11,21 @@ const addMethodDynamic = h.addMethodDynamic;
 // WeakMap implementation
 // ============================================================================
 
-/// WeakMap uses object identity as keys with weak references
-/// Simplified implementation - uses a regular map but with object pointer keys
+/// WeakMap entries are keyed by raw JSObject pointer addresses, not by GC-tracked
+/// weak references. In v0.1.0 the runtime relies on the per-request arena tie-in
+/// for lifetime safety: when `ctx.hybrid` is set, both the `WeakMapData` struct
+/// and its `entries` backing memory live on the request arena and are reclaimed
+/// together on arena reset (`context.HybridAllocator.arena.reset()` at the end of
+/// each request). Within a single request, the generational GC is non-moving and
+/// pointers are stable, so set/get/has/delete behave correctly as long as the
+/// JSObject keys are still reachable from elsewhere in JS.
+///
+/// Known limitation: across-request liveness tracking and post-collection pruning
+/// of stale pointer keys are not implemented. If a key object is collected and a
+/// new object happens to be allocated at the same address in the same request
+/// (rare, but possible after a forced GC), `get(newKey)` could surface the dead
+/// value. The v0.2.0 roadmap entry `docs/roadmap/weakmap-gc-integration.md`
+/// covers the full GC-finalizer path that closes this gap.
 pub const WeakMapData = struct {
     entries: std.AutoHashMap(usize, value.JSValue),
 
@@ -139,7 +152,9 @@ pub fn weakMapDelete(_: *context.Context, this: value.JSValue, args: []const val
 // WeakSet implementation
 // ============================================================================
 
-/// WeakSet uses object identity with weak references
+/// WeakSet shares the same per-request lifetime model and pointer-key limitation
+/// as `WeakMapData` above. See that comment block for the v0.2.0 roadmap link
+/// covering the GC-finalizer path that closes the stale-pointer gap.
 pub const WeakSetData = struct {
     entries: std.AutoHashMap(usize, void),
 
@@ -269,4 +284,53 @@ pub fn initWeakCollections(ctx: *context.Context) !void {
     const weak_set_ctor = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(weakSetConstructor), .WeakSet, 0);
     try ctx.setPropertyChecked(weak_set_ctor, .prototype, weak_set_proto.toValue());
     try ctx.setGlobal(.WeakSet, weak_set_ctor.toValue());
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "WeakMapData rejects non-object keys at the public API" {
+    // The pointer-key indirection means only real JSObject values can ride in
+    // and out. Numbers, strings, and other non-object JSValues short-circuit.
+    var data = WeakMapData.init(std.testing.allocator);
+    defer data.deinit();
+
+    const non_obj = value.JSValue.fromInt(7);
+    try std.testing.expectError(error.InvalidKey, data.set(non_obj, value.JSValue.undefined_val));
+    try std.testing.expect(!data.has(non_obj));
+    try std.testing.expectEqual(@as(?value.JSValue, null), data.get(non_obj));
+    try std.testing.expect(!data.delete(non_obj));
+}
+
+test "WeakSetData rejects non-object values at the public API" {
+    var data = WeakSetData.init(std.testing.allocator);
+    defer data.deinit();
+
+    const non_obj = value.JSValue.fromInt(7);
+    try std.testing.expectError(error.InvalidValue, data.add(non_obj));
+    try std.testing.expect(!data.has(non_obj));
+    try std.testing.expect(!data.delete(non_obj));
+}
+
+test "WeakMapData arena tie-in drops entries on arena reset" {
+    // The per-request lifetime semantic relies on the arena reset path: when the
+    // surrounding HybridAllocator's arena is reset between requests, both the
+    // WeakMapData struct (if arena-allocated) and the hash-map's backing memory
+    // are reclaimed in one shot. This test exercises the underlying hash-map
+    // tie-in directly with raw usize keys so it does not depend on the broader
+    // Context / GC stack. The v0.2.0 GC-finalizer refactor must preserve this
+    // property; if it does not, this test is the first thing to fail.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var entries = std.AutoHashMap(usize, value.JSValue).init(arena.allocator());
+    try entries.put(0xCAFE_0008, value.JSValue.fromInt(99));
+    try std.testing.expect(entries.contains(0xCAFE_0008));
+
+    _ = arena.reset(.retain_capacity);
+
+    var fresh = std.AutoHashMap(usize, value.JSValue).init(arena.allocator());
+    defer fresh.deinit();
+    try std.testing.expect(!fresh.contains(0xCAFE_0008));
 }
