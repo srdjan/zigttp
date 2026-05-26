@@ -7,21 +7,30 @@ Historical phase-0 deliverable for the peer-package move
 `packages/zigts/src/builtin_modules.zig` and `packages/modules/module-specs/`
 for current module inventory.
 
-## Source inventory
+## Current source inventory
 
-The 22 built-in virtual modules live under `packages/zigts/src/modules/` (8,161 lines total), already grouped to match `docs/virtual-modules/`:
+The built-in virtual module source is now split between SDK-style modules in
+`packages/modules/src/` and engine-bound bridges in `packages/zigts/src/modules/`.
+The public inventory remains governed by `packages/zigts/src/builtin_modules.zig`
+and the JSON specs in `packages/modules/module-specs/`.
 
 | Group | Files |
 |---|---|
-| `internal/` (not published) | compiler, file_resolver, module_graph, resolver, types, util |
-| `security/` | auth, crypto, decode, validate |
-| `data/` | cache, ratelimit, sql |
-| `net/` | fetch, service, websocket |
-| `http/` | http_mod, router, url |
-| `workflow/` | compose, durable, io, scope |
-| `platform/` | env, id, log, text, time |
+| `packages/modules/src/internal/` | util |
+| `packages/modules/src/security/` | auth, crypto, decode, validate |
+| `packages/modules/src/data/` | cache, ratelimit, sql |
+| `packages/modules/src/net/` | fetch, service, websocket |
+| `packages/modules/src/http/` | http_mod, router, url |
+| `packages/modules/src/workflow/` | compose |
+| `packages/modules/src/platform/` | env, id, log, text, time |
+| `packages/zigts/src/modules/internal/` | compiler, file_resolver, module_graph, resolver, types |
+| `packages/zigts/src/modules/workflow/` | durable, io, scope |
+| `packages/zigts/src/modules/data/` | sql install bridge |
+| `packages/zigts/src/modules/net/` | fetch, service, websocket bridges |
 
-The grouping matches the target layout, so the move is a lift-and-shift of files plus an import rewrite. The folder `internal/` contains the private module-registry machinery (`resolver`, `module_graph`, `file_resolver`, `compiler`, `types`, `util`). `resolver` and `compiler` belong with parser/bytecode machinery and stay in zigts per the plan's non-goals; `util` is what the modules package needs. `module_graph`, `file_resolver`, `types` are consumed outside the modules folder and stay in zigts.
+The remaining `zigts/src/modules/` files are the parts that still need engine
+state, parser/bytecode machinery, or runtime-installed callbacks. They are the
+next candidates for SDK expansion, not simple file moves.
 
 ## What the SDK already owns
 

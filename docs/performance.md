@@ -122,11 +122,11 @@ When the compile-time contract proves a handler is `pure` or `deterministic`+`re
 
 **Pool Slot Hint** (`packages/zigts/src/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) to O(1).
 
-**Relaxed Atomic Ordering** (`packages/runtime/src/zruntime.zig`): `in_use` counter uses `.monotonic` ordering (metrics only, not synchronization).
+**Relaxed Atomic Ordering** (`packages/runtime/src/runtime_pool.zig`): `in_use` counter uses `.monotonic` ordering (metrics only, not synchronization).
 
 **LRU Static Cache** (`packages/runtime/src/server.zig`): Doubly-linked list LRU eviction instead of clear-all, eliminating latency spikes.
 
-**Adaptive Backoff** (`packages/runtime/src/zruntime.zig`): Three-phase pool contention handling:
+**Adaptive Backoff** (`packages/runtime/src/runtime_pool.zig`): Three-phase pool contention handling:
 - Phase 1: 10 spin iterations using `spinLoopHint`
 - Phase 2: Sleep 10us-1ms with jitter (prevents thundering herd)
 - Phase 3: Circuit breaker fails fast after 100 retries

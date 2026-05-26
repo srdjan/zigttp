@@ -144,8 +144,15 @@ pub const LockFreePool = struct {
         }
 
         pub fn destroy(self: *Runtime, allocator: std.mem.Allocator) void {
-            // Destroy the shared runtime state first. Builtin and bytecode teardown
-            // may still walk persistent strings owned by this pooled runtime.
+            // Higher-level wrappers may hold borrowed pointers into this
+            // context. Let them clear their state before the engine-owned
+            // context, heap, and string table are destroyed.
+            if (self.user_deinit) |deinit_fn| {
+                deinit_fn(self, allocator);
+            }
+
+            // Builtin and bytecode teardown may still walk persistent strings
+            // owned by this pooled runtime.
             self.ctx.deinit();
             self.gc_state.deinit();
             self.heap_state.deinit();
@@ -155,9 +162,6 @@ pub const LockFreePool = struct {
             }
             allocator.destroy(self.gc_state);
             allocator.destroy(self.heap_state);
-            if (self.user_deinit) |deinit_fn| {
-                deinit_fn(self, allocator);
-            }
             self.strings.deinit();
             allocator.destroy(self);
         }
@@ -407,6 +411,46 @@ test "LockFreePool basic operations" {
     const rt2 = try pool.acquire();
     try std.testing.expectEqual(rt1, rt2);
     pool.release(rt2);
+}
+
+test "Runtime destroy clears user data before context teardown" {
+    const allocator = std.testing.allocator;
+
+    const Hooks = struct {
+        const State = struct {
+            sequence: *u8,
+        };
+
+        fn userDeinit(runtime: *LockFreePool.Runtime, _: std.mem.Allocator) void {
+            const sequence: *u8 = @ptrCast(@alignCast(runtime.user_data.?));
+            std.debug.assert(sequence.* == 0);
+            sequence.* = 1;
+            runtime.user_data = null;
+            runtime.user_deinit = null;
+        }
+
+        fn moduleDeinit(ptr: *anyopaque, alloc: std.mem.Allocator) void {
+            const state: *State = @ptrCast(@alignCast(ptr));
+            std.debug.assert(state.sequence.* == 1);
+            state.sequence.* = 2;
+            alloc.destroy(state);
+        }
+    };
+
+    var sequence: u8 = 0;
+    const rt = try LockFreePool.Runtime.create(allocator, .{});
+    rt.user_data = &sequence;
+    rt.user_deinit = Hooks.userDeinit;
+
+    const state = try allocator.create(Hooks.State);
+    state.* = .{ .sequence = &sequence };
+    rt.ctx.module_state[0] = .{
+        .ptr = state,
+        .deinit_fn = Hooks.moduleDeinit,
+    };
+
+    rt.destroy(allocator);
+    try std.testing.expectEqual(@as(u8, 2), sequence);
 }
 
 test "LockFreePool multiple runtimes" {

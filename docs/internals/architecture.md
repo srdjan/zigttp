@@ -40,7 +40,7 @@ HTTP listener, CLI, request routing, static file serving, contract-aware startup
 - `zigttp` — the primary developer CLI. `zigttp --help` shows five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Advanced commands (`serve`, `check`, `prove`, `mock`, `link`, `compile`, `build`, `doctor`, `proofs`, the cloud-deploy set, and more) stay under `zigttp help --all`; all still dispatch in-process. Entry: `cli_main.zig` → `dev_cli.zig`.
 - `zigttp-runtime` — the internal runtime template. Used for self-contained outputs and direct runtime tests. Entry: `main.zig` → `runtime_cli.zig`.
 
-Both binaries share the engine (`zigts`), core server/runtime code (`server.zig`, `zruntime.zig`, `contract_runtime.zig`), `self_extract.zig`, and `cli_shared.zig` (arg parsing, watch sets, size helpers). Build-time `runtime_feature_options` select the optional developer surfaces: `zigttp` links proven live reload and Studio, while `zigttp-runtime` links stubs and rejects `--watch` / `--studio` with a direct error. `zigts` links `pi_app` for the interactive `zigts expert` flow. Only `zigttp` links the `deploy/` subtree (OCI push, control plane, provider adapter).
+Both binaries share the engine (`zigts`), core server/runtime code (`server.zig`, `zruntime.zig`, `runtime_pool.zig`, `contract_runtime.zig`), `self_extract.zig`, and `cli_shared.zig` (arg parsing, watch sets, size helpers). Build-time `runtime_feature_options` select the optional developer surfaces: `zigttp` links proven live reload and Studio, while `zigttp-runtime` links stubs and rejects `--watch` / `--studio` with a direct error. `zigts` links `pi_app` for the interactive `zigts expert` flow. Only `zigttp` links the `deploy/` subtree (OCI push, control plane, provider adapter).
 
 **Key Components**:
 - `main.zig` - Runtime entry trampoline
@@ -50,7 +50,8 @@ Both binaries share the engine (`zigts`), core server/runtime code (`server.zig`
 - `cli_shared.zig` - Shared arg parsing, watch sets
 - `runtime_features.zig` - Compile-time switch for developer-only runtime features
 - `server.zig` - HTTP request/response handling, static file cache, route pre-filtering
-- `zruntime.zig` - HandlerPool management, JS context lifecycle
+- `zruntime.zig` - JS context lifecycle, request/response object marshalling, native callbacks
+- `runtime_pool.zig` - HandlerPool lifecycle, bytecode cache, pool metrics, runtime reuse/recycle policy
 - `contract_runtime.zig` - Runtime contract parser for startup env validation, route pre-filtering, and property logging
 - `live_reload.zig` - Proven live reload for the developer CLI: file watching, contract diffing, atomic handler hot-swap
 - `self_extract.zig` - Self-extracting binary format (bytecode, contract JSON, runtime policy)
@@ -112,7 +113,7 @@ The JIT is enabled by default in normal builds. The `analyzer_only` build flag e
 2. Request parsed from HTTP bytes
 3. If contract is loaded, request method+path checked against proven routes - non-matching requests return 404 without entering JS (`packages/runtime/src/contract_runtime.zig`)
 4. If handler is proven deterministic+read_only, check proof cache by request hash - cache hit returns the memoized response with `X-Zigttp-Proof-Cache: hit` header, skipping JS entirely (`packages/runtime/src/proof_adapter.zig`)
-5. HandlerPool acquires an isolated runtime from LockFreePool (`packages/runtime/src/zruntime.zig`)
+5. HandlerPool acquires an isolated runtime from LockFreePool (`packages/runtime/src/runtime_pool.zig`)
 6. Request converted to JS Request object
 7. Handler function invoked with Request
 8. JS Response extracted, stored in proof cache on miss, and sent as HTTP response
@@ -290,7 +291,8 @@ zigttp/
 │   ├── runtime/                 # HTTP server, CLI, request routing
 │   │   └── src/
 │   │       ├── main.zig             # CLI entry point
-│   │       ├── zruntime.zig         # HandlerPool, JS context management
+│   │       ├── zruntime.zig         # JS context lifecycle and native runtime bindings
+│   │       ├── runtime_pool.zig     # HandlerPool, bytecode cache, reuse/recycle policy
 │   │       ├── server.zig           # HTTP server implementation
 │   │       ├── contract_runtime.zig # Runtime contract parser (env validation, route pre-filter)
 │   │       ├── live_reload.zig      # Proven live reload (watch, contract diff, hot-swap)
@@ -366,11 +368,11 @@ All allocations use `errdefer` for cleanup on failure paths. Header strings are 
 
 **Pool Slot Hint** (`packages/zigts/src/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) linear scan to O(1) in the common case.
 
-**Relaxed Atomic Ordering** (`packages/runtime/src/zruntime.zig`): The `in_use` counter uses `.monotonic` ordering since it's only for metrics/limits, not synchronization.
+**Relaxed Atomic Ordering** (`packages/runtime/src/runtime_pool.zig`): The `in_use` counter uses `.monotonic` ordering since it's only for metrics/limits, not synchronization.
 
 **LRU Static Cache** (`packages/runtime/src/server.zig`): Static file cache uses doubly-linked list LRU eviction instead of clear-all, eliminating latency spikes.
 
-**Adaptive Backoff** (`packages/runtime/src/zruntime.zig`): Three-phase backoff for pool contention:
+**Adaptive Backoff** (`packages/runtime/src/runtime_pool.zig`): Three-phase backoff for pool contention:
 - Phase 1: 10 spin iterations using `spinLoopHint`
 - Phase 2: Sleep 10us-1ms with jitter (prevents thundering herd)
 - Phase 3: Circuit breaker fails fast after 100 retries
@@ -475,7 +477,7 @@ Output: `upgrade-manifest.json` with verdict, justification, surface summary, be
 
 Without `--prove`, `--watch` recompiles and swaps without contract diffing. Compilation errors keep the old handler running. Handlers using `zigttp:durable` refuse live swap because replay state depends on handler identity.
 
-**Key files**: `packages/runtime/src/live_reload.zig` (watch loop, contract diffing, swap orchestration), `HandlerPool.reloadHandler()` in `packages/runtime/src/zruntime.zig` (atomic pool swap), `Server.updateContract()` in `packages/runtime/src/server.zig` (contract + proof cache reconfiguration).
+**Key files**: `packages/runtime/src/live_reload.zig` (watch loop, contract diffing, swap orchestration), `HandlerPool.reloadHandler()` in `packages/runtime/src/runtime_pool.zig` (atomic pool swap), `Server.updateContract()` in `packages/runtime/src/server.zig` (contract + proof cache reconfiguration).
 
 ### Guard Composition
 
