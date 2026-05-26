@@ -258,6 +258,37 @@ fn buildDynamicResponseHeader(
     return pos;
 }
 
+/// Upper bound on any single studio JSON or ndjson response body. The
+/// studio is a developer tool surface — it serves local browser pages
+/// and never faces public traffic — but the builders behind these
+/// endpoints (stateJsonCopy, generatedTests, witnessDetailJson) allocate
+/// proportional to the size of the running workspace. A pathological
+/// workspace (huge witness corpus, many open files) could otherwise
+/// produce multi-megabyte responses. Returning 413 keeps memory
+/// pressure bounded and makes the limit visible. 1 MiB is generous
+/// for the documented studio UI.
+const MAX_STUDIO_RESPONSE_BYTES: usize = 1 << 20;
+
+/// Hand `body` (owned by `allocator`) to `response` as the response body,
+/// or replace it with a 413 if it exceeds the studio bound. Both branches
+/// leave `response` ready for the caller's `return true`.
+fn finishStudioOwnedResponse(
+    response: *HttpResponse,
+    allocator: std.mem.Allocator,
+    body: []u8,
+    content_type: []const u8,
+) !void {
+    if (body.len > MAX_STUDIO_RESPONSE_BYTES) {
+        allocator.free(body);
+        response.status = 413;
+        response.body = "Studio response exceeds size limit";
+        try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
+        return;
+    }
+    response.setBodyOwned(body);
+    try response.putHeaderBorrowed("Content-Type", content_type);
+}
+
 /// Populate `response` for a `/_zigttp/studio*` path. Returns true if the
 /// caller should send `response`, false if the path didn't match any
 /// studio route. Studio-disabled and witness-not-found are populated as
@@ -284,8 +315,7 @@ fn populateStudioResponse(
     };
     if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) {
         const state_body = try studio.stateJsonCopy(allocator);
-        response.setBodyOwned(state_body);
-        try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+        try finishStudioOwnedResponse(response, allocator, state_body, "application/json; charset=utf-8");
         return true;
     }
     if (std.mem.eql(u8, path, studio_mod.caller_verify_path)) {
@@ -306,8 +336,7 @@ fn populateStudioResponse(
                 else => return err,
             }
         };
-        response.setBodyOwned(verify_body);
-        try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+        try finishStudioOwnedResponse(response, allocator, verify_body, "application/json; charset=utf-8");
         return true;
     }
     if (std.mem.eql(u8, path, studio_mod.demo_state_path)) {
@@ -320,8 +349,7 @@ fn populateStudioResponse(
             }
             return err;
         };
-        response.setBodyOwned(response_body);
-        try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+        try finishStudioOwnedResponse(response, allocator, response_body, "application/json; charset=utf-8");
         return true;
     }
     if (std.mem.eql(u8, path, studio_mod.demo_action_path)) {
@@ -361,20 +389,17 @@ fn populateStudioResponse(
             }
             return err;
         };
-        response.setBodyOwned(response_body);
-        try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+        try finishStudioOwnedResponse(response, allocator, response_body, "application/json; charset=utf-8");
         return true;
     }
     if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) {
         const tests_body = try studio.generatedTests(allocator);
-        response.setBodyOwned(tests_body);
-        try response.putHeaderBorrowed("Content-Type", "application/x-ndjson; charset=utf-8");
+        try finishStudioOwnedResponse(response, allocator, tests_body, "application/x-ndjson; charset=utf-8");
         return true;
     }
     if (studio_mod.witnessDetailKey(path)) |key| {
         if (studio.witnessDetailJson(allocator, key)) |witness_body| {
-            response.setBodyOwned(witness_body);
-            try response.putHeaderBorrowed("Content-Type", "application/json; charset=utf-8");
+            try finishStudioOwnedResponse(response, allocator, witness_body, "application/json; charset=utf-8");
             return true;
         } else |err| switch (err) {
             error.InvalidWitnessKey, error.WitnessNotFound => {
@@ -3031,6 +3056,32 @@ test "get status text" {
     try std.testing.expectEqualStrings("OK", getStatusText(200));
     try std.testing.expectEqualStrings("Not Found", getStatusText(404));
     try std.testing.expectEqualStrings("Internal Server Error", getStatusText(500));
+}
+
+test "finishStudioOwnedResponse returns 413 when body exceeds bound" {
+    const allocator = std.testing.allocator;
+    var response = HttpResponse.init(allocator);
+    defer response.deinit();
+
+    const oversize_len = MAX_STUDIO_RESPONSE_BYTES + 1;
+    const big = try allocator.alloc(u8, oversize_len);
+    // Ownership transfers to finishStudioOwnedResponse on success or failure;
+    // it frees the buffer in the 413 branch.
+    try finishStudioOwnedResponse(&response, allocator, big, "application/json; charset=utf-8");
+    try std.testing.expectEqual(@as(u16, 413), response.status);
+}
+
+test "finishStudioOwnedResponse keeps body when within bound" {
+    const allocator = std.testing.allocator;
+    var response = HttpResponse.init(allocator);
+    defer response.deinit();
+
+    const body = try allocator.alloc(u8, 128);
+    @memset(body, '{');
+    try finishStudioOwnedResponse(&response, allocator, body, "application/json; charset=utf-8");
+    // HttpResponse.init defaults status to 200; helper only overwrites on 413.
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqual(@as(usize, 128), response.body.len);
 }
 
 test "path safety validation" {

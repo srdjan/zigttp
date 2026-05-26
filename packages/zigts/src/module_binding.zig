@@ -22,6 +22,8 @@ const file_io = @import("file_io.zig");
 const sqlite_runtime = @import("sqlite.zig");
 const resolver = @import("modules/internal/resolver.zig");
 const security_events = @import("security_events.zig");
+const gc = @import("gc.zig");
+const handler_policy = @import("handler_policy.zig");
 
 // Re-export EffectClass from resolver for backward compatibility
 pub const EffectClass = resolver.EffectClass;
@@ -1978,4 +1980,122 @@ test "wrapModuleFnWithCapabilities invocation activates threadlocal context" {
     // a subsequent call from outside any module context does not inherit
     // residual capabilities.
     try std.testing.expect(active_module_context == null);
+}
+
+// Policy gating: the four `allows*ForActiveModule` helpers are the only
+// path SDK consumers reach to ask the runtime policy whether a given
+// name/host is admitted. The thread-local active context must declare
+// `.policy_check` (rule: a module that consults policy must say so in
+// its binding), and the underlying `ctx.capability_policy` decides
+// allow vs deny per category. These tests pin both halves so a future
+// refactor that drops either gate fails closed.
+test "allowsEnvForActiveModule denies when policy enabled and name not in allowlist" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    ctx.capability_policy = .{
+        .env = .{ .enabled = true, .values = &[_][]const u8{"ALLOWED"} },
+    };
+
+    const token = pushActiveModuleContext("zigttp:env-test", &.{.policy_check});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expect(try allowsEnvForActiveModule(ctx, "ALLOWED"));
+    try std.testing.expect(!try allowsEnvForActiveModule(ctx, "DENIED"));
+}
+
+test "allowsEnvForActiveModule allows everything when policy section is disabled" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    // ctx.capability_policy is default: env.enabled = false → permissive
+
+    const token = pushActiveModuleContext("zigttp:env-test", &.{.policy_check});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expect(try allowsEnvForActiveModule(ctx, "ANYTHING"));
+}
+
+test "allowsEnvForActiveModule fails closed when active module lacks policy_check" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Active module declares clock but not policy_check.
+    const token = pushActiveModuleContext("zigttp:env-test", &.{.clock});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expectError(
+        ModuleCapabilityError.MissingModuleCapability,
+        allowsEnvForActiveModule(ctx, "DENIED"),
+    );
+}
+
+test "allowsCacheNamespaceForActiveModule denies namespaces outside the allowlist" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    ctx.capability_policy = .{
+        .cache = .{ .enabled = true, .values = &[_][]const u8{"sessions"} },
+    };
+
+    const token = pushActiveModuleContext("zigttp:cache-test", &.{.policy_check});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expect(try allowsCacheNamespaceForActiveModule(ctx, "sessions"));
+    try std.testing.expect(!try allowsCacheNamespaceForActiveModule(ctx, "secrets"));
+}
+
+test "allowsSqlQueryForActiveModule denies queries outside the allowlist" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    ctx.capability_policy = .{
+        .sql = .{ .enabled = true, .values = &[_][]const u8{"listTodos"}, .queries = &.{} },
+    };
+
+    const token = pushActiveModuleContext("zigttp:sql-test", &.{.policy_check});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expect(try allowsSqlQueryForActiveModule(ctx, "listTodos"));
+    try std.testing.expect(!try allowsSqlQueryForActiveModule(ctx, "dropEverything"));
+    // Today `allowsSqlWrite` piggybacks on the same `.sql` allowlist
+    // (see handler_policy.zig — the comment there flags the split as
+    // a future migration). Pin both the current sharing AND the
+    // intent: when `.sql_write` becomes a separate allowlist, this
+    // test should grow a deny case that's denied ONLY by `.sql_write`
+    // to prove the new split actually gates writes independently.
+    try std.testing.expect(try allowsSqlWriteForActiveModule(ctx, "listTodos"));
+    try std.testing.expect(!try allowsSqlWriteForActiveModule(ctx, "dropEverything"));
+}
+
+// Egress is unlike the other four policy categories: there is no
+// `allowsEgressHostForActiveModule` wrapper. Outbound `fetch` is a
+// runtime-initiated check (see zruntime.zig calling
+// `ctx.capability_policy.allowsEgressHost(host)`), not an SDK module
+// call routed through `active_module_context`, so it does not require
+// `.policy_check`. This test pins the raw `RuntimePolicy.allowsEgressHost`
+// semantics (case-insensitive host match). If a future change moves
+// outbound checks into an SDK module, the parity (a `*ForActiveModule`
+// wrapper, gated by `.policy_check`) must be added at the same time.
+test "allowsEgressHost is case-insensitive against the runtime policy" {
+    const policy: handler_policy.RuntimePolicy = .{
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"api.example.com"} },
+    };
+    try std.testing.expect(policy.allowsEgressHost("api.example.com"));
+    try std.testing.expect(policy.allowsEgressHost("API.EXAMPLE.COM"));
+    try std.testing.expect(!policy.allowsEgressHost("evil.example.com"));
 }

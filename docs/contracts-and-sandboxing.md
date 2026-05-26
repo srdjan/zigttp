@@ -128,6 +128,102 @@ GET/HEAD responses cached at runtime and served from Zig memory
 without entering JS. The `X-Zigttp-Proof-Cache: hit` response header
 confirms a cache hit.
 
+### When each contract assertion is enforced
+
+The contract is consulted at four distinct moments. Knowing which
+moment owns which assertion is the difference between "the binary
+won't boot" and "individual requests get rejected".
+
+**Build time** (before the binary is produced):
+- Type and effect checks against `Spec<...>` and `Effects<...>` on the
+  handler's return type. Failures stop compilation; no binary is
+  produced.
+- Explicit policy override validation against the contract when
+  `-Dpolicy` is passed. A policy that admits capabilities the contract
+  did not prove is rejected.
+- Replay regressions against `-Dreplay=traces.jsonl`.
+- Upgrade verdict against `-Dprove=old:traces` (when classified
+  `breaking`, the build fails unless `--force-swap` is on the eventual
+  runtime invocation).
+
+**Process startup** (once, when the self-extracting binary boots):
+- `embedded_handler.capability_policy` is in scope. The precompile
+  pipeline generates this as a comptime `pub const RuntimePolicy` in
+  the embedded handler module; the runtime applies it to each
+  context via `runtime_config.zig:applyEmbeddedCapabilityPolicy`.
+  Because the value is comptime-baked at build time, **the
+  RuntimePolicy is fixed for the lifetime of the binary** — there is
+  no contract-file parse at boot that could change it.
+- `proven_env` literals are validated against the process environment
+  (`proof_adapter.zig`). A missing required var fails the process
+  rather than 500-ing the first request.
+- Pooling policy is derived from contract properties
+  (`contract_runtime.zig:derivePoolingPolicy`) and applied to the
+  HandlerPool exactly once via `pool.setPoolingPolicy(...)` from
+  `server.zig:start`. There is no later code path that re-derives
+  or updates `pool.pooling_policy`.
+- Attestation envelope (`Zigttp-Attest`) is materialized for
+  `GET /.well-known/zigttp-attest`.
+
+**Per request** (in the dispatch path, before any JS runs):
+- Route pre-filter: when `routes_dynamic = false`, the proven route
+  table in `contract_runtime.zig` rejects non-matching method/path
+  combinations at the HTTP layer with a 404, never acquiring a
+  runtime. When `routes_dynamic = true`, every request falls through
+  to the handler and route matching is the handler's responsibility
+  — the contract surface stops being a runtime gate for routing.
+- Proof cache lookup: handlers proven `deterministic` + `read_only`
+  serve `GET`/`HEAD` from the Zig-side cache without entering JS
+  (`X-Zigttp-Proof-Cache: hit`).
+- Per-name policy checks for SDK-facing categories (env, cache, sql,
+  sql-write): the runtime exposes `allows{Env,CacheNamespace,SqlQuery,
+  SqlWrite}ForActiveModule` in `module_binding.zig`. Each consults
+  `ctx.capability_policy.allows*(name)` and rejects the call when the
+  name is outside the allowlist. The corresponding SDK module bindings
+  must declare `.policy_check` in `required_capabilities` — otherwise
+  the call panics with an undeclared-capability error. These two
+  layers are independent: `required_capabilities` is the module's
+  binding-level declaration of which gates it consults;
+  `ctx.capability_policy` is the contract-derived allow/deny data
+  those gates consult.
+- Outbound egress: handled inside the runtime's `fetch` path
+  (`zruntime.zig:2748`) via the unwrapped
+  `ctx.capability_policy.allowsEgressHost(host)`. This is a runtime-
+  initiated check on the URL host, not an SDK module call, so it
+  does not go through the `*ForActiveModule` wrappers and does not
+  require any binding to declare `.policy_check`.
+
+**Hot swap** (`--watch --prove`):
+- Re-runs the build-time contract diff against the running version
+  before applying the swap. A `breaking` verdict blocks the swap
+  unless `--force-swap` is in effect.
+- `runtime_pool.zig:reloadHandler` updates `handler_code` and
+  `handler_filename`, clears the bytecode cache, and invalidates
+  every idle runtime so it recompiles from the new source on next
+  acquire. In-flight requests finish on the old bytecode and are
+  recycled into the new code on their next cycle.
+- `server.zig:updateContract` (called by `live_reload`) replaces the
+  proven-routes table and the proof cache so per-request route
+  gating and the read-only cache reflect the new contract.
+- **RuntimePolicy is NOT swapped.** It is a comptime constant in
+  `embedded_handler.zig` baked at the build that produced the
+  running binary; hot swap of the handler source does not rebuild
+  the binary and therefore cannot change the policy. Tightening or
+  widening the policy requires a rebuild.
+- **`pool.pooling_policy` is NOT updated either.** It stays at the
+  value derived from the contract present at server startup. A new
+  contract whose properties would imply a different pooling policy
+  takes effect on the next process start, not on the next swap.
+- Durable handlers refuse hot swap entirely because replay state
+  depends on handler identity.
+
+A narrow gap to be aware of: a handler that flips `routes_dynamic`
+from `false` to `true` across a hot swap loses the route pre-filter
+on the next request. This is intentional — the new contract honestly
+says routing is no longer statically enumerated — but operators
+monitoring route-shape changes should treat that transition as a
+deliberate widening of the request surface.
+
 ## Explicit Policy Override (`-Dpolicy`)
 
 To override auto-derived sandboxing with a stricter or different

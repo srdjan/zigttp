@@ -637,3 +637,269 @@ test "hasTransferEncodingChunked: absent or other encoding returns false" {
     try testing.expect(!hasTransferEncodingChunked("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
     try testing.expect(!hasTransferEncodingChunked("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"));
 }
+
+// -------------------------------------------------------------------------
+// Deterministic fuzz harness
+//
+// std.testing.allocator already detects leaks; std.testing.checkAllAllocationFailures
+// is overkill here. The contract these tests pin is narrower: for any input
+// the parser must either return a typed error or a result whose slices stay
+// inside the input/storage buffer. No panic, no out-of-bounds read, no leak.
+// Inputs come from a fixed seed so failures reproduce.
+// -------------------------------------------------------------------------
+
+const FuzzKind = enum {
+    request_line,
+    query_string,
+    content_length_value,
+    header_section,
+    header_terminator,
+};
+
+fn fuzzScratch(rng: *std.Random, kind: FuzzKind, buf: []u8) []u8 {
+    // Length distribution: 80% small (<64), 15% medium (<512), 5% large
+    // up to buf.len. Skewed small so we exercise edge cases more often
+    // than long random strings.
+    const roll = rng.int(u8);
+    const len: usize = if (roll < 205)
+        @min(rng.uintLessThan(usize, 64) + 1, buf.len)
+    else if (roll < 243)
+        @min(rng.uintLessThan(usize, 512) + 1, buf.len)
+    else
+        @min(rng.uintLessThan(usize, buf.len) + 1, buf.len);
+
+    // Byte distribution biased toward HTTP-relevant characters so the
+    // fuzz exercises real parse states more than random bytes would.
+    for (buf[0..len]) |*b| {
+        const r = rng.int(u8);
+        b.* = switch (r % 16) {
+            0 => ' ',
+            1 => '\r',
+            2 => '\n',
+            3 => '\t',
+            4 => ':',
+            5 => '/',
+            6 => '?',
+            7 => '&',
+            8 => '=',
+            9 => '%',
+            10 => '+',
+            11 => '.',
+            12 => '-',
+            13 => '0' + rng.uintLessThan(u8, 10),
+            14 => 'a' + rng.uintLessThan(u8, 26),
+            else => rng.int(u8),
+        };
+    }
+
+    // Kind-specific shaping: nudge each input toward something parseable
+    // so we hit success paths too, not just the early-reject branches.
+    switch (kind) {
+        .request_line => {
+            // Try to seed a method + URL shape ~50% of the time. The
+            // method+url+version split is space-delimited, so if any of
+            // positions 5..end contain space/CR/LF the URL would end
+            // early and the parser sees a tiny URL. Overwrite the URL
+            // span with a single safe byte so the URL exercises full
+            // length and the parser's length cap path gets reached.
+            if (len >= 16 and rng.int(u8) < 128) {
+                @memcpy(buf[0..4], "GET ");
+                buf[4] = '/';
+                // Reserve the last 9 bytes for " HTTP/1.1" so the
+                // trailing tokens are well-formed. Fill the URL middle
+                // with a benign character that the parser will accept
+                // verbatim.
+                const url_end = if (len >= 13) len - 9 else len;
+                @memset(buf[5..url_end], 'a');
+                if (len >= 13) @memcpy(buf[url_end..len], " HTTP/1.1");
+            }
+        },
+        .header_section => {
+            // Append a terminator to about 50% of inputs.
+            if (len >= 4 and rng.int(u8) < 128) {
+                buf[len - 4] = '\r';
+                buf[len - 3] = '\n';
+                buf[len - 2] = '\r';
+                buf[len - 1] = '\n';
+            }
+        },
+        else => {},
+    }
+
+    return buf[0..len];
+}
+
+test "fuzz: parseRequestLine never panics or returns out-of-bounds slices" {
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE_1234);
+    var rng = prng.random();
+    var input_buf: [4096]u8 = undefined;
+    var storage: [8192]u8 = undefined;
+
+    var iter: usize = 0;
+    while (iter < 2000) : (iter += 1) {
+        const input = fuzzScratch(&rng, .request_line, &input_buf);
+        var offset: usize = 0;
+        if (parseRequestLine(&storage, &offset, input, DEFAULT_MAX_URL_LENGTH)) |line| {
+            // Slices must lie inside the storage buffer.
+            const storage_base = @intFromPtr(&storage[0]);
+            const storage_end = storage_base + storage.len;
+            const method_ptr = @intFromPtr(line.method.ptr);
+            const url_ptr = @intFromPtr(line.url.ptr);
+            try testing.expect(method_ptr >= storage_base and method_ptr + line.method.len <= storage_end);
+            try testing.expect(url_ptr >= storage_base and url_ptr + line.url.len <= storage_end);
+            try testing.expect(line.url.len <= DEFAULT_MAX_URL_LENGTH);
+            // path and query_string are subslices of url. By construction
+            // (split at the first '?'), the sum is exactly url.len when no
+            // '?' is present, and url.len - 1 when it is. The bound
+            // therefore is path.len + query.len <= url.len; a tighter
+            // bound here catches off-by-one errors at the '?' split.
+            try testing.expect(line.path.len + line.query_string.len <= line.url.len);
+        } else |err| {
+            // Any error must be one the call site expects to handle.
+            switch (err) {
+                error.InvalidRequest,
+                error.UriTooLong,
+                error.HeaderStorageExhausted,
+                => {},
+            }
+        }
+    }
+}
+
+test "fuzz: parseRequestLineBorrowed slices stay inside the input" {
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE_5678);
+    var rng = prng.random();
+    var input_buf: [4096]u8 = undefined;
+
+    var iter: usize = 0;
+    while (iter < 2000) : (iter += 1) {
+        const input = fuzzScratch(&rng, .request_line, &input_buf);
+        if (parseRequestLineBorrowed(input, DEFAULT_MAX_URL_LENGTH)) |line| {
+            const input_base = @intFromPtr(input.ptr);
+            const input_end = input_base + input.len;
+            const method_ptr = @intFromPtr(line.method.ptr);
+            const url_ptr = @intFromPtr(line.url.ptr);
+            try testing.expect(method_ptr >= input_base and method_ptr + line.method.len <= input_end);
+            try testing.expect(url_ptr >= input_base and url_ptr + line.url.len <= input_end);
+        } else |err| switch (err) {
+            error.InvalidRequest, error.UriTooLong => {},
+        }
+    }
+}
+
+test "fuzz: parseQueryString never leaks under arbitrary input" {
+    var prng = std.Random.DefaultPrng.init(0xDEADBEEF);
+    var rng = prng.random();
+    var input_buf: [2048]u8 = undefined;
+
+    var iter: usize = 0;
+    while (iter < 2000) : (iter += 1) {
+        const input = fuzzScratch(&rng, .query_string, &input_buf);
+        if (parseQueryString(testing.allocator, input, DEFAULT_MAX_QUERY_LENGTH)) |result| {
+            // Inspect before freeing — params slices point into storage.
+            // Percent-decoding monotonically shrinks length (`%XX` → 1
+            // byte; `+` → 1 byte; everything else stays 1:1), so the
+            // sum of decoded keys+values across all pairs is bounded
+            // above by the raw input length.
+            var sum: usize = 0;
+            for (result.params) |param| {
+                sum += param.key.len + param.value.len;
+            }
+            try testing.expect(sum <= input.len);
+            if (result.storage) |s| testing.allocator.free(s);
+            if (result.decoded_storage) |d| testing.allocator.free(d);
+        } else |err| switch (err) {
+            error.QueryTooLong, error.OutOfMemory => {},
+        }
+    }
+}
+
+test "fuzz: parseContentLengthValue is total over arbitrary bytes" {
+    var prng = std.Random.DefaultPrng.init(0xABCD1234);
+    var rng = prng.random();
+    var input_buf: [256]u8 = undefined;
+
+    var iter: usize = 0;
+    while (iter < 4000) : (iter += 1) {
+        const input = fuzzScratch(&rng, .content_length_value, &input_buf);
+        if (parseContentLengthValue(input)) |_| {
+            // Success path: every byte in the trimmed view was a digit.
+            const trimmed = std.mem.trim(u8, input, " \t");
+            try testing.expect(trimmed.len > 0);
+            for (trimmed) |c| try testing.expect(c >= '0' and c <= '9');
+        } else |err| switch (err) {
+            error.InvalidContentLength => {},
+        }
+    }
+}
+
+test "fuzz: parseContentLength tolerates malformed header sections" {
+    var prng = std.Random.DefaultPrng.init(0x11223344);
+    var rng = prng.random();
+    var input_buf: [4096]u8 = undefined;
+
+    var iter: usize = 0;
+    while (iter < 2000) : (iter += 1) {
+        const input = fuzzScratch(&rng, .header_section, &input_buf);
+        if (parseContentLength(input)) |_| {
+            // success or null — both fine
+        } else |err| switch (err) {
+            error.InvalidContentLength, error.DuplicateContentLength => {},
+        }
+    }
+}
+
+test "fuzz: findHeaderEnd reports only in-range offsets" {
+    var prng = std.Random.DefaultPrng.init(0x55667788);
+    var rng = prng.random();
+    var input_buf: [4096]u8 = undefined;
+
+    var iter: usize = 0;
+    while (iter < 4000) : (iter += 1) {
+        const input = fuzzScratch(&rng, .header_terminator, &input_buf);
+        if (findHeaderEnd(input)) |offset| {
+            try testing.expect(offset + 4 <= input.len);
+            try testing.expectEqual(@as(u8, '\r'), input[offset]);
+            try testing.expectEqual(@as(u8, '\n'), input[offset + 1]);
+            try testing.expectEqual(@as(u8, '\r'), input[offset + 2]);
+            try testing.expectEqual(@as(u8, '\n'), input[offset + 3]);
+        }
+    }
+}
+
+// Specific known-bad inputs that have historically tripped HTTP parsers.
+// These are regression pins, not fuzz iterations.
+test "parser rejects classic malformed request-line shapes" {
+    var storage: [256]u8 = undefined;
+    var offset: usize = 0;
+    // Two-tuple missing version is fine; the parser only enforces method+url.
+    // But truly empty parts must error.
+    offset = 0;
+    try testing.expectError(error.InvalidRequest, parseRequestLine(&storage, &offset, "", DEFAULT_MAX_URL_LENGTH));
+    offset = 0;
+    try testing.expectError(error.InvalidRequest, parseRequestLine(&storage, &offset, "GET", DEFAULT_MAX_URL_LENGTH));
+}
+
+test "parser preserves CR/LF embedded in the request line verbatim" {
+    // The request line is one logical line; embedded CR/LF could be a
+    // smuggling attempt. The current parser does NOT strip them — they
+    // end up inside `url` and downstream consumers see them. Pin that
+    // current behavior so any future "strip CR/LF" change is a
+    // conscious decision (and updates this test).
+    var storage: [256]u8 = undefined;
+    var offset: usize = 0;
+    const line = try parseRequestLine(&storage, &offset, "GET /a\r\nInjected: header HTTP/1.1", DEFAULT_MAX_URL_LENGTH);
+    try testing.expect(std.mem.indexOf(u8, line.url, "\r") != null);
+}
+
+test "parser preserves path traversal sequences in the URL slice verbatim" {
+    // Path traversal handling is a server-layer concern, not a parser
+    // concern. The parser keeps the URL verbatim; static file serving
+    // does the canonicalization. Pin that contract so a refactor that
+    // moves traversal handling into the parser doesn't quietly change
+    // semantics for proxy/passthrough handlers that want raw URLs.
+    var storage: [256]u8 = undefined;
+    var offset: usize = 0;
+    const line = try parseRequestLine(&storage, &offset, "GET /../etc/passwd HTTP/1.1", DEFAULT_MAX_URL_LENGTH);
+    try testing.expectEqualStrings("/../etc/passwd", line.url);
+}
