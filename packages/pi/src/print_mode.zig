@@ -1,4 +1,4 @@
-//! Non-interactive `--print` mode for `zigts expert`.
+//! Non-interactive `--print` mode for `zigttp expert` / `zigts expert`.
 //!
 //! Runs exactly one turn through the agent, emits either the rendered text
 //! or an NDJSON event stream, and returns. Bypasses the REPL and TUI.

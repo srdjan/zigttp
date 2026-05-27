@@ -468,7 +468,7 @@ fn renderTemplates(allocator: std.mem.Allocator) !ToolResult {
 fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
     const msg = try allocator.dupe(
         u8,
-        "zigts expert - changelog\n" ++
+        "zigttp expert - changelog\n" ++
             "  Full token accounting (input, cache_read, cache_write, output)\n" ++
             "  Post-apply auto-verify (verify_paths + diff review after each edit)\n" ++
             "  Session compaction (/compact)\n" ++
@@ -658,7 +658,7 @@ pub fn run(
     const approval_fn = selectApprovalFn(policy);
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
-        const banner = "zigts expert — NL by default, 'help' for commands, or 'quit'\n";
+        const banner = "zigttp expert — NL by default, 'help' for commands, or 'quit'\n";
         _ = std.c.write(std.c.STDOUT_FILENO, banner.ptr, banner.len);
     }
 

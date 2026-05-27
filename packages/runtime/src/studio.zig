@@ -909,7 +909,7 @@ fn writeNextActionsJson(
             .severity = "error",
             .title = "Repair failed declared specs",
             .command = command,
-            .detail = "Surface failing Spec<...> obligations as compiler diagnostics, then drive the repair loop from zigts expert via /specs <handler>.",
+            .detail = "Surface failing Spec<...> obligations as compiler diagnostics, then drive the repair loop from zigttp expert via /specs <handler>.",
         });
     }
 

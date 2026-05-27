@@ -1,6 +1,7 @@
 # pi
 
-The `zigts expert` coding agent. Built in Zig against the Anthropic
+The coding agent behind the primary `zigttp expert` CLI and the secondary
+`zigts expert` entry point. Built in Zig against the Anthropic
 Messages API, driven by a pure turn state machine with a compiler-aware
 tool registry and a mandatory compile-check veto on every edit.
 
@@ -144,7 +145,7 @@ overrides the root (used by tests).
 
 ### `--mode rpc` (line-delimited JSON-RPC 2.0)
 
-`zigts expert --mode rpc` exposes the agent over stdio for programmatic
+`zigttp expert --mode rpc` exposes the agent over stdio for programmatic
 clients. Methods: `turn`, `compact`, `session.info`, `tools.list`,
 `tools.invoke`, `skills.list`, `templates.{list,expand}`,
 `model.{list,set}`, `shutdown`. Turn events emit as `"event"`
@@ -152,7 +153,7 @@ notifications using the same `{v,k,d}` envelope as `events.jsonl`.
 
 ### Bottom-anchored retained TUI (`tui/`)
 
-![zigts expert TUI demo](../../docs/pi-tui-demo.gif)
+![zigttp expert TUI demo](../../docs/pi-tui-demo.gif)
 
 Status line (session id short, model, token totals) and input line stay
 anchored at the bottom of the terminal. Scrollback flows above them;

@@ -244,7 +244,7 @@ fn buildTuiCommand(
     defer allocator.free(quoted_root);
     const quoted_id = try shellQuote(allocator, session_id);
     defer allocator.free(quoted_id);
-    return try std.fmt.allocPrint(allocator, "cd {s} && zigts expert --session-id {s}", .{ quoted_root, quoted_id });
+    return try std.fmt.allocPrint(allocator, "cd {s} && zigttp expert --session-id {s}", .{ quoted_root, quoted_id });
 }
 
 fn shellQuote(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
@@ -274,5 +274,5 @@ test "demo passport TUI command shell-quotes workspace and session" {
     const allocator = testing.allocator;
     const command = try buildTuiCommand(allocator, "/tmp/proof demo", "abc'123");
     defer allocator.free(command);
-    try testing.expectEqualStrings("cd '/tmp/proof demo' && zigts expert --session-id 'abc'\\''123'", command);
+    try testing.expectEqualStrings("cd '/tmp/proof demo' && zigttp expert --session-id 'abc'\\''123'", command);
 }

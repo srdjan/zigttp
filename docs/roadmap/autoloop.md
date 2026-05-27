@@ -1,6 +1,6 @@
 # Property-goal autoloop
 
-The autoloop turns `zigts expert` into a property-convergence engine. You
+The autoloop turns `zigttp expert` into a property-convergence engine. You
 state the properties you want proven on a handler; the compiler drives
 the session until the properties flip green or a budget trips. The model
 is not in the loop; the compiler is.
@@ -8,7 +8,7 @@ is not in the loop; the compiler is.
 ## Invocation
 
 ```
-zigts expert --handler <path> --goal <csv> [--max-iters <n>]
+zigttp expert --handler <path> --goal <csv> [--max-iters <n>]
 ```
 
 `--goal` takes a comma-separated list of property tags. Entries are
@@ -89,7 +89,7 @@ function handler(req: Request): Response {
 Run:
 
 ```
-zigts expert --handler examples/autoloop/handler.ts \
+zigttp expert --handler examples/autoloop/handler.ts \
              --goal no_secret_leakage --max-iters 4
 ```
 
@@ -140,10 +140,10 @@ interactive REPL: each run lands events to
 prints to stdout after the verdict line:
 
 ```
-session: 0000019dc6219f77-6fe708132 (resume with `zigts expert --resume`)
+session: 0000019dc6219f77-6fe708132 (resume with `zigttp expert --resume`)
 ```
 
-`zigts expert --resume` from the same cwd opens the resulting session
+`zigttp expert --resume` from the same cwd opens the resulting session
 in the TUI - the witnesses tab populates with the witness diff each
 patch produced, and the user can replay or mint witnesses against the
 post-run handler state. Pass `--no-session` to skip persistence (the
@@ -158,7 +158,7 @@ counterexample it introduced (`witnesses_new`). Open the resulting
 session in the TUI to inspect them:
 
 ```
-zigts expert --resume
+zigttp expert --resume
 ```
 
 The witnesses tab (press `w`, or Tab to cycle) shows the witnesses

@@ -45,6 +45,10 @@ fn runExpertCommand(argv: []const []const u8, allocator: std.mem.Allocator) !voi
         std.debug.print("zigts expert does not accept subcommands; use direct commands like `zigts meta` or `zigts verify-paths`.\n", .{});
         std.process.exit(1);
     }
+    _ = pi_app.parseExpertFlags(argv) catch |err| {
+        std.debug.print("{s}", .{pi_app.flagErrorMessage(err)});
+        std.process.exit(2);
+    };
 
     if (!pi_app.envHasModelBackend()) {
         std.debug.print(
@@ -70,7 +74,9 @@ fn isExpertBareFlag(arg: []const u8) bool {
         std.mem.eql(u8, arg, "--no-edit") or
         std.mem.eql(u8, arg, "--no-session") or
         std.mem.eql(u8, arg, "--no-persist-tool-output") or
-        std.mem.eql(u8, arg, "--resume");
+        std.mem.eql(u8, arg, "--no-context-files") or
+        std.mem.eql(u8, arg, "--resume") or
+        std.mem.eql(u8, arg, "--continue");
 }
 
 fn isExpertValueTakingFlag(arg: []const u8) bool {
@@ -98,19 +104,29 @@ fn printExpertHelp() void {
         \\
         \\Usage:
         \\  zigts expert [--yes | --no-edit] [--no-session] [--no-persist-tool-output]
-        \\               [--session-id <id> | --resume]
-        \\               [--print <prompt> [--mode json]]
+        \\               [--session-id <id> | --resume | --continue | --fork <id>]
+        \\               [--tools minimal|full] [--no-context-files]
+        \\  zigts expert --print <prompt> [--mode json]
+        \\  zigts expert --mode rpc
+        \\  zigts expert --handler <handler.ts> --goal <goals> [--max-iters N]
         \\
         \\Flags:
         \\  --yes                      auto-approve every verified edit (non-interactive)
         \\  --no-edit                  auto-reject every verified edit (veto-only)
         \\  --no-session               disable session persistence for this run
         \\  --no-persist-tool-output   omit tool output bodies from persisted session
+        \\  --no-context-files         skip AGENTS.md / CLAUDE.md project context
         \\  --session-id <id>          resume or create a session with this id
-        \\  --resume                   resume the newest session for this cwd
+        \\  --resume, --continue       resume the newest session for this cwd
+        \\  --fork <session-id>        branch from an existing session
+        \\  --tools minimal|full       select workspace-read-only or full tool preset
         \\  --print <prompt>           run a single non-interactive turn and exit
         \\  --mode json                with --print, emit NDJSON transcript events
         \\                             instead of rendered text
+        \\  --mode rpc                 run line-delimited JSON-RPC 2.0 over stdio
+        \\  --handler <path>           handler path for autoloop repair
+        \\  --goal <csv>               property goals for autoloop repair
+        \\  --max-iters <N>            autoloop iteration budget
         \\
         \\Model backend:
         \\  Set one of these environment variables before launching:

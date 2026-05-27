@@ -1,4 +1,4 @@
-//! Top-level entrypoint for `zigts expert`.
+//! Top-level entrypoint for `zigttp expert` and `zigts expert`.
 
 const std = @import("std");
 const registry_mod = @import("registry/registry.zig");
@@ -185,7 +185,7 @@ fn runAutoloop(
 
     // Bootstrap a session unless `--no-session` is passed: lets the
     // autoloop's verified_patch and autoloop_outcome events persist to
-    // events.jsonl, so a follow-up `zigts expert --resume` can open
+    // events.jsonl, so a follow-up `zigttp expert --resume` can open
     // the resulting witnesses tab on the same patches. Without
     // session bootstrap the run is in-memory only (the original
     // behaviour, kept for `--no-session`).
@@ -220,7 +220,7 @@ fn runAutoloop(
     try printAutoloopOutcome(allocator, outcome, &session.transcript, handler, goal_slices);
     if (session.session_id) |sid| {
         var stdout_buf: [128]u8 = undefined;
-        const line = std.fmt.bufPrint(&stdout_buf, "session: {s} (resume with `zigts expert --resume`)\n", .{sid}) catch "session persisted\n";
+        const line = std.fmt.bufPrint(&stdout_buf, "session: {s} (resume with `zigttp expert --resume`)\n", .{sid}) catch "session persisted\n";
         _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
     }
     if (outcome.verdict != .achieved) std.process.exit(1);
@@ -290,7 +290,7 @@ fn exitWithMessage(msg: []const u8, code: u8) noreturn {
     std.process.exit(code);
 }
 
-fn flagErrorMessage(err: anyerror) []const u8 {
+pub fn flagErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.MutuallyExclusiveApprovalFlags => "error: --yes and --no-edit are mutually exclusive\n",
         error.MissingSessionId => "error: --session-id requires a value\n",
@@ -332,7 +332,7 @@ fn setMode(out: *ExpertFlags, val: []const u8) !void {
     return error.UnsupportedMode;
 }
 
-/// Flags parsed from `zigts expert` argv. `policy == null` means the user
+/// Flags parsed from `zigttp expert` / `zigts expert` argv. `policy == null` means the user
 /// did not pass `--yes` or `--no-edit`; callers pick an appropriate default
 /// (`.ask` for interactive, `.auto_reject` for `--print`).
 pub const ExpertFlags = struct {
@@ -353,7 +353,7 @@ pub const ExpertFlags = struct {
     rpc_mode: bool = false,
     tools_preset: ToolsPreset = .full,
     /// Comma-separated property tags to drive convergence against. When
-    /// non-null, `zigts expert` short-circuits the conversational run and
+    /// non-null, `zigttp expert` short-circuits the conversational run and
     /// invokes the autoloop orchestrator end-to-end.
     goals: ?[]const u8 = null,
     /// Iteration budget for the autoloop. When null, the orchestrator's

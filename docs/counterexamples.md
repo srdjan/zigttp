@@ -88,7 +88,7 @@ that re-introduces the same construct demotes the property again with
 the original counterexample call-out. Pinning is the moment a one-time
 catch becomes durable evidence.
 
-`[a]` hands the Counterexample to the `zigts expert` agent through the
+`[a]` hands the Counterexample to the `zigttp expert` agent through the
 `pi_counterexample_current` tool. The agent's `proof_enrichment` and
 `property_goals` channels consume it, so its first response is a fix
 proposal grounded in the exact construct the verifier flagged, not a

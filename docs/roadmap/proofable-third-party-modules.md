@@ -35,7 +35,7 @@ backend is an implementation detail.
 
 - Add an extension status command that lists registered manifests, exports,
   effects, capabilities, and validation errors.
-- Teach `zigts expert` to consult the live extension catalog before suggesting
+- Teach `zigttp expert` to consult the live extension catalog before suggesting
   imports from `zigttp-ext:*`.
 - Add a scaffold path for a minimal native-Zig extension package: manifest,
   `src/root.zig`, build file, and a verified handler example.
