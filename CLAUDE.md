@@ -121,6 +121,18 @@ TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, r
 
 `-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (memory limit), `-n N` (pool size), `--cors`, `--static DIR`, `--watch` (live reload), `--prove` (contract-diff before swap), `--force-swap` (apply breaking changes), `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`, `--no-env-check`.
 
+### zigttp auth
+
+`zigttp auth claude` prompts (with hidden input) for an Anthropic API key
+and stores it at `~/.zigttp/providers.json` with mode 0600. `zigttp auth
+openai` does the same for OpenAI. `zigttp auth status` prints which keys
+are configured (shell vs file, masked). `zigttp auth revoke <provider>`
+removes a stored key. The runtime calls `cli_auth.injectStoredProvidersIntoEnv`
+before dispatching `dev`/`serve`/`expert`, so stored values populate
+`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` automatically. Shell-set variables
+always win; the file only fills gaps. Listed under `zigttp help --all`
+(Credentials section), not in the core five.
+
 ### zigttp deploy
 
 `zigttp deploy` takes no arguments. It auto-detects the handler file and project name in the current directory, verifies the handler, and emits a self-contained binary at `.zigttp/deploy/<project-name>` with a `kind=deploy` row appended to `.zigttp/proofs.jsonl`. No credentials, Docker, or network. `zigttp deploy --local` and `--target local` are explicit aliases. Hosted cloud deploy (`--cloud`) is deferred from v0.1.0-beta. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).

@@ -83,11 +83,19 @@ fixture.
 
 `zigttp expert` opens an interactive coding agent that runs the same analyzers
 the compiler uses. It can explain a diagnostic, verify an edit, and propose a
-fix against your handler as you work:
+fix against your handler as you work.
+
+Store an Anthropic API key once, then launch the agent:
 
 ```bash
+zigttp auth claude     # paste a key from console.anthropic.com (input hidden)
 zigttp expert
 ```
+
+`auth claude` writes the key to `~/.zigttp/providers.json` at mode 0600 and the
+runtime auto-injects it on launch. A shell-exported `ANTHROPIC_API_KEY` works
+too and takes precedence. For a guided walkthrough, see
+[`examples/hello-claude/`](../examples/hello-claude/README.md).
 
 ## 6. Deploy
 

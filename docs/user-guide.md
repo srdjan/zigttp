@@ -27,7 +27,7 @@ Functions, Cloudflare Workers), powered by Zig and zigts.
 18. [TypeScript SDK](#typescript-sdk)
 19. [Runtime Sandboxing](#runtime-sandboxing)
 20. [Declarative Handler Testing](#declarative-handler-testing)
-21. [Route Forge with zigts expert](#route-forge-with-zigts-expert)
+21. [Route Forge with zigttp expert](#route-forge-with-zigttp-expert)
 22. [Author-Declared Specs](#author-declared-specs)
 23. [Troubleshooting](#troubleshooting)
 
@@ -110,12 +110,16 @@ zigttp test
 ### The expert
 
 ```bash
+zigttp auth claude     # one-time setup: paste an Anthropic API key
 zigttp expert
 ```
 
 `expert` opens the interactive compiler-in-the-loop agent. It runs the same
 analyzers the compiler uses, so it can explain a diagnostic, verify an edit,
-and propose a fix against your handler as you work.
+and propose a fix against your handler as you work. `auth claude` stores the
+key at `~/.zigttp/providers.json` (mode 0600) and the runtime auto-injects it
+into `ANTHROPIC_API_KEY` on launch; a shell-exported value also works and
+wins over the stored one.
 
 ### Verified local deploy
 
@@ -2187,9 +2191,9 @@ Tracing captures every virtual module call (with args and return values), `fetch
 
 ---
 
-## Route Forge with zigts expert
+## Route Forge with zigttp expert
 
-`zigts expert` can add routes through a compiler-native forge flow. The model
+`zigttp expert` can add routes through a compiler-native forge flow. The model
 does not write the route directly when this path is used; the forge tool
 synthesizes a candidate, runs the compiler analysis in memory, and exposes the
 diff for approval.
@@ -2347,7 +2351,7 @@ mode: it asks every exported helper to carry an explicit capsule
 - `zigts check --json` adds `declared_specs`, `spec_diagnostics`, and
   `proofCapsules` arrays to the proof envelope. Capsule discharge failures
   and ZTS606 appear in `spec_diagnostics` with a `function` field.
-- `zigts expert`: the `pi_specs_status` tool returns the active set and
+- `zigttp expert`: the `pi_specs_status` tool returns the active set and
   discharge state for a handler. Drive `pi_repair_plan` from this tool's
   output rather than from the `--goal` CLI flag - the author's `Spec<...>` is
   the obligation contract.

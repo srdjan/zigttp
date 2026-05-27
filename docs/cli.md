@@ -207,12 +207,36 @@ Code ranges: ZTS0xx parser, ZTS1xx sound mode, ZTS2xx type checker,
 ZTS3xx handler verifier, ZTS4xx flow checker, ZTS5xx author-declared
 specs, ZTS6xx strict ZigTS profile.
 
+## `zigttp auth` provider keys
+
+Stores API keys for the LLM providers `zigttp expert` and handler-side
+`zigttp:env` lookups consume, so users do not have to export shell
+variables or maintain a `.env` file.
+
+```bash
+zigttp auth claude              # prompt (hidden input) for an Anthropic key
+zigttp auth openai              # same for OpenAI
+zigttp auth status              # show configured providers, masked
+zigttp auth revoke <provider>   # delete a stored key (claude | openai)
+```
+
+Storage is `~/.zigttp/providers.json` at mode 0600, sibling to the
+`~/.zigttp/credentials` file used by hosted-cloud deploy. The runtime
+injects stored values into `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` at the
+start of `zigttp dev`, `zigttp serve`, and `zigttp expert`. A shell-set
+variable always wins; the file only fills the gap when the shell value
+is unset or blank. For a guided walkthrough, see
+[`examples/hello-claude/`](../examples/hello-claude/README.md).
+
 ## `zigttp expert` interactive agent
 
 Compiler-in-the-loop coding agent. Picks its model backend from the
 environment: `ANTHROPIC_API_KEY` selects the Anthropic provider,
 `OPENAI_API_KEY` selects the OpenAI provider. If neither variable is
-set to a non-empty value, the CLI exits with a setup message.
+set to a non-empty value, the CLI exits with a setup message. The
+fastest setup path is `zigttp auth claude`, which stores a key and
+auto-injects it on launch; exporting the variable in your shell works
+too.
 
 The persona, reference material, skill catalog, prompt templates,
 themes, and compiler metadata are baked into the binary. The one

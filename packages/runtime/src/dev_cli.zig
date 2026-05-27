@@ -33,6 +33,7 @@ const resolveRuntimeBinary = cli_paths.resolveRuntimeBinary;
 const cli_doctor = @import("cli_doctor.zig");
 const doctorCommand = cli_doctor.doctorCommand;
 const printDoctorHelp = cli_doctor.printDoctorHelp;
+const cli_auth = @import("cli_auth.zig");
 const doctorPathExists = cli_doctor.doctorPathExists;
 const runDoctorAnalyzerForProject = cli_doctor.runDoctorAnalyzerForProject;
 const printCheckStageFailures = cli_doctor.printCheckStageFailures;
@@ -82,6 +83,25 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
         printHelp();
         return;
+    }
+
+    if (std.mem.eql(u8, command, "auth")) {
+        cli_auth.authCommand(allocator, user_args[1..]) catch |err| switch (err) {
+            error.InvalidArgument, error.NotATty, error.EmptyKey, error.InvalidKey => std.process.exit(1),
+            else => return err,
+        };
+        return;
+    }
+
+    // Commands that hit a model backend or read handler env get the
+    // stored provider keys injected before dispatch, so users do not
+    // have to `export ANTHROPIC_API_KEY=...` in their shell. Shell
+    // values always win; injection only fills gaps.
+    if (std.mem.eql(u8, command, "dev") or
+        std.mem.eql(u8, command, "serve") or
+        std.mem.eql(u8, command, "expert"))
+    {
+        cli_auth.injectStoredProvidersIntoEnv(allocator);
     }
 
     if (std.mem.eql(u8, command, "init")) {
@@ -312,16 +332,32 @@ pub fn main(init: std.process.Init.Minimal) !void {
             printExpertHelp();
             return;
         }
-        if (user_args.len > 1) {
-            std.debug.print("zigttp expert does not accept arguments.\n\n", .{});
-            printExpertHelp();
-            return;
+        switch (validateExpertArgs(user_args[1..])) {
+            .ok => {},
+            .unknown_flag => |flag| {
+                std.debug.print("zigttp expert does not accept flag '{s}'. See `zigttp expert --help`.\n", .{flag});
+                std.process.exit(1);
+            },
+            .unexpected_arg => |arg| {
+                std.debug.print(
+                    "zigttp expert does not accept subcommand or positional argument '{s}'. See `zigttp expert --help`.\n",
+                    .{arg},
+                );
+                std.process.exit(1);
+            },
         }
+        _ = pi_app.parseExpertFlags(user_args[1..]) catch |err| {
+            std.debug.print("{s}", .{pi_app.flagErrorMessage(err)});
+            std.process.exit(2);
+        };
         if (!pi_app.envHasModelBackend()) {
             std.debug.print(
                 \\zigttp expert needs a model backend.
                 \\
-                \\Set one of these environment variables, then run `zigttp expert` again:
+                \\Quickest path:
+                \\  zigttp auth claude   # paste your key once, stored at ~/.zigttp/providers.json
+                \\
+                \\Or set one of these environment variables and run `zigttp expert` again:
                 \\  ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
                 \\  OPENAI_API_KEY
                 \\
@@ -331,6 +367,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             std.process.exit(1);
         }
         const witness_replay_lib = @import("witness_replay_lib.zig");
+        pi_app.setInvocationArgv(user_args[1..]);
         pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
         try pi_app.run(allocator);
         return;
@@ -1793,6 +1830,65 @@ fn hasAllFlag(argv: []const []const u8) bool {
     return false;
 }
 
+const ExpertArgValidation = union(enum) {
+    ok,
+    unknown_flag: []const u8,
+    unexpected_arg: []const u8,
+};
+
+fn validateExpertArgs(argv: []const []const u8) ExpertArgValidation {
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--help") or
+            std.mem.eql(u8, arg, "-h") or
+            std.mem.eql(u8, arg, "help"))
+        {
+            continue;
+        }
+        if (isExpertBareFlag(arg)) continue;
+        if (std.mem.startsWith(u8, arg, "--")) {
+            if (isExpertValueTakingFlag(arg)) {
+                if (i + 1 < argv.len) i += 1;
+                continue;
+            }
+            if (isExpertValueTakingFlagEq(arg)) continue;
+            return .{ .unknown_flag = arg };
+        }
+        return .{ .unexpected_arg = arg };
+    }
+    return .ok;
+}
+
+fn isExpertBareFlag(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--yes") or
+        std.mem.eql(u8, arg, "--no-edit") or
+        std.mem.eql(u8, arg, "--no-session") or
+        std.mem.eql(u8, arg, "--no-persist-tool-output") or
+        std.mem.eql(u8, arg, "--no-context-files") or
+        std.mem.eql(u8, arg, "--resume") or
+        std.mem.eql(u8, arg, "--continue");
+}
+
+fn isExpertValueTakingFlag(arg: []const u8) bool {
+    for (pi_app.value_taking_flags) |name| {
+        if (std.mem.eql(u8, arg, name)) return true;
+    }
+    return false;
+}
+
+fn isExpertValueTakingFlagEq(arg: []const u8) bool {
+    for (pi_app.value_taking_flags) |name| {
+        if (arg.len > name.len and
+            std.mem.startsWith(u8, arg, name) and
+            arg[name.len] == '=')
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// The default `zigttp --help` surface: only the five core verbs. Everything
 /// else lives behind `zigttp help --all` (`core_help_all`).
 const core_help =
@@ -1849,6 +1945,11 @@ const core_help_all =
     \\  zigttp proofs [list|show|diff|watch|export|badge|bundle|verify]
     \\  zigttp verify <url>                    Verify a deployed proof receipt
     \\
+    \\Credentials:
+    \\  zigttp auth claude                     Store an Anthropic API key for expert
+    \\  zigttp auth status                     Show which provider keys are configured
+    \\  zigttp auth revoke <provider>          Remove a stored key (claude | openai)
+    \\
     \\Machine tools (JSON output for IDE and review-bot integrations):
     \\  zigttp features                        List supported language features
     \\  zigttp modules                         List virtual module exports
@@ -1875,26 +1976,58 @@ fn printHelpAll() void {
     _ = std.c.write(std.c.STDOUT_FILENO, core_help_all.ptr, core_help_all.len);
 }
 
+const expert_help =
+    \\zigttp expert - interactive compiler-in-the-loop agent
+    \\
+    \\Usage:
+    \\  zigttp expert [--yes | --no-edit] [--no-session] [--no-persist-tool-output]
+    \\                [--session-id <id> | --resume | --continue | --fork <id>]
+    \\                [--tools minimal|full] [--no-context-files]
+    \\  zigttp expert --print <prompt> [--mode json]
+    \\  zigttp expert --mode rpc
+    \\  zigttp expert --handler <handler.ts> --goal <goals> [--max-iters N]
+    \\
+    \\Flags:
+    \\  --yes                      auto-approve every verified edit
+    \\  --no-edit                  auto-reject every verified edit
+    \\  --no-session               disable session persistence for this run
+    \\  --no-persist-tool-output   omit tool output bodies from persisted session
+    \\  --no-context-files         skip AGENTS.md / CLAUDE.md project context
+    \\  --session-id <id>          resume or create a session with this id
+    \\  --resume, --continue       resume the newest session for this cwd
+    \\  --fork <session-id>        branch from an existing session
+    \\  --tools minimal|full       select workspace-read-only or full tool preset
+    \\  --print <prompt>           run a single non-interactive turn and exit
+    \\  --mode json                with --print, emit NDJSON transcript events
+    \\  --mode rpc                 run line-delimited JSON-RPC 2.0 over stdio
+    \\  --handler <path>           handler path for autoloop repair
+    \\  --goal <csv>               property goals for autoloop repair
+    \\  --max-iters <N>            autoloop iteration budget
+    \\
+    \\Examples:
+    \\  zigttp expert --resume
+    \\  zigttp expert --print "add a GET /health route" --mode json
+    \\  zigttp expert --handler handler.ts --goal no_secret_leakage
+    \\
+    \\Model backend:
+    \\  Run `zigttp auth claude` once to store an Anthropic key at
+    \\  ~/.zigttp/providers.json (mode 0600). `zigttp expert` reads it
+    \\  on launch. Alternatively, export one of these variables yourself:
+    \\    ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
+    \\    OPENAI_API_KEY
+    \\  An empty value counts as missing; the command exits with a setup
+    \\  message instead of launching against an unconfigured backend.
+    \\
+    \\For machine-facing compiler tooling, use direct commands such as:
+    \\  zigttp meta
+    \\  zigttp verify-paths <file>...
+    \\  zigttp verify-modules --builtins --strict --json
+    \\  zigttp proofs export --session <id> --out <path>
+    \\
+;
+
 fn printExpertHelp() void {
-    const help =
-        \\zigttp expert - interactive compiler-in-the-loop agent
-        \\
-        \\Usage:
-        \\  zigttp expert
-        \\
-        \\Starts the interactive coding agent. It runs the same analyzers the
-        \\compiler uses, so it can verify edits, explain diagnostics, and propose
-        \\fixes against your handler as you work.
-        \\
-        \\Model backend:
-        \\  Set one of these environment variables before launching:
-        \\    ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
-        \\    OPENAI_API_KEY
-        \\  An empty value counts as missing; the command exits with a setup
-        \\  message instead of launching against an unconfigured backend.
-        \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    _ = std.c.write(std.c.STDOUT_FILENO, expert_help.ptr, expert_help.len);
 }
 
 const Template = enum { basic, api, htmx };
@@ -1965,6 +2098,54 @@ test "hasAllFlag detects the --all escape hatch" {
     try std.testing.expect(hasAllFlag(&.{ "foo", "all" }));
     try std.testing.expect(!hasAllFlag(&.{"--help"}));
     try std.testing.expect(!hasAllFlag(&.{}));
+}
+
+test "validateExpertArgs accepts documented expert launch forms" {
+    const ok = struct {
+        fn expect(argv: []const []const u8) !void {
+            switch (validateExpertArgs(argv)) {
+                .ok => {},
+                else => return error.ExpectedValidExpertArgs,
+            }
+        }
+    }.expect;
+
+    try ok(&.{});
+    try ok(&.{"--resume"});
+    try ok(&.{"--continue"});
+    try ok(&.{ "--session-id", "abc" });
+    try ok(&.{"--session-id=abc"});
+    try ok(&.{ "--fork", "abc" });
+    try ok(&.{"--fork=abc"});
+    try ok(&.{ "--print", "add a GET /health route", "--mode", "json" });
+    try ok(&.{"--mode=rpc"});
+    try ok(&.{ "--handler", "handler.ts", "--goal", "no_secret_leakage", "--max-iters", "4" });
+    try ok(&.{ "--tools", "minimal", "--yes", "--no-context-files" });
+    try ok(&.{ "--no-session", "--no-persist-tool-output", "--no-edit" });
+}
+
+test "validateExpertArgs rejects unknown expert flags and subcommands" {
+    switch (validateExpertArgs(&.{"--bogus"})) {
+        .unknown_flag => |flag| try std.testing.expectEqualStrings("--bogus", flag),
+        else => return error.ExpectedUnknownExpertFlag,
+    }
+    switch (validateExpertArgs(&.{"diagnose"})) {
+        .unexpected_arg => |arg| try std.testing.expectEqualStrings("diagnose", arg),
+        else => return error.ExpectedUnexpectedExpertArg,
+    }
+}
+
+test "expert help advertises documented modes" {
+    inline for (.{
+        "zigttp expert --resume",
+        "zigttp expert --print <prompt> [--mode json]",
+        "zigttp expert --mode rpc",
+        "zigttp expert --handler <handler.ts> --goal <goals>",
+        "--tools minimal|full",
+        "--no-context-files",
+    }) |needle| {
+        try std.testing.expect(std.mem.indexOf(u8, expert_help, needle) != null);
+    }
 }
 
 test "hasLongHelpFlag preserves -h for host flags" {

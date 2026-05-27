@@ -66,6 +66,25 @@ For the full first project path, see
 and `test` print on every save, see
 [Reading the Proof Card](docs/proof-card.md).
 
+## Quick Start with AI
+
+`zigttp expert` is an interactive agent that uses Claude (or OpenAI) to
+read, edit, and prove your handler. One command stores the key; another
+launches the agent. The stream you see in the terminal is real SSE from
+the Anthropic API.
+
+```bash
+zigttp auth claude     # paste a key from https://console.anthropic.com/
+zigttp expert          # streams Claude into your terminal
+```
+
+The key is stored at `~/.zigttp/providers.json` with mode 0600 and is
+picked up automatically by `dev`, `serve`, and `expert`. A shell-set
+`ANTHROPIC_API_KEY` always wins; the stored value only fills the gap.
+Use `zigttp auth status` to see what's configured and `zigttp auth
+revoke claude` to remove it. For a guided walkthrough, see
+[`examples/hello-claude/`](examples/hello-claude/README.md).
+
 ## Handler Example
 
 ```jsx
