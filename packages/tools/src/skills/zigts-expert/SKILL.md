@@ -45,6 +45,9 @@ zigts modules --json
 # Show proof report (env vars, hosts, sandbox contract)
 zigts check --json --contract handler.ts
 
+# Preview compiler-authored local canonical refactors
+zigts canonicalize handler.ts --json --simulate
+
 # Contract comparison
 zigts prove old-contract.json new-contract.json
 ```
@@ -167,12 +170,40 @@ Error:
 
 To record I/O for deterministic replay and test generation, see `references/testing-replay.md` (`--trace`, `--replay`, JSONL test format).
 
+## One-Way ZigTS
+
+The one-way profile is the default strict profile for code that should remain
+easy for the compiler and agent to refactor mechanically. ZTS608+ diagnostics
+are errors, not advisory style warnings.
+
+Rules:
+
+- Prefer named `function` declarations for reused helpers. Keep arrow
+  functions for callbacks and one-off local values.
+- Prefer `export function name(...)` over exported function-valued `const`
+  declarations unless the export is intentionally a first-class value.
+- Public helpers that reach capabilities should declare an explicit
+  `Effects<...>` return capsule.
+- Public helpers used under declared specs should declare an explicit
+  `Proof<...>` return capsule.
+
+Canonical diagnostics start at ZTS608. Existing strict diagnostics keep their
+current meanings: ZTS602 for dynamic capability keys, ZTS604 for avoidable
+`let`, and ZTS606/ZTS607 for proof/effects failures.
+
+Use `zigts canonicalize <file> --json` to preview compiler-authored local
+rewrite intents for canonical diagnostics and mechanically safe strict-profile
+repairs such as `let` to `const`. Add `--simulate` to have the compiler apply
+the previews in memory and run `edit-simulate`; source files are never written.
+Apply the replacement only through `edit-simulate` / compiler veto.
+
 ### Diagnostic Code Ranges
 
 - ZTS0xx: Parser errors (unsupported features, syntax)
 - ZTS1xx: Sound mode / BoolChecker (type safety in conditions, arithmetic)
 - ZTS2xx: TypeChecker (type mismatches, argument errors)
 - ZTS3xx: HandlerVerifier (missing returns, unchecked results, state isolation)
+- ZTS6xx: Strict and one-way ZigTS diagnostics
 
 ## Language Rules - What zigts Is
 
@@ -376,18 +407,18 @@ function handler(req: Request): Response {
 ```typescript
 import { guard } from "zigttp:compose";
 
-const rateLimiter = (req: Request): Response | undefined => {
+function rateLimiter(req: Request): Response | undefined {
     const ip = req.headers["x-forwarded-for"] ?? "unknown";
     const count = cacheIncr("ratelimit", ip, 1, 60);
     if (count > 100) return Response.json({ error: "rate limited" }, { status: 429 });
-};
+}
 
-const requireAuth = (req: Request): Response | undefined => {
+function requireAuth(req: Request): Response | undefined {
     const token = parseBearer(req.headers["authorization"]);
     if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
     const result = jwtVerify(token, env("JWT_SECRET") ?? "secret");
     if (!result.ok) return Response.json({ error: result.error }, { status: 403 });
-};
+}
 
 const handler = guard(rateLimiter) |> guard(requireAuth) |> dashboard;
 ```

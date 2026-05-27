@@ -283,7 +283,9 @@ distinct type SessionId = string;
 const uid: UserId = UserId("usr_123");     // constructor wraps the base type
 const sid: SessionId = SessionId("sess");
 
-const lookup = (id: UserId) => id;
+function lookup(id: UserId): UserId {
+    return id;
+}
 lookup(uid);    // OK
 lookup(sid);    // ERROR: SessionId is not assignable to UserId
 lookup("raw");  // ERROR: string is not assignable to UserId

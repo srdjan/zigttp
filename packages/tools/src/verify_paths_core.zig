@@ -31,7 +31,9 @@ pub fn collect(
 ) !VerifyPathsOutcome {
     var has_errors = false;
     for (paths) |path| {
-        var result = precompile.runCheckOnly(scratch, path, null, true, null) catch |err| {
+        var result = precompile.runCheckOnlyWithOptions(scratch, path, .{
+            .json_mode = true,
+        }) catch |err| {
             const fake: Diagnostic = .{
                 .code = "ZTS000",
                 .severity = "error",
@@ -181,4 +183,67 @@ test "writeJsonEnvelope surfaces ZTS400 for a flow violation" {
     try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS400\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "secret data flows into response body") != null);
+}
+
+test "writeJsonEnvelope canonical diagnostics make ok false" {
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const fixture =
+        \\const parse = (x: number): number => x;
+        \\function handler(req: Request): Response {
+        \\  const a = parse(1);
+        \\  const b = parse(2);
+        \\  return Response.json({ a, b });
+        \\}
+    ;
+    try tmp_dir.dir.writeFile(.{ .sub_path = "canonical.ts", .data = fixture });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs_path = try tmp_dir.dir.realpath("canonical.ts", &path_buf);
+    const paths = [_][]const u8{abs_path};
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const outcome = try writeJsonEnvelope(allocator, &aw.writer, &paths);
+    buf = aw.toArrayList();
+    const s = buf.items;
+
+    try std.testing.expect(!outcome.ok);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS608\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"severity\":\"error\"") != null);
+}
+
+test "writeJsonEnvelope canonical clean file keeps ok true" {
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const fixture =
+        \\function parse(x: number): number { return x; }
+        \\function handler(req: Request): Response {
+        \\  const a = parse(1);
+        \\  const b = parse(2);
+        \\  return Response.json({ a, b });
+        \\}
+    ;
+    try tmp_dir.dir.writeFile(.{ .sub_path = "canonical.ts", .data = fixture });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs_path = try tmp_dir.dir.realpath("canonical.ts", &path_buf);
+    const paths = [_][]const u8{abs_path};
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const outcome = try writeJsonEnvelope(allocator, &aw.writer, &paths);
+    buf = aw.toArrayList();
+    const s = buf.items;
+
+    try std.testing.expect(outcome.ok);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS608\"") == null);
 }

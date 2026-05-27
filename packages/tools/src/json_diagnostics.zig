@@ -144,6 +144,10 @@ fn strictCheckerCode(kind: strict_checker.DiagnosticKind) []const u8 {
         .non_exhaustive_profile_match => "ZTS603",
         .avoidable_let => "ZTS604",
         .computed_property_access => "ZTS605",
+        .canonical_arrow_helper => "ZTS608",
+        .canonical_export_function_const => "ZTS609",
+        .canonical_public_helper_effects => "ZTS610",
+        .canonical_public_helper_proof => "ZTS611",
     };
 }
 

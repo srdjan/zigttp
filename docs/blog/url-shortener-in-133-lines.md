@@ -50,13 +50,13 @@ The `schemaCompile` and `sql` calls sit at module scope. They run once at load t
 Authentication wiring surprised me with how clean it turned out:
 
 ```typescript
-const requireAuth = (req: Request): Response | undefined => {
+function requireAuth(req: Request): Response | undefined {
     const token = parseBearer(req.headers["authorization"]);
     if (!token) return Response.json({ error: "missing token" }, { status: 401 });
     const secret = env("JWT_SECRET") ?? "dev-secret";
     const result = jwtVerify(token, secret);
     if (!result.ok) return Response.json({ error: result.error }, { status: 403 });
-};
+}
 
 // Later, in the handler:
 const authed = guard(requireAuth) |> authedRouter;

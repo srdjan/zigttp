@@ -175,6 +175,7 @@ zigttp gen-tests [handler.ts] [-o output.jsonl]
 zigttp verify-paths <f>... [--json]            # full analysis (includes flow-checker)
 zigttp verify-modules --builtins --strict --json
 zigttp edit-simulate [handler.ts] [--before old.ts]
+zigttp canonicalize <file> --json [--simulate] # local canonical refactor intents
 zigttp describe-rule [name|code] [--json] [--hash]
 zigttp search <keyword> [--json]
 zigttp review-patch <file> [--before <old>] [--diff-only]
@@ -205,7 +206,7 @@ and you want compile-time typing for internal service responses.
 
 Code ranges: ZTS0xx parser, ZTS1xx sound mode, ZTS2xx type checker,
 ZTS3xx handler verifier, ZTS4xx flow checker, ZTS5xx author-declared
-specs, ZTS6xx strict ZigTS profile.
+specs, ZTS6xx strict ZigTS profile and one-way canonical diagnostics.
 
 ## `zigttp auth` provider keys
 

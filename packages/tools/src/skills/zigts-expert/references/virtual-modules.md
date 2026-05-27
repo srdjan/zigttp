@@ -168,21 +168,21 @@ guard(fn: (req: Request) => Response | undefined): fn
 Compile-time handler composition via pipe operator. Pre-guards receive `req`, return `Response` to short-circuit or `undefined` to continue. Post-guards (after the main handler) receive the response.
 
 ```typescript
-const cors = (req: Request): Response | undefined => {
+function cors(req: Request): Response | undefined {
     if (req.method === "OPTIONS") {
         return Response.text("", { status: 204, headers: {
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, POST"
         }});
     }
-};
+}
 
-const requireAuth = (req: Request): Response | undefined => {
+function requireAuth(req: Request): Response | undefined {
     const token = parseBearer(req.headers["authorization"]);
     if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
     const result = jwtVerify(token, env("JWT_SECRET") ?? "secret");
     if (!result.ok) return Response.json({ error: result.error }, { status: 403 });
-};
+}
 
 const handler = guard(cors)
     |> guard(requireAuth)

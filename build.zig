@@ -527,6 +527,17 @@ pub fn build(b: *std.Build) void {
     }, fixtures_root ++ "/verify_paths_missing.golden.json", 1);
     addExpertGolden(b, expert_golden_step, zigts_exe, &.{ "describe-rule", "ZTS303", "--json" }, fixtures_root ++ "/describe_rule_ZTS303.golden.json", 0);
     addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+        "canonicalize",
+        fixtures_root ++ "/canonicalize_mixed.ts",
+        "--json",
+    }, fixtures_root ++ "/canonicalize_mixed.golden.json", 0);
+    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+        "canonicalize",
+        fixtures_root ++ "/canonicalize_mixed.ts",
+        "--json",
+        "--simulate",
+    }, fixtures_root ++ "/canonicalize_mixed_simulate.golden.json", 0);
+    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
         "verify-paths",
         fixtures_root ++ "/clean_handler.ts",
     }, fixtures_root ++ "/verify_paths_clean_text.golden.txt", 0);

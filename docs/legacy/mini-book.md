@@ -403,16 +403,16 @@ in reverse order. The handler itself is wrapped in an implicit root scope.
 ```typescript
 import { guard } from "zigttp:compose";
 
-const preflight = (req: Request): Response | undefined => {
+function preflight(req: Request): Response | undefined {
     if (req.method === "OPTIONS") {
         return Response.text("", { status: 204, headers: { "Access-Control-Allow-Origin": "*" } });
     }
-};
+}
 
-const requireAuth = (req: Request): Response | undefined => {
+function requireAuth(req: Request): Response | undefined {
     const token = parseBearer(req.headers.get("authorization"));
     if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
-};
+}
 
 const handler = guard(preflight)
     |> guard(requireAuth)
@@ -867,7 +867,7 @@ import { routerMatch } from "zigttp:router";
 import { env } from "zigttp:env";
 
 // Pre-guard: handle CORS preflight
-const preflight = (req: Request): Response | undefined => {
+function preflight(req: Request): Response | undefined {
     if (req.method === "OPTIONS") {
         return Response.text("", {
             status: 204,
@@ -878,15 +878,15 @@ const preflight = (req: Request): Response | undefined => {
             }
         });
     }
-};
+}
 
 // Pre-guard: require authentication
-const requireAuth = (req: Request): Response | undefined => {
+function requireAuth(req: Request): Response | undefined {
     const token = parseBearer(req.headers.get("authorization"));
     if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
     const result = jwtVerify(token, env("JWT_SECRET") ?? "secret");
     if (!result.ok) return Response.json({ error: result.error }, { status: 403 });
-};
+}
 
 // Main handler
 function routeHandler(req: Request): Response {

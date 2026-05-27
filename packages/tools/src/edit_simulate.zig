@@ -402,3 +402,39 @@ test "violationKey excludes line numbers" {
     try std.testing.expectEqual(key1.code_hash, key2.code_hash);
     try std.testing.expectEqual(key1.msg_hash, key2.msg_hash);
 }
+
+test "simulate flags newly introduced canonical diagnostics" {
+    const before =
+        \\function parse(x: number): number { return x; }
+        \\function handler(req: Request): Response {
+        \\  const a = parse(1);
+        \\  const b = parse(2);
+        \\  return Response.json({ a, b });
+        \\}
+    ;
+    const after =
+        \\const parse = (x: number): number => x;
+        \\function handler(req: Request): Response {
+        \\  const a = parse(1);
+        \\  const b = parse(2);
+        \\  return Response.json({ a, b });
+        \\}
+    ;
+
+    var result = try simulate(std.testing.allocator, .{
+        .file = "handler.ts",
+        .content = after,
+        .before = before,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    var saw_608 = false;
+    for (result.violations.items) |v| {
+        if (std.mem.eql(u8, v.code, "ZTS608")) {
+            saw_608 = true;
+            try std.testing.expect(v.introduced_by_patch);
+        }
+    }
+    try std.testing.expect(saw_608);
+    try std.testing.expect(result.new_count > 0);
+}

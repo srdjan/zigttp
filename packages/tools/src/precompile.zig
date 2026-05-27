@@ -49,6 +49,7 @@ const persistFlowWitnesses = check_mod.persistFlowWitnesses;
 const syncCheckResultProperties = check_mod.syncCheckResultProperties;
 const appendSpecDiagnosticsJson = check_mod.appendSpecDiagnosticsJson;
 pub const appendExportCapsuleDiagnostics = check_mod.appendExportCapsuleDiagnostics;
+const appendCanonicalPublicHelperDiagnostics = check_mod.appendCanonicalPublicHelperDiagnostics;
 const refreshSpecDiagnostics = check_mod.refreshSpecDiagnostics;
 
 const buildtime_mod = @import("precompile_buildtime.zig");
@@ -857,6 +858,13 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
 
 /// Run the full analysis pipeline without generating bytecode.
 /// Returns a CheckResult with all verification, contract, and coverage data.
+pub const CheckOptions = struct {
+    sql_schema_path: ?[]const u8 = null,
+    json_mode: bool = false,
+    system_path: ?[]const u8 = null,
+    skip_contract: bool = false,
+};
+
 pub fn runCheckOnly(
     allocator: std.mem.Allocator,
     handler_path: []const u8,
@@ -864,14 +872,26 @@ pub fn runCheckOnly(
     json_mode: bool,
     system_path: ?[]const u8,
 ) !CheckResult {
+    return runCheckOnlyWithOptions(allocator, handler_path, .{
+        .sql_schema_path = sql_schema_path,
+        .json_mode = json_mode,
+        .system_path = system_path,
+    });
+}
+
+pub fn runCheckOnlyWithOptions(
+    allocator: std.mem.Allocator,
+    handler_path: []const u8,
+    opts: CheckOptions,
+) !CheckResult {
     const source = readFilePosix(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
-        if (!json_mode) {
+        if (!opts.json_mode) {
             debugPrint("Error reading handler file '{s}': {}\n", .{ handler_path, err });
         }
         return err;
     };
     defer allocator.free(source);
-    return runCheckOnlyFromSource(allocator, source, handler_path, sql_schema_path, json_mode, system_path, false);
+    return runCheckOnlyFromSourceWithOptions(allocator, source, handler_path, opts);
 }
 
 /// Like runCheckOnly but operates on pre-read source. When skip_contract
@@ -886,6 +906,24 @@ pub fn runCheckOnlyFromSource(
     system_path: ?[]const u8,
     skip_contract: bool,
 ) !CheckResult {
+    return runCheckOnlyFromSourceWithOptions(allocator, source, handler_path, .{
+        .sql_schema_path = sql_schema_path,
+        .json_mode = json_mode,
+        .system_path = system_path,
+        .skip_contract = skip_contract,
+    });
+}
+
+pub fn runCheckOnlyFromSourceWithOptions(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    handler_path: []const u8,
+    opts: CheckOptions,
+) !CheckResult {
+    const sql_schema_path = opts.sql_schema_path;
+    const json_mode = opts.json_mode;
+    const system_path = opts.system_path;
+    const skip_contract = opts.skip_contract;
     var result = CheckResult{};
     result.line_count = @intCast(std.mem.count(u8, source, "\n") + 1);
 
@@ -981,7 +1019,10 @@ pub fn runCheckOnlyFromSource(
     var resolved = try zigts.pipeline.resolve(
         allocator,
         parsed,
-        .{ .type_env = type_env_storage.envPtr(), .service_type_context = stc_ptr },
+        .{
+            .type_env = type_env_storage.envPtr(),
+            .service_type_context = stc_ptr,
+        },
     );
     defer resolved.deinit();
 
@@ -1237,6 +1278,7 @@ pub fn runCheckOnlyFromSource(
     // CheckResult mirror aligned with the finalized contract before returning.
     syncCheckResultProperties(&result);
     try refreshSpecDiagnostics(allocator, &result);
+    appendCanonicalPublicHelperDiagnostics(allocator, &result, handler_path);
     if (json_mode) appendSpecDiagnosticsJson(allocator, &result, handler_path);
 
     return result;
@@ -3598,6 +3640,166 @@ test "runCheckOnlyFromSource: helper exceeding handler Effects budget gets ZTS60
     try std.testing.expect(saw_607);
     // The handler's declared budget is recorded on the contract.
     try std.testing.expectEqual(@as(u8, 1), contract.capability_budget.len);
+}
+
+test "runCheckOnlyFromSource: canonical reused arrow helper fails strict check" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const parse = (x: number): number => x;
+        \\
+        \\function handler(req: Request): Response {
+        \\  const a = parse(1);
+        \\  const b = parse(2);
+        \\  return Response.json({ a, b });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-arrow.ts", .{
+        .json_mode = true,
+    });
+    defer result.deinit(allocator);
+
+    var saw_608 = false;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS608")) {
+            saw_608 = true;
+            try std.testing.expectEqualStrings("error", d.severity);
+        }
+    }
+    try std.testing.expect(saw_608);
+    try std.testing.expect(result.totalErrors() > 0);
+}
+
+test "runCheckOnlyFromSource: one-way public helper effects diagnostic" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zigttp:crypto";
+        \\
+        \\export function digest(s: string): string {
+        \\  return sha256(s);
+        \\}
+        \\
+        \\function handler(req: Request): Effects<Response, "crypto"> {
+        \\  return Response.text(digest("x"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-effects.ts", .{
+        .json_mode = true,
+    });
+    defer result.deinit(allocator);
+
+    var saw_610 = false;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS610")) {
+            saw_610 = true;
+            try std.testing.expectEqualStrings("error", d.severity);
+        }
+    }
+    try std.testing.expect(saw_610);
+    try std.testing.expect(result.totalErrors() > 0);
+}
+
+test "runCheckOnlyFromSource: one-way public helper proof diagnostic" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function stable(s: string): string {
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  return Response.text(stable("x"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-proof.ts", .{
+        .json_mode = true,
+    });
+    defer result.deinit(allocator);
+
+    var saw_611 = false;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS611")) {
+            saw_611 = true;
+            try std.testing.expectEqualStrings("error", d.severity);
+        }
+    }
+    try std.testing.expect(saw_611);
+    try std.testing.expect(result.totalErrors() > 0);
+}
+
+test "runCheckOnlyFromSource: proof capsule diagnostic ignores unreachable exported helper" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function unrelated(s: string): string {
+        \\  return s;
+        \\}
+        \\
+        \\function stable(s: string): string {
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  return Response.text(stable("x"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-unrelated-proof.ts", .{
+        .json_mode = true,
+    });
+    defer result.deinit(allocator);
+
+    for (result.json_diagnostics.items) |d| {
+        try std.testing.expect(!std.mem.eql(u8, d.code, "ZTS611"));
+    }
+    try std.testing.expectEqual(@as(u32, 0), result.canonical_errors);
+}
+
+test "runCheckOnlyFromSource: proof capsule diagnostic ignores non-capsule specs" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function stable(s: string): string {
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Response & Spec<"result_safe"> {
+        \\  return Response.text(stable("x"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-result-safe-proof.ts", .{
+        .json_mode = true,
+    });
+    defer result.deinit(allocator);
+
+    for (result.json_diagnostics.items) |d| {
+        try std.testing.expect(!std.mem.eql(u8, d.code, "ZTS611"));
+    }
+    try std.testing.expectEqual(@as(u32, 0), result.canonical_errors);
+}
+
+test "formatProofCard: canonical public helper diagnostics are visible in text mode" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zigttp:crypto";
+        \\
+        \\export function digest(s: string): string {
+        \\  return sha256(s);
+        \\}
+        \\
+        \\function handler(req: Request): Effects<Response, "crypto"> {
+        \\  return Response.text(digest("x"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-effects-text.ts", .{});
+    defer result.deinit(allocator);
+    try std.testing.expect(result.canonical_errors > 0);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    formatProofCard(&aw.writer, &result, "one-way-effects-text.ts");
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Canonical diagnostics") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS610") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "one-way-effects-text.ts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Effects<...>") != null);
 }
 
 test "runCheckOnlyFromSource: composed Spec and Effects preserves handler budget diagnostics" {

@@ -619,6 +619,7 @@ pub const ContractBuilder = struct {
         defer if (reachable) |r| self.allocator.free(r);
 
         for (table.capsules.items) |*cap| {
+            const reachable_from_handler = helperReachable(analyzer, reachable, cap.name);
             // The helper's own capsule discharge (ZTS500 / ZTS502),
             // attributed to the helper.
             for (cap.diagnostics.items) |d| {
@@ -641,7 +642,7 @@ pub const ContractBuilder = struct {
             // breaks, and the helper carries no capsule declaring it. A
             // helper that declared the property already owns a ZTS500, so
             // skipping declared properties avoids double-reporting.
-            if (helperReachable(analyzer, reachable, cap.name)) {
+            if (reachable_from_handler) {
                 inline for (.{
                     spec_discharge.CapsuleProperty.total,
                     spec_discharge.CapsuleProperty.pure,
@@ -670,6 +671,7 @@ pub const ContractBuilder = struct {
                 .proven_deterministic = cap.proven.deterministic,
                 .discharged = cap.discharged(),
                 .exported = cap.exported,
+                .handler_reachable = reachable_from_handler,
             };
             errdefer summary.deinit(self.allocator);
             for (cap.declared.items) |name| {
@@ -682,6 +684,7 @@ pub const ContractBuilder = struct {
                 .line = cap.line,
                 .discharged = cap.effectDischarged(),
                 .exported = cap.exported,
+                .handler_reachable = reachable_from_handler,
             };
             errdefer effect_summary.deinit(self.allocator);
             for (cap.effect_declared.items) |name| {

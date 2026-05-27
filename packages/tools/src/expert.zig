@@ -132,7 +132,7 @@ pub fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !v
         const outcome = try verify_paths_core.collect(allocator, paths.items, &emitter);
         has_errors = !outcome.ok;
 
-        if (!has_errors) {
+        if (emitter.list.items.len == 0) {
             try w.print("Verified {d} file(s): no violations\n", .{paths.items.len});
         } else {
             try w.print("Verified {d} file(s): {d} violation(s)\n", .{

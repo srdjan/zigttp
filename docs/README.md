@@ -75,6 +75,9 @@ notes document design contracts, governance, and roadmap work.
   and phase-0 design.
 - [Policy Wasm Capability Gating](design/zigttp_zigts_policy_wasm_spec.md) -
   policy component proposal.
+- [zigttp Expert Compiler-Embedded Assistant](design/zigttp-expert-compiler-embedded.md) -
+  one-way ZigTS strategy, compiler-vetoed agent loop, and implementation
+  roadmap.
 - [Frontier](roadmap/frontier.md) - strategic direction.
 - [v1 Public Release](roadmap/v1-public-release.md) - release flow,
   milestones, and gates for the first public Zigttp demo.

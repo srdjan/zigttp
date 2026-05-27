@@ -9,6 +9,7 @@ pub const expert_meta = @import("expert_meta.zig");
 pub const verify_paths_core = @import("verify_paths_core.zig");
 pub const describe_rule = @import("describe_rule.zig");
 pub const edit_simulate = @import("edit_simulate.zig");
+pub const canonicalize = @import("canonicalize.zig");
 pub const module_audit = @import("module_audit.zig");
 pub const json_diagnostics = @import("json_diagnostics.zig");
 pub const system_analysis = @import("system_analysis.zig");
@@ -20,6 +21,7 @@ const system_build = @import("system_build.zig");
 const system_rollout = @import("system_rollout.zig");
 const search_rules = @import("search_rules.zig");
 const review_patch = @import("review_patch.zig");
+const canonicalize_cmd = @import("canonicalize.zig");
 const expert = @import("expert.zig");
 const project_config_mod = @import("project_config");
 const zigts = @import("zigts");
@@ -101,6 +103,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
     if (std.mem.eql(u8, command, "edit-simulate")) {
         try edit_simulate.runWithArgs(allocator, argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "canonicalize")) {
+        try canonicalize_cmd.runWithArgs(allocator, argv[1..]);
         return;
     }
     if (std.mem.eql(u8, command, "describe-rule")) {
@@ -188,7 +194,11 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     const system_path = explicit_system_path orelse discovered_system;
 
-    var result = try precompile.runCheckOnly(allocator, target, sql_schema_path, json_mode, system_path);
+    var result = try precompile.runCheckOnlyWithOptions(allocator, target, .{
+        .sql_schema_path = sql_schema_path,
+        .json_mode = json_mode,
+        .system_path = system_path,
+    });
     defer result.deinit(allocator);
 
     // Opt-in docs mode: ask exported helpers to carry explicit capsules
@@ -455,6 +465,7 @@ fn printHelp() void {
         \\  zigts verify-module-manifest <manifest.json> [--json]
         \\  zigts extension-status --module-manifest <path>... [--json]
         \\  zigts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
+        \\  zigts canonicalize <file> --json [--simulate]
         \\  zigts describe-rule [rule-name|code] [--json] [--hash]
         \\  zigts search <keyword> [--json]
         \\  zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]

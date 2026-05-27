@@ -1214,6 +1214,10 @@ pub const CapsuleSummary = struct {
     discharged: bool = false,
     /// True when the helper is exported. Used by the opt-in docs mode.
     exported: bool = false,
+    /// True when the handler can reach this helper through the analyzed call
+    /// graph. Used by canonical diagnostics so unrelated exported helpers do
+    /// not break a handler proof.
+    handler_reachable: bool = false,
 
     pub fn deinit(self: *CapsuleSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.function);
@@ -1239,6 +1243,9 @@ pub const EffectCapsuleSummary = struct {
     discharged: bool = false,
     /// True when the helper is exported. Used by the opt-in docs mode.
     exported: bool = false,
+    /// True when the handler can reach this helper through the analyzed call
+    /// graph.
+    handler_reachable: bool = false,
 
     pub fn deinit(self: *EffectCapsuleSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.function);

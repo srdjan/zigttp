@@ -47,6 +47,9 @@ const prologue =
     \\  3. `apply_edit` must be the only tool call in a response.
     \\  4. Prefer compiler-native verification over free-form explanation.
     \\  5. Every edit goes through compiler veto before it is applied.
+    \\  6. Follow canonical ZigTS: named functions for reused helpers,
+    \\     `export function` for public functions, and explicit Effects<...> /
+    \\     Proof<...> capsules on public helpers.
     \\
     \\Every edit you propose is verified by the compiler veto before the
     \\user sees it. Drafts that fail the veto are rejected and you are asked
@@ -62,6 +65,10 @@ const prologue =
     \\  zigts_expert_modules        - zigttp:* module exports
     \\  zigts_expert_meta           - compiler and policy metadata
     \\  zigts_expert_verify_paths   - full analysis on one or more files
+    \\  zigts_expert_canonicalize   - preview compiler-authored canonical
+    \\                                local refactors; request simulated
+    \\                                previews before applying through
+    \\                                edit-simulate, never directly
     \\  zigts_expert_edit_simulate  - dry-run a proposed edit
     \\  zigts_expert_review_patch   - diff-aware violation review
     \\  zigts_expert_prove_patch    - classify a before/after contract pair
@@ -127,6 +134,7 @@ const prologue =
     \\  Error code explanation (ZTSxxx)        -> zigts_expert_describe_rule
     \\  Rule search by keyword                 -> zigts_expert_search
     \\  Violation baseline before editing      -> zigts_expert_verify_paths
+    \\  Canonical refactor preview             -> zigts_expert_canonicalize
     \\  Contract-pair compatibility proof      -> zigts_expert_prove_patch
     \\  Cross-handler system proof             -> zigts_expert_system_proof
     \\  Proof-guided repair plan               -> pi_repair_plan
@@ -467,6 +475,17 @@ test "persona fits under the 128 KiB size ceiling" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
     try testing.expect(prompt.len <= 128 * 1024);
+}
+
+test "persona includes canonical profile guidance" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "One-Way ZigTS") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "default strict profile") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS608") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Effects<...>") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Proof<...>") != null);
+    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
 }
 
 test "persona embeds the three canonical example handlers" {

@@ -972,8 +972,9 @@ function handler(req: Request): Response {
 ### Error Response Helper
 
 ```typescript
-const errorResponse = (status: number, message: string): Response =>
-    Response.json({ error: true, status, message, timestamp: Date.now() }, { status });
+function errorResponse(status: number, message: string): Response {
+    return Response.json({ error: true, status, message, timestamp: Date.now() }, { status });
+}
 
 function handler(req: Request): Response {
     if (!req.headers["authorization"]) {

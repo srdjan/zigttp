@@ -25,6 +25,7 @@ pub const CheckResult = struct {
     verify_warnings: u32 = 0,
     flow_errors: u32 = 0,
     flow_warnings: u32 = 0,
+    canonical_errors: u32 = 0,
     exhaustive_returns: bool = false,
     results_safe: bool = false,
     optionals_safe: bool = false,
@@ -49,7 +50,7 @@ pub const CheckResult = struct {
     proof_trace_json: ?[]u8 = null,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
-        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.specErrors();
+        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.canonical_errors + self.specErrors();
     }
 
     pub fn totalWarnings(self: *const CheckResult) u32 {
@@ -233,6 +234,58 @@ pub fn appendExportCapsuleDiagnostics(
     }
 }
 
+/// Default canonical profile: public helpers that participate in capability
+/// or declared-proof paths carry explicit capsules.
+pub fn appendCanonicalPublicHelperDiagnostics(
+    allocator: std.mem.Allocator,
+    result: *CheckResult,
+    handler_path: []const u8,
+) void {
+    const contract = if (result.contract) |*c| c else return;
+
+    for (contract.function_effect_capsules.items) |cap| {
+        if (!cap.exported or !cap.handler_reachable or cap.declared.items.len > 0 or cap.inferred.items.len == 0) continue;
+        result.json_diagnostics.append(allocator, .{
+            .code = "ZTS610",
+            .severity = "error",
+            .message = "public helper reaches capabilities and should declare Effects<...>",
+            .file = handler_path,
+            .line = cap.line,
+            .column = 0,
+            .suggestion = "annotate the exported helper's return type with `Effects<T, \"...\">` for the reached capabilities.",
+        }) catch {};
+        result.canonical_errors += 1;
+    }
+
+    if (!declaresProofSupportedSpec(contract.declared_specs.items)) return;
+    for (contract.function_capsules.items) |cap| {
+        if (!cap.exported or !cap.handler_reachable or cap.declared.items.len > 0) continue;
+        result.json_diagnostics.append(allocator, .{
+            .code = "ZTS611",
+            .severity = "error",
+            .message = "public helper participates in declared specs and should declare Proof<...>",
+            .file = handler_path,
+            .line = cap.line,
+            .column = 0,
+            .suggestion = "annotate the exported helper's return type with `Proof<T, \"...\">` for the declared proof properties it preserves.",
+        }) catch {};
+        result.canonical_errors += 1;
+    }
+}
+
+fn declaresProofSupportedSpec(specs: []const []const u8) bool {
+    for (specs) |name| {
+        if (std.mem.eql(u8, name, "total") or
+            std.mem.eql(u8, name, "pure") or
+            std.mem.eql(u8, name, "read_only") or
+            std.mem.eql(u8, name, "deterministic"))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult) !void {
     const contract = if (result.contract) |*c| c else return;
     if (contract.declared_specs.items.len == 0) return;
@@ -359,7 +412,28 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         writer.print("  Max I/O depth: {d}\n", .{depth}) catch return;
     }
 
+    if (r.canonical_errors > 0) {
+        writer.print("\n  Canonical diagnostics:\n", .{}) catch return;
+        for (r.json_diagnostics.items) |d| {
+            if (!isCanonicalDiagnostic(d.code)) continue;
+            writer.print(
+                "    {s} ({s}) {s}:{d}:{d}  {s}\n",
+                .{ d.code, d.severity, d.file, d.line, d.column, d.message },
+            ) catch return;
+            if (d.suggestion) |suggestion| {
+                writer.print("      help: {s}\n", .{suggestion}) catch return;
+            }
+        }
+    }
+
     writer.print("\n  {d} errors, {d} warnings\n", .{ r.totalErrors(), r.totalWarnings() }) catch return;
+}
+
+fn isCanonicalDiagnostic(code: []const u8) bool {
+    return std.mem.eql(u8, code, "ZTS608") or
+        std.mem.eql(u8, code, "ZTS609") or
+        std.mem.eql(u8, code, "ZTS610") or
+        std.mem.eql(u8, code, "ZTS611");
 }
 
 const dots = "." ** 32;

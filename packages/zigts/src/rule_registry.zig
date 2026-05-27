@@ -217,6 +217,34 @@ const strict_meta = [_]struct {
         .example = "obj[key]",
         .help = "Use a typed field, a literal key, or validate/narrow the object before indexing.",
     },
+    .{
+        .kind = .canonical_arrow_helper,
+        .code = "ZTS608",
+        .description = "A reused non-callback arrow helper is better represented as a named function.",
+        .example = "const parseUser = (input: Input): User => makeUser(input);",
+        .help = "Rewrite reusable helpers as named function declarations; keep arrows for callbacks and local one-off values.",
+    },
+    .{
+        .kind = .canonical_export_function_const,
+        .code = "ZTS609",
+        .description = "An exported function-valued const hides that the public API is a function.",
+        .example = "export const handler = (req: Request): Response => Response.json({ok: true});",
+        .help = "Use `export function name(...) { ... }` unless the export is intentionally a first-class function value.",
+    },
+    .{
+        .kind = .canonical_public_helper_effects,
+        .code = "ZTS610",
+        .description = "A public helper that reaches capabilities should declare its Effects<...> ceiling.",
+        .example = "export function loadUser(id: string): User { return sqlOne(\"getUser\", {id}); }",
+        .help = "Annotate the helper return type with `Effects<T, \"...\">` when it participates in capability-bearing paths.",
+    },
+    .{
+        .kind = .canonical_public_helper_proof,
+        .code = "ZTS611",
+        .description = "A public helper used under declared specs should declare its Proof<...> capsule.",
+        .example = "export function stableKey(input: Input): string { return input.id; }",
+        .help = "Annotate the helper return type with `Proof<T, \"...\">` when it participates in declared proof obligations.",
+    },
 };
 
 // ---------------------------------------------------------------------------

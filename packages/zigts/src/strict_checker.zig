@@ -41,6 +41,21 @@ pub const DiagnosticKind = enum {
     non_exhaustive_profile_match,
     avoidable_let,
     computed_property_access,
+    canonical_arrow_helper,
+    canonical_export_function_const,
+    canonical_public_helper_effects,
+    canonical_public_helper_proof,
+
+    pub fn isCanonicalProfile(self: DiagnosticKind) bool {
+        return switch (self) {
+            .canonical_arrow_helper,
+            .canonical_export_function_const,
+            .canonical_public_helper_effects,
+            .canonical_public_helper_proof,
+            => true,
+            else => false,
+        };
+    }
 };
 
 pub const Diagnostic = struct {
@@ -72,6 +87,7 @@ pub const StrictChecker = struct {
     assigned_bindings: std.AutoHashMapUnmanaged(u32, void),
     annotated_function_bindings: std.AutoHashMapUnmanaged(u32, void),
     static_literal_bindings: std.AutoHashMapUnmanaged(u32, void),
+    call_counts: std.AutoHashMapUnmanaged(u32, u32),
     imported_functions: std.ArrayList(ImportedFunction),
 
     pub fn init(
@@ -91,12 +107,14 @@ pub const StrictChecker = struct {
             .assigned_bindings = .empty,
             .annotated_function_bindings = .empty,
             .static_literal_bindings = .empty,
+            .call_counts = .empty,
             .imported_functions = .empty,
         };
     }
 
     pub fn deinit(self: *StrictChecker) void {
         self.imported_functions.deinit(self.allocator);
+        self.call_counts.deinit(self.allocator);
         self.static_literal_bindings.deinit(self.allocator);
         self.annotated_function_bindings.deinit(self.allocator);
         self.assigned_bindings.deinit(self.allocator);
@@ -108,6 +126,7 @@ pub const StrictChecker = struct {
         self.collectAnnotatedFunctions(root);
         self.collectStaticLiterals(root);
         self.collectAssignments(root);
+        self.collectCallCounts(root);
         self.walkStmt(root);
 
         var error_count: u32 = 0;
@@ -152,6 +171,11 @@ pub const StrictChecker = struct {
         self.diagnostics.append(self.allocator, diag) catch {};
     }
 
+    fn canonicalSeverity(self: *const StrictChecker) Severity {
+        _ = self;
+        return .err;
+    }
+
     fn walkStmt(self: *StrictChecker, node: NodeIndex) void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
@@ -186,6 +210,19 @@ pub const StrictChecker = struct {
                         .node = node,
                         .message = "let binding is never reassigned",
                         .help = "use const for bindings that do not change",
+                    });
+                }
+                if (decl.kind == .@"const" and
+                    self.ir_view.getTag(decl.init) == .arrow_function and
+                    !self.isHandlerBinding(decl.binding) and
+                    self.bindingCallCount(decl.binding) > 1)
+                {
+                    self.addDiagnostic(.{
+                        .severity = self.canonicalSeverity(),
+                        .kind = .canonical_arrow_helper,
+                        .node = node,
+                        .message = "reused arrow helper should be a named function",
+                        .help = "rewrite reusable helpers as `function name(...) { ... }`; keep arrows for callbacks and local one-off values",
                     });
                 }
                 if (decl.init != null_node) {
@@ -349,6 +386,15 @@ pub const StrictChecker = struct {
         } else if (tag == .var_decl) {
             const decl = self.ir_view.getVarDecl(node) orelse return;
             if (decl.init != null_node and self.isFunctionNode(decl.init)) {
+                if (decl.kind == .@"const") {
+                    self.addDiagnostic(.{
+                        .severity = self.canonicalSeverity(),
+                        .kind = .canonical_export_function_const,
+                        .node = node,
+                        .message = "exported function-valued const should be an export function declaration",
+                        .help = "use `export function name(...) { ... }` unless the export is intentionally a first-class function value",
+                    });
+                }
                 self.checkFunctionAnnotation(decl.init);
             }
         }
@@ -630,6 +676,101 @@ pub const StrictChecker = struct {
         }
     }
 
+    fn collectCallCounts(self: *StrictChecker, node: NodeIndex) void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                for (0..block.stmts_count) |i| {
+                    self.collectCallCounts(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
+                }
+            },
+            .export_decl => {
+                const export_decl = self.ir_view.getExportDecl(node) orelse return;
+                self.collectCallCounts(export_decl.declaration);
+            },
+            .function_decl, .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                self.collectCallCounts(decl.init);
+            },
+            .function_expr, .arrow_function => {
+                if (self.ir_view.getFunction(node)) |func| self.collectCallCounts(func.body);
+            },
+            .if_stmt => {
+                const if_stmt = self.ir_view.getIfStmt(node) orelse return;
+                self.collectCallCounts(if_stmt.condition);
+                self.collectCallCounts(if_stmt.then_branch);
+                self.collectCallCounts(if_stmt.else_branch);
+            },
+            .for_of_stmt => {
+                const for_iter = self.ir_view.getForIter(node) orelse return;
+                self.collectCallCounts(for_iter.iterable);
+                self.collectCallCounts(for_iter.body);
+            },
+            .return_stmt, .expr_stmt => {
+                if (self.ir_view.getOptValue(node)) |value| self.collectCallCounts(value);
+            },
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return;
+                self.collectCallCounts(bin.left);
+                self.collectCallCounts(bin.right);
+            },
+            .unary_op, .spread => {
+                const un = self.ir_view.getUnary(node) orelse return;
+                self.collectCallCounts(un.operand);
+            },
+            .ternary => {
+                const ternary = self.ir_view.getTernary(node) orelse return;
+                self.collectCallCounts(ternary.condition);
+                self.collectCallCounts(ternary.then_branch);
+                self.collectCallCounts(ternary.else_branch);
+            },
+            .call, .method_call => {
+                const call = self.ir_view.getCall(node) orelse return;
+                self.recordCall(call.callee);
+                self.collectCallCounts(call.callee);
+                for (0..call.args_count) |i| {
+                    self.collectCallCounts(self.ir_view.getListIndex(call.args_start, @intCast(i)));
+                }
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return;
+                self.collectCallCounts(member.object);
+                self.collectCallCounts(member.computed);
+            },
+            .array_literal => {
+                const arr = self.ir_view.getArray(node) orelse return;
+                for (0..arr.elements_count) |i| {
+                    self.collectCallCounts(self.ir_view.getListIndex(arr.elements_start, @intCast(i)));
+                }
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(node) orelse return;
+                for (0..obj.properties_count) |i| {
+                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+                    const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                    self.collectCallCounts(prop.key);
+                    self.collectCallCounts(prop.value);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn recordCall(self: *StrictChecker, callee: NodeIndex) void {
+        if (self.ir_view.getTag(callee) != .identifier) return;
+        const binding = self.ir_view.getBinding(callee) orelse return;
+        const key = bindingKey(binding);
+        const gop = self.call_counts.getOrPut(self.allocator, key) catch return;
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        gop.value_ptr.* += 1;
+    }
+
+    fn bindingCallCount(self: *const StrictChecker, binding: ir.BindingRef) u32 {
+        return self.call_counts.get(bindingKey(binding)) orelse 0;
+    }
+
     fn importedFunctionForCallee(self: *const StrictChecker, callee: NodeIndex) ?ImportedFunction {
         if (self.ir_view.getTag(callee) != .identifier) return null;
         const binding = self.ir_view.getBinding(callee) orelse return null;
@@ -780,4 +921,41 @@ test "strict checker accepts reassigned let" {
     for (checker.getDiagnostics()) |diag| {
         try testing.expect(diag.kind != .avoidable_let);
     }
+}
+
+test "canonical profile warns on reused arrow helper" {
+    const source = "const parse = (x) => x; function handler(req) { const a = parse(1); const b = parse(2); return Response.json({a,b}); }";
+    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var checker = StrictChecker.init(testing.allocator, view, null, null, null);
+    defer checker.deinit();
+    const errors = try checker.check(root);
+    try testing.expect(errors > 0);
+    var saw = false;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind == .canonical_arrow_helper) {
+            saw = true;
+            try testing.expectEqual(Severity.err, diag.severity);
+        }
+    }
+    try testing.expect(saw);
+}
+
+test "strict checker accepts one-off arrow helper value" {
+    const source = "const parse = (x) => x; function handler(req) { const a = parse(1); return Response.json({a}); }";
+    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var checker = StrictChecker.init(testing.allocator, view, null, null, null);
+    defer checker.deinit();
+    const errors = try checker.check(root);
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_arrow_helper);
+    }
+    // Other strict diagnostics may fire because this untyped fixture uses an
+    // unannotated function; the canonical arrow-helper rule should not.
+    _ = errors;
 }
