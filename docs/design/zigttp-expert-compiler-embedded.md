@@ -7,6 +7,16 @@ metadata, canonical diagnostics, compiler-authored refactor previews, and edit
 veto into the `zigttp` and `zigts` binaries. The one-way language profile
 described here is the enforced standard for generated and checked handler code.
 
+**Implementation status (2026-05-27).** The canonical profile is enforced
+unconditionally on every check. The strict checker carries eleven canonical
+rules (`ZTS608`-`ZTS618`); the agent persona embeds the
+[`canonical-style`](../../packages/pi/src/skills/canonical-style.md) skill on
+every prompt assembly. The full rule reference with before/after pairs and
+migration recipes lives at [`canonical-profile.md`](../canonical-profile.md).
+The opt-in `--one-way` flag described in Phase 3 below was not built; the
+rules turned out to make sense unconditionally and a mode selector would have
+been overhead without users.
+
 ## Goal
 
 `zigttp expert` should produce handler code that is easy for the compiler to

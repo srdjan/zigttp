@@ -148,6 +148,13 @@ fn strictCheckerCode(kind: strict_checker.DiagnosticKind) []const u8 {
         .canonical_export_function_const => "ZTS609",
         .canonical_public_helper_effects => "ZTS610",
         .canonical_public_helper_proof => "ZTS611",
+        .canonical_ternary => "ZTS612",
+        .canonical_compound_assignment => "ZTS613",
+        .canonical_non_leading_spread => "ZTS614",
+        .canonical_template_complex_interp => "ZTS615",
+        .canonical_call_spread => "ZTS616",
+        .canonical_default_parameter => "ZTS617",
+        .canonical_destructure_depth => "ZTS618",
     };
 }
 

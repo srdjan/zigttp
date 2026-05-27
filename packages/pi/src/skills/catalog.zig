@@ -26,6 +26,7 @@ const embedded_sources = [_][]const u8{
     @embedFile("route-table.md"),
     @embedFile("auth-jwt.md"),
     @embedFile("sql-query.md"),
+    @embedFile("canonical-style.md"),
 };
 
 pub const catalog: [embedded_sources.len]Skill = build: {
@@ -61,6 +62,7 @@ test "catalog has exactly the expected entries, in order" {
         "route-table",
         "auth-jwt",
         "sql-query",
+        "canonical-style",
     };
     try testing.expectEqual(expected.len, catalog.len);
     for (expected, 0..) |name, i| {

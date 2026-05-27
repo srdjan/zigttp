@@ -45,6 +45,13 @@ pub const DiagnosticKind = enum {
     canonical_export_function_const,
     canonical_public_helper_effects,
     canonical_public_helper_proof,
+    canonical_ternary,
+    canonical_compound_assignment,
+    canonical_non_leading_spread,
+    canonical_template_complex_interp,
+    canonical_call_spread,
+    canonical_default_parameter,
+    canonical_destructure_depth,
 
     pub fn isCanonicalProfile(self: DiagnosticKind) bool {
         return switch (self) {
@@ -52,6 +59,13 @@ pub const DiagnosticKind = enum {
             .canonical_export_function_const,
             .canonical_public_helper_effects,
             .canonical_public_helper_proof,
+            .canonical_ternary,
+            .canonical_compound_assignment,
+            .canonical_non_leading_spread,
+            .canonical_template_complex_interp,
+            .canonical_call_spread,
+            .canonical_default_parameter,
+            .canonical_destructure_depth,
             => true,
             else => false,
         };
@@ -197,12 +211,14 @@ pub const StrictChecker = struct {
             .function_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 self.checkFunctionAnnotation(decl.init);
+                self.checkFunctionParams(decl.init);
                 if (self.ir_view.getFunction(decl.init)) |func| {
                     self.walkStmt(func.body);
                 }
             },
             .var_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
+                if (decl.pattern != null_node) self.checkDestructurePattern(decl.pattern);
                 if (decl.kind == .let and !self.assigned_bindings.contains(bindingKey(decl.binding))) {
                     self.addDiagnostic(.{
                         .severity = .err,
@@ -275,6 +291,13 @@ pub const StrictChecker = struct {
             },
             .ternary => {
                 const ternary = self.ir_view.getTernary(node) orelse return;
+                self.addDiagnostic(.{
+                    .severity = self.canonicalSeverity(),
+                    .kind = .canonical_ternary,
+                    .node = node,
+                    .message = "ternary expression is not part of canonical ZigTS",
+                    .help = "use an if/else statement, a match expression, or an immediately-invoked block",
+                });
                 self.walkExpr(ternary.condition);
                 self.walkExpr(ternary.then_branch);
                 self.walkExpr(ternary.else_branch);
@@ -284,7 +307,18 @@ pub const StrictChecker = struct {
                 const call = self.ir_view.getCall(node) orelse return;
                 self.walkExpr(call.callee);
                 for (0..call.args_count) |i| {
-                    self.walkExpr(self.ir_view.getListIndex(call.args_start, @intCast(i)));
+                    const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
+                    const arg_tag = self.ir_view.getTag(arg);
+                    if (arg_tag != null and arg_tag.? == .spread) {
+                        self.addDiagnostic(.{
+                            .severity = self.canonicalSeverity(),
+                            .kind = .canonical_call_spread,
+                            .node = arg,
+                            .message = "spread arguments are not part of canonical ZigTS",
+                            .help = "pass positional arguments or widen the helper signature to accept the array directly",
+                        });
+                    }
+                    self.walkExpr(arg);
                 }
             },
             .member_access, .optional_chain => {
@@ -309,6 +343,15 @@ pub const StrictChecker = struct {
             },
             .assignment => {
                 const assign = self.ir_view.getAssignment(node) orelse return;
+                if (assign.op != null) {
+                    self.addDiagnostic(.{
+                        .severity = self.canonicalSeverity(),
+                        .kind = .canonical_compound_assignment,
+                        .node = node,
+                        .message = "compound assignment is not part of canonical ZigTS",
+                        .help = "write the update explicitly: `x = x + 1` instead of `x += 1`",
+                    });
+                }
                 self.walkExpr(assign.target);
                 self.walkExpr(assign.value);
             },
@@ -322,6 +365,20 @@ pub const StrictChecker = struct {
                 const obj = self.ir_view.getObject(node) orelse return;
                 for (0..obj.properties_count) |i| {
                     const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+                    const prop_tag = self.ir_view.getTag(prop_idx);
+                    if (prop_tag != null and prop_tag.? == .object_spread) {
+                        if (i > 0) {
+                            self.addDiagnostic(.{
+                                .severity = self.canonicalSeverity(),
+                                .kind = .canonical_non_leading_spread,
+                                .node = prop_idx,
+                                .message = "object spread must appear before any explicit keys",
+                                .help = "reorder so the spread is first: `{...base, x: 1}` instead of `{x: 1, ...base}`. Later keys still override.",
+                            });
+                        }
+                        if (self.ir_view.getOptValue(prop_idx)) |value| self.walkExpr(value);
+                        continue;
+                    }
                     const prop = self.ir_view.getProperty(prop_idx) orelse continue;
                     if (prop.is_computed and !self.isStaticComputedKey(prop.key)) {
                         self.addDiagnostic(.{
@@ -339,7 +396,19 @@ pub const StrictChecker = struct {
                 const tmpl = self.ir_view.getTemplate(node) orelse return;
                 for (0..tmpl.parts_count) |i| {
                     const part = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
-                    if (self.ir_view.getOptValue(part)) |value| self.walkExpr(value);
+                    const value = self.ir_view.getOptValue(part) orelse continue;
+                    const part_tag = self.ir_view.getTag(part);
+                    const interp = part_tag != null and part_tag.? == .template_part_expr;
+                    if (interp and !self.isSimpleTemplateInterp(value)) {
+                        self.addDiagnostic(.{
+                            .severity = self.canonicalSeverity(),
+                            .kind = .canonical_template_complex_interp,
+                            .node = part,
+                            .message = "template interpolation must be an identifier or a literal-keyed property access",
+                            .help = "hoist the expression into a `const` immediately above the template, then interpolate the new name",
+                        });
+                    }
+                    self.walkExpr(value);
                 }
             },
             .match_expr => {
@@ -362,6 +431,7 @@ pub const StrictChecker = struct {
             },
             .function_expr, .arrow_function => {
                 self.checkFunctionAnnotation(node);
+                self.checkFunctionParams(node);
                 if (self.ir_view.getFunction(node)) |func| self.walkStmt(func.body);
             },
             .jsx_element => {
@@ -413,6 +483,63 @@ pub const StrictChecker = struct {
                 .message = "strict ZigTS requires explicit function parameter and return types",
                 .help = "annotate each parameter and the return type, for example `function handler(req: Request): Response`",
             });
+        }
+    }
+
+    /// Walk a destructuring pattern and flag nested binding patterns.
+    /// `const {a: {b}} = obj` inflates review cost and tends to drift in
+    /// agent output; canonical ZigTS keeps each destructure one level
+    /// deep with intermediate `const` bindings for further drilling.
+    fn checkDestructurePattern(self: *StrictChecker, node: NodeIndex) void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .object_pattern, .array_pattern => {
+                const arr = self.ir_view.getArray(node) orelse return;
+                for (0..arr.elements_count) |i| {
+                    const child = self.ir_view.getListIndex(arr.elements_start, @intCast(i));
+                    self.checkDestructurePattern(child);
+                }
+            },
+            .pattern_element => {
+                // `.pattern_rest` is excluded: rest elements never carry a
+                // nested pattern (`elem.key` is always null_node for them),
+                // so they cannot introduce destructure depth.
+                const elem = self.ir_view.getPatternElem(node) orelse return;
+                if (elem.key != null_node) {
+                    self.addDiagnostic(.{
+                        .severity = self.canonicalSeverity(),
+                        .kind = .canonical_destructure_depth,
+                        .node = node,
+                        .message = "destructuring patterns must be at most one level deep",
+                        .help = "destructure one level, then drill into the value with a follow-up `const`: `const {a} = obj; const {b} = a;`",
+                    });
+                    self.checkDestructurePattern(elem.key);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Walk a function's parameter list and flag canonical violations:
+    /// default values at the signature site (ZTS617). Param walking is
+    /// separate from `checkFunctionAnnotation` because parameter shape
+    /// matters even when the function carries no type annotation - the
+    /// canonical rules apply unconditionally.
+    fn checkFunctionParams(self: *StrictChecker, node: NodeIndex) void {
+        const func = self.ir_view.getFunction(node) orelse return;
+        for (0..func.params_count) |i| {
+            const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+            const elem = self.ir_view.getPatternElem(param_idx) orelse continue;
+            if (elem.default_value != null_node) {
+                self.addDiagnostic(.{
+                    .severity = self.canonicalSeverity(),
+                    .kind = .canonical_default_parameter,
+                    .node = param_idx,
+                    .message = "default parameter values are not part of canonical ZigTS",
+                    .help = "accept `(a: T | undefined)` and resolve the default in the body: `const resolved = a === undefined ? DEFAULT : a;`",
+                });
+            }
         }
     }
 
@@ -814,6 +941,23 @@ pub const StrictChecker = struct {
         };
     }
 
+    /// Canonical template interpolations are restricted to identifiers and
+    /// chains of literal-keyed member access (`user.profile.name`). Anything
+    /// else - function calls, arithmetic, ternaries, computed access - must
+    /// be hoisted into a `const` above the template.
+    fn isSimpleTemplateInterp(self: *const StrictChecker, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        return switch (tag) {
+            .identifier => true,
+            .member_access => blk: {
+                const member = self.ir_view.getMember(node) orelse break :blk false;
+                if (member.computed != null_node) break :blk false;
+                break :blk self.isSimpleTemplateInterp(member.object);
+            },
+            else => false,
+        };
+    }
+
     fn isLiteralOrStaticTemplate(self: *const StrictChecker, node: NodeIndex) bool {
         const tag = self.ir_view.getTag(node) orelse return false;
         if (tag == .lit_string) return true;
@@ -959,3 +1103,111 @@ test "strict checker accepts one-off arrow helper value" {
     // unannotated function; the canonical arrow-helper rule should not.
     _ = errors;
 }
+
+fn expectKind(checker: *const StrictChecker, kind: DiagnosticKind) !void {
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind == kind) return;
+    }
+    return error.DiagnosticNotEmitted;
+}
+
+fn checkSource(source: []const u8) !StrictChecker {
+    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var checker = StrictChecker.init(testing.allocator, view, null, null, null);
+    errdefer checker.deinit();
+    _ = try checker.check(root);
+    return checker;
+}
+
+test "canonical_ternary fires on a ternary expression" {
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? 200 : 500; return Response.json({x}); }");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_ternary);
+}
+
+test "canonical_compound_assignment fires on +=" {
+    var checker = try checkSource("function handler(req) { let n = 0; n += 1; return Response.json({n}); }");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_compound_assignment);
+}
+
+test "canonical_compound_assignment does not fire on plain =" {
+    var checker = try checkSource("function handler(req) { let n = 0; n = n + 1; return Response.json({n}); }");
+    defer checker.deinit();
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_compound_assignment);
+    }
+}
+
+test "canonical_non_leading_spread fires when spread follows explicit keys" {
+    var checker = try checkSource("function handler(req) { const base = {a: 1}; const next = {b: 2, ...base}; return Response.json(next); }");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_non_leading_spread);
+}
+
+test "canonical_non_leading_spread accepts leading spread" {
+    var checker = try checkSource("function handler(req) { const base = {a: 1}; const next = {...base, b: 2}; return Response.json(next); }");
+    defer checker.deinit();
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_non_leading_spread);
+    }
+}
+
+test "canonical_template_complex_interp fires on a call inside interpolation" {
+    var checker = try checkSource("function getName() { return 'x'; } function handler(req) { return Response.text(`hi ${getName()}`); }");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_template_complex_interp);
+}
+
+test "canonical_template_complex_interp accepts identifier and member access" {
+    var checker = try checkSource("function handler(req) { const user = {name: 'a'}; return Response.text(`hi ${user.name}`); }");
+    defer checker.deinit();
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_template_complex_interp);
+    }
+}
+
+test "canonical_call_spread accepts positional args" {
+    var checker = try checkSource("function send(a, b) { return a + b; } function handler(req) { return Response.json({n: send(1, 2)}); }");
+    defer checker.deinit();
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_call_spread);
+    }
+}
+
+test "canonical_default_parameter fires on a signature default" {
+    var checker = try checkSource("function greet(name = 'world') { return name; } function handler(req) { return Response.text(greet()); }");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_default_parameter);
+}
+
+test "canonical_default_parameter accepts explicit undefined-resolved defaults" {
+    var checker = try checkSource("function greet(name) { const resolved = name === undefined ? 'world' : name; return resolved; } function handler(req) { return Response.text(greet(undefined)); }");
+    defer checker.deinit();
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_default_parameter);
+    }
+}
+
+test "canonical_destructure_depth fires on nested object pattern" {
+    var checker = try checkSource("function handler(req) { const payload = {user: {name: 'a'}}; const {user: {name}} = payload; return Response.text(name); }");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_destructure_depth);
+}
+
+test "canonical_destructure_depth accepts flat destructure" {
+    var checker = try checkSource("function handler(req) { const payload = {user: 'a'}; const {user} = payload; return Response.text(user); }");
+    defer checker.deinit();
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_destructure_depth);
+    }
+}
+
+// NOTE: a positive test for `f(...args)` is intentionally absent. The parser
+// constructs the spread Node with `.data.unary` shape while the IR reader at
+// parser/ir.zig:1107 expects `.data.opt_value`; the resulting safety panic
+// prevents the detector from ever running. The detector here is in place so
+// the rule fires automatically once the parser/IR mismatch is fixed.

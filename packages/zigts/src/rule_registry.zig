@@ -245,6 +245,55 @@ const strict_meta = [_]struct {
         .example = "export function stableKey(input: Input): string { return input.id; }",
         .help = "Annotate the helper return type with `Proof<T, \"...\">` when it participates in declared proof obligations.",
     },
+    .{
+        .kind = .canonical_ternary,
+        .code = "ZTS612",
+        .description = "Ternary expressions are not part of canonical ZigTS.",
+        .example = "const status = ok ? 200 : 500;",
+        .help = "Use an if/else statement, a match expression, or an immediately-invoked block.",
+    },
+    .{
+        .kind = .canonical_compound_assignment,
+        .code = "ZTS613",
+        .description = "Compound assignment operators are not part of canonical ZigTS.",
+        .example = "count += 1;",
+        .help = "Write the update explicitly: `count = count + 1` instead of `count += 1`.",
+    },
+    .{
+        .kind = .canonical_non_leading_spread,
+        .code = "ZTS614",
+        .description = "Object spread must appear before any explicit keys.",
+        .example = "const next = {status: \"ok\", ...base};",
+        .help = "Reorder so the spread is first: `{...base, status: \"ok\"}`. Later keys still override.",
+    },
+    .{
+        .kind = .canonical_template_complex_interp,
+        .code = "ZTS615",
+        .description = "Template interpolations must be identifiers or literal-keyed property access.",
+        .example = "`user ${getUser().name} at ${Date.now()}`",
+        .help = "Hoist complex expressions into a `const` immediately above the template, then interpolate the new name.",
+    },
+    .{
+        .kind = .canonical_call_spread,
+        .code = "ZTS616",
+        .description = "Spread arguments at call sites are not part of canonical ZigTS.",
+        .example = "send(...args);",
+        .help = "Pass positional arguments, or widen the helper signature so it accepts the array directly.",
+    },
+    .{
+        .kind = .canonical_default_parameter,
+        .code = "ZTS617",
+        .description = "Default parameter values are not part of canonical ZigTS.",
+        .example = "function greet(name: string = \"world\") { /* ... */ }",
+        .help = "Accept `(a: T | undefined)` and resolve the default in the body: `const resolved = a === undefined ? DEFAULT : a;`",
+    },
+    .{
+        .kind = .canonical_destructure_depth,
+        .code = "ZTS618",
+        .description = "Destructuring patterns must be at most one level deep.",
+        .example = "const {user: {name}} = payload;",
+        .help = "Destructure one level, then drill into the value with a follow-up `const`: `const {user} = payload; const {name} = user;`",
+    },
 };
 
 // ---------------------------------------------------------------------------

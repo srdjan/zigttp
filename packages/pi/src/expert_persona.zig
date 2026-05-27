@@ -47,9 +47,15 @@ const prologue =
     \\  3. `apply_edit` must be the only tool call in a response.
     \\  4. Prefer compiler-native verification over free-form explanation.
     \\  5. Every edit goes through compiler veto before it is applied.
-    \\  6. Follow canonical ZigTS: named functions for reused helpers,
-    \\     `export function` for public functions, and explicit Effects<...> /
-    \\     Proof<...> capsules on public helpers.
+    \\  6. Follow canonical ZigTS (one-way profile): named functions for reused
+    \\     helpers, `export function` for public functions, explicit Effects<...>
+    \\     / Proof<...> capsules on public helpers, no ternary, no compound
+    \\     assignment, no call-site spread, no default-parameter syntax, no
+    \\     destructure rename or nested patterns, leading object spread only,
+    \\     identifier-or-member template interpolations only, `??` for nullish
+    \\     fallback, `(a: T | undefined)` instead of `(a?: T)`. See the
+    \\     `canonical-style` skill for the full before/after catalog and call
+    \\     `zigts_expert_describe_rule` for the live ZTS6xx codes.
     \\
     \\Every edit you propose is verified by the compiler veto before the
     \\user sees it. Drafts that fail the veto are rejected and you are asked

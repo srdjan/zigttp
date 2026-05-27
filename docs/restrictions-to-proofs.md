@@ -41,6 +41,13 @@ earned each `[+]` chip.
 | dynamic capability key | hidden env/cache/sql/egress authority | literal capability manifests | use string literals or const literal aliases |
 | avoidable `let` | needless mutable slots | simpler state-isolation proof | use `const` unless reassigned |
 | dynamic computed property access | shape-erasing indexed reads | shape-stable property access | use fields, literal keys, or const literal aliases |
+| ternary `a ? b : c` | duplicate branching idiom and inline-nesting drift | one canonical branching form per control-flow shape | use `if`/`else` or `match` |
+| compound assignment (`+=`, `-=`, ...) | hidden mutation in expression position | explicit write effects and diff-visible updates | write `x = x + e` |
+| non-leading object spread | precedence ambiguity around "which keys win" | unambiguous override semantics | put spread first: `{...base, x: 1}` |
+| complex template interpolation | inline expressions hide call/effect sites in strings | named intermediates and visible call sites | hoist into a `const` above the template |
+| call-site spread `f(...args)` | dynamic arity invisible to the contract extractor | static call-arity and stable helper contracts | pass positional args or widen the helper signature |
+| default parameter value | hidden default invisible at call sites and in contracts | diff-visible defaults in the function body | accept `T \| undefined` and resolve in the body |
+| nested destructuring | deep patterns inflate review cost and drift in agent output | one-level destructure with intermediate names | drill in with follow-up `const` bindings |
 
 ## Why
 
@@ -72,3 +79,10 @@ making?" in one sentence.
 - **dynamic capability key** - non-literal authority cannot be represented in a precise deployment contract.
 - **avoidable `let`** - unnecessary mutable slots widen the state the verifier must track.
 - **dynamic computed property access** - arbitrary indexes erase object shape and defeat field-level narrowing.
+- **ternary `a ? b : c`** - duplicate branching idiom that competes with `if`/`else` and `match`; nested ternaries are a primary source of agent style drift.
+- **compound assignment (`+=`, `-=`, ...)** - in-place arithmetic update hides write effects in expression position, the same footgun the `++`/`--` ban already addressed.
+- **non-leading object spread** - mixed spread-and-literal order makes the "which keys win" reading ambiguous; the leading-spread form has only one valid reading.
+- **complex template interpolation** - function calls and arithmetic inside `${...}` hide call sites in strings; named intermediates surface them.
+- **call-site spread `f(...args)`** - dynamic arity defeats the contract extractor's ability to pin a helper's parameter shape.
+- **default parameter value** - signature-site defaults are invisible to the contract extractor and to callers reading the diff.
+- **nested destructuring** - patterns nested inside another binding pattern inflate review cost without buying any proof.

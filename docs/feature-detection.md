@@ -155,6 +155,8 @@ Arithmetic and bitwise compound assignments are supported and desugar to `x = x 
 
 `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `>>>=`
 
+**Canonical profile note:** the arithmetic compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`) emit `ZTS613 canonical_compound_assignment` and must be rewritten to the explicit form `x = x + e`. See `docs/canonical-profile.md` for the full canonical ruleset.
+
 ### Unsupported Logical Compound Assignments (3 total)
 
 Logical compound assignments require short-circuit semantics and are not supported:
@@ -200,6 +202,22 @@ Logical compound assignments require short-circuit semantics and are not support
 | `Object.assign()` | Use object spread `{...obj1, ...obj2}` |
 | `Object.freeze()` | Objects are mutable by design |
 | `Object.isFrozen()` | Objects are mutable by design |
+
+## Canonical Profile (Strict Checker)
+
+A third layer of detection runs alongside the parser: the strict checker enforces the **canonical ZigTS profile** on every `zigttp check` and `zigttp verify-paths` run. These rules tighten the language further, removing redundant idioms that compete with an already-canonical form. The goal is one canonical spelling per operation.
+
+| Code | Rule | Canonical replacement |
+|------|------|----------------------|
+| `ZTS612` | ternary `a ? b : c` | `if`/`else` block or `match` expression |
+| `ZTS613` | compound assignment (`+=`, `-=`, ...) | `x = x + e` |
+| `ZTS614` | non-leading object spread `{x: 1, ...base}` | leading spread: `{...base, x: 1}` |
+| `ZTS615` | complex template interpolation `${getX()}` | hoist into a `const` above the template |
+| `ZTS616` | call-site spread `f(...args)` | positional args or widen the helper signature |
+| `ZTS617` | default parameter value `(a = v)` | accept `T \| undefined` and resolve in the body |
+| `ZTS618` | nested destructuring `{a: {b}}` | drill in with follow-up `const` bindings |
+
+The full reference with before/after pairs and rationale lives at `docs/canonical-profile.md`.
 
 ## Error Message Pattern
 
