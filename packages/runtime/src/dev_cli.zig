@@ -682,7 +682,7 @@ fn printInitNextSteps(name: []const u8, template: Template) void {
     std.debug.print("  try it:\n", .{});
     std.debug.print("\n", .{});
     std.debug.print("    cd {s}\n", .{name});
-    std.debug.print("    {s}zigttp dev{s}          {s}# watch, prove, and start the Proof Quest{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
+    std.debug.print("    {s}zigttp dev{s}          {s}# watch and prove on every save{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
     std.debug.print("    curl http://127.0.0.1:3000{s}\n", .{starterPathForTemplate(template)});
     std.debug.print("\n", .{});
     std.debug.print("    {s}zigttp test{s}         {s}# run tests/handler.test.jsonl{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
@@ -962,8 +962,6 @@ fn extractTemplateFlag(allocator: std.mem.Allocator, argv: []const []const u8) !
     const resized = try allocator.realloc(filtered, n);
     return .{ .template = template, .filtered = resized };
 }
-
-
 
 fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, command: []const u8) !void {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
@@ -1654,7 +1652,7 @@ fn printDevHelp() void {
         \\Common options:
         \\  -p, --port <PORT>     Port to listen on (project default: 3000)
         \\  -h, --host <HOST>     Host to bind to (project default: 127.0.0.1)
-        \\  --studio              Also serve /_zigttp/studio
+        \\  --studio              Also serve the optional /_zigttp/studio mirror
         \\  --no-prove            Watch and reload without contract proof gating
         \\  --no-tour             Skip the first-run proof tour
         \\  --quest               Replay the guided proof quest
@@ -1673,8 +1671,9 @@ fn printStudioHelp() void {
     const help =
         \\zigttp studio [options] [handler.ts]
         \\
-        \\Open the browser proof workbench at /_zigttp/studio. In an empty
-        \\directory, this command scaffolds a project in place before launching.
+        \\Open the optional browser proof workbench at /_zigttp/studio. In an
+        \\empty directory, this command scaffolds a project in place before
+        \\launching.
         \\
         \\Options:
         \\  --template basic|api|htmx  Template used for empty-dir scaffolding
@@ -1838,6 +1837,7 @@ const core_help_all =
     \\Run and inspect:
     \\  zigttp serve [handler.ts]              Run a handler without watch or proof
     \\  zigttp doctor [path]                   Check project readiness
+    \\  zigttp studio [handler.ts]             Optional browser proof workbench
     \\  zigttp demo                            Guided local proof theater
     \\  zigttp edge [--config FILE]            Run the in-process edge runtime
     \\
@@ -1945,19 +1945,19 @@ test "help --all surfaces the advanced commands" {
         }
     }.f;
     inline for (.{
-        "zigttp serve",         "zigttp build",          "zigttp compile",
-        "zigttp doctor",        "zigttp proofs",         "zigttp check",
-        "zigttp prove",         "zigttp features",       "zigttp modules",
-        "zigttp restrictions",  "zigttp meta",           "zigttp describe-rule",
-        "zigttp verify-paths",  "zigttp verify-modules", "zigttp edit-simulate",
-        "zigttp review-patch",  "zigttp rollout",
+        "zigttp serve",        "zigttp build",          "zigttp compile",
+        "zigttp doctor",       "zigttp proofs",         "zigttp check",
+        "zigttp prove",        "zigttp features",       "zigttp modules",
+        "zigttp restrictions", "zigttp meta",           "zigttp describe-rule",
+        "zigttp verify-paths", "zigttp verify-modules", "zigttp edit-simulate",
+        "zigttp review-patch", "zigttp rollout",
     }) |cmd| {
         try std.testing.expect(has(core_help_all, cmd));
     }
 }
 
-test "help --all hides the browser studio workbench" {
-    try std.testing.expect(std.mem.indexOf(u8, core_help_all, "zigttp studio") == null);
+test "help --all surfaces the optional browser studio workbench" {
+    try std.testing.expect(std.mem.indexOf(u8, core_help_all, "zigttp studio") != null);
 }
 
 test "hasAllFlag detects the --all escape hatch" {

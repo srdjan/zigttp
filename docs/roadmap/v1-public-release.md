@@ -7,8 +7,7 @@ zigttp init my-app
 cd my-app
 zigttp dev
 # edit src/handler.ts
-zigttp check
-zigttp build
+zigttp test
 zigttp deploy
 zigttp proofs badge
 ```
@@ -26,9 +25,11 @@ commands are gated at the CLI boundary (see Milestone 5).
   `zigttp.json`.
 - Handler authoring happens in the user's editor while the terminal HUD watches
   and re-verifies on save.
-- `zigttp studio` remains the browser proof workbench for the same live state.
-- `zigttp check` is the fast terminal verifier.
-- `zigttp build` verifies the handler and emits `.zigttp/build/<app>`.
+- `zigttp test` verifies the handler and runs the project fixture.
+- `zigttp studio` remains an optional browser proof workbench for the same live
+  state, but is not part of the initial success path.
+- `zigttp check` and `zigttp build` remain advanced commands for one-shot
+  verification and explicit build output.
 - `zigttp deploy` verifies the handler, emits `.zigttp/deploy/<app>`, and
   records `kind=deploy` in `.zigttp/proofs.jsonl`.
 - `zigttp deploy --cloud` and the hosted account commands are deferred from
@@ -44,8 +45,8 @@ Required:
   `public/`, `.gitignore`, and `README.md`.
 - Reject unsafe project names before writing files.
 - Keep starter handlers small, readable, and verifiable.
-- Print next steps that match the public release flow, including `dev` and the
-  proof badge artifact.
+- Print next steps that match the public release flow: `dev`, `test`, and
+  `deploy`.
 
 Acceptance:
 
@@ -56,9 +57,9 @@ zigttp doctor
 zigttp check
 ```
 
-## Milestone 2: Studio Workbench
+## Milestone 2: Optional Studio Workbench
 
-Status: existing proof dashboard, needs release polish.
+Status: existing proof dashboard, kept as an advanced mirror.
 
 Required:
 
@@ -68,6 +69,9 @@ Required:
   declared specs, witnesses, and generated tests.
 - Re-run analysis on handler changes.
 - Keep Studio bound to `127.0.0.1` unless the user explicitly changes host.
+- Keep Studio out of the default `zigttp --help` and required first-run path.
+  It remains discoverable from `zigttp help --all`, `zigttp studio --help`, and
+  the CLI reference.
 
 Acceptance:
 
@@ -147,8 +151,9 @@ required.
 Required:
 
 - Keep `zig build smoke-v1` wired to `scripts/smoke-v1.sh`.
-- Exercise the exact public path: init, doctor, check, dev/studio, build, run,
-  deploy, run, badge.
+- Exercise the exact public path: init, dev, test, deploy, run, badge.
+- Keep separate coverage for advanced diagnostics: doctor, check, studio,
+  build, and proofs.
 - Keep negative-path smoke cases for invalid project names, missing project
   diagnostics, and broken handler build refusal.
 
@@ -162,9 +167,6 @@ zig build smoke-v1
 
 ## Open Decisions
 
-- Whether Studio should remain an observer-only workbench for v1 or include a
-  small browser editor. The current release contract assumes editor-based
-  authoring.
 - Whether cloud-only flags should continue implying `--cloud` for compatibility
   or require explicit `--cloud`. Deferred along with hosted cloud deploy;
   revisit when the path is re-enabled.

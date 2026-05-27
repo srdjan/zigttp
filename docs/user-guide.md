@@ -85,7 +85,18 @@ This creates `src/handler.ts`, `tests/handler.test.jsonl`, `public/`, `zigttp.js
 zigttp dev
 ```
 
-Edit `src/handler.ts` in your editor; HTMX projects use `src/handler.tsx`. The terminal proof card re-verifies on save and shows the verdict, proven surface, proof deltas, counterexamples, and `Why:` rows for attributed property demotions. If a save fails, the reload banner names the failing analyzer stage and keeps the previous handler serving. Press `Tab` to rotate the proof card's left pane through three lenses: `Properties` (the default `[+]`/`[-]` pills), `Trade` (each proof paired with the substrate restrictions that earned it), and `Handover` (a copy-pasteable AI proof certificate). The same three views are mirrored in Studio with a tab bar and a one-click Copy button on the Handover view. When `--studio` is on, the HUD prints a `Studio mirror: http://...` footer beneath each frame; modern terminals (iTerm2, WezTerm, Ghostty, VS Code) make it click-to-open. The browser workbench at `http://localhost:3000/_zigttp/studio` opens with that same ASCII frame mirrored at the top, then the rest of the dashboard below.
+Edit `src/handler.ts` in your editor; HTMX projects use `src/handler.tsx`. The
+terminal proof card re-verifies on save and shows the verdict, proven surface,
+proof deltas, counterexamples, and `Why:` rows for attributed property
+demotions. If a save fails, the reload banner names the failing analyzer stage
+and keeps the previous handler serving. Press `Tab` to rotate the proof card's
+left pane through three lenses: `Properties` (the default `[+]`/`[-]` pills),
+`Trade` (each proof paired with the substrate restrictions that earned it), and
+`Handover` (a copy-pasteable AI proof certificate).
+
+For a browser mirror of the same live state, run `zigttp studio` or pass
+`--studio` to `zigttp dev`. Studio is optional; the terminal loop is the default
+first-run experience.
 
 ### Test
 
@@ -194,7 +205,7 @@ Common `dev` options:
 ```
   -p, --port <PORT>     Port to listen on (project default: 3000)
   -h, --host <HOST>     Host/IP to bind to
-  --studio              Also serve /_zigttp/studio
+  --studio              Also serve the optional /_zigttp/studio mirror
   --no-prove            Watch and reload without proof gating
   --no-tour             Skip the first-run tour
   --quest               Replay the proof quest

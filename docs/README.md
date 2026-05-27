@@ -22,8 +22,8 @@ notes document design contracts, governance, and roadmap work.
 
 ## Reference
 
-- [CLI Reference](cli.md) - every `zigttp` and `zigts` subcommand, the
-  expert REPL, edge, proofs ledger, verify, studio.
+- [CLI Reference](cli.md) - the five-command workflow plus advanced analyzer,
+  edge, proofs ledger, verify, and optional Studio commands.
 - [Contracts and Auto-Sandboxing](contracts-and-sandboxing.md) -
   contract extraction, runtime sandboxing, policy override, OpenAPI
   and TypeScript SDK emit, deterministic replay, proven evolution,

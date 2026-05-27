@@ -37,6 +37,7 @@ build_link.log
 proof-report.txt
 proof.json
 codedb.snapshot
+.codegraph/
 
 # External metadoor generator-pack scratch (consumed via
 # `precompile --generator-pack`; regenerated on demand by the

@@ -150,8 +150,8 @@ pages:
 
 - [User Guide](docs/user-guide.md) - handler API, routing, JSON,
   tests, troubleshooting
-- [CLI Reference](docs/cli.md) - every `zigttp` and `zigts`
-  subcommand, the expert REPL, edge, proofs, verify, studio
+- [CLI Reference](docs/cli.md) - the five-command workflow plus advanced
+  analyzer, edge, proofs, verify, and optional Studio commands
 - [Contracts and Auto-Sandboxing](docs/contracts-and-sandboxing.md) -
   contract extraction, policy, OpenAPI/SDK emit, replay, evolution,
   `Spec<...>`

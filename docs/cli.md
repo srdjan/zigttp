@@ -138,6 +138,21 @@ re-hashes the components of a locally-stored proof bundle.
 Reports environment readiness: platform, manifest validity, entry-file
 presence, path permissions, and analyzer pass status.
 
+### `zigttp studio`
+
+Optional browser proof workbench for a handler. It runs the same watch and
+proof loop as `zigttp dev`, then mirrors the terminal proof card at
+`/_zigttp/studio`.
+
+```bash
+zigttp studio [handler.ts]
+zigttp dev --studio
+```
+
+Studio keeps the terminal workflow as the source of truth: a failed save keeps
+the previous handler running, and the browser state follows the same analyzer
+verdict.
+
 ## Machine tools
 
 Standalone analysis and compilation without starting a server. All of
