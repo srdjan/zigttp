@@ -60,3 +60,4 @@ demo/proof-review/.ffmpeg.log
 # Generator output from `zigts check --types`. Regenerated on demand;
 # never commit.
 /zigttp.d.ts
+demo/
