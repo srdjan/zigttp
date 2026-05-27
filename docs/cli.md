@@ -1,12 +1,15 @@
 # CLI Reference
 
-zigttp ships three binaries: `zigttp` (developer CLI and local runtime),
-`zigttp-runtime` (internal template used by self-contained outputs), and
-`zigts` (compiler, analyzer, and the interactive `expert` coding agent).
+The developer surface is a single binary: `zigttp`. The standalone
+`zigts` binary is also installed for IDE and CI integrations that prefer
+to call the analyzer directly; every `zigts <command>` is also reachable
+as `zigttp <command>`. The serverless runtime template ships as
+`zigttp-runtime` and is invoked automatically by `zigttp` itself — you
+should never need to type its name.
 
 Every command keeps its own `--help`. This page is the index.
 
-## `zigttp` developer CLI
+## Developer commands
 
 Day-to-day use is five commands. Everything else is advanced and stays
 out of the default help; run `zigttp help --all` for the full list.
@@ -130,56 +133,43 @@ header, `3` signature invalid, `4` fingerprint mismatch, `5` HTTP error.
 <bundle-dir>`: the first checks a live endpoint over HTTP, the second
 re-hashes the components of a locally-stored proof bundle.
 
-### `zigttp studio`
-
-Browser proof workbench for a handler. Runs the handler with
-`--watch --prove` and serves `/_zigttp/studio`.
-
-```bash
-zigttp studio examples/handler/handler.ts
-```
-
-The workbench mirrors the terminal proof card byte-for-byte in the
-browser, with tabs for `Properties / Trade / Handover` that match the
-TUI's lens rotation. Failing spec pills expand to the matching ZTS
-diagnostic; witness rows expand to the falsifying request and expected
-vs got. The TUI prints a `Studio mirror: http://...` footer wrapped in
-an OSC 8 hyperlink so modern terminals make it click-to-open.
-
 ### `zigttp doctor`
 
 Reports environment readiness: platform, manifest validity, entry-file
 presence, path permissions, and analyzer pass status.
 
-## `zigts` compiler and analyzer CLI
+## Machine tools
 
-Standalone analysis and compilation without starting a server.
+Standalone analysis and compilation without starting a server. All of
+these are also available as `zigts <command>` for IDE and CI tooling
+that prefers calling the analyzer binary directly; the surface and
+output formats are identical.
 
 ```bash
-zigts check [handler.ts] [options]
-zigts compile [--system path] <handler.ts> <out.zig>
-zigts prove <old.json> <new.json>             # exit 0=safe, 1=breaking, 2=needs_review
-zigts mock <tests.jsonl> [--port N]           # mock server from test cases
-zigts link <system.json>                      # cross-handler contract linking
-zigts rollout <old-system.json> <new-system.json>
-zigts features [--json]                       # allowed/blocked language features
-zigts modules [--json]                        # virtual modules and exports
-zigts restrictions [--json] [--by proof|class]
-zigts meta [--json]                           # policy metadata (version, hash, rule count)
-zigts gen-tests [handler.ts] [-o output.jsonl]
-zigts verify-paths <f>... [--json]            # full analysis (includes flow-checker)
-zigts verify-modules --builtins --strict --json
-zigts edit-simulate [handler.ts] [--before old.ts]
-zigts describe-rule [name|code] [--json] [--hash]
-zigts search <keyword> [--json]
-zigts review-patch <file> [--before <old>] [--diff-only]
-zigts ratchet show|check <handler.ts>
-zigts witnesses ...
+zigttp check [handler.ts] [options]
+zigttp compile [--system path] <handler.ts> <out.zig>
+zigttp prove <old.json> <new.json>             # exit 0=safe, 1=breaking, 2=needs_review
+zigttp mock <tests.jsonl> [--port N]           # mock server from test cases
+zigttp link <system.json>                      # cross-handler contract linking
+zigttp rollout <old-system.json> <new-system.json>
+zigttp features [--json]                       # allowed/blocked language features
+zigttp modules [--json]                        # virtual modules and exports
+zigttp restrictions [--json] [--by proof|class]
+zigttp meta [--json]                           # policy metadata (version, hash, rule count)
+zigttp gen-tests [handler.ts] [-o output.jsonl]
+zigttp verify-paths <f>... [--json]            # full analysis (includes flow-checker)
+zigttp verify-modules --builtins --strict --json
+zigttp edit-simulate [handler.ts] [--before old.ts]
+zigttp describe-rule [name|code] [--json] [--hash]
+zigttp search <keyword> [--json]
+zigttp review-patch <file> [--before <old>] [--diff-only]
+zigttp ratchet show|check <handler.ts>
+zigttp witnesses ...
 ```
 
 ### Structured JSON output
 
-`zigts check --json handler.ts` writes machine-readable diagnostics to
+`zigttp check --json handler.ts` writes machine-readable diagnostics to
 stdout. Add `--system system.json` when the handler uses `serviceCall()`
 and you want compile-time typing for internal service responses.
 
@@ -202,7 +192,7 @@ Code ranges: ZTS0xx parser, ZTS1xx sound mode, ZTS2xx type checker,
 ZTS3xx handler verifier, ZTS4xx flow checker, ZTS5xx author-declared
 specs, ZTS6xx strict ZigTS profile.
 
-## `zigts expert` interactive agent
+## `zigttp expert` interactive agent
 
 Compiler-in-the-loop coding agent. Picks its model backend from the
 environment: `ANTHROPIC_API_KEY` selects the Anthropic provider,
@@ -222,27 +212,27 @@ Full pi architecture: [../packages/pi/README.md](../packages/pi/README.md).
 
 ```bash
 # Interactive REPL
-zigts expert
-zigts expert --resume                    # resume newest session for this cwd
-zigts expert --continue                  # alias for --resume
-zigts expert --session-id <id>           # named or resumed session
-zigts expert --fork <session-id>         # branch from an existing session
-zigts expert --yes                       # auto-approve all verified edits
-zigts expert --no-edit                   # auto-reject all verified edits
-zigts expert --no-context-files          # skip AGENTS.md / CLAUDE.md load
-zigts expert --tools minimal             # workspace-read-only tool preset
-zigts expert --tools full                # full compiler tool preset (default)
+zigttp expert
+zigttp expert --resume                    # resume newest session for this cwd
+zigttp expert --continue                  # alias for --resume
+zigttp expert --session-id <id>           # named or resumed session
+zigttp expert --fork <session-id>         # branch from an existing session
+zigttp expert --yes                       # auto-approve all verified edits
+zigttp expert --no-edit                   # auto-reject all verified edits
+zigttp expert --no-context-files          # skip AGENTS.md / CLAUDE.md load
+zigttp expert --tools minimal             # workspace-read-only tool preset
+zigttp expert --tools full                # full compiler tool preset (default)
 
 # Non-interactive (one turn and exit)
-zigts expert --print "add a GET /health route"
-zigts expert --print "..." --mode json   # NDJSON event stream to stdout
+zigttp expert --print "add a GET /health route"
+zigttp expert --print "..." --mode json   # NDJSON event stream to stdout
 
 # Line-delimited JSON-RPC 2.0 over stdio (long-lived session)
-zigts expert --mode rpc
+zigttp expert --mode rpc
 
 # Property-goal autoloop (compiler-driven; LLM is not in the loop)
-zigts expert --handler handler.ts --goal no_secret_leakage,injection_safe
-zigts expert --handler handler.ts --goal no_secret_leakage --max-iters 4
+zigttp expert --handler handler.ts --goal no_secret_leakage,injection_safe
+zigttp expert --handler handler.ts --goal no_secret_leakage --max-iters 4
 ```
 
 In `--mode json`, each event is `{"v":1,"k":"<kind>","d":<payload>}`.

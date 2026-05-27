@@ -7,16 +7,15 @@ const self_extract = @import("self_extract.zig");
 const zigts_cli = @import("zigts_cli");
 const proofs_cli = @import("proofs_cli.zig");
 const witnesses_cli = @import("witnesses_cli.zig");
-const intent_runner = @import("intent_runner.zig");
 const precompile = zigts_cli.precompile;
 const shared = @import("cli_shared.zig");
 const runtime_cli = @import("runtime_cli.zig");
 const embedded_handler = @import("embedded_handler");
 const proof_ledger = @import("proof_ledger.zig");
 const ratchet_command = @import("ratchet_command.zig");
-// Hosted cloud deploy is deferred from v0.1.0-beta: the CLI entry points are
-// gated in `main` (see `rejectCloudCommand`). The control-plane module stays
-// imported so it keeps compiling, ready to re-enable in a later release.
+// Hosted cloud deploy is deferred from v0.1.0-beta. The control-plane module
+// stays imported so it keeps compiling, ready to re-enable in a later release;
+// only the `deploy --cloud` rejection in `main` remains user-visible.
 const deploy = @import("deploy.zig");
 const live_reload = @import("live_reload.zig");
 const demo = @import("demo.zig");
@@ -41,7 +40,6 @@ const hasHelpFlag = cli_args.hasHelpFlag;
 const hasLongHelpFlag = cli_args.hasLongHelpFlag;
 const containsString = cli_args.containsString;
 const deployArgsRequestCloud = cli_args.deployArgsRequestCloud;
-const rejectCloudCommand = cli_args.rejectCloudCommand;
 const printNoProjectConfigDiagnostic = cli_args.printNoProjectConfigDiagnostic;
 const handlePreflightError = cli_args.handlePreflightError;
 const cloud_only_deploy_flags = cli_args.cloud_only_deploy_flags;
@@ -49,13 +47,7 @@ const template_choices = cli_args.template_choices;
 
 /// Slice 1 placeholder. Replace with a build-injected constant (short git sha
 /// plus stable tag) when the `build.zig` wiring lands later in slice 1.
-/// Legacy alias. Slice 1 introduced `--attest` as an opt-in flag; slice 2
-/// flipped attestation default-on, so the spelling now warns once and is a
-/// no-op. `--no-attest` is the explicit opt-out.
-const attest_flag_legacy: []const u8 = "--attest";
 const no_attest_flag: []const u8 = "--no-attest";
-
-var attest_legacy_warned: bool = false;
 
 /// Shared help text describing `--no-attest`. Three command help printers
 /// all advertise the same flag; one source of truth prevents drift.
@@ -65,13 +57,6 @@ const no_attest_help_block: []const u8 =
     \\                        identity at ~/.zigttp/attest/keypair.bin.
     \\
 ;
-
-fn warnAttestLegacyOnce() void {
-    if (attest_legacy_warned) return;
-    attest_legacy_warned = true;
-    const msg = "note: --attest is now the default; drop the flag or pass --no-attest to opt out.\n";
-    _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-}
 
 pub fn main(init: std.process.Init.Minimal) !void {
     var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
@@ -258,7 +243,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.mem.eql(u8, command, "prove") or
         std.mem.eql(u8, command, "mock") or
         std.mem.eql(u8, command, "link") or
-        std.mem.eql(u8, command, "gen-tests"))
+        std.mem.eql(u8, command, "gen-tests") or
+        std.mem.eql(u8, command, "rollout") or
+        std.mem.eql(u8, command, "features") or
+        std.mem.eql(u8, command, "modules") or
+        std.mem.eql(u8, command, "restrictions") or
+        std.mem.eql(u8, command, "meta") or
+        std.mem.eql(u8, command, "verify-paths") or
+        std.mem.eql(u8, command, "verify-modules") or
+        std.mem.eql(u8, command, "verify-module-manifest") or
+        std.mem.eql(u8, command, "extension-status") or
+        std.mem.eql(u8, command, "edit-simulate") or
+        std.mem.eql(u8, command, "describe-rule") or
+        std.mem.eql(u8, command, "search") or
+        std.mem.eql(u8, command, "review-patch"))
     {
         zigts_cli.run(allocator, user_args) catch |err| {
             if (err == error.NoProjectConfig) {
@@ -337,7 +335,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try pi_app.run(allocator);
         return;
     }
-    if (std.mem.eql(u8, command, "login")) rejectCloudCommand("login");
     if (std.mem.eql(u8, command, "deploy")) {
         if (deployArgsRequestCloud(user_args[1..])) |flag| {
             std.debug.print(
@@ -391,10 +388,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (code != 0) std.process.exit(code);
         return;
     }
-    if (std.mem.eql(u8, command, "review")) rejectCloudCommand("review");
-    if (std.mem.eql(u8, command, "grants")) rejectCloudCommand("grants");
-    if (std.mem.eql(u8, command, "revoke-grant")) rejectCloudCommand("revoke-grant");
-    if (std.mem.eql(u8, command, "logout")) rejectCloudCommand("logout");
     if (std.mem.eql(u8, command, "proofs")) {
         // Expected user-input errors are explained on stderr by proofs_cli
         // itself; only unexpected ones (allocator, etc.) bubble.
@@ -409,10 +402,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
             if (witnesses_cli.isExpectedUserError(err)) std.process.exit(1);
             return err;
         };
-        return;
-    }
-    if (std.mem.eql(u8, command, "assert-intent")) {
-        try intent_runner.runWithArgs(allocator, user_args[1..]);
         return;
     }
     if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version")) {
@@ -1131,13 +1120,11 @@ const CompileCommandOptions = struct {
     handler_path: []const u8,
     output_path: []const u8,
     attest_requested: bool,
-    legacy_attest_seen: bool,
 };
 
 const BuildCommandOptions = struct {
     output_override: ?[]const u8,
     attest_requested: bool,
-    legacy_attest_seen: bool,
 };
 
 const CommandArgError = union(enum) {
@@ -1147,28 +1134,22 @@ const CommandArgError = union(enum) {
     unknown_arg: []const u8,
 };
 
-const CommandArgFailure = struct {
-    err: CommandArgError,
-    legacy_attest_seen: bool,
-};
-
 const CompileCommandParse = union(enum) {
-    help: bool,
+    help,
     ok: CompileCommandOptions,
-    err: CommandArgFailure,
+    err: CommandArgError,
 };
 
 const BuildCommandParse = union(enum) {
-    help: bool,
+    help,
     ok: BuildCommandOptions,
-    err: CommandArgFailure,
+    err: CommandArgError,
 };
 
 fn parseCompileCommandArgs(argv: []const []const u8) CompileCommandParse {
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
     var attest_requested = true;
-    var legacy_attest_seen = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -1176,17 +1157,13 @@ fn parseCompileCommandArgs(argv: []const []const u8) CompileCommandParse {
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
             i += 1;
             if (i >= argv.len) {
-                return .{ .err = .{ .err = .missing_output_value, .legacy_attest_seen = legacy_attest_seen } };
+                return .{ .err = .missing_output_value };
             }
             output_path = argv[i];
-        } else if (std.mem.eql(u8, arg, attest_flag_legacy)) {
-            // Kept as a no-op for parsing. The command emits the legacy warning
-            // after parse succeeds, so parse-only tests stay side-effect free.
-            legacy_attest_seen = true;
         } else if (std.mem.eql(u8, arg, no_attest_flag)) {
             attest_requested = false;
         } else if (std.mem.eql(u8, arg, "--help")) {
-            return .{ .help = legacy_attest_seen };
+            return .help;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             handler_path = arg;
         } else {
@@ -1195,22 +1172,21 @@ fn parseCompileCommandArgs(argv: []const []const u8) CompileCommandParse {
             // Without this branch, a typo like `--ouptut` was swallowed
             // and the build proceeded against the wrong (or default)
             // state with no diagnostic.
-            return .{ .err = .{ .err = .{ .unknown_arg = arg }, .legacy_attest_seen = legacy_attest_seen } };
+            return .{ .err = .{ .unknown_arg = arg } };
         }
     }
 
     if (handler_path == null) {
-        return .{ .err = .{ .err = .missing_handler_path, .legacy_attest_seen = legacy_attest_seen } };
+        return .{ .err = .missing_handler_path };
     }
     if (output_path == null) {
-        return .{ .err = .{ .err = .missing_output_flag, .legacy_attest_seen = legacy_attest_seen } };
+        return .{ .err = .missing_output_flag };
     }
 
     return .{ .ok = .{
         .handler_path = handler_path.?,
         .output_path = output_path.?,
         .attest_requested = attest_requested,
-        .legacy_attest_seen = legacy_attest_seen,
     } };
 }
 
@@ -1240,19 +1216,13 @@ fn failCompileCommandArgs(err: CommandArgError) !void {
 
 fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const opts = switch (parseCompileCommandArgs(argv)) {
-        .help => |legacy_attest_seen| {
-            if (legacy_attest_seen) warnAttestLegacyOnce();
+        .help => {
             printCompileHelp();
             return;
         },
         .ok => |opts| opts,
-        .err => |failure| {
-            if (failure.legacy_attest_seen) warnAttestLegacyOnce();
-            return failCompileCommandArgs(failure.err);
-        },
+        .err => |err| return failCompileCommandArgs(err),
     };
-
-    if (opts.legacy_attest_seen) warnAttestLegacyOnce();
 
     try buildArtifact(allocator, .{
         .handler_path = opts.handler_path,
@@ -1328,7 +1298,6 @@ fn prepareProjectArtifact(
 fn parseBuildCommandArgs(argv: []const []const u8) BuildCommandParse {
     var output_override: ?[]const u8 = null;
     var attest_requested = true;
-    var legacy_attest_seen = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -1336,26 +1305,21 @@ fn parseBuildCommandArgs(argv: []const []const u8) BuildCommandParse {
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
             i += 1;
             if (i >= argv.len) {
-                return .{ .err = .{ .err = .missing_output_value, .legacy_attest_seen = legacy_attest_seen } };
+                return .{ .err = .missing_output_value };
             }
             output_override = argv[i];
-        } else if (std.mem.eql(u8, arg, attest_flag_legacy)) {
-            // Kept as a no-op for parsing. The command emits the legacy warning
-            // after parse succeeds, so parse-only tests stay side-effect free.
-            legacy_attest_seen = true;
         } else if (std.mem.eql(u8, arg, no_attest_flag)) {
             attest_requested = false;
         } else if (std.mem.eql(u8, arg, "--help")) {
-            return .{ .help = legacy_attest_seen };
+            return .help;
         } else {
-            return .{ .err = .{ .err = .{ .unknown_arg = arg }, .legacy_attest_seen = legacy_attest_seen } };
+            return .{ .err = .{ .unknown_arg = arg } };
         }
     }
 
     return .{ .ok = .{
         .output_override = output_override,
         .attest_requested = attest_requested,
-        .legacy_attest_seen = legacy_attest_seen,
     } };
 }
 
@@ -1378,19 +1342,13 @@ fn failBuildCommandArgs(err: CommandArgError) !void {
 
 fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const opts = switch (parseBuildCommandArgs(argv)) {
-        .help => |legacy_attest_seen| {
-            if (legacy_attest_seen) warnAttestLegacyOnce();
+        .help => {
             printBuildHelp();
             return;
         },
         .ok => |opts| opts,
-        .err => |failure| {
-            if (failure.legacy_attest_seen) warnAttestLegacyOnce();
-            return failBuildCommandArgs(failure.err);
-        },
+        .err => |err| return failBuildCommandArgs(err),
     };
-
-    if (opts.legacy_attest_seen) warnAttestLegacyOnce();
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -1412,7 +1370,7 @@ fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     , .{ artifact.output_path, artifact.output_path });
 }
 
-const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local", attest_flag_legacy, no_attest_flag };
+const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local", no_attest_flag };
 
 fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var attest_requested = true;
@@ -1420,10 +1378,6 @@ fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         if (std.mem.eql(u8, arg, "--help")) {
             printLocalDeployHelp();
             return;
-        }
-        if (std.mem.eql(u8, arg, attest_flag_legacy)) {
-            warnAttestLegacyOnce();
-            continue;
         }
         if (std.mem.eql(u8, arg, no_attest_flag)) {
             attest_requested = false;
@@ -1567,7 +1521,7 @@ fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void 
     const attestation_jws: ?[]u8 = blk: {
         if (!attest_requested) break :blk null;
         const cj = contract_json orelse {
-            std.log.warn("--attest requested but no contract was emitted; skipping attestation", .{});
+            std.log.warn("attestation requested but no contract was emitted; skipping attestation", .{});
             break :blk null;
         };
         const contract_ptr = if (compiled.contract) |*c| c else break :blk null;
@@ -1885,7 +1839,6 @@ const core_help_all =
     \\  zigttp serve [handler.ts]              Run a handler without watch or proof
     \\  zigttp doctor [path]                   Check project readiness
     \\  zigttp demo                            Guided local proof theater
-    \\  zigttp studio [handler.ts]             Browser proof workbench
     \\  zigttp edge [--config FILE]            Run the in-process edge runtime
     \\
     \\Package:
@@ -1896,14 +1849,25 @@ const core_help_all =
     \\  zigttp proofs [list|show|diff|watch|export|badge|bundle|verify]
     \\  zigttp verify <url>                    Verify a deployed proof receipt
     \\
+    \\Machine tools (JSON output for IDE and review-bot integrations):
+    \\  zigttp features                        List supported language features
+    \\  zigttp modules                         List virtual module exports
+    \\  zigttp restrictions                    Show language restrictions and the proofs they unlock
+    \\  zigttp meta                            Compiler and policy metadata
+    \\  zigttp describe-rule [name|code]       Look up a diagnostic rule
+    \\  zigttp search <keyword>                Search rules by keyword
+    \\  zigttp verify-paths <file>...          Behavior-path verification
+    \\  zigttp verify-modules <file>...        Module-contract verification
+    \\  zigttp edit-simulate [handler.ts]      Simulate an edit and report violations
+    \\  zigttp review-patch <file>             Review a patch for new violations
+    \\  zigttp rollout <old-system> <new>      System-level deployment manifest
+    \\
     \\Advanced:
     \\  zigttp ratchet [show|check]            Property-regression gate
     \\  zigttp witnesses [list|pin|unpin|prune|synthesize]  Falsifying-input corpus
     \\  zigttp version                         Show version
     \\
     \\Every command keeps its own `--help`.
-    \\
-    \\The internal runtime template is installed as `zigttp-runtime`.
     \\
 ;
 
@@ -1981,11 +1945,19 @@ test "help --all surfaces the advanced commands" {
         }
     }.f;
     inline for (.{
-        "zigttp serve",  "zigttp build",  "zigttp compile", "zigttp doctor",
-        "zigttp proofs", "zigttp studio", "zigttp check",   "zigttp prove",
+        "zigttp serve",         "zigttp build",          "zigttp compile",
+        "zigttp doctor",        "zigttp proofs",         "zigttp check",
+        "zigttp prove",         "zigttp features",       "zigttp modules",
+        "zigttp restrictions",  "zigttp meta",           "zigttp describe-rule",
+        "zigttp verify-paths",  "zigttp verify-modules", "zigttp edit-simulate",
+        "zigttp review-patch",  "zigttp rollout",
     }) |cmd| {
         try std.testing.expect(has(core_help_all, cmd));
     }
+}
+
+test "help --all hides the browser studio workbench" {
+    try std.testing.expect(std.mem.indexOf(u8, core_help_all, "zigttp studio") == null);
 }
 
 test "hasAllFlag detects the --all escape hatch" {
@@ -2020,9 +1992,12 @@ test "help --all no longer advertises hosted cloud deploy" {
             return std.mem.indexOf(u8, haystack, needle) != null;
         }
     }.f;
+    // Trailing space avoids spurious substring matches with longer
+    // command names (e.g. `zigttp review` would otherwise match
+    // `zigttp review-patch`).
     inline for (.{
-        "zigttp login",  "zigttp logout",       "zigttp review",
-        "zigttp grants", "zigttp revoke-grant", "zigttp assert-intent",
+        "zigttp login ",  "zigttp logout ",       "zigttp review ",
+        "zigttp grants ", "zigttp revoke-grant ", "zigttp assert-intent ",
         "--cloud",
     }) |hidden| {
         try std.testing.expect(!has(core_help_all, hidden));
@@ -3188,10 +3163,10 @@ test "prepareProjectArtifact returns NoProjectConfig when no zigttp.json on or a
 
 test "compileCommand requires a handler positional" {
     const testing = std.testing;
-    try testing.expectEqual(CommandArgError.missing_handler_path, parseCompileCommandArgs(&.{}).err.err);
+    try testing.expectEqual(CommandArgError.missing_handler_path, parseCompileCommandArgs(&.{}).err);
     try testing.expectEqual(
         CommandArgError.missing_handler_path,
-        parseCompileCommandArgs(&.{ "-o", "out.bin" }).err.err,
+        parseCompileCommandArgs(&.{ "-o", "out.bin" }).err,
     );
 }
 
@@ -3200,7 +3175,7 @@ test "compileCommand requires -o" {
     // Handler positional present, but -o missing.
     try testing.expectEqual(
         CommandArgError.missing_output_flag,
-        parseCompileCommandArgs(&.{"handler.ts"}).err.err,
+        parseCompileCommandArgs(&.{"handler.ts"}).err,
     );
 }
 
@@ -3210,7 +3185,7 @@ test "compileCommand rejects bare -o without a follow-up path" {
     // must fire as MissingArgument rather than silently leaving output null.
     try testing.expectEqual(
         CommandArgError.missing_output_value,
-        parseCompileCommandArgs(&.{ "handler.ts", "-o" }).err.err,
+        parseCompileCommandArgs(&.{ "handler.ts", "-o" }).err,
     );
 }
 
@@ -3218,17 +3193,17 @@ test "buildCommand rejects bare -o without a follow-up path" {
     const testing = std.testing;
     try testing.expectEqual(
         CommandArgError.missing_output_value,
-        parseBuildCommandArgs(&.{"-o"}).err.err,
+        parseBuildCommandArgs(&.{"-o"}).err,
     );
 }
 
 test "buildCommand rejects unknown flags as UnknownOption" {
     const testing = std.testing;
-    // Anything past the known set (`-o`, `--no-attest`, legacy `--attest`,
-    // `--help`) hits the catch-all branch and exits with UnknownOption so
+    // Anything past the known set (`-o`, `--no-attest`, `--help`) hits
+    // the catch-all branch and exits with UnknownOption so
     // the user knows their flag was not recognised.
-    try testing.expectEqualStrings("--unknown-flag", parseBuildCommandArgs(&.{"--unknown-flag"}).err.err.unknown_arg);
-    try testing.expectEqualStrings("unexpected_positional", parseBuildCommandArgs(&.{"unexpected_positional"}).err.err.unknown_arg);
+    try testing.expectEqualStrings("--unknown-flag", parseBuildCommandArgs(&.{"--unknown-flag"}).err.unknown_arg);
+    try testing.expectEqualStrings("unexpected_positional", parseBuildCommandArgs(&.{"unexpected_positional"}).err.unknown_arg);
 }
 
 test "compileCommand rejects unknown -prefixed flags symmetrically with buildCommand" {
@@ -3238,6 +3213,6 @@ test "compileCommand rejects unknown -prefixed flags symmetrically with buildCom
     // positional branch. A typo like `--ouptut` would be ignored and the
     // build would proceed with the default state. The new else arm
     // returns UnknownOption — same behaviour as buildCommand.
-    try testing.expectEqualStrings("--ouptut", parseCompileCommandArgs(&.{ "--ouptut", "out.bin", "handler.ts" }).err.err.unknown_arg);
-    try testing.expectEqualStrings("--json", parseCompileCommandArgs(&.{ "--json", "handler.ts", "-o", "out.bin" }).err.err.unknown_arg);
+    try testing.expectEqualStrings("--ouptut", parseCompileCommandArgs(&.{ "--ouptut", "out.bin", "handler.ts" }).err.unknown_arg);
+    try testing.expectEqualStrings("--json", parseCompileCommandArgs(&.{ "--json", "handler.ts", "-o", "out.bin" }).err.unknown_arg);
 }

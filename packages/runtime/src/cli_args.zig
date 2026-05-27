@@ -52,19 +52,6 @@ pub fn deployArgsRequestCloud(argv: []const []const u8) ?[]const u8 {
     return null;
 }
 
-/// Hosted cloud deploy (`login`, `logout`, `review`, `grants`, `revoke-grant`,
-/// and `deploy --cloud`) is deferred from v0.1.0-beta. The control-plane code
-/// stays in the tree; only these CLI entry points are gated, so the path is
-/// trivially re-enabled in a later release.
-pub fn rejectCloudCommand(name: []const u8) noreturn {
-    std.debug.print(
-        "zigttp {s} is part of hosted cloud deploy, which is not available in v0.1.0-beta.\n" ++
-            "`zigttp deploy` builds a self-contained binary you can run anywhere.\n",
-        .{name},
-    );
-    std.process.exit(1);
-}
-
 pub fn printNoProjectConfigDiagnostic(command: []const u8) void {
     std.debug.print(
         \\No zigttp.json found in the current directory or any parent.

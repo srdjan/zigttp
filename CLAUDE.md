@@ -10,9 +10,9 @@ Validated on Zig 0.16.0 stable.
 
 The build produces three binaries:
 
-- `zigttp` — the primary developer CLI and local runtime entrypoint. `zigttp --help` advertises only the five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Everything else is advanced and listed under `zigttp help --all`: the analyzer commands `check`, `prove`, `mock`, `link`, `gen-tests`, plus `serve`, `compile`, `build`, `verify`, `doctor`, `demo`, `studio`, `edge`, `proofs` (with `list | show | diff | watch | export | badge | bundle | verify` subcommands), `ratchet` (with `show | check` subcommands), `witnesses`. The top-level `zigttp verify <url>` is the proof-receipt verifier and is distinct from `zigttp proofs verify <bundle-dir>` (bundle integrity). Hosted cloud deploy is deferred from v0.1.0-beta: `deploy --cloud`, `login`, `logout`, `review`, `grants`, and `revoke-grant` are gated at the CLI boundary and reject with a "not in this beta" message; their control-plane code stays in `packages/runtime/src/deploy/`. The experimental `assert-intent` command still dispatches but is hidden from `help --all`.
-- `zigttp-runtime` — the internal runtime template used for self-contained outputs and direct runtime tests.
-- `zigts` — the engine/compiler CLI plus the interactive `zigts expert` coding-agent entrypoint.
+- `zigttp` — the primary developer CLI and local runtime entrypoint. `zigttp --help` advertises only the five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Everything else is advanced and listed under `zigttp help --all`: the analyzer commands `check`, `prove`, `mock`, `link`, `gen-tests`, `rollout`, plus `serve`, `compile`, `build`, `verify`, `doctor`, `demo`, `edge`, `proofs` (with `list | show | diff | watch | export | badge | bundle | verify` subcommands), `ratchet` (with `show | check` subcommands), `witnesses`. A "Machine tools" section in `help --all` lists the JSON-output commands `features`, `modules`, `restrictions`, `meta`, `describe-rule`, `search`, `verify-paths`, `verify-modules`, `edit-simulate`, and `review-patch` — all reachable as `zigttp <command>` via thin delegations into the same code path the `zigts` binary uses. The top-level `zigttp verify <url>` is the proof-receipt verifier and is distinct from `zigttp proofs verify <bundle-dir>` (bundle integrity). The browser proof workbench (`zigttp studio`) is built but hidden from help in v0.1.0-beta. Hosted cloud deploy is deferred too: `deploy --cloud` still parses and rejects with a "not in this beta" message; the related account verbs (`login`, `logout`, `review`, `grants`, `revoke-grant`) are not dispatched and treated as unknown commands. Control-plane code stays under `packages/deploy/` ready to re-enable.
+- `zigttp-runtime` — the internal runtime template used for self-contained outputs and direct runtime tests. Invoked automatically by `zigttp`; users never type its name.
+- `zigts` — the engine/compiler CLI installed alongside `zigttp` for IDE and CI integrations that prefer calling the analyzer directly. Every `zigts <command>` is also reachable as `zigttp <command>`; surface and output formats are identical.
 
 ```bash
 zig build                                      # Debug build (all three binaries)
@@ -125,35 +125,37 @@ TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, r
 
 `zigttp deploy` takes no arguments. It auto-detects the handler file and project name in the current directory, verifies the handler, and emits a self-contained binary at `.zigttp/deploy/<project-name>` with a `kind=deploy` row appended to `.zigttp/proofs.jsonl`. No credentials, Docker, or network. `zigttp deploy --local` and `--target local` are explicit aliases. Hosted cloud deploy (`--cloud`) is deferred from v0.1.0-beta. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
 
-Proof receipts ship default-on as of slice 2: every fresh `compile`, `build`, or `deploy --local` signs the contract, bytecode, and rule-registry hashes with the persistent Ed25519 identity at `~/.zigttp/attest/keypair.bin` (generated on first use, mode 0600) and embeds the JWS in the self-extracting binary. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request and serves `GET /.well-known/zigttp-attest` with the full attestation envelope plus the JWK public key (ETag, `Cache-Control: max-age=3600`, 304 on `If-None-Match`). `zigttp verify <url>` validates the signature from any third-party machine. Opt out for a specific build with `--no-attest`; the legacy `--attest` flag still works but warns once per process. Specs: [docs/roadmap/attest-slice-1.md](docs/roadmap/attest-slice-1.md), [docs/roadmap/attest-slice-2.md](docs/roadmap/attest-slice-2.md).
+Proof receipts ship default-on as of slice 2: every fresh `compile`, `build`, or `deploy --local` signs the contract, bytecode, and rule-registry hashes with the persistent Ed25519 identity at `~/.zigttp/attest/keypair.bin` (generated on first use, mode 0600) and embeds the JWS in the self-extracting binary. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request and serves `GET /.well-known/zigttp-attest` with the full attestation envelope plus the JWK public key (ETag, `Cache-Control: max-age=3600`, 304 on `If-None-Match`). `zigttp verify <url>` validates the signature from any third-party machine. Opt out for a specific build with `--no-attest`. Specs: [docs/roadmap/attest-slice-1.md](docs/roadmap/attest-slice-1.md), [docs/roadmap/attest-slice-2.md](docs/roadmap/attest-slice-2.md).
 
-### zigts (compiler/analyzer)
+### Machine tools (analyzer surface)
+
+Every analyzer command is reachable as `zigttp <command>`. The standalone `zigts` binary is also installed for IDE and CI integrations; surface and output formats are identical.
 
 ```bash
-zigts check [handler.ts] [--json] [--contract] [--types] [--sql-schema path] [--system path] [--require-export-capsules]
-zigts compile [flags] <handler.ts> <output.zig>
-zigts prove <old.json> <new.json> [output-dir/]
-zigts mock <tests.jsonl> [--port PORT]
-zigts link <system.json> [--output-dir <dir>]
-zigts features [--json]
-zigts modules [--json]
-zigts restrictions [--json] [--by proof|class]
-zigts meta [--json]
-zigts verify-paths <file>... [--json]
-zigts verify-modules <file>... [--strict] [--json]
-zigts verify-modules --builtins [--strict] [--json]
-zigts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
-zigts describe-rule [rule-name|code] [--json] [--hash]
-zigts search <keyword> [--json]
-zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
-zigts expert
+zigttp check [handler.ts] [--json] [--contract] [--types] [--sql-schema path] [--system path] [--require-export-capsules]
+zigttp compile [flags] <handler.ts> <output.zig>
+zigttp prove <old.json> <new.json> [output-dir/]
+zigttp mock <tests.jsonl> [--port PORT]
+zigttp link <system.json> [--output-dir <dir>]
+zigttp features [--json]
+zigttp modules [--json]
+zigttp restrictions [--json] [--by proof|class]
+zigttp meta [--json]
+zigttp verify-paths <file>... [--json]
+zigttp verify-modules <file>... [--strict] [--json]
+zigttp verify-modules --builtins [--strict] [--json]
+zigttp edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
+zigttp describe-rule [rule-name|code] [--json] [--hash]
+zigttp search <keyword> [--json]
+zigttp review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
+zigttp expert
 ```
 
-`--json` emits structured diagnostics to stdout with error codes (ZTS0xx-ZTS3xx), source locations, and suggestion fields. `zigts features` and `zigts modules` list language rules and virtual module exports. `zigts restrictions` projects every blocked feature into the failure class it eliminates and the proof it unlocks (see [docs/restrictions-to-proofs.md](docs/restrictions-to-proofs.md) for the table). `zigts expert` is the canonical interactive compiler-in-the-loop workflow.
+`--json` emits structured diagnostics to stdout with error codes (ZTS0xx-ZTS3xx), source locations, and suggestion fields. `zigttp features` and `zigttp modules` list language rules and virtual module exports. `zigttp restrictions` projects every blocked feature into the failure class it eliminates and the proof it unlocks (see [docs/restrictions-to-proofs.md](docs/restrictions-to-proofs.md) for the table). `zigttp expert` is the canonical interactive compiler-in-the-loop workflow.
 
-`zigts edit-simulate` runs the analysis pipeline on a handler file and reports violations as JSON. With `--before`, it marks violations introduced by the edit vs pre-existing. `zigts describe-rule` lists all diagnostic rules; `--hash` outputs the policy hash for CI assertions. `zigts search` finds rules by keyword. `zigts review-patch` combines edit-simulate with `--diff-only` filtering to show only new violations.
+`zigttp edit-simulate` runs the analysis pipeline on a handler file and reports violations as JSON. With `--before`, it marks violations introduced by the edit vs pre-existing. `zigttp describe-rule` lists all diagnostic rules; `--hash` outputs the policy hash for CI assertions. `zigttp search` finds rules by keyword. `zigttp review-patch` combines edit-simulate with `--diff-only` filtering to show only new violations.
 
-`zigts meta`, `zigts verify-paths`, and `zigts verify-modules` are the machine-facing verification surface. `zigts expert` is the interactive agent that uses the same underlying analyzers in-process.
+`zigttp meta`, `zigttp verify-paths`, and `zigttp verify-modules` are the machine-facing verification surface. `zigttp expert` is the interactive agent that uses the same underlying analyzers in-process.
 
 ## Conventions
 

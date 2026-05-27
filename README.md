@@ -24,7 +24,7 @@ flips back green.
 zigttp init my-app && cd my-app && zigttp dev
 ```
 
-See [`zigts restrictions`](docs/restrictions-to-proofs.md) for the
+See [`zigttp restrictions`](docs/restrictions-to-proofs.md) for the
 cut-to-proof map and [`examples/README.md`](examples/README.md) for
 the curated reading order.
 
@@ -130,9 +130,9 @@ and more.
   WebSocket, durable, scope - implemented in Zig with capability
   declarations enforced at call time.
   [Virtual modules index](docs/virtual-modules/README.md).
-- **`zigts expert` interactive agent.** Compiler-in-the-loop coding
+- **`zigttp expert` interactive agent.** Compiler-in-the-loop coding
   agent with a property-goal autoloop where the compiler (not the
-  LLM) drives convergence. [CLI reference](docs/cli.md#zigts-expert-interactive-agent),
+  LLM) drives convergence. [CLI reference](docs/cli.md#zigttp-expert-interactive-agent),
   [autoloop](docs/roadmap/autoloop.md).
 
 ## Numbers
