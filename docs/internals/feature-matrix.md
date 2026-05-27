@@ -37,6 +37,23 @@ Sources used to populate this matrix:
 - **Test fixture**: the most-precise existing fixture path. **gap** means
   no fixture pins this feature end-to-end at handler level.
 
+## Coverage policy
+
+Use JSONL handler fixtures selectively. Pick the smallest test layer that can
+catch a real regression:
+
+- Use an end-to-end fixture for runtime behavior that crosses parser, codegen,
+  interpreter, and the handler response path.
+- Use a Zig unit test for parser-only, stripper-only, type-checker,
+  strict-checker, JIT, or diagnostic behavior.
+- Count existing example coverage only when the assertion proves the result. A
+  broad `bodyContains` check can show that a handler ran, but it does not prove
+  each syntax feature in the source.
+
+Features that parse but are banned by `docs/canonical-profile.md` should not
+create new end-to-end fixture backlog unless the test is specifically for the
+rejection rule.
+
 ## Runtime syntax
 
 | Feature | Parser | IR | Codegen | Interp | Baseline JIT | Optimized JIT | Test fixture |
@@ -48,36 +65,35 @@ Sources used to populate this matrix:
 | Object literals | OK | OK | `new_object_literal`, `set_slot` | OK | TODO-verify | TODO-verify | examples/handler/handler.test.jsonl |
 | Array literals | OK | OK | `new_array` | OK | TODO-verify | TODO-verify | examples/handler/handler.test.jsonl |
 | Destructuring (object, array) | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | examples/handler/sugar.test.jsonl |
-| Spread in arrays / calls | OK | OK | `array_spread`, `call_spread` | OK | TODO-verify | TODO-verify | gap |
+| Object/array spread | OK | OK | `array_spread` / object-spread lowering | OK | TODO-verify | TODO-verify | examples/handler/feature-probes.test.jsonl |
 | Template literals | OK | OK | `concat_n`, `concat_2` | OK | TODO-verify | TODO-verify | examples/handler/sugar.test.jsonl |
 | `if` / `else` | OK | OK | `if_true`, `if_false`, `goto` | OK | TODO-verify | TODO-verify | examples/handler/handler.test.jsonl |
 | `for...of` over arrays | OK | OK | `for_of_next`, `for_of_next_put_loc` | OK | TODO-verify | TODO-verify | examples/handler/handler.test.jsonl |
-| `for...of` over `range(n)` | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | gap |
-| `break` / `continue` in `for...of` | OK | OK | `goto`, `drop_goto` | OK | TODO-verify | TODO-verify | gap |
+| `for...of` over `range(n)` | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | examples/handler/feature-probes.test.jsonl |
+| `break` / `continue` in `for...of` | OK | OK | `goto`, `drop_goto` | OK | TODO-verify | TODO-verify | examples/handler/feature-probes.test.jsonl |
 | Strict equality `===` / `!==` | OK | OK | `strict_eq`, `strict_neq` | OK | TODO-verify | TODO-verify | examples/handler/handler.test.jsonl |
-| Optional chaining `?.` | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | gap |
-| Nullish coalescing `??` | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | gap |
-| Compound arithmetic `+=`, `*=`, etc. | OK | OK | `add_const_i8` etc. | OK | TODO-verify | TODO-verify | gap |
-| Compound bitwise `&=`, `|=`, `^=`, `<<=`, `>>=` | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | gap |
-| Pipe operator `\|>` | OK (parse.zig:4327) | OK | TODO-verify | OK | TODO-verify | TODO-verify | gap |
+| Optional chaining `?.` | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | examples/handler/feature-probes.test.jsonl |
+| Nullish coalescing `??` | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | examples/handler/feature-probes.test.jsonl |
+| Compound arithmetic `+=`, `*=`, etc. | OK | OK | `add_const_i8` etc. | OK | TODO-verify | TODO-verify | unit coverage: `strict_checker.zig` (`ZTS613` canonical rejection) |
+| Compound bitwise `&=`, `|=`, `^=`, `<<=`, `>>=` | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | parser unit coverage; no end-to-end fixture backlog |
+| Pipe operator `\|>` | OK (parse.zig:4327) | OK | TODO-verify | OK | TODO-verify | TODO-verify | examples/handler/sugar.test.jsonl |
 | `match` expression | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | examples/routing/match-handler.test.jsonl |
-| `assert` statement | OK (parse.zig:4074) | OK | TODO-verify | OK | TODO-verify | TODO-verify | gap |
+| `assert` statement | OK (parse.zig:4074) | OK | TODO-verify | OK | TODO-verify | TODO-verify | examples/handler/feature-probes.test.jsonl |
 | JSX / TSX | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | examples/jsx/jsx-ssr.test.jsonl |
-| Closures (capture by reference) | OK | OK | `make_closure`, `get_upvalue`, `put_upvalue`, `close_upvalue` | OK | TODO-verify | TODO-verify | gap |
-| Tail call `return f(...)` | OK | OK | `tail_call` | OK | TODO-verify | TODO-verify | gap |
+| Closures (capture by reference) | OK | OK | `make_closure`, `get_upvalue`, `put_upvalue`, `close_upvalue` | OK | TODO-verify | TODO-verify | examples/handler/feature-probes.test.jsonl |
+| Tail call `return f(...)` | OK | OK | `tail_call` | OK | TODO-verify | TODO-verify | examples/handler/feature-probes.test.jsonl |
 
 ## Standard library helpers
 
 | Feature | Parser | IR | Codegen | Interp | Baseline JIT | Optimized JIT | Test fixture |
 |---|---|---|---|---|---|---|---|
-| `Object.keys` / `Object.values` / `Object.entries` | OK | OK | `get_global`, `call` | OK | TODO-verify | TODO-verify | gap |
-| `Math.floor` / `ceil` / `round` / `abs` | OK | OK | `math_floor`, `math_ceil`, `math_round`, `math_abs` | OK | TODO-verify | TODO-verify | gap |
-| `Math.min` / `Math.max` (2-arg) | OK | OK | `math_min2`, `math_max2` | OK | TODO-verify | TODO-verify | gap |
+| `Object.keys` / `Object.values` / `Object.entries` | OK | OK | `get_global`, `call` | OK | TODO-verify | TODO-verify | examples/handler/sugar.test.jsonl; examples/handler/feature-probes.test.jsonl |
+| `Math.floor` / `ceil` / `round` / `abs` | OK | OK | `math_floor`, `math_ceil`, `math_round`, `math_abs` | OK | TODO-verify | TODO-verify | examples/handler/feature-probes.test.jsonl |
+| `Math.min` / `Math.max` (2-arg) | OK | OK | `math_min2`, `math_max2` | OK | TODO-verify | TODO-verify | examples/handler/feature-probes.test.jsonl |
 | `console.log` | OK | OK | TODO-verify | OK | none | none | examples/handler/handler.test.jsonl |
 | `JSON.parse` / `JSON.stringify` | OK | OK | TODO-verify | OK | none | none | examples/handler/handler.test.jsonl |
-| Array HOFs (`.map`, `.filter`, `.reduce`, `.forEach`) | OK | OK | `call_method` | OK | TODO-verify | TODO-verify | gap |
-| `range(n)` | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | gap |
-| Typed arrays | OK | TODO-verify | TODO-verify | TODO-verify | TODO-verify | TODO-verify | gap |
+| Array HOFs (`.map`, `.filter`, `.reduce`, `.forEach`) | OK | OK | `call_method` | OK | TODO-verify | TODO-verify | examples/handler/sugar.test.jsonl; examples/handler/feature-probes.test.jsonl |
+| `range(n)` | OK | OK | TODO-verify | OK | TODO-verify | TODO-verify | examples/handler/feature-probes.test.jsonl |
 
 ## TypeScript surface (stripped before runtime, then checked by analyzer)
 
@@ -85,15 +101,15 @@ Sources used to populate this matrix:
 |---|---|---|---|---|---|
 | Type aliases | OK | OK | `type_pool.zig` | strip-only | examples/handler/handler-ts.test.jsonl |
 | Generic type aliases | OK | OK | `type_pool.zig` | strip-only | examples/handler/handler-ts.test.jsonl |
-| `distinct type` | OK | OK | `type_pool.zig` | strip-only | gap |
-| Interfaces | OK | OK | `type_pool.zig` | strip-only | gap |
+| `distinct type` | OK | OK | `type_pool.zig` | strip-only | unit coverage: `stripper.zig`, `type_checker.zig` |
+| Interfaces | OK | OK | `type_pool.zig` | strip-only | unit coverage: `stripper.zig` |
 | Variable / parameter / return annotations | OK | OK | `type_pool.zig` | strip-only | examples/handler/handler-ts.test.jsonl |
-| Function generics | OK | OK | `type_pool.zig` | strip-only | gap |
+| Function generics | OK | OK | `type_pool.zig` | strip-only | unit coverage: `stripper.zig`, `type_pool.zig` |
 | `import type` / `export type` | OK | OK | `type_pool.zig` | strip-only | examples/handler/handler-ts.test.jsonl |
-| `Spec<T>`, `Proof<T,S>`, `Effects<T,S>` from `zigttp:types` | OK | OK | `type_pool.zig` (t_intersection) | strip-only | gap |
-| Type guards `x is T` | OK | OK | `type_pool.zig` | strip-only | gap |
-| Readonly fields | OK | OK | `type_pool.zig` | strip-only | gap |
-| Template literal types | OK | OK | `type_pool.zig` (matchesTemplateLiteral, type_pool.zig:1934) | strip-only | gap |
+| `Spec<T>`, `Proof<T,S>`, `Effects<T,S>` from `zigttp:types` | OK | OK | `type_pool.zig` (t_intersection) | strip-only | unit coverage: `stripper.zig`, `type_pool.zig` |
+| Type guards `x is T` | OK | OK | `type_pool.zig` | strip-only | unit coverage: `stripper.zig` |
+| Readonly fields | OK | OK | `type_pool.zig` | strip-only | unit coverage: `type_pool.zig`, `type_checker.zig` |
+| Template literal types | OK | OK | `type_pool.zig` (matchesTemplateLiteral, type_pool.zig:1934) | strip-only | unit coverage: `type_pool.zig`, `type_checker.zig` |
 
 ## Unsupported (rejected at parse/strip with suggestion)
 
@@ -118,29 +134,27 @@ Sources used to populate this matrix:
 
 ## Identified gaps
 
-These features appear in `docs/language-subset.md` as supported but the
-matrix shows **gap** in the Test fixture column. Promoting them to **OK**
-requires either pointing at an existing fixture I missed or adding a
-small handler that exercises the feature and a `.test.jsonl` next to it.
+The high-value end-to-end backlog from the first pass is now covered by
+`examples/handler/feature-probes.test.jsonl` plus the stricter
+`examples/handler/sugar.test.jsonl`. Remaining matrix work is tier-specific:
+replace `TODO-verify` cells with code references or unit fixtures for
+baseline and optimized JIT behavior.
 
-- Spread in array literals and call arguments
-- `for...of` over `range(n)` (range itself is documented; `for...of` over
-  range is the composition that matters)
-- `break` / `continue` inside `for...of`
-- Optional chaining `?.`
-- Nullish coalescing `??`
-- Compound arithmetic and bitwise assignments
-- Pipe operator `|>`
-- `assert` statement
-- Closures with upvalue capture
-- Tail calls
-- `Object.keys` / `values` / `entries` end-to-end (handler scope)
-- `Math.*` end-to-end
-- Array HOFs (`map`, `filter`, `reduce`, `forEach`)
-- Typed arrays
-- `distinct type`, interfaces, generic functions, type guards, readonly
-  fields, template literal types — TS surface, mostly strip-only but
-  unobserved at handler scope
+Covered or tracked outside end-to-end fixtures:
+
+- Compound arithmetic and bitwise assignments: parser support exists, and the
+  canonical profile rejects compound assignment through `ZTS613`. Keep this at
+  parser/strict-checker unit level.
+- Call-site spread: the canonical profile rejects it through `ZTS616`, and
+  `docs/canonical-profile.md` records incomplete parser support. Do not add a
+  passing handler fixture for it.
+- TypeScript strip-only constructs (`distinct type`, interfaces, function
+  generics, `Spec<T>`, `Proof<T,S>`, `Effects<T,S>`, type guards, readonly
+  fields, template literal types): keep coverage in `stripper.zig`,
+  `type_pool.zig`, and `type_checker.zig` unless the runtime surface changes.
+- Typed arrays: not listed in `docs/language-subset.md`; keep them out of the
+  supported-feature fixture backlog until the product surface explicitly adds
+  them.
 
 ## JIT tier coverage
 

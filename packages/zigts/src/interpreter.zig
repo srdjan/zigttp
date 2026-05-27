@@ -1447,11 +1447,11 @@ pub const Interpreter = struct {
                         if (len_val.isInt()) {
                             const src_len: usize = @intCast(len_val.getInt());
                             for (0..src_len) |i| {
-                                const elem = source.getSlot(@intCast(i));
+                                const elem = source.getIndex(@intCast(i)) orelse value.JSValue.undefined_val;
                                 if (self.ctx.enforce_arena_escape and self.ctx.hybrid != null and !target.flags.is_arena and self.ctx.isEphemeralValue(elem)) {
                                     return error.ArenaObjectEscape;
                                 }
-                                target.setSlot(@intCast(idx), elem);
+                                try self.ctx.setIndexChecked(target, @intCast(idx), elem);
                                 idx += 1;
                             }
                             try self.ctx.push(value.JSValue.fromInt(@intCast(idx)));
@@ -1460,6 +1460,26 @@ pub const Interpreter = struct {
                     }
                 }
                 try self.ctx.push(idx_val);
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .object_spread => {
+                // Stack: [target_object, source_object]
+                self.advanceOp();
+                const source_val = self.ctx.pop();
+                const target_val = self.ctx.peek();
+
+                if (target_val.isObject() and source_val.isObject()) {
+                    const target = object.JSObject.fromValue(target_val);
+                    const source = object.JSObject.fromValue(source_val);
+                    const pool = self.ctx.hidden_class_pool orelse continue :sw @enumFromInt(self.pc[0]);
+                    const keys = try source.getOwnEnumerableKeys(self.ctx.allocator, pool);
+                    defer self.ctx.allocator.free(keys);
+
+                    for (keys) |key| {
+                        const prop_val = source.getProperty(pool, key) orelse value.JSValue.undefined_val;
+                        try self.ctx.setPropertyChecked(target, key, prop_val);
+                    }
+                }
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .call_spread => {

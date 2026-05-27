@@ -52,6 +52,7 @@ run_tests "examples/handler/handler-full.tsx" "examples/handler/handler.test.jso
 run_tests "examples/handler/handler.ts"       "examples/handler/handler-ts.test.jsonl"
 run_tests "examples/handler/handler.tsx"       "examples/handler/handler-tsx.test.jsonl"
 run_tests "examples/handler/sugar.ts"          "examples/handler/sugar.test.jsonl"
+run_tests "examples/handler/feature-probes.ts" "examples/handler/feature-probes.test.jsonl"
 
 # jsx/
 run_tests "examples/jsx/jsx-simple.tsx"    "examples/jsx/jsx-simple.test.jsonl"

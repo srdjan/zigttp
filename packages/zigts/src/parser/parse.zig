@@ -2049,7 +2049,7 @@ pub const Parser = struct {
                     const spread_node = try self.nodes.add(.{
                         .tag = .spread,
                         .loc = loc,
-                        .data = .{ .unary = .{ .op = .neg, .operand = spread_expr } },
+                        .data = .{ .opt_value = spread_expr },
                     });
                     try args.append(self.allocator, spread_node);
                 } else {
@@ -2360,7 +2360,7 @@ pub const Parser = struct {
                     const spread_node = try self.nodes.add(.{
                         .tag = .spread,
                         .loc = loc,
-                        .data = .{ .unary = .{ .op = .neg, .operand = spread_expr } },
+                        .data = .{ .opt_value = spread_expr },
                     });
                     try elements.append(self.allocator, spread_node);
                 } else {
@@ -4326,6 +4326,30 @@ test "unsupported: logical compound assignment &&=" {
         return;
     };
     try std.testing.expect(false);
+}
+
+test "array spread parses" {
+    var parser = Parser.init(std.testing.allocator, "const xs = [0, ...rest, 3];");
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "call spread parses before canonical-profile rejection" {
+    var parser = Parser.init(std.testing.allocator, "const r = f(...args);");
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
 }
 
 test "pipe operator: simple" {

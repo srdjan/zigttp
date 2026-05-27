@@ -1556,9 +1556,8 @@ pub const JSObject = extern struct {
                 }
             } else if (data_val.isExternPtr()) {
                 if (self.inline_slots[Slots.FUNC_IS_CLOSURE].isTrue()) {
-                    // Closure - free ClosureData (which owns upvalues array)
+                    // Closure bytecode is owned by the parent function constant pool.
                     const closure_data = data_val.toExternPtr(ClosureData);
-                    destroyFunctionBytecode(allocator, @constCast(closure_data.bytecode));
                     closure_data.deinit(allocator);
                     allocator.destroy(closure_data);
                 } else {

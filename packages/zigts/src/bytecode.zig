@@ -142,6 +142,7 @@ pub const Opcode = enum(u8) {
     make_function = 0x86, // +u16 const_idx (creates function from bytecode in constant pool)
     array_spread = 0x87, // Spread source array into target array (pops source, target on stack)
     call_spread = 0x88, // Call function with spread args (special handling)
+    object_spread = 0x89, // Copy enumerable properties from source object into target object
 
     // Type checks
     typeof = 0x90,
@@ -338,6 +339,7 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         .make_function => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "make_function" },
         .array_spread => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "array_spread" },
         .call_spread => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "call_spread" },
+        .object_spread => .{ .size = 1, .n_pop = 1, .n_push = 0, .name = "object_spread" },
 
         // Type checks
         .typeof => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "typeof" },

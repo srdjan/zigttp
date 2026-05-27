@@ -1075,7 +1075,7 @@ pub const IRStore = struct {
             },
             .optional_chain => blk: {
                 const m = node.data.member;
-                const b_val = m.computed | (@as(u32, m.property) << 16);
+                const b_val = @as(u32, m.property) | (@as(u32, 1) << 16);
                 break :blk self.addNode(.optional_chain, loc, .{ .a = m.object, .b = b_val });
             },
             .assignment => blk: {

@@ -3243,13 +3243,17 @@ fn writePolicySectionFromAllowList(writer: anytype, field_name: []const u8, sect
     if (section) |allow| {
         try writer.writeAll(".{\n");
         try writer.writeAll("        .enabled = true,\n");
-        try writer.writeAll("        .values = &[_][]const u8{\n");
-        for (allow.values.items) |item| {
-            try writer.writeAll("            ");
-            try writeZigStringLiteral(writer, item);
-            try writer.writeAll(",\n");
+        if (allow.values.items.len == 0) {
+            try writer.writeAll("        .values = &[_][]const u8{},\n");
+        } else {
+            try writer.writeAll("        .values = &[_][]const u8{\n");
+            for (allow.values.items) |item| {
+                try writer.writeAll("            ");
+                try writeZigStringLiteral(writer, item);
+                try writer.writeAll(",\n");
+            }
+            try writer.writeAll("        },\n");
         }
-        try writer.writeAll("        },\n");
         try writer.writeAll("    },\n");
         return;
     }
@@ -3265,13 +3269,17 @@ fn writeContractDerivedSection(writer: anytype, field_name: []const u8, literals
         // Static: restrict to proven literals
         try writer.writeAll(".{\n");
         try writer.writeAll("        .enabled = true,\n");
-        try writer.writeAll("        .values = &[_][]const u8{\n");
-        for (literals) |item| {
-            try writer.writeAll("            ");
-            try writeZigStringLiteral(writer, item);
-            try writer.writeAll(",\n");
+        if (literals.len == 0) {
+            try writer.writeAll("        .values = &[_][]const u8{},\n");
+        } else {
+            try writer.writeAll("        .values = &[_][]const u8{\n");
+            for (literals) |item| {
+                try writer.writeAll("            ");
+                try writeZigStringLiteral(writer, item);
+                try writer.writeAll(",\n");
+            }
+            try writer.writeAll("        },\n");
         }
-        try writer.writeAll("        },\n");
         try writer.writeAll("    },\n");
     } else {
         // Dynamic: can't restrict
@@ -3284,13 +3292,17 @@ fn writeSqlContractDerivedSection(writer: anytype, contract: *const HandlerContr
     if (!contract.sql.dynamic) {
         try writer.writeAll(".{\n");
         try writer.writeAll("        .enabled = true,\n");
-        try writer.writeAll("        .values = &[_][]const u8{\n");
-        for (contract.sql.queries.items) |query| {
-            try writer.writeAll("            ");
-            try writeZigStringLiteral(writer, query.name);
-            try writer.writeAll(",\n");
+        if (contract.sql.queries.items.len == 0) {
+            try writer.writeAll("        .values = &[_][]const u8{},\n");
+        } else {
+            try writer.writeAll("        .values = &[_][]const u8{\n");
+            for (contract.sql.queries.items) |query| {
+                try writer.writeAll("            ");
+                try writeZigStringLiteral(writer, query.name);
+                try writer.writeAll(",\n");
+            }
+            try writer.writeAll("        },\n");
         }
-        try writer.writeAll("        },\n");
         try writer.writeAll("    },\n");
     } else {
         try writer.writeAll(".{},\n");
@@ -3304,15 +3316,15 @@ fn writeBytecodeArray(writer: anytype, bytecode_data: []const u8) !void {
         const row_end = @min(i + 16, bytecode_data.len);
         while (i < row_end) {
             const byte = bytecode_data[i];
-            var buf: [6]u8 = undefined;
+            var buf: [5]u8 = undefined;
             buf[0] = '0';
             buf[1] = 'x';
             buf[2] = hexChar(@truncate(byte >> 4));
             buf[3] = hexChar(@truncate(byte & 0x0f));
             buf[4] = ',';
-            buf[5] = ' ';
             try writer.writeAll(buf[0..]);
             i += 1;
+            if (i < row_end) try writer.writeAll(" ");
         }
         try writer.writeAll("\n");
     }
@@ -4431,6 +4443,43 @@ test "buildServiceTypeContextFromContracts: errdefer ladder closes every failure
             try std.testing.expectEqual(error.OutOfMemory, err);
         }
     }
+}
+
+test "writeBytecodeArray emits zig-fmt stable rows" {
+    const allocator = std.testing.allocator;
+
+    var output = std.ArrayList(u8).empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+
+    const bytes = [_]u8{ 0x01, 0xab, 0xff };
+    try writeBytecodeArray(&aw.writer, &bytes);
+    output = aw.toArrayList();
+
+    try std.testing.expectEqualStrings(
+        "    0x01, 0xab, 0xff,\n",
+        output.items,
+    );
+}
+
+test "writeCapabilityPolicy emits zig-fmt stable empty allowlists" {
+    const allocator = std.testing.allocator;
+
+    var output = std.ArrayList(u8).empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+
+    const policy = HandlerPolicy{
+        .env = .{},
+        .egress = .{},
+        .cache = .{},
+        .sql = .{},
+    };
+    try writeCapabilityPolicy(&aw.writer, policy, null);
+    output = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, output.items, ".values = &[_][]const u8{},") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, ".values = &[_][]const u8{\n        },") == null);
 }
 
 test {

@@ -2132,20 +2132,30 @@ pub const Runtime = struct {
     }
 
     fn callFunction(self: *Self, func_obj: *zq.JSObject, args: []const zq.JSValue) !zq.JSValue {
-        // Get bytecode function data
-        const bc_data = func_obj.getBytecodeFunctionData() orelse {
-            // Try native function
-            const native_data = func_obj.getNativeFunctionData() orelse return error.NotCallable;
-            return native_data.func(self.ctx, zq.JSValue.undefined_val, args);
-        };
+        if (func_obj.getClosureData()) |closure_data| {
+            const prev_closure = self.interpreter.current_closure;
+            self.interpreter.current_closure = closure_data;
+            defer self.interpreter.current_closure = prev_closure;
 
-        const func_bc = bc_data.bytecode;
-        return try self.interpreter.callBytecodeFunction(
-            func_obj.toValue(),
-            func_bc,
-            zq.JSValue.undefined_val,
-            args,
-        );
+            return try self.interpreter.callBytecodeFunction(
+                func_obj.toValue(),
+                closure_data.bytecode,
+                zq.JSValue.undefined_val,
+                args,
+            );
+        }
+
+        if (func_obj.getBytecodeFunctionData()) |bc_data| {
+            return try self.interpreter.callBytecodeFunction(
+                func_obj.toValue(),
+                bc_data.bytecode,
+                zq.JSValue.undefined_val,
+                args,
+            );
+        }
+
+        const native_data = func_obj.getNativeFunctionData() orelse return error.NotCallable;
+        return native_data.func(self.ctx, zq.JSValue.undefined_val, args);
     }
 
     /// Wrapper for calling JS functions from http.zig (used for JSX function components)

@@ -3362,6 +3362,7 @@ pub const BaselineCompiler = struct {
             // Exclude complex/unsupported operations from inlining
             .call_spread,
             .array_spread,
+            .object_spread,
             .await_val,
             .make_async,
             .import_module,

@@ -1,0 +1,31 @@
+{"type":"test","name":"object and array spread preserve values"}
+{"type":"request","method":"GET","url":"/spread","headers":{},"body":null}
+{"type":"expect","status":200,"body":"{\"obj\":{\"a\":1,\"b\":2,\"c\":3},\"arr\":[0,1,2,3],\"empty\":[],\"emptyThenValue\":[1],\"valueThenEmpty\":[0]}"}
+
+{"type":"test","name":"range loop supports break and continue"}
+{"type":"request","method":"GET","url":"/range","headers":{},"body":null}
+{"type":"expect","status":200,"body":"{\"seen\":\"0234\",\"total\":9}"}
+
+{"type":"test","name":"optional chaining and nullish coalescing"}
+{"type":"request","method":"GET","url":"/optional","headers":{},"body":null}
+{"type":"expect","status":200,"body":"{\"active\":\"Ada\",\"empty\":\"missing\",\"absent\":\"missing\"}"}
+
+{"type":"test","name":"assert passes when condition is true"}
+{"type":"request","method":"GET","url":"/assert","headers":{"authorization":"Bearer test"},"body":null}
+{"type":"expect","status":200,"body":"{\"authorization\":\"Bearer test\"}"}
+
+{"type":"test","name":"assert returns error expression when condition is false"}
+{"type":"request","method":"GET","url":"/assert","headers":{},"body":null}
+{"type":"expect","status":400,"body":"{\"error\":\"authorization required\"}"}
+
+{"type":"test","name":"closure captures outer value"}
+{"type":"request","method":"GET","url":"/closure","headers":{},"body":null}
+{"type":"expect","status":200,"body":"{\"value\":12}"}
+
+{"type":"test","name":"tail call recursion returns final value"}
+{"type":"request","method":"GET","url":"/tail","headers":{},"body":null}
+{"type":"expect","status":200,"body":"{\"value\":120}"}
+
+{"type":"test","name":"object math and array helper results"}
+{"type":"request","method":"GET","url":"/helpers","headers":{},"body":null}
+{"type":"expect","status":200,"body":"{\"values\":[1,2],\"entries\":[[\"a\",1],[\"b\",2]],\"floors\":[-2,-2,3],\"rounded\":[-2,-1,4],\"abs\":1.8,\"min\":4,\"max\":9,\"forEachTotal\":6}"}

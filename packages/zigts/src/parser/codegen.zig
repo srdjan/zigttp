@@ -1285,6 +1285,63 @@ pub const CodeGen = struct {
     }
 
     fn emitArrayLiteral(self: *CodeGen, array: Node.ArrayExpr) !void {
+        if (array.has_spread) {
+            try self.emit(.new_array);
+            try self.emitU16(0);
+            self.pushStack(1);
+
+            // Keep the next write index on top of the array while spreads can
+            // expand to a dynamic number of elements.
+            try self.emitSmallInt(0);
+
+            var spread_i: u16 = 0;
+            while (spread_i < array.elements_count) : (spread_i += 1) {
+                const elem_idx = self.ir.getListIndex(array.elements_start, spread_i);
+                if (elem_idx == null_node) {
+                    try self.emit(.push_1);
+                    self.pushStack(1);
+                    try self.emit(.add);
+                    self.popStack(1);
+                    continue;
+                }
+
+                const elem_tag = self.ir.getTag(elem_idx) orelse {
+                    try self.emit(.push_1);
+                    self.pushStack(1);
+                    try self.emit(.add);
+                    self.popStack(1);
+                    continue;
+                };
+
+                if (elem_tag == .spread) {
+                    if (self.ir.getOptValue(elem_idx)) |source_expr| {
+                        try self.emitNode(source_expr);
+                    } else {
+                        try self.emit(.push_undefined);
+                        self.pushStack(1);
+                    }
+                    try self.emit(.array_spread);
+                    self.popStack(1);
+                    continue;
+                }
+
+                try self.emit(.dup2);
+                self.pushStack(2);
+                try self.emitNode(elem_idx);
+                try self.emit(.put_elem);
+                self.popStack(3);
+
+                try self.emit(.push_1);
+                self.pushStack(1);
+                try self.emit(.add);
+                self.popStack(1);
+            }
+
+            try self.emit(.drop);
+            self.popStack(1);
+            return;
+        }
+
         try self.emit(.new_array);
         try self.emitU16(array.elements_count);
         self.pushStack(1);
@@ -1426,7 +1483,16 @@ pub const CodeGen = struct {
             const prop_idx = self.ir.getListIndex(object.properties_start, i);
             const prop_tag = self.ir.getTag(prop_idx) orelse continue;
 
-            if (prop_tag == .object_property) {
+            if (prop_tag == .object_spread) {
+                if (self.ir.getOptValue(prop_idx)) |source_expr| {
+                    try self.emitNode(source_expr);
+                } else {
+                    try self.emit(.push_undefined);
+                    self.pushStack(1);
+                }
+                try self.emit(.object_spread);
+                self.popStack(1);
+            } else if (prop_tag == .object_property) {
                 const prop = self.ir.getProperty(prop_idx).?;
 
                 try self.emit(.dup); // Duplicate object reference
