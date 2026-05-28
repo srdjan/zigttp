@@ -5,6 +5,41 @@ Spec for the recorded-replay harness that unblocks
 model provider, recorded once against the real API and replayed
 deterministically in CI so the test suite never burns tokens.
 
+## Status
+
+Slice A landed: cassette replay + record library, JSONL format, mode
+selector (`ZIGTTP_CASSETTE_MODE` = `replay` | `record` | `passthrough`),
+`zig build test-cassette` runs offline, and a round-trip test against a
+local `std.Io.net` server proves recorded bytes equal replayed bytes.
+
+Shipped:
+
+- `packages/pi/src/providers/cassette_client.zig` - `ModelClient` vtable
+  backed by a cassette. Routes through the production parsers
+  (`anthropic/sse_parser.zig`, `anthropic/response_assembler.zig`,
+  `openai/client.parseResponse`) so replay exercises the live decode path.
+- `packages/pi/src/providers/cassette_record.zig` - `capturePost` against
+  a real socket, `serializeCassette` to JSONL, `writeCassette` to disk,
+  and the `Mode` enum that callers honor before opening a connection.
+- `packages/pi/src/providers/testdata/anthropic/text_simple.jsonl` +
+  `text_simple.sse.txt` sidecar - hand-written Anthropic SSE fixture.
+- `packages/pi/src/providers/testdata/openai/chat_completion.jsonl` -
+  hand-written OpenAI Chat Completions fixture.
+- `zig build test-cassette` - focused offline test step.
+
+Still deferred (covered by the original spec below):
+
+- `packages/pi/tools/cassette_record.zig` standalone recorder binary
+  wired as `zig build cassette-record -- <scenario>`. The library
+  primitives are in place; only the binary entry point + scenario
+  registry are missing.
+- The three OpenAI Responses API streaming scenarios
+  (`ping_pong.jsonl`, `tool_call.jsonl`, `multi_turn.jsonl`).
+- `packages/pi/src/providers/openai/sse_parser.zig` and
+  `response_assembler.zig` - needed to consume the Responses API stream
+  format. The current OpenAI client is Chat Completions
+  (non-streaming), so this slice covers it via a single-body cassette.
+
 ## Scope
 
 The OpenAI provider drop-in shipped as a single non-streaming file at

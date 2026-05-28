@@ -279,6 +279,25 @@ pub fn build(b: *std.Build) void {
     const expert_app_test_step = b.step("test-expert-app", "Run zigts expert in-process app tests");
     expert_app_test_step.dependOn(&run_pi_tests.step);
 
+    // Cassette harness tests. Focused subset that only covers the
+    // record/replay layer; runs offline, never needs an API key, and
+    // does not transitively pull in tools/skills tests so it stays fast.
+    const cassette_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = pi_dep.path("src/cassette_tests.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    cassette_tests.root_module.addImport("zigts", zigts_host_mod);
+    cassette_tests.root_module.addImport("zigts_cli", pi_zigts_cli_host_mod);
+    cassette_tests.root_module.addImport("zigts_expert_skill", pi_zigts_expert_skill_host_mod);
+    cassette_tests.root_module.addImport("project_config", project_config_mod);
+    const run_cassette_tests = b.addRunArtifact(cassette_tests);
+    const cassette_test_step = b.step("test-cassette", "Run pi provider cassette harness tests (offline)");
+    cassette_test_step.dependOn(&run_cassette_tests.step);
+
     const capability_audit = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-capability-helpers.sh" });
     const capability_audit_step = b.step("test-capability-audit", "Run capability helper audit");
     capability_audit_step.dependOn(&capability_audit.step);
