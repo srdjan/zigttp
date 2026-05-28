@@ -12,6 +12,9 @@ const type_env_mod = @import("type_env.zig");
 const type_checker_mod = @import("type_checker.zig");
 const type_pool_mod = @import("type_pool.zig");
 const bool_checker = @import("bool_checker.zig");
+const repair_intent_mod = @import("repair_intent.zig");
+
+pub const RepairIntent = repair_intent_mod.RepairIntent;
 
 const NodeIndex = ir.NodeIndex;
 const NodeTag = ir.NodeTag;
@@ -78,6 +81,11 @@ pub const Diagnostic = struct {
     node: NodeIndex,
     message: []const u8,
     help: ?[]const u8,
+    /// Slice B (expert-strategy §5): typed repair primitive the agent uses
+    /// to pick an apply step directly. `null` when no single canonical
+    /// repair applies (e.g. implicit_unknown — needs a type annotation that
+    /// can take several shapes).
+    repair_intent: ?RepairIntent = null,
 };
 
 const ImportedFunction = struct {
@@ -226,6 +234,7 @@ pub const StrictChecker = struct {
                         .node = node,
                         .message = "let binding is never reassigned",
                         .help = "use const for bindings that do not change",
+                        .repair_intent = .replace_let_with_const,
                     });
                 }
                 if (decl.kind == .@"const" and
@@ -239,6 +248,7 @@ pub const StrictChecker = struct {
                         .node = node,
                         .message = "reused arrow helper should be a named function",
                         .help = "rewrite reusable helpers as `function name(...) { ... }`; keep arrows for callbacks and local one-off values",
+                        .repair_intent = .replace_arrow_with_function,
                     });
                 }
                 if (decl.init != null_node) {
@@ -263,6 +273,7 @@ pub const StrictChecker = struct {
                         .node = node,
                         .message = "for-of binding uses let",
                         .help = "use `for (const item of items)` unless the loop binding itself is reassigned",
+                        .repair_intent = .replace_let_with_const,
                     });
                 }
                 self.walkExpr(for_iter.iterable);
@@ -297,6 +308,7 @@ pub const StrictChecker = struct {
                     .node = node,
                     .message = "ternary expression is not part of canonical ZigTS",
                     .help = "use an if/else statement, a match expression, or an immediately-invoked block",
+                    .repair_intent = .replace_ternary_with_if,
                 });
                 self.walkExpr(ternary.condition);
                 self.walkExpr(ternary.then_branch);
@@ -316,6 +328,7 @@ pub const StrictChecker = struct {
                             .node = arg,
                             .message = "spread arguments are not part of canonical ZigTS",
                             .help = "pass positional arguments or widen the helper signature to accept the array directly",
+                            .repair_intent = .widen_signature_drop_spread,
                         });
                     }
                     self.walkExpr(arg);
@@ -350,6 +363,7 @@ pub const StrictChecker = struct {
                         .node = node,
                         .message = "compound assignment is not part of canonical ZigTS",
                         .help = "write the update explicitly: `x = x + 1` instead of `x += 1`",
+                        .repair_intent = .replace_compound_assign_with_explicit,
                     });
                 }
                 self.walkExpr(assign.target);
@@ -374,6 +388,7 @@ pub const StrictChecker = struct {
                                 .node = prop_idx,
                                 .message = "object spread must appear before any explicit keys",
                                 .help = "reorder so the spread is first: `{...base, x: 1}` instead of `{x: 1, ...base}`. Later keys still override.",
+                                .repair_intent = .lead_with_spread,
                             });
                         }
                         if (self.ir_view.getOptValue(prop_idx)) |value| self.walkExpr(value);
@@ -406,6 +421,7 @@ pub const StrictChecker = struct {
                             .node = part,
                             .message = "template interpolation must be an identifier or a literal-keyed property access",
                             .help = "hoist the expression into a `const` immediately above the template, then interpolate the new name",
+                            .repair_intent = .name_const_above_template,
                         });
                     }
                     self.walkExpr(value);
@@ -421,6 +437,7 @@ pub const StrictChecker = struct {
                         .node = node,
                         .message = "match expression must be exhaustive in strict ZigTS",
                         .help = "cover every finite union member or add an explicit default when the type is not finite",
+                        .repair_intent = .add_trailing_return,
                     });
                 }
                 for (0..match.arms_count) |i| {
@@ -463,6 +480,7 @@ pub const StrictChecker = struct {
                         .node = node,
                         .message = "exported function-valued const should be an export function declaration",
                         .help = "use `export function name(...) { ... }` unless the export is intentionally a first-class function value",
+                        .repair_intent = .replace_export_arrow_with_function,
                     });
                 }
                 self.checkFunctionAnnotation(decl.init);
@@ -513,6 +531,7 @@ pub const StrictChecker = struct {
                         .node = node,
                         .message = "destructuring patterns must be at most one level deep",
                         .help = "destructure one level, then drill into the value with a follow-up `const`: `const {a} = obj; const {b} = a;`",
+                        .repair_intent = .flatten_destructure,
                     });
                     self.checkDestructurePattern(elem.key);
                 }
@@ -538,6 +557,7 @@ pub const StrictChecker = struct {
                     .node = param_idx,
                     .message = "default parameter values are not part of canonical ZigTS",
                     .help = "accept `(a: T | undefined)` and resolve the default in the body: `const resolved = a === undefined ? DEFAULT : a;`",
+                    .repair_intent = .lift_default_to_body,
                 });
             }
         }
@@ -1204,6 +1224,25 @@ test "canonical_destructure_depth accepts flat destructure" {
     for (checker.getDiagnostics()) |diag| {
         try testing.expect(diag.kind != .canonical_destructure_depth);
     }
+}
+
+test "canonical_ternary diagnostic carries repair_intent = replace_ternary_with_if" {
+    // Slice B (expert-strategy §5): every veto-able strict diagnostic must
+    // populate the typed repair primitive so the agent picks an apply step
+    // directly. ZTS612 is the representative canonical-profile case.
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? 200 : 500; return Response.json({x}); }");
+    defer checker.deinit();
+    var saw_ternary = false;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind == .canonical_ternary) {
+            saw_ternary = true;
+            try testing.expectEqual(
+                @as(?RepairIntent, .replace_ternary_with_if),
+                diag.repair_intent,
+            );
+        }
+    }
+    try testing.expect(saw_ternary);
 }
 
 // NOTE: a positive test for `f(...args)` is intentionally absent. The parser

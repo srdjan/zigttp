@@ -22,6 +22,9 @@ const builtin_modules = @import("builtin_modules.zig");
 const mb = @import("module_binding.zig");
 const bool_checker_mod = @import("bool_checker.zig");
 const counterexample = @import("counterexample.zig");
+const repair_intent_mod = @import("repair_intent.zig");
+
+pub const RepairIntent = repair_intent_mod.RepairIntent;
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -78,6 +81,11 @@ pub const Diagnostic = struct {
     message: []const u8,
     help: ?[]const u8,
     witness: ?Witness = null,
+    /// Slice B (expert-strategy §5): typed repair primitive the agent uses
+    /// to pick an apply step directly. All flow-checker diagnostics map to
+    /// the same `insert_guard_before_line` shape today — the agent inserts
+    /// a redact/mask/validate call ahead of the offending sink.
+    repair_intent: ?RepairIntent = null,
 };
 
 /// Map a diagnostic kind to the property tag it witnesses. `null` when the
@@ -800,6 +808,7 @@ pub const FlowChecker = struct {
                                 .node = ret_val,
                                 .message = "unvalidated user input in Response.html (potential XSS)",
                                 .help = "use JSX with renderToString() for auto-escaping, or pass input through validateObject() first",
+                                .repair_intent = .insert_guard_before_line,
                             });
                             self.properties.injection_safe = false;
                         }
@@ -850,6 +859,7 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("secret data flows into response body", .secret),
                         .help = "env vars with sensitive names (SECRET, PASSWORD, KEY, TOKEN) must not appear in responses",
+                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_secret_leakage = false;
                 }
@@ -860,6 +870,7 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("credential data flows into response body", .credential),
                         .help = "auth tokens and JWT payloads should not be returned to clients",
+                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_credential_leakage = false;
                 }
@@ -872,6 +883,7 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("secret data flows into console output", .secret),
                         .help = "env vars with sensitive names must not be logged",
+                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_secret_leakage = false;
                 }
@@ -882,6 +894,7 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("credential data flows into console output", .credential),
                         .help = "auth tokens and JWTs must not be logged",
+                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_credential_leakage = false;
                 }
@@ -894,6 +907,7 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("secret data flows into fetchSync URL", .secret),
                         .help = "secrets in URLs are logged by proxies and CDNs; pass secrets in headers or body instead",
+                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_secret_leakage = false;
                 }
@@ -904,6 +918,7 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("credential data flows into fetchSync URL", .credential),
                         .help = "pass auth tokens in headers, not URLs",
+                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_credential_leakage = false;
                 }
@@ -916,6 +931,7 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("secret data flows into fetchSync request body", .secret),
                         .help = "do not send env secrets to external services",
+                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_secret_leakage = false;
                 }
@@ -927,6 +943,7 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = "unvalidated user input flows into fetchSync body",
                         .help = "pass user input through validateJson() or validateObject() before sending to external services",
+                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.input_validated = false;
                     self.properties.injection_safe = false;
@@ -1969,4 +1986,48 @@ test "propertyTagForKind: every DiagnosticKind variant maps to a non-null Proper
             return err;
         };
     }
+}
+
+test "secret_in_response diagnostic carries repair_intent = insert_guard_before_line" {
+    // Slice B (expert-strategy §5): flow-checker diagnostics must populate
+    // the typed repair primitive so the agent picks an apply step directly.
+    // ZTS400 is representative of every ZTS4xx flow leak: the canonical
+    // repair is `insert_guard_before_line`, where the agent inserts a
+    // redact/mask/strip call ahead of the offending sink.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  return Response.json({ leaked: secret });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var saw_secret_leak: bool = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind == .secret_in_response) {
+            saw_secret_leak = true;
+            try std.testing.expectEqual(
+                @as(?RepairIntent, .insert_guard_before_line),
+                d.repair_intent,
+            );
+        }
+    }
+    try std.testing.expect(saw_secret_leak);
 }

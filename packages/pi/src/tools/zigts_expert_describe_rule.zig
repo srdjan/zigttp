@@ -95,3 +95,29 @@ test "unknown query returns not-ok body" {
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "Unknown rule") != null);
 }
+
+test "lookup by code surfaces repair_intent when present" {
+    // Slice B (expert-strategy §5): the agent reads `repair_intent` from
+    // describe-rule output to pick an apply primitive directly. ZTS612
+    // (canonical_ternary) maps to `replace_ternary_with_if`.
+    var result = try execute(testing.allocator, &.{"ZTS612"});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        result.llm_text,
+        "\"repair_intent\":\"replace_ternary_with_if\"",
+    ) != null);
+}
+
+test "lookup by code omits repair_intent when unset" {
+    // Some diagnostics deliberately have no canonical repair primitive
+    // (e.g. ZTS600 implicit_unknown — needs a type annotation that can
+    // take several shapes). The field is omitted, not emitted as null.
+    var result = try execute(testing.allocator, &.{"ZTS600"});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"repair_intent\"") == null);
+}

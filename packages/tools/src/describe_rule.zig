@@ -93,6 +93,14 @@ pub fn writeRuleJson(writer: anytype, entry: *const rule_registry.RuleEntry) !vo
     }
     try writer.writeAll(",\"help\":");
     try writeJsonString(writer, entry.help);
+    // Slice B: surface the typed repair primitive so `zigttp expert` can pick
+    // an apply primitive without parsing the prose help. Emitted only when a
+    // repair is registered for the rule; null repairs stay absent so older
+    // consumers see no schema change for unrepairable diagnostics.
+    if (entry.repair) |r| {
+        try writer.writeAll(",\"repair_intent\":");
+        try writeJsonString(writer, r.asString());
+    }
     try writer.writeAll("}");
 }
 
@@ -105,6 +113,9 @@ fn writeRuleText(writer: anytype, entry: *const rule_registry.RuleEntry) !void {
         try writer.print("Example: {s}\n", .{ex});
     }
     try writer.print("Help: {s}\n", .{entry.help});
+    if (entry.repair) |r| {
+        try writer.print("Repair: {s}\n", .{r.asString()});
+    }
 }
 
 fn printHelp() void {
