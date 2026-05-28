@@ -20,6 +20,7 @@ const json_diagnostics = zigts_cli.json_diagnostics;
 const skill = @import("zigts_expert_skill");
 const skills_catalog = @import("skills/catalog.zig");
 const prompts_catalog = @import("prompts/catalog.zig");
+const memory_store = @import("memory_store.zig");
 
 /// Hard cap on the assembled system prompt. When an AGENTS.md project-context
 /// append would push us past this, we truncate the *project context* (never
@@ -43,6 +44,19 @@ const WITNESS_SECTION_CAP: usize = 8 * 1024;
 /// before the first entry line. Used by `witnessLineBudget` to reserve
 /// space for the banner that `writeBanner` plus the intro line emit.
 const WITNESS_SECTION_OVERHEAD: usize = 256;
+
+/// Bytes reserved for the PROJECT MEMORY banner + any future per-line
+/// rendering overhead beyond what `memory_store.selectForPersona`'s budget
+/// formula already accounts for. The selector charges 8 bytes of overhead
+/// per entry; this reservation covers the section banner itself.
+const MEMORY_SECTION_OVERHEAD: usize = 512;
+
+/// Maximum portion of the prompt budget the PROJECT MEMORY section is
+/// allowed to consume, even when the remaining space could fit more. Keeps
+/// a stale, oversized corpus from crowding out PROJECT CONTEXT. Tuned
+/// against the 128 KiB cap: 8 KiB ~= ~120 short facts at 8-byte overhead +
+/// average fact length.
+const MEMORY_SECTION_SOFT_CAP: usize = 8 * 1024;
 
 // The tool list inside the prologue below must stay in sync with
 // `pi_app.buildRegistry`. Drift is a soft degradation, not a hard break:
@@ -143,6 +157,16 @@ const prologue =
     \\                                with summary, property, and pinned status,
     \\                                plus per-property counts for coverage
     \\                                triage
+    \\  pi_remember_fact            - persist a cross-session project fact to
+    \\                                .zigttp/memory.jsonl so the next expert
+    \\                                session can see it. Use for naming
+    \\                                conventions, failed approaches, and
+    \\                                load-bearing invariants; never for
+    \\                                transient state or secrets.
+    \\  pi_recall_facts             - read back the persisted project memory
+    \\                                corpus, pinned-first then most-recent,
+    \\                                with optional limit and pinned-only
+    \\                                filter
     \\  zig_build_step              - run `zig build <step>`
     \\  zig_test_step               - run `zig build test...`
     \\
@@ -163,6 +187,8 @@ const prologue =
     \\  Apply an approved route candidate       -> pi_apply_feature_plan
     \\  Read author-declared specs + status    -> pi_specs_status
     \\  Inspect persisted witness corpus       -> pi_witnesses
+    \\  Record a cross-session project fact    -> pi_remember_fact
+    \\  Recall persisted project memory        -> pi_recall_facts
     \\  Virtual module implementation audit    -> zigts_expert_verify_modules
     \\  List files in workspace                -> workspace_list_files
     \\  Read a source file                     -> workspace_read_file
@@ -301,20 +327,47 @@ pub fn buildSystemPromptWithContext(
     allocator: std.mem.Allocator,
     project_context: ?[]const u8,
 ) ![]u8 {
-    return buildSystemPromptWithContextAndCorpus(allocator, project_context, null);
+    return buildSystemPromptFull(allocator, project_context, null, null);
 }
 
-/// Build the system prompt, optionally appending a project-context block and
-/// a WITNESSED FAILURES few-shot section sourced from a witness corpus
-/// directory (typically `.zigttp/witnesses/<short_hash>` for a handler in
-/// scope). Truncation order, from most to least protected: persona prologue
-/// and rule/feature/module snapshots are never cut; the WITNESSED FAILURES
-/// section is cut second; PROJECT CONTEXT is cut first. A missing corpus or
-/// an empty entry list omits the witness section entirely.
+/// Build the system prompt with an optional WITNESSED FAILURES few-shot
+/// section sourced from a witness corpus directory (typically
+/// `.zigttp/witnesses/<short_hash>` for a handler in scope). Delegates to
+/// `buildSystemPromptFull`; kept for callers and tests that only need the
+/// witness axis.
 pub fn buildSystemPromptWithContextAndCorpus(
     allocator: std.mem.Allocator,
     project_context: ?[]const u8,
     witness_corpus_dir: ?[]const u8,
+) ![]u8 {
+    return buildSystemPromptFull(allocator, project_context, witness_corpus_dir, null);
+}
+
+/// Build the system prompt with an optional PROJECT MEMORY section sourced
+/// from `<project_root>/.zigttp/memory.jsonl`. Delegates to
+/// `buildSystemPromptFull`; kept for callers and tests that only need the
+/// memory axis.
+pub fn buildSystemPromptWithContextAndMemory(
+    allocator: std.mem.Allocator,
+    project_context: ?[]const u8,
+    project_root: ?[]const u8,
+) ![]u8 {
+    return buildSystemPromptFull(allocator, project_context, null, project_root);
+}
+
+/// Combined entry point. Emits both the WITNESSED FAILURES section (when a
+/// corpus directory is given) and the PROJECT MEMORY section (when a project
+/// root is given), in that order, before PROJECT CONTEXT. Truncation order
+/// from most to least protected: persona prologue + rule/feature/module
+/// snapshots (never cut) > PROJECT MEMORY (last of the optional sections to
+/// shrink) > WITNESSED FAILURES (cut second) > PROJECT CONTEXT (cut first).
+/// A missing corpus or empty entry list omits the witness section; a missing
+/// store or empty entry list omits the memory section.
+pub fn buildSystemPromptFull(
+    allocator: std.mem.Allocator,
+    project_context: ?[]const u8,
+    witness_corpus_dir: ?[]const u8,
+    project_root: ?[]const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -360,13 +413,13 @@ pub fn buildSystemPromptWithContextAndCorpus(
         try w.print("  /template:{s}\n    {s}\n\n", .{ t.name, t.description });
     }
 
-    // WITNESSED FAILURES is the first thing eligible for truncation after
-    // project context: it sits between the snapshots (never cut) and the
-    // project context (cut first). The budget is bounded above by
-    // `WITNESS_SECTION_CAP` and bounded below by leaving enough headroom
-    // for the epilogue plus a worst-case truncation marker. Project context
-    // takes whatever remains under the cap, which is why it is the first to
-    // shrink when the witness section uses its full budget.
+    // WITNESSED FAILURES is cut second under prompt-cap pressure: it sits
+    // between the snapshots (never cut) and the project context (cut first).
+    // The budget is bounded above by `WITNESS_SECTION_CAP` and bounded
+    // below by leaving enough headroom for the epilogue plus a worst-case
+    // truncation marker. Project context takes whatever remains under the
+    // cap, which is why it is the first to shrink when the witness section
+    // uses its full budget.
     if (witness_corpus_dir) |dir| {
         const persona_len_before_witnesses = aw.writer.end;
         const room_after_witnesses_reserve =
@@ -395,6 +448,22 @@ pub fn buildSystemPromptWithContextAndCorpus(
                 }
             }
         }
+    }
+
+    // PROJECT MEMORY (cross-session fact store) sits between any WITNESSED
+    // FAILURES section and PROJECT CONTEXT. It is the last of the optional
+    // sections to shrink under prompt-cap pressure, so it computes its
+    // budget against the remaining headroom but caps softly at
+    // `MEMORY_SECTION_SOFT_CAP` to avoid crowding out PROJECT CONTEXT.
+    //
+    // Byte budget formula (in `writeMemorySection`):
+    //   remaining = PROMPT_CAP_BYTES - persona_so_far
+    //                - CTX_TRUNCATION_RESERVED  (epilogue + context marker)
+    //                - MEMORY_SECTION_OVERHEAD  (memory banner)
+    //                - len(project_context or 0) (so CONTEXT keeps room)
+    //   memory_budget = min(remaining, MEMORY_SECTION_SOFT_CAP)
+    if (project_root) |root| {
+        try writeMemorySection(allocator, w, aw.writer.end, root, project_context);
     }
 
     // Project context is appended after persona+snapshots but before the
@@ -435,6 +504,45 @@ pub fn buildSystemPromptWithContextAndCorpus(
 fn writeSection(writer: anytype, title: []const u8, body: []const u8) !void {
     try writeBanner(writer, title);
     try writer.writeAll(body);
+}
+
+/// Render the PROJECT MEMORY section (or skip it cleanly when the store
+/// is empty or the budget is exhausted). The selector is reused as-is
+/// from `memory_store`, so changes to the per-entry rendering shape stay
+/// in one place.
+fn writeMemorySection(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    persona_len_so_far: usize,
+    project_root: []const u8,
+    project_context: ?[]const u8,
+) !void {
+    const entries = memory_store.loadAll(allocator, project_root) catch return;
+    defer memory_store.freeEntries(allocator, entries);
+    if (entries.len == 0) return;
+
+    const ctx_len = if (project_context) |ctx| ctx.len else 0;
+    const fixed_reserve = CTX_TRUNCATION_RESERVED + MEMORY_SECTION_OVERHEAD;
+    const need_under = fixed_reserve + ctx_len;
+    if (persona_len_so_far + need_under >= PROMPT_CAP_BYTES) return;
+    const remaining = PROMPT_CAP_BYTES - persona_len_so_far - need_under;
+    const budget = @min(remaining, MEMORY_SECTION_SOFT_CAP);
+    if (budget == 0) return;
+
+    const selection = memory_store.selectForPersona(allocator, entries, budget) catch return;
+    defer allocator.free(selection);
+    if (selection.len == 0) return;
+
+    try writeBanner(writer, "PROJECT MEMORY (read-only, from .zigttp/memory.jsonl)");
+    try writer.writeAll("Cross-session facts the agent has recorded for this project. Pinned\n");
+    try writer.writeAll("facts come first; unpinned facts are listed most-recent first. Use\n");
+    try writer.writeAll("pi_recall_facts to read the full corpus; pi_remember_fact to append.\n\n");
+    for (selection) |e| {
+        try writer.writeAll("  ");
+        if (e.pinned) try writer.writeAll("[pin] ");
+        try writer.writeAll(e.fact);
+        try writer.writeByte('\n');
+    }
 }
 
 fn writeBanner(writer: anytype, title: []const u8) !void {
@@ -827,4 +935,86 @@ test "persona witness section truncates cleanly when the budget overflows" {
     try testing.expect(std.mem.startsWith(u8, last_line, "- ["));
     try testing.expect(std.mem.indexOf(u8, last_line, "(key=") != null);
     try testing.expect(std.mem.endsWith(u8, last_line, ")"));
+}
+
+// ---------------------------------------------------------------------------
+// PROJECT MEMORY section
+// ---------------------------------------------------------------------------
+
+test "PROJECT MEMORY section appears when the store has entries" {
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(testing.io, &buf);
+    const root = buf[0..len];
+
+    try memory_store.append(allocator, root, .{
+        .id = "mem-1",
+        .fact = "always use Result<T> for fallible helpers",
+        .source = "manual_entry",
+        .timestamp_unix_ms = 1,
+        .pinned = true,
+    });
+    try memory_store.append(allocator, root, .{
+        .id = "mem-2",
+        .fact = "session id generator lives in session/session_id.zig",
+        .source = "tool",
+        .timestamp_unix_ms = 2,
+        .pinned = false,
+    });
+
+    const prompt = try buildSystemPromptWithContextAndMemory(allocator, null, root);
+    defer allocator.free(prompt);
+
+    const banner = std.mem.indexOf(u8, prompt, "PROJECT MEMORY") orelse return error.TestExpected;
+    const pinned_marker = std.mem.indexOf(u8, prompt, "[pin] always use Result<T>") orelse
+        return error.TestExpected;
+    const unpinned = std.mem.indexOf(u8, prompt, "session id generator lives") orelse
+        return error.TestExpected;
+    const epilogue_pos = std.mem.indexOf(u8, prompt, "END OF PERSONA") orelse return error.TestExpected;
+
+    try testing.expect(banner < pinned_marker);
+    try testing.expect(pinned_marker < unpinned);
+    try testing.expect(unpinned < epilogue_pos);
+    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
+}
+
+test "PROJECT MEMORY section is omitted when the store is missing" {
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(testing.io, &buf);
+    const root = buf[0..len];
+
+    const prompt = try buildSystemPromptWithContextAndMemory(allocator, null, root);
+    defer allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "PROJECT MEMORY") == null);
+}
+
+test "PROJECT MEMORY sits before PROJECT CONTEXT in the prompt" {
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(testing.io, &buf);
+    const root = buf[0..len];
+
+    try memory_store.append(allocator, root, .{
+        .id = "m",
+        .fact = "memory ordering sentinel",
+        .source = "manual_entry",
+        .timestamp_unix_ms = 1,
+        .pinned = true,
+    });
+
+    const ctx = "## CLAUDE.md\n\nproject context sentinel\n";
+    const prompt = try buildSystemPromptWithContextAndMemory(allocator, ctx, root);
+    defer allocator.free(prompt);
+
+    const mem_pos = std.mem.indexOf(u8, prompt, "PROJECT MEMORY") orelse return error.TestExpected;
+    const ctx_pos = std.mem.indexOf(u8, prompt, "PROJECT CONTEXT") orelse return error.TestExpected;
+    try testing.expect(mem_pos < ctx_pos);
+    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
 }

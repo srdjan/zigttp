@@ -27,7 +27,10 @@ comptime {
     _ = @import("tools/pi_repair_plan.zig");
     _ = @import("tools/pi_apply_repair_plan.zig");
     _ = @import("tools/pi_forge_route.zig");
+    _ = @import("tools/pi_remember_fact.zig");
+    _ = @import("tools/pi_recall_facts.zig");
     _ = @import("tools/repair_apply.zig");
+    _ = @import("memory_store.zig");
     _ = @import("repl.zig");
     _ = @import("commands.zig");
     _ = @import("tui/term.zig");
