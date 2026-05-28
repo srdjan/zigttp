@@ -598,16 +598,16 @@ pub fn selectFewShot(
 
     if (kept == entries.len) return entries;
 
-    // Free the entries we did not keep, then shrink the slice in place.
+    // Free the entries we did not keep, then return a fresh slice. We do not
+    // use allocator.resize here: it returns the same backing allocation, so
+    // the caller's freeEntries would either free a length-mismatched slice
+    // (allocator size-class panic) or, in the kept == 0 edge case, free a
+    // zero-length slice that points into freed memory.
     for (entries[kept..]) |*e| freeEntry(allocator, e);
-    if (!allocator.resize(entries, kept)) {
-        // Fall back to a fresh allocation when the allocator cannot shrink.
-        const kept_slice = try allocator.alloc(Entry, kept);
-        @memcpy(kept_slice, entries[0..kept]);
-        allocator.free(entries);
-        return kept_slice;
-    }
-    return entries[0..kept];
+    const kept_slice = try allocator.alloc(Entry, kept);
+    @memcpy(kept_slice, entries[0..kept]);
+    allocator.free(entries);
+    return kept_slice;
 }
 
 fn fewShotLessThan(_: void, a: Entry, b: Entry) bool {

@@ -79,7 +79,9 @@ fn decodeJson(
     const out = try allocator.alloc([]const u8, 3);
     errdefer allocator.free(out);
     out[0] = try allocator.dupe(u8, fact_v.string);
+    errdefer allocator.free(out[0]);
     out[1] = try allocator.dupe(u8, source);
+    errdefer allocator.free(out[1]);
     out[2] = try allocator.dupe(u8, pinned_str);
     return out;
 }

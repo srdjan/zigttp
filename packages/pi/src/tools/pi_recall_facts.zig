@@ -11,10 +11,14 @@
 //!   { "limit"?: number, "pinned_only"?: bool }
 //!
 //! Output:
-//!   { "ok": true, "total": N,
+//!   { "ok": true, "returned": N, "corpus_total": M,
 //!     "entries": [
 //!       { "id": "...", "fact": "...", "source": "...",
 //!         "session_id": "..."|null, "timestamp_unix_ms": 0, "pinned": false } ] }
+//!
+//! `returned` is the count of entries in the response (post-limit, post-filter).
+//! `corpus_total` is the total entry count on disk so the agent can tell
+//! whether to widen its query.
 
 const std = @import("std");
 const zigts = @import("zigts");
@@ -34,8 +38,8 @@ pub const tool: registry_mod.ToolDef = .{
     \\.zigttp/memory.jsonl. Pinned facts come first (chronological), then
     \\unpinned facts most-recent first. `limit` caps the response (default
     \\20). `pinned_only` filters to just the pinned set. A missing corpus
-    \\is not an error: the response is { "ok": true, "total": 0,
-    \\"entries": [] }.
+    \\is not an error: the response is { "ok": true, "returned": 0,
+    \\"corpus_total": 0, "entries": [] }.
     \\
     \\Call this when the user references project context the persona's
     \\injected slice may not have covered, or when you need to inspect
@@ -77,6 +81,7 @@ fn decodeJson(
     const out = try allocator.alloc([]const u8, 2);
     errdefer allocator.free(out);
     out[0] = try std.fmt.allocPrint(allocator, "{d}", .{limit});
+    errdefer allocator.free(out[0]);
     out[1] = try allocator.dupe(u8, if (pinned_only) "true" else "false");
     return out;
 }
@@ -128,7 +133,10 @@ fn execute(
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &out);
     const w = &aw.writer;
 
-    try w.print("{{\"ok\":true,\"total\":{d},\"entries\":[", .{kept.items.len});
+    try w.print(
+        "{{\"ok\":true,\"returned\":{d},\"corpus_total\":{d},\"entries\":[",
+        .{ kept.items.len, entries.len },
+    );
     for (kept.items, 0..) |e, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"id\":");
@@ -195,7 +203,7 @@ test "decodeJson carries pinned_only" {
     try testing.expectEqualStrings("true", args[1]);
 }
 
-test "execute on missing corpus returns total:0" {
+test "execute on missing corpus returns returned:0 / corpus_total:0" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -210,7 +218,8 @@ test "execute on missing corpus returns total:0" {
     var result = try execute(allocator, &args);
     defer result.deinit(allocator);
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"returned\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"corpus_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"entries\":[]") != null);
 }
 
@@ -255,7 +264,8 @@ test "execute returns persisted entries pinned-first then most-recent unpinned" 
     defer result.deinit(allocator);
     try testing.expect(result.ok);
     const text = result.llm_text;
-    try testing.expect(std.mem.indexOf(u8, text, "\"total\":3") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"returned\":3") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"corpus_total\":3") != null);
 
     // Pinned ("b") must appear before the most-recent unpinned ("c"), which
     // must appear before the oldest unpinned ("a").
@@ -297,7 +307,8 @@ test "execute pinned_only filters out unpinned entries" {
     const args = [_][]const u8{ "20", "true" };
     var result = try execute(allocator, &args);
     defer result.deinit(allocator);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"total\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"returned\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"corpus_total\":2") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "fact-b") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "fact-a") == null);
 }

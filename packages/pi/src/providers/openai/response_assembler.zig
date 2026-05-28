@@ -9,12 +9,14 @@
 //! list once, just like the Anthropic side keys on `content_block_start.index`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const turn = @import("../../turn.zig");
 const events = @import("events.zig");
 
 pub const AssembleError = error{
     Empty,
     ApiError,
+    UnexpectedDeltaOrder,
 };
 
 pub const Outcome = struct {
@@ -45,7 +47,18 @@ pub fn assemble(
 
     for (event_list) |ev| {
         switch (ev) {
-            .api_error => return AssembleError.ApiError,
+            .api_error => |info| {
+                // Surface kind/message so operators see why a turn failed
+                // instead of just the bare ApiError tag. Gated by is_test so
+                // the existing test that asserts the bare error stays quiet.
+                if (!builtin.is_test) {
+                    std.log.warn(
+                        "openai api error: kind={s} message={s}",
+                        .{ info.kind, info.message },
+                    );
+                }
+                return AssembleError.ApiError;
+            },
             .response_started => {},
             .output_item_added => |added| {
                 try ensureCapacity(arena, &items, added.output_index);
@@ -62,7 +75,10 @@ pub fn assemble(
                 const item = &items.items[delta.output_index];
                 switch (item.*) {
                     .message => |*buf| try buf.appendSlice(arena, delta.text),
-                    else => {},
+                    // Delta for a slot whose item.added arrived later (or
+                    // never) is a streaming protocol violation — fail loudly
+                    // instead of silently dropping the text/tool args.
+                    else => return AssembleError.UnexpectedDeltaOrder,
                 }
             },
             .function_call_arguments_delta => |delta| {
@@ -70,7 +86,7 @@ pub fn assemble(
                 const item = &items.items[delta.output_index];
                 switch (item.*) {
                     .function_call => |*fc| try fc.args.appendSlice(arena, delta.delta),
-                    else => {},
+                    else => return AssembleError.UnexpectedDeltaOrder,
                 }
             },
             .output_item_done => {},

@@ -45,6 +45,7 @@ pub const CassetteError = error{
     UnsupportedProvider,
     SidecarNotFound,
     SidecarUnreadable,
+    NonStreamingOpenAINotSupported,
 };
 
 pub const Header = struct {
@@ -210,6 +211,11 @@ pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResul
             return .{ .reply = reply, .usage = outcome.usage };
         },
         .openai => {
+            // The live OpenAI client only speaks the streaming Responses API
+            // (Slice E); a non-streaming cassette body has no parser to drive
+            // and would silently misframe through openai_sse_parser. Fail
+            // loudly so the recording side knows to re-record with stream=true.
+            if (!cassette.header.stream) return CassetteError.NonStreamingOpenAINotSupported;
             const event_list = try openai_sse_parser.parseAll(arena, cassette.body);
             const outcome = try openai_response_assembler.assemble(arena, event_list);
             return .{ .reply = outcome.reply, .usage = outcome.usage };

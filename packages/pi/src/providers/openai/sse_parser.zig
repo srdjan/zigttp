@@ -109,7 +109,9 @@ fn decodeRecord(
     arena: std.mem.Allocator,
     record: LineRecord,
 ) !?events.Event {
-    if (record.data.len == 0) return ParseError.MalformedSse;
+    // SSE permits event-only records (no `data:` line) for keepalives or
+    // comments; skip them rather than failing the whole parse.
+    if (record.data.len == 0) return null;
 
     const root_value = try std.json.parseFromSliceLeaky(
         std.json.Value,

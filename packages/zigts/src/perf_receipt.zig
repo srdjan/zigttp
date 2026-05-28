@@ -88,6 +88,7 @@ pub const VerifyResult = struct {
 pub const SignError = error{
     InvalidHexLength,
     OutOfMemory,
+    SignFailed,
 };
 
 pub const VerifyError = error{
@@ -135,7 +136,7 @@ pub fn sign(
     const signing_input = joinDot(allocator, header_b64, payload_b64) catch return error.OutOfMemory;
     defer allocator.free(signing_input);
 
-    const signature = key_pair.sign(signing_input, null) catch unreachable;
+    const signature = key_pair.sign(signing_input, null) catch return error.SignFailed;
     const signature_bytes = signature.toBytes();
     const signature_b64 = encodeBase64Owned(allocator, &signature_bytes) catch return error.OutOfMemory;
     defer allocator.free(signature_b64);
