@@ -191,6 +191,23 @@ const [nested] = second;
 
 Destructuring patterns must be at most one level deep. Drill into nested values with follow-up `const` bindings. Why: the intermediate names show up in errors, panics, and trace output; deeply nested patterns inflate review cost and are a common drift target in agent output.
 
+### ZTS619 - unused index alias in `for...of`
+
+```ts
+// before
+for (const pair of items.entries()) {
+  const [_i, item] = pair;
+  use(item);
+}
+
+// after
+for (const item of items) {
+  use(item);
+}
+```
+
+A `for (const pair of arr.entries())` whose body destructures `[_i, item]` and never reads `_i` carries the `.entries()` call and the alias binding for no payoff. The canonical form drops both and iterates the array directly. Why: the unused index widens the loop's surface for iterator-scope-confinement analysis - the analyzer must track an extra binding only to prove it dead. Eliminating the alias collapses that branch and the proof goes through without an alias-tracking pass.
+
 ## Deferred cuts
 
 Two cuts from the original plan remain unimplemented because they require infrastructure the strict checker does not currently carry:

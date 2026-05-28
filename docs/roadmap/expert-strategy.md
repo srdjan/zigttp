@@ -56,8 +56,9 @@ The profile is enforced unconditionally on every `zigttp check` and `zigttp veri
 | ZTS616 | Call-site spread `f(...args)`               | Positional args or widened signature        | Static arity; monomorphic call inlining                        |
 | ZTS617 | Default parameter value `(a = v)`           | Accept `T \| undefined` and resolve in body | Default-value site is named, not hidden in signature           |
 | ZTS618 | Nested destructuring `{a: {b}}`             | One level then follow-up `const`            | Bounded destructure depth; readable error sites                |
+| ZTS619 | Unused index alias in `for...of`            | Iterate the array directly                  | Iterator scope confinement; no alias-tracking pass             |
 
-ZTS612 through ZTS618 are the most recent slice (commit `c0b66fa`, May 2026). They round out the canonical profile by removing the last expression-level alternates whose presence forced the strict checker to carry two-arm logic per rule.
+ZTS612 through ZTS618 are the most recent slice (commit `c0b66fa`, May 2026). They round out the expression-level alternates. ZTS619 picks up the first item from the loop-shape audit: a `for (const pair of arr.entries())` whose body destructures `[_i, item]` and never reads `_i` collapses to `for (const item of arr)`, dropping a binding the analyzer would otherwise have to track only to prove dead.
 
 The numbers ZTS600 through ZTS603 cover the foundational profile rules (implicit `unknown`, missing public annotation, dynamic capability access, non-exhaustive profile match) and are documented in `packages/zigts/src/strict_checker.zig`.
 
@@ -175,7 +176,7 @@ The shipped surface above is substantial. The roadmap below is north-star, in th
 
 ### Near-term: finish the canonical profile and harness gaps
 
-- **Continue the equivalence-class audit.** ZTS612-618 closed the expression-level alternates the original audit identified. Candidates for ZTS619+ are visible in handler code: index aliasing in `for...of` loops, redundant `as const` on already-immutable literals, parameter destructure on call sites where the callee declares the wider shape. Each candidate needs a write-up that names the proof it unlocks, not just the spelling it bans. Don't add rules whose only justification is consistency; every rule should earn its cost in the proof card.
+- **Continue the equivalence-class audit.** ZTS612-618 closed the expression-level alternates the original audit identified. ZTS619 closed the first loop-shape alternate (unused index alias in `for...of`). Remaining candidates visible in handler code: redundant `as const` on already-immutable literals, parameter destructure on call sites where the callee declares the wider shape. Each candidate needs a write-up that names the proof it unlocks, not just the spelling it bans. Don't add rules whose only justification is consistency; every rule should earn its cost in the proof card.
 - **Cassette harness for provider tests.** Per the deferred slice 5b note, the OpenAI client landed without a record/replay harness. Without it, provider regression tests either hit the live API (slow, flaky, paid) or stub at too high a level. The harness should record on first run, replay deterministically thereafter, and round-trip the wire format faithfully enough that streaming-vs-batch differences are visible.
 - **Streaming for OpenAI.** Anthropic streaming is wired; OpenAI is batch-only. The user-facing latency win is real and the implementation is small once the cassette harness exists.
 

@@ -155,6 +155,7 @@ fn strictCheckerCode(kind: strict_checker.DiagnosticKind) []const u8 {
         .canonical_call_spread => "ZTS616",
         .canonical_default_parameter => "ZTS617",
         .canonical_destructure_depth => "ZTS618",
+        .canonical_unused_index_alias => "ZTS619",
     };
 }
 

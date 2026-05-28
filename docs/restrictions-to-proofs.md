@@ -48,6 +48,7 @@ earned each `[+]` chip.
 | call-site spread `f(...args)` | dynamic arity invisible to the contract extractor | static call-arity and stable helper contracts | pass positional args or widen the helper signature |
 | default parameter value | hidden default invisible at call sites and in contracts | diff-visible defaults in the function body | accept `T \| undefined` and resolve in the body |
 | nested destructuring | deep patterns inflate review cost and drift in agent output | one-level destructure with intermediate names | drill in with follow-up `const` bindings |
+| unused index alias in `for...of` | alias-tracking pass on a binding that is never read | iterator-scope confinement with one fewer binding to track | iterate over the array directly; drop `.entries()` and the destructure |
 
 ## Why
 
@@ -86,3 +87,4 @@ making?" in one sentence.
 - **call-site spread `f(...args)`** - dynamic arity defeats the contract extractor's ability to pin a helper's parameter shape.
 - **default parameter value** - signature-site defaults are invisible to the contract extractor and to callers reading the diff.
 - **nested destructuring** - patterns nested inside another binding pattern inflate review cost without buying any proof.
+- **unused index alias in `for...of`** - an index binding the loop body never reads still forces the analyzer to track it before proving it dead; dropping `.entries()` lets iterator-scope confinement land directly.
