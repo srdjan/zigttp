@@ -29,11 +29,12 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "ast-rewrite",
     .description =
     \\Dispatch a typed RepairIntent into a verified in-memory canonical
-    \\rewrite. v1 supports the five canonicalize refactors:
+    \\rewrite. Supported canonicalize refactors:
     \\replace_let_with_const, canonicalize_for_of_const,
     \\replace_arrow_with_function, replace_export_arrow_with_function,
-    \\canonicalize_capability_key_alias. The tool never writes files; it
-    \\returns the proposed content and an edit_simulate veto verdict.
+    \\replace_compound_assign_with_explicit, canonicalize_capability_key_alias.
+    \\The tool never writes files; it returns the proposed content and an
+    \\edit_simulate veto verdict.
     ,
     .input_schema =
     \\{"type":"object","properties":{"path":{"type":"string"},"line":{"type":"integer","minimum":1},"intent":{"type":"string","description":"RepairIntent tag name."},"plan_id":{"type":"string","description":"Optional correlation id for the surfaced repair candidate."},"source":{"type":"string","description":"Optional source snapshot; only honoured for line-local intents."}},"required":["path","line","intent"]}
@@ -47,6 +48,7 @@ const SupportedKind = enum {
     canonicalize_for_of_const,
     replace_arrow_with_function,
     replace_export_arrow_with_function,
+    replace_compound_assign_with_explicit,
     canonicalize_capability_key_alias,
 
     fn fromIntent(intent: RepairIntent) ?SupportedKind {
@@ -55,6 +57,7 @@ const SupportedKind = enum {
             .canonicalize_for_of_const => .canonicalize_for_of_const,
             .replace_arrow_with_function => .replace_arrow_with_function,
             .replace_export_arrow_with_function => .replace_export_arrow_with_function,
+            .replace_compound_assign_with_explicit => .replace_compound_assign_with_explicit,
             .canonicalize_capability_key_alias => .canonicalize_capability_key_alias,
             else => null,
         };
@@ -179,6 +182,7 @@ fn produceProposed(
         .canonicalize_for_of_const,
         .replace_arrow_with_function,
         .replace_export_arrow_with_function,
+        .replace_compound_assign_with_explicit,
         => try repair_apply.applyIntent(allocator, source, .{
             .plan_id = "",
             .intent_kind = kind.asString(),
@@ -300,7 +304,7 @@ fn unsupportedIntent(
         plan_id,
         intent_str,
         "unsupported_repair_intent",
-        "zigts_expert_ast_rewrite only supports the five canonicalize repair intents: replace_let_with_const, canonicalize_for_of_const, replace_arrow_with_function, replace_export_arrow_with_function, canonicalize_capability_key_alias",
+        "zigts_expert_ast_rewrite only supports the canonicalize repair intents: replace_let_with_const, canonicalize_for_of_const, replace_arrow_with_function, replace_export_arrow_with_function, replace_compound_assign_with_explicit, canonicalize_capability_key_alias",
     );
 }
 
@@ -439,6 +443,34 @@ test "ast rewrite: replace_let_with_const clears veto on a local let" {
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "  const count = 1;") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
     try expectPayloadIntent(result, "replace_let_with_const");
+}
+
+test "ast rewrite: replace_compound_assign_with_explicit clears veto on a compound assignment" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  let count = 1;
+        \\  count += 2;
+        \\  return Response.json({ count });
+        \\}
+    ;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try writeFixture(tmp.sub_path, source);
+    defer testing.allocator.free(path);
+
+    const input = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"path\":\"{s}\",\"line\":3,\"intent\":\"replace_compound_assign_with_explicit\",\"plan_id\":\"rp_ca\"}}",
+        .{path},
+    );
+    defer testing.allocator.free(input);
+    var result = try runExecute(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "  count = count + 2;") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
+    try expectPayloadIntent(result, "replace_compound_assign_with_explicit");
 }
 
 test "ast rewrite: canonicalize_for_of_const clears veto on a for-of let" {

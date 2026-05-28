@@ -695,6 +695,7 @@ fn applyPlans(
             .goal_context = options.goals,
             .witnesses_defeated = defeated_view,
             .witnesses_new = new_view,
+            .emit_perf_receipt = true,
         });
         errdefer payload.deinit(allocator);
 

@@ -32,6 +32,7 @@ pub const RepairKind = enum {
     canonicalize_for_of_const,
     replace_arrow_with_function,
     replace_export_arrow_with_function,
+    replace_compound_assign_with_explicit,
 
     pub fn fromString(s: []const u8) ?RepairKind {
         return std.meta.stringToEnum(RepairKind, s);
@@ -50,7 +51,22 @@ pub fn applyIntent(
         .add_trailing_return => insertTemplateBeforeLastClosingBrace(allocator, source, intent.template),
         .replace_let_with_const, .canonicalize_for_of_const => applyAvoidableLet(allocator, source, intent.line),
         .replace_arrow_with_function, .replace_export_arrow_with_function => applyCanonicalFunction(allocator, source, intent.line),
+        .replace_compound_assign_with_explicit => applyCompoundAssign(allocator, source, intent.line),
     };
+}
+
+fn applyCompoundAssign(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    line: u32,
+) ![]u8 {
+    const target = canonicalize.sourceLine(source, line) orelse return error.InvalidRepairLine;
+    const replacement = canonicalize.compoundAssignReplacement(allocator, target) catch |e| switch (e) {
+        error.UnsupportedRefactor => return error.UnsupportedRepairIntent,
+        else => return e,
+    };
+    defer allocator.free(replacement);
+    return replaceLine(allocator, source, line, replacement);
 }
 
 fn applyAvoidableLet(
@@ -238,6 +254,74 @@ test "replace_let_with_const intent rewrites a local let line" {
     defer testing.allocator.free(out);
     try testing.expect(std.mem.indexOf(u8, out, "  const count = 1;") != null);
     try testing.expect(std.mem.indexOf(u8, out, "let ") == null);
+}
+
+test "replace_compound_assign_with_explicit rewrites a compound assignment" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  let n = 0;
+        \\  n += 1;
+        \\  return Response.json({ n });
+        \\}
+    ;
+    const out = try applyIntent(testing.allocator, source, .{
+        .plan_id = "rp_ca",
+        .intent_kind = "replace_compound_assign_with_explicit",
+        .line = 3,
+        .template = "",
+    });
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "  n = n + 1;") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "+=") == null);
+}
+
+test "replace_compound_assign_with_explicit expands a dotted-identifier target" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  state.total *= factor;
+        \\  return Response.json({});
+        \\}
+    ;
+    const out = try applyIntent(testing.allocator, source, .{
+        .plan_id = "rp_ca_dot",
+        .intent_kind = "replace_compound_assign_with_explicit",
+        .line = 2,
+        .template = "",
+    });
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "  state.total = state.total * factor;") != null);
+}
+
+test "replace_compound_assign_with_explicit refuses a call-base target" {
+    // `f().x += 1` would re-evaluate `f()`; the transform must bail so the
+    // agent falls back to a manual edit rather than changing behavior.
+    const source =
+        \\function handler(req: Request): Response {
+        \\  obj.compute().total *= 2;
+        \\  return Response.json({});
+        \\}
+    ;
+    try testing.expectError(error.UnsupportedRepairIntent, applyIntent(testing.allocator, source, .{
+        .plan_id = "rp_ca2",
+        .intent_kind = "replace_compound_assign_with_explicit",
+        .line = 2,
+        .template = "",
+    }));
+}
+
+test "replace_compound_assign_with_explicit refuses an indexed target" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  totals[i] += 1;
+        \\  return Response.json({});
+        \\}
+    ;
+    try testing.expectError(error.UnsupportedRepairIntent, applyIntent(testing.allocator, source, .{
+        .plan_id = "rp_ca3",
+        .intent_kind = "replace_compound_assign_with_explicit",
+        .line = 2,
+        .template = "",
+    }));
 }
 
 test "canonicalize_for_of_const intent rewrites a for-of let binding" {

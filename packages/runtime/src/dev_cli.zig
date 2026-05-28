@@ -367,8 +367,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             std.process.exit(1);
         }
         const witness_replay_lib = @import("witness_replay_lib.zig");
+        const perf_probe_lib = @import("perf_probe_lib.zig");
         pi_app.setInvocationArgv(user_args[1..]);
         pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
+        pi_app.perf_probe.setProbeFn(perf_probe_lib.recordPerfReceipt);
         try pi_app.run(allocator);
         return;
     }
@@ -1866,6 +1868,8 @@ fn isExpertBareFlag(arg: []const u8) bool {
         std.mem.eql(u8, arg, "--no-session") or
         std.mem.eql(u8, arg, "--no-persist-tool-output") or
         std.mem.eql(u8, arg, "--no-context-files") or
+        std.mem.eql(u8, arg, "--perf-receipt") or
+        std.mem.eql(u8, arg, "--no-perf-receipt") or
         std.mem.eql(u8, arg, "--resume") or
         std.mem.eql(u8, arg, "--continue");
 }
@@ -1993,6 +1997,7 @@ const expert_help =
     \\  --no-session               disable session persistence for this run
     \\  --no-persist-tool-output   omit tool output bodies from persisted session
     \\  --no-context-files         skip AGENTS.md / CLAUDE.md project context
+    \\  --no-perf-receipt          do not sign a perf receipt on applied edits
     \\  --session-id <id>          resume or create a session with this id
     \\  --resume, --continue       resume the newest session for this cwd
     \\  --fork <session-id>        branch from an existing session
@@ -2122,6 +2127,8 @@ test "validateExpertArgs accepts documented expert launch forms" {
     try ok(&.{ "--handler", "handler.ts", "--goal", "no_secret_leakage", "--max-iters", "4" });
     try ok(&.{ "--tools", "minimal", "--yes", "--no-context-files" });
     try ok(&.{ "--no-session", "--no-persist-tool-output", "--no-edit" });
+    try ok(&.{"--no-perf-receipt"});
+    try ok(&.{"--perf-receipt"});
 }
 
 test "validateExpertArgs rejects unknown expert flags and subcommands" {

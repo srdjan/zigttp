@@ -4,6 +4,7 @@ const zigts_cli = @import("zigts_cli");
 const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
 const tools_common = @import("tools/common.zig");
+const perf_probe = @import("perf_probe.zig");
 
 const edit_simulate = zigts_cli.edit_simulate;
 const precompile = zigts_cli.precompile;
@@ -65,6 +66,10 @@ pub const BuildVerifiedPatchOptions = struct {
     goal_context: []const []const u8 = &.{},
     witnesses_defeated: []const ui_payload.WitnessBody = &.{},
     witnesses_new: []const ui_payload.WitnessBody = &.{},
+    /// When true, fire the perf-as-proof probe against the just-written
+    /// handler (best-effort; emits a signed `kind=perf` ledger row). Only the
+    /// real apply paths set this; dry-run and demo callers leave it false.
+    emit_perf_receipt: bool = false,
 };
 
 pub fn buildVerifiedPatchPayload(
@@ -138,6 +143,21 @@ pub fn buildVerifiedPatchPayload(
     analysis.prove = null;
     analysis.system = null;
     analysis.rule_citations = &.{};
+
+    // Best-effort perf-as-proof receipt for the just-applied edit. Never fails
+    // the apply (the receipt is an audit artifact, not a gate). Gate the path
+    // resolve on the probe actually being able to run, so the disabled
+    // (`--no-perf-receipt`), unregistered (analyzer-only builds, tests), and
+    // dry-run cases skip the resolve+alloc entirely instead of doing the work
+    // and then no-op'ing inside `record`.
+    if (options.emit_perf_receipt and perf_probe.isEnabled() and perf_probe.isConfigured()) {
+        const handler_abs = resolveHandlerPath(allocator, options.workspace_root, options.file) catch null;
+        if (handler_abs) |abs| {
+            defer allocator.free(abs);
+            perf_probe.record(allocator, abs, options.after, options.applied_at_unix_ms);
+        }
+    }
+
     return payload;
 }
 
@@ -971,6 +991,71 @@ test "analyzePatch returns prove classification and rule citations" {
     try testing.expectEqual(@as(usize, 1), analysis.rule_citations.len);
     try testing.expectEqualStrings("ZTS204", analysis.rule_citations[0]);
     try testing.expect(analysis.hunks.len == 1);
+}
+
+var perf_probe_test_calls: usize = 0;
+var perf_probe_test_after_len: usize = 0;
+
+fn recordingPerfProbe(
+    _: std.mem.Allocator,
+    _: []const u8,
+    after_bytes: []const u8,
+    _: i64,
+) anyerror!void {
+    perf_probe_test_calls += 1;
+    perf_probe_test_after_len = after_bytes.len;
+}
+
+test "buildVerifiedPatchPayload fires the perf probe when emit_perf_receipt is set" {
+    const workspace_root = try tools_common.workspaceRoot(testing.allocator);
+    defer testing.allocator.free(workspace_root);
+
+    perf_probe_test_calls = 0;
+    perf_probe_test_after_len = 0;
+    perf_probe.setProbeFn(recordingPerfProbe);
+    perf_probe.setEnabled(true);
+    defer perf_probe.reset();
+
+    const after = "function handler(req: Request): Response { return Response.json({ ok: true }); }";
+    var payload = try buildVerifiedPatchPayload(testing.allocator, .{
+        .workspace_root = workspace_root,
+        .file = "handler.ts",
+        .before = null,
+        .after = after,
+        .policy_hash = "deadbeef",
+        .applied_at_unix_ms = 1_700_000_000_000,
+        .post_apply_ok = true,
+        .emit_perf_receipt = true,
+    });
+    defer payload.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), perf_probe_test_calls);
+    try testing.expectEqual(@as(usize, after.len), perf_probe_test_after_len);
+}
+
+test "buildVerifiedPatchPayload skips the perf probe by default" {
+    const workspace_root = try tools_common.workspaceRoot(testing.allocator);
+    defer testing.allocator.free(workspace_root);
+
+    perf_probe_test_calls = 0;
+    perf_probe.setProbeFn(recordingPerfProbe);
+    perf_probe.setEnabled(true);
+    defer perf_probe.reset();
+
+    const after = "function handler(req: Request): Response { return Response.json({ ok: true }); }";
+    var payload = try buildVerifiedPatchPayload(testing.allocator, .{
+        .workspace_root = workspace_root,
+        .file = "handler.ts",
+        .before = null,
+        .after = after,
+        .policy_hash = "deadbeef",
+        .applied_at_unix_ms = 1_700_000_000_000,
+        .post_apply_ok = true,
+        // emit_perf_receipt defaults false
+    });
+    defer payload.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), perf_probe_test_calls);
 }
 
 test "buildUnifiedDiff emits empty diff for identical content" {

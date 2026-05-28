@@ -56,6 +56,7 @@ pub const DiagnosticKind = enum {
     canonical_default_parameter,
     canonical_destructure_depth,
     canonical_unused_index_alias,
+    canonical_redundant_bool_compare,
 
     pub fn isCanonicalProfile(self: DiagnosticKind) bool {
         return switch (self) {
@@ -71,6 +72,7 @@ pub const DiagnosticKind = enum {
             .canonical_default_parameter,
             .canonical_destructure_depth,
             .canonical_unused_index_alias,
+            .canonical_redundant_bool_compare,
             => true,
             else => false,
         };
@@ -296,6 +298,7 @@ pub const StrictChecker = struct {
         switch (tag) {
             .binary_op => {
                 const bin = self.ir_view.getBinary(node) orelse return;
+                self.checkRedundantBoolCompare(node, bin);
                 self.walkExpr(bin.left);
                 self.walkExpr(bin.right);
             },
@@ -619,6 +622,63 @@ pub const StrictChecker = struct {
             .help = "drop `.entries()` and the destructure; iterate over the array directly",
             .repair_intent = .drop_unused_index_alias,
         });
+    }
+
+    /// ZTS620 canonical_redundant_bool_compare: detect a strict comparison of
+    /// a statically-boolean value against a boolean literal (`x === true`,
+    /// `x !== false`, and the operand-reversed forms). For a boolean `x` the
+    /// comparison is exactly `x` or `!x`, so the literal comparison is a
+    /// redundant spelling of the boolean test itself.
+    ///
+    /// The static-boolean guard is load-bearing for soundness: `x === true`
+    /// is only equivalent to `x` when `x` is a boolean. For a non-boolean
+    /// `x`, `x === true` is an identity test against the literal `true`,
+    /// which differs from the truthiness test `x`. When type information is
+    /// unavailable, or the value operand is not provably boolean, the rule
+    /// does not fire.
+    fn checkRedundantBoolCompare(self: *StrictChecker, node: NodeIndex, bin: ir.Node.BinaryExpr) void {
+        if (bin.op != .strict_eq and bin.op != .strict_neq) return;
+
+        const left_bool = self.boolLiteralValue(bin.left);
+        const right_bool = self.boolLiteralValue(bin.right);
+
+        // Exactly one operand must be a boolean literal. `true === false` is a
+        // constant the optimizer handles; it is not the redundant-test shape.
+        const lit_value: bool, const value_node: NodeIndex = blk: {
+            if (left_bool != null and right_bool == null) break :blk .{ left_bool.?, bin.right };
+            if (right_bool != null and left_bool == null) break :blk .{ right_bool.?, bin.left };
+            return;
+        };
+
+        // Soundness guard: the non-literal operand must be statically boolean.
+        const tc = self.type_checker orelse return;
+        if (tc.inferType(value_node) != tc.env.pool.idx_boolean) return;
+
+        // `=== true` / `!== false` reduce to `x`; `=== false` / `!== true`
+        // reduce to `!x`.
+        const positive = (bin.op == .strict_eq) == lit_value;
+        const help = if (positive)
+            "drop the comparison and use the boolean directly: `x`"
+        else
+            "drop the comparison and negate the boolean directly: `!x`";
+
+        self.addDiagnostic(.{
+            .severity = self.canonicalSeverity(),
+            .kind = .canonical_redundant_bool_compare,
+            .node = node,
+            .message = "comparing a boolean against a boolean literal is not canonical ZigTS",
+            .help = help,
+            .repair_intent = .drop_redundant_bool_compare,
+        });
+    }
+
+    /// The value of a boolean literal node, or null when `node` is not a
+    /// `lit_bool`. `IrView.getBoolValue` does not tag-check, so the tag gate
+    /// here is required to avoid reading a non-boolean node's payload as a
+    /// bool.
+    fn boolLiteralValue(self: *const StrictChecker, node: NodeIndex) ?bool {
+        if (self.ir_view.getTag(node) != .lit_bool) return null;
+        return self.ir_view.getBoolValue(node);
     }
 
     /// True when `node` is `<expr>.entries()` with no arguments.
@@ -1331,6 +1391,82 @@ fn checkSource(source: []const u8) !StrictChecker {
     errdefer checker.deinit();
     _ = try checker.check(root);
     return checker;
+}
+
+/// Typed harness for rules that need inferred types (e.g. ZTS620's boolean
+/// guard). Heap-allocated so the env/checker that capture `&pool`/`&env`
+/// keep stable addresses across the returned handle. Caller calls `deinit`.
+const TypedHarness = struct {
+    parser: @import("parser/root.zig").JsParser,
+    pool: type_pool_mod.TypePool,
+    env: TypeEnv,
+    tc: TypeChecker,
+    checker: StrictChecker,
+
+    fn deinit(self: *TypedHarness) void {
+        self.checker.deinit();
+        self.tc.deinit();
+        self.env.deinit();
+        self.pool.deinit(testing.allocator);
+        self.parser.deinit();
+        testing.allocator.destroy(self);
+    }
+};
+
+fn checkSourceTyped(source: []const u8) !*TypedHarness {
+    const h = try testing.allocator.create(TypedHarness);
+    errdefer testing.allocator.destroy(h);
+    h.parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    const root = try h.parser.parse();
+    const view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
+    h.pool = type_pool_mod.TypePool.init(testing.allocator);
+    h.env = TypeEnv.init(testing.allocator, &h.pool);
+    h.tc = TypeChecker.init(testing.allocator, view, null, &h.env, null);
+    _ = try h.tc.check(root);
+    h.checker = StrictChecker.init(testing.allocator, view, null, &h.env, &h.tc);
+    _ = try h.checker.check(root);
+    return h;
+}
+
+test "canonical_redundant_bool_compare fires on `=== true` for a boolean" {
+    var h = try checkSourceTyped(
+        "function handler(req) { const ready = req.method === \"GET\"; if (ready === true) { return Response.text(\"a\"); } return Response.text(\"b\"); }",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_redundant_bool_compare);
+}
+
+test "canonical_redundant_bool_compare fires on `!== false` for a boolean" {
+    var h = try checkSourceTyped(
+        "function handler(req) { const ready = req.method === \"GET\"; if (ready !== false) { return Response.text(\"a\"); } return Response.text(\"b\"); }",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_redundant_bool_compare);
+}
+
+test "canonical_redundant_bool_compare does not fire on a non-boolean comparison" {
+    // `n === 1` compares a number against a number literal, not a boolean
+    // against a boolean literal: leave it alone.
+    var h = try checkSourceTyped(
+        "function handler(req) { const n = 1; if (n === 1) { return Response.text(\"a\"); } return Response.text(\"b\"); }",
+    );
+    defer h.deinit();
+    for (h.checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_redundant_bool_compare);
+    }
+}
+
+test "canonical_redundant_bool_compare does not fire without type info" {
+    // The null-type-checker harness cannot prove the operand is boolean, so
+    // the soundness guard suppresses the rule rather than risk a non-boolean
+    // identity comparison.
+    var checker = try checkSource(
+        "function handler(req) { const ready = req.method === \"GET\"; if (ready === true) { return Response.text(\"a\"); } return Response.text(\"b\"); }",
+    );
+    defer checker.deinit();
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_redundant_bool_compare);
+    }
 }
 
 test "canonical_ternary fires on a ternary expression" {

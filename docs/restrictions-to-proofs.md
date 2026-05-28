@@ -49,6 +49,7 @@ earned each `[+]` chip.
 | default parameter value | hidden default invisible at call sites and in contracts | diff-visible defaults in the function body | accept `T \| undefined` and resolve in the body |
 | nested destructuring | deep patterns inflate review cost and drift in agent output | one-level destructure with intermediate names | drill in with follow-up `const` bindings |
 | unused index alias in `for...of` | alias-tracking pass on a binding that is never read | iterator-scope confinement with one fewer binding to track | iterate over the array directly; drop `.entries()` and the destructure |
+| boolean compared to a boolean literal (`x === true`) | redundant spelling of the boolean test, with a non-boolean identity-comparison footgun | one canonical boolean-test shape; flow/narrowing passes skip literal-comparison nodes | use the boolean directly: `x` (or `!x` for `=== false`) |
 
 ## Why
 

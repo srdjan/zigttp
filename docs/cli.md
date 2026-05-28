@@ -260,6 +260,7 @@ zigttp expert --fork <session-id>         # branch from an existing session
 zigttp expert --yes                       # auto-approve all verified edits
 zigttp expert --no-edit                   # auto-reject all verified edits
 zigttp expert --no-context-files          # skip AGENTS.md / CLAUDE.md load
+zigttp expert --no-perf-receipt           # skip the signed perf receipt on applied edits
 zigttp expert --tools minimal             # workspace-read-only tool preset
 zigttp expert --tools full                # full compiler tool preset (default)
 

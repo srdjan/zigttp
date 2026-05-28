@@ -27,6 +27,7 @@ test {
     _ = deploy.oci.tar;
 
     _ = @import("proof_ledger.zig");
+    _ = @import("perf_probe_lib.zig");
     _ = @import("proofs_cli.zig");
     _ = @import("proof_card_tui.zig");
     _ = @import("proof_audit_ring.zig");

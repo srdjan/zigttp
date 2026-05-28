@@ -149,6 +149,32 @@ const {user} = payload;
 const {name} = user;
 ```
 
+### Unused index alias in `for...of` (ZTS619)
+```ts
+// before
+for (const pair of items.entries()) {
+  const [_i, item] = pair;
+  use(item);
+}
+
+// after
+for (const item of items) {
+  use(item);
+}
+```
+
+### Boolean compared to a boolean literal (ZTS620)
+```ts
+// before
+if (ready === true) { ... }
+if (ready === false) { ... }
+
+// after
+if (ready) { ... }
+if (!ready) { ... }
+```
+Only flagged when `ready` is statically boolean: `x === true` is exactly `x` and `x === false` is exactly `!x`. For a non-boolean `x` the comparison is an identity check, not a truthiness test, so the rule does not fire there.
+
 ## Working rules for the agent
 
 1. Always consult live tools for rules and modules. Never answer language or module questions from memory: call `zigts_expert_describe_rule`, `zigts_expert_features`, `zigts_expert_modules`.

@@ -208,6 +208,22 @@ for (const item of items) {
 
 A `for (const pair of arr.entries())` whose body destructures `[_i, item]` and never reads `_i` carries the `.entries()` call and the alias binding for no payoff. The canonical form drops both and iterates the array directly. Why: the unused index widens the loop's surface for iterator-scope-confinement analysis - the analyzer must track an extra binding only to prove it dead. Eliminating the alias collapses that branch and the proof goes through without an alias-tracking pass.
 
+### ZTS620 - boolean compared to a boolean literal
+
+```ts
+// before
+if (ready === true) { ... }
+if (ready === false) { ... }
+
+// after
+if (ready) { ... }
+if (!ready) { ... }
+```
+
+For a statically-boolean `ready`, `ready === true` evaluates to exactly `ready` and `ready === false` to exactly `!ready` (likewise `!== false` -> `ready`, `!== true` -> `!ready`). The literal comparison is a redundant spelling of the boolean test itself, so the canonical form drops it. Why: it collapses the boolean-test equivalence class to a single shape, so the flow checker and type-narrowing passes do not have to special-case a `strict_eq`/`strict_neq` node whose other operand is a boolean literal.
+
+The rule is **type-guarded** and fires only when the type checker proves the compared operand is boolean. This is load-bearing for soundness: for a non-boolean `x`, `x === true` is an identity test against the literal `true`, which is *not* the same as the truthiness test `x` (e.g. `1 === true` is `false` while `if (1)` is truthy). When type information is unavailable, or the operand is not provably boolean, the rule does not fire. This is the type-directed-rule pattern the "Deferred cuts" note below anticipated, now realized through the strict checker's `type_checker` access.
+
 ## Deferred cuts
 
 Two cuts from the original plan remain unimplemented because they require infrastructure the strict checker does not currently carry:

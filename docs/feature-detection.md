@@ -216,6 +216,8 @@ A third layer of detection runs alongside the parser: the strict checker enforce
 | `ZTS616` | call-site spread `f(...args)` | positional args or widen the helper signature |
 | `ZTS617` | default parameter value `(a = v)` | accept `T \| undefined` and resolve in the body |
 | `ZTS618` | nested destructuring `{a: {b}}` | drill in with follow-up `const` bindings |
+| `ZTS619` | unused index alias in `for...of` | iterate the array directly; drop `.entries()` and the destructure |
+| `ZTS620` | boolean compared to a boolean literal (`x === true`) | use the boolean directly: `x` (or `!x` for `=== false`) |
 
 The full reference with before/after pairs and rationale lives at `docs/canonical-profile.md`.
 

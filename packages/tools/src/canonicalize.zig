@@ -81,6 +81,19 @@ pub fn collect(allocator: std.mem.Allocator, file: []const u8) !Result {
                 .replacement = replacement,
                 .original_line = try allocator.dupe(u8, line),
             });
+        } else if (std.mem.eql(u8, diag.code, "ZTS613")) {
+            const replacement = compoundAssignReplacement(allocator, line) catch |err| switch (err) {
+                error.UnsupportedRefactor => continue,
+                else => return err,
+            };
+            try appendRefactorUnique(allocator, &result, .{
+                .kind = "canonicalize_compound_assign",
+                .line = diag.line,
+                .column = diag.column,
+                .message = diag.message,
+                .replacement = replacement,
+                .original_line = try allocator.dupe(u8, line),
+            });
         } else if (std.mem.eql(u8, diag.code, "ZTS602")) {
             const replacement = capabilityAliasReplacement(allocator, source, diag, diagnostics) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
@@ -187,6 +200,70 @@ pub fn avoidableLetReplacement(allocator: std.mem.Allocator, line: []const u8) !
         line[0..at],
         line[at + needle.len ..],
     });
+}
+
+/// ZTS613: rewrite a compound assignment `lhs OP= rhs` into the explicit
+/// `lhs = lhs OP rhs` so the read and the write are both visible.
+///
+/// Conservative by design: only the arithmetic operators (`+= -= *= /= %=`)
+/// are handled, and the target must be a *simple lvalue* — an identifier or a
+/// dotted-identifier chain (`a`, `a.b.c`). A target containing a call or index
+/// (`f().x`, `a[i]`) is refused with `UnsupportedRefactor`, because expanding
+/// it would re-evaluate a possibly side-effecting base expression twice and
+/// change behavior. Bitwise/shift compound operators are likewise refused to
+/// avoid the `<=`/`<<=` and `>=`/`>>=` lexing ambiguity; the agent falls back
+/// to a manual edit there.
+pub fn compoundAssignReplacement(allocator: std.mem.Allocator, line: []const u8) ![]u8 {
+    const trimmed_left = trimLeft(line, " \t");
+    const indent = line[0 .. line.len - trimmed_left.len];
+
+    // Find the compound-assignment `=`: the first `=` immediately preceded by
+    // an arithmetic operator and not itself part of `==`.
+    var i: usize = indent.len;
+    while (i < line.len) : (i += 1) {
+        if (line[i] != '=') continue;
+        if (i == indent.len) continue;
+        if (i + 1 < line.len and line[i + 1] == '=') continue; // ==, ===
+        const op_char = line[i - 1];
+        if (!isArithmeticOpChar(op_char)) continue;
+
+        const lhs = std.mem.trim(u8, line[indent.len .. i - 1], " \t");
+        const rhs = trimLeft(line[i + 1 ..], " \t");
+        if (!isSimpleLvalue(lhs)) return error.UnsupportedRefactor;
+        if (rhs.len == 0) return error.UnsupportedRefactor;
+
+        return std.fmt.allocPrint(allocator, "{s}{s} = {s} {c} {s}", .{
+            indent,
+            lhs,
+            lhs,
+            op_char,
+            rhs,
+        });
+    }
+    return error.UnsupportedRefactor;
+}
+
+fn isArithmeticOpChar(c: u8) bool {
+    return c == '+' or c == '-' or c == '*' or c == '/' or c == '%';
+}
+
+/// A simple lvalue is an identifier or dotted-identifier chain: re-evaluating
+/// it is side-effect-free, so `lhs = lhs OP rhs` preserves behavior.
+fn isSimpleLvalue(s: []const u8) bool {
+    if (s.len == 0) return false;
+    if (!isIdentStart(s[0])) return false;
+    var prev_dot = false;
+    for (s, 0..) |c, idx| {
+        if (c == '.') {
+            // No leading/trailing/double dots.
+            if (idx == 0 or idx == s.len - 1 or prev_dot) return false;
+            prev_dot = true;
+            continue;
+        }
+        if (!isIdentContinue(c)) return false;
+        prev_dot = false;
+    }
+    return true;
 }
 
 const AliasReplacement = struct {

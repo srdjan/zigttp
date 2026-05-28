@@ -90,6 +90,7 @@ fn execute(
             .applied_at_unix_ms = common.nowUnixMs(),
             .post_apply_ok = true,
             .post_apply_summary = "feature plan applied through compiler veto",
+            .emit_perf_receipt = true,
         },
     ) };
     defer patch_payload.deinit(allocator);

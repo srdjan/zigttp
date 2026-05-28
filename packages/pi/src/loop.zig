@@ -481,6 +481,7 @@ fn appendVerifiedPatchEntry(
             .post_apply_summary = post_apply.summary,
             .transcript = transcript,
             .repair_plan_ids = repair_links.repair_plan_ids,
+            .emit_perf_receipt = true,
         },
     ) };
     errdefer {

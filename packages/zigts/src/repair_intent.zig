@@ -43,6 +43,13 @@ pub const RepairIntent = enum {
     canonicalize_for_of_const,
     canonicalize_capability_key_alias,
 
+    // ZTS620 (expert-strategy §5 near-term audit). Emitted by the strict
+    // checker for a comparison of a statically-boolean value against a
+    // boolean literal (`x === true`); the planner lowers it to dropping the
+    // comparison in favour of `x` or `!x`. Appended last to preserve every
+    // prior variant's `@intFromEnum` value.
+    drop_redundant_bool_compare,
+
     pub fn asString(self: RepairIntent) []const u8 {
         return @tagName(self);
     }

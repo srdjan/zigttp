@@ -348,6 +348,14 @@ const strict_meta = [_]struct {
         .help = "Drop `.entries()` and the destructure; iterate the array directly: `for (const x of arr) { use(x); }`",
         .repair = .drop_unused_index_alias,
     },
+    .{
+        .kind = .canonical_redundant_bool_compare,
+        .code = "ZTS620",
+        .description = "A boolean value compared against a boolean literal (`x === true`).",
+        .example = "if (ready === true) { ... }",
+        .help = "Drop the literal comparison and use the boolean directly: `if (ready) { ... }` (or `if (!ready)` for `=== false`).",
+        .repair = .drop_redundant_bool_compare,
+    },
 };
 
 // ---------------------------------------------------------------------------
