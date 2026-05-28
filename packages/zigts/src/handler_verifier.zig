@@ -23,6 +23,9 @@ const type_pool_mod = @import("type_pool.zig");
 const type_checker_mod = @import("type_checker.zig");
 const bool_checker_mod = @import("bool_checker.zig");
 const match_analysis_mod = @import("match_analysis.zig");
+const repair_intent_mod = @import("repair_intent.zig");
+
+pub const RepairIntent = repair_intent_mod.RepairIntent;
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -118,6 +121,10 @@ pub const Diagnostic = struct {
     /// For unchecked_result_value: the function that produced the result.
     /// Borrowed from the module binding registry - always valid.
     source_func: ?[]const u8 = null,
+    /// Slice B (expert-strategy §5): typed repair primitive the agent uses
+    /// to pick an apply step directly. `null` when no single canonical
+    /// repair applies (e.g. unused_variable — needs a free-form delete).
+    repair_intent: ?RepairIntent = null,
 };
 
 /// Return status for a statement or block - used by exhaustive return analysis.
@@ -363,6 +370,7 @@ pub const HandlerVerifier = struct {
                 .node = handler_func,
                 .message = "not all code paths return a Response",
                 .help = "ensure every branch (if/else, switch/default) ends with a return statement",
+                .repair_intent = .add_trailing_return,
             });
         }
 
@@ -812,6 +820,7 @@ pub const HandlerVerifier = struct {
                         .node = node,
                         .message = "match expression without default arm may not produce a value",
                         .help = "add 'default:' or 'when _:' arm to handle all cases",
+                        .repair_intent = .add_trailing_return,
                     });
                 }
             },
@@ -1046,6 +1055,7 @@ pub const HandlerVerifier = struct {
                 .help = "check result.ok before accessing result.value:\n           if (result.ok) { ... result.value ... }",
                 .source_module = rb.source_module,
                 .source_func = rb.source_func,
+                .repair_intent = .insert_guard_before_line,
             });
         }
     }
@@ -1326,6 +1336,7 @@ pub const HandlerVerifier = struct {
             .node = node,
             .message = "optional value used without checking for undefined",
             .help = "check before use: if (val !== undefined) { ... }\n           or provide a default: val ?? \"fallback\"",
+            .repair_intent = .insert_guard_before_line,
         });
     }
 
@@ -1343,6 +1354,7 @@ pub const HandlerVerifier = struct {
             .node = node,
             .message = "property access on optional value without checking for undefined",
             .help = "check before access: if (val) { ... val.prop ... }\n           or use optional chaining: val?.prop",
+            .repair_intent = .insert_guard_before_line,
         });
     }
 
@@ -1632,4 +1644,51 @@ test "HandlerVerifier still warns on non-exhaustive union match" {
         \\  return Response.json({ out });
         \\}
     , 0, 1);
+}
+
+test "missing_return_path diagnostic carries repair_intent = add_trailing_return" {
+    // Slice B (expert-strategy §5): handler_verifier diagnostics must
+    // populate the typed repair primitive so the expert agent can pick an
+    // apply step directly. The handler returns only on the truthy branch;
+    // the false branch leaves the function with no Response, which trips
+    // ZTS302 (missing_return_path). The fix the agent should pick is
+    // add_trailing_return — a `return Response.text("", { status: 500 })`
+    // tail appended to the body.
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  if (req.method === "GET") {
+        \\    return Response.json({ ok: true });
+        \\  }
+        \\}
+    ;
+
+    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    defer strip_result.deinit();
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = findHandlerFunction(ir_view, root) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+
+    var verifier = HandlerVerifier.init(allocator, ir_view, null, null, null);
+    defer verifier.deinit();
+    _ = try verifier.verify(handler_fn);
+
+    var saw_missing_return: bool = false;
+    for (verifier.getDiagnostics()) |diag| {
+        if (diag.kind == .missing_return_path) {
+            saw_missing_return = true;
+            try std.testing.expectEqual(
+                @as(?RepairIntent, .add_trailing_return),
+                diag.repair_intent,
+            );
+        }
+    }
+    try std.testing.expect(saw_missing_return);
 }

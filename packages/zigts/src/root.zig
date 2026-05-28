@@ -91,6 +91,7 @@ pub const contract_diff = @import("contract_diff.zig");
 pub const system_linker = @import("system_linker.zig");
 pub const rule_error = @import("rule_error.zig");
 pub const rule_registry = @import("rule_registry.zig");
+pub const repair_intent = @import("repair_intent.zig");
 pub const ws_consistency = @import("ws_consistency.zig");
 pub const spec_discharge = @import("spec_discharge.zig");
 pub const function_specs = @import("function_specs.zig");
