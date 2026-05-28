@@ -4,14 +4,16 @@
 //! + current-binary compiler snapshot (rules / features / modules / meta)
 //! + epilogue.
 //!
-//! Pure: no network, no filesystem. The compiler's rule registry, feature
-//! matrix, and module catalog are comptime-known and flow through the
-//! existing in-process serializers so the persona can never drift from the
-//! binary's actual semantics.
+//! Pure on the compiler-snapshot path; the optional WITNESSED FAILURES
+//! few-shot section reads a single on-disk corpus directory. The compiler's
+//! rule registry, feature matrix, and module catalog are comptime-known and
+//! flow through the existing in-process serializers so the persona can never
+//! drift from the binary's actual semantics.
 
 const std = @import("std");
 const zigts = @import("zigts");
 const rule_registry = zigts.rule_registry;
+const witness_corpus = zigts.witness_corpus;
 const zigts_cli = @import("zigts_cli");
 const expert_meta = zigts_cli.expert_meta;
 const json_diagnostics = zigts_cli.json_diagnostics;
@@ -30,6 +32,17 @@ pub const PROMPT_CAP_BYTES: usize = 128 * 1024;
 /// three combined are under 1 KiB; 2 KiB is conservative headroom so a
 /// future epilogue tweak does not silently push us past the cap.
 const CTX_TRUNCATION_RESERVED: usize = 2048;
+
+/// Hard cap on the WITNESSED FAILURES few-shot section, including banner and
+/// every rendered entry line. Keeps the section bounded so a corpus that
+/// has grown unusually large never crowds out project context past the
+/// budget the persona expects to hand to it.
+const WITNESS_SECTION_CAP: usize = 8 * 1024;
+
+/// Banner + helper-prose overhead inside the WITNESSED FAILURES section
+/// before the first entry line. Used by `witnessLineBudget` to reserve
+/// space for the banner that `writeBanner` plus the intro line emit.
+const WITNESS_SECTION_OVERHEAD: usize = 256;
 
 // The tool list inside the prologue below must stay in sync with
 // `pi_app.buildRegistry`. Drift is a soft degradation, not a hard break:
@@ -276,7 +289,7 @@ const epilogue =
 ;
 
 pub fn buildSystemPrompt(allocator: std.mem.Allocator) ![]u8 {
-    return buildSystemPromptWithContext(allocator, null);
+    return buildSystemPromptWithContextAndCorpus(allocator, null, null);
 }
 
 /// Build the system prompt with an optional project-context block appended.
@@ -287,6 +300,21 @@ pub fn buildSystemPrompt(allocator: std.mem.Allocator) ![]u8 {
 pub fn buildSystemPromptWithContext(
     allocator: std.mem.Allocator,
     project_context: ?[]const u8,
+) ![]u8 {
+    return buildSystemPromptWithContextAndCorpus(allocator, project_context, null);
+}
+
+/// Build the system prompt, optionally appending a project-context block and
+/// a WITNESSED FAILURES few-shot section sourced from a witness corpus
+/// directory (typically `.zigttp/witnesses/<short_hash>` for a handler in
+/// scope). Truncation order, from most to least protected: persona prologue
+/// and rule/feature/module snapshots are never cut; the WITNESSED FAILURES
+/// section is cut second; PROJECT CONTEXT is cut first. A missing corpus or
+/// an empty entry list omits the witness section entirely.
+pub fn buildSystemPromptWithContextAndCorpus(
+    allocator: std.mem.Allocator,
+    project_context: ?[]const u8,
+    witness_corpus_dir: ?[]const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -330,6 +358,43 @@ pub fn buildSystemPromptWithContext(
     try w.writeAll("positional args ({{1}}, {{2}}, {{args}}) before being sent as your user message.\n\n");
     inline for (prompts_catalog.catalog) |t| {
         try w.print("  /template:{s}\n    {s}\n\n", .{ t.name, t.description });
+    }
+
+    // WITNESSED FAILURES is the first thing eligible for truncation after
+    // project context: it sits between the snapshots (never cut) and the
+    // project context (cut first). The budget is bounded above by
+    // `WITNESS_SECTION_CAP` and bounded below by leaving enough headroom
+    // for the epilogue plus a worst-case truncation marker. Project context
+    // takes whatever remains under the cap, which is why it is the first to
+    // shrink when the witness section uses its full budget.
+    if (witness_corpus_dir) |dir| {
+        const persona_len_before_witnesses = aw.writer.end;
+        const room_after_witnesses_reserve =
+            if (PROMPT_CAP_BYTES > persona_len_before_witnesses + CTX_TRUNCATION_RESERVED)
+                PROMPT_CAP_BYTES - persona_len_before_witnesses - CTX_TRUNCATION_RESERVED
+            else
+                0;
+        const witness_budget = @min(WITNESS_SECTION_CAP, room_after_witnesses_reserve);
+        if (witness_budget > WITNESS_SECTION_OVERHEAD) {
+            const line_budget = witness_budget - WITNESS_SECTION_OVERHEAD;
+            const entries = witness_corpus.selectFewShot(allocator, dir, line_budget) catch try allocator.alloc(witness_corpus.Entry, 0);
+            defer witness_corpus.freeEntries(allocator, entries);
+            if (entries.len > 0) {
+                try writeBanner(w, "WITNESSED FAILURES (load-bearing counterexamples from this handler's corpus)");
+                try w.writeAll("Past falsifying inputs. Use these as patterns to avoid; never reintroduce a\n");
+                try w.writeAll("path that closes here. Call `pi_witnesses` for the full corpus and `summary`\n");
+                try w.writeAll("text behind each entry.\n\n");
+                for (entries) |e| {
+                    const short_len = @min(witness_corpus.FEW_SHOT_KEY_PREFIX_LEN, e.key.len);
+                    const short_key = e.key[0..short_len];
+                    if (e.pinned) {
+                        try w.print("- [{s}] {s} (key={s}, pinned)\n", .{ e.property, e.summary, short_key });
+                    } else {
+                        try w.print("- [{s}] {s} (key={s})\n", .{ e.property, e.summary, short_key });
+                    }
+                }
+            }
+        }
     }
 
     // Project context is appended after persona+snapshots but before the
@@ -593,4 +658,173 @@ test "empty project context is ignored" {
     const prompt_with = try buildSystemPromptWithContext(testing.allocator, "");
     defer testing.allocator.free(prompt_with);
     try testing.expect(std.mem.indexOf(u8, prompt_with, "PROJECT CONTEXT") == null);
+}
+
+// ---------------------------------------------------------------------------
+// WITNESSED FAILURES few-shot section
+// ---------------------------------------------------------------------------
+
+const counterexample = zigts.counterexample;
+
+fn personaChdirTmp(tmp: *std.testing.TmpDir) ![:0]u8 {
+    const old_cwd = try std.process.currentPathAlloc(testing.io, testing.allocator);
+    errdefer testing.allocator.free(old_cwd);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(testing.io, &buf);
+    try std.Io.Threaded.chdir(buf[0..len]);
+    return old_cwd;
+}
+
+fn seedFixtureWitness(
+    allocator: std.mem.Allocator,
+    dir: []const u8,
+    property: counterexample.PropertyTag,
+    origin_node: u32,
+    sink_node: u32,
+    summary: []const u8,
+    pinned: bool,
+) ![]u8 {
+    var w = try counterexample.solve(allocator, .{
+        .property = property,
+        .origin = .{ .line = 1, .column = 1 },
+        .sink = .{ .line = 2, .column = 1 },
+        .origin_node_id = origin_node,
+        .sink_node_id = sink_node,
+        .summary = summary,
+        .constraints = &.{},
+        .io_calls = &.{},
+    });
+    defer w.deinit(allocator);
+    var r = try witness_corpus.persist(allocator, dir, w);
+    errdefer r.deinit(allocator);
+    if (pinned) try witness_corpus.pin(allocator, dir, r.key, true);
+    const key_dup = try allocator.dupe(u8, r.key);
+    r.deinit(allocator);
+    return key_dup;
+}
+
+test "persona injects WITNESSED FAILURES section with pinned entries first" {
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try personaChdirTmp(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const dir = try witness_corpus.corpusDir(allocator, "h.ts");
+    defer allocator.free(dir);
+    try witness_corpus.ensureCorpusDir(allocator, dir, "h.ts");
+
+    const k1 = try seedFixtureWitness(allocator, dir, .no_secret_leakage, 1, 2, "unpinned-alpha", false);
+    allocator.free(k1);
+    const k2 = try seedFixtureWitness(allocator, dir, .injection_safe, 3, 4, "pinned-beta", true);
+    allocator.free(k2);
+    const k3 = try seedFixtureWitness(allocator, dir, .no_credential_leakage, 5, 6, "unpinned-gamma", false);
+    allocator.free(k3);
+
+    const prompt = try buildSystemPromptWithContextAndCorpus(allocator, null, dir);
+    defer allocator.free(prompt);
+
+    try testing.expect(std.mem.indexOf(u8, prompt, "WITNESSED FAILURES") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pinned-beta") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "unpinned-alpha") != null);
+
+    const pinned_pos = std.mem.indexOf(u8, prompt, "pinned-beta") orelse return error.TestExpected;
+    const unpinned_alpha_pos = std.mem.indexOf(u8, prompt, "unpinned-alpha") orelse return error.TestExpected;
+    const unpinned_gamma_pos = std.mem.indexOf(u8, prompt, "unpinned-gamma") orelse return error.TestExpected;
+    try testing.expect(pinned_pos < unpinned_alpha_pos);
+    try testing.expect(pinned_pos < unpinned_gamma_pos);
+
+    // WITNESSED FAILURES sits before PROJECT CONTEXT (none here) and before END OF PERSONA.
+    const witnesses_pos = std.mem.indexOf(u8, prompt, "WITNESSED FAILURES") orelse return error.TestExpected;
+    const epilogue_pos = std.mem.indexOf(u8, prompt, "END OF PERSONA") orelse return error.TestExpected;
+    try testing.expect(witnesses_pos < epilogue_pos);
+    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
+}
+
+test "persona omits WITNESSED FAILURES section when corpus is empty" {
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try personaChdirTmp(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const dir = try witness_corpus.corpusDir(allocator, "ghost.ts");
+    defer allocator.free(dir);
+    // Note: deliberately no `ensureCorpusDir` here - the directory is missing.
+
+    const prompt = try buildSystemPromptWithContextAndCorpus(allocator, null, dir);
+    defer allocator.free(prompt);
+
+    try testing.expect(std.mem.indexOf(u8, prompt, "WITNESSED FAILURES") == null);
+}
+
+test "persona witness section truncates cleanly when the budget overflows" {
+    // Seed enough wide entries that all of them cannot fit; assert the
+    // section is present, contains a strict prefix of the sorted corpus,
+    // and the rendered output ends on a newline (no partial entry line).
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try personaChdirTmp(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const dir = try witness_corpus.corpusDir(allocator, "h.ts");
+    defer allocator.free(dir);
+    try witness_corpus.ensureCorpusDir(allocator, dir, "h.ts");
+
+    // Wide summaries push each rendered line past ~600 bytes; with the
+    // 8 KiB section cap minus banner overhead, far fewer than 64 fit.
+    const wide_summary = "x" ** 600;
+    var seeded: usize = 0;
+    while (seeded < 64) : (seeded += 1) {
+        var w = try counterexample.solve(allocator, .{
+            .property = .no_secret_leakage,
+            .origin = .{ .line = @intCast(seeded + 1), .column = 1 },
+            .sink = .{ .line = @intCast(seeded + 2), .column = 1 },
+            .origin_node_id = @intCast(seeded * 2 + 1),
+            .sink_node_id = @intCast(seeded * 2 + 2),
+            .summary = wide_summary,
+            .constraints = &.{},
+            .io_calls = &.{},
+        });
+        defer w.deinit(allocator);
+        var r = try witness_corpus.persist(allocator, dir, w);
+        r.deinit(allocator);
+    }
+
+    const prompt = try buildSystemPromptWithContextAndCorpus(allocator, null, dir);
+    defer allocator.free(prompt);
+
+    try testing.expect(std.mem.indexOf(u8, prompt, "WITNESSED FAILURES") != null);
+    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
+
+    // Find the witness section boundaries: from its banner to the next
+    // banner ("============================================================"
+    // line). The section must end on a newline and the last non-empty line
+    // must look like a complete entry ("- [...] ... (key=...)" form).
+    const banner = "WITNESSED FAILURES";
+    const section_start = std.mem.indexOf(u8, prompt, banner) orelse return error.TestExpected;
+    const tail = prompt[section_start..];
+    // Skip past the banner's own ===... bar to find the next section bar.
+    const after_banner_bar = std.mem.indexOf(u8, tail, "\n\n") orelse return error.TestExpected;
+    const search_from = section_start + after_banner_bar + 2;
+    const next_bar = std.mem.indexOf(u8, prompt[search_from..], "\n========") orelse return error.TestExpected;
+    const section_end = search_from + next_bar;
+    const section = prompt[section_start..section_end];
+
+    try testing.expect(std.mem.endsWith(u8, section, "\n"));
+
+    // Last non-empty line must be a complete bullet entry. Walk back over
+    // trailing newlines, then back to the previous newline.
+    var end = section.len;
+    while (end > 0 and section[end - 1] == '\n') end -= 1;
+    var line_start = end;
+    while (line_start > 0 and section[line_start - 1] != '\n') line_start -= 1;
+    const last_line = section[line_start..end];
+    try testing.expect(std.mem.startsWith(u8, last_line, "- ["));
+    try testing.expect(std.mem.indexOf(u8, last_line, "(key=") != null);
+    try testing.expect(std.mem.endsWith(u8, last_line, ")"));
 }
