@@ -57,6 +57,10 @@ comptime {
     _ = @import("providers/anthropic/response_assembler.zig");
     _ = @import("providers/anthropic/apply_edit.zig");
     _ = @import("providers/anthropic/client.zig");
+    _ = @import("providers/openai/events.zig");
+    _ = @import("providers/openai/sse_parser.zig");
+    _ = @import("providers/openai/response_assembler.zig");
+    _ = @import("providers/openai/client.zig");
     _ = @import("app.zig");
     _ = @import("print_mode.zig");
     _ = @import("session/paths.zig");
