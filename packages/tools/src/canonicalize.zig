@@ -125,7 +125,7 @@ fn freeRefactorOwned(allocator: std.mem.Allocator, refactor: *Refactor) void {
     };
 }
 
-fn canonicalFunctionReplacement(allocator: std.mem.Allocator, line: []const u8) ![]u8 {
+pub fn canonicalFunctionReplacement(allocator: std.mem.Allocator, line: []const u8) ![]u8 {
     const trimmed = std.mem.trim(u8, line, " \t\r\n");
     const is_export = std.mem.startsWith(u8, trimmed, "export const ");
     const prefix_len: usize = if (is_export) "export const ".len else "const ".len;
@@ -170,7 +170,7 @@ fn canonicalFunctionReplacement(allocator: std.mem.Allocator, line: []const u8) 
     });
 }
 
-fn avoidableLetReplacement(allocator: std.mem.Allocator, line: []const u8) ![]u8 {
+pub fn avoidableLetReplacement(allocator: std.mem.Allocator, line: []const u8) ![]u8 {
     const trimmed_left = trimLeft(line, " \t");
     const indent_len = line.len - trimmed_left.len;
     const indent = line[0..indent_len];
@@ -373,7 +373,7 @@ fn assignmentEquals(source: []const u8) ?usize {
     return null;
 }
 
-fn sourceLine(source: []const u8, line_num: u32) ?[]const u8 {
+pub fn sourceLine(source: []const u8, line_num: u32) ?[]const u8 {
     if (line_num == 0) return null;
     var current: u32 = 1;
     var start: usize = 0;

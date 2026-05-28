@@ -37,6 +37,7 @@ const gen_tests_tool = @import("tools/gen_tests.zig");
 const pi_goal_check_tool = @import("tools/pi_goal_check.zig");
 const pi_repair_plan_tool = @import("tools/pi_repair_plan.zig");
 const pi_apply_repair_plan_tool = @import("tools/pi_apply_repair_plan.zig");
+const ast_rewrite_tool = @import("tools/zigts_expert_ast_rewrite.zig");
 const pi_feature_plan_tool = @import("tools/pi_feature_plan.zig");
 const pi_apply_feature_plan_tool = @import("tools/pi_apply_feature_plan.zig");
 const pi_forge_route_tool = @import("tools/pi_forge_route.zig");
@@ -97,6 +98,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, pi_goal_check_tool.tool);
     try reg.register(allocator, pi_repair_plan_tool.tool);
     try reg.register(allocator, pi_apply_repair_plan_tool.tool);
+    try reg.register(allocator, ast_rewrite_tool.tool);
     try reg.register(allocator, pi_feature_plan_tool.tool);
     try reg.register(allocator, pi_apply_feature_plan_tool.tool);
     try reg.register(allocator, pi_forge_route_tool.tool);
@@ -512,6 +514,7 @@ test "buildRegistry registers every first-party compiler primitive" {
         "pi_goal_check",
         "pi_repair_plan",
         "pi_apply_repair_plan",
+        "zigts_expert_ast_rewrite",
         "pi_feature_plan",
         "pi_apply_feature_plan",
         "pi_forge_route",
