@@ -42,6 +42,8 @@ const pi_apply_feature_plan_tool = @import("tools/pi_apply_feature_plan.zig");
 const pi_forge_route_tool = @import("tools/pi_forge_route.zig");
 const pi_specs_status_tool = @import("tools/pi_specs_status.zig");
 const pi_witnesses_tool = @import("tools/pi_witnesses.zig");
+const pi_remember_fact_tool = @import("tools/pi_remember_fact.zig");
+const pi_recall_facts_tool = @import("tools/pi_recall_facts.zig");
 const pi_extension_catalog_tool = @import("tools/pi_extension_catalog.zig");
 const effects_tool = @import("tools/zigts_expert_effects.zig");
 const narrow_tool = @import("tools/zigts_expert_narrow.zig");
@@ -100,6 +102,8 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, pi_forge_route_tool.tool);
     try reg.register(allocator, pi_specs_status_tool.tool);
     try reg.register(allocator, pi_witnesses_tool.tool);
+    try reg.register(allocator, pi_remember_fact_tool.tool);
+    try reg.register(allocator, pi_recall_facts_tool.tool);
     try reg.register(allocator, pi_extension_catalog_tool.tool);
     try reg.register(allocator, effects_tool.tool);
     try reg.register(allocator, narrow_tool.tool);
@@ -513,6 +517,8 @@ test "buildRegistry registers every first-party compiler primitive" {
         "pi_forge_route",
         "pi_specs_status",
         "pi_witnesses",
+        "pi_remember_fact",
+        "pi_recall_facts",
     };
 
     for (expected_names) |expected| {
