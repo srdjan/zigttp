@@ -55,6 +55,7 @@ pub const DiagnosticKind = enum {
     canonical_call_spread,
     canonical_default_parameter,
     canonical_destructure_depth,
+    canonical_unused_index_alias,
 
     pub fn isCanonicalProfile(self: DiagnosticKind) bool {
         return switch (self) {
@@ -69,6 +70,7 @@ pub const DiagnosticKind = enum {
             .canonical_call_spread,
             .canonical_default_parameter,
             .canonical_destructure_depth,
+            .canonical_unused_index_alias,
             => true,
             else => false,
         };
@@ -276,6 +278,7 @@ pub const StrictChecker = struct {
                         .repair_intent = .replace_let_with_const,
                     });
                 }
+                self.checkUnusedIndexAlias(node, for_iter);
                 self.walkExpr(for_iter.iterable);
                 self.walkStmt(for_iter.body);
             },
@@ -560,6 +563,194 @@ pub const StrictChecker = struct {
                     .repair_intent = .lift_default_to_body,
                 });
             }
+        }
+    }
+
+    /// ZTS619 canonical_unused_index_alias: detect for-of loops whose iterable
+    /// is `<expr>.entries()` and whose body destructures the loop binding into
+    /// `[<index>, <value>]` with `<index>` never read. The `.entries()` call
+    /// and the destructure exist solely to introduce a name for the index;
+    /// when that name is dead, iterating directly over `<expr>` collapses the
+    /// loop body to a single binding and eliminates the alias-tracking branch
+    /// the iterator-scope-confinement analysis would otherwise carry.
+    fn checkUnusedIndexAlias(self: *StrictChecker, node: NodeIndex, for_iter: ir.Node.ForIterStmt) void {
+        if (!self.isEntriesCall(for_iter.iterable)) return;
+        if (for_iter.body == null_node) return;
+        const body_tag = self.ir_view.getTag(for_iter.body) orelse return;
+
+        // First statement of the loop body must be the destructuring binding.
+        const first_stmt = if (body_tag == .block) blk: {
+            const block = self.ir_view.getBlock(for_iter.body) orelse return;
+            if (block.stmts_count == 0) return;
+            break :blk self.ir_view.getListIndex(block.stmts_start, 0);
+        } else for_iter.body;
+        if (self.ir_view.getTag(first_stmt) != .var_decl) return;
+        const decl = self.ir_view.getVarDecl(first_stmt) orelse return;
+        if (decl.pattern == null_node) return;
+        if (decl.init == null_node) return;
+
+        // The destructure must source the loop binding directly: `const [...] = pair`
+        // where `pair` is the for-of binding. Anything else is not the alias shape
+        // ZTS619 targets.
+        if (self.ir_view.getTag(decl.init) != .identifier) return;
+        const init_binding = self.ir_view.getBinding(decl.init) orelse return;
+        if (init_binding.scope_id != for_iter.binding.scope_id or
+            init_binding.slot != for_iter.binding.slot) return;
+
+        // Pattern must be a two-element array pattern: [index, value].
+        if (self.ir_view.getTag(decl.pattern) != .array_pattern) return;
+        const arr = self.ir_view.getArray(decl.pattern) orelse return;
+        if (arr.elements_count != 2) return;
+
+        const index_elem_idx = self.ir_view.getListIndex(arr.elements_start, 0);
+        const index_elem = self.ir_view.getPatternElem(index_elem_idx) orelse return;
+        if (index_elem.kind != .simple) return;
+
+        // Conservative read check: if the index name appears anywhere in the
+        // loop body as an identifier reference (other than its own binding
+        // site), assume it's read and bail. This walks the body once.
+        if (self.bindingReadInBody(for_iter.body, index_elem.binding)) return;
+
+        self.addDiagnostic(.{
+            .severity = self.canonicalSeverity(),
+            .kind = .canonical_unused_index_alias,
+            .node = node,
+            .message = "for-of binds an index alias that is never read",
+            .help = "drop `.entries()` and the destructure; iterate over the array directly",
+            .repair_intent = .drop_unused_index_alias,
+        });
+    }
+
+    /// True when `node` is `<expr>.entries()` with no arguments.
+    fn isEntriesCall(self: *const StrictChecker, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        if (tag != .call and tag != .method_call) return false;
+        const call = self.ir_view.getCall(node) orelse return false;
+        if (call.args_count != 0) return false;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return false;
+        if (callee_tag != .member_access) return false;
+        const member = self.ir_view.getMember(call.callee) orelse return false;
+        const method_name = self.resolveAtomName(member.property) orelse return false;
+        return std.mem.eql(u8, method_name, "entries");
+    }
+
+    /// Walks `body` and returns true if `target` appears as an identifier
+    /// reference. Bindings introduced inside the body (the var_decl that
+    /// names `target` itself) do not count as reads; only identifier nodes
+    /// that resolve to the binding do.
+    fn bindingReadInBody(self: *const StrictChecker, body: NodeIndex, target: ir.BindingRef) bool {
+        return self.scanBindingRead(body, target);
+    }
+
+    fn scanBindingRead(self: *const StrictChecker, node: NodeIndex, target: ir.BindingRef) bool {
+        if (node == null_node) return false;
+        const tag = self.ir_view.getTag(node) orelse return false;
+        switch (tag) {
+            .identifier => {
+                const binding = self.ir_view.getBinding(node) orelse return false;
+                return binding.scope_id == target.scope_id and binding.slot == target.slot;
+            },
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return false;
+                for (0..block.stmts_count) |i| {
+                    if (self.scanBindingRead(self.ir_view.getListIndex(block.stmts_start, @intCast(i)), target)) return true;
+                }
+                return false;
+            },
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return false;
+                // Skip the destructure pattern itself - the index name shows up
+                // there as a binding site, not a read. Walk only the initializer.
+                return self.scanBindingRead(decl.init, target);
+            },
+            .function_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return false;
+                return self.scanBindingRead(decl.init, target);
+            },
+            .if_stmt => {
+                const if_stmt = self.ir_view.getIfStmt(node) orelse return false;
+                return self.scanBindingRead(if_stmt.condition, target) or
+                    self.scanBindingRead(if_stmt.then_branch, target) or
+                    self.scanBindingRead(if_stmt.else_branch, target);
+            },
+            .for_of_stmt => {
+                const inner = self.ir_view.getForIter(node) orelse return false;
+                return self.scanBindingRead(inner.iterable, target) or
+                    self.scanBindingRead(inner.body, target);
+            },
+            .return_stmt, .expr_stmt => {
+                const value = self.ir_view.getOptValue(node) orelse return false;
+                return self.scanBindingRead(value, target);
+            },
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return false;
+                return self.scanBindingRead(bin.left, target) or self.scanBindingRead(bin.right, target);
+            },
+            .unary_op, .spread => {
+                const un = self.ir_view.getUnary(node) orelse return false;
+                return self.scanBindingRead(un.operand, target);
+            },
+            .ternary => {
+                const tern = self.ir_view.getTernary(node) orelse return false;
+                return self.scanBindingRead(tern.condition, target) or
+                    self.scanBindingRead(tern.then_branch, target) or
+                    self.scanBindingRead(tern.else_branch, target);
+            },
+            .assignment => {
+                const assign = self.ir_view.getAssignment(node) orelse return false;
+                return self.scanBindingRead(assign.target, target) or
+                    self.scanBindingRead(assign.value, target);
+            },
+            .call, .method_call => {
+                const call = self.ir_view.getCall(node) orelse return false;
+                if (self.scanBindingRead(call.callee, target)) return true;
+                for (0..call.args_count) |i| {
+                    if (self.scanBindingRead(self.ir_view.getListIndex(call.args_start, @intCast(i)), target)) return true;
+                }
+                return false;
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return false;
+                if (self.scanBindingRead(member.object, target)) return true;
+                return self.scanBindingRead(member.computed, target);
+            },
+            .array_literal => {
+                const arr = self.ir_view.getArray(node) orelse return false;
+                for (0..arr.elements_count) |i| {
+                    if (self.scanBindingRead(self.ir_view.getListIndex(arr.elements_start, @intCast(i)), target)) return true;
+                }
+                return false;
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(node) orelse return false;
+                for (0..obj.properties_count) |i| {
+                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+                    const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                    if (self.scanBindingRead(prop.value, target)) return true;
+                }
+                return false;
+            },
+            .template_literal => {
+                const tmpl = self.ir_view.getTemplate(node) orelse return false;
+                for (0..tmpl.parts_count) |i| {
+                    const part = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
+                    if (self.ir_view.getOptValue(part)) |value| {
+                        if (self.scanBindingRead(value, target)) return true;
+                    }
+                }
+                return false;
+            },
+            .match_expr => {
+                const match = self.ir_view.getMatchExpr(node) orelse return false;
+                if (self.scanBindingRead(match.discriminant, target)) return true;
+                for (0..match.arms_count) |i| {
+                    const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
+                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+                    if (self.scanBindingRead(arm.body, target)) return true;
+                }
+                return false;
+            },
+            else => return false,
         }
     }
 
@@ -1250,3 +1441,76 @@ test "canonical_ternary diagnostic carries repair_intent = replace_ternary_with_
 // parser/ir.zig:1107 expects `.data.opt_value`; the resulting safety panic
 // prevents the detector from ever running. The detector here is in place so
 // the rule fires automatically once the parser/IR mismatch is fixed.
+
+test "canonical_unused_index_alias fires when index is never read" {
+    var checker = try checkSource(
+        \\function handler(req) {
+        \\  const arr = [10, 20];
+        \\  for (const pair of arr.entries()) {
+        \\    const [_i, x] = pair;
+        \\    const _used = x;
+        \\  }
+        \\  return Response.json({ok: true});
+        \\}
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_unused_index_alias);
+}
+
+test "canonical_unused_index_alias does not fire when index is read" {
+    var checker = try checkSource(
+        \\function handler(req) {
+        \\  const arr = [10, 20];
+        \\  for (const pair of arr.entries()) {
+        \\    const [i, x] = pair;
+        \\    const _seen = i + x;
+        \\  }
+        \\  return Response.json({ok: true});
+        \\}
+    );
+    defer checker.deinit();
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_unused_index_alias);
+    }
+}
+
+test "canonical_unused_index_alias does not fire on plain for-of" {
+    var checker = try checkSource(
+        \\function handler(req) {
+        \\  const arr = [10, 20];
+        \\  for (const x of arr) {
+        \\    const _used = x;
+        \\  }
+        \\  return Response.json({ok: true});
+        \\}
+    );
+    defer checker.deinit();
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_unused_index_alias);
+    }
+}
+
+test "canonical_unused_index_alias diagnostic carries repair_intent" {
+    var checker = try checkSource(
+        \\function handler(req) {
+        \\  const arr = [10, 20];
+        \\  for (const pair of arr.entries()) {
+        \\    const [_i, x] = pair;
+        \\    const _used = x;
+        \\  }
+        \\  return Response.json({ok: true});
+        \\}
+    );
+    defer checker.deinit();
+    var saw = false;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind == .canonical_unused_index_alias) {
+            saw = true;
+            try testing.expectEqual(
+                @as(?RepairIntent, .drop_unused_index_alias),
+                diag.repair_intent,
+            );
+        }
+    }
+    try testing.expect(saw);
+}

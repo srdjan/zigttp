@@ -340,6 +340,14 @@ const strict_meta = [_]struct {
         .help = "Destructure one level, then drill into the value with a follow-up `const`: `const {user} = payload; const {name} = user;`",
         .repair = .flatten_destructure,
     },
+    .{
+        .kind = .canonical_unused_index_alias,
+        .code = "ZTS619",
+        .description = "for-of binds an index alias via `.entries()` that is never read.",
+        .example = "for (const pair of arr.entries()) { const [_i, x] = pair; use(x); }",
+        .help = "Drop `.entries()` and the destructure; iterate the array directly: `for (const x of arr) { use(x); }`",
+        .repair = .drop_unused_index_alias,
+    },
 };
 
 // ---------------------------------------------------------------------------
