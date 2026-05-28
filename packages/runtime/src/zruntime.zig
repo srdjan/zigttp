@@ -4923,6 +4923,7 @@ test {
     _ = @import("ws_gateway.zig");
     _ = @import("ws_frame_loop.zig");
     _ = @import("durable_fetch.zig");
+    _ = @import("benchmark.zig");
 }
 
 test "Runtime creation" {

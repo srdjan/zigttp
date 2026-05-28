@@ -19,12 +19,19 @@ pub const EventKind = enum {
     deploy,
     swap,
     check,
+    /// Slice H: a signed perf-as-proof receipt attached to an applied edit.
+    /// Carries a `perf` JSON object alongside `facts` (callers building a
+    /// perf row supply a minimal ReviewFacts whose only meaningful field
+    /// is `contract_sha`). Existing consumers that only know `deploy`,
+    /// `swap`, `check` keep working: they ignore the extra `perf` key.
+    perf,
 
     pub fn toString(self: EventKind) []const u8 {
         return switch (self) {
             .deploy => "deploy",
             .swap => "swap",
             .check => "check",
+            .perf => "perf",
         };
     }
 
@@ -32,7 +39,31 @@ pub const EventKind = enum {
         if (std.mem.eql(u8, s, "deploy")) return .deploy;
         if (std.mem.eql(u8, s, "swap")) return .swap;
         if (std.mem.eql(u8, s, "check")) return .check;
+        if (std.mem.eql(u8, s, "perf")) return .perf;
         return null;
+    }
+};
+
+/// Payload of a `kind=perf` row. The `sig` field is the compact JWS
+/// produced by `zigts.perf_receipt.sign` over the same numeric fields;
+/// downstream verifiers re-hash the handler bytes and call
+/// `zigts.perf_receipt.verify` to confirm the operator's signature.
+///
+/// `sample_count == 0` means the probe was skipped (handler capabilities
+/// disqualified it: see proof_enrichment.zig). The row still records the
+/// fact that an apply happened so that a future audit can prove no
+/// receipt was suppressed.
+pub const PerfPayload = struct {
+    handler_hash: []const u8,
+    p50_us: u64,
+    p99_us: u64,
+    alloc_bytes: u64,
+    sample_count: u64,
+    sig: []const u8,
+
+    pub fn deinit(self: *PerfPayload, allocator: std.mem.Allocator) void {
+        allocator.free(self.handler_hash);
+        allocator.free(self.sig);
     }
 };
 
@@ -44,11 +75,15 @@ pub const Event = struct {
     handler_path: []const u8,
     service_name: ?[]const u8,
     facts: review.ReviewFacts,
+    /// Present only when `kind == .perf`. Older readers that predate
+    /// Slice H ignore this field, which keeps the schema additive.
+    perf: ?PerfPayload = null,
 
     pub fn deinit(self: *Event, allocator: std.mem.Allocator) void {
         allocator.free(self.handler_path);
         if (self.service_name) |s| allocator.free(s);
         self.facts.deinit(allocator);
+        if (self.perf) |*p| p.deinit(allocator);
     }
 };
 
@@ -63,6 +98,10 @@ pub const AppendParams = struct {
     service_name: ?[]const u8 = null,
     /// Override clock for tests; null means read the wall clock.
     now_unix_ms: ?i64 = null,
+    /// Present only when `kind == .perf`. Borrowed; the caller frees
+    /// after `appendEvent` returns. The serialiser writes a `perf` JSON
+    /// object next to `facts`; older readers ignore it.
+    perf: ?*const PerfPayload = null,
 };
 
 pub fn appendEvent(allocator: std.mem.Allocator, params: AppendParams) !void {
@@ -86,6 +125,23 @@ pub fn appendEvent(allocator: std.mem.Allocator, params: AppendParams) !void {
     }
     try json.objectField("facts");
     try params.facts.writeJson(&json);
+    if (params.perf) |perf| {
+        try json.objectField("perf");
+        try json.beginObject();
+        try json.objectField("handlerHash");
+        try json.write(perf.handler_hash);
+        try json.objectField("p50Us");
+        try json.write(perf.p50_us);
+        try json.objectField("p99Us");
+        try json.write(perf.p99_us);
+        try json.objectField("allocBytes");
+        try json.write(perf.alloc_bytes);
+        try json.objectField("sampleCount");
+        try json.write(perf.sample_count);
+        try json.objectField("sig");
+        try json.write(perf.sig);
+        try json.endObject();
+    }
     try json.endObject();
     try aw.writer.writeByte('\n');
 
@@ -240,12 +296,44 @@ fn parseLine(allocator: std.mem.Allocator, line: []const u8) !Event {
     var facts = try review.ReviewFacts.parseJson(allocator, facts_value.object);
     errdefer facts.deinit(allocator);
 
+    var perf_payload: ?PerfPayload = null;
+    errdefer if (perf_payload) |*p| p.deinit(allocator);
+    if (obj.get("perf")) |perf_value| {
+        if (perf_value != .object) return error.InvalidLedgerLine;
+        perf_payload = try parsePerfPayload(allocator, perf_value.object);
+    }
+
     return .{
         .ts_unix_ms = ts,
         .kind = kind,
         .handler_path = handler_path,
         .service_name = service_name,
         .facts = facts,
+        .perf = perf_payload,
+    };
+}
+
+fn parsePerfPayload(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !PerfPayload {
+    const handler_hash_str = json_util.getString(obj, "handlerHash") orelse return error.InvalidLedgerLine;
+    const sig_str = json_util.getString(obj, "sig") orelse return error.InvalidLedgerLine;
+    const p50 = json_util.getI64(obj, "p50Us") orelse return error.InvalidLedgerLine;
+    const p99 = json_util.getI64(obj, "p99Us") orelse return error.InvalidLedgerLine;
+    const alloc_bytes = json_util.getI64(obj, "allocBytes") orelse return error.InvalidLedgerLine;
+    const samples = json_util.getI64(obj, "sampleCount") orelse return error.InvalidLedgerLine;
+    if (p50 < 0 or p99 < 0 or alloc_bytes < 0 or samples < 0) return error.InvalidLedgerLine;
+
+    const handler_hash = try allocator.dupe(u8, handler_hash_str);
+    errdefer allocator.free(handler_hash);
+    const sig = try allocator.dupe(u8, sig_str);
+    errdefer allocator.free(sig);
+
+    return .{
+        .handler_hash = handler_hash,
+        .p50_us = @intCast(p50),
+        .p99_us = @intCast(p99),
+        .alloc_bytes = @intCast(alloc_bytes),
+        .sample_count = @intCast(samples),
+        .sig = sig,
     };
 }
 
@@ -458,4 +546,77 @@ test "readEvents rejects malformed lines" {
         try zigts.file_io.writeFile(testing.allocator, ledgerPath(), line);
         try testing.expectError(error.InvalidLedgerLine, readEvents(testing.allocator));
     }
+}
+
+test "appendEvent round-trips a kind=perf row with embedded JWS" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var facts = try buildFactsForTest(testing.allocator, "sha-perf-1", false);
+    defer facts.deinit(testing.allocator);
+
+    // The signature value is opaque to the ledger; we use a placeholder
+    // string here and exercise the real JWS path in the runtime end-to-end
+    // test (see test "Slice H end-to-end" in zruntime.zig).
+    const perf: PerfPayload = .{
+        .handler_hash = "f" ** 64,
+        .p50_us = 17,
+        .p99_us = 142,
+        .alloc_bytes = 4096,
+        .sample_count = 256,
+        .sig = "header.payload.signature",
+    };
+
+    try appendEvent(testing.allocator, .{
+        .kind = .perf,
+        .facts = &facts,
+        .handler_path = "src/handler.ts",
+        .now_unix_ms = 1_700_000_001_000,
+        .perf = &perf,
+    });
+
+    const events = try readEvents(testing.allocator);
+    defer freeEvents(testing.allocator, events);
+
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(EventKind.perf, events[0].kind);
+    try testing.expect(events[0].perf != null);
+    try testing.expectEqualStrings("f" ** 64, events[0].perf.?.handler_hash);
+    try testing.expectEqual(@as(u64, 17), events[0].perf.?.p50_us);
+    try testing.expectEqual(@as(u64, 142), events[0].perf.?.p99_us);
+    try testing.expectEqual(@as(u64, 4096), events[0].perf.?.alloc_bytes);
+    try testing.expectEqual(@as(u64, 256), events[0].perf.?.sample_count);
+    try testing.expectEqualStrings("header.payload.signature", events[0].perf.?.sig);
+}
+
+test "appendEvent without perf payload omits the field for back-compat" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var facts = try buildFactsForTest(testing.allocator, "sha-nope", false);
+    defer facts.deinit(testing.allocator);
+
+    try appendEvent(testing.allocator, .{
+        .kind = .deploy,
+        .facts = &facts,
+        .handler_path = "src/handler.ts",
+        .now_unix_ms = 1,
+    });
+
+    // Confirm the JSON has no "perf" key so old consumers see exactly
+    // what they saw pre-Slice H.
+    const raw = try zigts.file_io.readFile(testing.allocator, ledgerPath(), 8192);
+    defer testing.allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"perf\"") == null);
+
+    const events = try readEvents(testing.allocator);
+    defer freeEvents(testing.allocator, events);
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(@as(?PerfPayload, null), events[0].perf);
 }

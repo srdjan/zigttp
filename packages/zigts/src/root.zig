@@ -89,6 +89,7 @@ pub const file_io = @import("file_io.zig");
 pub const module_slots = @import("module_slots.zig");
 pub const contract_diff = @import("contract_diff.zig");
 pub const system_linker = @import("system_linker.zig");
+pub const perf_receipt = @import("perf_receipt.zig");
 pub const rule_error = @import("rule_error.zig");
 pub const rule_registry = @import("rule_registry.zig");
 pub const repair_intent = @import("repair_intent.zig");
