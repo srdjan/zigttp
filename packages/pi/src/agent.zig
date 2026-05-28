@@ -156,11 +156,11 @@ pub const AgentSession = struct {
         };
     }
 
-    /// Constructs a session whose backend is a real OpenAI Chat Completions
-    /// client. Same ownership contract as `initAnthropic`: api_key, system
-    /// prompt, and tools_json are all duped so the caller's buffers can be
-    /// freed independently. `tools_json` is the OpenAI-shaped tools array
-    /// produced by `openai_client.writeToolsArray`.
+    /// Constructs a session whose backend is a real OpenAI Responses-API
+    /// streaming client. Same ownership contract as `initAnthropic`:
+    /// api_key, system prompt, and tools_json are all duped so the caller's
+    /// buffers can be freed independently. `tools_json` is the
+    /// Responses-API tools array produced by `openai_client.writeToolsArray`.
     pub fn initOpenAI(
         allocator: std.mem.Allocator,
         api_key: []const u8,

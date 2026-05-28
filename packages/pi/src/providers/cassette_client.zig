@@ -27,7 +27,8 @@ const transcript_mod = @import("../transcript.zig");
 const anthropic_sse_parser = @import("anthropic/sse_parser.zig");
 const anthropic_response_assembler = @import("anthropic/response_assembler.zig");
 const anthropic_apply_edit = @import("anthropic/apply_edit.zig");
-const openai_client = @import("openai/client.zig");
+const openai_sse_parser = @import("openai/sse_parser.zig");
+const openai_response_assembler = @import("openai/response_assembler.zig");
 
 const max_cassette_bytes: usize = 16 * 1024 * 1024;
 const max_sse_sidecar_bytes: usize = 16 * 1024 * 1024;
@@ -208,7 +209,11 @@ pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResul
             const reply = try anthropic_apply_edit.maybeRemap(arena, outcome.reply);
             return .{ .reply = reply, .usage = outcome.usage };
         },
-        .openai => try openai_client.parseResponse(arena, cassette.body),
+        .openai => {
+            const event_list = try openai_sse_parser.parseAll(arena, cassette.body);
+            const outcome = try openai_response_assembler.assemble(arena, event_list);
+            return .{ .reply = outcome.reply, .usage = outcome.usage };
+        },
     };
 }
 
@@ -227,7 +232,7 @@ test "loadCassetteFromBytes resolves an inline openai cassette" {
 
     const cassette = try loadCassetteFromBytes(arena.allocator(), cassette_openai_chat_completion, null);
     try testing.expectEqual(Provider.openai, cassette.header.provider);
-    try testing.expect(!cassette.header.stream);
+    try testing.expect(cassette.header.stream);
     try testing.expect(cassette.body.len > 0);
 }
 

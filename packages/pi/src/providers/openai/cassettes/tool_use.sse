@@ -1,0 +1,23 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_03","object":"response","status":"in_progress","model":"gpt-4o-mini"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_01","type":"function_call","call_id":"call_abc123","name":"zigts_expert_describe_rule","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"rule\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"\"ZTS303\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\"rule\":\"ZTS303\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_01","type":"function_call","call_id":"call_abc123","name":"zigts_expert_describe_rule","arguments":"{\"rule\":\"ZTS303\"}"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_03","object":"response","status":"completed","model":"gpt-4o-mini","usage":{"input_tokens":42,"output_tokens":15,"total_tokens":57}}}
+
+data: [DONE]
+

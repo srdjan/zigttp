@@ -467,21 +467,29 @@ fn drainRequestHead(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, io
 }
 
 test "round-trip: capture from local server, serialise, replay yields identical body" {
+    // OpenAI moved to the Responses API streaming endpoint (Slice E), so
+    // the round-trip exercises a minimal SSE stream rather than the old
+    // Chat Completions JSON envelope.
     const response_body =
-        \\{"id":"chatcmpl-roundtrip","choices":[{"index":0,"message":{"role":"assistant","content":"hello world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}
-    ;
+        "event: response.output_item.added\n" ++
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" ++
+        "event: response.output_text.delta\n" ++
+        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello world\"}\n\n" ++
+        "event: response.completed\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n" ++
+        "data: [DONE]\n";
 
-    var server = try LocalHttpServer.init(testing.allocator, response_body, "application/json");
+    var server = try LocalHttpServer.init(testing.allocator, response_body, "text/event-stream");
     try server.start();
     errdefer server.join() catch {};
 
-    const url = try server.url(testing.allocator, "/v1/chat/completions");
+    const url = try server.url(testing.allocator, "/v1/responses");
     defer testing.allocator.free(url);
 
     var captured = try capturePost(testing.allocator, url, &.{
         .{ .name = "authorization", .value = "Bearer test-fixture-key" },
         .{ .name = "content-type", .value = "application/json" },
-    }, "{\"model\":\"gpt-4o-mini\",\"messages\":[]}");
+    }, "{\"model\":\"gpt-4o-mini\",\"input\":[]}");
     defer captured.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u16, 200), captured.status);
@@ -498,7 +506,7 @@ test "round-trip: capture from local server, serialise, replay yields identical 
     try writeCassette(testing.allocator, cassette_path, captured.body, .{
         .provider = .openai,
         .scenario = "roundtrip",
-        .stream = false,
+        .stream = true,
     });
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

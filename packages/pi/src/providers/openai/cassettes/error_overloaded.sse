@@ -1,0 +1,5 @@
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_err","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached for requests"}}}
+
+data: [DONE]
+

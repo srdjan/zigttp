@@ -1,20 +1,25 @@
-//! Non-streaming HTTPS wire layer for the OpenAI Chat Completions API.
+//! Streaming HTTPS wire layer for the OpenAI Responses API.
 //!
-//! Mirrors the public surface of `providers/anthropic/client.zig` so the
-//! `Backend` union in `agent.zig` can swap providers without leaking
-//! vendor specifics into the loop. We POST a single JSON request and
-//! parse a single JSON response. Streaming/SSE was intentionally skipped
-//! at this step; the loop runs one turn at a time and only consumes the
-//! final reply or the structured tool-call list, both of which the
-//! non-streaming envelope already carries.
+//! Mirrors the shape of `providers/anthropic/client.zig`: post a request,
+//! parse the streamed SSE body, fold the events into a `turn.AssistantReply`
+//! identical to the Anthropic one. The loop sees one provider-shaped
+//! result regardless of which backend produced it.
+//!
+//! The earlier non-streaming Chat Completions implementation lived here;
+//! Slice E of the expert-strategy roadmap swapped it for the Responses
+//! API streaming endpoint so the OpenAI path matches Anthropic's "watch
+//! tool calls assemble in real time" experience. See
+//! `docs/roadmap/expert-strategy.md` §5.
 
 const std = @import("std");
 const loop = @import("../../loop.zig");
 const turn = @import("../../turn.zig");
 const transcript_mod = @import("../../transcript.zig");
 const registry_mod = @import("../../registry/registry.zig");
+const sse_parser = @import("sse_parser.zig");
+const response_assembler = @import("response_assembler.zig");
 
-const default_base_url = "https://api.openai.com/v1/chat/completions";
+const default_base_url = "https://api.openai.com/v1/responses";
 pub const default_model = "gpt-4o-mini";
 pub const default_max_tokens: u32 = 8192;
 const max_response_body_bytes: usize = 16 * 1024 * 1024;
@@ -62,12 +67,19 @@ pub const Client = struct {
     ) !loop.ModelCallResult {
         const body = try buildRequestBody(arena, self.config, transcript, extra_user_text);
         const response_body = try post(arena, self.config, body);
-        return try parseResponse(arena, response_body);
+        const event_list = try sse_parser.parseAll(arena, response_body);
+        const outcome = try response_assembler.assemble(arena, event_list);
+        return .{ .reply = outcome.reply, .usage = outcome.usage };
     }
 };
 
 // -----------------------------------------------------------------------
 // Request body
+//
+// The Responses API uses a flatter, "input + tools" shape compared to the
+// Chat Completions one we used before. The system prompt is hoisted into a
+// top-level `instructions` field; everything else (user, assistant, tool
+// calls, tool results) becomes an entry in the `input` array.
 // -----------------------------------------------------------------------
 
 pub fn buildRequestBody(
@@ -83,23 +95,20 @@ pub fn buildRequestBody(
     try w.writeByte('{');
     try w.writeAll("\"model\":");
     try writeJsonString(w, config.model);
-    try w.print(",\"max_tokens\":{d}", .{config.max_tokens});
-    try w.writeAll(",\"stream\":false");
-
-    try w.writeAll(",\"messages\":[");
-    // System prompt as the first message; OpenAI uses role=system rather
-    // than a dedicated top-level field.
-    try w.writeAll("{\"role\":\"system\",\"content\":");
+    try w.print(",\"max_output_tokens\":{d}", .{config.max_tokens});
+    try w.writeAll(",\"stream\":true");
+    try w.writeAll(",\"instructions\":");
     try writeJsonString(w, config.system_prompt);
-    try w.writeByte('}');
 
+    try w.writeAll(",\"input\":[");
+    var first_entry = true;
     for (transcript.entries.items) |*entry| {
-        try writeTranscriptEntry(w, entry);
+        try writeTranscriptEntry(w, entry, &first_entry);
     }
     if (extra_user_text) |body| {
-        try w.writeAll(",{\"role\":\"user\",\"content\":");
-        try writeJsonString(w, body);
-        try w.writeByte('}');
+        if (!first_entry) try w.writeByte(',');
+        first_entry = false;
+        try writeUserMessage(w, body);
     }
     try w.writeByte(']');
 
@@ -113,44 +122,63 @@ pub fn buildRequestBody(
     return try buf.toOwnedSlice(arena);
 }
 
-fn writeTranscriptEntry(w: anytype, entry: *const transcript_mod.OwnedEntry) !void {
+fn writeUserMessage(w: anytype, body: []const u8) !void {
+    try w.writeAll("{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":");
+    try writeJsonString(w, body);
+    try w.writeAll("}]}");
+}
+
+fn writeAssistantText(w: anytype, body: []const u8) !void {
+    try w.writeAll("{\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":");
+    try writeJsonString(w, body);
+    try w.writeAll("}]}");
+}
+
+fn writeTranscriptEntry(
+    w: anytype,
+    entry: *const transcript_mod.OwnedEntry,
+    first_entry: *bool,
+) !void {
     switch (entry.*) {
         .user_text => |body| {
-            try w.writeAll(",{\"role\":\"user\",\"content\":");
-            try writeJsonString(w, body);
-            try w.writeByte('}');
+            if (!first_entry.*) try w.writeByte(',');
+            first_entry.* = false;
+            try writeUserMessage(w, body);
         },
         .system_note => |body| {
-            // System notes are surfaced to the model as user-role context
-            // blocks to match the Anthropic provider's mapping; OpenAI's
-            // role=system is reserved for the persona prompt.
-            try w.writeAll(",{\"role\":\"user\",\"content\":");
-            try writeJsonString(w, body);
-            try w.writeByte('}');
+            // System notes are surfaced as additional user-role context
+            // blocks; the top-level `instructions` field carries the
+            // persona prompt exclusively.
+            if (!first_entry.*) try w.writeByte(',');
+            first_entry.* = false;
+            try writeUserMessage(w, body);
         },
         .model_text => |body| {
-            try w.writeAll(",{\"role\":\"assistant\",\"content\":");
-            try writeJsonString(w, body);
-            try w.writeByte('}');
+            if (!first_entry.*) try w.writeByte(',');
+            first_entry.* = false;
+            try writeAssistantText(w, body);
         },
         .assistant_tool_use => |calls| {
-            try w.writeAll(",{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[");
-            for (calls, 0..) |call, i| {
-                if (i > 0) try w.writeByte(',');
-                try w.writeAll("{\"id\":");
+            // The Responses API expects each function call to be its own
+            // top-level input item (no wrapping assistant message).
+            for (calls) |call| {
+                if (!first_entry.*) try w.writeByte(',');
+                first_entry.* = false;
+                try w.writeAll("{\"type\":\"function_call\",\"call_id\":");
                 try writeJsonString(w, call.id);
-                try w.writeAll(",\"type\":\"function\",\"function\":{\"name\":");
+                try w.writeAll(",\"name\":");
                 try writeJsonString(w, call.name);
                 try w.writeAll(",\"arguments\":");
                 try writeJsonString(w, call.args_json);
-                try w.writeAll("}}");
+                try w.writeByte('}');
             }
-            try w.writeAll("]}");
         },
         .tool_result => |result| {
-            try w.writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
+            if (!first_entry.*) try w.writeByte(',');
+            first_entry.* = false;
+            try w.writeAll("{\"type\":\"function_call_output\",\"call_id\":");
             try writeJsonString(w, result.tool_use_id);
-            try w.writeAll(",\"content\":");
+            try w.writeAll(",\"output\":");
             try writeJsonString(w, result.llm_text);
             try w.writeByte('}');
         },
@@ -160,95 +188,26 @@ fn writeTranscriptEntry(w: anytype, entry: *const transcript_mod.OwnedEntry) !vo
 
 // -----------------------------------------------------------------------
 // Tools schema
+//
+// The Responses API expects each tool to be `{type, name, description,
+// parameters}` flat (no nested `function` wrapper that Chat Completions
+// used). The signature is unchanged so call sites in agent.zig keep
+// working without modification.
 // -----------------------------------------------------------------------
 
 pub fn writeToolsArray(writer: anytype, registry: *const registry_mod.Registry) !void {
     try writer.writeByte('[');
     for (registry.list(), 0..) |entry, i| {
         if (i > 0) try writer.writeByte(',');
-        try writer.writeAll("{\"type\":\"function\",\"function\":{\"name\":");
+        try writer.writeAll("{\"type\":\"function\",\"name\":");
         try writeJsonString(writer, entry.name);
         try writer.writeAll(",\"description\":");
         try writeJsonString(writer, entry.description);
         try writer.writeAll(",\"parameters\":");
         try writer.writeAll(entry.input_schema);
-        try writer.writeAll("}}");
+        try writer.writeByte('}');
     }
     try writer.writeByte(']');
-}
-
-// -----------------------------------------------------------------------
-// Response parsing
-// -----------------------------------------------------------------------
-
-pub fn parseResponse(arena: std.mem.Allocator, body: []const u8) !loop.ModelCallResult {
-    const parsed = std.json.parseFromSlice(std.json.Value, arena, body, .{}) catch
-        return error.UnexpectedResponseShape;
-    if (parsed.value != .object) return error.UnexpectedResponseShape;
-    const root = parsed.value.object;
-
-    var usage: turn.Usage = .{};
-    if (root.get("usage")) |usage_value| {
-        if (usage_value == .object) {
-            const u = usage_value.object;
-            if (u.get("prompt_tokens")) |v| if (v == .integer) {
-                usage.input_tokens = @intCast(v.integer);
-            };
-            if (u.get("completion_tokens")) |v| if (v == .integer) {
-                usage.output_tokens = @intCast(v.integer);
-            };
-        }
-    }
-
-    const choices = root.get("choices") orelse return error.UnexpectedResponseShape;
-    if (choices != .array or choices.array.items.len == 0) return error.UnexpectedResponseShape;
-    const first = choices.array.items[0];
-    if (first != .object) return error.UnexpectedResponseShape;
-    const message = first.object.get("message") orelse return error.UnexpectedResponseShape;
-    if (message != .object) return error.UnexpectedResponseShape;
-    const msg_obj = message.object;
-
-    // Tool-call branch takes priority when present; OpenAI sets
-    // `finish_reason = "tool_calls"` but inspecting `tool_calls` directly
-    // is enough.
-    if (msg_obj.get("tool_calls")) |tcs_value| {
-        if (tcs_value == .array and tcs_value.array.items.len > 0) {
-            const items = try arena.alloc(turn.ToolCall, tcs_value.array.items.len);
-            for (tcs_value.array.items, 0..) |item, i| {
-                if (item != .object) return error.UnexpectedResponseShape;
-                const tc = item.object;
-                const id = (tc.get("id") orelse return error.UnexpectedResponseShape);
-                if (id != .string) return error.UnexpectedResponseShape;
-                const func = tc.get("function") orelse return error.UnexpectedResponseShape;
-                if (func != .object) return error.UnexpectedResponseShape;
-                const fn_obj = func.object;
-                const name_v = fn_obj.get("name") orelse return error.UnexpectedResponseShape;
-                if (name_v != .string) return error.UnexpectedResponseShape;
-                const args_v = fn_obj.get("arguments") orelse return error.UnexpectedResponseShape;
-                if (args_v != .string) return error.UnexpectedResponseShape;
-
-                // Dupe into the arena: parser borrows from `body`, but the
-                // arena's lifetime matches the turn so this is safe.
-                items[i] = .{
-                    .id = try arena.dupe(u8, id.string),
-                    .name = try arena.dupe(u8, name_v.string),
-                    .args_json = try arena.dupe(u8, args_v.string),
-                };
-            }
-            return .{
-                .reply = .{ .response = .{ .tool_calls = items } },
-                .usage = usage,
-            };
-        }
-    }
-
-    const content = msg_obj.get("content") orelse return error.UnexpectedResponseShape;
-    if (content != .string) return error.UnexpectedResponseShape;
-    const text = try arena.dupe(u8, content.string);
-    return .{
-        .reply = .{ .response = .{ .final_text = text } },
-        .usage = usage,
-    };
 }
 
 // -----------------------------------------------------------------------
@@ -286,7 +245,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]u8 {
     const extra_headers = [_]std.http.Header{
         .{ .name = "authorization", .value = auth_header },
         .{ .name = "content-type", .value = "application/json" },
-        .{ .name = "accept", .value = "application/json" },
+        .{ .name = "accept", .value = "text/event-stream" },
     };
 
     var req = try client.request(.POST, uri, .{
@@ -340,7 +299,7 @@ fn writeJsonString(writer: anytype, s: []const u8) !void {
 
 const testing = std.testing;
 
-test "buildRequestBody: first turn carries system + one user message and no tools" {
+test "buildRequestBody: first turn carries instructions + one user input item and no tools" {
     var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(testing.allocator);
     try transcript.append(testing.allocator, .{ .user_text = "add a GET route" });
@@ -359,17 +318,18 @@ test "buildRequestBody: first turn carries system + one user message and no tool
     const root = parsed.value.object;
     try testing.expectEqualStrings(default_model, root.get("model").?.string);
     try testing.expect(root.get("tools") == null);
-    try testing.expect(!root.get("stream").?.bool);
+    try testing.expect(root.get("stream").?.bool);
+    try testing.expectEqualStrings("you are a zigts expert", root.get("instructions").?.string);
 
-    const msgs = root.get("messages").?.array.items;
-    try testing.expectEqual(@as(usize, 2), msgs.len);
-    try testing.expectEqualStrings("system", msgs[0].object.get("role").?.string);
-    try testing.expectEqualStrings("you are a zigts expert", msgs[0].object.get("content").?.string);
-    try testing.expectEqualStrings("user", msgs[1].object.get("role").?.string);
-    try testing.expectEqualStrings("add a GET route", msgs[1].object.get("content").?.string);
+    const input = root.get("input").?.array.items;
+    try testing.expectEqual(@as(usize, 1), input.len);
+    try testing.expectEqualStrings("user", input[0].object.get("role").?.string);
+    const content = input[0].object.get("content").?.array.items;
+    try testing.expectEqualStrings("input_text", content[0].object.get("type").?.string);
+    try testing.expectEqualStrings("add a GET route", content[0].object.get("text").?.string);
 }
 
-test "buildRequestBody: tool-use and tool-result entries serialize round-trip into OpenAI shape" {
+test "buildRequestBody: tool-use and tool-result entries serialize as Responses-API items" {
     var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(testing.allocator);
 
@@ -394,54 +354,49 @@ test "buildRequestBody: tool-use and tool-result entries serialize round-trip in
 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
     defer parsed.deinit();
-    const msgs = parsed.value.object.get("messages").?.array.items;
-    // [system, user, assistant w/ tool_calls, tool]
-    try testing.expectEqual(@as(usize, 4), msgs.len);
+    const items = parsed.value.object.get("input").?.array.items;
+    // [user, function_call, function_call_output]
+    try testing.expectEqual(@as(usize, 3), items.len);
 
-    try testing.expectEqualStrings("assistant", msgs[2].object.get("role").?.string);
-    const tcs = msgs[2].object.get("tool_calls").?.array.items;
-    try testing.expectEqualStrings("call_1", tcs[0].object.get("id").?.string);
-    try testing.expectEqualStrings("function", tcs[0].object.get("type").?.string);
-    try testing.expectEqualStrings("zigts_expert_meta", tcs[0].object.get("function").?.object.get("name").?.string);
+    try testing.expectEqualStrings("user", items[0].object.get("role").?.string);
 
-    try testing.expectEqualStrings("tool", msgs[3].object.get("role").?.string);
-    try testing.expectEqualStrings("call_1", msgs[3].object.get("tool_call_id").?.string);
+    try testing.expectEqualStrings("function_call", items[1].object.get("type").?.string);
+    try testing.expectEqualStrings("call_1", items[1].object.get("call_id").?.string);
+    try testing.expectEqualStrings("zigts_expert_meta", items[1].object.get("name").?.string);
+    try testing.expectEqualStrings("{}", items[1].object.get("arguments").?.string);
+
+    try testing.expectEqualStrings("function_call_output", items[2].object.get("type").?.string);
+    try testing.expectEqualStrings("call_1", items[2].object.get("call_id").?.string);
+    try testing.expectEqualStrings("{\"version\":\"x\"}", items[2].object.get("output").?.string);
 }
 
-test "parseResponse: final_text path extracts content" {
-    const body =
-        \\{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"hello world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}
-    ;
+test "buildRequestBody: multiple tool calls in one assistant turn unroll into separate items" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    const calls = [_]turn.ToolCall{
+        .{ .id = "call_a", .name = "tool_a", .args_json = "{}" },
+        .{ .id = "call_b", .name = "tool_b", .args_json = "{\"x\":1}" },
+    };
+    try transcript.append(testing.allocator, .{ .user_text = "u" });
+    try transcript.append(testing.allocator, .{ .assistant_tool_use = &calls });
+
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try parseResponse(arena.allocator(), body);
-    switch (result.reply.response) {
-        .final_text => |t| try testing.expectEqualStrings("hello world", t),
-        else => return error.TestFailed,
-    }
-    try testing.expectEqual(@as(u64, 12), result.usage.input_tokens);
-    try testing.expectEqual(@as(u64, 3), result.usage.output_tokens);
+    const body = try buildRequestBody(arena.allocator(), .{
+        .api_key = "k",
+        .system_prompt = "s",
+    }, &transcript, null);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
+    defer parsed.deinit();
+    const items = parsed.value.object.get("input").?.array.items;
+    // [user, function_call_a, function_call_b]
+    try testing.expectEqual(@as(usize, 3), items.len);
+    try testing.expectEqualStrings("call_a", items[1].object.get("call_id").?.string);
+    try testing.expectEqualStrings("call_b", items[2].object.get("call_id").?.string);
 }
 
-test "parseResponse: tool_calls path lifts id + name + arguments" {
-    const body =
-        \\{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_abc","type":"function","function":{"name":"zigts_expert_meta","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}
-    ;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const result = try parseResponse(arena.allocator(), body);
-    switch (result.reply.response) {
-        .tool_calls => |calls| {
-            try testing.expectEqual(@as(usize, 1), calls.len);
-            try testing.expectEqualStrings("call_abc", calls[0].id);
-            try testing.expectEqualStrings("zigts_expert_meta", calls[0].name);
-            try testing.expectEqualStrings("{}", calls[0].args_json);
-        },
-        else => return error.TestFailed,
-    }
-}
-
-test "writeToolsArray: wraps registry entries in OpenAI tool shape" {
+test "writeToolsArray: wraps registry entries in flat Responses-API tool shape" {
     const echo_tool: registry_mod.ToolDef = .{
         .name = "echo",
         .label = "Echo",
@@ -465,7 +420,10 @@ test "writeToolsArray: wraps registry entries in OpenAI tool shape" {
     const items = parsed.value.array.items;
     try testing.expectEqual(@as(usize, 1), items.len);
     try testing.expectEqualStrings("function", items[0].object.get("type").?.string);
-    try testing.expectEqualStrings("echo", items[0].object.get("function").?.object.get("name").?.string);
+    try testing.expectEqualStrings("echo", items[0].object.get("name").?.string);
+    try testing.expectEqualStrings("Concatenate args with spaces", items[0].object.get("description").?.string);
+    // The schema is inlined as-is.
+    try testing.expect(items[0].object.get("parameters").? == .object);
 }
 
 fn stubExecute(_: std.mem.Allocator, _: []const []const u8) anyerror!registry_mod.ToolResult {
