@@ -758,7 +758,21 @@ fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []co
     const user_has_prove = shared.hasFlag(argv, "--prove");
     const user_has_quest = shared.hasFlag(argv, "--quest");
     const user_no_tour = shared.hasFlag(argv, "--no-tour");
+    const user_record_proof = shared.hasFlag(argv, "--record-proof");
     const default_quest = !user_no_tour and !user_has_quest and shared.stderrIsTty() and !cli_tour.tourMarkerExists(allocator);
+
+    // `--record-proof` desugars to the existing live `--trace` capture aimed
+    // inside a capsule directory, plus a manifest written once the session
+    // ends. The session trace path must outlive the child process.
+    const capsule_name = "default";
+    const record_trace_path: ?[]u8 = if (user_record_proof)
+        proof_cli.sessionTracePathAlloc(allocator, capsule_name) catch |err| blk: {
+            std.debug.print("zigttp dev: --record-proof could not prepare a capsule: {}\n", .{err});
+            break :blk null;
+        }
+    else
+        null;
+    defer if (record_trace_path) |p| allocator.free(p);
 
     var child_args = std.ArrayList([]const u8).empty;
     defer child_args.deinit(allocator);
@@ -767,11 +781,27 @@ fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []co
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--no-prove")) continue;
         if (std.mem.eql(u8, arg, "--no-tour")) continue;
+        // `--record-proof` is a dev-layer flag; the runtime sees only --trace.
+        if (std.mem.eql(u8, arg, "--record-proof")) continue;
         try child_args.append(allocator, arg);
     }
     if (!user_has_watch) try child_args.append(allocator, "--watch");
     if (!user_has_prove and !user_no_prove) try child_args.append(allocator, "--prove");
     if (default_quest and !user_no_prove) try child_args.append(allocator, "--quest-default");
+    if (record_trace_path) |trace_path| {
+        try child_args.append(allocator, "--trace");
+        try child_args.append(allocator, trace_path);
+        // Write the manifest up front: it describes the handler (its hashes,
+        // contract, policy), not the recorded traces, and `dev` is normally
+        // ended with Ctrl+C — which signals the whole process group, so any
+        // post-shutdown code here would not reliably run. Writing now means
+        // the capsule is complete the moment the first request is captured.
+        recordProofManifest(allocator, argv, capsule_name) catch |err| {
+            std.debug.print("zigttp dev: --record-proof could not write the capsule manifest: {}\n", .{err});
+        };
+        std.debug.print("Recording a proof capsule to .zigttp/capsules/{s}/ — requests this session are captured.\n", .{capsule_name});
+        std.debug.print("After an edit, replay it with: zigttp proof replay {s}\n", .{capsule_name});
+    }
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -784,6 +814,34 @@ fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []co
         .stderr = .inherit,
     });
     _ = child.wait(io) catch {};
+}
+
+/// Resolve the handler + system path the recording session used, then write
+/// the capsule manifest. Split out so `devCommand` stays readable.
+fn recordProofManifest(allocator: std.mem.Allocator, argv: []const []const u8, capsule_name: []const u8) !void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    const explicit_path = shared.findPositionalPath(argv);
+    var project = try project_config_mod.discover(allocator, io, explicit_path);
+    defer if (project) |*p| p.deinit(allocator);
+
+    const handler_path = if (explicit_path) |path|
+        try allocator.dupe(u8, path)
+    else if (project) |*cfg|
+        try cfg.resolvedEntry(allocator)
+    else
+        return error.NoProjectConfig;
+    defer allocator.free(handler_path);
+
+    const system_path = if (explicit_path == null and project != null)
+        try project.?.resolvedSystemPath(allocator)
+    else
+        null;
+    defer if (system_path) |p| allocator.free(p);
+
+    try proof_cli.writeManifest(allocator, capsule_name, handler_path, system_path);
 }
 
 fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
@@ -1707,6 +1765,8 @@ fn printDevHelp() void {
         \\  -h, --host <HOST>     Host to bind to (project default: 127.0.0.1)
         \\  --studio              Also serve the optional /_zigttp/studio mirror
         \\  --no-prove            Watch and reload without contract proof gating
+        \\  --record-proof        Capture this session's requests into a replayable
+        \\                        proof capsule (.zigttp/capsules/default/)
         \\  --no-tour             Skip the first-run proof tour
         \\  --quest               Replay the guided proof quest
         \\  --outbound-http       Enable native outbound HTTP bridge

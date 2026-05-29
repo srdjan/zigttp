@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const zigts = @import("zigts");
+const zigts_cli = @import("zigts_cli");
 const capsule = @import("capsule.zig");
 const replay_runner = @import("replay_runner.zig");
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
@@ -26,6 +27,9 @@ const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 const trace = zigts.trace;
 const file_io = zigts.file_io;
 const rule_registry = zigts.rule_registry;
+const precompile = zigts_cli.precompile;
+const handler_contract = zigts.handler_contract;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const max_handler_bytes = 4 * 1024 * 1024;
 const max_trace_bytes = 16 * 1024 * 1024;
@@ -245,6 +249,119 @@ pub fn replayTraceFiles(
     }
 
     return report;
+}
+
+// -- Recording --------------------------------------------------------------
+
+/// Relative path (within the capsule dir) of the trace file `dev
+/// --record-proof` records a session into. A single rolling file keeps the
+/// capsule simple; re-recording overwrites it via the live `--trace` writer.
+pub const session_trace_rel = "traces/session.jsonl";
+
+/// Absolute path the recorder should pass to the runtime's `--trace` flag so
+/// live request capture lands inside the capsule. Creates the capsule and its
+/// `traces/` subdir. Caller frees.
+pub fn sessionTracePathAlloc(allocator: std.mem.Allocator, capsule_name: []const u8) ![]u8 {
+    try capsule.ensureCapsuleDir(allocator, capsule_name);
+    const traces_dir = try std.fs.path.join(allocator, &.{ capsule.capsules_root, capsule_name, "traces" });
+    defer allocator.free(traces_dir);
+    try mkdirIfAbsent(allocator, traces_dir);
+    return std.fs.path.join(allocator, &.{ capsule.capsules_root, capsule_name, session_trace_rel });
+}
+
+fn mkdirIfAbsent(allocator: std.mem.Allocator, path: []const u8) !void {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    switch (std.posix.errno(std.posix.system.mkdir(path_z, 0o755))) {
+        .SUCCESS, .EXIST => {},
+        else => return error.MakeDirFailed,
+    }
+}
+
+/// Compile `handler_path`, derive the proof facts, and write the capsule
+/// manifest. Called by `dev --record-proof` once the recording session ends,
+/// so the capsule's pinned hashes describe the handler the traces ran
+/// against. Best-effort: a compile failure leaves the recorded traces in
+/// place without a manifest and is reported, never fatal to `dev`.
+pub fn writeManifest(
+    allocator: std.mem.Allocator,
+    capsule_name: []const u8,
+    handler_path: []const u8,
+    system_path: ?[]const u8,
+) !void {
+    var check = try precompile.runCheckOnly(allocator, handler_path, null, false, system_path);
+    defer check.deinit(allocator);
+
+    const contract = if (check.contract) |*c| c else return Error.HandlerNotFound;
+
+    const handler_src = try file_io.readFile(allocator, handler_path, max_handler_bytes);
+    defer allocator.free(handler_src);
+
+    var handler_hash: [64]u8 = undefined;
+    capsule.hashHex(handler_src, &handler_hash);
+
+    // Contract hash over the serialized contract JSON.
+    var contract_json: std.ArrayList(u8) = .empty;
+    defer contract_json.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &contract_json);
+    try handler_contract.writeContractJson(contract, &aw.writer);
+    contract_json = aw.toArrayList();
+    var contract_hash: [64]u8 = undefined;
+    capsule.hashHex(contract_json.items, &contract_hash);
+
+    const policy = rule_registry.policyHash();
+
+    // Routes: prefer the api routes (carry method), fall back to plain routes.
+    var routes: std.ArrayList(capsule.Route) = .empty;
+    defer routes.deinit(allocator);
+    for (contract.api.routes.items) |r| {
+        try routes.append(allocator, .{ .method = r.method, .path = r.path });
+    }
+    if (routes.items.len == 0) {
+        for (contract.routes.items) |r| {
+            try routes.append(allocator, .{ .method = "GET", .path = r.pattern });
+        }
+    }
+
+    // Proven specs from the classified properties.
+    var spec_buf: [zigts.handler_contract.HandlerProperties.max_proven_specs]?[]const u8 = undefined;
+    var proven: std.ArrayList([]const u8) = .empty;
+    defer proven.deinit(allocator);
+    if (contract.properties) |props| {
+        const n = props.provenSpecNames(&spec_buf);
+        for (spec_buf[0..n]) |name_opt| {
+            if (name_opt) |name| try proven.append(allocator, name);
+        }
+    }
+
+    // Declared specs and imported modules (effects) are owned by the contract.
+    var declared: std.ArrayList([]const u8) = .empty;
+    defer declared.deinit(allocator);
+    for (contract.declared_specs.items) |s| try declared.append(allocator, s);
+
+    var effects: std.ArrayList([]const u8) = .empty;
+    defer effects.deinit(allocator);
+    for (contract.modules.items) |m| try effects.append(allocator, m);
+
+    const manifest: capsule.Manifest = .{
+        .name = capsule_name,
+        .handler_path = handler_path,
+        .handler_hash = &handler_hash,
+        .contract_hash = &contract_hash,
+        .zigttp_version = zigts.version.string,
+        .policy_hash = &policy,
+        .proven_specs = proven.items,
+        .declared_specs = declared.items,
+        .routes = routes.items,
+        .effects = effects.items,
+        .trace_files = &.{session_trace_rel},
+    };
+
+    const json = try manifest.toJsonAlloc(allocator);
+    defer allocator.free(json);
+    const manifest_path = try capsule.manifestPathAlloc(allocator, capsule_name);
+    defer allocator.free(manifest_path);
+    try file_io.writeFile(allocator, manifest_path, json);
 }
 
 fn printHelp() void {

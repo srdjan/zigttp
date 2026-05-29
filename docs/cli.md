@@ -45,6 +45,9 @@ a parent. Scaffolded projects bind port `3000`; raw `serve` defaults to
     --prove             With --watch: diff behavioral contracts before swapping
     --force-swap        With --watch --prove: apply breaking changes anyway
     --trace <FILE>      Record handler I/O traces to JSONL file
+    --record-proof      (dev only) Capture this session into a replayable proof
+                        capsule at .zigttp/capsules/default/; replay later with
+                        `zigttp proof replay default`
     --replay <FILE>     Replay recorded traces and verify handler output
     --test <FILE>       Run declarative handler tests from JSONL file
     --sqlite <FILE>     SQLite database path for zigttp:sql
