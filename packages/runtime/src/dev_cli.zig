@@ -46,6 +46,9 @@ const printNoProjectConfigDiagnostic = cli_args.printNoProjectConfigDiagnostic;
 const handlePreflightError = cli_args.handlePreflightError;
 const cloud_only_deploy_flags = cli_args.cloud_only_deploy_flags;
 const template_choices = cli_args.template_choices;
+const cli_templates = @import("cli_templates.zig");
+const Template = cli_templates.Template;
+const parseTemplate = cli_templates.parseTemplate;
 
 /// Slice 1 placeholder. Replace with a build-injected constant (short git sha
 /// plus stable tag) when the `build.zig` wiring lands later in slice 1.
@@ -2177,27 +2180,11 @@ fn printExpertHelp() void {
     _ = std.c.write(std.c.STDOUT_FILENO, expert_help.ptr, expert_help.len);
 }
 
-const Template = enum { basic, api, htmx };
-
 fn handlerPathForTemplate(template: Template) []const u8 {
     return switch (template) {
         .basic, .api => "src/handler.ts",
         .htmx => "src/handler.tsx",
     };
-}
-
-fn parseTemplate(name: []const u8) ?Template {
-    if (std.mem.eql(u8, name, "basic")) return .basic;
-    if (std.mem.eql(u8, name, "api")) return .api;
-    if (std.mem.eql(u8, name, "htmx")) return .htmx;
-    return null;
-}
-
-test "parseTemplate accepts v1 templates only" {
-    try std.testing.expectEqual(Template.basic, parseTemplate("basic").?);
-    try std.testing.expectEqual(Template.api, parseTemplate("api").?);
-    try std.testing.expectEqual(Template.htmx, parseTemplate("htmx").?);
-    try std.testing.expect(parseTemplate("react") == null);
 }
 
 test "default help advertises only the five core commands" {
