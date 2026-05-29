@@ -266,7 +266,7 @@ pub fn replayActiveCapsule(
     workspace_root: []const u8,
     handler_path: []const u8,
     after_bytes: []const u8,
-) !ReplayProbeTally {
+) !ReplayReport {
     const capsule_name = "default";
     const manifest_rel = try capsule.manifestPathAlloc(allocator, capsule_name);
     defer allocator.free(manifest_rel);
@@ -293,15 +293,8 @@ pub fn replayActiveCapsule(
         handler_path,
     ) catch return .{};
 
-    return .{ .total = report.total, .regressed = report.regressed };
+    return report;
 }
-
-/// Mirror of `pi_app.capsule_probe.ReplayTally`, redeclared here to avoid a
-/// PI import in the runtime layer (the seam passes plain integers).
-pub const ReplayProbeTally = struct {
-    total: u32 = 0,
-    regressed: u32 = 0,
-};
 
 // -- Recording --------------------------------------------------------------
 
@@ -317,17 +310,8 @@ pub fn sessionTracePathAlloc(allocator: std.mem.Allocator, capsule_name: []const
     try capsule.ensureCapsuleDir(allocator, capsule_name);
     const traces_dir = try std.fs.path.join(allocator, &.{ capsule.capsules_root, capsule_name, "traces" });
     defer allocator.free(traces_dir);
-    try mkdirIfAbsent(allocator, traces_dir);
+    try capsule.mkdirIfAbsent(allocator, traces_dir);
     return std.fs.path.join(allocator, &.{ capsule.capsules_root, capsule_name, session_trace_rel });
-}
-
-fn mkdirIfAbsent(allocator: std.mem.Allocator, path: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-    switch (std.posix.errno(std.posix.system.mkdir(path_z, 0o755))) {
-        .SUCCESS, .EXIST => {},
-        else => return error.MakeDirFailed,
-    }
 }
 
 /// Compile `handler_path`, derive the proof facts, and write the capsule

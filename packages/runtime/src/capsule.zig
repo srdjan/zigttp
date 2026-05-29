@@ -264,7 +264,10 @@ pub fn ensureCapsuleDir(allocator: std.mem.Allocator, name: []const u8) !void {
     try mkdirIfAbsent(allocator, dir);
 }
 
-fn mkdirIfAbsent(allocator: std.mem.Allocator, path: []const u8) !void {
+/// Create `path` if absent via POSIX `mkdir` (`std.fs.cwd()` is unavailable
+/// in this build). `.EXIST` is success. Exposed so callers that lay out
+/// capsule subdirectories (e.g. the recorder's `traces/`) share one idiom.
+pub fn mkdirIfAbsent(allocator: std.mem.Allocator, path: []const u8) !void {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
     switch (std.posix.errno(std.posix.system.mkdir(path_z, 0o755))) {
