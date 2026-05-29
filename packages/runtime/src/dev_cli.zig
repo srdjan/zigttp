@@ -6,6 +6,7 @@ const zigts = @import("zigts");
 const self_extract = @import("self_extract.zig");
 const zigts_cli = @import("zigts_cli");
 const proofs_cli = @import("proofs_cli.zig");
+const proof_cli = @import("proof_cli.zig");
 const witnesses_cli = @import("witnesses_cli.zig");
 const precompile = zigts_cli.precompile;
 const shared = @import("cli_shared.zig");
@@ -435,6 +436,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // itself; only unexpected ones (allocator, etc.) bubble.
         proofs_cli.run(allocator, user_args[1..]) catch |err| {
             if (proofs_cli.isExpectedUserError(err)) std.process.exit(1);
+            return err;
+        };
+        return;
+    }
+    if (std.mem.eql(u8, command, "proof")) {
+        // Proof Flight Recorder capsule replay. Expected user errors (missing
+        // capsule, policy mismatch, regression) are explained on stderr;
+        // only unexpected ones bubble.
+        proof_cli.run(allocator, user_args[1..]) catch |err| {
+            if (proof_cli.isExpectedUserError(err)) std.process.exit(1);
             return err;
         };
         return;
@@ -1950,6 +1961,7 @@ const core_help_all =
     \\
     \\Proof ledger:
     \\  zigttp proofs [list|show|diff|watch|export|badge|bundle|verify]
+    \\  zigttp proof replay <capsule>          Replay a recorded capsule against the current handler
     \\  zigttp verify <url>                    Verify a deployed proof receipt
     \\
     \\Credentials:

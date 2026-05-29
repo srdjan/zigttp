@@ -28,6 +28,7 @@ test {
 
     _ = @import("proof_ledger.zig");
     _ = @import("capsule.zig");
+    _ = @import("proof_cli.zig");
     _ = @import("perf_probe_lib.zig");
     _ = @import("equivalence_probe_lib.zig");
     _ = @import("proofs_cli.zig");

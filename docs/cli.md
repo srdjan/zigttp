@@ -114,6 +114,28 @@ Refs may be `HEAD`, `HEAD~N`, or a contract sha prefix. The ledger
 persists only contract-derived identifiers; no env values, tokens, or
 PII.
 
+### `zigttp proof`
+
+Replay a recorded proof capsule (under `.zigttp/capsules/<name>/`)
+against the current handler. A capsule bundles a handler's recorded
+request traces with a manifest pinning the handler, contract, and policy
+hashes, so `proof replay` answers "did this edit change behavior on a
+request I actually exercised?"
+
+```bash
+zigttp proof replay <capsule>                     # exit 0 = reproduced, 1 = regression
+zigttp proof replay <capsule> --allow-version-mismatch
+```
+
+Each recorded request is replayed against replay stubs (no live
+effects); a status or body change counts as a regression and exits 1.
+Replay fails closed when the capsule's schema or policy hash no longer
+matches the running binary - the recorded behavior was proven under a
+different rule set - and `--allow-version-mismatch` overrides that gate.
+The capsule format lives in `packages/runtime/src/capsule.zig`. Distinct
+from `zigttp proofs` (the ledger viewer above): `proof` replays traces,
+`proofs` renders receipts.
+
 ### `zigttp verify`
 
 Third-party proof-receipt verifier. Fetches a deployed URL, reads its
