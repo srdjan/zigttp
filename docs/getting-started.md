@@ -30,6 +30,10 @@ Open `proof-demo/passport/index.html` to inspect the exported Proof Passport.
 It captures the baseline proof, an unsafe edit with a secret-flow witness, the
 repair, and the local deploy receipt.
 
+To carry the same proof to a pull request instead of a scripted demo, see the
+[Proof Gate](proof-gate.md): `zigttp proofs gate` aggregates a behavioral
+verdict across every changed handler and posts it as a sticky PR comment.
+
 ## 1. Install
 
 Pre-built binaries for macOS and Linux (x86_64, aarch64):

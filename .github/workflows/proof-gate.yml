@@ -1,0 +1,56 @@
+name: Proof Gate
+
+# Posts a behavioral-proof verdict for every changed handler as a sticky PR
+# comment and fails the check when a change is `breaking`. The verdict
+# (equivalent / additive / breaking) is the compiler's answer to "is this safe
+# to merge?", computed by `zigttp proofs gate`. See docs/proof-gate.md.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: proof-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: '0.16.0'
+
+jobs:
+  proof-gate:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `git show <base>:<path>` can read the before side.
+          fetch-depth: 0
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build zigttp
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Run proof gate
+        id: gate
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/proof-gate.sh "origin/${BASE_REF}" "HEAD"
+        continue-on-error: true
+
+      - name: Post proof comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: zigttp-proof
+          path: proof-gate.md
+
+      - name: Enforce verdict
+        if: steps.gate.outputs.verdict == 'breaking' && !contains(github.event.pull_request.labels.*.name, 'proof-override')
+        run: |
+          echo "::error::A handler change is breaking. Review the proof comment, or add the 'proof-override' label to merge anyway."
+          exit 1

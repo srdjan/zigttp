@@ -123,11 +123,20 @@ zigttp proofs watch                        # tail new entries (Ctrl+C to exit)
 zigttp proofs export [--format md|html|svg] [--ref HEAD]
 zigttp proofs bundle --contract PATH --out DIR [--binary PATH] [--replay PATH]
 zigttp proofs verify <bundle-dir>          # re-check every sha256
+zigttp proofs gate [--base REF] [--head REF] [--format md|json]  # PR gate; exit 1 on breaking
 ```
 
 Refs may be `HEAD`, `HEAD~N`, or a contract sha prefix. The ledger
 persists only contract-derived identifiers; no env values, tokens, or
 PII.
+
+`zigttp proofs gate` is the pull-request gate rather than a ledger view:
+it compiles the before and after of every handler changed in a git range,
+aggregates one repo-level behavioral verdict (`equivalent` /
+`equivalent_modulo_laws` / `additive` / `breaking`), and emits a PR-ready
+Markdown report or machine JSON. Exit `0` safe, `1` breaking, `2` git or
+usage error. See [proof-gate.md](proof-gate.md) for the shipped GitHub
+Action that posts it as a sticky comment.
 
 ### `zigttp proof`
 

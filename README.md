@@ -151,7 +151,10 @@ and more.
 - **Proof-carrying changes.** `zigttp prove-behavior <before.ts>
   <after.ts>` reports whether an edit is behaviorally equivalent or
   breaking; the expert loop signs the same verdict as a
-  `kind=equivalence` receipt after each edit. [CLI](docs/cli.md).
+  `kind=equivalence` receipt after each edit. `zigttp proofs gate`
+  aggregates that verdict across every handler changed in a git range and
+  posts it on the pull request. [CLI](docs/cli.md), [Proof
+  Gate](docs/proof-gate.md).
 - **Durable execution.** `run(key, fn)`, `step(name, fn)`,
   `sleep(ms)`, `waitSignal(name)` from `zigttp:durable` with
   write-ahead oplog and crash recovery.

@@ -635,26 +635,35 @@ fn diffBehaviors(
     var diff = BehaviorDiff{};
     errdefer diff.deinit(allocator);
 
-    // For each old path, check if a matching new path exists
+    // Several behavior paths can share a (method, pattern, conditions) key but
+    // differ in response status (a multi-route routerMatch handler produces
+    // exactly this). Matching must therefore consume each new path at most once
+    // and prefer an exact-status twin over a status-differing one, otherwise a
+    // contract is not even diff-identical to itself. `used` tracks which new
+    // paths have already been paired.
+    const used = try allocator.alloc(bool, new_paths.len);
+    defer allocator.free(used);
+    @memset(used, false);
+
     for (old_paths) |old_path| {
-        if (findMatchingPath(new_paths, &old_path)) |new_path| {
-            if (old_path.response_status == new_path.response_status) {
-                diff.preserved += 1;
-                try diff.changes.append(allocator, .{
-                    .method = old_path.route_method,
-                    .pattern = old_path.route_pattern,
-                    .status = old_path.response_status,
-                    .change = .preserved,
-                });
-            } else {
-                diff.response_changed += 1;
-                try diff.changes.append(allocator, .{
-                    .method = old_path.route_method,
-                    .pattern = old_path.route_pattern,
-                    .status = new_path.response_status,
-                    .change = .response_changed,
-                });
-            }
+        if (takeMatchingPath(new_paths, used, &old_path, true)) |idx| {
+            used[idx] = true;
+            diff.preserved += 1;
+            try diff.changes.append(allocator, .{
+                .method = old_path.route_method,
+                .pattern = old_path.route_pattern,
+                .status = old_path.response_status,
+                .change = .preserved,
+            });
+        } else if (takeMatchingPath(new_paths, used, &old_path, false)) |idx| {
+            used[idx] = true;
+            diff.response_changed += 1;
+            try diff.changes.append(allocator, .{
+                .method = old_path.route_method,
+                .pattern = old_path.route_pattern,
+                .status = new_paths[idx].response_status,
+                .change = .response_changed,
+            });
         } else {
             diff.removed += 1;
             try diff.changes.append(allocator, .{
@@ -666,26 +675,36 @@ fn diffBehaviors(
         }
     }
 
-    // Find new paths not present in old
-    for (new_paths) |new_path| {
-        if (findMatchingPath(old_paths, &new_path) == null) {
-            diff.added += 1;
-            try diff.changes.append(allocator, .{
-                .method = new_path.route_method,
-                .pattern = new_path.route_pattern,
-                .status = new_path.response_status,
-                .change = .added,
-            });
-        }
+    // Any new path never consumed above is genuinely new.
+    for (new_paths, 0..) |new_path, idx| {
+        if (used[idx]) continue;
+        diff.added += 1;
+        try diff.changes.append(allocator, .{
+            .method = new_path.route_method,
+            .pattern = new_path.route_pattern,
+            .status = new_path.response_status,
+            .change = .added,
+        });
     }
 
     return diff;
 }
 
-/// Find a path in the list that matches the target by (method, pattern, conditions).
-fn findMatchingPath(paths: []const BehaviorPath, target: *const BehaviorPath) ?*const BehaviorPath {
-    for (paths) |*path| {
-        if (behaviorPathKeysMatch(path, target)) return path;
+/// Index of the first unused path matching `target` by (method, pattern,
+/// conditions). When `require_status_equal` is set, also requires the response
+/// status to match, so callers can prefer exact twins before falling back to
+/// status-differing matches.
+fn takeMatchingPath(
+    paths: []const BehaviorPath,
+    used: []const bool,
+    target: *const BehaviorPath,
+    require_status_equal: bool,
+) ?usize {
+    for (paths, 0..) |*path, idx| {
+        if (used[idx]) continue;
+        if (!behaviorPathKeysMatch(path, target)) continue;
+        if (require_status_equal and path.response_status != target.response_status) continue;
+        return idx;
     }
     return null;
 }
@@ -2233,6 +2252,45 @@ test "diffBehaviors added path" {
 
     try std.testing.expectEqual(@as(u32, 0), bd.preserved);
     try std.testing.expectEqual(@as(u32, 1), bd.added);
+    try std.testing.expect(!bd.hasBreaking());
+}
+
+test "diffBehaviors: paths sharing a key but differing in status diff clean against themselves" {
+    // Regression: a multi-route routerMatch handler produces several behavior
+    // paths with the same (method, pattern, conditions) key but different
+    // response statuses. First-match-without-consume mispaired them, so a
+    // handler read as `breaking` against an identical copy of itself. The
+    // matcher must consume each new path once and prefer an exact-status twin.
+    const allocator = std.testing.allocator;
+
+    const ok = handler_contract.BehaviorPath{
+        .route_method = "GET",
+        .route_pattern = "/",
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 0,
+        .is_failure_path = false,
+    };
+    const not_found = handler_contract.BehaviorPath{
+        .route_method = "GET",
+        .route_pattern = "/",
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 404,
+        .io_depth = 0,
+        .is_failure_path = true,
+    };
+
+    const paths = [_]handler_contract.BehaviorPath{ ok, not_found };
+
+    var bd = try diffBehaviors(allocator, &paths, &paths);
+    defer bd.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 2), bd.preserved);
+    try std.testing.expectEqual(@as(u32, 0), bd.response_changed);
+    try std.testing.expectEqual(@as(u32, 0), bd.removed);
+    try std.testing.expectEqual(@as(u32, 0), bd.added);
     try std.testing.expect(!bd.hasBreaking());
 }
 

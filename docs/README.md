@@ -14,6 +14,8 @@ notes document design contracts, governance, and roadmap work.
   JavaScript/TypeScript features, and replacements.
 - [Reading the Proof Card](proof-card.md) - the verdict, proven surface, and
   counterexamples that `check` and `dev` print on every save.
+- [Proof Gate](proof-gate.md) - `zigttp proofs gate` and the GitHub Action
+  that post a behavioral verdict for every changed handler on a pull request.
 - [TypeScript](typescript.md) - type stripping, type checking, and
   `comptime()`.
 - [JSX Guide](jsx-guide.md) - JSX/TSX handlers and server-side rendering.

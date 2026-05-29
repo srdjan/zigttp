@@ -70,6 +70,32 @@ pub fn recordEquivalenceReceiptWithKey(
     const before_contract = if (before_result.contract) |*c| c else return;
     const after_contract = if (after_result.contract) |*c| c else return;
 
+    return signAndAppend(allocator, handler_path, before_contract, after_contract, applied_at_unix_ms, key_pair);
+}
+
+/// Sign and append a `kind=equivalence` row from already-compiled contracts,
+/// loading the persistent attest key. Callers that have just compiled the two
+/// versions (e.g. `proofs gate`) use this to avoid recompiling them. Same
+/// best-effort contract as the source-bytes entry points.
+pub fn recordEquivalenceReceiptFromContracts(
+    allocator: std.mem.Allocator,
+    handler_path: []const u8,
+    before_contract: *const zq.HandlerContract,
+    after_contract: *const zq.HandlerContract,
+    applied_at_unix_ms: i64,
+) anyerror!void {
+    const signer = identity.loadOrCreate(allocator) catch return;
+    return signAndAppend(allocator, handler_path, before_contract, after_contract, applied_at_unix_ms, signer.key_pair);
+}
+
+fn signAndAppend(
+    allocator: std.mem.Allocator,
+    handler_path: []const u8,
+    before_contract: *const zq.HandlerContract,
+    after_contract: *const zq.HandlerContract,
+    applied_at_unix_ms: i64,
+    key_pair: Ed25519.KeyPair,
+) anyerror!void {
     var diff = contract_diff.diffContracts(allocator, before_contract, after_contract) catch return;
     defer diff.deinit(allocator);
 

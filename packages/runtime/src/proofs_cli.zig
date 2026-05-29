@@ -8,6 +8,7 @@ const proof_ledger = @import("proof_ledger.zig");
 const review = @import("zigttp_deploy").review;
 const printer_mod = @import("zigttp_deploy").printer;
 const bundle_mod = @import("proofs/bundle.zig");
+const pr_gate = @import("proofs/pr_gate.zig");
 
 const Subcommand = enum {
     list,
@@ -18,6 +19,7 @@ const Subcommand = enum {
     badge,
     bundle,
     verify,
+    gate,
     help,
 };
 
@@ -42,6 +44,9 @@ pub fn isExpectedUserError(err: anyerror) bool {
         error.NoBundleJson,
         error.Sha256Mismatch,
         error.MissingComponent,
+        error.NotAGitRepo,
+        error.BadGitRef,
+        error.UnknownFormat,
         => true,
         else => false,
     };
@@ -84,6 +89,56 @@ pub fn runWith(
         .badge => try badgeCommand(allocator, argv[1..], stdout, stderr),
         .bundle => try bundleCommand(allocator, argv[1..], stdout, stderr),
         .verify => try verifyCommand(allocator, argv[1..], stdout, stderr),
+        .gate => try gateCommand(allocator, argv[1..], stdout, stderr),
+    }
+}
+
+fn gateCommand(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    var opts: pr_gate.Options = .{};
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--base")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgValue;
+            opts.base = argv[i];
+        } else if (std.mem.eql(u8, arg, "--head")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgValue;
+            opts.head = argv[i];
+        } else if (std.mem.eql(u8, arg, "--out")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgValue;
+            opts.out = argv[i];
+        } else if (std.mem.eql(u8, arg, "--no-sign")) {
+            opts.no_sign = true;
+        } else if (std.mem.eql(u8, arg, "--format")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgValue;
+            if (std.mem.eql(u8, argv[i], "md")) {
+                opts.format = .md;
+            } else if (std.mem.eql(u8, argv[i], "json")) {
+                opts.format = .json;
+            } else {
+                try stderr.writeAll("zigttp proofs gate: --format must be md or json\n");
+                return error.UnknownFormat;
+            }
+        } else {
+            try stderr.print("zigttp proofs gate: unknown argument `{s}`\n", .{arg});
+            return error.UnknownArgument;
+        }
+    }
+
+    const code = try pr_gate.run(allocator, opts, stdout, stderr);
+    if (code != 0) {
+        stdout.flush() catch {};
+        stderr.flush() catch {};
+        std.process.exit(code);
     }
 }
 
@@ -167,6 +222,7 @@ fn parseSubcommand(argv: []const []const u8) !Subcommand {
     if (std.mem.eql(u8, first, "badge")) return .badge;
     if (std.mem.eql(u8, first, "bundle")) return .bundle;
     if (std.mem.eql(u8, first, "verify")) return .verify;
+    if (std.mem.eql(u8, first, "gate")) return .gate;
     return error.UnknownSubcommand;
 }
 
@@ -196,6 +252,13 @@ fn writeHelp(w: *std.Io.Writer) !void {
         \\  verify <dir>     Re-check every component sha256 in <dir>/bundle.json
         \\                   against the actual file bytes. Exits non-zero on
         \\                   any mismatch.
+        \\  gate             Compile before/after for every handler changed in a
+        \\                   git range, aggregate a repo-level behavioral verdict,
+        \\                   and emit a PR-ready report. Exit 1 on `breaking`.
+        \\                   Flags: [--base REF] [--head REF] [--format md|json]
+        \\                          [--out PATH] [--no-sign].
+        \\                   Defaults: --base origin/main (then main), head is the
+        \\                   working tree, --format md.
         \\
         \\Refs may be HEAD, HEAD~N, or a contract sha prefix.
         \\Ledger file: .zigttp/proofs.jsonl
