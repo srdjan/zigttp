@@ -24,6 +24,7 @@ const std = @import("std");
 const zigts = @import("zigts");
 const zigts_cli = @import("zigts_cli");
 const equivalence_probe_lib = @import("../equivalence_probe_lib.zig");
+const shared = @import("../cli_shared.zig");
 
 const contract_diff = zigts.contract_diff;
 const file_io = zigts.file_io;
@@ -503,16 +504,8 @@ const GitResult = struct {
     stdout: []u8,
 };
 
-fn realCwd(allocator: std.mem.Allocator) ![]u8 {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const cwd_z = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io_backend.io(), ".", allocator);
-    defer allocator.free(cwd_z);
-    return try allocator.dupe(u8, cwd_z);
-}
-
 fn runGit(allocator: std.mem.Allocator, cwd: []const u8, args: []const []const u8) !GitResult {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     const r = std.process.run(allocator, io_backend.io(), .{
         .argv = args,
@@ -582,12 +575,6 @@ fn readAtRef(arena: std.mem.Allocator, cwd: []const u8, ref: []const u8, path: [
     return res.stdout;
 }
 
-fn nowUnixMs() i64 {
-    var ts: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
-    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
-}
-
 // ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
@@ -605,7 +592,7 @@ pub fn run(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const cwd = realCwd(arena) catch {
+    const cwd = shared.realCwd(arena) catch {
         try stderr.writeAll("zigttp proofs gate: cannot resolve the working directory\n");
         return 2;
     };
@@ -733,7 +720,7 @@ fn analyzeHandler(
     if (sign) {
         // Best-effort: append a signed kind=equivalence row from the contracts
         // already in hand. A failure never changes the verdict.
-        equivalence_probe_lib.recordEquivalenceReceiptFromContracts(gpa, path, before_contract, after_contract, nowUnixMs()) catch {};
+        equivalence_probe_lib.recordEquivalenceReceiptFromContracts(gpa, path, before_contract, after_contract, shared.nowUnixMs()) catch {};
         signed = true;
     }
 

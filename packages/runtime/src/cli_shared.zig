@@ -66,6 +66,30 @@ pub fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) 
     return args.toOwnedSlice(allocator);
 }
 
+pub fn threadedIo(allocator: std.mem.Allocator) std.Io.Threaded {
+    return std.Io.Threaded.init(allocator, .{ .environ = .empty });
+}
+
+pub fn realCwd(allocator: std.mem.Allocator) ![]u8 {
+    var io_backend = threadedIo(allocator);
+    defer io_backend.deinit();
+    const cwd_z = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io_backend.io(), ".", allocator);
+    defer allocator.free(cwd_z);
+    return try allocator.dupe(u8, cwd_z);
+}
+
+pub fn nowUnixMs() i64 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
+pub fn takeArg(i: *usize, argv: []const []const u8, missing: anyerror) ![]const u8 {
+    i.* += 1;
+    if (i.* >= argv.len) return missing;
+    return argv[i.*];
+}
+
 pub fn printVersion() void {
     const version = "zigttp " ++ zigts.version.string ++ "\n";
     _ = std.c.write(std.c.STDOUT_FILENO, version.ptr, version.len);
@@ -174,7 +198,7 @@ pub const WatchSet = struct {
 };
 
 pub fn buildWatchSet(allocator: std.mem.Allocator, argv: []const []const u8) !WatchSet {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
 

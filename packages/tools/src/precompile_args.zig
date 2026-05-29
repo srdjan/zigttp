@@ -13,6 +13,15 @@ fn errPrint(comptime fmt: []const u8, args: anytype) void {
     std.debug.print(fmt, args);
 }
 
+fn takeArg(index: *usize, argv: []const []const u8, comptime message: []const u8) ![]const u8 {
+    index.* += 1;
+    if (index.* >= argv.len) {
+        errPrint(message ++ "\n", .{});
+        return error.MissingArgument;
+    }
+    return argv[index.*];
+}
+
 pub const PrecompileOptions = struct {
     handler_path: []const u8,
     output_path: []const u8,
@@ -81,131 +90,67 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             continue;
         }
         if (std.mem.eql(u8, arg, "--sdk")) {
-            index += 1;
-            opts.sdk_target = if (index < argv.len) argv[index] else {
-                errPrint("Missing target after --sdk (values: ts)\n", .{});
-                return error.MissingArgument;
-            };
+            opts.sdk_target = try takeArg(&index, argv, "Missing target after --sdk (values: ts)");
             continue;
         }
         if (std.mem.eql(u8, arg, "--sql-schema")) {
-            index += 1;
-            opts.sql_schema_path = if (index < argv.len) argv[index] else {
-                errPrint("Missing path after --sql-schema\n", .{});
-                return error.MissingArgument;
-            };
+            opts.sql_schema_path = try takeArg(&index, argv, "Missing path after --sql-schema");
             continue;
         }
         if (std.mem.eql(u8, arg, "--system")) {
-            index += 1;
-            opts.system_path = if (index < argv.len) argv[index] else {
-                errPrint("Missing path after --system\n", .{});
-                return error.MissingArgument;
-            };
+            opts.system_path = try takeArg(&index, argv, "Missing path after --system");
             continue;
         }
         if (std.mem.eql(u8, arg, "--policy")) {
-            index += 1;
-            opts.policy_path = if (index < argv.len) argv[index] else {
-                errPrint("Missing path after --policy\n", .{});
-                return error.MissingArgument;
-            };
+            opts.policy_path = try takeArg(&index, argv, "Missing path after --policy");
             continue;
         }
         if (std.mem.eql(u8, arg, "--replay")) {
-            index += 1;
-            opts.replay_trace_path = if (index < argv.len) argv[index] else {
-                errPrint("Missing path after --replay\n", .{});
-                return error.MissingArgument;
-            };
+            opts.replay_trace_path = try takeArg(&index, argv, "Missing path after --replay");
             continue;
         }
         if (std.mem.eql(u8, arg, "--test-file")) {
-            index += 1;
-            opts.test_file_path = if (index < argv.len) argv[index] else {
-                errPrint("Missing path after --test-file\n", .{});
-                return error.MissingArgument;
-            };
+            opts.test_file_path = try takeArg(&index, argv, "Missing path after --test-file");
             continue;
         }
         if (std.mem.eql(u8, arg, "--prove")) {
-            index += 1;
-            opts.prove_spec = if (index < argv.len) argv[index] else {
-                errPrint("Missing spec after --prove (format: contract.json or contract.json:traces.jsonl)\n", .{});
-                return error.MissingArgument;
-            };
+            opts.prove_spec = try takeArg(&index, argv, "Missing spec after --prove (format: contract.json or contract.json:traces.jsonl)");
             continue;
         }
         if (std.mem.eql(u8, arg, "--manifest")) {
-            index += 1;
-            opts.manifest_path = if (index < argv.len) argv[index] else {
-                errPrint("Missing path after --manifest\n", .{});
-                return error.MissingArgument;
-            };
+            opts.manifest_path = try takeArg(&index, argv, "Missing path after --manifest");
             continue;
         }
         if (std.mem.eql(u8, arg, "--expect-properties")) {
-            index += 1;
-            opts.expect_properties_path = if (index < argv.len) argv[index] else {
-                errPrint("Missing path after --expect-properties\n", .{});
-                return error.MissingArgument;
-            };
+            opts.expect_properties_path = try takeArg(&index, argv, "Missing path after --expect-properties");
             continue;
         }
         if (std.mem.eql(u8, arg, "--data-labels")) {
-            index += 1;
-            opts.data_labels_path = if (index < argv.len) argv[index] else {
-                errPrint("Missing path after --data-labels\n", .{});
-                return error.MissingArgument;
-            };
+            opts.data_labels_path = try takeArg(&index, argv, "Missing path after --data-labels");
             continue;
         }
         if (std.mem.eql(u8, arg, "--fault-severity")) {
-            index += 1;
-            opts.fault_severity_path = if (index < argv.len) argv[index] else {
-                errPrint("Missing path after --fault-severity\n", .{});
-                return error.MissingArgument;
-            };
+            opts.fault_severity_path = try takeArg(&index, argv, "Missing path after --fault-severity");
             continue;
         }
         if (std.mem.eql(u8, arg, "--generator-pack")) {
-            index += 1;
-            opts.generator_pack_path = if (index < argv.len) argv[index] else {
-                errPrint("Missing path after --generator-pack\n", .{});
-                return error.MissingArgument;
-            };
+            opts.generator_pack_path = try takeArg(&index, argv, "Missing path after --generator-pack");
             continue;
         }
         if (std.mem.eql(u8, arg, "--report")) {
-            index += 1;
-            opts.report_format = if (index < argv.len) argv[index] else {
-                errPrint("Missing format after --report (values: json)\n", .{});
-                return error.MissingArgument;
-            };
+            opts.report_format = try takeArg(&index, argv, "Missing format after --report (values: json)");
             continue;
         }
         if (std.mem.eql(u8, arg, "--build-time")) {
-            index += 1;
-            opts.build_time = if (index < argv.len) argv[index] else {
-                errPrint("Missing value after --build-time\n", .{});
-                return error.MissingArgument;
-            };
+            opts.build_time = try takeArg(&index, argv, "Missing value after --build-time");
             continue;
         }
         if (std.mem.eql(u8, arg, "--git-commit")) {
-            index += 1;
-            opts.git_commit = if (index < argv.len) argv[index] else {
-                errPrint("Missing value after --git-commit\n", .{});
-                return error.MissingArgument;
-            };
+            opts.git_commit = try takeArg(&index, argv, "Missing value after --git-commit");
             continue;
         }
         if (std.mem.eql(u8, arg, "--module-manifest")) {
-            index += 1;
-            if (index >= argv.len) {
-                errPrint("Missing path after --module-manifest\n", .{});
-                return error.MissingArgument;
-            }
+            _ = try takeArg(&index, argv, "Missing path after --module-manifest");
             continue;
         }
         if (handler_path == null) {
@@ -249,12 +194,7 @@ pub fn collectModuleManifestPaths(
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         if (std.mem.eql(u8, argv[i], "--module-manifest")) {
-            i += 1;
-            if (i >= argv.len) {
-                errPrint("Missing path after --module-manifest\n", .{});
-                return error.MissingArgument;
-            }
-            try out.append(allocator, argv[i]);
+            try out.append(allocator, try takeArg(&i, argv, "Missing path after --module-manifest"));
         }
     }
     return out.toOwnedSlice(allocator);

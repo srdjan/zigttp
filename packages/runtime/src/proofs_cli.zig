@@ -9,6 +9,7 @@ const review = @import("zigttp_deploy").review;
 const printer_mod = @import("zigttp_deploy").printer;
 const bundle_mod = @import("proofs/bundle.zig");
 const pr_gate = @import("proofs/pr_gate.zig");
+const shared = @import("cli_shared.zig");
 
 const Subcommand = enum {
     list,
@@ -104,25 +105,18 @@ fn gateCommand(
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
         if (std.mem.eql(u8, arg, "--base")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingArgValue;
-            opts.base = argv[i];
+            opts.base = try shared.takeArg(&i, argv, error.MissingArgValue);
         } else if (std.mem.eql(u8, arg, "--head")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingArgValue;
-            opts.head = argv[i];
+            opts.head = try shared.takeArg(&i, argv, error.MissingArgValue);
         } else if (std.mem.eql(u8, arg, "--out")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingArgValue;
-            opts.out = argv[i];
+            opts.out = try shared.takeArg(&i, argv, error.MissingArgValue);
         } else if (std.mem.eql(u8, arg, "--no-sign")) {
             opts.no_sign = true;
         } else if (std.mem.eql(u8, arg, "--format")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingArgValue;
-            if (std.mem.eql(u8, argv[i], "md")) {
+            const value = try shared.takeArg(&i, argv, error.MissingArgValue);
+            if (std.mem.eql(u8, value, "md")) {
                 opts.format = .md;
-            } else if (std.mem.eql(u8, argv[i], "json")) {
+            } else if (std.mem.eql(u8, value, "json")) {
                 opts.format = .json;
             } else {
                 try stderr.writeAll("zigttp proofs gate: --format must be md or json\n");
@@ -157,21 +151,13 @@ fn bundleCommand(
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
         if (std.mem.eql(u8, arg, "--contract")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingArgValue;
-            contract_path = argv[i];
+            contract_path = try shared.takeArg(&i, argv, error.MissingArgValue);
         } else if (std.mem.eql(u8, arg, "--binary")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingArgValue;
-            binary_path = argv[i];
+            binary_path = try shared.takeArg(&i, argv, error.MissingArgValue);
         } else if (std.mem.eql(u8, arg, "--replay")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingArgValue;
-            replay_path = argv[i];
+            replay_path = try shared.takeArg(&i, argv, error.MissingArgValue);
         } else if (std.mem.eql(u8, arg, "--out")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingArgValue;
-            out_dir = argv[i];
+            out_dir = try shared.takeArg(&i, argv, error.MissingArgValue);
         } else {
             try stderr.print("zigttp proofs bundle: unknown argument '{s}'\n", .{arg});
             return error.UnknownArgument;
@@ -382,7 +368,7 @@ fn diffCommand(
 /// and emit any newly appended rows. Exits only on signal (Ctrl+C) or an
 /// unrecoverable read error.
 fn watchCommand(allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
 
@@ -437,24 +423,21 @@ fn exportCommand(
     while (i < rest.len) : (i += 1) {
         const arg = rest[i];
         if (std.mem.eql(u8, arg, "--format")) {
-            i += 1;
-            if (i >= rest.len) {
+            const value = shared.takeArg(&i, rest, error.MissingArgValue) catch {
                 try stderr.writeAll("--format requires a value (md, html, or svg).\n");
                 return error.MissingArgValue;
-            }
-            format = ExportFormat.fromString(rest[i]) orelse {
+            };
+            format = ExportFormat.fromString(value) orelse {
                 try stderr.writeAll("Unknown --format. Expected md, html, or svg.\n");
                 return error.InvalidFormat;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--ref")) {
-            i += 1;
-            if (i >= rest.len) {
+            ref_text = shared.takeArg(&i, rest, error.MissingArgValue) catch {
                 try stderr.writeAll("--ref requires a value (HEAD, HEAD~N, or a sha prefix).\n");
                 return error.MissingArgValue;
-            }
-            ref_text = rest[i];
+            };
             continue;
         }
         try stderr.writeAll("zigttp proofs export accepts --format and --ref only.\n");
@@ -503,30 +486,24 @@ fn badgeCommand(
     while (i < rest.len) : (i += 1) {
         const arg = rest[i];
         if (std.mem.eql(u8, arg, "--out")) {
-            i += 1;
-            if (i >= rest.len) {
+            out_path = shared.takeArg(&i, rest, error.MissingArgValue) catch {
                 try stderr.writeAll("--out requires a path.\n");
                 return error.MissingArgValue;
-            }
-            out_path = rest[i];
+            };
             continue;
         }
         if (std.mem.eql(u8, arg, "--ref")) {
-            i += 1;
-            if (i >= rest.len) {
+            ref_text = shared.takeArg(&i, rest, error.MissingArgValue) catch {
                 try stderr.writeAll("--ref requires a value (HEAD, HEAD~N, or a sha prefix).\n");
                 return error.MissingArgValue;
-            }
-            ref_text = rest[i];
+            };
             continue;
         }
         if (std.mem.eql(u8, arg, "--public-url")) {
-            i += 1;
-            if (i >= rest.len) {
+            public_url = shared.takeArg(&i, rest, error.MissingArgValue) catch {
                 try stderr.writeAll("--public-url requires a URL.\n");
                 return error.MissingArgValue;
-            }
-            public_url = rest[i];
+            };
             continue;
         }
         if (std.mem.eql(u8, arg, "--inline")) {

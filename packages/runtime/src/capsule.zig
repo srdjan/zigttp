@@ -422,7 +422,8 @@ test "version mismatch fails closed" {
 }
 
 test "missing required field rejects" {
-    const json = \\{"schemaVersion":1,"name":"x"}
+    const json =
+        \\{"schemaVersion":1,"name":"x"}
     ;
     try testing.expectError(error.MissingField, parse(testing.allocator, json, .{}));
 }

@@ -112,9 +112,7 @@ fn parseEdgeConfigPath(argv: []const []const u8) ![]const u8 {
             return error.HelpRequested;
         }
         if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--config")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingEdgeConfig;
-            path = argv[i];
+            path = try shared.takeArg(&i, argv, error.MissingEdgeConfig);
             continue;
         }
         if (!std.mem.startsWith(u8, arg, "-")) {
@@ -312,15 +310,12 @@ fn parseCommonServeFlag(
     config: *ServerConfig,
 ) !bool {
     if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--port")) {
-        i.* += 1;
-        if (i.* >= argv.len) return error.MissingPortValue;
-        config.port = std.fmt.parseInt(u16, argv[i.*], 10) catch return error.InvalidPort;
+        const value = try shared.takeArg(i, argv, error.MissingPortValue);
+        config.port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidPort;
         return true;
     }
     if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--host")) {
-        i.* += 1;
-        if (i.* >= argv.len) return error.MissingHostValue;
-        config.host = argv[i.*];
+        config.host = try shared.takeArg(i, argv, error.MissingHostValue);
         return true;
     }
     if (std.mem.eql(u8, arg, "--cors")) {
@@ -332,15 +327,11 @@ fn parseCommonServeFlag(
         return true;
     }
     if (std.mem.eql(u8, arg, "--system")) {
-        i.* += 1;
-        if (i.* >= argv.len) return error.MissingSystemFile;
-        config.runtime_config.system_config_path = argv[i.*];
+        config.runtime_config.system_config_path = try shared.takeArg(i, argv, error.MissingSystemFile);
         return true;
     }
     if (std.mem.eql(u8, arg, "--durable")) {
-        i.* += 1;
-        if (i.* >= argv.len) return error.MissingDurableDir;
-        config.runtime_config.durable_oplog_dir = argv[i.*];
+        config.runtime_config.durable_oplog_dir = try shared.takeArg(i, argv, error.MissingDurableDir);
         return true;
     }
     if (std.mem.eql(u8, arg, "--outbound-http")) {
@@ -348,10 +339,8 @@ fn parseCommonServeFlag(
         return true;
     }
     if (std.mem.eql(u8, arg, "--outbound-host")) {
-        i.* += 1;
-        if (i.* >= argv.len) return error.MissingOutboundHost;
         config.runtime_config.outbound_http_enabled = true;
-        config.runtime_config.outbound_allow_host = argv[i.*];
+        config.runtime_config.outbound_allow_host = try shared.takeArg(i, argv, error.MissingOutboundHost);
         return true;
     }
     if (std.mem.eql(u8, arg, "--no-env-check")) {
@@ -359,22 +348,19 @@ fn parseCommonServeFlag(
         return true;
     }
     if (std.mem.eql(u8, arg, "--security-log")) {
-        i.* += 1;
-        if (i.* >= argv.len) return error.MissingSecurityLogPath;
-        config.security_log_path = argv[i.*];
+        config.security_log_path = try shared.takeArg(i, argv, error.MissingSecurityLogPath);
         return true;
     }
     if (std.mem.eql(u8, arg, "--lifecycle")) {
-        i.* += 1;
-        if (i.* >= argv.len) return error.MissingLifecycleValue;
-        config.lifecycle_override = parseLifecycle(argv[i.*]) orelse return error.InvalidLifecycleValue;
+        const value = try shared.takeArg(i, argv, error.MissingLifecycleValue);
+        config.lifecycle_override = parseLifecycle(value) orelse return error.InvalidLifecycleValue;
         return true;
     }
     return false;
 }
 
 fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !ServerConfig {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
 
@@ -423,59 +409,40 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             printServeHelp();
             return error.HelpRequested;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--eval")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingEvalCode;
-            config.handler = .{ .inline_code = argv[i] };
+            config.handler = .{ .inline_code = try shared.takeArg(&i, argv, error.MissingEvalCode) };
             handler_set = true;
         } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--memory")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingMemoryValue;
-            config.runtime_config.memory_limit = shared.parseSize(argv[i]) catch return error.InvalidMemorySize;
+            const value = try shared.takeArg(&i, argv, error.MissingMemoryValue);
+            config.runtime_config.memory_limit = shared.parseSize(value) catch return error.InvalidMemorySize;
         } else if (std.mem.eql(u8, arg, "--max-body-size")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingMaxBodySize;
-            config.max_body_size = shared.parseSize(argv[i]) catch return error.InvalidMaxBodySize;
+            const value = try shared.takeArg(&i, argv, error.MissingMaxBodySize);
+            config.max_body_size = shared.parseSize(value) catch return error.InvalidMaxBodySize;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--pool")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingPoolValue;
-            config.pool_size = std.fmt.parseInt(usize, argv[i], 10) catch return error.InvalidPoolSize;
+            const value = try shared.takeArg(&i, argv, error.MissingPoolValue);
+            config.pool_size = std.fmt.parseInt(usize, value, 10) catch return error.InvalidPoolSize;
         } else if (std.mem.eql(u8, arg, "--static")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingStaticDir;
-            config.static_dir = argv[i];
+            config.static_dir = try shared.takeArg(&i, argv, error.MissingStaticDir);
         } else if (std.mem.eql(u8, arg, "--outbound-http")) {
             config.runtime_config.outbound_http_enabled = true;
         } else if (std.mem.eql(u8, arg, "--outbound-host")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingOutboundHost;
             config.runtime_config.outbound_http_enabled = true;
-            config.runtime_config.outbound_allow_host = argv[i];
+            config.runtime_config.outbound_allow_host = try shared.takeArg(&i, argv, error.MissingOutboundHost);
         } else if (std.mem.eql(u8, arg, "--outbound-timeout-ms")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingOutboundTimeout;
+            const value = try shared.takeArg(&i, argv, error.MissingOutboundTimeout);
             config.runtime_config.outbound_http_enabled = true;
-            config.runtime_config.outbound_timeout_ms = std.fmt.parseInt(u32, argv[i], 10) catch return error.InvalidOutboundTimeout;
+            config.runtime_config.outbound_timeout_ms = std.fmt.parseInt(u32, value, 10) catch return error.InvalidOutboundTimeout;
         } else if (std.mem.eql(u8, arg, "--outbound-max-response")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingOutboundMaxResponse;
+            const value = try shared.takeArg(&i, argv, error.MissingOutboundMaxResponse);
             config.runtime_config.outbound_http_enabled = true;
-            config.runtime_config.outbound_max_response_bytes = shared.parseSize(argv[i]) catch return error.InvalidOutboundMaxResponse;
+            config.runtime_config.outbound_max_response_bytes = shared.parseSize(value) catch return error.InvalidOutboundMaxResponse;
         } else if (std.mem.eql(u8, arg, "--sqlite")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingSqlitePath;
-            config.runtime_config.sqlite_path = argv[i];
+            config.runtime_config.sqlite_path = try shared.takeArg(&i, argv, error.MissingSqlitePath);
         } else if (std.mem.eql(u8, arg, "--trace")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingTraceFile;
-            config.runtime_config.trace_file_path = argv[i];
+            config.runtime_config.trace_file_path = try shared.takeArg(&i, argv, error.MissingTraceFile);
         } else if (std.mem.eql(u8, arg, "--replay")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingReplayFile;
-            config.runtime_config.replay_file_path = argv[i];
+            config.runtime_config.replay_file_path = try shared.takeArg(&i, argv, error.MissingReplayFile);
         } else if (std.mem.eql(u8, arg, "--test")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingTestFile;
-            config.runtime_config.test_file_path = argv[i];
+            config.runtime_config.test_file_path = try shared.takeArg(&i, argv, error.MissingTestFile);
         } else if (std.mem.eql(u8, arg, "--watch") or
             std.mem.eql(u8, arg, "--prove") or
             std.mem.eql(u8, arg, "--force-swap") or
@@ -503,7 +470,7 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
 }
 
 fn watcherThread(live_reload: *live_reload_mod.LiveReloadState) void {
-    var io_backend = std.Io.Threaded.init(live_reload.allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(live_reload.allocator);
     defer io_backend.deinit();
 
     live_reload.run(io_backend.io()) catch |err| {

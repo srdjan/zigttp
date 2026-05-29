@@ -3,6 +3,7 @@ const zigts = @import("zigts");
 const pi_app = @import("pi_app");
 const proof_ledger = @import("proof_ledger.zig");
 const self_extract = @import("self_extract.zig");
+const shared = @import("cli_shared.zig");
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
@@ -64,7 +65,7 @@ pub const Workspace = struct {
 
     pub fn cleanup(self: *Workspace, allocator: std.mem.Allocator) void {
         if (!self.owned_temp) return;
-        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+        var io_backend = shared.threadedIo(allocator);
         defer io_backend.deinit();
         const io = io_backend.io();
         const parent = std.fs.path.dirname(self.root) orelse return;
@@ -124,7 +125,7 @@ fn validateOutputDir(path: []const u8) !void {
 }
 
 pub fn scaffoldWorkspace(allocator: std.mem.Allocator, root: []const u8, port: u16) !void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
 
@@ -140,11 +141,11 @@ pub fn scaffoldWorkspace(allocator: std.mem.Allocator, root: []const u8, port: u
     );
     defer allocator.free(manifest);
 
-    try writeChildFile(allocator, root, "zigttp.json", manifest);
-    try writeChildFile(allocator, root, "src/handler.tsx", baseline_source);
-    try writeChildFile(allocator, root, "tests/handler.test.jsonl", demo_tests);
-    try writeChildFile(allocator, root, "README.md", demo_readme);
-    try writeChildFile(allocator, root, ".gitignore", demo_gitignore);
+    try writeRelativeFile(allocator, root, "zigttp.json", manifest);
+    try writeRelativeFile(allocator, root, "src/handler.tsx", baseline_source);
+    try writeRelativeFile(allocator, root, "tests/handler.test.jsonl", demo_tests);
+    try writeRelativeFile(allocator, root, "README.md", demo_readme);
+    try writeRelativeFile(allocator, root, ".gitignore", demo_gitignore);
 }
 
 pub fn applyAction(allocator: std.mem.Allocator, config: Config, action: Action) !Step {
@@ -291,7 +292,7 @@ pub fn exportPassport(
 ) !void {
     if (options.out_dir.len == 0) return error.InvalidOutputPath;
 
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, options.out_dir);
@@ -309,15 +310,15 @@ pub fn exportPassport(
 
     const verify_text = try renderVerifyText(allocator, config, options.step);
     defer allocator.free(verify_text);
-    try writeExportFile(allocator, options.out_dir, "verify.txt", verify_text);
+    try writeRelativeFile(allocator, options.out_dir, "verify.txt", verify_text);
 
     const passport_json = try renderPassportJson(allocator, config, session, options.step);
     defer allocator.free(passport_json);
-    try writeExportFile(allocator, options.out_dir, "passport.json", passport_json);
+    try writeRelativeFile(allocator, options.out_dir, "passport.json", passport_json);
 
     const index_html = try renderPassportHtml(allocator, config, session, options.step);
     defer allocator.free(index_html);
-    try writeExportFile(allocator, options.out_dir, "index.html", index_html);
+    try writeRelativeFile(allocator, options.out_dir, "index.html", index_html);
 }
 
 fn tempWorkspacePath(allocator: std.mem.Allocator) ![]u8 {
@@ -331,7 +332,7 @@ fn tempWorkspacePath(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn pathExists(path: []const u8) bool {
-    var io_backend = std.Io.Threaded.init(std.heap.smp_allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(std.heap.smp_allocator);
     defer io_backend.deinit();
     std.Io.Dir.access(std.Io.Dir.cwd(), io_backend.io(), path, .{}) catch return false;
     return true;
@@ -343,13 +344,7 @@ fn createChildDir(allocator: std.mem.Allocator, io: std.Io, root: []const u8, ch
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, path);
 }
 
-fn writeChildFile(allocator: std.mem.Allocator, root: []const u8, rel: []const u8, data: []const u8) !void {
-    const path = try std.fs.path.join(allocator, &.{ root, rel });
-    defer allocator.free(path);
-    try zigts.file_io.writeFile(allocator, path, data);
-}
-
-fn writeExportFile(allocator: std.mem.Allocator, root: []const u8, rel: []const u8, data: []const u8) !void {
+fn writeRelativeFile(allocator: std.mem.Allocator, root: []const u8, rel: []const u8, data: []const u8) !void {
     const path = try std.fs.path.join(allocator, &.{ root, rel });
     defer allocator.free(path);
     try zigts.file_io.writeFile(allocator, path, data);
@@ -365,14 +360,14 @@ fn copyOptionalFile(allocator: std.mem.Allocator, source: []const u8, dest: []co
 }
 
 fn deleteLedger(allocator: std.mem.Allocator) void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     std.Io.Dir.cwd().deleteFile(io_backend.io(), proof_ledger.ledgerPath()) catch {};
     std.Io.Dir.cwd().deleteFile(io_backend.io(), deploy_marker_path) catch {};
 }
 
 fn deployMarkerExists(allocator: std.mem.Allocator) bool {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     std.Io.Dir.access(std.Io.Dir.cwd(), io_backend.io(), deploy_marker_path, .{}) catch return false;
     return true;
@@ -382,7 +377,7 @@ fn runLocalDeploy(allocator: std.mem.Allocator) !void {
     const self_path = try self_extract.getSelfExePath(allocator);
     defer allocator.free(self_path);
 
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
 
@@ -409,6 +404,15 @@ fn stepTitle(step: Step) []const u8 {
         .witness => "unsafe edit: secret flow witness captured",
         .repaired => "repair applied: proof is green again",
         .deployed => "local deploy receipt written",
+    };
+}
+
+fn stepReached(current: Step, target: Step) bool {
+    return switch (target) {
+        .baseline => true,
+        .witness => current == .witness or current == .repaired or current == .deployed,
+        .repaired => current == .repaired or current == .deployed,
+        .deployed => current == .deployed,
     };
 }
 
@@ -573,10 +577,10 @@ fn renderPassportJson(
     try json.endObject();
     try json.objectField("steps");
     try json.beginArray();
-    try writeStepJson(&json, .baseline, true);
-    try writeStepJson(&json, .witness, step == .witness or step == .repaired or step == .deployed);
-    try writeStepJson(&json, .repaired, step == .repaired or step == .deployed);
-    try writeStepJson(&json, .deployed, step == .deployed);
+    try writeStepJson(&json, .baseline, stepReached(step, .baseline));
+    try writeStepJson(&json, .witness, stepReached(step, .witness));
+    try writeStepJson(&json, .repaired, stepReached(step, .repaired));
+    try writeStepJson(&json, .deployed, stepReached(step, .deployed));
     try json.endArray();
     try json.endObject();
     try aw.writer.writeByte('\n');
@@ -651,10 +655,10 @@ fn renderPassportHtml(
         \\</code></dd></dl>
         \\<h2>Flow</h2><ol>
     );
-    try writeHtmlStep(w, .baseline, true);
-    try writeHtmlStep(w, .witness, step == .witness or step == .repaired or step == .deployed);
-    try writeHtmlStep(w, .repaired, step == .repaired or step == .deployed);
-    try writeHtmlStep(w, .deployed, step == .deployed);
+    try writeHtmlStep(w, .baseline, stepReached(step, .baseline));
+    try writeHtmlStep(w, .witness, stepReached(step, .witness));
+    try writeHtmlStep(w, .repaired, stepReached(step, .repaired));
+    try writeHtmlStep(w, .deployed, stepReached(step, .deployed));
     try w.writeAll(
         \\</ol>
         \\<h2>Files</h2><ul>
@@ -893,7 +897,7 @@ test "demo workspace creation and overwrite refusal" {
     var ws = try createWorkspace(allocator, "proof-demo", 4567);
     defer ws.deinit(allocator);
 
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
     try std.Io.Dir.access(std.Io.Dir.cwd(), io, "proof-demo/zigttp.json", .{});
@@ -915,7 +919,7 @@ test "demo temp workspace cleanup removes owned directory" {
     const root = try allocator.dupe(u8, ws.root);
     defer allocator.free(root);
 
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
     try std.Io.Dir.access(std.Io.Dir.cwd(), io, root, .{});

@@ -397,6 +397,12 @@ pub const ExpertFlags = struct {
     equivalence_receipt: bool = true,
 };
 
+fn takeArg(i: *usize, argv: []const []const u8, missing: anyerror) ![]const u8 {
+    i.* += 1;
+    if (i.* >= argv.len) return missing;
+    return argv[i.*];
+}
+
 /// Scan argv for the expert launch flags. Unknown `--*` tokens are ignored so
 /// future slices can add their own without breaking this parser. `--yes` and
 /// `--no-edit` together return an error so the caller can report a clear
@@ -415,36 +421,28 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
         if (std.mem.eql(u8, arg, "--no-context-files")) out.no_context_files = true;
         if (std.mem.eql(u8, arg, "--resume") or std.mem.eql(u8, arg, "--continue")) out.resume_latest = true;
         if (std.mem.eql(u8, arg, "--fork")) {
-            if (i + 1 >= argv.len) return error.MissingForkSessionId;
-            i += 1;
-            out.fork_session_id = argv[i];
+            out.fork_session_id = try takeArg(&i, argv, error.MissingForkSessionId);
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--fork=")) {
             out.fork_session_id = arg["--fork=".len..];
         }
         if (std.mem.eql(u8, arg, "--tools")) {
-            if (i + 1 >= argv.len) return error.MissingToolsPreset;
-            i += 1;
-            out.tools_preset = try parseToolsPreset(argv[i]);
+            out.tools_preset = try parseToolsPreset(try takeArg(&i, argv, error.MissingToolsPreset));
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--tools=")) {
             out.tools_preset = try parseToolsPreset(arg["--tools=".len..]);
         }
         if (std.mem.eql(u8, arg, "--session-id")) {
-            if (i + 1 >= argv.len) return error.MissingSessionId;
-            i += 1;
-            out.session_id = argv[i];
+            out.session_id = try takeArg(&i, argv, error.MissingSessionId);
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--session-id=")) {
             out.session_id = arg["--session-id=".len..];
         }
         if (std.mem.eql(u8, arg, "--print")) {
-            if (i + 1 >= argv.len) return error.MissingPrintPrompt;
-            i += 1;
-            out.print = argv[i];
+            out.print = try takeArg(&i, argv, error.MissingPrintPrompt);
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--print=")) {
@@ -452,36 +450,28 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
             continue;
         }
         if (std.mem.eql(u8, arg, "--mode")) {
-            if (i + 1 >= argv.len) return error.MissingModeValue;
-            i += 1;
-            try setMode(&out, argv[i]);
+            try setMode(&out, try takeArg(&i, argv, error.MissingModeValue));
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--mode=")) {
             try setMode(&out, arg["--mode=".len..]);
         }
         if (std.mem.eql(u8, arg, "--goal")) {
-            if (i + 1 >= argv.len) return error.MissingGoalValue;
-            i += 1;
-            out.goals = argv[i];
+            out.goals = try takeArg(&i, argv, error.MissingGoalValue);
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--goal=")) {
             out.goals = arg["--goal=".len..];
         }
         if (std.mem.eql(u8, arg, "--max-iters")) {
-            if (i + 1 >= argv.len) return error.MissingMaxItersValue;
-            i += 1;
-            out.max_iters = try parseMaxIters(argv[i]);
+            out.max_iters = try parseMaxIters(try takeArg(&i, argv, error.MissingMaxItersValue));
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--max-iters=")) {
             out.max_iters = try parseMaxIters(arg["--max-iters=".len..]);
         }
         if (std.mem.eql(u8, arg, "--handler")) {
-            if (i + 1 >= argv.len) return error.MissingHandlerValue;
-            i += 1;
-            out.handler = argv[i];
+            out.handler = try takeArg(&i, argv, error.MissingHandlerValue);
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--handler=")) {

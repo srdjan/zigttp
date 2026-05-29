@@ -107,8 +107,6 @@ pub const sqlite = @import("sqlite.zig");
 pub const sql_analysis = @import("sql_analysis.zig");
 pub const modules = @import("modules/root.zig");
 pub const compat = @import("compat.zig");
-// Optional/experimental modules (not wired into runtime by default)
-// pub const compiler = @import("compiler.zig");
 pub const jit = @import("jit/root.zig");
 
 // Re-export main types for convenience
