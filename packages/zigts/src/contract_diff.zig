@@ -48,6 +48,19 @@ pub fn deriveProofLevel(contract: *const HandlerContract) ProofLevel {
     return .partial;
 }
 
+/// How strong a behavioral-equivalence claim a handler supports, from its
+/// proven properties. A pure or deterministic handler's output is a function
+/// of its request, so a verdict over it is a real behavioral claim; anything
+/// else is `"structural"` - a claim about the contract surface only, never an
+/// overstated behavioral equivalence. Shared by `prove-behavior` and the
+/// equivalence receipt so the scoping stays consistent.
+pub fn claimScope(properties: ?handler_contract.HandlerProperties) []const u8 {
+    const props = properties orelse return "structural";
+    if (props.pure) return "pure";
+    if (props.deterministic) return "deterministic";
+    return "structural";
+}
+
 // -------------------------------------------------------------------------
 // Diff data types
 // -------------------------------------------------------------------------
@@ -234,6 +247,25 @@ pub const ContractDiff = struct {
             return .equivalent_modulo_laws;
         }
         return structural;
+    }
+
+    /// Behavior-aware verdict for proof-carrying changes. `classify()`
+    /// answers a surface question (did routes/capabilities change?); a
+    /// *behavioral* verdict must also fail when a response on an existing
+    /// path changed or was removed, even when the route surface is
+    /// identical. So when the per-path behavior diff reports a breaking
+    /// change, the verdict is `.breaking` regardless of the surface
+    /// classification; otherwise it defers to `classify()` (which already
+    /// covers added routes -> additive, canonical laws -> modulo_laws).
+    ///
+    /// This is opt-in (callers that want the surface answer keep calling
+    /// `classify()`); the `prove-behavior` command and the equivalence
+    /// receipt both call this.
+    pub fn behavioralVerdict(self: *const ContractDiff) Classification {
+        if (self.behavior_diff) |bd| {
+            if (bd.hasBreaking()) return .breaking;
+        }
+        return self.classify();
     }
 
     /// Classify the diff purely structurally, ignoring any canonicalization
@@ -2413,4 +2445,43 @@ test "diffContracts does not upgrade when surface differs" {
     // Surface is additive, so canonicalization does not try to upgrade.
     try std.testing.expectEqual(Classification.additive, diff.classify());
     try std.testing.expectEqual(@as(usize, 0), diff.laws_used.items.len);
+}
+
+test "behavioralVerdict flags a changed response path as breaking" {
+    // Unchanged surface, but a changed response path must read as breaking,
+    // not equivalent — the whole point of the behavioral verdict.
+    var diff: ContractDiff = .{
+        .routes = .empty,
+        .api_route_changes = .empty,
+        .env_changes = .empty,
+        .egress_changes = .empty,
+        .cache_changes = .empty,
+        .sql_changes = .empty,
+        .dynamic_changes = .empty,
+        .behavior_diff = .{ .preserved = 0, .response_changed = 1, .removed = 0, .added = 0 },
+    };
+    defer diff.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Classification.breaking, diff.behavioralVerdict());
+}
+
+test "behavioralVerdict leaves a clean diff at the surface verdict" {
+    var diff: ContractDiff = .{
+        .routes = .empty,
+        .api_route_changes = .empty,
+        .env_changes = .empty,
+        .egress_changes = .empty,
+        .cache_changes = .empty,
+        .sql_changes = .empty,
+        .dynamic_changes = .empty,
+        .behavior_diff = .{ .preserved = 2, .response_changed = 0, .removed = 0, .added = 0 },
+    };
+    defer diff.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Classification.equivalent, diff.behavioralVerdict());
+}
+
+test "claimScope maps handler properties to claim strength" {
+    try std.testing.expectEqualStrings("structural", claimScope(null));
+    try std.testing.expectEqualStrings("pure", claimScope(.{ .pure = true, .read_only = true, .stateless = true, .retry_safe = true, .deterministic = true, .has_egress = false }));
+    try std.testing.expectEqualStrings("deterministic", claimScope(.{ .pure = false, .read_only = true, .stateless = true, .retry_safe = true, .deterministic = true, .has_egress = false }));
+    try std.testing.expectEqualStrings("structural", claimScope(.{ .pure = false, .read_only = false, .stateless = false, .retry_safe = false, .deterministic = false, .has_egress = true }));
 }

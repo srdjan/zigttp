@@ -25,6 +25,12 @@ pub const EventKind = enum {
     /// is `contract_sha`). Existing consumers that only know `deploy`,
     /// `swap`, `check` keep working: they ignore the extra `perf` key.
     perf,
+    /// A signed behavioral-equivalence verdict (proof-carrying changes):
+    /// the classification `contract_diff` computes between two handler
+    /// versions, promoted into a signed `equivalence` JSON object alongside
+    /// `facts`. Existing consumers that only know the earlier kinds keep
+    /// working: they ignore the extra `equivalence` key.
+    equivalence,
 
     pub fn toString(self: EventKind) []const u8 {
         return switch (self) {
@@ -32,6 +38,7 @@ pub const EventKind = enum {
             .swap => "swap",
             .check => "check",
             .perf => "perf",
+            .equivalence => "equivalence",
         };
     }
 
@@ -40,6 +47,7 @@ pub const EventKind = enum {
         if (std.mem.eql(u8, s, "swap")) return .swap;
         if (std.mem.eql(u8, s, "check")) return .check;
         if (std.mem.eql(u8, s, "perf")) return .perf;
+        if (std.mem.eql(u8, s, "equivalence")) return .equivalence;
         return null;
     }
 };
@@ -67,6 +75,37 @@ pub const PerfPayload = struct {
     }
 };
 
+/// Payload of a `kind=equivalence` row (proof-carrying changes). The `sig`
+/// field is the compact JWS produced by `zigts.equivalence_receipt.sign`
+/// over the verdict-defining fields; a verifier re-derives the signing input
+/// and checks the operator's signature. `classification` is one of
+/// equivalent / equivalent_modulo_laws / additive / breaking, and
+/// `claim_scope` (pure / deterministic / structural) records how strong the
+/// claim is, so an effectful handler never reads as a clean behavioral
+/// equivalence.
+pub const EquivalencePayload = struct {
+    before_contract_hash: []const u8,
+    after_contract_hash: []const u8,
+    classification: []const u8,
+    laws_fired: []const []const u8 = &.{},
+    preserved: u32 = 0,
+    response_changed: u32 = 0,
+    added: u32 = 0,
+    removed: u32 = 0,
+    claim_scope: []const u8,
+    sig: []const u8,
+
+    pub fn deinit(self: *EquivalencePayload, allocator: std.mem.Allocator) void {
+        allocator.free(self.before_contract_hash);
+        allocator.free(self.after_contract_hash);
+        allocator.free(self.classification);
+        for (self.laws_fired) |law| allocator.free(law);
+        allocator.free(self.laws_fired);
+        allocator.free(self.claim_scope);
+        allocator.free(self.sig);
+    }
+};
+
 /// Strings are owned so a parsed event survives independently of the buffer
 /// it came from.
 pub const Event = struct {
@@ -78,12 +117,16 @@ pub const Event = struct {
     /// Present only when `kind == .perf`. Older readers that predate
     /// Slice H ignore this field, which keeps the schema additive.
     perf: ?PerfPayload = null,
+    /// Present only when `kind == .equivalence`. Older readers ignore this
+    /// field, which keeps the schema additive.
+    equivalence: ?EquivalencePayload = null,
 
     pub fn deinit(self: *Event, allocator: std.mem.Allocator) void {
         allocator.free(self.handler_path);
         if (self.service_name) |s| allocator.free(s);
         self.facts.deinit(allocator);
         if (self.perf) |*p| p.deinit(allocator);
+        if (self.equivalence) |*e| e.deinit(allocator);
     }
 };
 
@@ -102,6 +145,10 @@ pub const AppendParams = struct {
     /// after `appendEvent` returns. The serialiser writes a `perf` JSON
     /// object next to `facts`; older readers ignore it.
     perf: ?*const PerfPayload = null,
+    /// Present only when `kind == .equivalence`. Borrowed; the caller frees
+    /// after `appendEvent` returns. The serialiser writes an `equivalence`
+    /// JSON object next to `facts`; older readers ignore it.
+    equivalence: ?*const EquivalencePayload = null,
 };
 
 pub fn appendEvent(allocator: std.mem.Allocator, params: AppendParams) !void {
@@ -140,6 +187,36 @@ pub fn appendEvent(allocator: std.mem.Allocator, params: AppendParams) !void {
         try json.write(perf.sample_count);
         try json.objectField("sig");
         try json.write(perf.sig);
+        try json.endObject();
+    }
+    if (params.equivalence) |eq| {
+        try json.objectField("equivalence");
+        try json.beginObject();
+        try json.objectField("beforeContractHash");
+        try json.write(eq.before_contract_hash);
+        try json.objectField("afterContractHash");
+        try json.write(eq.after_contract_hash);
+        try json.objectField("classification");
+        try json.write(eq.classification);
+        try json.objectField("lawsFired");
+        try json.beginArray();
+        for (eq.laws_fired) |law| try json.write(law);
+        try json.endArray();
+        try json.objectField("behaviorDiff");
+        try json.beginObject();
+        try json.objectField("preserved");
+        try json.write(eq.preserved);
+        try json.objectField("responseChanged");
+        try json.write(eq.response_changed);
+        try json.objectField("added");
+        try json.write(eq.added);
+        try json.objectField("removed");
+        try json.write(eq.removed);
+        try json.endObject();
+        try json.objectField("claimScope");
+        try json.write(eq.claim_scope);
+        try json.objectField("sig");
+        try json.write(eq.sig);
         try json.endObject();
     }
     try json.endObject();
@@ -303,6 +380,13 @@ fn parseLine(allocator: std.mem.Allocator, line: []const u8) !Event {
         perf_payload = try parsePerfPayload(allocator, perf_value.object);
     }
 
+    var equivalence_payload: ?EquivalencePayload = null;
+    errdefer if (equivalence_payload) |*e| e.deinit(allocator);
+    if (obj.get("equivalence")) |eq_value| {
+        if (eq_value != .object) return error.InvalidLedgerLine;
+        equivalence_payload = try parseEquivalencePayload(allocator, eq_value.object);
+    }
+
     return .{
         .ts_unix_ms = ts,
         .kind = kind,
@@ -310,7 +394,74 @@ fn parseLine(allocator: std.mem.Allocator, line: []const u8) !Event {
         .service_name = service_name,
         .facts = facts,
         .perf = perf_payload,
+        .equivalence = equivalence_payload,
     };
+}
+
+fn parseEquivalencePayload(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !EquivalencePayload {
+    const before_str = json_util.getString(obj, "beforeContractHash") orelse return error.InvalidLedgerLine;
+    const after_str = json_util.getString(obj, "afterContractHash") orelse return error.InvalidLedgerLine;
+    const classification_str = json_util.getString(obj, "classification") orelse return error.InvalidLedgerLine;
+    const claim_scope_str = json_util.getString(obj, "claimScope") orelse return error.InvalidLedgerLine;
+    const sig_str = json_util.getString(obj, "sig") orelse return error.InvalidLedgerLine;
+
+    var preserved: u32 = 0;
+    var response_changed: u32 = 0;
+    var added: u32 = 0;
+    var removed: u32 = 0;
+    if (obj.get("behaviorDiff")) |bd_value| {
+        if (bd_value != .object) return error.InvalidLedgerLine;
+        const bd = bd_value.object;
+        preserved = readU32Field(bd, "preserved") orelse 0;
+        response_changed = readU32Field(bd, "responseChanged") orelse 0;
+        added = readU32Field(bd, "added") orelse 0;
+        removed = readU32Field(bd, "removed") orelse 0;
+    }
+
+    var laws: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (laws.items) |law| allocator.free(law);
+        laws.deinit(allocator);
+    }
+    if (obj.get("lawsFired")) |laws_value| {
+        if (laws_value != .array) return error.InvalidLedgerLine;
+        for (laws_value.array.items) |item| {
+            if (item != .string) return error.InvalidLedgerLine;
+            const dup = try allocator.dupe(u8, item.string);
+            errdefer allocator.free(dup);
+            try laws.append(allocator, dup);
+        }
+    }
+
+    const before = try allocator.dupe(u8, before_str);
+    errdefer allocator.free(before);
+    const after = try allocator.dupe(u8, after_str);
+    errdefer allocator.free(after);
+    const classification = try allocator.dupe(u8, classification_str);
+    errdefer allocator.free(classification);
+    const claim_scope = try allocator.dupe(u8, claim_scope_str);
+    errdefer allocator.free(claim_scope);
+    const sig = try allocator.dupe(u8, sig_str);
+    errdefer allocator.free(sig);
+
+    return .{
+        .before_contract_hash = before,
+        .after_contract_hash = after,
+        .classification = classification,
+        .laws_fired = try laws.toOwnedSlice(allocator),
+        .preserved = preserved,
+        .response_changed = response_changed,
+        .added = added,
+        .removed = removed,
+        .claim_scope = claim_scope,
+        .sig = sig,
+    };
+}
+
+fn readU32Field(obj: std.json.ObjectMap, key: []const u8) ?u32 {
+    const v = json_util.getI64(obj, key) orelse return null;
+    if (v < 0 or v > std.math.maxInt(u32)) return null;
+    return @intCast(v);
 }
 
 fn parsePerfPayload(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !PerfPayload {
@@ -619,4 +770,59 @@ test "appendEvent without perf payload omits the field for back-compat" {
     defer freeEvents(testing.allocator, events);
     try testing.expectEqual(@as(usize, 1), events.len);
     try testing.expectEqual(@as(?PerfPayload, null), events[0].perf);
+}
+
+test "appendEvent round-trips a kind=equivalence row" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var facts = try buildFactsForTest(testing.allocator, "sha-eq-1", false);
+    defer facts.deinit(testing.allocator);
+
+    const eq: EquivalencePayload = .{
+        .before_contract_hash = "aa",
+        .after_contract_hash = "bb",
+        .classification = "equivalent_modulo_laws",
+        .laws_fired = &.{ "spread_assoc", "guard_hoist" },
+        .preserved = 5,
+        .response_changed = 0,
+        .added = 1,
+        .removed = 0,
+        .claim_scope = "deterministic",
+        .sig = "header.payload.signature",
+    };
+
+    try appendEvent(testing.allocator, .{
+        .kind = .equivalence,
+        .facts = &facts,
+        .handler_path = "src/handler.ts",
+        .now_unix_ms = 1_700_000_003_000,
+        .equivalence = &eq,
+    });
+
+    const events = try readEvents(testing.allocator);
+    defer freeEvents(testing.allocator, events);
+
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(EventKind.equivalence, events[0].kind);
+    try testing.expect(events[0].equivalence != null);
+    const got = events[0].equivalence.?;
+    try testing.expectEqualStrings("aa", got.before_contract_hash);
+    try testing.expectEqualStrings("bb", got.after_contract_hash);
+    try testing.expectEqualStrings("equivalent_modulo_laws", got.classification);
+    try testing.expectEqual(@as(usize, 2), got.laws_fired.len);
+    try testing.expectEqualStrings("spread_assoc", got.laws_fired[0]);
+    try testing.expectEqualStrings("guard_hoist", got.laws_fired[1]);
+    try testing.expectEqual(@as(u32, 5), got.preserved);
+    try testing.expectEqual(@as(u32, 1), got.added);
+    try testing.expectEqualStrings("deterministic", got.claim_scope);
+    try testing.expectEqualStrings("header.payload.signature", got.sig);
+}
+
+test "equivalence event kind round-trips through string" {
+    try testing.expectEqual(EventKind.equivalence, EventKind.fromString("equivalence").?);
+    try testing.expectEqualStrings("equivalence", EventKind.equivalence.toString());
 }

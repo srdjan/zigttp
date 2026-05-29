@@ -5,6 +5,7 @@ const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
 const tools_common = @import("tools/common.zig");
 const perf_probe = @import("perf_probe.zig");
+const equivalence_probe = @import("equivalence_probe.zig");
 
 const edit_simulate = zigts_cli.edit_simulate;
 const precompile = zigts_cli.precompile;
@@ -144,17 +145,27 @@ pub fn buildVerifiedPatchPayload(
     analysis.system = null;
     analysis.rule_citations = &.{};
 
-    // Best-effort perf-as-proof receipt for the just-applied edit. Never fails
-    // the apply (the receipt is an audit artifact, not a gate). Gate the path
-    // resolve on the probe actually being able to run, so the disabled
-    // (`--no-perf-receipt`), unregistered (analyzer-only builds, tests), and
-    // dry-run cases skip the resolve+alloc entirely instead of doing the work
-    // and then no-op'ing inside `record`.
-    if (options.emit_perf_receipt and perf_probe.isEnabled() and perf_probe.isConfigured()) {
-        const handler_abs = resolveHandlerPath(allocator, options.workspace_root, options.file) catch null;
-        if (handler_abs) |abs| {
-            defer allocator.free(abs);
-            perf_probe.record(allocator, abs, options.after, options.applied_at_unix_ms);
+    // Best-effort proof receipts for the just-applied edit (perf + behavioral
+    // equivalence). Never fail the apply — the receipts are audit artifacts,
+    // not gates. Resolve the handler path once and share it across both
+    // probes, and only when at least one probe will actually run, so the
+    // disabled / unregistered / dry-run cases skip the resolve+alloc entirely
+    // instead of doing the work and then no-op'ing inside `record`.
+    if (options.emit_perf_receipt) {
+        const perf_will_run = perf_probe.isEnabled() and perf_probe.isConfigured();
+        const equivalence_will_run = equivalence_probe.isEnabled() and equivalence_probe.isConfigured();
+        if (perf_will_run or equivalence_will_run) {
+            if (resolveHandlerPath(allocator, options.workspace_root, options.file) catch null) |abs| {
+                defer allocator.free(abs);
+                if (perf_will_run) {
+                    perf_probe.record(allocator, abs, options.after, options.applied_at_unix_ms);
+                }
+                // Skipped when there is no before-image (a new file has nothing
+                // to be equivalent to); `record` handles the null internally.
+                if (equivalence_will_run) {
+                    equivalence_probe.record(allocator, abs, options.before, options.after, options.applied_at_unix_ms);
+                }
+            }
         }
     }
 

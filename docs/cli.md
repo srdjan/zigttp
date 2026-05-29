@@ -164,6 +164,7 @@ output formats are identical.
 zigttp check [handler.ts] [options]
 zigttp compile [--system path] <handler.ts> <out.zig>
 zigttp prove <old.json> <new.json>             # exit 0=safe, 1=breaking, 2=needs_review
+zigttp prove-behavior <before.ts> <after.ts> [--json]  # behavioral verdict; exit 0=safe, 1=breaking, 2=error
 zigttp mock <tests.jsonl> [--port N]           # mock server from test cases
 zigttp link <system.json>                      # cross-handler contract linking
 zigttp rollout <old-system.json> <new-system.json>

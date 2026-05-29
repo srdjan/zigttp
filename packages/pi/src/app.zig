@@ -58,6 +58,11 @@ pub const witness_replay = @import("witness_replay.zig");
 /// Re-exported so the runtime stack can register the engine-backed perf
 /// probe via `pi_app.perf_probe.setProbeFn` at startup (Slice H wiring).
 pub const perf_probe = @import("perf_probe.zig");
+
+/// Proof-carrying changes: the runtime host registers the signed
+/// equivalence-receipt probe via `pi_app.equivalence_probe.setProbeFn` at
+/// startup, mirroring the perf-probe seam.
+pub const equivalence_probe = @import("equivalence_probe.zig");
 pub const demo_passport = @import("demo_passport.zig");
 
 /// Re-exported so the `zigttp expert` CLI dispatch can fail fast when no
@@ -132,6 +137,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const flags = parseExpertFlags(argv) catch |err| exitWithMessage(flagErrorMessage(err), 2);
 
     perf_probe.setEnabled(flags.perf_receipt);
+    equivalence_probe.setEnabled(flags.equivalence_receipt);
 
     var registry = switch (flags.tools_preset) {
         .full => try buildRegistry(allocator),
@@ -380,6 +386,10 @@ pub const ExpertFlags = struct {
     /// the attestation default; `--no-perf-receipt` opts out. No effect when
     /// the runtime probe is not registered (analyzer-only builds, tests).
     perf_receipt: bool = true,
+    /// Emit a signed `kind=equivalence` receipt after each applied edit: the
+    /// behavioral verdict between the pre- and post-edit handler. Default on,
+    /// matching the attestation default; `--no-equivalence-receipt` opts out.
+    equivalence_receipt: bool = true,
 };
 
 /// Scan argv for the expert launch flags. Unknown `--*` tokens are ignored so
@@ -474,6 +484,8 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
         }
         if (std.mem.eql(u8, arg, "--no-perf-receipt")) out.perf_receipt = false;
         if (std.mem.eql(u8, arg, "--perf-receipt")) out.perf_receipt = true;
+        if (std.mem.eql(u8, arg, "--no-equivalence-receipt")) out.equivalence_receipt = false;
+        if (std.mem.eql(u8, arg, "--equivalence-receipt")) out.equivalence_receipt = true;
     }
     if (saw_yes and saw_no_edit) return error.MutuallyExclusiveApprovalFlags;
     if (out.resume_latest and out.session_id != null) return error.MutuallyExclusiveResumeFlags;
@@ -569,6 +581,16 @@ test "parseExpertFlags: --no-perf-receipt opts out" {
     const argv = [_][]const u8{ "zigts", "expert", "--no-perf-receipt" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(false, flags.perf_receipt);
+}
+
+test "parseExpertFlags: equivalence receipt defaults on, --no- opts out" {
+    const default_argv = [_][]const u8{ "zigts", "expert" };
+    const default_flags = try parseExpertFlags(default_argv[0..]);
+    try testing.expectEqual(true, default_flags.equivalence_receipt);
+
+    const off_argv = [_][]const u8{ "zigts", "expert", "--no-equivalence-receipt" };
+    const off_flags = try parseExpertFlags(off_argv[0..]);
+    try testing.expectEqual(false, off_flags.equivalence_receipt);
 }
 
 test "parseExpertFlags: --yes yields auto_approve" {

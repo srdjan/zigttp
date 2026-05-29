@@ -21,6 +21,7 @@ const system_build = @import("system_build.zig");
 const system_rollout = @import("system_rollout.zig");
 const search_rules = @import("search_rules.zig");
 const review_patch = @import("review_patch.zig");
+const prove_behavior = @import("prove_behavior.zig");
 const canonicalize_cmd = @import("canonicalize.zig");
 const expert = @import("expert.zig");
 const project_config_mod = @import("project_config");
@@ -123,6 +124,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
     if (std.mem.eql(u8, command, "gen-tests")) {
         try runGenTestsCommand(allocator, argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "prove-behavior")) {
+        try prove_behavior.runWithArgs(allocator, argv[1..]);
         return;
     }
     printHelp();
@@ -469,6 +474,7 @@ fn printHelp() void {
         \\  zigts describe-rule [rule-name|code] [--json] [--hash]
         \\  zigts search <keyword> [--json]
         \\  zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
+        \\  zigts prove-behavior <before.ts> <after.ts> [--json]
         \\  zigts gen-tests [handler.ts] [-o output.jsonl]
         \\  zigts expert                          (interactive coding agent)
         \\  zigts ledger export --session <id> --out <path>

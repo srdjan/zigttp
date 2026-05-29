@@ -276,7 +276,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.mem.eql(u8, command, "edit-simulate") or
         std.mem.eql(u8, command, "describe-rule") or
         std.mem.eql(u8, command, "search") or
-        std.mem.eql(u8, command, "review-patch"))
+        std.mem.eql(u8, command, "review-patch") or
+        std.mem.eql(u8, command, "prove-behavior"))
     {
         zigts_cli.run(allocator, user_args) catch |err| {
             if (err == error.NoProjectConfig) {
@@ -368,9 +369,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
         const witness_replay_lib = @import("witness_replay_lib.zig");
         const perf_probe_lib = @import("perf_probe_lib.zig");
+        const equivalence_probe_lib = @import("equivalence_probe_lib.zig");
         pi_app.setInvocationArgv(user_args[1..]);
         pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
         pi_app.perf_probe.setProbeFn(perf_probe_lib.recordPerfReceipt);
+        pi_app.equivalence_probe.setProbeFn(equivalence_probe_lib.recordEquivalenceReceipt);
         try pi_app.run(allocator);
         return;
     }
@@ -1965,6 +1968,7 @@ const core_help_all =
     \\  zigttp verify-modules <file>...        Module-contract verification
     \\  zigttp edit-simulate [handler.ts]      Simulate an edit and report violations
     \\  zigttp review-patch <file>             Review a patch for new violations
+    \\  zigttp prove-behavior <before> <after> Behavioral-equivalence verdict between two handler versions
     \\  zigttp rollout <old-system> <new>      System-level deployment manifest
     \\
     \\Advanced:
