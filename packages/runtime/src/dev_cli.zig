@@ -332,7 +332,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             printExpertHelp();
             return;
         }
-        switch (validateExpertArgs(user_args[1..])) {
+        switch (cli_args.validateExpertArgs(user_args[1..])) {
             .ok => {},
             .unknown_flag => |flag| {
                 std.debug.print("zigttp expert does not accept flag '{s}'. See `zigttp expert --help`.\n", .{flag});
@@ -473,67 +473,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 fn hasAllFlag(argv: []const []const u8) bool {
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "all")) return true;
-    }
-    return false;
-}
-
-const ExpertArgValidation = union(enum) {
-    ok,
-    unknown_flag: []const u8,
-    unexpected_arg: []const u8,
-};
-
-fn validateExpertArgs(argv: []const []const u8) ExpertArgValidation {
-    var i: usize = 0;
-    while (i < argv.len) : (i += 1) {
-        const arg = argv[i];
-        if (std.mem.eql(u8, arg, "--help") or
-            std.mem.eql(u8, arg, "-h") or
-            std.mem.eql(u8, arg, "help"))
-        {
-            continue;
-        }
-        if (isExpertBareFlag(arg)) continue;
-        if (std.mem.startsWith(u8, arg, "--")) {
-            if (isExpertValueTakingFlag(arg)) {
-                if (i + 1 < argv.len) i += 1;
-                continue;
-            }
-            if (isExpertValueTakingFlagEq(arg)) continue;
-            return .{ .unknown_flag = arg };
-        }
-        return .{ .unexpected_arg = arg };
-    }
-    return .ok;
-}
-
-fn isExpertBareFlag(arg: []const u8) bool {
-    return std.mem.eql(u8, arg, "--yes") or
-        std.mem.eql(u8, arg, "--no-edit") or
-        std.mem.eql(u8, arg, "--no-session") or
-        std.mem.eql(u8, arg, "--no-persist-tool-output") or
-        std.mem.eql(u8, arg, "--no-context-files") or
-        std.mem.eql(u8, arg, "--perf-receipt") or
-        std.mem.eql(u8, arg, "--no-perf-receipt") or
-        std.mem.eql(u8, arg, "--resume") or
-        std.mem.eql(u8, arg, "--continue");
-}
-
-fn isExpertValueTakingFlag(arg: []const u8) bool {
-    for (pi_app.value_taking_flags) |name| {
-        if (std.mem.eql(u8, arg, name)) return true;
-    }
-    return false;
-}
-
-fn isExpertValueTakingFlagEq(arg: []const u8) bool {
-    for (pi_app.value_taking_flags) |name| {
-        if (arg.len > name.len and
-            std.mem.startsWith(u8, arg, name) and
-            arg[name.len] == '=')
-        {
-            return true;
-        }
     }
     return false;
 }
@@ -727,43 +666,6 @@ test "hasAllFlag detects the --all escape hatch" {
     try std.testing.expect(hasAllFlag(&.{ "foo", "all" }));
     try std.testing.expect(!hasAllFlag(&.{"--help"}));
     try std.testing.expect(!hasAllFlag(&.{}));
-}
-
-test "validateExpertArgs accepts documented expert launch forms" {
-    const ok = struct {
-        fn expect(argv: []const []const u8) !void {
-            switch (validateExpertArgs(argv)) {
-                .ok => {},
-                else => return error.ExpectedValidExpertArgs,
-            }
-        }
-    }.expect;
-
-    try ok(&.{});
-    try ok(&.{"--resume"});
-    try ok(&.{"--continue"});
-    try ok(&.{ "--session-id", "abc" });
-    try ok(&.{"--session-id=abc"});
-    try ok(&.{ "--fork", "abc" });
-    try ok(&.{"--fork=abc"});
-    try ok(&.{ "--print", "add a GET /health route", "--mode", "json" });
-    try ok(&.{"--mode=rpc"});
-    try ok(&.{ "--handler", "handler.ts", "--goal", "no_secret_leakage", "--max-iters", "4" });
-    try ok(&.{ "--tools", "minimal", "--yes", "--no-context-files" });
-    try ok(&.{ "--no-session", "--no-persist-tool-output", "--no-edit" });
-    try ok(&.{"--no-perf-receipt"});
-    try ok(&.{"--perf-receipt"});
-}
-
-test "validateExpertArgs rejects unknown expert flags and subcommands" {
-    switch (validateExpertArgs(&.{"--bogus"})) {
-        .unknown_flag => |flag| try std.testing.expectEqualStrings("--bogus", flag),
-        else => return error.ExpectedUnknownExpertFlag,
-    }
-    switch (validateExpertArgs(&.{"diagnose"})) {
-        .unexpected_arg => |arg| try std.testing.expectEqualStrings("diagnose", arg),
-        else => return error.ExpectedUnexpectedExpertArg,
-    }
 }
 
 test "expert help advertises documented modes" {

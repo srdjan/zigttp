@@ -6,6 +6,7 @@
 //! main() and the per-command preflight paths.
 
 const std = @import("std");
+const pi_app = @import("pi_app");
 
 /// `zigttp deploy` flags that opt into hosted cloud deploy. They are
 /// intercepted by `deployArgsRequestCloud` before `localDeployCommand`
@@ -95,4 +96,107 @@ pub fn handlePreflightError(err: anyerror, command: []const u8) bool {
         return true;
     }
     return false;
+}
+
+pub const ExpertArgValidation = union(enum) {
+    ok,
+    unknown_flag: []const u8,
+    unexpected_arg: []const u8,
+};
+
+/// Validate `zigttp expert` argv against the documented flag set before the
+/// agent loop starts, so a typo'd flag or stray subcommand fails fast with a
+/// clear message instead of being silently ignored. Value-taking flags are
+/// resolved against `pi_app.value_taking_flags` so this list stays in sync
+/// with the expert CLI's own parser.
+pub fn validateExpertArgs(argv: []const []const u8) ExpertArgValidation {
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--help") or
+            std.mem.eql(u8, arg, "-h") or
+            std.mem.eql(u8, arg, "help"))
+        {
+            continue;
+        }
+        if (isExpertBareFlag(arg)) continue;
+        if (std.mem.startsWith(u8, arg, "--")) {
+            if (isExpertValueTakingFlag(arg)) {
+                if (i + 1 < argv.len) i += 1;
+                continue;
+            }
+            if (isExpertValueTakingFlagEq(arg)) continue;
+            return .{ .unknown_flag = arg };
+        }
+        return .{ .unexpected_arg = arg };
+    }
+    return .ok;
+}
+
+fn isExpertBareFlag(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--yes") or
+        std.mem.eql(u8, arg, "--no-edit") or
+        std.mem.eql(u8, arg, "--no-session") or
+        std.mem.eql(u8, arg, "--no-persist-tool-output") or
+        std.mem.eql(u8, arg, "--no-context-files") or
+        std.mem.eql(u8, arg, "--perf-receipt") or
+        std.mem.eql(u8, arg, "--no-perf-receipt") or
+        std.mem.eql(u8, arg, "--resume") or
+        std.mem.eql(u8, arg, "--continue");
+}
+
+fn isExpertValueTakingFlag(arg: []const u8) bool {
+    for (pi_app.value_taking_flags) |name| {
+        if (std.mem.eql(u8, arg, name)) return true;
+    }
+    return false;
+}
+
+fn isExpertValueTakingFlagEq(arg: []const u8) bool {
+    for (pi_app.value_taking_flags) |name| {
+        if (arg.len > name.len and
+            std.mem.startsWith(u8, arg, name) and
+            arg[name.len] == '=')
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+test "validateExpertArgs accepts documented expert launch forms" {
+    const ok = struct {
+        fn expect(argv: []const []const u8) !void {
+            switch (validateExpertArgs(argv)) {
+                .ok => {},
+                else => return error.ExpectedValidExpertArgs,
+            }
+        }
+    }.expect;
+
+    try ok(&.{});
+    try ok(&.{"--resume"});
+    try ok(&.{"--continue"});
+    try ok(&.{ "--session-id", "abc" });
+    try ok(&.{"--session-id=abc"});
+    try ok(&.{ "--fork", "abc" });
+    try ok(&.{"--fork=abc"});
+    try ok(&.{ "--print", "add a GET /health route", "--mode", "json" });
+    try ok(&.{"--mode=rpc"});
+    try ok(&.{ "--handler", "handler.ts", "--goal", "no_secret_leakage", "--max-iters", "4" });
+    try ok(&.{ "--tools", "minimal", "--yes", "--no-context-files" });
+    try ok(&.{ "--no-session", "--no-persist-tool-output", "--no-edit" });
+    try ok(&.{"--no-perf-receipt"});
+    try ok(&.{"--perf-receipt"});
+}
+
+test "validateExpertArgs rejects unknown expert flags and subcommands" {
+    switch (validateExpertArgs(&.{"--bogus"})) {
+        .unknown_flag => |flag| try std.testing.expectEqualStrings("--bogus", flag),
+        else => return error.ExpectedUnknownExpertFlag,
+    }
+    switch (validateExpertArgs(&.{"diagnose"})) {
+        .unexpected_arg => |arg| try std.testing.expectEqualStrings("diagnose", arg),
+        else => return error.ExpectedUnexpectedExpertArg,
+    }
 }
