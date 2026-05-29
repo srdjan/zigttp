@@ -4,6 +4,9 @@ const pi_app = @import("pi_app");
 const proof_ledger = @import("proof_ledger.zig");
 const self_extract = @import("self_extract.zig");
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
 pub const action_path = "/_zigttp/studio/demo/action";
 pub const state_path = "/_zigttp/studio/demo/state.json";
 const deploy_marker_path = ".zigttp/demo-deployed";
@@ -43,6 +46,11 @@ pub const Step = enum {
 pub const Config = struct {
     workspace_root: []const u8,
     handler_path: []const u8,
+};
+
+pub const PassportExport = struct {
+    out_dir: []const u8,
+    step: Step,
 };
 
 pub const Workspace = struct {
@@ -276,6 +284,42 @@ pub fn writeStateJson(
     return try allocator.dupe(u8, aw.writer.buffered());
 }
 
+pub fn exportPassport(
+    allocator: std.mem.Allocator,
+    config: Config,
+    options: PassportExport,
+) !void {
+    if (options.out_dir.len == 0) return error.InvalidOutputPath;
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, options.out_dir);
+
+    var session = try pi_app.demo_passport.ensureSession(allocator, config.workspace_root);
+    defer session.deinit(allocator);
+
+    const events_export = try std.fs.path.join(allocator, &.{ options.out_dir, "events.jsonl" });
+    defer allocator.free(events_export);
+    try copyOptionalFile(allocator, session.events_path, events_export, "");
+
+    const meta_export = try std.fs.path.join(allocator, &.{ options.out_dir, "session-meta.json" });
+    defer allocator.free(meta_export);
+    try copyOptionalFile(allocator, session.meta_path, meta_export, "{}\n");
+
+    const verify_text = try renderVerifyText(allocator, config, options.step);
+    defer allocator.free(verify_text);
+    try writeExportFile(allocator, options.out_dir, "verify.txt", verify_text);
+
+    const passport_json = try renderPassportJson(allocator, config, session, options.step);
+    defer allocator.free(passport_json);
+    try writeExportFile(allocator, options.out_dir, "passport.json", passport_json);
+
+    const index_html = try renderPassportHtml(allocator, config, session, options.step);
+    defer allocator.free(index_html);
+    try writeExportFile(allocator, options.out_dir, "index.html", index_html);
+}
+
 fn tempWorkspacePath(allocator: std.mem.Allocator) ![]u8 {
     var ts: std.posix.timespec = undefined;
     _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
@@ -303,6 +347,21 @@ fn writeChildFile(allocator: std.mem.Allocator, root: []const u8, rel: []const u
     const path = try std.fs.path.join(allocator, &.{ root, rel });
     defer allocator.free(path);
     try zigts.file_io.writeFile(allocator, path, data);
+}
+
+fn writeExportFile(allocator: std.mem.Allocator, root: []const u8, rel: []const u8, data: []const u8) !void {
+    const path = try std.fs.path.join(allocator, &.{ root, rel });
+    defer allocator.free(path);
+    try zigts.file_io.writeFile(allocator, path, data);
+}
+
+fn copyOptionalFile(allocator: std.mem.Allocator, source: []const u8, dest: []const u8, fallback: []const u8) !void {
+    const bytes = zigts.file_io.readFile(allocator, source, 16 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return zigts.file_io.writeFile(allocator, dest, fallback),
+        else => return err,
+    };
+    defer allocator.free(bytes);
+    try zigts.file_io.writeFile(allocator, dest, bytes);
 }
 
 fn deleteLedger(allocator: std.mem.Allocator) void {
@@ -438,6 +497,193 @@ fn objectString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
 
 fn deployArtifactPath(allocator: std.mem.Allocator, workspace_root: []const u8) ![]u8 {
     return try std.fs.path.join(allocator, &.{ ".zigttp", "deploy", std.fs.path.basename(workspace_root) });
+}
+
+const LedgerSummary = struct {
+    contract_sha: ?[]const u8 = null,
+    kind: ?proof_ledger.EventKind = null,
+};
+
+fn latestLedgerSummary(allocator: std.mem.Allocator) !LedgerSummary {
+    const events = try proof_ledger.readEvents(allocator);
+    defer proof_ledger.freeEvents(allocator, events);
+    if (events.len == 0) return .{};
+
+    const latest = events[events.len - 1];
+    return .{
+        .contract_sha = try allocator.dupe(u8, latest.facts.contract_sha),
+        .kind = latest.kind,
+    };
+}
+
+fn renderPassportJson(
+    allocator: std.mem.Allocator,
+    config: Config,
+    session: pi_app.demo_passport.SessionInfo,
+    step: Step,
+) ![]u8 {
+    const latest = try latestLedgerSummary(allocator);
+    defer if (latest.contract_sha) |sha| allocator.free(sha);
+
+    const policy_hash = zigts.rule_registry.policyHash();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var json: std.json.Stringify = .{ .writer = &aw.writer };
+
+    try json.beginObject();
+    try json.objectField("schemaVersion");
+    try json.write(@as(u8, 1));
+    try json.objectField("kind");
+    try json.write("zigttp-proof-passport");
+    try json.objectField("step");
+    try json.write(step.toString());
+    try json.objectField("title");
+    try json.write(stepTitle(step));
+    try json.objectField("generatedAtUnixMs");
+    try json.write(proof_ledger.defaultNowMs());
+    try json.objectField("workspace");
+    try json.write(config.workspace_root);
+    try json.objectField("handlerPath");
+    try json.write(config.handler_path);
+    try json.objectField("sessionId");
+    try json.write(session.session_id);
+    try json.objectField("sessionDir");
+    try json.write(session.session_dir);
+    try json.objectField("policyHash");
+    try json.write(policy_hash[0..]);
+    try json.objectField("contractHash");
+    if (latest.contract_sha) |sha| try json.write(sha) else try json.write(null);
+    try json.objectField("latestLedgerKind");
+    if (latest.kind) |kind| try json.write(kind.toString()) else try json.write(null);
+    try json.objectField("proofs");
+    try json.beginArray();
+    try json.write("injection_safe");
+    try json.write("no_secret_leakage");
+    try json.endArray();
+    try json.objectField("files");
+    try json.beginObject();
+    try json.objectField("events");
+    try json.write("events.jsonl");
+    try json.objectField("meta");
+    try json.write("session-meta.json");
+    try json.objectField("verify");
+    try json.write("verify.txt");
+    try json.objectField("html");
+    try json.write("index.html");
+    try json.endObject();
+    try json.objectField("steps");
+    try json.beginArray();
+    try writeStepJson(&json, .baseline, true);
+    try writeStepJson(&json, .witness, step == .witness or step == .repaired or step == .deployed);
+    try writeStepJson(&json, .repaired, step == .repaired or step == .deployed);
+    try writeStepJson(&json, .deployed, step == .deployed);
+    try json.endArray();
+    try json.endObject();
+    try aw.writer.writeByte('\n');
+    return try allocator.dupe(u8, aw.writer.buffered());
+}
+
+fn writeStepJson(json: *std.json.Stringify, step: Step, complete: bool) !void {
+    try json.beginObject();
+    try json.objectField("step");
+    try json.write(step.toString());
+    try json.objectField("title");
+    try json.write(stepTitle(step));
+    try json.objectField("complete");
+    try json.write(complete);
+    try json.endObject();
+}
+
+fn renderVerifyText(allocator: std.mem.Allocator, config: Config, step: Step) ![]u8 {
+    const artifact = try std.fs.path.join(allocator, &.{ config.workspace_root, ".zigttp", "deploy", std.fs.path.basename(config.workspace_root) });
+    defer allocator.free(artifact);
+    return try std.fmt.allocPrint(allocator,
+        \\Proof Passport verification
+        \\
+        \\Workspace:
+        \\  cd {s}
+        \\
+        \\Checks:
+        \\  zigttp check
+        \\  zigttp test
+        \\  zigttp deploy
+        \\  zigttp proofs show HEAD
+        \\
+        \\Run deployed artifact:
+        \\  {s} -p 3001
+        \\  curl http://127.0.0.1:3001/
+        \\
+        \\Exported step: {s}
+        \\
+    , .{ config.workspace_root, artifact, step.toString() });
+}
+
+fn renderPassportHtml(
+    allocator: std.mem.Allocator,
+    config: Config,
+    session: pi_app.demo_passport.SessionInfo,
+    step: Step,
+) ![]u8 {
+    const latest = try latestLedgerSummary(allocator);
+    defer if (latest.contract_sha) |sha| allocator.free(sha);
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+    try w.writeAll(
+        \\<!doctype html><html lang="en"><meta charset="utf-8">
+        \\<title>zigttp Proof Passport</title>
+        \\<style>body{font:16px/1.5 system-ui,-apple-system,BlinkMacSystemFont,sans-serif;margin:40px;max-width:880px;color:#18202a}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.ok{color:#116329}.pending{color:#7a4b00}.box{border:1px solid #d9dee7;border-radius:8px;padding:16px;margin:16px 0}li{margin:8px 0}</style>
+        \\<body><h1>zigttp Proof Passport</h1>
+    );
+    try w.print("<p class=\"box\">Step: <strong>{s}</strong> - ", .{step.toString()});
+    try writeHtmlEscaped(w, stepTitle(step));
+    try w.writeAll("</p><dl>");
+    try w.writeAll("<dt>Workspace</dt><dd><code>");
+    try writeHtmlEscaped(w, config.workspace_root);
+    try w.writeAll("</code></dd><dt>Handler</dt><dd><code>");
+    try writeHtmlEscaped(w, config.handler_path);
+    try w.writeAll("</code></dd><dt>Session</dt><dd><code>");
+    try writeHtmlEscaped(w, session.session_id);
+    try w.writeAll("</code></dd><dt>Contract</dt><dd><code>");
+    if (latest.contract_sha) |sha| try writeHtmlEscaped(w, sha) else try w.writeAll("not recorded");
+    try w.writeAll(
+        \\</code></dd></dl>
+        \\<h2>Flow</h2><ol>
+    );
+    try writeHtmlStep(w, .baseline, true);
+    try writeHtmlStep(w, .witness, step == .witness or step == .repaired or step == .deployed);
+    try writeHtmlStep(w, .repaired, step == .repaired or step == .deployed);
+    try writeHtmlStep(w, .deployed, step == .deployed);
+    try w.writeAll(
+        \\</ol>
+        \\<h2>Files</h2><ul>
+        \\<li><a href="passport.json">passport.json</a></li>
+        \\<li><a href="events.jsonl">events.jsonl</a></li>
+        \\<li><a href="session-meta.json">session-meta.json</a></li>
+        \\<li><a href="verify.txt">verify.txt</a></li>
+        \\</ul></body></html>
+    );
+    return try allocator.dupe(u8, w.buffered());
+}
+
+fn writeHtmlStep(writer: anytype, step: Step, complete: bool) !void {
+    try writer.print("<li class=\"{s}\"><strong>{s}</strong>: ", .{ if (complete) "ok" else "pending", step.toString() });
+    try writeHtmlEscaped(writer, stepTitle(step));
+    try writer.writeAll(if (complete) " (complete)</li>" else " (not reached)</li>");
+}
+
+fn writeHtmlEscaped(writer: anytype, value: []const u8) !void {
+    for (value) |c| {
+        switch (c) {
+            '&' => try writer.writeAll("&amp;"),
+            '<' => try writer.writeAll("&lt;"),
+            '>' => try writer.writeAll("&gt;"),
+            '"' => try writer.writeAll("&quot;"),
+            '\'' => try writer.writeAll("&#39;"),
+            else => try writer.writeByte(c),
+        }
+    }
 }
 
 pub const baseline_source =
@@ -675,4 +921,59 @@ test "demo temp workspace cleanup removes owned directory" {
     try std.Io.Dir.access(std.Io.Dir.cwd(), io, root, .{});
     ws.cleanup(allocator);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, root, .{}));
+}
+
+test "demo passport export writes offline files" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try proof_ledger.chdirTmpForTest(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const sessions_dir = try std.fs.path.resolve(allocator, &.{"sessions"});
+    defer allocator.free(sessions_dir);
+    const sessions_z = try allocator.dupeZ(u8, sessions_dir);
+    defer allocator.free(sessions_z);
+    _ = setenv("ZIGTTP_SESSIONS_DIR", sessions_z.ptr, 1);
+    defer _ = unsetenv("ZIGTTP_SESSIONS_DIR");
+
+    var ws = try createWorkspace(allocator, "proof-demo", 4567);
+    defer ws.deinit(allocator);
+
+    var session = try pi_app.demo_passport.resetToBaseline(allocator, ws.root);
+    defer session.deinit(allocator);
+
+    const handler_path = try std.fs.path.join(allocator, &.{ ws.root, "src", "handler.tsx" });
+    defer allocator.free(handler_path);
+    const passport_dir = try std.fs.path.join(allocator, &.{ ws.root, "passport" });
+    defer allocator.free(passport_dir);
+
+    try exportPassport(allocator, .{
+        .workspace_root = ws.root,
+        .handler_path = handler_path,
+    }, .{
+        .out_dir = passport_dir,
+        .step = .baseline,
+    });
+
+    const passport_json_path = try std.fs.path.join(allocator, &.{ passport_dir, "passport.json" });
+    defer allocator.free(passport_json_path);
+    const passport_json = try zigts.file_io.readFile(allocator, passport_json_path, 64 * 1024);
+    defer allocator.free(passport_json);
+    try std.testing.expect(std.mem.indexOf(u8, passport_json, "\"kind\":\"zigttp-proof-passport\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, passport_json, "\"step\":\"baseline\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, passport_json, "\"contractHash\":null") != null);
+
+    const index_path = try std.fs.path.join(allocator, &.{ passport_dir, "index.html" });
+    defer allocator.free(index_path);
+    const index_html = try zigts.file_io.readFile(allocator, index_path, 64 * 1024);
+    defer allocator.free(index_html);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "zigttp Proof Passport") != null);
+
+    const verify_path = try std.fs.path.join(allocator, &.{ passport_dir, "verify.txt" });
+    defer allocator.free(verify_path);
+    const verify_text = try zigts.file_io.readFile(allocator, verify_path, 64 * 1024);
+    defer allocator.free(verify_text);
+    try std.testing.expect(std.mem.indexOf(u8, verify_text, "zigttp proofs show HEAD") != null);
 }

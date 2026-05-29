@@ -61,6 +61,16 @@ zigttp deploy                     # self-contained signed binary
 ./.zigttp/deploy/my-app
 ```
 
+To see the full proof story without editing a file, run the local demo:
+
+```bash
+zigttp demo --scripted --out proof-demo --export proof-demo/passport
+open proof-demo/passport/index.html
+```
+
+That produces an offline Proof Passport showing the green baseline, unsafe
+secret-flow witness, verified repair, and local deploy receipt.
+
 For the full first project path, see
 [Getting Started](docs/getting-started.md). For the verdict that `dev`
 and `test` print on every save, see

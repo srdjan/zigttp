@@ -26,6 +26,18 @@ Project commands auto-detect `zigttp.json` from the current directory or
 a parent. Scaffolded projects bind port `3000`; raw `serve` defaults to
 `8080` unless a project manifest is discovered.
 
+### `zigttp demo`
+
+Runs the local Proof Theater. The scripted form is the release-friendly path:
+
+```bash
+zigttp demo --scripted --out proof-demo --export proof-demo/passport
+```
+
+It creates a demo workspace, applies the unsafe secret-flow edit, repairs it,
+deploys locally, and writes an offline Proof Passport with `passport.json`,
+`events.jsonl`, `session-meta.json`, `verify.txt`, and `index.html`.
+
 ### Common `dev` and `serve` options
 
 ```text

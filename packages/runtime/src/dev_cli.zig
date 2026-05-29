@@ -896,8 +896,10 @@ fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: [
 
 const DemoArgs = struct {
     no_open: bool = false,
+    scripted: bool = false,
     port: u16 = 3000,
     out_dir: ?[]const u8 = null,
+    export_dir: ?[]const u8 = null,
 };
 
 fn parseDemoArgs(argv: []const []const u8) !DemoArgs {
@@ -907,6 +909,11 @@ fn parseDemoArgs(argv: []const []const u8) !DemoArgs {
         const arg = argv[i];
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return error.HelpRequested;
         if (std.mem.eql(u8, arg, "--no-open")) {
+            parsed.no_open = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--scripted")) {
+            parsed.scripted = true;
             parsed.no_open = true;
             continue;
         }
@@ -923,6 +930,12 @@ fn parseDemoArgs(argv: []const []const u8) !DemoArgs {
             parsed.out_dir = argv[i];
             continue;
         }
+        if (std.mem.eql(u8, arg, "--export")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingOptionValue;
+            parsed.export_dir = argv[i];
+            continue;
+        }
         return error.UnknownOption;
     }
     return parsed;
@@ -933,7 +946,7 @@ fn demoCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []c
 
     var workspace = try demo.createWorkspace(allocator, parsed.out_dir, parsed.port);
     defer workspace.deinit(allocator);
-    defer workspace.cleanup(allocator);
+    defer if (!parsed.scripted) workspace.cleanup(allocator);
     var passport = try pi_app.demo_passport.resetToBaseline(allocator, workspace.root);
     defer passport.deinit(allocator);
 
@@ -973,6 +986,36 @@ fn demoCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []c
         \\
     , .{ workspace.root, url, passport.tui_command, verify_url, well_known_url });
 
+    if (parsed.scripted) {
+        const workspace_root = try resolveDemoPathFrom(allocator, old_cwd, workspace.root);
+        defer allocator.free(workspace_root);
+        const handler_path = try std.fs.path.join(allocator, &.{ workspace_root, "src", "handler.tsx" });
+        defer allocator.free(handler_path);
+        const export_dir = if (parsed.export_dir) |path|
+            try resolveDemoPathFrom(allocator, old_cwd, path)
+        else
+            null;
+        defer if (export_dir) |path| allocator.free(path);
+
+        try std.Io.Threaded.chdir(workspace_root);
+        const config: demo.Config = .{
+            .workspace_root = workspace_root,
+            .handler_path = handler_path,
+        };
+        _ = try demo.applyAction(allocator, config, .introduce_bug);
+        _ = try demo.applyAction(allocator, config, .repair_bug);
+        const final_step = try demo.applyAction(allocator, config, .deploy);
+        if (export_dir) |path| {
+            try demo.exportPassport(allocator, config, .{
+                .out_dir = path,
+                .step = final_step,
+            });
+            std.debug.print("Passport:  {s}\n", .{path});
+        }
+        std.debug.print("Scripted:  complete ({s})\n", .{final_step.toString()});
+        return;
+    }
+
     if (!parsed.no_open) openBrowser(allocator, url);
 
     var child_args: std.ArrayList([]const u8) = .empty;
@@ -997,6 +1040,11 @@ fn demoCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []c
         .stderr = .inherit,
     });
     _ = child.wait(io) catch {};
+}
+
+fn resolveDemoPathFrom(allocator: std.mem.Allocator, base_dir: []const u8, path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) return try allocator.dupe(u8, path);
+    return try std.fs.path.resolve(allocator, &.{ base_dir, path });
 }
 
 fn openBrowser(allocator: std.mem.Allocator, url: []const u8) void {
@@ -1899,6 +1947,7 @@ fn printLocalDeployHelp() void {
 fn printDemoHelp() void {
     const help =
         \\zigttp demo [--no-open] [--port N] [--out DIR]
+        \\zigttp demo --scripted --out DIR [--export DIR]
         \\
         \\Create a self-contained Proof Theater workspace and launch Studio.
         \\The demo runs fully local: no cloud credentials, API keys, or
@@ -1908,6 +1957,8 @@ fn printDemoHelp() void {
         \\  --no-open       Do not try to open the browser
         \\  --port <PORT>   Studio port (default: 3000)
         \\  --out <DIR>     Write the demo project to DIR. Refuses to overwrite.
+        \\  --scripted      Run baseline -> witness -> repair -> deploy and exit.
+        \\  --export <DIR>  Write an offline Proof Passport export.
         \\  --help          Show this help
         \\
     ;

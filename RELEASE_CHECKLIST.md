@@ -17,6 +17,7 @@ Run every gate on macOS (native) before tagging. All must pass.
 - [ ] `zig build test-zigts` -- engine tests only
 - [ ] `zig build test-zruntime` -- runtime tests only
 - [ ] `zig build smoke-v1` -- public v1 flow: init, studio, build, deploy --local
+- [ ] `zig build smoke-demo` -- scripted Proof Passport export flow
 - [ ] `bash scripts/test-examples.sh` -- 15 example handler suites (exit 0)
 - [ ] `zig build -Doptimize=ReleaseFast` -- release binary compiles cleanly
 - [ ] `./zig-out/bin/zigttp doctor --release --json` -- release proof passport reports no blockers

@@ -18,6 +18,18 @@ Advanced commands (the proof ledger, project diagnostics, the analyzer,
 cloud capability grants, and more) stay out of the way until you need them.
 Run `zigttp help --all` to see them; each keeps its own `--help`.
 
+## Proof Passport Demo
+
+For a local, noninteractive walkthrough of the proof model:
+
+```bash
+zigttp demo --scripted --out proof-demo --export proof-demo/passport
+```
+
+Open `proof-demo/passport/index.html` to inspect the exported Proof Passport.
+It captures the baseline proof, an unsafe edit with a secret-flow witness, the
+repair, and the local deploy receipt.
+
 ## 1. Install
 
 Pre-built binaries for macOS and Linux (x86_64, aarch64):
