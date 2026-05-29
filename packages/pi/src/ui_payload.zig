@@ -906,6 +906,12 @@ pub const VerifiedPatchPayload = struct {
     witnesses_new: []WitnessBody = &.{},
     post_apply_ok: bool,
     post_apply_summary: ?[]u8,
+    /// Proof Flight Recorder capsule replay against this applied edit.
+    /// `capsule_total == 0` means no capsule was checked (none recorded, or
+    /// the probe is disabled/unwired). `capsule_regressed > 0` means the edit
+    /// changed behavior on a recorded request. Scalar, no ownership.
+    capsule_total: u32 = 0,
+    capsule_regressed: u32 = 0,
 
     pub fn clone(self: VerifiedPatchPayload, allocator: std.mem.Allocator) !VerifiedPatchPayload {
         const file_copy = try allocator.dupe(u8, self.file);
@@ -985,6 +991,8 @@ pub const VerifiedPatchPayload = struct {
             .witnesses_new = witnesses_new_copy,
             .post_apply_ok = self.post_apply_ok,
             .post_apply_summary = post_apply_summary_copy,
+            .capsule_total = self.capsule_total,
+            .capsule_regressed = self.capsule_regressed,
         };
     }
 

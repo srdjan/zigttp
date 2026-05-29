@@ -2240,6 +2240,13 @@ fn writeVerifiedPatchPayload(
     if (payload.post_apply_summary) |note| {
         try w.print("post_apply: {s}\n", .{note});
     }
+    if (payload.capsule_total > 0) {
+        if (payload.capsule_regressed > 0) {
+            try w.print("capsule: {d}/{d} requests regressed (recorded behavior changed)\n", .{ payload.capsule_regressed, payload.capsule_total });
+        } else {
+            try w.print("capsule: {d}/{d} requests reproduced\n", .{ payload.capsule_total, payload.capsule_total });
+        }
+    }
     if (payload.after_properties) |p| {
         try w.writeAll("\nproperties:\n");
         inline for (@typeInfo(ui_payload_mod.PropertiesSnapshot).@"struct".fields) |field| {
@@ -2295,6 +2302,13 @@ fn writeLedgerPatchPanel(
     }
     if (payload.post_apply_summary) |summary| {
         try w.print("post_apply_summary: {s}\n", .{summary});
+    }
+    if (payload.capsule_total > 0) {
+        if (payload.capsule_regressed > 0) {
+            try w.print("capsule: {d}/{d} requests regressed\n", .{ payload.capsule_regressed, payload.capsule_total });
+        } else {
+            try w.print("capsule: {d}/{d} requests reproduced\n", .{ payload.capsule_total, payload.capsule_total });
+        }
     }
     try w.writeAll("\n");
 

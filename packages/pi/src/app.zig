@@ -63,6 +63,11 @@ pub const perf_probe = @import("perf_probe.zig");
 /// equivalence-receipt probe via `pi_app.equivalence_probe.setProbeFn` at
 /// startup, mirroring the perf-probe seam.
 pub const equivalence_probe = @import("equivalence_probe.zig");
+
+/// Proof Flight Recorder: the runtime host registers the capsule-replay probe
+/// via `pi_app.capsule_probe.setProbeFn` at startup, mirroring the perf-probe
+/// seam. The expert loop uses it to flag edits that regress a recorded capsule.
+pub const capsule_probe = @import("capsule_probe.zig");
 pub const demo_passport = @import("demo_passport.zig");
 
 /// Re-exported so the `zigttp expert` CLI dispatch can fail fast when no

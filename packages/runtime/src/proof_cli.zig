@@ -251,6 +251,58 @@ pub fn replayTraceFiles(
     return report;
 }
 
+// -- Expert-loop probe ------------------------------------------------------
+
+/// Capsule-replay probe for the expert loop (`pi_app.capsule_probe` seam).
+/// Replays the workspace's `default` capsule against just-applied content and
+/// returns the tally. Silent zero-tally when there is no capsule (the common
+/// case) so the expert loop pays nothing until a developer records one.
+///
+/// Replays against `after_bytes` directly (not the on-disk handler), so it
+/// reflects the edit the agent just applied. Best-effort: any failure yields a
+/// zero tally rather than an error, matching the seam's non-gating contract.
+pub fn replayActiveCapsule(
+    allocator: std.mem.Allocator,
+    workspace_root: []const u8,
+    handler_path: []const u8,
+    after_bytes: []const u8,
+) !ReplayProbeTally {
+    const capsule_name = "default";
+    const manifest_rel = try capsule.manifestPathAlloc(allocator, capsule_name);
+    defer allocator.free(manifest_rel);
+    const manifest_path = try std.fs.path.join(allocator, &.{ workspace_root, manifest_rel });
+    defer allocator.free(manifest_path);
+
+    const manifest_json = file_io.readFile(allocator, manifest_path, max_trace_bytes) catch {
+        // No capsule recorded for this workspace — nothing to check.
+        return .{};
+    };
+    defer allocator.free(manifest_json);
+
+    var loaded = capsule.parse(allocator, manifest_json, .{}) catch return .{};
+    defer loaded.deinit();
+
+    const capsule_dir = try std.fs.path.join(allocator, &.{ workspace_root, capsule.capsules_root, capsule_name });
+    defer allocator.free(capsule_dir);
+
+    const report = replayTraceFiles(
+        allocator,
+        capsule_dir,
+        loaded.manifest.trace_files,
+        after_bytes,
+        handler_path,
+    ) catch return .{};
+
+    return .{ .total = report.total, .regressed = report.regressed };
+}
+
+/// Mirror of `pi_app.capsule_probe.ReplayTally`, redeclared here to avoid a
+/// PI import in the runtime layer (the seam passes plain integers).
+pub const ReplayProbeTally = struct {
+    total: u32 = 0,
+    regressed: u32 = 0,
+};
+
 // -- Recording --------------------------------------------------------------
 
 /// Relative path (within the capsule dir) of the trace file `dev

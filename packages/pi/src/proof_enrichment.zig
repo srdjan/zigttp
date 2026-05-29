@@ -6,6 +6,7 @@ const ui_payload = @import("ui_payload.zig");
 const tools_common = @import("tools/common.zig");
 const perf_probe = @import("perf_probe.zig");
 const equivalence_probe = @import("equivalence_probe.zig");
+const capsule_probe = @import("capsule_probe.zig");
 
 const edit_simulate = zigts_cli.edit_simulate;
 const precompile = zigts_cli.precompile;
@@ -114,7 +115,7 @@ pub fn buildVerifiedPatchPayload(
 
     const patch_hash_value: [32]u8 = options.patch_hash orelse computePatchHash(options.before, analysis.unified_diff);
 
-    const payload = ui_payload.VerifiedPatchPayload{
+    var payload = ui_payload.VerifiedPatchPayload{
         .file = file_copy,
         .policy_hash = policy_copy,
         .applied_at_unix_ms = options.applied_at_unix_ms,
@@ -154,7 +155,8 @@ pub fn buildVerifiedPatchPayload(
     if (options.emit_perf_receipt) {
         const perf_will_run = perf_probe.isEnabled() and perf_probe.isConfigured();
         const equivalence_will_run = equivalence_probe.isEnabled() and equivalence_probe.isConfigured();
-        if (perf_will_run or equivalence_will_run) {
+        const capsule_will_run = capsule_probe.isEnabled() and capsule_probe.isConfigured();
+        if (perf_will_run or equivalence_will_run or capsule_will_run) {
             if (resolveHandlerPath(allocator, options.workspace_root, options.file) catch null) |abs| {
                 defer allocator.free(abs);
                 if (perf_will_run) {
@@ -164,6 +166,14 @@ pub fn buildVerifiedPatchPayload(
                 // to be equivalent to); `record` handles the null internally.
                 if (equivalence_will_run) {
                     equivalence_probe.record(allocator, abs, options.before, options.after, options.applied_at_unix_ms);
+                }
+                // Replay the workspace's recorded capsule (if any) against the
+                // just-applied content. A regression means the edit changed a
+                // request the developer exercised. Audit signal, not a gate.
+                if (capsule_will_run) {
+                    const tally = capsule_probe.check(allocator, options.workspace_root, abs, options.after);
+                    payload.capsule_total = tally.total;
+                    payload.capsule_regressed = tally.regressed;
                 }
             }
         }
@@ -1017,6 +1027,15 @@ fn recordingPerfProbe(
     perf_probe_test_after_len = after_bytes.len;
 }
 
+fn regressionCapsuleProbe(
+    _: std.mem.Allocator,
+    _: []const u8,
+    _: []const u8,
+    _: []const u8,
+) anyerror!capsule_probe.ReplayTally {
+    return .{ .total = 3, .regressed = 1 };
+}
+
 test "buildVerifiedPatchPayload fires the perf probe when emit_perf_receipt is set" {
     const workspace_root = try tools_common.workspaceRoot(testing.allocator);
     defer testing.allocator.free(workspace_root);
@@ -1067,6 +1086,55 @@ test "buildVerifiedPatchPayload skips the perf probe by default" {
     defer payload.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 0), perf_probe_test_calls);
+}
+
+test "buildVerifiedPatchPayload surfaces a capsule replay regression on the payload" {
+    const workspace_root = try tools_common.workspaceRoot(testing.allocator);
+    defer testing.allocator.free(workspace_root);
+
+    capsule_probe.setProbeFn(regressionCapsuleProbe);
+    capsule_probe.setEnabled(true);
+    defer capsule_probe.reset();
+
+    const after = "function handler(req: Request): Response { return Response.json({ ok: true }); }";
+    var payload = try buildVerifiedPatchPayload(testing.allocator, .{
+        .workspace_root = workspace_root,
+        .file = "handler.ts",
+        .before = null,
+        .after = after,
+        .policy_hash = "deadbeef",
+        .applied_at_unix_ms = 1_700_000_000_000,
+        .post_apply_ok = true,
+        .emit_perf_receipt = true,
+    });
+    defer payload.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 3), payload.capsule_total);
+    try testing.expectEqual(@as(u32, 1), payload.capsule_regressed);
+}
+
+test "buildVerifiedPatchPayload leaves capsule tally zero when no probe is wired" {
+    const workspace_root = try tools_common.workspaceRoot(testing.allocator);
+    defer testing.allocator.free(workspace_root);
+
+    capsule_probe.reset(); // unconfigured
+    defer capsule_probe.reset();
+
+    const after = "function handler(req: Request): Response { return Response.json({ ok: true }); }";
+    var payload = try buildVerifiedPatchPayload(testing.allocator, .{
+        .workspace_root = workspace_root,
+        .file = "handler.ts",
+        .before = null,
+        .after = after,
+        .policy_hash = "deadbeef",
+        .applied_at_unix_ms = 1_700_000_000_000,
+        .post_apply_ok = true,
+        .emit_perf_receipt = true,
+    });
+    defer payload.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 0), payload.capsule_total);
+    try testing.expectEqual(@as(u32, 0), payload.capsule_regressed);
 }
 
 test "buildUnifiedDiff emits empty diff for identical content" {

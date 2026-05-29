@@ -375,6 +375,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
         pi_app.perf_probe.setProbeFn(perf_probe_lib.recordPerfReceipt);
         pi_app.equivalence_probe.setProbeFn(equivalence_probe_lib.recordEquivalenceReceipt);
+        pi_app.capsule_probe.setProbeFn(capsuleReplayProbe);
         try pi_app.run(allocator);
         return;
     }
@@ -814,6 +815,20 @@ fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []co
         .stderr = .inherit,
     });
     _ = child.wait(io) catch {};
+}
+
+/// Adapter registered into the `pi_app.capsule_probe` seam: replays the
+/// workspace's active capsule against just-applied content and maps the
+/// runtime tally onto the PI seam's tally type. Best-effort by contract.
+fn capsuleReplayProbe(
+    allocator: std.mem.Allocator,
+    workspace_root: []const u8,
+    handler_path: []const u8,
+    after_bytes: []const u8,
+) anyerror!pi_app.capsule_probe.ReplayTally {
+    const tally = proof_cli.replayActiveCapsule(allocator, workspace_root, handler_path, after_bytes) catch
+        return pi_app.capsule_probe.ReplayTally{};
+    return .{ .total = tally.total, .regressed = tally.regressed };
 }
 
 /// Resolve the handler + system path the recording session used, then write
