@@ -1,0 +1,235 @@
+//! Top-level `zigttp` help surfaces: the default five-verb screen, the full
+//! `help --all` advanced listing, and the `expert` help. Split out of
+//! dev_cli.zig; dev_cli.main calls these and the per-command help printers
+//! live with their own command modules.
+
+const std = @import("std");
+
+pub fn hasAllFlag(argv: []const []const u8) bool {
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "all")) return true;
+    }
+    return false;
+}
+
+/// The default `zigttp --help` surface: only the five core verbs. Everything
+/// else lives behind `zigttp help --all` (`core_help_all`).
+const core_help =
+    \\zigttp - serverless JavaScript runtime
+    \\
+    \\Commands:
+    \\  zigttp init <name>     Create a project
+    \\  zigttp dev             Run locally, watch and prove on every save
+    \\  zigttp test            Run handler tests
+    \\  zigttp expert          Interactive compiler-in-the-loop agent
+    \\  zigttp deploy          Build, prove, and deploy (local by default)
+    \\
+    \\Get started:
+    \\  zigttp init my-app && cd my-app
+    \\  zigttp dev
+    \\
+    \\Run `zigttp help --all` for advanced commands.
+    \\
+;
+
+pub fn printHelp() void {
+    _ = std.c.write(std.c.STDOUT_FILENO, core_help.ptr, core_help.len);
+}
+
+const core_help_all =
+    \\zigttp - serverless JavaScript runtime
+    \\
+    \\Core commands:
+    \\  zigttp init <name> [--template basic|api|htmx]  Create a project
+    \\  zigttp dev [handler.ts]                Run locally, watch and prove on save
+    \\  zigttp test [tests.jsonl]              Run handler tests
+    \\  zigttp expert                          Interactive compiler-in-the-loop agent
+    \\  zigttp deploy                          Build, prove, deploy (local default)
+    \\
+    \\Analyze:
+    \\  zigttp check [handler.ts]              Run the analyzer once
+    \\  zigttp prove <old.json> <new.json>     Contract upgrade safety check
+    \\  zigttp mock <tests.jsonl>              Mock server from test fixtures
+    \\  zigttp link <system.json>              Cross-handler system linking
+    \\  zigttp gen-tests [handler.ts]          Generate a starter test fixture
+    \\
+    \\Run and inspect:
+    \\  zigttp serve [handler.ts]              Run a handler without watch or proof
+    \\  zigttp doctor [path]                   Check project readiness
+    \\  zigttp studio [handler.ts]             Optional browser proof workbench
+    \\  zigttp demo                            Guided local proof theater
+    \\  zigttp edge [--config FILE]            Run the in-process edge runtime
+    \\
+    \\Package:
+    \\  zigttp build [-o <bin>]                Emit a self-contained binary
+    \\  zigttp compile <handler.ts> -o <bin>   Build a binary from an explicit path
+    \\
+    \\Proof ledger:
+    \\  zigttp proofs [list|show|diff|watch|export|badge|bundle|verify]
+    \\  zigttp proof replay <capsule>          Replay a recorded capsule against the current handler
+    \\  zigttp verify <url>                    Verify a deployed proof receipt
+    \\
+    \\Credentials:
+    \\  zigttp auth claude                     Store an Anthropic API key for expert
+    \\  zigttp auth status                     Show which provider keys are configured
+    \\  zigttp auth revoke <provider>          Remove a stored key (claude | openai)
+    \\
+    \\Machine tools (JSON output for IDE and review-bot integrations):
+    \\  zigttp features                        List supported language features
+    \\  zigttp modules                         List virtual module exports
+    \\  zigttp restrictions                    Show language restrictions and the proofs they unlock
+    \\  zigttp meta                            Compiler and policy metadata
+    \\  zigttp describe-rule [name|code]       Look up a diagnostic rule
+    \\  zigttp search <keyword>                Search rules by keyword
+    \\  zigttp verify-paths <file>...          Behavior-path verification
+    \\  zigttp verify-modules <file>...        Module-contract verification
+    \\  zigttp edit-simulate [handler.ts]      Simulate an edit and report violations
+    \\  zigttp review-patch <file>             Review a patch for new violations
+    \\  zigttp prove-behavior <before> <after> Behavioral-equivalence verdict between two handler versions
+    \\  zigttp rollout <old-system> <new>      System-level deployment manifest
+    \\
+    \\Advanced:
+    \\  zigttp ratchet [show|check]            Property-regression gate
+    \\  zigttp witnesses [list|pin|unpin|prune|synthesize]  Falsifying-input corpus
+    \\  zigttp version                         Show version
+    \\
+    \\Every command keeps its own `--help`.
+    \\
+;
+
+pub fn printHelpAll() void {
+    _ = std.c.write(std.c.STDOUT_FILENO, core_help_all.ptr, core_help_all.len);
+}
+
+const expert_help =
+    \\zigttp expert - interactive compiler-in-the-loop agent
+    \\
+    \\Usage:
+    \\  zigttp expert [--yes | --no-edit] [--no-session] [--no-persist-tool-output]
+    \\                [--session-id <id> | --resume | --continue | --fork <id>]
+    \\                [--tools minimal|full] [--no-context-files]
+    \\  zigttp expert --print <prompt> [--mode json]
+    \\  zigttp expert --mode rpc
+    \\  zigttp expert --handler <handler.ts> --goal <goals> [--max-iters N]
+    \\
+    \\Flags:
+    \\  --yes                      auto-approve every verified edit
+    \\  --no-edit                  auto-reject every verified edit
+    \\  --no-session               disable session persistence for this run
+    \\  --no-persist-tool-output   omit tool output bodies from persisted session
+    \\  --no-context-files         skip AGENTS.md / CLAUDE.md project context
+    \\  --no-perf-receipt          do not sign a perf receipt on applied edits
+    \\  --session-id <id>          resume or create a session with this id
+    \\  --resume, --continue       resume the newest session for this cwd
+    \\  --fork <session-id>        branch from an existing session
+    \\  --tools minimal|full       select workspace-read-only or full tool preset
+    \\  --print <prompt>           run a single non-interactive turn and exit
+    \\  --mode json                with --print, emit NDJSON transcript events
+    \\  --mode rpc                 run line-delimited JSON-RPC 2.0 over stdio
+    \\  --handler <path>           handler path for autoloop repair
+    \\  --goal <csv>               property goals for autoloop repair
+    \\  --max-iters <N>            autoloop iteration budget
+    \\
+    \\Examples:
+    \\  zigttp expert --resume
+    \\  zigttp expert --print "add a GET /health route" --mode json
+    \\  zigttp expert --handler handler.ts --goal no_secret_leakage
+    \\
+    \\Model backend:
+    \\  Run `zigttp auth claude` once to store an Anthropic key at
+    \\  ~/.zigttp/providers.json (mode 0600). `zigttp expert` reads it
+    \\  on launch. Alternatively, export one of these variables yourself:
+    \\    ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
+    \\    OPENAI_API_KEY
+    \\  An empty value counts as missing; the command exits with a setup
+    \\  message instead of launching against an unconfigured backend.
+    \\
+    \\For machine-facing compiler tooling, use direct commands such as:
+    \\  zigttp meta
+    \\  zigttp verify-paths <file>...
+    \\  zigttp verify-modules --builtins --strict --json
+    \\  zigttp proofs export --session <id> --out <path>
+    \\
+;
+
+pub fn printExpertHelp() void {
+    _ = std.c.write(std.c.STDOUT_FILENO, expert_help.ptr, expert_help.len);
+}
+
+test "default help advertises only the five core commands" {
+    const has = struct {
+        fn f(haystack: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, haystack, needle) != null;
+        }
+    }.f;
+    inline for (.{
+        "zigttp init", "zigttp dev", "zigttp test", "zigttp expert", "zigttp deploy",
+    }) |verb| {
+        try std.testing.expect(has(core_help, verb));
+    }
+    inline for (.{
+        "zigttp check", "zigttp serve", "zigttp compile", "zigttp proofs", "zigttp doctor",
+    }) |hidden| {
+        try std.testing.expect(!has(core_help, hidden));
+    }
+}
+
+test "help --all surfaces the advanced commands" {
+    const has = struct {
+        fn f(haystack: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, haystack, needle) != null;
+        }
+    }.f;
+    inline for (.{
+        "zigttp serve",        "zigttp build",          "zigttp compile",
+        "zigttp doctor",       "zigttp proofs",         "zigttp check",
+        "zigttp prove",        "zigttp features",       "zigttp modules",
+        "zigttp restrictions", "zigttp meta",           "zigttp describe-rule",
+        "zigttp verify-paths", "zigttp verify-modules", "zigttp edit-simulate",
+        "zigttp review-patch", "zigttp rollout",
+    }) |cmd| {
+        try std.testing.expect(has(core_help_all, cmd));
+    }
+}
+
+test "help --all surfaces the optional browser studio workbench" {
+    try std.testing.expect(std.mem.indexOf(u8, core_help_all, "zigttp studio") != null);
+}
+
+test "hasAllFlag detects the --all escape hatch" {
+    try std.testing.expect(hasAllFlag(&.{"--all"}));
+    try std.testing.expect(hasAllFlag(&.{ "foo", "all" }));
+    try std.testing.expect(!hasAllFlag(&.{"--help"}));
+    try std.testing.expect(!hasAllFlag(&.{}));
+}
+
+test "expert help advertises documented modes" {
+    inline for (.{
+        "zigttp expert --resume",
+        "zigttp expert --print <prompt> [--mode json]",
+        "zigttp expert --mode rpc",
+        "zigttp expert --handler <handler.ts> --goal <goals>",
+        "--tools minimal|full",
+        "--no-context-files",
+    }) |needle| {
+        try std.testing.expect(std.mem.indexOf(u8, expert_help, needle) != null);
+    }
+}
+
+test "help --all no longer advertises hosted cloud deploy" {
+    const has = struct {
+        fn f(haystack: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, haystack, needle) != null;
+        }
+    }.f;
+    // Trailing space avoids spurious substring matches with longer
+    // command names (e.g. `zigttp review` would otherwise match
+    // `zigttp review-patch`).
+    inline for (.{
+        "zigttp login ",  "zigttp logout ",       "zigttp review ",
+        "zigttp grants ", "zigttp revoke-grant ", "zigttp assert-intent ",
+        "--cloud",
+    }) |hidden| {
+        try std.testing.expect(!has(core_help_all, hidden));
+    }
+}
