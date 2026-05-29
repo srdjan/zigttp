@@ -76,8 +76,8 @@ pub fn recordEquivalenceReceiptWithKey(
     const classification = diff.behavioralVerdict();
     const scope = contract_diff.claimScope(after_contract.properties);
 
-    const before_hash = hashHex(before_bytes);
-    const after_hash = hashHex(after_bytes);
+    const before_hash = contractHashHex(allocator, before_contract) catch return;
+    const after_hash = contractHashHex(allocator, after_contract) catch return;
 
     var preserved: u32 = 0;
     var response_changed: u32 = 0;
@@ -137,6 +137,13 @@ fn hashHex(bytes: []const u8) [64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
+fn contractHashHex(allocator: std.mem.Allocator, contract: *const zq.HandlerContract) ![64]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try zq.writeContractJson(contract, &aw.writer);
+    return hashHex(aw.writer.buffered());
+}
+
 /// A `kind=equivalence` row carries its evidence in the `equivalence` object;
 /// `facts` only needs a `contract_sha` so `zigttp proofs` can key the row.
 fn minimalFacts(allocator: std.mem.Allocator, sha: []const u8) !review.ReviewFacts {
@@ -171,6 +178,49 @@ test "hashHex is stable and matches the known SHA-256 of the input" {
         "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
         &a,
     );
+}
+
+test "contractHashHex hashes the serialized contract JSON" {
+    const path = try testing.allocator.dupe(u8, "handler.ts");
+    var contract = zq.HandlerContract{
+        .handler = .{ .path = path, .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = .{ .queries = .empty, .dynamic = false },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+        },
+        .api = .{
+            .schemas = .empty,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = .empty,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+    };
+    defer contract.deinit(testing.allocator);
+
+    const got = try contractHashHex(testing.allocator, &contract);
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try zq.writeContractJson(&contract, &aw.writer);
+    const expected = hashHex(aw.writer.buffered());
+
+    try testing.expectEqualStrings(&expected, &got);
 }
 
 // behavioralVerdict and claimScope now live in `contract_diff` (shared with

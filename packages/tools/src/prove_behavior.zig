@@ -88,7 +88,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     };
     defer allocator.free(after_src);
 
-    var before_result = try precompile.runCheckOnlyFromSource(allocator, before_src, after, null, true, null, false);
+    var before_result = try precompile.runCheckOnlyFromSource(allocator, before_src, before, null, true, null, false);
     defer before_result.deinit(allocator);
     var after_result = try precompile.runCheckOnlyFromSource(allocator, after_src, after, null, true, null, false);
     defer after_result.deinit(allocator);

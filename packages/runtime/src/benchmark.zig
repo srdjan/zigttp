@@ -85,10 +85,11 @@ pub fn runHandlerCorpusFromSource(
         .enforce_arena_escape = false,
     };
 
-    const runtime = try Runtime.init(allocator, config);
-    // Mirrors the bench harness: the script-runtime path skips deinit
-    // because the page allocator does not support individual frees. The
-    // process-shared allocator reclaims at exit.
+    var runtime_arena = std.heap.ArenaAllocator.init(allocator);
+    defer runtime_arena.deinit();
+    const runtime_allocator = runtime_arena.allocator();
+
+    const runtime = try Runtime.init(runtime_allocator, config);
 
     runtime.loadCode(source, handler_path) catch return HandlerCorpusStats{};
 
@@ -846,10 +847,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 const testing = std.testing;
 
 test "runHandlerCorpus on a benign pure handler reports samples and p50" {
-    // page_allocator: the Runtime intentionally skips deinit, matching the
-    // bench harness pattern; testing.allocator would flag the unfreed
-    // bytes as leaks. Process exit reclaims the pages either way.
-    const allocator = std.heap.page_allocator;
+    const allocator = testing.allocator;
     const source =
         \\function handler(req) {
         \\  return Response.json({ ok: true });
@@ -868,7 +866,7 @@ test "runHandlerCorpus on a benign pure handler reports samples and p50" {
 }
 
 test "runHandlerCorpus respects the wall-clock budget" {
-    const allocator = std.heap.page_allocator;
+    const allocator = testing.allocator;
     const source =
         \\function handler(req) {
         \\  return Response.json({ ok: true });
@@ -895,7 +893,7 @@ test "runHandlerCorpus respects the wall-clock budget" {
 }
 
 test "runHandlerCorpus returns sample_count=0 when handler is missing" {
-    const allocator = std.heap.page_allocator;
+    const allocator = testing.allocator;
     const source =
         \\function not_handler() { return 1; }
     ;
