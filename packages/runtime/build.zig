@@ -32,12 +32,12 @@ pub fn build(b: *std.Build) void {
     });
     const pi_app_mod = pi_dep.module("pi_app");
 
-    const deploy_dep = b.dependency("zigttp_deploy", .{
+    const proof_review_dep = b.dependency("zigttp_proof_review", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram,
     });
-    const deploy_mod = deploy_dep.module("zigttp_deploy");
+    const proof_review_mod = proof_review_dep.module("zigttp_proof_review");
 
     const runtime_features = runtimeFeatureOptions(b, .{
         .enable_live_reload = false,
@@ -77,7 +77,7 @@ pub fn build(b: *std.Build) void {
     cli_main.addImport("zigts_cli", zigts_cli_mod);
     cli_main.addImport("pi_app", pi_app_mod);
     cli_main.addImport("project_config", project_config_mod);
-    cli_main.addImport("zigttp_deploy", deploy_mod);
+    cli_main.addImport("zigttp_proof_review", proof_review_mod);
     cli_main.addOptions("runtime_feature_options", cli_features);
 
     const cli_main_tests = b.addModule("cli_main_tests", .{
@@ -89,7 +89,7 @@ pub fn build(b: *std.Build) void {
     cli_main_tests.addImport("zigts_cli", zigts_cli_mod);
     cli_main_tests.addImport("pi_app", pi_app_mod);
     cli_main_tests.addImport("project_config", project_config_mod);
-    cli_main_tests.addImport("zigttp_deploy", deploy_mod);
+    cli_main_tests.addImport("zigttp_proof_review", proof_review_mod);
     cli_main_tests.addOptions("runtime_feature_options", cli_features);
 
     const zruntime = b.addModule("zruntime", .{
@@ -124,7 +124,7 @@ pub fn build(b: *std.Build) void {
     });
     witness_replay.addImport("zigts", zigts_mod);
     witness_replay.addImport("pi_app", pi_app_mod);
-    witness_replay.addImport("zigttp_deploy", deploy_mod);
+    witness_replay.addImport("zigttp_proof_review", proof_review_mod);
 }
 
 fn runtimeFeatureOptions(b: *std.Build, config: RuntimeFeatureConfig) *std.Build.Step.Options {

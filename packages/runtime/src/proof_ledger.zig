@@ -11,9 +11,9 @@
 
 const std = @import("std");
 const zigts = @import("zigts");
-const review = @import("zigttp_deploy").review;
-const state = @import("zigttp_deploy").state;
-const json_util = @import("zigttp_deploy").json_util;
+const review = @import("zigttp_proof_review").review;
+const state = @import("zigttp_proof_review").state;
+const json_util = @import("zigttp_proof_review").json_util;
 
 pub const EventKind = enum {
     deploy,

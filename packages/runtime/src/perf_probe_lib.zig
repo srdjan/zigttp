@@ -25,7 +25,7 @@ const zq = @import("zigts");
 const benchmark = @import("benchmark.zig");
 const proof_ledger = @import("proof_ledger.zig");
 const identity = @import("attest/identity.zig");
-const review = @import("zigttp_deploy").review;
+const review = @import("zigttp_proof_review").review;
 
 const perf_receipt = zq.perf_receipt;
 const Sha256 = std.crypto.hash.sha2.Sha256;

@@ -25,8 +25,8 @@
         .zigttp_pi = .{
             .path = "packages/pi",
         },
-        .zigttp_deploy = .{
-            .path = "packages/deploy",
+        .zigttp_proof_review = .{
+            .path = "packages/proof-review",
         },
     },
     .paths = .{

@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     });
     const zigts_cli_mod = tools_dep.module("zigts_cli");
 
-    _ = b.addModule("zigttp_deploy", .{
+    _ = b.addModule("zigttp_proof_review", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,

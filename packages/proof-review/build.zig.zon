@@ -1,7 +1,7 @@
 .{
-    .name = .zigttp_deploy,
+    .name = .zigttp_proof_review,
     .version = "0.0.0",
-    .fingerprint = 0x4b12afae2181b6c5,
+    .fingerprint = 0xfa24f2cc4cca7af9,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zigts = .{

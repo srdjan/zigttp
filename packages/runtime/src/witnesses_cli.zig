@@ -15,8 +15,8 @@ const std = @import("std");
 const zigts = @import("zigts");
 const witness_corpus = zigts.witness_corpus;
 const spec_discharge = zigts.spec_discharge;
-const printer_mod = @import("zigttp_deploy").printer;
-const io_util = @import("zigttp_deploy").io_util;
+const printer_mod = @import("zigttp_proof_review").printer;
+const io_util = @import("zigttp_proof_review").io_util;
 
 const Subcommand = enum {
     list,

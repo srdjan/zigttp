@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const zigts = @import("zigts");
-const review = @import("zigttp_deploy").review;
+const review = @import("zigttp_proof_review").review;
 const PropertyProvenance = zigts.handler_contract.PropertyProvenance;
 
 pub const Preview = review.CounterexamplePreview;

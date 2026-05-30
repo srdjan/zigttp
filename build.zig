@@ -164,16 +164,16 @@ pub fn build(b: *std.Build) void {
     // zigttp proof-review package tests
     // Pass perf_histogram so the build-graph dedups this dep with the one
     // runtime threads through its own modules. Without it the option-set
-    // hashes diverge and Zig instantiates zigttp_deploy twice, splitting
-    // type identity across the deploy/runtime boundary.
-    const deploy_pkg_dep = b.dependency("zigttp_deploy", .{
+    // hashes diverge and Zig instantiates zigttp_proof_review twice, splitting
+    // type identity across the proof-review/runtime boundary.
+    const proof_review_pkg_dep = b.dependency("zigttp_proof_review", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
     });
-    const deploy_pkg_tests = b.addTest(.{
+    const proof_review_pkg_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = deploy_pkg_dep.path("src/test_root.zig"),
+            .root_source_file = proof_review_pkg_dep.path("src/test_root.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -183,9 +183,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const run_deploy_pkg_tests = b.addRunArtifact(deploy_pkg_tests);
-    const deploy_pkg_test_step = b.step("test-deploy", "Run zigttp proof-review package tests");
-    deploy_pkg_test_step.dependOn(&run_deploy_pkg_tests.step);
+    const run_proof_review_pkg_tests = b.addRunArtifact(proof_review_pkg_tests);
+    const proof_review_pkg_test_step = b.step("test-proof-review", "Run zigttp proof-review package tests");
+    proof_review_pkg_test_step.dependOn(&run_proof_review_pkg_tests.step);
 
     const precompile_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -641,7 +641,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_zigts_tests.step);
     test_step.dependOn(&run_sdk_tests.step);
     test_step.dependOn(&run_modules_tests.step);
-    test_step.dependOn(&run_deploy_pkg_tests.step);
+    test_step.dependOn(&run_proof_review_pkg_tests.step);
     test_step.dependOn(expert_golden_step);
 
     // ZRuntime tests (native Zig runtime)

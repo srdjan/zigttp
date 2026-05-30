@@ -8,17 +8,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
 test {
     _ = @import("dev_cli.zig");
 
-    // Force-link the proof-review deploy submodules used by the developer
-    // CLI. Hosted deploy/provider modules are tested by the deploy package
-    // itself, not by the CLI test target.
+    // Force-link the proof-review submodules used by the developer CLI.
     // Lazy analysis through the package boundary won't reach decls that
     // are only declared but never referenced; the explicit refs below
-    // ensure every relevant deploy file is compiled and its `test`
+    // ensure every relevant proof-review file is compiled and its `test`
     // blocks collected.
-    const deploy = @import("zigttp_deploy");
-    _ = deploy.printer;
-    _ = deploy.review;
-    _ = deploy.state;
+    const proof_review = @import("zigttp_proof_review");
+    _ = proof_review.printer;
+    _ = proof_review.review;
+    _ = proof_review.state;
 
     _ = @import("proof_ledger.zig");
     _ = @import("capsule.zig");

@@ -25,7 +25,7 @@ const zq = @import("zigts");
 const zigts_cli = @import("zigts_cli");
 const proof_ledger = @import("proof_ledger.zig");
 const identity = @import("attest/identity.zig");
-const review = @import("zigttp_deploy").review;
+const review = @import("zigttp_proof_review").review;
 
 const precompile = zigts_cli.precompile;
 const contract_diff = zq.contract_diff;

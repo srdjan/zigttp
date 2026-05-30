@@ -487,7 +487,7 @@ The parser recognizes `guard()` calls within pipe operator chains and desugars t
 
 `zigttp deploy` is local-only in v0.1.0-beta. It auto-detects the project handler, verifies the handler, builds a self-contained `zigttp-runtime` binary, signs the attestation envelope by default, and writes the artifact under `.zigttp/deploy/<project-name>`. It does not require credentials, Docker, a registry, or network access.
 
-The deploy proof-review surface remains in `packages/deploy/src/review.zig` and related helpers. Local deploy, Studio, the proof ledger, and agent probes use those types to render the same verdict language across development and release artifacts. Hosted control-plane, provider, registry, and OCI image orchestration code is intentionally out of core.
+The proof-review package surface remains in `packages/proof-review/src/review.zig` and related helpers. Local deploy, Studio, the proof ledger, and agent probes use those types to render the same verdict language across development and release artifacts. Hosted control-plane, provider, registry, and OCI image orchestration code is intentionally out of core.
 
 ### Self-Extracting Binary Trailer
 

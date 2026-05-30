@@ -1,4 +1,4 @@
-//! zigttp-deploy — proof review/card support for local deploy, Studio, proofs,
+//! zigttp-proof-review — proof review/card support for local deploy, Studio, proofs,
 //! and agent probes. Hosted control-plane deploy code was retired from core;
 //! the request runtime does not consume these files.
 

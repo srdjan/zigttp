@@ -13,8 +13,8 @@
         .zigttp_pi = .{
             .path = "../pi",
         },
-        .zigttp_deploy = .{
-            .path = "../deploy",
+        .zigttp_proof_review = .{
+            .path = "../proof-review",
         },
     },
     .paths = .{
