@@ -1,8 +1,9 @@
 //! zigttp-deploy — local self-contained binary deploy + hosted control-plane
 //! orchestration. Depends only on zigts and zigts_cli (the precompile/build
 //! pipeline that produces the deployable artifact). The runtime package
-//! imports this module to wire `zigttp deploy` and the studio/proofs UI;
-//! the runtime itself does not consume any of these files at request time.
+//! imports this module for proof review/card data used by local deploy,
+//! studio, proofs, and agent probes; the request runtime does not consume
+//! these files.
 
 pub const auth = @import("auth.zig");
 pub const autodetect = @import("autodetect.zig");

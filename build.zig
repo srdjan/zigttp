@@ -446,9 +446,9 @@ pub fn build(b: *std.Build) void {
     });
 
     // Developer CLI — the primary user-facing `zigttp` binary. Contains init,
-    // dev, serve, check, compile, prove, mock, link, expert, deploy, login,
-    // logout, review, grants, revoke-grant, doctor. Links pi_app and the full
-    // deploy subtree.
+    // dev, serve, check, compile, prove, mock, link, expert, local deploy,
+    // doctor, and the proof/proof-ledger tools. Hosted deploy account verbs
+    // are intentionally absent from CLI dispatch in the beta.
     const cli_exe = b.addExecutable(.{
         .name = "zigttp",
         .root_module = runtime_dep.module("cli_main"),

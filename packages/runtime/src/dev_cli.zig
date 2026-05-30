@@ -12,10 +12,6 @@ const runtime_cli = @import("runtime_cli.zig");
 const embedded_handler = @import("embedded_handler");
 const proof_ledger = @import("proof_ledger.zig");
 const ratchet_command = @import("ratchet_command.zig");
-// Hosted cloud deploy is deferred from v0.1.0-beta. The control-plane module
-// stays imported so it keeps compiling, ready to re-enable in a later release;
-// only the `deploy --cloud` rejection in `main` remains user-visible.
-const deploy = @import("deploy.zig");
 const pi_app = @import("pi_app");
 const verify_cli = @import("verify_cli.zig");
 const cli_args = @import("cli_args.zig");
