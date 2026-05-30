@@ -144,7 +144,7 @@ pub fn hasFlag(argv: []const []const u8, name: []const u8) bool {
     return false;
 }
 
-pub fn looksLikeHandlerFile(path: []const u8) bool {
+fn looksLikeHandlerFile(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".js") or
         std.mem.endsWith(u8, path, ".jsx") or
         std.mem.endsWith(u8, path, ".ts") or

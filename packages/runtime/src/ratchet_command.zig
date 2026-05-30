@@ -28,6 +28,7 @@
 const std = @import("std");
 const zigts = @import("zigts");
 const zigts_cli = @import("zigts_cli");
+const cli_args = @import("cli_args.zig");
 const precompile = zigts_cli.precompile;
 const HandlerProperties = zigts.handler_contract.HandlerProperties;
 
@@ -74,23 +75,8 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError!
     }
 }
 
-/// Project-wide convention (mirrors dev_cli.zig:408 `hasHelpFlag`): `--help`,
-/// `-h`, or bare `help` anywhere in argv routes to printHelp(). Lets users type
-/// `ratchet check --help` after the subcommand, not just before it.
-fn argvAsksForHelp(argv: []const []const u8) bool {
-    for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--help") or
-            std.mem.eql(u8, arg, "-h") or
-            std.mem.eql(u8, arg, "help"))
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 fn runShow(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError!void {
-    if (argvAsksForHelp(argv)) {
+    if (cli_args.hasHelpFlag(argv)) {
         printHelp();
         return;
     }
@@ -141,7 +127,7 @@ fn runShow(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError!
 }
 
 fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError!void {
-    if (argvAsksForHelp(argv)) {
+    if (cli_args.hasHelpFlag(argv)) {
         printHelp();
         return;
     }

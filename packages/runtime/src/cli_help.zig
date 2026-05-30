@@ -156,12 +156,11 @@ pub fn printExpertHelp() void {
     _ = std.c.write(std.c.STDOUT_FILENO, expert_help.ptr, expert_help.len);
 }
 
+fn has(haystack: []const u8, needle: []const u8) bool {
+    return std.mem.indexOf(u8, haystack, needle) != null;
+}
+
 test "default help advertises only the five core commands" {
-    const has = struct {
-        fn f(haystack: []const u8, needle: []const u8) bool {
-            return std.mem.indexOf(u8, haystack, needle) != null;
-        }
-    }.f;
     inline for (.{
         "zigttp init", "zigttp dev", "zigttp test", "zigttp expert", "zigttp deploy",
     }) |verb| {
@@ -175,11 +174,6 @@ test "default help advertises only the five core commands" {
 }
 
 test "help --all surfaces the advanced commands" {
-    const has = struct {
-        fn f(haystack: []const u8, needle: []const u8) bool {
-            return std.mem.indexOf(u8, haystack, needle) != null;
-        }
-    }.f;
     inline for (.{
         "zigttp serve",        "zigttp build",          "zigttp compile",
         "zigttp doctor",       "zigttp proofs",         "zigttp check",
@@ -193,7 +187,7 @@ test "help --all surfaces the advanced commands" {
 }
 
 test "help --all surfaces the optional browser studio workbench" {
-    try std.testing.expect(std.mem.indexOf(u8, core_help_all, "zigttp studio") != null);
+    try std.testing.expect(has(core_help_all, "zigttp studio"));
 }
 
 test "hasAllFlag detects the --all escape hatch" {
@@ -212,16 +206,11 @@ test "expert help advertises documented modes" {
         "--tools minimal|full",
         "--no-context-files",
     }) |needle| {
-        try std.testing.expect(std.mem.indexOf(u8, expert_help, needle) != null);
+        try std.testing.expect(has(expert_help, needle));
     }
 }
 
 test "help --all no longer advertises hosted cloud deploy" {
-    const has = struct {
-        fn f(haystack: []const u8, needle: []const u8) bool {
-            return std.mem.indexOf(u8, haystack, needle) != null;
-        }
-    }.f;
     // Trailing space avoids spurious substring matches with longer
     // command names (e.g. `zigttp review` would otherwise match
     // `zigttp review-patch`).
