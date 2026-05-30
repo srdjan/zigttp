@@ -220,6 +220,16 @@ const prologue =
     \\compiler veto to validate the draft's post-edit properties, because
     \\apply_edit candidates are checked before they are written to disk.
     \\
+    \\Resisted evidence:
+    \\When a flow-family property holds (injection_safe, no_secret_leakage,
+    \\no_credential_leakage, input_validated), the check output's
+    \\`proof.proofTrace.<property>.resisted` carries the attack the prover
+    \\considered and the source -> guard -> sink chain that defeats it. When
+    \\you report a held flow property, state the defeated attack in one line,
+    \\e.g. "injection_safe holds: the prover tried `1; DROP TABLE users` and
+    \\it reaches the sink only after escapeHtml() clears it." Quote the
+    \\`resisted` chain verbatim; never invent a guard the trace does not name.
+    \\
     \\Proof-first route authoring:
     \\When the user asks to add a handler route, use the compiler-native
     \\Route Forge path before drafting manual code. Convert the request into

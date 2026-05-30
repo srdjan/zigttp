@@ -205,12 +205,22 @@ pub fn writeProofCardFrame(
     }
     // The proof trace pairs with the Properties chips; render it only on
     // that lens. This also keeps the JSON parse off the other three lens
-    // renders that `refreshLensCache` performs every recompile.
+    // renders that `refreshLensCache` performs every recompile. The trace and
+    // resisted blocks read the same object, so parse once and share it.
     if (opts.lens == .properties) {
         if (opts.proof_trace_json) |ptj| {
-            if (try writeProofTraceBlock(allocator, writer, widths, ptj)) {
-                try writeBorder(writer, widths);
-            }
+            if (std.json.parseFromSlice(std.json.Value, allocator, ptj, .{})) |parsed| {
+                defer parsed.deinit();
+                if (parsed.value == .object) {
+                    const obj = parsed.value.object;
+                    if (try writeProofTraceBlock(allocator, writer, widths, obj)) {
+                        try writeBorder(writer, widths);
+                    }
+                    if (try writeResistedBlock(allocator, writer, widths, obj)) {
+                        try writeBorder(writer, widths);
+                    }
+                }
+            } else |_| {}
         }
     }
     try writeStatusBar(writer, widths, card);
@@ -340,31 +350,46 @@ fn writeFullRow(
     try writer.writeAll("|\n");
 }
 
+// Typed accessors over std.json.Value for the proof-trace render blocks
+// below. Both blocks pull object/string/array fields by key from the same
+// parsed `proofTrace` object; these flatten the `get + switch` idiom to a
+// single optional read.
+fn jsonString(v: std.json.Value) ?[]const u8 {
+    return switch (v) {
+        .string => |s| s,
+        else => null,
+    };
+}
+fn objField(obj: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
+    return switch (obj.get(key) orelse return null) {
+        .object => |o| o,
+        else => null,
+    };
+}
+fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    return jsonString(obj.get(key) orelse return null);
+}
+fn arrField(obj: std.json.ObjectMap, key: []const u8) ?std.json.Array {
+    return switch (obj.get(key) orelse return null) {
+        .array => |a| a,
+        else => null,
+    };
+}
+
 /// Render the "Proof trace" block: for every headline property that did not
 /// hold, one full-width row carrying the analyzer's reasoning. Surfaces the
 /// counterexample behind each red chip without a keystroke. Returns true when
-/// at least one row was written. `json` is the analyzer's `proofTrace` object;
-/// a parse failure is non-fatal and simply skips the block.
+/// at least one row was written. `obj` is the parsed `proofTrace` object,
+/// shared with `writeResistedBlock` so the JSON is parsed once per frame.
 fn writeProofTraceBlock(
     allocator: std.mem.Allocator,
     writer: *std.Io.Writer,
     widths: ColumnWidths,
-    json: []const u8,
+    obj: std.json.ObjectMap,
 ) !bool {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return false;
-    defer parsed.deinit();
-    const obj = switch (parsed.value) {
-        .object => |o| o,
-        else => return false,
-    };
-
     var wrote_title = false;
     inline for (review.property_metas) |meta| {
-        const e: ?std.json.ObjectMap = if (obj.get(meta.field)) |entry| switch (entry) {
-            .object => |o| o,
-            else => null,
-        } else null;
-        if (e) |fields| {
+        if (objField(obj, meta.field)) |fields| {
             const holds = if (fields.get("holds")) |h| switch (h) {
                 .bool => |b| b,
                 else => true,
@@ -374,13 +399,57 @@ fn writeProofTraceBlock(
                     try writeFullRow(writer, widths, "Proof trace: how each red proof broke");
                     wrote_title = true;
                 }
-                const summary: []const u8 = if (fields.get("summary")) |s| switch (s) {
-                    .string => |str| str,
-                    else => "",
-                } else "";
+                const summary = strField(fields, "summary") orelse "";
                 const line = try std.fmt.allocPrint(allocator, "  -{s}: {s}", .{ meta.label, summary });
                 defer allocator.free(line);
                 try writeFullRow(writer, widths, line);
+            }
+        }
+    }
+    return wrote_title;
+}
+
+/// Render the "resisted" block: for every held flow property that carries a
+/// `resisted` object, show the representative attack the prover considered and
+/// the source -> guard -> sink chain that defeats it. The green-proof mirror of
+/// `writeProofTraceBlock`: it turns a passing checkmark into legible evidence.
+/// Returns true when at least one row was written. `obj` is the parsed
+/// `proofTrace` object, shared with `writeProofTraceBlock`.
+fn writeResistedBlock(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    widths: ColumnWidths,
+    obj: std.json.ObjectMap,
+) !bool {
+    var wrote_title = false;
+    inline for (review.property_metas) |meta| {
+        if (objField(obj, meta.field)) |fields| {
+            if (objField(fields, "resisted")) |rf| {
+                if (!wrote_title) {
+                    try writeFullRow(writer, widths, "Resisted: the attack each proof defeats");
+                    wrote_title = true;
+                }
+                const header = try std.fmt.allocPrint(allocator, "  +{s}", .{meta.label});
+                defer allocator.free(header);
+                try writeFullRow(writer, widths, header);
+
+                if (strField(rf, "attackInput")) |s| {
+                    const line = try std.fmt.allocPrint(allocator, "    tried: {s}", .{s});
+                    defer allocator.free(line);
+                    try writeFullRow(writer, widths, line);
+                }
+                if (arrField(rf, "chain")) |steps| {
+                    for (steps.items) |step| if (jsonString(step)) |s| {
+                        const line = try std.fmt.allocPrint(allocator, "    -> {s}", .{s});
+                        defer allocator.free(line);
+                        try writeFullRow(writer, widths, line);
+                    };
+                }
+                if (strField(rf, "conclusion")) |s| {
+                    const line = try std.fmt.allocPrint(allocator, "    {s}", .{s});
+                    defer allocator.free(line);
+                    try writeFullRow(writer, widths, line);
+                }
             }
         }
     }
@@ -996,6 +1065,47 @@ test "writeProofCardFrame: proof trace block surfaces failing properties and kee
     // The failing property appears with its reasoning; the passing one does not.
     try std.testing.expect(std.mem.indexOf(u8, out, "Proof trace: how each red proof broke") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Date.now() reads a clock.") != null);
+
+    // Every rendered row still has identical visible width.
+    var iter = std.mem.splitScalar(u8, out, '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) continue;
+        try std.testing.expectEqual(@as(usize, 100), line.len);
+    }
+}
+
+test "writeProofCardFrame: resisted block surfaces a held flow proof and keeps width" {
+    const allocator = std.testing.allocator;
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+
+    var delta = try review.deriveDelta(allocator, &current, null);
+    defer delta.deinit(allocator);
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "us-east",
+        .current = &current,
+        .baseline = null,
+        .delta = &delta,
+    };
+
+    const trace_json =
+        \\{"injection_safe":{"holds":true,"kind":"flow-trace","summary":"No unvalidated user input reaches a SQL or HTML sink.",
+        \\"resisted":{"attackInput":"1; DROP TABLE users--","chain":["user input enters the handler","validated by schemaCompile() at L7","reaches an HTML response body at L12, already cleared"],"conclusion":"the validator clears the taint before the sink; the attack input cannot reach it unescaped."}}}
+    ;
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeProofCardFrame(allocator, &card, &aw.writer, .{ .width = 100, .proof_trace_json = trace_json });
+    const out = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Resisted: the attack each proof defeats") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "+injection-safe") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "tried: 1; DROP TABLE users--") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "validated by schemaCompile() at L7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "the validator clears the taint") != null);
 
     // Every rendered row still has identical visible width.
     var iter = std.mem.splitScalar(u8, out, '\n');

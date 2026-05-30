@@ -88,6 +88,42 @@ pub const Diagnostic = struct {
     repair_intent: ?RepairIntent = null,
 };
 
+/// How a flow property was *held* (proven safe), captured for the green-proof
+/// card. The passing-case sibling of `Witness`: where `Witness` records the
+/// path that breaks a property, a `DefendedPath` records why the property
+/// could not be broken. Two shapes:
+///   - `.validated`: a tainted value reached a sink but carried `.validated`,
+///     i.e. it passed a named validator first. `guard_func` is the validator.
+///   - `.never_reached`: a tainted value was read but reached no sink at all.
+///     No guard is named (none exists); the value is simply contained.
+///
+/// Soundness: a `.validated` path is emitted ONLY when the specific validator
+/// binding is recovered from the sink expression's `result.value` provenance.
+/// If the guard cannot be named, no path is recorded - the property still
+/// proves true, it just carries no resisted card. The evidence is always
+/// derived from what the prover observed, never fabricated.
+pub const SafeForm = enum { validated, never_reached };
+
+pub const DefendedPath = struct {
+    property: counterexample.PropertyTag,
+    safe_form: SafeForm,
+    /// Validator function name, present iff `safe_form == .validated`.
+    /// Borrowed from `module_fn_meta` (checker-lifetime); never freed here.
+    guard_func: ?[]const u8 = null,
+    guard_line: u32 = 0,
+    /// Human label of the sink the validated value safely reached
+    /// (static literal); "" for `.never_reached`.
+    sink_label: []const u8 = "",
+    sink_line: u32 = 0,
+};
+
+/// The validator call that produced a `.validated` binding, recorded so a
+/// defended path can name the guard. `node` resolves to the call's source loc.
+const GuardInfo = struct {
+    func: []const u8,
+    node: NodeIndex,
+};
+
 /// Map a diagnostic kind to the property tag it witnesses. `null` when the
 /// diagnostic does not correspond to a currently modelled property (the
 /// counterexample surface is a subset of flow diagnostics by design).
@@ -230,6 +266,15 @@ pub const FlowChecker = struct {
     /// Result binding tracking: packed(scope_id, slot) -> return_labels from the producing call.
     /// When accessing .value on these bindings, the return_labels are merged in.
     result_binding_labels: std.AutoHashMapUnmanaged(u32, LabelSet),
+    /// Guard provenance for validated bindings: packed(scope_id, slot) -> the
+    /// validator call that set the `.validated` label. Lets a defended path
+    /// name the guard ("validated by schemaCompile()"). Populated alongside
+    /// `result_binding_labels` in `trackResultBinding`.
+    result_binding_guard: std.AutoHashMapUnmanaged(u32, GuardInfo),
+    /// Passing-case evidence: why each held flow property could not be broken.
+    /// The green-proof sibling of `diagnostics`. Strings are borrowed
+    /// (checker-lifetime / static); only the list backing is freed.
+    defended_paths: std.ArrayListUnmanaged(DefendedPath),
     /// Handler request parameter binding key (packed scope_id + slot).
     req_binding_key: ?u32,
     /// Slot of the `env` function import (for smart label refinement).
@@ -262,6 +307,8 @@ pub const FlowChecker = struct {
             .module_fn_meta = .empty,
             .binding_origin = .empty,
             .result_binding_labels = .empty,
+            .result_binding_guard = .empty,
+            .defended_paths = .empty,
             .req_binding_key = null,
             .env_fn_slot = null,
             .working_constraints = .empty,
@@ -288,6 +335,8 @@ pub const FlowChecker = struct {
         self.working_constraints.deinit(self.allocator);
         self.working_io_calls.deinit(self.allocator);
         self.result_binding_labels.deinit(self.allocator);
+        self.result_binding_guard.deinit(self.allocator);
+        self.defended_paths.deinit(self.allocator);
 
         // Free dynamically formatted diagnostic messages
         for (self.allocated_messages.items) |msg| {
@@ -316,6 +365,7 @@ pub const FlowChecker = struct {
         self.scanImports();
         self.findHandlerParam(handler_func);
         self.walkStmt(handler_func);
+        self.recordContainedSecrets();
 
         var error_count: u32 = 0;
         for (self.diagnostics.items) |diag| {
@@ -324,8 +374,166 @@ pub const FlowChecker = struct {
         return error_count;
     }
 
+    /// After the walk, record `.never_reached` defended paths for the leak
+    /// families: a secret/credential binding was read but no sink consumed it.
+    /// Only fires when such a binding exists, so handlers that touch no secrets
+    /// carry no spurious card. The user_input family is intentionally excluded
+    /// here - the request parameter always carries `.user_input`, so a
+    /// never-reached scan on it would fire on every handler.
+    fn recordContainedSecrets(self: *FlowChecker) void {
+        const Pair = struct { tag: counterexample.PropertyTag, label: DataLabel, held: bool };
+        const pairs = [_]Pair{
+            .{ .tag = .no_secret_leakage, .label = .secret, .held = self.properties.no_secret_leakage },
+            .{ .tag = .no_credential_leakage, .label = .credential, .held = self.properties.no_credential_leakage },
+        };
+        for (pairs) |p| {
+            if (!p.held) continue;
+            if (self.hasDefendedPath(p.tag)) continue;
+            if (!self.anyBindingHasLabel(p.label)) continue;
+            self.defended_paths.append(self.allocator, .{
+                .property = p.tag,
+                .safe_form = .never_reached,
+            }) catch {};
+        }
+    }
+
+    fn anyBindingHasLabel(self: *const FlowChecker, label: DataLabel) bool {
+        var it = self.binding_labels.valueIterator();
+        while (it.next()) |ls| {
+            if (ls.has(label)) return true;
+        }
+        return false;
+    }
+
+    fn hasDefendedPath(self: *const FlowChecker, tag: counterexample.PropertyTag) bool {
+        for (self.defended_paths.items) |d| {
+            if (d.property == tag) return true;
+        }
+        return false;
+    }
+
+    /// Record a `.validated` defended path for `tag` if its guard can be named
+    /// from the sink value's `result.value` provenance. No guard found -> no
+    /// path (the property still holds; it just carries no resisted card).
+    fn recordValidated(
+        self: *FlowChecker,
+        tag: counterexample.PropertyTag,
+        value_expr: NodeIndex,
+        sink_node: NodeIndex,
+        sink_label: []const u8,
+    ) void {
+        if (self.hasDefendedPath(tag)) return;
+        const guard = self.findGuardInExpr(value_expr) orelse return;
+        const guard_loc = self.ir_view.getLoc(guard.node);
+        const sink_loc = self.ir_view.getLoc(sink_node);
+        self.defended_paths.append(self.allocator, .{
+            .property = tag,
+            .safe_form = .validated,
+            .guard_func = guard.func,
+            .guard_line = if (guard_loc) |l| l.line else 0,
+            .sink_label = sink_label,
+            .sink_line = if (sink_loc) |l| l.line else 0,
+        }) catch {};
+    }
+
+    /// Walk an expression for the validator that cleared the taint: the first
+    /// `<ident>.value` whose binding is a tracked validation result, or a bare
+    /// identifier that is itself such a binding. Mirrors `inferLabels`'
+    /// recursion over the shapes that can carry a `.validated` label.
+    fn findGuardInExpr(self: *const FlowChecker, node: NodeIndex) ?GuardInfo {
+        if (node == null_node) return null;
+        const tag = self.ir_view.getTag(node) orelse return null;
+        switch (tag) {
+            .identifier => {
+                const binding = self.ir_view.getBinding(node) orelse return null;
+                const key = packBindingKey(binding.scope_id, binding.slot);
+                return self.result_binding_guard.get(key);
+            },
+            .member_access, .optional_chain => {
+                const member = self.ir_view.getMember(node) orelse return null;
+                // `result.value` is the canonical validated-value access.
+                if (self.resolveAtomName(member.property)) |prop_name| {
+                    if (std.mem.eql(u8, prop_name, "value")) {
+                        const obj_tag = self.ir_view.getTag(member.object) orelse return null;
+                        if (obj_tag == .identifier) {
+                            const binding = self.ir_view.getBinding(member.object) orelse return null;
+                            const key = packBindingKey(binding.scope_id, binding.slot);
+                            if (self.result_binding_guard.get(key)) |g| return g;
+                        }
+                    }
+                }
+                return self.findGuardInExpr(member.object);
+            },
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return null;
+                return self.findGuardInExpr(bin.left) orelse self.findGuardInExpr(bin.right);
+            },
+            .ternary => {
+                const t = self.ir_view.getTernary(node) orelse return null;
+                return self.findGuardInExpr(t.then_branch) orelse self.findGuardInExpr(t.else_branch);
+            },
+            .template_literal => {
+                const tmpl = self.ir_view.getTemplate(node) orelse return null;
+                for (0..tmpl.parts_count) |i| {
+                    const part_idx = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
+                    const part_tag = self.ir_view.getTag(part_idx) orelse continue;
+                    if (part_tag == .template_part_expr) {
+                        if (self.ir_view.getOptValue(part_idx)) |expr| {
+                            if (self.findGuardInExpr(expr)) |g| return g;
+                        }
+                    }
+                }
+                return null;
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(node) orelse return null;
+                var i: u16 = 0;
+                while (i < obj.properties_count) : (i += 1) {
+                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+                    const prop_tag = self.ir_view.getTag(prop_idx) orelse continue;
+                    if (prop_tag == .object_property) {
+                        const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                        if (self.findGuardInExpr(prop.value)) |g| return g;
+                    } else if (prop_tag == .object_spread) {
+                        if (self.ir_view.getOptValue(prop_idx)) |val| {
+                            if (self.findGuardInExpr(val)) |g| return g;
+                        }
+                    }
+                }
+                return null;
+            },
+            .array_literal => {
+                const arr = self.ir_view.getArray(node) orelse return null;
+                var i: u16 = 0;
+                while (i < arr.elements_count) : (i += 1) {
+                    const elem_idx = self.ir_view.getListIndex(arr.elements_start, i);
+                    if (self.findGuardInExpr(elem_idx)) |g| return g;
+                }
+                return null;
+            },
+            .spread, .unary_op => {
+                if (self.ir_view.getOptValue(node)) |operand| return self.findGuardInExpr(operand);
+                return null;
+            },
+            .assignment => {
+                const asgn = self.ir_view.getAssignment(node) orelse return null;
+                return self.findGuardInExpr(asgn.value);
+            },
+            .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return null;
+                return self.findGuardInExpr(member.object);
+            },
+            else => return null,
+        }
+    }
+
     pub fn getDiagnostics(self: *const FlowChecker) []const Diagnostic {
         return self.diagnostics.items;
+    }
+
+    /// Passing-case evidence: defended paths for held flow properties.
+    pub fn getDefendedPaths(self: *const FlowChecker) []const DefendedPath {
+        return self.defended_paths.items;
     }
 
     pub fn getProperties(self: *const FlowChecker) FlowProperties {
@@ -812,6 +1020,14 @@ pub const FlowChecker = struct {
                             });
                             self.properties.injection_safe = false;
                         }
+                    } else if (labels.has(.validated)) {
+                        // Defended: a validated value safely reaches an HTML
+                        // response. The `.validated` label is present only
+                        // because the value passed a named validator (e.g.
+                        // escapeHtml/validateObject), so the guard is real.
+                        if (self.isGlobalMethodCall(call_data.callee, "Response", &.{"html"})) {
+                            self.recordValidated(.injection_safe, data_arg, ret_val, "an HTML response body");
+                        }
                     }
                 }
             }
@@ -840,7 +1056,17 @@ pub const FlowChecker = struct {
             }
             if (call_data.args_count > 1) {
                 const opts_arg = self.ir_view.getListIndex(call_data.args_start, 1);
-                self.checkSinkLabels(self.inferObjectBodyLabels(opts_arg), node, .egress_body);
+                const body_labels = self.inferObjectBodyLabels(opts_arg);
+                self.checkSinkLabels(body_labels, node, .egress_body);
+                // Defended: a validated value safely reaches an egress body.
+                // `.validated` is present only because the value passed a named
+                // validator; `findGuardInExpr` recurses the options object to
+                // the `body:` value to name it.
+                if (body_labels.has(.validated)) {
+                    for ([_]counterexample.PropertyTag{ .injection_safe, .input_validated }) |defended_tag| {
+                        self.recordValidated(defended_tag, opts_arg, node, "an egress request body");
+                    }
+                }
             }
         }
     }
@@ -1109,6 +1335,14 @@ pub const FlowChecker = struct {
         if (return_labels.has(.validated)) {
             const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
             self.result_binding_labels.put(self.allocator, key, return_labels) catch {};
+            // Remember the validator that cleared the taint so a defended path
+            // can name it. `func` is borrowed from the module metadata table.
+            if (self.module_fn_meta.get(callee_binding.slot)) |meta| {
+                self.result_binding_guard.put(self.allocator, key, .{
+                    .func = meta.func,
+                    .node = vd.init,
+                }) catch {};
+            }
         }
     }
 
@@ -1783,6 +2017,157 @@ test "FlowChecker captures result_ok constraint on validated path" {
     try std.testing.expect(found);
 }
 
+test "FlowChecker records validated defended path reaching egress body" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { validateObject } from "zigttp:validate";
+        \\function handler(req) {
+        \\  const v = validateObject(req.body, "{}");
+        \\  fetchSync("https://api.example.com", { method: "POST", body: v.value });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var saw_injection = false;
+    var saw_input_validated = false;
+    for (checker.getDefendedPaths()) |d| {
+        if (d.property == .injection_safe) {
+            saw_injection = true;
+            try std.testing.expectEqual(SafeForm.validated, d.safe_form);
+            try std.testing.expect(d.guard_func != null);
+            try std.testing.expectEqualStrings("validateObject", d.guard_func.?);
+        }
+        if (d.property == .input_validated) saw_input_validated = true;
+    }
+    try std.testing.expect(saw_injection);
+    try std.testing.expect(saw_input_validated);
+    // The property itself must actually hold for the card to render.
+    try std.testing.expect(checker.getProperties().injection_safe);
+}
+
+test "FlowChecker records validated defended path reaching an HTML response" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { escapeHtml } from "zigttp:text";
+        \\function handler(req) {
+        \\  const raw = req.headers.get("x-name");
+        \\  const safe = escapeHtml(raw);
+        \\  return Response.html(safe);
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDefendedPaths()) |d| {
+        if (d.property == .injection_safe) {
+            found = true;
+            try std.testing.expectEqual(SafeForm.validated, d.safe_form);
+            try std.testing.expect(d.guard_func != null);
+            try std.testing.expectEqualStrings("escapeHtml", d.guard_func.?);
+        }
+    }
+    try std.testing.expect(found);
+    try std.testing.expect(checker.getProperties().injection_safe);
+}
+
+test "FlowChecker records never_reached defended path for unused secret" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const k = env("SECRET_KEY");
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDefendedPaths()) |d| {
+        if (d.property == .no_secret_leakage) {
+            found = true;
+            try std.testing.expectEqual(SafeForm.never_reached, d.safe_form);
+            try std.testing.expect(d.guard_func == null);
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "FlowChecker records no defended path for a leaking secret" {
+    // A handler that actually leaks must not also claim a defended path for
+    // the same property: violation and defended are mutually exclusive.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const k = env("SECRET_KEY");
+        \\  return Response.json({ leaked: k });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    try std.testing.expect(!checker.getProperties().no_secret_leakage);
+    for (checker.getDefendedPaths()) |d| {
+        try std.testing.expect(d.property != .no_secret_leakage);
+    }
+}
+
 test "LabelSet operations in flow context" {
     // Verify secret + credential merge
     const secret = LabelSet{ .secret = true };
@@ -1880,6 +2265,8 @@ test "setExternalLabels registers short form from qualified name" {
         .module_fn_meta = .empty,
         .binding_origin = .empty,
         .result_binding_labels = .empty,
+        .result_binding_guard = .empty,
+        .defended_paths = .empty,
         .req_binding_key = null,
         .env_fn_slot = null,
         .working_constraints = .empty,

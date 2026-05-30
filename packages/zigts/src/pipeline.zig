@@ -214,6 +214,10 @@ pub const CheckedModule = struct {
     pub fn flowDiagnostics(self: *const CheckedModule) []const flow_checker_mod.Diagnostic {
         return self.flow_checker.getDiagnostics();
     }
+
+    pub fn defendedPaths(self: *const CheckedModule) []const flow_checker_mod.DefendedPath {
+        return self.flow_checker.getDefendedPaths();
+    }
 };
 
 pub fn check(

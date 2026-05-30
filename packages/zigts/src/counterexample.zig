@@ -99,6 +99,20 @@ pub const PropertyTag = enum {
     }
 };
 
+/// A representative falsifying input for a property, used to narrate a
+/// *passing* proof: "the prover tried this and the code resisted it." This is
+/// a fixed, property-appropriate literal - the input the prover would reject,
+/// never observed program data. The resisted-counterexample surface (see
+/// `proof_trace.zig`) renders it as the `tried:` line on a green proof card.
+pub fn attackInput(property: PropertyTag) []const u8 {
+    return switch (property) {
+        .injection_safe => "1; DROP TABLE users--",
+        .no_secret_leakage, .no_credential_leakage => "secret-sentinel",
+        .input_validated => "{\"q\":\"<oversized/malformed payload>\"}",
+        .pii_contained => "user@example.com",
+    };
+}
+
 /// Source span for a witness endpoint. Columns are 1-based to match the
 /// rest of the compiler diagnostics surface.
 pub const SourceSpan = struct {
@@ -416,6 +430,15 @@ pub fn writeJsonl(writer: anytype, witness: CounterexampleWitness) !void {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "attackInput returns a non-empty literal for every property tag" {
+    inline for (@typeInfo(PropertyTag).@"enum".fields) |field| {
+        const tag = @field(PropertyTag, field.name);
+        try std.testing.expect(attackInput(tag).len > 0);
+    }
+    try std.testing.expectEqualStrings("1; DROP TABLE users--", attackInput(.injection_safe));
+    try std.testing.expectEqualStrings("secret-sentinel", attackInput(.no_secret_leakage));
+}
 
 test "solve produces default GET / request with no constraints" {
     const allocator = std.testing.allocator;

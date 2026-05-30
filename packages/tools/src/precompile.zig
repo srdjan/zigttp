@@ -1257,10 +1257,13 @@ pub fn runCheckOnlyFromSourceWithOptions(
         defer trace_arena.deinit();
         const flow_for_trace: []const zigts.flow_checker.Diagnostic =
             if (checked_opt) |*ck| ck.flowDiagnostics() else &.{};
+        const defended_for_trace: []const zigts.flow_checker.DefendedPath =
+            if (checked_opt) |*ck| ck.defendedPaths() else &.{};
         if (zigts.proof_trace.collect(
             trace_arena.allocator(),
             c,
             flow_for_trace,
+            defended_for_trace,
             ir_view,
             result.paths_enumerated,
             result.paths_exhaustive,

@@ -59,9 +59,27 @@ pub const ProofCounterexample = struct {
     fix: []const u8 = "",
 };
 
+/// The green-proof mirror of `ProofCounterexample`: a representative attack
+/// the prover considered and the source -> guard -> sink chain that defeats
+/// it. Present only when a flow property `holds`. Turns a passing checkmark
+/// into legible evidence ("tried X; the validator caught it"). Derived from a
+/// `flow_checker.DefendedPath`, never fabricated.
+pub const ResistedCounterexample = struct {
+    /// The falsifying input the prover would reject (a canned, property-
+    /// appropriate literal from `counterexample.attackInput`).
+    attack_input: []const u8,
+    /// Ordered human-readable steps: where the input enters, the guard that
+    /// clears it (if any), and the sink it safely reaches.
+    chain: []const []const u8,
+    /// One-line statement of why the attack cannot succeed.
+    conclusion: []const u8,
+};
+
 /// One property's full reasoning. `summary` is always present and legible;
 /// `counterexample` is present only when `holds` is false and a concrete one
-/// is derivable. Facts are only meaningful for `path_enumeration` traces.
+/// is derivable. `resisted` is the inverse: present only when a flow property
+/// holds and a defended path was captured. Facts are only meaningful for
+/// `path_enumeration` traces.
 pub const ProofTrace = struct {
     /// snake_case `HandlerProperties` field name.
     property: []const u8,
@@ -73,6 +91,7 @@ pub const ProofTrace = struct {
     failable_sites: u32 = 0,
     covered_sites: u32 = 0,
     counterexample: ?ProofCounterexample = null,
+    resisted: ?ResistedCounterexample = null,
 };
 
 fn wirePropertyName(name: []const u8) []const u8 {
@@ -260,6 +279,7 @@ pub fn collect(
     arena: std.mem.Allocator,
     contract: *const HandlerContract,
     flow_diags: []const flow_checker.Diagnostic,
+    defended: []const flow_checker.DefendedPath,
     ir_view: ir.IrView,
     paths_enumerated: u32,
     paths_exhaustive: bool,
@@ -277,6 +297,7 @@ pub fn collect(
                 holds,
                 contract,
                 flow_diags,
+                defended,
                 ir_view,
                 paths_enumerated,
                 paths_exhaustive,
@@ -292,6 +313,7 @@ fn buildTrace(
     holds: bool,
     contract: *const HandlerContract,
     flow_diags: []const flow_checker.Diagnostic,
+    defended: []const flow_checker.DefendedPath,
     ir_view: ir.IrView,
     paths_enumerated: u32,
     paths_exhaustive: bool,
@@ -359,12 +381,14 @@ fn buildTrace(
             }
         },
         .flow => {
-            if (!holds) {
-                if (info.flow_tag) |tag| {
+            if (info.flow_tag) |tag| {
+                if (!holds) {
                     if (findFlowDiag(flow_diags, tag)) |diag| {
                         trace.summary = diag.message;
                         trace.counterexample = try flowCounterexample(arena, diag, tag, ir_view);
                     }
+                } else if (findDefended(defended, tag)) |dp| {
+                    trace.resisted = try resistedFor(arena, dp, tag);
                 }
             }
         },
@@ -381,6 +405,69 @@ fn findFlowDiag(
         if (diag_tag == tag) return diag;
     }
     return null;
+}
+
+fn findDefended(
+    defended: []const flow_checker.DefendedPath,
+    tag: counterexample.PropertyTag,
+) ?flow_checker.DefendedPath {
+    for (defended) |d| {
+        if (d.property == tag) return d;
+    }
+    return null;
+}
+
+/// The label family a tag tracks, for the chain's source phrasing.
+fn sourcePhrase(tag: counterexample.PropertyTag) []const u8 {
+    return switch (tag) {
+        .no_secret_leakage => "a secret-labelled value",
+        .no_credential_leakage => "a credential-labelled value",
+        .input_validated, .pii_contained, .injection_safe => "user input",
+    };
+}
+
+/// Build the green-proof evidence from a defended path. Soundness: a
+/// `.validated` path always carries a named guard (the flow checker only
+/// records one when the validator binding is recovered), so the chain never
+/// invents a guard; a `.never_reached` path states containment with no guard.
+fn resistedFor(
+    arena: std.mem.Allocator,
+    dp: flow_checker.DefendedPath,
+    tag: counterexample.PropertyTag,
+) !ResistedCounterexample {
+    const source = sourcePhrase(tag);
+    var chain: std.ArrayListUnmanaged([]const u8) = .empty;
+    switch (dp.safe_form) {
+        .validated => {
+            std.debug.assert(dp.guard_func != null);
+            const guard = dp.guard_func orelse "a validator";
+            try chain.append(arena, try std.fmt.allocPrint(arena, "{s} enters the handler", .{source}));
+            try chain.append(arena, try std.fmt.allocPrint(
+                arena,
+                "validated by {s}() at L{d}",
+                .{ guard, dp.guard_line },
+            ));
+            try chain.append(arena, try std.fmt.allocPrint(
+                arena,
+                "reaches {s} at L{d}, already cleared",
+                .{ dp.sink_label, dp.sink_line },
+            ));
+            return .{
+                .attack_input = counterexample.attackInput(tag),
+                .chain = try chain.toOwnedSlice(arena),
+                .conclusion = "the validator clears the taint before the sink; the attack input cannot reach it unescaped.",
+            };
+        },
+        .never_reached => {
+            try chain.append(arena, try std.fmt.allocPrint(arena, "{s} is read", .{source}));
+            try chain.append(arena, "it never reaches a response, log, or egress sink");
+            return .{
+                .attack_input = counterexample.attackInput(tag),
+                .chain = try chain.toOwnedSlice(arena),
+                .conclusion = "no sink is reachable from the tainted source; the value stays contained.",
+            };
+        },
+    }
 }
 
 fn flowCounterexample(
@@ -454,6 +541,18 @@ pub fn writeJson(writer: anytype, traces: []const ProofTrace) !void {
         if (trace.counterexample) |cx| {
             try writer.writeAll(",\"counterexample\":");
             try writeCounterexample(writer, cx);
+        }
+        if (trace.resisted) |r| {
+            try writer.writeAll(",\"resisted\":{\"attackInput\":");
+            try json_utils.writeJsonString(writer, r.attack_input);
+            try writer.writeAll(",\"chain\":[");
+            for (r.chain, 0..) |step, j| {
+                if (j > 0) try writer.writeByte(',');
+                try json_utils.writeJsonString(writer, step);
+            }
+            try writer.writeAll("],\"conclusion\":");
+            try json_utils.writeJsonString(writer, r.conclusion);
+            try writer.writeByte('}');
         }
         try writer.writeByte('}');
     }
@@ -571,6 +670,37 @@ test "writeJson emits an offending-node counterexample" {
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"kind\":\"offending-node\"") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"line\":14") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"snippet\":\"Date.now()\"") != null);
+}
+
+test "writeJson emits a resisted counterexample for a passing flow property" {
+    const steps = [_][]const u8{
+        "user input enters the handler",
+        "validated by schemaCompile() at L7",
+        "reaches an egress request body at L12, already cleared",
+    };
+    const traces = [_]ProofTrace{.{
+        .property = "injection_safe",
+        .holds = true,
+        .kind = .flow_trace,
+        .summary = "No unvalidated user input reaches a SQL or HTML sink.",
+        .resisted = .{
+            .attack_input = "1; DROP TABLE users--",
+            .chain = &steps,
+            .conclusion = "the validator clears the taint before the sink; the attack input cannot reach it unescaped.",
+        },
+    }};
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
+    try writeJson(&aw.writer, &traces);
+    buf = aw.toArrayList();
+
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"resisted\":{") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"attackInput\":\"1; DROP TABLE users--\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"validated by schemaCompile() at L7\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"conclusion\":") != null);
+    // holds==true, so no failing counterexample is present.
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"counterexample\"") == null);
 }
 
 test "writeJson emits a flow-chain counterexample" {

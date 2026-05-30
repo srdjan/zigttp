@@ -111,6 +111,15 @@ auto-rendered block in the terminal HUD, to see:
   `path-enumeration` is exhaustive symbolic enumeration of execution paths.
   `flow-trace` is a source-to-sink data-flow taint trace.
 - The `counterexample`, when the property does not hold.
+- The `resisted` evidence, when a data-flow property *does* hold. This is the
+  green-proof mirror of the counterexample: a representative attack the prover
+  considered (`attackInput`), the source -> guard -> sink `chain` that defeats
+  it, and a one-line `conclusion`. For example, a held `injection_safe` shows
+  the SQL/HTML payload it tried, the validator that cleared it (e.g.
+  `escapeHtml()`), and the sink it safely reached. A contained secret shows
+  that it was read but never reached a response, log, or egress sink. The
+  evidence is derived from what the prover observed, never invented: a named
+  guard appears only when the validator binding is recovered from the source.
 
 The trace is the same data on every surface. `zigttp check --json` emits it as
 a `proof.proofTrace` object keyed by property name, so agents and CI read the
