@@ -16,11 +16,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const ext_demo_dep = b.dependency("zigttp_ext_demo", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     const mod = b.addModule("zigts", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -40,5 +35,4 @@ pub fn build(b: *std.Build) void {
     }
     mod.addImport("zigttp-sdk", sdk_dep.module("zigttp-sdk"));
     mod.addImport("zigttp-modules", modules_dep.module("zigttp-modules"));
-    mod.addImport("zigttp-ext-demo", ext_demo_dep.module("zigttp-ext-demo"));
 }

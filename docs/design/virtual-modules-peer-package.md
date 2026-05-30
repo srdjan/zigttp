@@ -49,7 +49,7 @@ That spread creates a circular dependency if both packages import each other:
 - `packages/zigts/src/builtin_modules.zig` needs the 22 bindings from modules to register them.
 - Zig's build graph rejects circular package deps.
 
-The existing extension pattern (`zigttp-ext-demo`) sidesteps this by using `zigttp-sdk` — a stable ABI layer that exposes only opaque handles and packed-struct value types. Extensions never see zigts internals.
+The extension scaffold sidesteps this by using `zigttp-sdk` — a stable ABI layer that exposes only opaque handles and packed-struct value types. Extensions never see zigts internals.
 
 **The peer-package move is feasible only if virtual modules switch from zigts internals to the SDK ABI.**
 
@@ -86,7 +86,7 @@ Deliverable: `docs/design/virtual-modules-sdk-api.md` - a table of every type th
 
 Design decisions to lock before Phase 1:
 
-1. **V-table shape**. Fat pointer (Context = `{ ptr: *anyopaque, vtable: *const ContextVTable }`) vs thin-pointer-plus-extern-fns. Recommendation: fat pointer, matches `zigttp-ext-demo`'s existing usage.
+1. **V-table shape**. Fat pointer (Context = `{ ptr: *anyopaque, vtable: *const ContextVTable }`) vs thin-pointer-plus-extern-fns. Recommendation: fat pointer, matching the SDK scaffold shape.
 2. **Memory ownership**. `createString(ctx, bytes)` returns a handle — who owns the backing memory? Proposal: zigts GC owns; SDK users hold opaque handles that are root-safe for the scope of the call.
 3. **Tests**. Modules currently have unit tests that spin up a real `GC` + `Heap` + `Context`. After the port, tests spin up zigts via the SDK's context factory, or tests move into zigts's test suite. Recommendation: keep tests in the modules package; SDK exposes a `TestHarness` helper that wraps real zigts initialization.
 
@@ -179,7 +179,7 @@ For each module:
 - `zig build test --summary all` reports **≥ 1503 passing, 4 skipped** (baseline before any work began) on the final commit.
 - `git log --oneline` shows one commit per phase, each one building cleanly in isolation (`git bisect` friendly).
 - `scripts/check-capability-helpers.sh` still enforces no direct zigts-internal sensitive-op calls from the modules package (update the glob).
-- Third-party extension ergonomics unchanged: `zigttp-ext-demo` continues to work.
+- Third-party extension ergonomics remain based on the SDK scaffold.
 
 ## Effort estimate
 

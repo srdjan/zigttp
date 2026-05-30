@@ -2493,14 +2493,6 @@ test "sound: x !== undefined on non-optional is tautological" {
     , 0, 1);
 }
 
-test "sound: zigttp-ext import return type participates in undefined tautology checks" {
-    try checkSourceFull(
-        \\import { double } from "zigttp-ext:math";
-        \\const value = double(21);
-        \\const r = value !== undefined;
-    , 0, 1);
-}
-
 test "sound: x === undefined on optional is not tautological" {
     try checkSourceFull(
         \\import { env } from "zigttp:env";

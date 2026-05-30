@@ -3486,33 +3486,6 @@ test "computeProperties egress is conservative write" {
     try std.testing.expect(!props.idempotent);
 }
 
-test "scanImports includes zigttp-ext modules in contract function map" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { double } from "zigttp-ext:math";
-        \\const value = double(21);
-    ;
-
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
-    var atoms = context.AtomTable.init(allocator);
-    defer atoms.deinit();
-    parser.setAtomTable(&atoms);
-    defer parser.deinit();
-
-    _ = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-
-    var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
-    defer builder.deinit();
-
-    try builder.scanImports();
-
-    try std.testing.expect(containsString(builder.modules_list.items, "zigttp-ext:math"));
-    try std.testing.expectEqual(@as(usize, 1), builder.functions_map.items.len);
-    try std.testing.expectEqualStrings("zigttp-ext:math", builder.functions_map.items[0].module);
-    try std.testing.expect(containsString(builder.functions_map.items[0].names.items, "double"));
-}
-
 test "registered partner manifest contributes effect class to handler properties" {
     const allocator = std.testing.allocator;
 

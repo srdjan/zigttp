@@ -39,7 +39,7 @@ The parser supports ES6 `import`/`export` syntax for built-in virtual modules
 | `import { decodeJson, decodeForm } from "zigttp:decode"` | Typed ingress module imports |
 | `import { cacheGet, cacheSet } from "zigttp:cache"` | Cache module imports |
 | `import { run, step } from "zigttp:durable"` | Durable execution imports |
-| `import { double } from "zigttp-ext:math"` | Registered extension imports |
+| `import { charge } from "zigttp-ext:stripe"` | Registered extension imports |
 | `import type { Spec, Proof, Effects } from "zigttp:types"` | Type-only imports for the built-in `Spec<...>` obligation alias and the `Proof<...>` / `Effects<...>` capsule aliases (stripped at load time) |
 
 ### Supported Export Forms

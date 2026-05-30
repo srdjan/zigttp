@@ -4964,38 +4964,6 @@ test "virtual module import alias resolves to callable binding" {
     try std.testing.expectEqualStrings("function", response.body);
 }
 
-test "packaged extension module import resolves to callable binding" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const rt = try Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    const handler_code =
-        \\import { double, isEven, clockModulo } from "zigttp-ext:math";
-        \\function handler(req) {
-        \\  return Response.json({
-        \\    doubled: double(21),
-        \\    even: isEven(42),
-        \\    modulo: clockModulo(1)
-        \\  });
-        \\}
-    ;
-    try rt.loadHandler(handler_code, "<extension-import>");
-
-    var request = HttpRequestOwned{
-        .method = try allocator.dupe(u8, "GET"),
-        .url = try allocator.dupe(u8, "/"),
-        .headers = .empty,
-        .body = null,
-    };
-    defer request.deinit(allocator);
-
-    var response = try rt.executeHandler(request.asView());
-    defer response.deinit();
-    try std.testing.expectEqualStrings("{\"doubled\":42,\"even\":true,\"modulo\":0}", response.body);
-}
-
 test "built-in module import runs under capability wrapper context" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

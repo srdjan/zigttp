@@ -44,7 +44,7 @@ backend is an implementation detail.
 
 - Manifest parser tests for valid demo metadata, duplicate exports, invalid
   capabilities, invalid effects, and invalid return kinds.
-- Integration test for a handler importing `zigttp-ext:math` with and without a
+- Integration test for a handler importing a scaffolded `zigttp-ext:*` module with and without a
   registered manifest.
 - Contract JSON round-trip test for extension manifest hash/specifier/export
   facts.

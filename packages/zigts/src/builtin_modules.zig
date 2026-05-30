@@ -191,7 +191,7 @@ test "fromSpecifier finds known modules" {
     try std.testing.expect(fromSpecifier("zigttp:cache") != null);
     try std.testing.expect(fromSpecifier("zigttp:url") != null);
     try std.testing.expect(fromSpecifier("zigttp:id") != null);
-    try std.testing.expect(fromSpecifier("zigttp-ext:math") != null);
+    try std.testing.expect(fromSpecifier("zigttp-ext:math") == null);
     try std.testing.expect(fromSpecifier("zigttp:unknown") == null);
 }
 
@@ -207,20 +207,6 @@ test "findExport finds known module export" {
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("zigttp:crypto", result.?.binding.specifier);
     try std.testing.expectEqual(mb.ReturnKind.string, result.?.func.returns);
-}
-
-test "findExport finds extension module export" {
-    const result = findExport("zigttp-ext:math", "double");
-    try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("zigttp-ext:math", result.?.binding.specifier);
-    try std.testing.expectEqual(mb.ReturnKind.number, result.?.func.returns);
-}
-
-test "findFunction finds extension functions" {
-    const result = findFunction("double");
-    try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("zigttp-ext:math", result.?.binding.specifier);
-    try std.testing.expectEqual(mb.ReturnKind.number, result.?.func.returns);
 }
 
 test "findFunction finds result-producing functions" {

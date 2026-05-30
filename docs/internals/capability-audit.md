@@ -49,6 +49,6 @@ WebSocket `send`, `close`, and the broadcast-style `getWebSockets` dispatch all 
 
 ## Caveats
 
-- The audit walks first-party modules under `packages/modules/src/`. Third-party modules under `packages/zigttp-ext-demo/` and any future user-supplied bindings need the same review at registration time.
+- The audit walks first-party modules under `packages/modules/src/`. Third-party modules supplied through extension manifests need the same review at registration time.
 - Adding `.network` to `service` and `websocket` changes their `capabilityHash` (`module_binding.zig:1103`), which propagates into the policy hash baked into proof receipts. Existing attestations on deployed binaries become invalid until rebuilt; `policy-hash.txt` will need regeneration.
 - Module-side `requireCapability` is only used for `.runtime_callback`. Extending enforcement to other capabilities at call time would require either (a) a wrapper in `module_binding_adapter.zig` that walks the declared set, or (b) per-function calls to `requireCapability`. Out of scope for this audit.

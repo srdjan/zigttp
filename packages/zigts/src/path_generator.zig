@@ -1049,11 +1049,11 @@ test "stubValueForType falsy" {
     try std.testing.expectEqualStrings("false", stubValueForType(.boolean, false));
 }
 
-test "scanImports tracks zigttp-ext functions with binding names" {
+test "scanImports tracks virtual module functions with binding names" {
     const allocator = std.testing.allocator;
     const source =
-        \\import { double } from "zigttp-ext:math";
-        \\const value = double(21);
+        \\import { env } from "zigttp:env";
+        \\const value = env("NAME");
     ;
 
     var parser = @import("parser/parse.zig").Parser.init(allocator, source);
@@ -1077,7 +1077,7 @@ test "scanImports tracks zigttp-ext functions with binding names" {
         if (tag != .import_decl) continue;
         const import_decl = ir_view.getImportDecl(idx) orelse continue;
         const module_str = ir_view.getString(import_decl.module_idx) orelse continue;
-        if (!std.mem.eql(u8, module_str, "zigttp-ext:math")) continue;
+        if (!std.mem.eql(u8, module_str, "zigttp:env")) continue;
         const spec_idx = ir_view.getListIndex(import_decl.specifiers_start, 0);
         const spec = ir_view.getImportSpec(spec_idx) orelse continue;
         tracked_slot = spec.local_binding.slot;
@@ -1085,7 +1085,7 @@ test "scanImports tracks zigttp-ext functions with binding names" {
     }
 
     const meta = generator.module_fn_bindings.get(tracked_slot orelse return error.ExpectedTrackedSlot) orelse return error.ExpectedTrackedMeta;
-    try std.testing.expectEqualStrings("ext_math", meta.module);
-    try std.testing.expectEqualStrings("double", meta.func);
-    try std.testing.expectEqual(mb.ReturnKind.number, meta.returns);
+    try std.testing.expectEqualStrings("env", meta.module);
+    try std.testing.expectEqualStrings("env", meta.func);
+    try std.testing.expectEqual(mb.ReturnKind.optional_string, meta.returns);
 }

@@ -184,12 +184,6 @@ test "validateImports accepts known exports" {
     try std.testing.expect(validateImports(binding, &names) == null);
 }
 
-test "validateImports accepts extension exports" {
-    const binding = builtin_modules.fromSpecifier("zigttp-ext:math") orelse return error.ExpectedBinding;
-    const names = [_][]const u8{ "double", "isEven" };
-    try std.testing.expect(validateImports(binding, &names) == null);
-}
-
 test "validateImports reports first missing export" {
     const binding = builtin_modules.fromSpecifier("zigttp:env") orelse return error.ExpectedBinding;
     const names = [_][]const u8{ "env", "missing" };

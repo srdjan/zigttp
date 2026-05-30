@@ -10,9 +10,6 @@
         .zigttp_modules = .{
             .path = "../modules",
         },
-        .zigttp_ext_demo = .{
-            .path = "../zigttp-ext-demo",
-        },
     },
     .paths = .{
         "build.zig",

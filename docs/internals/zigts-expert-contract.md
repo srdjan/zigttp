@@ -211,9 +211,9 @@ zigts extension-status <path> [<path>...] --json
   "ok": true,
   "manifests": [
     {
-      "path": "packages/zigttp-ext-demo/zigttp-module.json",
+      "path": "zigttp-module.json",
       "valid": true,
-      "specifier": "zigttp-ext:math",
+      "specifier": "zigttp-ext:stripe",
       "backend": "native_zig",
       "stateModel": "none",
       "requiredCapabilities": ["clock"],

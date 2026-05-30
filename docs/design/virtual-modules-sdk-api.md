@@ -89,7 +89,7 @@ The `ModuleFn` opaque-handle ABI (`*ModuleHandle` instead of `*anyopaque`) alrea
 
 ### 1. V-table shape
 
-Fat-pointer handle, matching the current `zigttp-ext-demo` usage: `ModuleHandle` stays an opaque type, and every SDK free function takes `*ModuleHandle` as first argument. Internally zigts casts it to `*Context`. No explicit `{ ptr, vtable }` struct; the cast is authorized via `pub fn handleToContext` on the zigts side.
+Fat-pointer handle, matching the extension scaffold: `ModuleHandle` stays an opaque type, and every SDK free function takes `*ModuleHandle` as first argument. Internally zigts casts it to `*Context`. No explicit `{ ptr, vtable }` struct; the cast is authorized via `pub fn handleToContext` on the zigts side.
 
 Rationale: thin-wrapper v-tables would add indirection at every allocator/object op with no benefit given both zigts and modules live in the same binary. The opacity (`opaque {}`) already prevents modules from reaching past the ABI. Third-party extensions loaded as separate objects (future) will need a true v-table; that is a follow-up and explicitly out of scope here.
 

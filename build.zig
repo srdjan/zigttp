@@ -63,11 +63,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const ext_demo_dep = b.dependency("zigttp_ext_demo", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     // Capture git commit for reproducible build metadata. Failure to read
     // git is non-fatal: the precompile binary falls back to the sentinel
     // "unknown", so tarball builds and CI environments without a .git
@@ -110,7 +105,6 @@ pub fn build(b: *std.Build) void {
     zigts_tests_root.addOptions("build_options", zigts_build_options);
     zigts_tests_root.addImport("zigttp-sdk", zigttp_sdk_dep.module("zigttp-sdk"));
     zigts_tests_root.addImport("zigttp-modules", zigttp_modules_dep.module("zigttp-modules"));
-    zigts_tests_root.addImport("zigttp-ext-demo", ext_demo_dep.module("zigttp-ext-demo"));
     zigts_tests_root.addCSourceFile(.{
         .file = zigts_dep.path("deps/sqlite/sqlite3.c"),
         .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
