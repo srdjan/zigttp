@@ -56,7 +56,6 @@ Calling into the virtual modules (the in-binary stdlib that replaces npm).
 - **parallel/** - `parallel` and `race` from `zigttp:io`.
 - **websocket/** - WebSocket events with `serializeAttachment` and rooms.
 - **sql/** - the `sql` tagged template from `zigttp:sql`.
-- **htmx-todo/**, **shopping-cart/**, **url-shortener/** - small full apps wiring several modules together.
 - **system/** - the cross-handler linking story (`zigts link`).
 - **autoloop/** - the agent autoloop demo (`zigts expert`).
 

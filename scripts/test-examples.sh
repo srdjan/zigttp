@@ -12,7 +12,7 @@ PASS=0
 FAIL=0
 
 # Build once up front, then invoke the produced binary directly. Going through
-# `zig build run --` per suite would re-walk the build graph 14 times per CI run.
+# `zig build run --` per suite would re-walk the build graph for every suite.
 echo "Building runtime..."
 $ZIG build
 echo ""
@@ -67,18 +67,6 @@ run_tests "examples/modules/modules_all.ts"  "examples/modules/modules_all.test.
 run_tests "examples/routing/router.ts"         "examples/routing/router.test.jsonl"
 run_tests "examples/routing/guard-compose.ts"  "examples/routing/guard-compose.test.jsonl"
 run_tests "examples/routing/match-handler.ts"  "examples/routing/match-handler.test.jsonl"
-
-# htmx-todo/
-run_tests "examples/htmx-todo/handlers.tsx"    "examples/htmx-todo/handlers.test.jsonl"
-
-# shopping-cart/
-run_tests "examples/shopping-cart/shopping-cart.tsx" "examples/shopping-cart/shopping-cart.test.jsonl"
-
-# url-shortener/ — re-enabled after value.zig toConditionBool fix. The prior
-# "fixture drift" note was misdiagnosed: the handler uses `if (pub)` on the
-# result of `routerMatch`, and the old truthiness path rejected objects at
-# runtime, producing silent empty 200s that looked like fixture drift.
-run_tests "examples/url-shortener/shortener.ts" "examples/url-shortener/shortener.test.jsonl"
 
 echo ""
 echo "====================="

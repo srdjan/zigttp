@@ -399,7 +399,7 @@ See the examples directory for complete working examples:
 
 - `examples/handler/handler-full.tsx` - Full routing + JSX handler
 - `examples/jsx/jsx-ssr.tsx` - SSR example with layouts
-- `examples/htmx-todo/` - HTMX Todo app with JSX
+- `examples/jsx/` - focused JSX handlers and SSR examples
 
 ## Best Practices
 

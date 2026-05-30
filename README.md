@@ -92,8 +92,7 @@ The key is stored at `~/.zigttp/providers.json` with mode 0600 and is
 picked up automatically by `dev`, `serve`, and `expert`. A shell-set
 `ANTHROPIC_API_KEY` always wins; the stored value only fills the gap.
 Use `zigttp auth status` to see what's configured and `zigttp auth
-revoke claude` to remove it. For a guided walkthrough, see
-[`examples/hello-claude/`](examples/hello-claude/README.md).
+revoke claude` to remove it.
 
 ## Handler Example
 

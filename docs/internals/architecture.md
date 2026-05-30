@@ -331,8 +331,6 @@ zigttp/
     ├── modules/           # Virtual module usage
     ├── routing/           # Router, match, guard composition
     ├── parallel/          # Concurrent I/O demos
-    ├── shopping-cart/     # Full shopping cart app
-    ├── htmx-todo/         # HTMX Todo app
     └── sql/               # SQL schema + CRUD handler
 ```
 

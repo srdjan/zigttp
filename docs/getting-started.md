@@ -110,8 +110,7 @@ zigttp expert
 
 `auth claude` writes the key to `~/.zigttp/providers.json` at mode 0600 and the
 runtime auto-injects it on launch. A shell-exported `ANTHROPIC_API_KEY` works
-too and takes precedence. For a guided walkthrough, see
-[`examples/hello-claude/`](../examples/hello-claude/README.md).
+too and takes precedence.
 
 ## 6. Deploy
 

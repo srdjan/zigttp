@@ -273,8 +273,7 @@ Storage is `~/.zigttp/providers.json` at mode 0600, sibling to the
 injects stored values into `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` at the
 start of `zigttp dev`, `zigttp serve`, and `zigttp expert`. A shell-set
 variable always wins; the file only fills the gap when the shell value
-is unset or blank. For a guided walkthrough, see
-[`examples/hello-claude/`](../examples/hello-claude/README.md).
+is unset or blank.
 
 ## `zigttp expert` interactive agent
 
