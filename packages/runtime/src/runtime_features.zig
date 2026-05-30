@@ -9,3 +9,8 @@ pub const live_reload = if (options.enable_live_reload)
     @import("live_reload.zig")
 else
     @import("live_reload_stub.zig");
+
+pub const edge = if (options.enable_edge)
+    @import("edge_server.zig")
+else
+    @import("edge_server_stub.zig");

@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 
 const Server = @import("server.zig").Server;
 const ServerConfig = @import("server.zig").ServerConfig;
-const edge_server = @import("edge_server.zig");
+const edge_server = @import("runtime_features.zig").edge;
 const contract_runtime = @import("contract_runtime.zig");
 const replay_runner = @import("replay_runner.zig");
 const test_runner = @import("test_runner.zig");
@@ -83,6 +83,8 @@ pub fn edgeCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         if (err == error.HelpRequested) return;
         return err;
     };
+
+    if (!feature_options.enable_edge) shared.featureCompiledOut("edge", "edge");
 
     var config = try edge_server.loadConfig(allocator, config_path);
     var edge = edge_server.EdgeServer.init(allocator, config) catch |err| {

@@ -9,6 +9,7 @@ const proof_cli = @import("proof_cli.zig");
 const witnesses_cli = @import("witnesses_cli.zig");
 const shared = @import("cli_shared.zig");
 const runtime_cli = @import("runtime_cli.zig");
+const feature_options = @import("runtime_feature_options");
 const embedded_handler = @import("embedded_handler");
 const proof_ledger = @import("proof_ledger.zig");
 const ratchet_command = @import("ratchet_command.zig");
@@ -154,6 +155,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             dev_command.printStudioHelp();
             return;
         }
+        if (!feature_options.enable_studio) shared.featureCompiledOut("studio", "studio");
         dev_command.studioCommand(allocator, args[0], user_args[1..]) catch |err| {
             if (handlePreflightError(err, command)) std.process.exit(1);
             return err;

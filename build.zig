@@ -5,6 +5,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
     const perf_histogram_enabled = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
+    const studio_enabled = b.option(bool, "studio", "Compile the browser proof workbench (zigttp studio) into the dev CLI") orelse false;
+    const edge_enabled = b.option(bool, "edge", "Compile the in-process edge runtime (zigttp edge) into the binaries") orelse false;
     const zigts_dep = b.dependency("zigts", .{
         .target = target,
         .optimize = optimize,
@@ -30,6 +32,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
+        .studio = studio_enabled,
+        .edge = edge_enabled,
     });
     const runtime_bench_dep = b.dependency("zigttp_runtime", .{
         .target = target,

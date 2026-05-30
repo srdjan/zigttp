@@ -100,6 +100,14 @@ pub fn writeStdoutLine(s: []const u8) void {
     _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
 }
 
+/// Report that an opt-in feature was compiled out of this build and exit
+/// non-zero. `name` is the command (e.g. "studio"), `flag` the build option
+/// to rebuild with (e.g. "studio" for `zig build -Dstudio`).
+pub fn featureCompiledOut(name: []const u8, flag: []const u8) noreturn {
+    std.debug.print("zigttp {s} was compiled out of this build. Rebuild with: zig build -D{s}\n", .{ name, flag });
+    std.process.exit(1);
+}
+
 pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
     var skip_next = false;
     for (argv) |arg| {

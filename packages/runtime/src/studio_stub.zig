@@ -65,6 +65,15 @@ pub const State = struct {
         _ = self;
     }
 
+    pub fn updateFacts(self: *State, update: anytype) void {
+        _ = self;
+        _ = update;
+    }
+
+    pub fn broadcast(self: *State) void {
+        _ = self;
+    }
+
     pub fn updateError(self: *State, message: []const u8) void {
         _ = self;
         _ = message;
