@@ -26,6 +26,12 @@ pub const RuntimeConfig = struct {
     /// replayed on startup; completed ones keep duplicate keys idempotent.
     durable_oplog_dir: ?[]const u8 = null,
     system_config_path: ?[]const u8 = null,
+    /// Dev/serve live path only: a contract-derived egress allowlist applied
+    /// on top of the embedded (stub) policy by `applyEmbeddedCapabilityPolicy`.
+    /// Null on AOT paths, which already carry their egress in
+    /// `embedded_handler.capability_policy`. The slice is borrowed; its owner
+    /// (the dev server) keeps it alive across the runtimes that read it.
+    dev_egress_policy: ?zq.handler_policy.RuntimeAllowList = null,
 };
 
 pub fn openTraceFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
@@ -83,6 +89,12 @@ pub fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.he
     }
 }
 
-pub fn applyEmbeddedCapabilityPolicy(ctx: *zq.Context) void {
+pub fn applyEmbeddedCapabilityPolicy(ctx: *zq.Context, config: RuntimeConfig) void {
     ctx.capability_policy = embedded_handler.capability_policy;
+    // Dev/serve override: the embedded policy is the empty stub here, so the
+    // contract-derived egress allowlist is the only enforcement in interpreted
+    // mode. AOT builds leave dev_egress_policy null and keep the embedded list.
+    if (config.dev_egress_policy) |egress| {
+        ctx.capability_policy.egress = egress;
+    }
 }

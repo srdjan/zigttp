@@ -187,8 +187,10 @@ won't boot" and "individual requests get rejected".
   `ctx.capability_policy` is the contract-derived allow/deny data
   those gates consult.
 - Outbound egress: handled inside the runtime's `fetch` path
-  (`zruntime.zig:2748`) via the unwrapped
-  `ctx.capability_policy.allowsEgressHost(host)`. This is a runtime-
+  (`zruntime.zig:outboundHostViolation`) via the unwrapped
+  `ctx.capability_policy.allowsEgressHost(host)`. The check sits in
+  the shared `parseFetchArgs`, so it covers both the sequential and
+  the `zigttp:io` parallel/race fetch paths. This is a runtime-
   initiated check on the URL host, not an SDK module call, so it
   does not go through the `*ForActiveModule` wrappers and does not
   require any binding to declare `.policy_check`.
@@ -205,11 +207,17 @@ won't boot" and "individual requests get rejected".
 - `server.zig:updateContract` (called by `live_reload`) replaces the
   proven-routes table and the proof cache so per-request route
   gating and the read-only cache reflect the new contract.
-- **RuntimePolicy is NOT swapped.** It is a comptime constant in
-  `embedded_handler.zig` baked at the build that produced the
-  running binary; hot swap of the handler source does not rebuild
-  the binary and therefore cannot change the policy. Tightening or
-  widening the policy requires a rebuild.
+- **The egress section of the policy IS re-derived on swap; env,
+  cache, and sql are not.** In the interpreted `dev`/`serve` path the
+  embedded `RuntimePolicy` is the empty stub, so `live_reload`
+  re-derives the egress allowlist from each new contract and applies it
+  via `server.zig:setDevEgressPolicy` → `runtime_pool.zig:setDevEgressPolicy`
+  (plumbed as `RuntimeConfig.dev_egress_policy`), invalidating idle
+  runtimes so they re-create enforcing the new hosts. The env, cache,
+  and sql sections are not wired into the dev path and stay permissive
+  there. In a precompiled or deployed binary the policy is the comptime
+  constant baked at build time and is never swapped; tightening or
+  widening it requires a rebuild.
 - **`pool.pooling_policy` is NOT updated either.** It stays at the
   value derived from the contract present at server startup. A new
   contract whose properties would imply a different pooling policy

@@ -232,6 +232,24 @@ pub const HandlerPool = struct {
         return invalidated;
     }
 
+    /// Dev/serve live path only: pin a contract-derived egress allowlist onto
+    /// the pool config and invalidate idle runtimes so they re-create enforcing
+    /// it. Recreated runtimes read `self.config` in `ensureRuntime`. In-flight
+    /// (checked-out) runtimes finish under the previous policy, so the caller
+    /// must keep the previous allowlist's backing strings alive one generation
+    /// (see `Server.setDevEgressPolicy`). Mirrors `reloadHandler`'s locking.
+    pub fn setDevEgressPolicy(self: *Self, policy: zq.handler_policy.RuntimeAllowList) void {
+        self.runtime_init_mutex.lock();
+        self.config.dev_egress_policy = policy;
+        self.runtime_init_mutex.unlock();
+
+        for (self.pool.slots) |*slot| {
+            if (slot.load(.acquire)) |base_rt| {
+                self.invalidateRuntime(base_rt);
+            }
+        }
+    }
+
     fn nextRequestId(self: *Self) u64 {
         return if (collect_pool_metrics) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
     }

@@ -440,6 +440,9 @@ pub const LiveReloadState = struct {
                 return;
             };
             self.server.updateContract(validated);
+            // The validated runtime contract drops egress; enforce it from the
+            // full HandlerContract so dev/serve matches deployed egress policy.
+            self.server.setDevEgressPolicy(hc);
         }
     }
 
@@ -729,6 +732,7 @@ pub const LiveReloadState = struct {
                         return;
                     };
                     self.server.updateContract(validated);
+                    self.server.setDevEgressPolicy(hc);
 
                     if (self.server.proof_cache != null) {
                         printProve("Proof cache: enabled (deterministic + read_only)\n", .{});

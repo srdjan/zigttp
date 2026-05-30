@@ -1024,6 +1024,25 @@ pub const AppendedPayload = struct {
 // Server Implementation
 // ============================================================================
 
+/// Deep-copy a borrowed host list into freshly owned slices. On failure the
+/// partial allocation is unwound so nothing leaks.
+fn dupeHostList(allocator: std.mem.Allocator, hosts: []const []const u8) ![]const []const u8 {
+    const out = try allocator.alloc([]const u8, hosts.len);
+    errdefer allocator.free(out);
+    var filled: usize = 0;
+    errdefer for (out[0..filled]) |h| allocator.free(h);
+    for (hosts, 0..) |h, i| {
+        out[i] = try allocator.dupe(u8, h);
+        filled = i + 1;
+    }
+    return out;
+}
+
+fn freeHostList(allocator: std.mem.Allocator, hosts: []const []const u8) void {
+    for (hosts) |h| allocator.free(h);
+    allocator.free(hosts);
+}
+
 pub const Server = struct {
     config: ServerConfig,
     allocator: std.mem.Allocator,
@@ -1059,6 +1078,13 @@ pub const Server = struct {
     /// WebSocket connection registry. Initialised lazily on the first
     /// upgrade attempt; a handler with no WS exports pays zero cost.
     ws_pool: ?websocket_pool.Pool = null,
+    /// Dev/serve egress allowlist backing storage. The contract-derived
+    /// `RuntimeAllowList` handed to the pool borrows these slices, so two
+    /// generations are retained: a live-reload swap rotates `current` into
+    /// `previous` (still readable by in-flight runtimes) and frees the older
+    /// generation. Both are freed in `deinit`. Null on AOT/embedded paths.
+    dev_egress_hosts_current: ?[]const []const u8 = null,
+    dev_egress_hosts_previous: ?[]const []const u8 = null,
 
     const Self = @This();
     const IoBackend = Io.Threaded;
@@ -1136,6 +1162,8 @@ pub const Server = struct {
         if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
         if (self.security_logger) |logger| logger.deinit();
         if (self.studio) |*studio| studio.deinit();
+        if (self.dev_egress_hosts_previous) |prev| freeHostList(self.allocator, prev);
+        if (self.dev_egress_hosts_current) |cur| freeHostList(self.allocator, cur);
         engine.deinitSecurityEvents();
         self.static_cache.deinit();
         if (self.evented_ready) {
@@ -1243,6 +1271,40 @@ pub const Server = struct {
 
         self.signer_fingerprint_hex = verify_result.fingerprint_hex;
         self.syncStudioCallerReceipt();
+    }
+
+    /// Derive the egress allowlist from a freshly compiled HandlerContract and
+    /// push it onto the runtime pool (dev/serve live path only). Fail-closed
+    /// when the contract proved a literal host set (`!egress.dynamic`),
+    /// matching the AOT policy semantics; permissive when egress is dynamic.
+    /// No-op without a pool. The duped host strings are server-owned and
+    /// retained for one extra generation so in-flight runtimes never read freed
+    /// memory after a reload swaps the list.
+    pub fn setDevEgressPolicy(self: *Self, contract: *const zigts.HandlerContract) void {
+        const pool = if (self.pool) |*p| p else return;
+
+        // Rotate generations: free gen N-2, keep gen N-1 alive for in-flight
+        // runtimes still referencing it.
+        if (self.dev_egress_hosts_previous) |prev| freeHostList(self.allocator, prev);
+        self.dev_egress_hosts_previous = self.dev_egress_hosts_current;
+        self.dev_egress_hosts_current = null;
+
+        // Reuse the same contract->policy mapping the AOT paths use; dev only
+        // enforces the egress section. Fail-closed when the host set was proven
+        // (!dynamic), permissive when dynamic - identical to deployed builds.
+        var egress = zigts.handler_policy.contractToRuntimePolicy(contract).egress;
+
+        // contractToRuntimePolicy borrows the host slices from the contract,
+        // which a later reload frees; own a copy so in-flight runtimes stay safe.
+        if (egress.values.len > 0) {
+            egress.values = dupeHostList(self.allocator, egress.values) catch {
+                // OOM: fail open rather than crash the dev server.
+                pool.setDevEgressPolicy(.{});
+                return;
+            };
+            self.dev_egress_hosts_current = egress.values;
+        }
+        pool.setDevEgressPolicy(egress);
     }
 
     fn syncStudioCallerReceipt(self: *Self) void {
@@ -2191,4 +2253,27 @@ test "findHeaderEnd handles short buffers" {
     try std.testing.expectEqual(@as(?usize, null), findHeaderEnd(""));
     try std.testing.expectEqual(@as(?usize, null), findHeaderEnd("\r\n\r"));
     try std.testing.expectEqual(@as(?usize, 0), findHeaderEnd("\r\n\r\n"));
+}
+
+test "dupeHostList round-trips into independent allocations" {
+    const allocator = std.testing.allocator;
+    const hosts = [_][]const u8{ "api.stripe.com", "localhost" };
+    const dup = try dupeHostList(allocator, &hosts);
+    defer freeHostList(allocator, dup);
+
+    try std.testing.expectEqual(@as(usize, 2), dup.len);
+    try std.testing.expectEqualStrings("api.stripe.com", dup[0]);
+    try std.testing.expectEqualStrings("localhost", dup[1]);
+    // Not aliasing the borrowed input.
+    try std.testing.expect(dup[0].ptr != hosts[0].ptr);
+}
+
+test "dupeHostList unwinds partial allocation on failure" {
+    const hosts = [_][]const u8{ "a", "b", "c" };
+    // Allocations: outer slice, dupe("a"), dupe("b") <- fails here.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    const result = dupeHostList(failing.allocator(), &hosts);
+    try std.testing.expectError(error.OutOfMemory, result);
+    // No leak report from testing.allocator confirms the errdefer ladder freed
+    // the outer slice and the host duped before the failure.
 }

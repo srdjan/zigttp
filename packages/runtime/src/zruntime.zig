@@ -194,7 +194,7 @@ pub const Runtime = struct {
         errdefer ctx.deinit();
 
         applyRuntimeConfig(ctx, gc_state, heap_state, config);
-        applyEmbeddedCapabilityPolicy(ctx);
+        applyEmbeddedCapabilityPolicy(ctx, config);
 
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
         try zq.builtins.initBuiltins(ctx);
@@ -327,7 +327,7 @@ pub const Runtime = struct {
         };
 
         applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
-        applyEmbeddedCapabilityPolicy(pool_rt.ctx);
+        applyEmbeddedCapabilityPolicy(pool_rt.ctx, config);
 
         // Install core JS builtins if the pooled runtime hasn't already done so.
         if (pool_rt.ctx.builtin_objects.items.len == 0) {
@@ -5745,6 +5745,180 @@ test "fetchSync respects embedded capability policy host allowlist" {
     defer parsed.deinit();
     const obj = parsed.value.object;
     try std.testing.expectEqualStrings("HostNotAllowed", obj.get("blocked").?.string);
+}
+
+// Regression guard: the concurrent fetch path (zigttp:io parallel) shares
+// parseFetchArgs with the sync path, so the egress allowlist is enforced at
+// collection time. A disallowed host is rejected before a descriptor is
+// registered, so it never opens a socket and drops out of the results array.
+test "parallel fetch enforces egress allowlist - disallowed host never registers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{ .outbound_http_enabled = true });
+    defer rt.deinit();
+    rt.ctx.capability_policy = .{
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"localhost"} },
+    };
+
+    // Both thunks target a disallowed host: no descriptor registers, so
+    // parallel() returns an empty array and example.com is never connected.
+    const handler_code =
+        \\import { parallel } from "zigttp:io";
+        \\function a() { return fetchSync("http://example.com/one"); }
+        \\function b() { return fetchSync("http://example.com/two"); }
+        \\function handler(req) {
+        \\  const results = parallel([a, b]);
+        \\  return Response.json({ count: results.length });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<parallel-egress-blocked>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.object.get("count").?.integer);
+}
+
+// Discrimination: an allowlisted host passes through the parallel path
+// (registers, executes, returns 200) while a disallowed sibling drops out.
+test "parallel fetch allows allowlisted host and drops disallowed one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server = try TestHttpServer.init(allocator, .echo_request_json);
+    defer server.join() catch {};
+    try server.start();
+
+    const allowed_url = try server.url(allocator, "/ok");
+    defer allocator.free(allowed_url);
+
+    const rt = try Runtime.init(allocator, .{ .outbound_http_enabled = true });
+    defer rt.deinit();
+    rt.ctx.capability_policy = .{
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"127.0.0.1"} },
+    };
+
+    const handler_code = try std.fmt.allocPrint(
+        allocator,
+        \\import {{ parallel }} from "zigttp:io";
+        \\function allowed() {{ return fetchSync("{s}"); }}
+        \\function blocked() {{ return fetchSync("http://example.com/x"); }}
+        \\function handler(req) {{
+        \\  const results = parallel([allowed, blocked]);
+        \\  return Response.json({{
+        \\    count: results.length,
+        \\    status: results.length > 0 ? results[0].status : 0
+        \\  }});
+        \\}}
+    , .{allowed_url});
+    try rt.loadHandler(handler_code, "<parallel-egress-mixed>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 1), obj.get("count").?.integer);
+    // The allowlisted host actually executed and returned the echo server's
+    // 201; the disallowed host dropped out (count == 1, not 2).
+    try std.testing.expectEqual(@as(i64, 201), obj.get("status").?.integer);
+}
+
+// Change 2: the dev/serve contract-derived allowlist arrives via
+// RuntimeConfig.dev_egress_policy and is applied by applyEmbeddedCapabilityPolicy
+// on top of the (empty) embedded stub. Enforced identically on the sync path.
+test "dev_egress_policy config enforces egress on sync fetch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .outbound_http_enabled = true,
+        .dev_egress_policy = .{ .enabled = true, .values = &[_][]const u8{"localhost"} },
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req) {
+        \\  return Response.json({ blocked: fetchSync("http://example.com").json().error });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<dev-egress-sync>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("HostNotAllowed", parsed.value.object.get("blocked").?.string);
+}
+
+// ...and on the parallel path, via the same config-supplied allowlist.
+test "dev_egress_policy config enforces egress on parallel fetch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .outbound_http_enabled = true,
+        .dev_egress_policy = .{ .enabled = true, .values = &[_][]const u8{"localhost"} },
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { parallel } from "zigttp:io";
+        \\function a() { return fetchSync("http://example.com/one"); }
+        \\function b() { return fetchSync("http://example.com/two"); }
+        \\function handler(req) {
+        \\  return Response.json({ count: parallel([a, b]).length });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<dev-egress-parallel>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.object.get("count").?.integer);
 }
 
 test "fetchSync sends request data and exposes response helpers" {
