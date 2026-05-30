@@ -8,8 +8,8 @@
 - `packages/zigts/src/jit/` contains the baseline JIT compiler for x86-64 and ARM64.
 - `packages/zigts/src/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
 - `packages/tools/` contains build-time tooling (`precompile.zig` for handler bytecode embedding, `zigts_cli.zig` for the compiler CLI).
-- `packages/zigttp-sdk/` and `packages/zigttp-ext-demo/` are the extension SDK and demo.
-- `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `shopping-cart/`, `htmx-todo/`, `sql/`).
+- `packages/zigttp-sdk/` contains the extension SDK.
+- `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `sql/`).
 - `scripts/` contains shell scripts for build and setup.
 - `docs/` contains user-facing documentation (see Documentation section below).
 - `zig-out/` and `.zig-cache/` are generated outputs; don't edit or commit them.
@@ -19,18 +19,15 @@
 | File | Purpose |
 |------|---------|
 | `docs/user-guide.md` | Complete handler API reference, routing, virtual modules, CLI options |
-| `docs/architecture.md` | System design, runtime model, project structure |
+| `docs/internals/architecture.md` | System design, runtime model, project structure |
 | `docs/performance.md` | Benchmarks, cold starts, optimizations, deployment patterns |
-| `docs/api-reference.md` | Zig embedding API, extending with native functions |
+| `docs/internals/api-reference.md` | Zig embedding API, extending with native functions |
 | `docs/typescript.md` | Type stripping, compile-time evaluation (`comptime()`) |
 | `docs/jsx-guide.md` | JSX/TSX usage and server-side rendering |
 | `docs/feature-detection.md` | Unsupported feature detection matrix |
 | `docs/verification.md` | `-Dverify` compile-time proof of handler correctness |
 | `docs/sound-mode.md` | Type-directed analysis across operators (arithmetic, comparison, boolean) |
-| `docs/extension-model.md` | Design note for third-party virtual modules via `zigttp-sdk` |
-| `docs/deploy-tutorial.md` | `zigttp deploy`, `zigttp login`, drift detection, self-hosted control plane |
-| `docs/mini-book.md` | Narrative guide covering runtime, verification, and sandboxing |
-| `docs/blog/` | Long-form posts (e.g., `url-shortener-in-133-lines.md`) |
+| `docs/deploy-tutorial.md` | local `zigttp deploy`, proof review, and attestation |
 
 ## Build, Test, and Development Commands
 - `zig build` - debug build.

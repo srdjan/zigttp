@@ -336,9 +336,9 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
     , .{ artifact.output_path, artifact.output_path, artifact.project.host, artifact.project.port });
 }
 
-/// Slice 1 of proof receipts (docs/roadmap/attest-slice-1.md). Produces a
-/// compact JWS committing to (contract_json, bytecode, rule-registry policy,
-/// capability matrix) for the current build. Caller owns the returned bytes.
+/// Produces a compact JWS committing to (contract_json, bytecode,
+/// rule-registry policy, capability matrix) for the current build. Caller owns
+/// the returned bytes.
 /// Returns null when the compile did not yield a HandlerContract; we cannot
 /// sign chips we never derived.
 fn buildAttestationJws(

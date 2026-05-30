@@ -418,8 +418,7 @@ zigttp ratchet check <handler.ts>     # diff active specs against proven; exit 1
 ```
 
 Handlers that declare no `Spec<...>` ratchet against the default full
-supported set. Specs and follow-up backlog:
-[roadmap/attest-slice-4.md](roadmap/attest-slice-4.md).
+supported set.
 
 ## Behavioral contract
 

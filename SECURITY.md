@@ -37,7 +37,7 @@ The high-level boundaries enforced by zigttp:
 
 4. **WebSocket boundary.** RFC 6455 frame parsing is delegated to `std.http.Server.WebSocket`; runtime maps stdlib errors to wire-correct close codes (1002 for protocol error, 1009 for oversize). See [docs/internals/websocket-audit.md](docs/internals/websocket-audit.md) for the full checklist and the one documented gap (peer-sent close-code validation, deferred to W2).
 
-5. **Attestation trust model.** Slice 1 (current beta): the JWS protected header carries the full Ed25519 public key. `zigttp verify <url>` validates the signature against that embedded key and prints the key fingerprint. This proves "the holder of this key signed these claims" - not "this key belongs to a specific publisher." For now, third-party verifiers should pin keys with `--trust-key <hex>`. Slice 2 adds identity binding via well-known endpoints. See [docs/roadmap/attest-slice-1.md](docs/roadmap/attest-slice-1.md) and [docs/roadmap/attest-slice-2.md](docs/roadmap/attest-slice-2.md).
+5. **Attestation trust model.** The JWS protected header carries the full Ed25519 public key. `zigttp verify <url>` validates the signature against that embedded key and prints the key fingerprint. This proves "the holder of this key signed these claims" - not "this key belongs to a specific publisher." The well-known attestation document exposes the same claims for inspection; it does not establish publisher identity by itself. Third-party verifiers that care about identity should pin keys with `--trust-key <hex>` or apply an explicit trusted-origin policy.
 
 6. **Self-extracting binary integrity.** The 32-byte trailer's CRC-32 is a corruption check, not a security check. The actual integrity boundary is the JWS attestation over `(bytecode_sha256, contract_sha256, policy_sha256)`. See [docs/internals/architecture.md - Self-Extracting Binary Trailer](docs/internals/architecture.md#self-extracting-binary-trailer).
 
@@ -52,4 +52,3 @@ The high-level boundaries enforced by zigttp:
 - [docs/internals/capability-audit.md](docs/internals/capability-audit.md) - per-module capability declaration audit
 - [docs/internals/websocket-audit.md](docs/internals/websocket-audit.md) - RFC 6455 compliance audit
 - [packages/zigts/src/module_binding.zig](packages/zigts/src/module_binding.zig) - capability enforcement surface
-- [docs/design/zigttp_zigts_policy_wasm_spec.md](docs/design/zigttp_zigts_policy_wasm_spec.md) - deferred Wasm policy runtime design

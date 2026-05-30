@@ -1,15 +1,13 @@
-//! Slice 2 of proof receipts (see docs/roadmap/attest-slice-2.md).
+//! Persistent proof-receipt identity.
 //!
-//! Persistent organisation-level Ed25519 keypair. Slice 1 minted an ephemeral
-//! key per build; slice 2 loads or generates a stable key from
-//! `~/.zigttp/attest/keypair.bin`, so every deploy by the same operator
-//! attests under the same identity that verifiers can pin once and trust
-//! across future builds.
+//! Loads or generates a stable Ed25519 keypair from
+//! `~/.zigttp/attest/keypair.bin`, so every deploy by the same operator attests
+//! under the same identity that verifiers can pin once and trust across future
+//! builds.
 //!
 //! File format: 64 raw bytes - the 32-byte Ed25519 seed followed by the
 //! 32-byte derived public key. No header, no encoding, no encryption.
-//! Mode 0600 enforced on both write and load. Encryption, hardware-backed
-//! custody, and rotation CLI land in slice 3.
+//! Mode 0600 enforced on both write and load.
 
 const std = @import("std");
 const Ed25519 = std.crypto.sign.Ed25519;

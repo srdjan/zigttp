@@ -1,13 +1,14 @@
-//! Slice 1 of proof receipts (see docs/roadmap/attest-slice-1.md).
+//! Proof receipt envelope.
 //!
 //! Produces and verifies a compact JWS (RFC 7515 Section 7.1) that commits
 //! to a handler build's contract hash, bytecode hash, policy hash, and a
 //! human-readable property summary. Ed25519 signatures, public key embedded
 //! in the protected header so the JWS is self-contained.
 //!
-//! Trust model: slice 1 confirms "whoever held this private key signed
+//! Trust model: this confirms "whoever held this private key signed
 //! these claims," not "this key belongs to the legitimate operator."
-//! Identity binding lands in slice 2 (well-known + transparency).
+//! External verifiers should pin trusted keys or inspect the well-known
+//! attestation document served by the deployed binary.
 
 const std = @import("std");
 const Ed25519 = std.crypto.sign.Ed25519;

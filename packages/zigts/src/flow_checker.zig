@@ -81,8 +81,8 @@ pub const Diagnostic = struct {
     message: []const u8,
     help: ?[]const u8,
     witness: ?Witness = null,
-    /// Slice B (expert-strategy §5): typed repair primitive the agent uses
-    /// to pick an apply step directly. All flow-checker diagnostics map to
+    /// Typed repair primitive the agent uses to pick an apply step directly.
+    /// All flow-checker diagnostics map to
     /// the same `insert_guard_before_line` shape today — the agent inserts
     /// a redact/mask/validate call ahead of the offending sink.
     repair_intent: ?RepairIntent = null,
@@ -1989,8 +1989,8 @@ test "propertyTagForKind: every DiagnosticKind variant maps to a non-null Proper
 }
 
 test "secret_in_response diagnostic carries repair_intent = insert_guard_before_line" {
-    // Slice B (expert-strategy §5): flow-checker diagnostics must populate
-    // the typed repair primitive so the agent picks an apply step directly.
+    // Flow-checker diagnostics must populate the typed repair primitive so
+    // the agent picks an apply step directly.
     // ZTS400 is representative of every ZTS4xx flow leak: the canonical
     // repair is `insert_guard_before_line`, where the agent inserts a
     // redact/mask/strip call ahead of the offending sink.

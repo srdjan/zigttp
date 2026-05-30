@@ -1,7 +1,6 @@
 //! Shared deterministic application for compiler-native repair intents.
 //!
-//! Slice G of the expert-strategy §5 roadmap extended the dispatch to cover
-//! four line-local canonicalize refactors (`replace_let_with_const`,
+//! Dispatch covers four line-local canonicalize refactors (`replace_let_with_const`,
 //! `canonicalize_for_of_const`, `replace_arrow_with_function`,
 //! `replace_export_arrow_with_function`). The fifth canonicalize refactor —
 //! `canonicalize_capability_key_alias` — needs cross-line scope analysis

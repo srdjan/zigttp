@@ -2,7 +2,7 @@
 
 Use this page as the entry point for the maintained docs. Public guides cover
 day-to-day use. Reference docs pin exact APIs and module behavior. Internal
-notes document design contracts, governance, and roadmap work.
+notes document architecture, governance, and audit material.
 
 ## Start
 
@@ -51,8 +51,6 @@ notes document design contracts, governance, and roadmap work.
   deployment tuning.
 - [Limits and Failure Behavior](reliability.md) - request, memory, and stack
   limits, and how the runtime reports handler errors, faults, and exit codes.
-- [Blog: URL Shortener](blog/url-shortener-in-133-lines.md) - worked example
-  with guard composition and module usage.
 
 ## Internals
 
@@ -64,30 +62,3 @@ notes document design contracts, governance, and roadmap work.
   capability governance and audit checks.
 - [zigts Expert Contract](internals/zigts-expert-contract.md) - stable
   structured-tool surface for compiler-in-the-loop workflows.
-
-## Design And Roadmap
-
-- [Extension Model](design/extension-model.md) - third-party virtual-module
-  design direction.
-- [Virtual Modules Peer Package](design/virtual-modules-peer-package.md) -
-  module extraction design note.
-- [Virtual-Module SDK API](design/virtual-modules-sdk-api.md) - SDK inventory
-  and phase-0 design.
-- [Policy Wasm Capability Gating](design/zigttp_zigts_policy_wasm_spec.md) -
-  policy component proposal.
-- [zigttp Expert Compiler-Embedded Assistant](design/zigttp-expert-compiler-embedded.md) -
-  one-way ZigTS strategy, compiler-vetoed agent loop, and implementation
-  roadmap.
-- [Frontier](roadmap/frontier.md) - strategic direction.
-- [v1 Public Release](roadmap/v1-public-release.md) - release flow,
-  milestones, and gates for the first public Zigttp demo.
-- [Autoloop](roadmap/autoloop.md) - property-goal repair loop.
-- [Proofable Third-Party Modules](roadmap/proofable-third-party-modules.md) -
-  deferred extension roadmap item.
-- [TUI Roadmap](roadmap/roadmap-tui.md) - pi TUI product note.
-- [pi OpenAI Cassettes](roadmap/pi-cassettes.md) - provider cassette plan.
-
-## Legacy
-
-- [The zigttp Book](legacy/mini-book.md) is retained for older narrative
-  context. Prefer the guides above for current API details.

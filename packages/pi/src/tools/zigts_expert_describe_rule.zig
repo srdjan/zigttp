@@ -97,8 +97,8 @@ test "unknown query returns not-ok body" {
 }
 
 test "lookup by code surfaces repair_intent when present" {
-    // Slice B (expert-strategy §5): the agent reads `repair_intent` from
-    // describe-rule output to pick an apply primitive directly. ZTS612
+    // The agent reads `repair_intent` from describe-rule output to pick an
+    // apply primitive directly. ZTS612
     // (canonical_ternary) maps to `replace_ternary_with_if`.
     var result = try execute(testing.allocator, &.{"ZTS612"});
     defer result.deinit(testing.allocator);

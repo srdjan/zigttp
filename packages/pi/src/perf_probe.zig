@@ -1,12 +1,11 @@
 //! Perf-as-proof receipt probe (PI side).
 //!
-//! Slice H of the expert-strategy §5 roadmap landed the primitives — the
-//! signed perf-receipt JWS (`zigts.perf_receipt`), the `kind=perf` ledger
-//! row (`runtime/proof_ledger.zig`), and the engine-backed latency probe
-//! (`runtime/benchmark.zig`). Wiring them onto applied edits was deferred
-//! because the probe needs the JS engine and the ledger pulls in the deploy
-//! stack — neither is importable from PI without inverting the build
-//! dependency (the runtime binaries consume PI, not the other way round).
+//! Perf-receipt primitives live across the signed JWS (`zigts.perf_receipt`),
+//! the `kind=perf` ledger row (`runtime/proof_ledger.zig`), and the
+//! engine-backed latency probe (`runtime/benchmark.zig`). Wiring them onto
+//! applied edits goes through this seam because the probe needs the JS engine
+//! and the ledger pulls in the deploy stack; neither is importable from PI
+//! without inverting the build dependency.
 //!
 //! This module is the cycle-free seam, mirroring `witness_replay.zig`: the
 //! binary that ships PI together with the runtime stack registers a probe

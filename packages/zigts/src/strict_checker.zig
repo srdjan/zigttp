@@ -85,8 +85,8 @@ pub const Diagnostic = struct {
     node: NodeIndex,
     message: []const u8,
     help: ?[]const u8,
-    /// Slice B (expert-strategy §5): typed repair primitive the agent uses
-    /// to pick an apply step directly. `null` when no single canonical
+    /// Typed repair primitive the agent uses to pick an apply step directly.
+    /// `null` when no single canonical
     /// repair applies (e.g. implicit_unknown — needs a type annotation that
     /// can take several shapes).
     repair_intent: ?RepairIntent = null,
@@ -1554,8 +1554,8 @@ test "canonical_destructure_depth accepts flat destructure" {
 }
 
 test "canonical_ternary diagnostic carries repair_intent = replace_ternary_with_if" {
-    // Slice B (expert-strategy §5): every veto-able strict diagnostic must
-    // populate the typed repair primitive so the agent picks an apply step
+    // Every veto-able strict diagnostic must populate the typed repair
+    // primitive so the agent picks an apply step
     // directly. ZTS612 is the representative canonical-profile case.
     var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? 200 : 500; return Response.json({x}); }");
     defer checker.deinit();

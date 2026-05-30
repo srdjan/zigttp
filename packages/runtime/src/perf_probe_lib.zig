@@ -1,5 +1,5 @@
 //! Perf-receipt probe library: the runtime-backed implementation of the PI
-//! `perf_probe` seam (Slice H wiring of the expert-strategy §5 roadmap).
+//! `perf_probe` seam for perf-as-proof receipts.
 //!
 //! The PI agent host registers `recordPerfReceipt` via a function pointer at
 //! startup (see `dev_cli.zig`, next to the witness-replay injection). PI

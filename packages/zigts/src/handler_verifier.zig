@@ -121,8 +121,8 @@ pub const Diagnostic = struct {
     /// For unchecked_result_value: the function that produced the result.
     /// Borrowed from the module binding registry - always valid.
     source_func: ?[]const u8 = null,
-    /// Slice B (expert-strategy §5): typed repair primitive the agent uses
-    /// to pick an apply step directly. `null` when no single canonical
+    /// Typed repair primitive the agent uses to pick an apply step directly.
+    /// `null` when no single canonical
     /// repair applies (e.g. unused_variable — needs a free-form delete).
     repair_intent: ?RepairIntent = null,
 };
@@ -1647,8 +1647,8 @@ test "HandlerVerifier still warns on non-exhaustive union match" {
 }
 
 test "missing_return_path diagnostic carries repair_intent = add_trailing_return" {
-    // Slice B (expert-strategy §5): handler_verifier diagnostics must
-    // populate the typed repair primitive so the expert agent can pick an
+    // Handler verifier diagnostics must populate the typed repair primitive
+    // so the expert agent can pick an
     // apply step directly. The handler returns only on the truthy branch;
     // the false branch leaves the function with no Response, which trips
     // ZTS302 (missing_return_path). The fix the agent should pick is

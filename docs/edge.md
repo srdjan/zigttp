@@ -130,4 +130,4 @@ log correlation.
   with `zigttp:ratelimit` inside individual handlers, or front the edge
   with a proxy that does.
 
-These are tracked as post-v1 roadmap items in `docs/roadmap/frontier.md`.
+These are deliberately outside the current edge runtime.

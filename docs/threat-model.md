@@ -1,8 +1,8 @@
 # Threat Model
 
 This document records the public security boundaries for the v0.1.0-beta
-runtime and tooling. It is intentionally narrower than the roadmap/design
-notes: only behavior implemented in this repository is in scope.
+runtime and tooling. It is intentionally narrow: only behavior implemented in
+this repository is in scope.
 
 ## Assets
 

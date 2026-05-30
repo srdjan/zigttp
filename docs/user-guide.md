@@ -133,7 +133,7 @@ zigttp deploy
 `.zigttp/proofs.jsonl`. No credentials, no Docker, no network access. See
 [docs/deploy-tutorial.md](deploy-tutorial.md) for the full deploy flow.
 
-Attestation is default-on (slice 2). The build signs the contract and bytecode hashes into a JWS embedded in the binary, using the persistent identity at `~/.zigttp/attest/keypair.bin`. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request and serves `GET /.well-known/zigttp-attest` as cacheable JSON. `zigttp verify <url>` validates the signature from any third-party machine. Pass `--no-attest` to skip signing for a specific build. Full design: [docs/roadmap/attest-slice-2.md](roadmap/attest-slice-2.md).
+Attestation is default-on. The build signs the contract and bytecode hashes into a JWS embedded in the binary, using the persistent identity at `~/.zigttp/attest/keypair.bin`. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request and serves `GET /.well-known/zigttp-attest` as cacheable JSON. `zigttp verify <url>` validates the signature from any third-party machine. Pass `--no-attest` to skip signing for a specific build. See [Deploy](deploy-tutorial.md) for the full flow.
 
 ### Proof badge
 
@@ -2122,8 +2122,7 @@ parses this contract and uses it for three things:
    `Cache-Control: public, max-age=3600`, 304 on `If-None-Match`.
    Third parties can run `zigttp verify <url>` against any handler
    route to read the response headers, or fetch the well-known doc
-   directly to inspect the full contract surface offline. Full design:
-   [docs/roadmap/attest-slice-2.md](roadmap/attest-slice-2.md).
+   directly to inspect the full contract surface offline.
 
 ### Non-Precompiled Handlers
 

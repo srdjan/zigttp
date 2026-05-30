@@ -112,7 +112,7 @@ pub const RuntimePolicy = struct {
 
     /// Same backing list as allowsSqlQuery in Phase 1 - the split lets the
     /// db.read vs db.write policy actions diverge later without a contract
-    /// migration. See docs/zigttp_zigts_policy_wasm_spec.md section 7.3.
+    /// migration.
     pub fn allowsSqlWrite(self: RuntimePolicy, name: []const u8) bool {
         return self.sql.allows(name);
     }

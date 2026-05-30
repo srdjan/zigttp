@@ -2,9 +2,6 @@
 
 This document describes the architecture of zigttp, a serverless JavaScript runtime powered by the zigts JavaScript engine.
 
-For the strategic direction beyond the current implementation, see
-[Frontier](../roadmap/frontier.md).
-
 ## Design Philosophy
 
 **Goal**: Instant cold starts, small deployment package, request isolation, and a self-contained runtime graph with vendored native dependencies.
@@ -406,8 +403,6 @@ When no explicit `--policy` file is provided, the precompiler auto-derives a `Ru
 ### Module Binding System
 
 Each virtual module declares a `pub const binding: ModuleBinding` struct - the single source of truth for all compile-time consumers. The `FunctionBinding` struct captures effect class, return kind (for verification/type checking), param types, traceability, and declarative contract extraction rules. `ModuleBinding` also carries `required_capabilities`, which records the runtime capabilities consumed by the module's Zig implementation for governance and auditability. These declarations are distinct from handler-facing `effect` metadata and do not feed into `RuntimePolicy`. The `packages/zigts/src/builtin_modules.zig` registry lists all bindings and runs comptime validation (unique specifiers, unique function names, state lifecycle consistency, duplicate capability declarations).
-
-For the planned redesign of third-party virtual modules, see [Extension Model](../design/extension-model.md).
 
 Consumers that previously maintained separate hardcoded tables now read from the registry:
 - **Type checker** (`packages/zigts/src/modules/internal/types.zig`): maps `ReturnKind` to `TypeIndex` via `mapReturnKind()`

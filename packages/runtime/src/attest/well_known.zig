@@ -1,4 +1,4 @@
-//! Slice 2 item B of proof receipts (docs/roadmap/attest-slice-2.md).
+//! Well-known proof receipt document.
 //!
 //! Precomputes the `GET /.well-known/zigttp-attest` response body once at
 //! startup. The doc carries the same JWS the runtime emits in the

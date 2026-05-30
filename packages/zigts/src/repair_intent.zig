@@ -2,13 +2,12 @@
 //! `zigttp expert` agent can pick an apply primitive directly instead of
 //! parsing the prose `help` text.
 //!
-//! Slice B of the expert-strategy §5 roadmap. The seed set covers the
-//! canonical ZigTS diagnostics (ZTS6xx), the handler verifier's structural
-//! checks (ZTS3xx), and the data-label flow checker (ZTS4xx). Variants
-//! `insert_guard_before_line` and `add_trailing_return` already exist as
-//! lower-level `EditIntentKind` primitives in `repair_plan.zig`; this enum
-//! is the higher-level *intent* a checker emits, which a planner then
-//! lowers to one of those edit primitives.
+//! The seed set covers the canonical ZigTS diagnostics (ZTS6xx), the handler
+//! verifier's structural checks (ZTS3xx), and the data-label flow checker
+//! (ZTS4xx). Variants `insert_guard_before_line` and `add_trailing_return`
+//! already exist as lower-level `EditIntentKind` primitives in
+//! `repair_plan.zig`; this enum is the higher-level *intent* a checker emits,
+//! which a planner then lowers to one of those edit primitives.
 //!
 //! Importable from `analyzer_only` builds: pure enum, no I/O.
 
@@ -34,7 +33,7 @@ pub const RepairIntent = enum {
     insert_guard_before_line,
     add_trailing_return,
 
-    // Slice G additions (expert-strategy §5 Wave 1) — variants emitted by the
+    // Variants emitted by the
     // `zigts_expert_ast_rewrite` tool when the model targets canonicalize
     // refactors that the existing `replace_let_with_const` variant does not
     // distinguish at the call site. Appended at the end so existing variants
@@ -43,8 +42,7 @@ pub const RepairIntent = enum {
     canonicalize_for_of_const,
     canonicalize_capability_key_alias,
 
-    // ZTS620 (expert-strategy §5 near-term audit). Emitted by the strict
-    // checker for a comparison of a statically-boolean value against a
+    // Emitted by the strict checker for a comparison of a statically-boolean value against a
     // boolean literal (`x === true`); the planner lowers it to dropping the
     // comparison in favour of `x` or `!x`. Appended last to preserve every
     // prior variant's `@intFromEnum` value.

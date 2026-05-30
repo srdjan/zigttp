@@ -1,6 +1,5 @@
-//! zigts_expert_ast_rewrite - first-class AST tool primitives the expert
-//! model invokes by `RepairIntent` name. Wave 1 / Slice G of the
-//! expert-strategy §5 roadmap.
+//! zigts_expert_ast_rewrite - first-class AST tool primitives the expert model
+//! invokes by `RepairIntent` name.
 //!
 //! Each dispatch case calls into the pure transformation in
 //! `packages/tools/src/canonicalize.zig` (the line-local refactors flow

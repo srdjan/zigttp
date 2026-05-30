@@ -1,14 +1,10 @@
 //! Policy capability gating - Phase 1 (in-process).
 //!
-//! Defines the PolicyInput / PolicyResult ABI from
-//! docs/zigttp_zigts_policy_wasm_spec.md sections 5 and 6 and provides a
-//! LocalPolicyChecker that consults the existing RuntimePolicy allowlists.
-//! Phase 2 will swap LocalPolicyChecker for a pooled Wasm component without
-//! changing call sites.
+//! Defines the PolicyInput / PolicyResult ABI and provides a LocalPolicyChecker
+//! that consults the existing RuntimePolicy allowlists.
 //!
 //! Phase 1 actions: env.read, cache.read, cache.write, db.read, db.write,
-//! http.outbound. Unknown actions and missing required resources fail closed
-//! per spec section 11.
+//! http.outbound. Unknown actions and missing required resources fail closed.
 
 const std = @import("std");
 const handler_policy = @import("handler_policy.zig");

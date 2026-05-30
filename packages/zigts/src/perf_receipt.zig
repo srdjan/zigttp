@@ -1,4 +1,4 @@
-//! Slice H of the expert-strategy roadmap: perf-as-proof receipts.
+//! Perf-as-proof receipts.
 //!
 //! Defines the JWS subtype attached to `kind=perf` events in
 //! `.zigttp/proofs.jsonl`. A perf receipt commits to:

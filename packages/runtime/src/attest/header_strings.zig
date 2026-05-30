@@ -1,4 +1,4 @@
-//! Slice 1 of proof receipts (see docs/roadmap/attest-slice-1.md).
+//! Proof receipt response headers.
 //!
 //! Precomputes the two response header values exactly once, at runtime
 //! startup, so the per-request cost is one `writer.print` per header:

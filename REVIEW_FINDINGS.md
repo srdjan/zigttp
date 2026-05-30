@@ -605,15 +605,11 @@ The build-time CLI surface is coherent. The `expert` canonical-surface refactor 
 | `feature-detection.md` | **Accurate** | Unsupported-feature list (classes, async/await, var, while, switch, try/catch, null, regex, ==) matches parser diagnostics in `parse.zig`. |
 | `performance.md` | **Unverified** | States: "3ms runtime init", "1.2MB binary", "4MB memory baseline", cold-start breakdowns per deployment pattern. **Zero citation** to benchmarks in `../zigttp-bench` (external repo). No measured cold-start data under `build.zig bench` (that runs Zig-native microbenchmarks, not cold-start). Claims not validated in-tree. |
 | `deploy-tutorial.md` | **Accurate** | Walkthrough of `zigttp deploy` flow matches `deploy.zig` orchestration. Platform autodetect, first-run token prompt, drift detection all present. |
-| `extension-model.md` | **Accurate** | Virtual module redesign plans align with current `module_binding.zig` + `module_binding_adapter.zig`. Forward-looking, not dated. |
-| `frontier.md` | **Forward-looking** | Strategy doc; entries on "cross-platform deploy", "durable scale", "type-driven optimization" are aspirational. Not a source of drift. |
 | `zigts-expert-contract.md` | **Stale** | References `canonical-surface` refactor (`533fed8`). Describes role of `expert` CLI. Accurate to current surface. |
 | `capabilities.md` | **Accurate** | Lists env capabilities (clock, crypto, random, stderr, sqlite, filesystem, network, env, runtime_callback, policy_check) matching `module_binding.zig` declarations. |
 | `control-plane-contract.md` | **Accurate** | Deploy manifest and contract schemas match precompile emission + `deploy_manifest.zig`. |
 | `api-reference.md` | **Accurate** | Virtual module signatures match exports in `modules/*.zig`. |
-| `mini-book.md` | **Comprehensive tutorial** | Covers language, type checking, verification. Matches current feature set. |
 | `user-guide.md` | **Comprehensive reference** | Covers runtime CLI, deployment, durable execution, live reload. Aligns with `main.zig` and `zigttp_cli.zig`. |
-| `blog/` subdirectory | **Blog posts** | Not reviewed in detail (out of scope for correctness audit); no broken links to docs found. |
 
 **Deleted docs** (confirmed absent per Phase 1): `claude-tools.md`, `threat-model.md`, `rollout.md` no longer referenced anywhere. Confirmed with grep for orphan references.
 
@@ -755,4 +751,3 @@ Build `zigttp` with and without the `pi_app` import at `ReleaseFast`, diff sizes
 - **One PR for items 6-7** (test step chaining + pi_app measurement) — ergonomics and packaging; no runtime behavior change.
 
 None of these require a new subsystem or a refactor. The repo is in a state where the next round of work is small targeted PRs, not restructuring.
-

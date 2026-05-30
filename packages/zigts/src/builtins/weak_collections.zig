@@ -24,8 +24,7 @@ const addMethodDynamic = h.addMethodDynamic;
 /// of stale pointer keys are not implemented. If a key object is collected and a
 /// new object happens to be allocated at the same address in the same request
 /// (rare, but possible after a forced GC), `get(newKey)` could surface the dead
-/// value. The v0.2.0 roadmap entry `docs/roadmap/weakmap-gc-integration.md`
-/// covers the full GC-finalizer path that closes this gap.
+/// value.
 pub const WeakMapData = struct {
     entries: std.AutoHashMap(usize, value.JSValue),
 
@@ -153,8 +152,7 @@ pub fn weakMapDelete(_: *context.Context, this: value.JSValue, args: []const val
 // ============================================================================
 
 /// WeakSet shares the same per-request lifetime model and pointer-key limitation
-/// as `WeakMapData` above. See that comment block for the v0.2.0 roadmap link
-/// covering the GC-finalizer path that closes the stale-pointer gap.
+/// as `WeakMapData` above.
 pub const WeakSetData = struct {
     entries: std.AutoHashMap(usize, void),
 

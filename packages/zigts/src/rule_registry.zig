@@ -855,8 +855,8 @@ fn computePolicyHash() [64]u8 {
         hasher.update(rule.help);
         hasher.update("\x00");
         // Repair-intent byte — included so a rule getting a typed repair
-        // (or losing one) drifts the policy hash. Slice B (expert-strategy
-        // §5): the agent reads the repair tag instead of parsing prose, so
+        // (or losing one) drifts the policy hash. The agent reads the repair
+        // tag instead of parsing prose, so
         // changes here are policy-visible. Sentinel 0xFF stands in for null
         // because RepairIntent has well under 255 variants.
         const repair_byte: u8 = if (rule.repair) |r| @intCast(@intFromEnum(r)) else 0xFF;

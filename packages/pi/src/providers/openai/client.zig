@@ -5,11 +5,9 @@
 //! identical to the Anthropic one. The loop sees one provider-shaped
 //! result regardless of which backend produced it.
 //!
-//! The earlier non-streaming Chat Completions implementation lived here;
-//! Slice E of the expert-strategy roadmap swapped it for the Responses
-//! API streaming endpoint so the OpenAI path matches Anthropic's "watch
-//! tool calls assemble in real time" experience. See
-//! `docs/roadmap/expert-strategy.md` §5.
+//! The earlier non-streaming Chat Completions implementation lived here. The
+//! Responses API streaming endpoint keeps the OpenAI path aligned with
+//! Anthropic's "watch tool calls assemble in real time" experience.
 
 const std = @import("std");
 const loop = @import("../../loop.zig");

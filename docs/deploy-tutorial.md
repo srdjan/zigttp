@@ -18,7 +18,7 @@ Attestation is default-on. Every `zigttp deploy` signs the contract sha, bytecod
 
 It also serves `GET /.well-known/zigttp-attest` with the full attestation envelope plus the embedded contract surface as cacheable JSON (`Cache-Control: public, max-age=3600`, ETag, 304 on `If-None-Match`), so security scanners and registry crawlers can fetch the proof without calling every handler route.
 
-Pass `--no-attest` to skip signing for a single build (e.g. air-gapped or privacy-restricted deploys). The legacy `--attest` flag from slice 1 still works but warns once: it is now the default. Any consumer can validate the signature with `zigttp verify <url>` from any third-party machine. See [docs/roadmap/attest-slice-2.md](roadmap/attest-slice-2.md) for the full design and trust model.
+Pass `--no-attest` to skip signing for a single build (e.g. air-gapped or privacy-restricted deploys). The legacy `--attest` flag still works but warns once: it is now the default. Any consumer can validate the signature with `zigttp verify <url>` from any third-party machine. This proves that the holder of the embedded Ed25519 key signed the build claims; verifiers that care about publisher identity should pin trusted keys.
 
 ## Hosted cloud deploy
 

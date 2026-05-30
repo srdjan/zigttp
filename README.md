@@ -142,7 +142,7 @@ and more.
 - **Proof receipts (default-on).** Every `zigttp deploy` signs a JWS
   over `(bytecode, contract, policy)` with a persistent Ed25519
   identity. `zigttp verify <url>` validates from any machine.
-  [Attestation](docs/roadmap/attest-slice-2.md).
+  [Deploy](docs/deploy-tutorial.md).
 - **Deterministic replay and proven evolution.** Record I/O with
   `--trace`, replay with `--replay`, compare contracts across
   versions with `-Dprove`. [Replay and
@@ -167,8 +167,7 @@ and more.
   [Virtual modules index](docs/virtual-modules/README.md).
 - **`zigttp expert` interactive agent.** Compiler-in-the-loop coding
   agent with a property-goal autoloop where the compiler (not the
-  LLM) drives convergence. [CLI reference](docs/cli.md#zigttp-expert-interactive-agent),
-  [autoloop](docs/roadmap/autoloop.md).
+  LLM) drives convergence. [CLI reference](docs/cli.md#zigttp-expert-interactive-agent).
 
 ## Numbers
 
@@ -199,23 +198,10 @@ pages:
   Limits](docs/reliability.md)
 - [Architecture](docs/internals/architecture.md)
 
-## Roadmap
+## Release Scope
 
-zigttp is at v0.1.0-beta. Direction is set by two documents kept
-current in the repo:
-
-- [v0.1.0 Scope](docs/releases/v0.1.0-scope.md) - what's in this tag
-  and what is deliberately deferred.
-- [v1 Public Release](docs/roadmap/v1-public-release.md) - release
-  contract and gates for the first public release.
-- [Frontier](docs/roadmap/frontier.md) - strategic thesis: a
-  proof-aware TypeScript execution platform where the execution model
-  is compiler-visible, effects are explicit imports, and contracts
-  are first-class artifacts.
-
-Further notes (attestation slices, autoloop, proofable third-party
-modules, hosted proof dashboard) live in
-[docs/roadmap/](docs/roadmap/).
+zigttp is at v0.1.0-beta. [v0.1.0 Scope](docs/releases/v0.1.0-scope.md)
+lists what is in this tag and what is deliberately deferred.
 
 ## Contributing
 

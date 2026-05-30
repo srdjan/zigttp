@@ -89,8 +89,7 @@ Attestation is default-on: the build signs a JWS that the running server
 emits on every response as `Zigttp-Attest` and serves at
 `GET /.well-known/zigttp-attest` as JSON. The signing key is the
 persistent identity at `~/.zigttp/attest/keypair.bin`. Pass `--no-attest`
-to skip signing for one build. Full design: [deploy-tutorial.md](deploy-tutorial.md),
-[roadmap/attest-slice-2.md](roadmap/attest-slice-2.md).
+to skip signing for one build. Full flow: [deploy-tutorial.md](deploy-tutorial.md).
 
 Hosted cloud deploy is out of core for v0.1.0-beta. `zigttp deploy --cloud`
 and the related account commands reject with a "not in this beta" message.
@@ -387,8 +386,6 @@ Verdicts: `achieved`, `exhausted_iters`, `exhausted_time`, `stalled`,
 `regression_blocked`, `tool_failed`. Supported goals are the five
 flow-oriented PropertyTags: `no_secret_leakage`, `no_credential_leakage`,
 `input_validated`, `pii_contained`, `injection_safe`.
-
-Full reference: [roadmap/autoloop.md](roadmap/autoloop.md).
 
 ### Proof Delta Card and witnesses
 
