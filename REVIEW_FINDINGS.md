@@ -11,10 +11,11 @@ Severity legend: **BLOCKER** ships broken; **HIGH** real bug or significant desi
 ### Validated dependency graph
 
 ```
-zigttp (runtime binary)
+zigttp (dev CLI binary; the deploy artifact is the separate `zigttp-runtime`)
   ├── zigts         (engine)
-  ├── zigts_cli     (tools)          -- via deploy.zig
-  ├── pi_app        (pi)             -- linked unconditionally
+  ├── zigts_cli     (tools)
+  ├── pi_app        (pi)             -- dev CLI only; absent from the zigttp-runtime deploy artifact
+  ├── zigttp_proof_review (proof-review)
   └── project_config (tools submodule)
 
 zigts (compiler CLI binary)
@@ -40,8 +41,6 @@ Test targets:
   zruntime direct tests : runtime_dep.path("src/zruntime.zig")
 ```
 
-**Unusual edge**: `runtime → tools (zigts_cli)` via `packages/runtime/src/deploy.zig`. Direction flip from the natural layering (tools sits above runtime elsewhere). Reason: in-process precompile verification during `zigttp deploy`. Not called out in `docs/architecture.md`.
-
 **Build step inventory** (`zig build -l`): 13 steps — `test-zigts`, `test-precompile`, `test-property-expectations`, `test-rollout`, `test-expert`, `test-expert-app`, `test-capability-audit`, `test-module-governance`, `run`, `test`, `test-zruntime`, `release`, `bench`, plus conditional `system` (when `-Dsystem=...`).
 
 **Build options**: 19 — handler, aot, verify, contract, openapi, sdk, sql-schema, policy, system, replay, test-file, prove, generate-tests, manifest, expect-properties, data-labels, fault-severity, generator-pack, report.
@@ -53,7 +52,7 @@ Documented 9-step flow in `docs/architecture.md:90-101` matches code:
 | Step | File:Line |
 |---|---|
 | main entry | `packages/runtime/src/main.zig:4` |
-| CLI dispatch | `packages/runtime/src/zigttp_cli.zig:28` |
+| CLI dispatch | `packages/runtime/src/cli_main.zig` → `runtime_cli.zig` |
 | connection loop | `packages/runtime/src/server.zig:1109` (`handleConnection`) |
 | per-request arena | `packages/runtime/src/server.zig:1110` (`ArenaAllocator`) |
 | request parse | `packages/runtime/src/server.zig:1146` |
@@ -65,42 +64,6 @@ Documented 9-step flow in `docs/architecture.md:90-101` matches code:
 | runtime release | `handle.deinit()` at `server.zig:1243` → `zruntime.zig:4810` `releaseForRequest` |
 
 ### Findings
-
-#### F1.1 — HIGH: `zig build test` does not run the engine test suite
-
-**Where**: `build.zig:358-366`, doc claim `CLAUDE.md` line `zig build test                     # All tests`.
-
-**What**: The aggregate `test` step depends on `unit_tests`, `precompile`, `prop_expect`, `rollout`, `expert`, `pi`, `capability_audit`, `module_governance`. It does NOT depend on `test-zigts` (the ~1,004 engine test blocks in `packages/zigts/`). CI compensates in `.github/workflows/release.yml` by invoking steps explicitly. Local developers running the documented `zig build test` miss engine regressions entirely.
-
-The runtime `unit_tests` is rooted at `main.zig`, whose `test {}` block imports zruntime/server/proof_adapter, so those are covered transitively — but `zigts` is an external module, and Zig's test runner does not recurse into external modules' test blocks through `@import("zigts")`. That's exactly why `test-zigts` exists as a separate step rooted in `zigts_dep.path("src/root.zig")`.
-
-**Direction**: either chain `test-zigts` and `test-zruntime` into the `test` step (easy, adds build time), or correct the CLAUDE.md comment to reflect that the full suite is `zig build test test-zigts test-zruntime`. Prefer the former — the comment's claim is a developer-ergonomics contract.
-
-#### F1.2 — HIGH: `pi_app` is linked into the primary `zigttp` runtime binary
-
-**Where**: `build.zig:211` adds `pi_app` unconditionally to the main executable. `packages/runtime/src/zigttp_cli.zig:104-106` invokes it only when the subcommand is `"expert"`.
-
-**What**: Design goal (top of `docs/architecture.md`) is "instant cold starts, small deployment package, request isolation, zero external dependencies". Linking the Anthropic API client + TUI + REPL + transcript machinery into every deploy artifact directly conflicts with that goal. The `expert` subcommand is a developer-workstation feature, not something deployed FaaS instances need.
-
-Whether Zig's `ReleaseFast` dead-code elimination fully strips pi_app when it's unreached cannot be claimed without measurement (existing debug binary is 25 MB for `zigttp` vs 19 MB for the standalone `zigts` compiler — a 6 MB delta that includes deploy, pi, and runtime, with no way to isolate pi's share from this artifact alone).
-
-**Direction**: split `zigttp expert` out to a separate `zigttp-expert` binary, or confirm via before/after `ReleaseFast` build sizing that pi_app is stripped when unused and document that. Until one of those is done, the binary-size goal is unverified.
-
-#### F1.3 — MEDIUM: `runtime` package imports `tools` (`zigts_cli`)
-
-**Where**: `packages/runtime/src/deploy.zig` imports `zigts_cli`.
-
-**What**: Tools sit above runtime in the docs; here the runtime depends on tools. The reason is legitimate — `zigttp deploy` does in-process precompile verification as a pre-check — but the dependency direction is not mentioned in `docs/architecture.md`. A reader following the doc's layering would be surprised.
-
-**Direction**: add a note in `docs/architecture.md` (e.g., in the Native Deploy section) clarifying that deploy orchestration pulls the tools layer in-process. Or factor the precompile-verify surface into a minimal shared module so `runtime/src/deploy.zig` can depend on it without reaching into the tools CLI.
-
-#### F1.4 — MEDIUM: Architecture diagram omits the Deploy subsystem
-
-**Where**: `docs/architecture.md:16-31`.
-
-**What**: The system diagram lists HTTP Server / HandlerPool / Builtins. Deploy is ~2.1 KLOC in `deploy.zig` plus 13 files under `packages/runtime/src/deploy/` (control plane, OCI tar/layer/config/manifest/image, registry push, provider adapter, state, printer, autodetect, first-run, builder, types). It's a full subsystem and it's invisible in the overview diagram. Prose at the end of the doc describes it.
-
-**Direction**: add a third box row "Deploy: control plane, OCI, provider adapter" to the diagram. Keeps the overview honest about what lives in `packages/runtime/`.
 
 #### F1.5 — MEDIUM: static-file serving short-circuits the contract route pre-filter
 
@@ -128,14 +91,6 @@ Whether Zig's `ReleaseFast` dead-code elimination fully strips pi_app when it's 
 
 **Direction**: drop `b.installArtifact(bench_exe)` and let `bench_cmd` run against the unistalled artifact, or gate install behind an option.
 
-#### F1.8 — LOW: `run_cmd` depends on the full install step
-
-**Where**: `build.zig:328`.
-
-**What**: `zig build run -- ...` triggers `b.getInstallStep()`, which builds and installs `zigttp`, `zigts`, and `zigttp-bench`. A developer iterating on the runtime has to wait for the compiler CLI and bench to link on every `run`. Minor friction.
-
-**Direction**: `run_cmd.step.dependOn(&exe.step)` instead of `b.getInstallStep()`. Runs the freshly built binary without the install-tree side effects.
-
 #### F1.9 — NIT: `docs/architecture.md` file list omits `handler_loader.zig`, `trace_helpers.zig`
 
 **Where**: `docs/architecture.md:277-288`.
@@ -154,9 +109,9 @@ Whether Zig's `ReleaseFast` dead-code elimination fully strips pi_app when it's 
 
 ### Phase 1 summary
 
-Two findings deserve attention before any code-level review (F1.1 doc/CI drift and F1.2 binary-size design conflict). The request flow matches docs; the package graph has one undocumented edge (F1.3). The architecture document is accurate in substance but the top-of-doc diagram understates the Deploy subsystem (F1.4) and omits a security-relevant ordering detail (F1.5).
+The originally-filed F1.1 (`zig build test` gap), F1.2 (pi_app packaging), F1.3 (`runtime → tools` via `deploy.zig`), F1.4 (Deploy subsystem in the diagram), and F1.8 (`run_cmd` install dependency) have been removed as stale: F1.1 and F1.8 are fixed in the current `build.zig` (`test` chains `run_zigts_tests`; `run_cmd` no longer depends on `getInstallStep`); F1.3's `deploy.zig` and F1.4's `packages/runtime/src/deploy/` subsystem were retired with the hosted control plane; and F1.2 was resolved by measurement — the `zigttp-runtime` deploy artifact carries no `pi_app` (the agent and studio are comptime-stripped, 0 anthropic/studio symbols), and `pi_app` adds only ~0.37 MB to the dev-only `zigttp`/`zigts` binaries.
 
-No blockers. No findings require immediate code changes — only docs, build-step chaining, and a design decision on pi_app packaging.
+The remaining open Phase 1 items are minor: a security-relevant ordering note (F1.5), two build-ergonomics nits (F1.6, F1.7), and two doc nits (F1.9, F1.10). No blockers.
 
 ---
 
@@ -597,7 +552,7 @@ The build-time CLI surface is coherent. The `expert` canonical-surface refactor 
 
 | File | Status | Finding |
 |---|---|---|
-| `architecture.md` | **Mostly accurate** | Phase 1 findings F1.4 (Deploy subsystem invisible in diagram) and F1.5 (static-file ordering not mentioned) remain unaddressed. Request flow prose matches code. |
+| `architecture.md` | **Mostly accurate** | Phase 1 finding F1.5 (static-file ordering not mentioned) remains unaddressed. Request flow prose matches code. |
 | `verification.md` | **Accurate** | Checks 1-2 (Response returns, Result checking) match `handler_verifier.zig`. Mentions `bytecode_verifier.zig` (F3.10 from Phase 3 is moot). |
 | `sound-mode.md` | **Accurate** | Type-directed truthiness rules match `bool_checker.zig` logic. |
 | `typescript.md` | **Accurate** | Stripper examples match `stripper.zig` behavior; generic type aliases instantiation documented. |
@@ -613,7 +568,7 @@ The build-time CLI surface is coherent. The `expert` canonical-surface refactor 
 
 **Deleted docs** (confirmed absent per Phase 1): `claude-tools.md`, `threat-model.md`, `rollout.md` no longer referenced anywhere. Confirmed with grep for orphan references.
 
-**Drift summary**: No material drift. The two Phase 1 findings (architecture diagram gaps) remain open; none are contradicted by the docs.
+**Drift summary**: No material drift. Phase 1 finding F1.5 (static-file ordering) remains open; none are contradicted by the docs.
 
 ### CI audit
 
@@ -624,7 +579,7 @@ The build-time CLI surface is coherent. The `expert` canonical-surface refactor 
 **Test matrix** (lines 16-35):
 - Runs on macOS-latest and Ubuntu-latest (line 21).
 - Invokes: `zig build test test-zigts test-zruntime test-expert test-expert-app test-capability-audit test-module-governance` (line 29).
-- **Validation**: This exactly covers all test steps except `test-precompile`, `test-property-expectations`, and `test-rollout`. Phase 1 F1.1 identified the gap (`test-zigts` was missing from the default `test` step); CI compensates by invoking it explicitly, but local developers still miss it on `zig build test` alone.
+- **Validation**: This exactly covers all test steps except `test-precompile`, `test-property-expectations`, and `test-rollout`. The default `test` step now chains `run_zigts_tests` (the gap originally flagged in Phase 1 is fixed).
 - Also runs `bash scripts/test-examples.sh` (line 35) — end-to-end example handlers.
 
 **Platform matrix** (lines 59-73): `build` job builds for x86_64/aarch64 × macOS/Linux (4 targets). Does NOT cross-compile during the `test` job (tests run on CI OS only). Test coverage is platform-limited; runtime code paths on Linux arm64 are compiled in release build (lines 81) but not tested.
@@ -651,11 +606,11 @@ Enforces a pattern: each virtual module function must wrap its implementation wi
 
 **AGENTS.md** (64 lines): Describes the project for agent automation. Covers repo structure, test commands, virtual modules, how to add rules, deployment, durable execution. Matches CLAUDE.md in scope and accuracy. Does not reference deleted docs.
 
-**CLAUDE.md** (100+ lines, partially read): Project context, build commands, architecture, virtual modules table, JS subset, compile-time systems, CLI options. Accurate to current state. F1.1 (the `zig build test` inaccuracy flagged in Phase 1) is still present: line 25 claims `zig build test # All tests` but it doesn't run `test-zigts` or `test-zruntime`. Should be updated to reflect the full suite or documented with caveats. **STALE on this point**.
+**CLAUDE.md** (100+ lines, partially read): Project context, build commands, architecture, virtual modules table, JS subset, compile-time systems, CLI options. Accurate to current state, including the `zig build test` description — the default `test` step now chains the engine tests, so the earlier Phase 1 inaccuracy is resolved.
 
 ### Phase 7 summary
 
-Test coverage is **uneven**: the engine (1004 tests) is well-covered; the runtime core (zruntime, server) is light at ~8 tests per 1000 LOC; tools and durability are nearly untested. The durable-execution subsystem (`durable_store.zig` with 2 tests on ~1000 LOC) is a significant gap for a claimed feature. Documentation is **accurate and comprehensive**; no drift found except Phase 1 architecture diagram gaps remain unaddressed. CI **runs the core test suite but misses per-platform test validation** for Linux arm64; no PR-gating workflow (only tag pushes). The hardened repo policy (policy hash assertion, expert subsystem validation) is well-enforced. One meta-file stale point: CLAUDE.md line 25 incorrectly claims `zig build test` runs all tests — it does not run engine or runtime tests by default.
+Test coverage is **uneven**: the engine (1004 tests) is well-covered; the runtime core (zruntime, server) is light at ~8 tests per 1000 LOC; tools and durability are nearly untested. The durable-execution subsystem (`durable_store.zig` with 2 tests on ~1000 LOC) is a significant gap for a claimed feature. Documentation is **accurate and comprehensive**; no material drift found (the remaining open Phase 1 item is the F1.5 static-file ordering note). CI **runs the core test suite but misses per-platform test validation** for Linux arm64; no PR-gating workflow (only tag pushes). The hardened repo policy (policy hash assertion, expert subsystem validation) is well-enforced.
 
 ---
 
@@ -663,37 +618,35 @@ Test coverage is **uneven**: the engine (1004 tests) is well-covered; the runtim
 
 ### Count
 
-57 findings across 7 phases.
+52 findings across 7 phases (5 stale Phase 1 findings removed; see the Phase 1 summary).
 
 | Severity | Count |
 |---|---|
 | BLOCKER | 0 |
-| HIGH | 7 |
-| MEDIUM | 23 |
-| LOW | 22 |
+| HIGH | 5 |
+| MEDIUM | 21 |
+| LOW | 21 |
 | NIT | 5 |
 
-Phase 6 found zero HIGH/BLOCKER — the cross-cutting security/perf/error-handling posture is sound at the pattern level. The HIGH findings all live in Phases 1-4 and cluster around two fault lines: lifecycle boundaries (live reload, pool, module state) and proof-chain wiring (artifacts parsed but not verified, cache keys missing version/identity).
+Phase 6 found zero HIGH/BLOCKER — the cross-cutting security/perf/error-handling posture is sound at the pattern level. The HIGH findings all live in Phases 2-4 and cluster around two fault lines: lifecycle boundaries (live reload, pool, module state) and proof-chain wiring (artifacts parsed but not verified, cache keys missing version/identity).
 
 ### Consolidated HIGH findings
 
-1. **F1.1** — `zig build test` does not run the engine suite. CLAUDE.md line 25 is wrong.
-2. **F1.2** — `pi_app` linked unconditionally into the deploy binary. Binary-size goal unverified.
-3. **F2.1** — PIC coherence depends on undocumented hidden-class immutability invariant.
-4. **F3.1** — Bytecode cache key omits engine schema version. Silent drift across zigts versions.
-5. **F3.2** — Contract diff treats parameter renames (`/users/:id` → `/users/:userId`) as non-breaking.
-6. **F4.1** — Module-scope JS state persists across pooled requests, unverified and undocumented.
-7. **F4.2** — Live-reload hot-swap has a narrow generation-inconsistency window.
-8. **F4.3** — `--force-swap` can leave in-flight handlers referencing freed code buffers.
+1. **F2.1** — PIC coherence depends on undocumented hidden-class immutability invariant.
+2. **F3.1** — Bytecode cache key omits engine schema version. Silent drift across zigts versions.
+3. **F3.2** — Contract diff treats parameter renames (`/users/:id` → `/users/:userId`) as non-breaking.
+4. **F4.1** — Module-scope JS state persists across pooled requests, unverified and undocumented.
+5. **F4.2** — Live-reload hot-swap has a narrow generation-inconsistency window.
+6. **F4.3** — `--force-swap` can leave in-flight handlers referencing freed code buffers.
 
 (F4.7 proof-hash not enforced was tagged MEDIUM by Phase 4 but deserves HIGH in retrospect — see recommendation #1.)
 
-### Top-7 recommended actions (re-ranked after full review)
+### Top-5 recommended actions (re-ranked after full review)
 
 Ordered by fix-cost/impact ratio. Each bundles adjacent findings that share a fix.
 
 **1. Wire `artifact_sha256` + `policy_hash` into startup verification** — F4.7
-Two function calls in `Server.init()`. Converts attestation data into enforcement. Converts the whole compile-time proof chain from "we proved it" to "we proved it and we check it at startup." One-day fix. Should be done before F1.2 (binary-size work) because it changes what "correct deploy" means.
+Two function calls in `Server.init()`. Converts attestation data into enforcement. Converts the whole compile-time proof chain from "we proved it" to "we proved it and we check it at startup." One-day fix.
 
 **2. Add a `generation` counter to `HandlerPool`** — F4.2, F4.5, F6.A.1
 Single primitive that fixes three distinct bugs: live-reload race (F4.2), proof-cache staleness across handler swaps (F4.5), and cache coherence during reload (F6.A.1). Atomic u64 on the pool; runtimes carry their generation at checkout; mismatch triggers invalidation. Low risk, high coverage.
@@ -706,12 +659,6 @@ One-line change: `SHA256(source ++ SCHEMA_VERSION)`. CI already asserts policy-h
 
 **5. Tighten proof cache eligibility** — F4.6
 Extend `shouldCache` to reject `Set-Cookie`, `Vary`, `Cache-Control: private|no-store|must-revalidate`, `Authorization`. Tens of lines of code. Closes a real correctness hole in the "proven memoization" claim.
-
-**6. Fix the test-step gap** — F1.1
-Chain `test-zigts` + `test-zruntime` into the default `test` step. CI already runs them; local dev deserves parity. Alternatively correct CLAUDE.md — but chaining is better because the doc contract stays meaningful.
-
-**7. Resolve the `pi_app` packaging question** — F1.2
-Build `zigttp` with and without the `pi_app` import at `ReleaseFast`, diff sizes. If dead-code elimination strips it: document that and the finding closes. If it doesn't: split `zigttp-expert` into a separate binary. Needs measurement, not analysis.
 
 ### Cross-phase themes (ranked by prevalence)
 
@@ -739,7 +686,7 @@ Build `zigttp` with and without the `pi_app` import at `ReleaseFast`, diff sizes
 
 ### Deferred
 
-- **Phase 8** (`packages/pi/`): 2.3 KLOC agent/TUI/REPL. Not reviewed. Given F1.2 (should it even ship with `zigttp`?), a full review may be premature until the packaging question is resolved. If pi stays in the runtime binary, Phase 8 becomes a security review (pi has access to the Anthropic API and arbitrary handler analysis). If pi splits out, Phase 8 is a lower-priority developer-tool review.
+- **Phase 8** (`packages/pi/`): agent/TUI/REPL. Not reviewed. The packaging question is settled: pi is absent from the `zigttp-runtime` deploy artifact and adds only ~0.37 MB to the dev-only `zigttp`/`zigts` binaries. A Phase 8 review would be a developer-tool security review (pi has access to the Anthropic API and arbitrary handler analysis).
 - Perf benchmarks vs. claims — `docs/performance.md` cites numbers from `../zigttp-bench`; reviewer didn't run them.
 - The downgraded-BLOCKER F4.4 (`in_use` drift) — warrants a concrete repro attempt before closing. A targeted read of error paths in `ensureRuntime` + `pool.acquire` + their defers/errdefers would settle it in ~30 minutes.
 
@@ -748,6 +695,5 @@ Build `zigttp` with and without the `pi_app` import at `ReleaseFast`, diff sizes
 - **One PR for items 1-2** (`artifact_sha256` verification + `HandlerPool` generation counter) — the highest-leverage bundle. Adds enforcement to three existing attestation fields and fixes three separate staleness bugs. Should include tests that simulate reload-during-request and corrupt-payload-at-startup.
 - **One PR for item 3** (module-scope state policy) — short-circuits a design ambiguity. Spec change, not code change, unless the decision is to add a verifier check.
 - **One PR for items 4-5** (bytecode cache key + proof cache eligibility) — small surgical fixes with clear semantics.
-- **One PR for items 6-7** (test step chaining + pi_app measurement) — ergonomics and packaging; no runtime behavior change.
 
 None of these require a new subsystem or a refactor. The repo is in a state where the next round of work is small targeted PRs, not restructuring.

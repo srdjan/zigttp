@@ -117,8 +117,8 @@ function handler(request) {
 }
 ```
 
-See [examples/](examples/) for HTMX, SQL, auth, durable workflows,
-and more.
+See [examples/](examples/) for JSX/SSR, SQL, durable workflows,
+WebSocket, and more.
 
 ## What makes it different
 
