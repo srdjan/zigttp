@@ -220,6 +220,8 @@ zigttp meta [--json]                           # policy metadata (version, hash,
 zigttp gen-tests [handler.ts] [-o output.jsonl]
 zigttp verify-paths <f>... [--json]            # full analysis (includes flow-checker)
 zigttp verify-modules --builtins --strict --json
+zigttp verify-module-manifest <manifest.json> [--json]  # validate a partner module manifest
+zigttp extension-status --module-manifest <path>... [--json]  # registered partner-module summary
 zigttp edit-simulate [handler.ts] [--before old.ts]
 zigttp canonicalize <file> --json [--simulate] # local canonical refactor intents
 zigttp describe-rule [name|code] [--json] [--hash]

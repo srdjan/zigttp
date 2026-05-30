@@ -22,12 +22,88 @@ const system_rollout = @import("system_rollout.zig");
 const search_rules = @import("search_rules.zig");
 const review_patch = @import("review_patch.zig");
 const prove_behavior = @import("prove_behavior.zig");
-const canonicalize_cmd = @import("canonicalize.zig");
 const expert = @import("expert.zig");
 const project_config_mod = @import("project_config");
 const zigts = @import("zigts");
 const zigts_file_io = zigts.file_io;
 const writeContractJson = zigts.handler_contract.writeContractJson;
+
+/// Help-grouping for the canonical analyzer surface. `analyze` commands act on
+/// a handler/system; `machine` commands emit JSON metadata for IDE and
+/// review-bot integrations.
+pub const Category = enum { analyze, machine };
+
+/// One dispatchable analyzer command. This table is the single source of truth
+/// for the surface shared by the `zigts` binary and the `zigttp` developer CLI:
+/// both dispatch from it (`run` / `isAnalyzerCommand`) and both render help from
+/// it (`printHelp` / `writeCommandLines`). `compile` is intentionally absent -
+/// it names different operations in each binary (binary output in `zigttp`,
+/// `.zig` output in `zigts`) and stays a per-binary special case.
+pub const Command = struct {
+    name: []const u8,
+    run: *const fn (std.mem.Allocator, []const []const u8) anyerror!void,
+    /// Full usage line shown by `zigts --help` (without the leading `zigts `).
+    usage: []const u8,
+    /// Short argument hint shown by `zigttp help --all`.
+    args: []const u8,
+    /// One-line description shown by `zigttp help --all`.
+    blurb: []const u8,
+    category: Category,
+};
+
+pub const commands = [_]Command{
+    .{ .name = "check", .run = runCheckCommand, .category = .analyze, .args = "[handler.ts]", .blurb = "Run the analyzer once", .usage = "check [handler.ts] [--json] [--contract] [--types] [--sql-schema path] [--system path]" },
+    .{ .name = "prove", .run = prove.runWithArgs, .category = .analyze, .args = "<old.json> <new.json>", .blurb = "Contract upgrade safety check", .usage = "prove <old-contract.json> <new-contract.json> [output-dir/]" },
+    .{ .name = "mock", .run = mock.runWithArgs, .category = .analyze, .args = "<tests.jsonl>", .blurb = "Mock server from test fixtures", .usage = "mock <tests.jsonl> [--port PORT]" },
+    .{ .name = "link", .run = system_build.runWithArgs, .category = .analyze, .args = "<system.json>", .blurb = "Cross-handler system linking", .usage = "link <system.json> [--output-dir <dir>]" },
+    .{ .name = "gen-tests", .run = runGenTestsCommand, .category = .analyze, .args = "[handler.ts]", .blurb = "Generate a starter test fixture", .usage = "gen-tests [handler.ts] [-o output.jsonl]" },
+    .{ .name = "prove-behavior", .run = prove_behavior.runWithArgs, .category = .analyze, .args = "<before> <after>", .blurb = "Behavioral-equivalence verdict between two handler versions", .usage = "prove-behavior <before.ts> <after.ts> [--json]" },
+    .{ .name = "edit-simulate", .run = edit_simulate.runWithArgs, .category = .analyze, .args = "[handler.ts]", .blurb = "Simulate an edit and report violations", .usage = "edit-simulate [handler.ts] [--before old.ts] [--stdin-json]" },
+    .{ .name = "review-patch", .run = review_patch.runWithArgs, .category = .analyze, .args = "<file>", .blurb = "Review a patch for new violations", .usage = "review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]" },
+    .{ .name = "rollout", .run = system_rollout.runWithArgs, .category = .analyze, .args = "<old-system> <new>", .blurb = "System-level deployment manifest", .usage = "rollout <old-system.json> <new-system.json> [--output-dir <dir>]" },
+    .{ .name = "canonicalize", .run = canonicalize.runWithArgs, .category = .analyze, .args = "<file> --json", .blurb = "Canonicalize a handler and report refactors", .usage = "canonicalize <file> --json [--simulate]" },
+    .{ .name = "features", .run = runFeaturesCommand, .category = .machine, .args = "", .blurb = "List supported language features", .usage = "features [--json]" },
+    .{ .name = "modules", .run = runModulesCommand, .category = .machine, .args = "", .blurb = "List virtual module exports", .usage = "modules [--json]" },
+    .{ .name = "restrictions", .run = runRestrictionsCommand, .category = .machine, .args = "", .blurb = "Show language restrictions and the proofs they unlock", .usage = "restrictions [--json] [--by proof|class]" },
+    .{ .name = "meta", .run = expert.runMeta, .category = .machine, .args = "", .blurb = "Compiler and policy metadata", .usage = "meta [--json]" },
+    .{ .name = "describe-rule", .run = describe_rule.runWithArgs, .category = .machine, .args = "[name|code]", .blurb = "Look up a diagnostic rule", .usage = "describe-rule [rule-name|code] [--json] [--hash]" },
+    .{ .name = "search", .run = search_rules.runWithArgs, .category = .machine, .args = "<keyword>", .blurb = "Search rules by keyword", .usage = "search <keyword> [--json]" },
+    .{ .name = "verify-paths", .run = expert.runVerifyPaths, .category = .machine, .args = "<file>...", .blurb = "Behavior-path verification", .usage = "verify-paths <file>... [--json]" },
+    .{ .name = "verify-modules", .run = expert.runVerifyModules, .category = .machine, .args = "<file>...", .blurb = "Module-contract verification", .usage = "verify-modules <file>... [--strict] [--json] | --builtins" },
+    .{ .name = "verify-module-manifest", .run = expert.runVerifyModuleManifest, .category = .machine, .args = "<manifest.json>", .blurb = "Verify a module manifest", .usage = "verify-module-manifest <manifest.json> [--json]" },
+    .{ .name = "extension-status", .run = expert.runExtensionStatus, .category = .machine, .args = "--module-manifest <path>...", .blurb = "Report extension module status", .usage = "extension-status --module-manifest <path>... [--json]" },
+};
+
+/// True for every command in the shared registry. `compile` is excluded by
+/// design (see `Command`), so callers route it separately.
+pub fn isAnalyzerCommand(name: []const u8) bool {
+    for (commands) |c| {
+        if (std.mem.eql(u8, name, c.name)) return true;
+    }
+    return false;
+}
+
+/// Render the `zigttp help --all` lines for one category from the registry, so
+/// the developer CLI's analyzer/machine sections cannot drift from the surface
+/// `zigts` actually dispatches. Aligns the description column at byte 41.
+pub fn writeCommandLines(w: *std.Io.Writer, category: Category) std.Io.Writer.Error!void {
+    const prefix = "  zigttp ";
+    const desc_col = 41;
+    for (commands) |c| {
+        if (c.category != category) continue;
+        var width: usize = prefix.len + c.name.len;
+        try w.writeAll(prefix);
+        try w.writeAll(c.name);
+        if (c.args.len > 0) {
+            try w.writeByte(' ');
+            try w.writeAll(c.args);
+            width += 1 + c.args.len;
+        }
+        try w.splatByteAll(' ', if (width < desc_col) desc_col - width else 1);
+        try w.writeAll(c.blurb);
+        try w.writeByte('\n');
+    }
+}
 
 pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.smp_allocator;
@@ -46,89 +122,17 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
 
     const command = argv[0];
+    // `compile` names different operations in `zigts` (precompile to .zig) and
+    // `zigttp` (build a binary), so it stays out of the shared registry.
     if (std.mem.eql(u8, command, "compile")) {
         try precompile.runCompileWithArgs(allocator, argv[1..]);
         return;
     }
-    if (std.mem.eql(u8, command, "check")) {
-        try runCheckCommand(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "prove")) {
-        try prove.runWithArgs(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "mock")) {
-        try mock.runWithArgs(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "link")) {
-        try system_build.runWithArgs(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "rollout")) {
-        try system_rollout.runWithArgs(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "features")) {
-        try runFeaturesCommand(argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "modules")) {
-        try runModulesCommand(argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "restrictions")) {
-        try runRestrictionsCommand(argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "meta")) {
-        try expert.runMeta(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "verify-paths")) {
-        try expert.runVerifyPaths(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "verify-modules")) {
-        try expert.runVerifyModules(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "verify-module-manifest")) {
-        try expert.runVerifyModuleManifest(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "extension-status")) {
-        try expert.runExtensionStatus(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "edit-simulate")) {
-        try edit_simulate.runWithArgs(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "canonicalize")) {
-        try canonicalize_cmd.runWithArgs(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "describe-rule")) {
-        try describe_rule.runWithArgs(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "search")) {
-        try search_rules.runWithArgs(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "review-patch")) {
-        try review_patch.runWithArgs(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "gen-tests")) {
-        try runGenTestsCommand(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "prove-behavior")) {
-        try prove_behavior.runWithArgs(allocator, argv[1..]);
-        return;
+    for (commands) |c| {
+        if (std.mem.eql(u8, command, c.name)) {
+            try c.run(allocator, argv[1..]);
+            return;
+        }
     }
     printHelp();
     return error.UnknownCommand;
@@ -305,7 +309,7 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     if (result.totalWarnings() > 0) std.process.exit(2);
 }
 
-fn runFeaturesCommand(argv: []const []const u8) !void {
+fn runFeaturesCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--json")) json_mode = true;
@@ -328,7 +332,7 @@ fn runFeaturesCommand(argv: []const []const u8) !void {
     }
 }
 
-fn runRestrictionsCommand(argv: []const []const u8) !void {
+fn runRestrictionsCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
     var group_by: json_diag.RestrictionGrouping = .none;
     var i: usize = 0;
@@ -386,7 +390,7 @@ fn runRestrictionsCommand(argv: []const []const u8) !void {
     }
 }
 
-fn runModulesCommand(argv: []const []const u8) !void {
+fn runModulesCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--json")) json_mode = true;
@@ -449,39 +453,33 @@ pub fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) 
     return args.toOwnedSlice(allocator);
 }
 
+const help_head =
+    \\zigts - compiler and analysis tools for zigttp handlers
+    \\
+    \\Usage:
+    \\  zigts compile [precompile flags] <handler.ts> <output.zig>
+    \\
+;
+
+const help_tail =
+    \\
+    \\The interactive `expert` agent and session `ledger` commands live in the
+    \\developer CLI: run `zigttp expert` / `zigttp ledger`.
+    \\
+;
+
 fn printHelp() void {
-    const help =
-        \\zigts - compiler and analysis tools for zigttp handlers
-        \\
-        \\Usage:
-        \\  zigts check [handler.ts] [--json] [--contract] [--types] [--sql-schema path] [--system path]
-        \\  zigts compile [precompile flags] <handler.ts> <output.zig>
-        \\  zigts prove <old-contract.json> <new-contract.json> [output-dir/]
-        \\  zigts mock <tests.jsonl> [--port PORT]
-        \\  zigts link <system.json> [--output-dir <dir>]
-        \\  zigts rollout <old-system.json> <new-system.json> [--output-dir <dir>]
-        \\  zigts features [--json]
-        \\  zigts modules [--json]
-        \\  zigts restrictions [--json] [--by proof|class]
-        \\  zigts meta [--json]
-        \\  zigts verify-paths <file>... [--json]
-        \\  zigts verify-modules <file>... [--strict] [--json]
-        \\  zigts verify-modules --builtins [--strict] [--json]
-        \\  zigts verify-module-manifest <manifest.json> [--json]
-        \\  zigts extension-status --module-manifest <path>... [--json]
-        \\  zigts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
-        \\  zigts canonicalize <file> --json [--simulate]
-        \\  zigts describe-rule [rule-name|code] [--json] [--hash]
-        \\  zigts search <keyword> [--json]
-        \\  zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
-        \\  zigts prove-behavior <before.ts> <after.ts> [--json]
-        \\  zigts gen-tests [handler.ts] [-o output.jsonl]
-        \\
-        \\The interactive `expert` agent and session `ledger` commands live in the
-        \\developer CLI: run `zigttp expert` / `zigttp ledger`.
-        \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    // The usage lines come from the shared registry so `zigts` and `zigttp`
+    // advertise exactly the surface they dispatch.
+    w.writeAll(help_head) catch {};
+    for (commands) |c| {
+        w.print("  zigts {s}\n", .{c.usage}) catch {};
+    }
+    w.writeAll(help_tail) catch {};
+    const out = w.buffered();
+    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
 }
 
 fn printCheckHelp() void {

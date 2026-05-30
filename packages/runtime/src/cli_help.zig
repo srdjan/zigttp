@@ -4,6 +4,7 @@
 //! live with their own command modules.
 
 const std = @import("std");
+const zigts_cli = @import("zigts_cli");
 
 pub fn hasAllFlag(argv: []const []const u8) bool {
     for (argv) |arg| {
@@ -36,7 +37,12 @@ pub fn printHelp() void {
     _ = std.c.write(std.c.STDOUT_FILENO, core_help.ptr, core_help.len);
 }
 
-const core_help_all =
+// `help --all` is rendered in three static spans with the two analyzer
+// sections generated from `zigts_cli.commands` between them, so the developer
+// CLI advertises exactly the surface `zigts` dispatches (no hand-maintained
+// duplicate list to drift). The `.analyze` lines follow `help_all_head`; the
+// `.machine` lines follow `help_all_mid`.
+const help_all_head =
     \\zigttp - serverless JavaScript runtime
     \\
     \\Core commands:
@@ -47,11 +53,10 @@ const core_help_all =
     \\  zigttp deploy                          Build, prove, deploy (local default)
     \\
     \\Analyze:
-    \\  zigttp check [handler.ts]              Run the analyzer once
-    \\  zigttp prove <old.json> <new.json>     Contract upgrade safety check
-    \\  zigttp mock <tests.jsonl>              Mock server from test fixtures
-    \\  zigttp link <system.json>              Cross-handler system linking
-    \\  zigttp gen-tests [handler.ts]          Generate a starter test fixture
+    \\
+;
+
+const help_all_mid =
     \\
     \\Run and inspect:
     \\  zigttp serve [handler.ts]              Run a handler without watch or proof
@@ -76,18 +81,10 @@ const core_help_all =
     \\  zigttp auth revoke <provider>          Remove a stored key (claude | openai)
     \\
     \\Machine tools (JSON output for IDE and review-bot integrations):
-    \\  zigttp features                        List supported language features
-    \\  zigttp modules                         List virtual module exports
-    \\  zigttp restrictions                    Show language restrictions and the proofs they unlock
-    \\  zigttp meta                            Compiler and policy metadata
-    \\  zigttp describe-rule [name|code]       Look up a diagnostic rule
-    \\  zigttp search <keyword>                Search rules by keyword
-    \\  zigttp verify-paths <file>...          Behavior-path verification
-    \\  zigttp verify-modules <file>...        Module-contract verification
-    \\  zigttp edit-simulate [handler.ts]      Simulate an edit and report violations
-    \\  zigttp review-patch <file>             Review a patch for new violations
-    \\  zigttp prove-behavior <before> <after> Behavioral-equivalence verdict between two handler versions
-    \\  zigttp rollout <old-system> <new>      System-level deployment manifest
+    \\
+;
+
+const help_all_tail =
     \\
     \\Advanced:
     \\  zigttp ratchet [show|check]            Property-regression gate
@@ -98,8 +95,22 @@ const core_help_all =
     \\
 ;
 
+/// Render the full `help --all` text into `buf` (static spans plus the two
+/// registry-generated sections). 4 KB is comfortably above the rendered size.
+fn renderHelpAll(buf: []u8) []const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    w.writeAll(help_all_head) catch {};
+    zigts_cli.writeCommandLines(&w, .analyze) catch {};
+    w.writeAll(help_all_mid) catch {};
+    zigts_cli.writeCommandLines(&w, .machine) catch {};
+    w.writeAll(help_all_tail) catch {};
+    return w.buffered();
+}
+
 pub fn printHelpAll() void {
-    _ = std.c.write(std.c.STDOUT_FILENO, core_help_all.ptr, core_help_all.len);
+    var buf: [4096]u8 = undefined;
+    const out = renderHelpAll(&buf);
+    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
 }
 
 const expert_help =
@@ -175,6 +186,8 @@ test "default help advertises only the five core commands" {
 }
 
 test "help --all surfaces the advanced commands" {
+    var buf: [4096]u8 = undefined;
+    const help_all = renderHelpAll(&buf);
     inline for (.{
         "zigttp serve",        "zigttp build",          "zigttp compile",
         "zigttp doctor",       "zigttp proofs",         "zigttp check",
@@ -183,12 +196,25 @@ test "help --all surfaces the advanced commands" {
         "zigttp verify-paths", "zigttp verify-modules", "zigttp edit-simulate",
         "zigttp review-patch", "zigttp rollout",
     }) |cmd| {
-        try std.testing.expect(has(core_help_all, cmd));
+        try std.testing.expect(has(help_all, cmd));
+    }
+}
+
+test "help --all advertises every shared analyzer command" {
+    // Anti-drift guard: the developer CLI must list the full surface `zigts`
+    // dispatches. New entries in `zigts_cli.commands` fail here until added.
+    var buf: [4096]u8 = undefined;
+    const help_all = renderHelpAll(&buf);
+    for (zigts_cli.commands) |c| {
+        var needle_buf: [64]u8 = undefined;
+        const needle = std.fmt.bufPrint(&needle_buf, "zigttp {s}", .{c.name}) catch unreachable;
+        try std.testing.expect(has(help_all, needle));
     }
 }
 
 test "help --all surfaces the optional browser studio workbench" {
-    try std.testing.expect(has(core_help_all, "zigttp studio"));
+    var buf: [4096]u8 = undefined;
+    try std.testing.expect(has(renderHelpAll(&buf), "zigttp studio"));
 }
 
 test "hasAllFlag detects the --all escape hatch" {
@@ -215,11 +241,13 @@ test "help --all no longer advertises hosted cloud deploy" {
     // Trailing space avoids spurious substring matches with longer
     // command names (e.g. `zigttp review` would otherwise match
     // `zigttp review-patch`).
+    var buf: [4096]u8 = undefined;
+    const help_all = renderHelpAll(&buf);
     inline for (.{
         "zigttp login ",  "zigttp logout ",       "zigttp review ",
         "zigttp grants ", "zigttp revoke-grant ", "zigttp assert-intent ",
         "--cloud",
     }) |hidden| {
-        try std.testing.expect(!has(core_help_all, hidden));
+        try std.testing.expect(!has(help_all, hidden));
     }
 }

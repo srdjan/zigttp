@@ -255,26 +255,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
         return;
     }
-    if (std.mem.eql(u8, command, "check") or
-        std.mem.eql(u8, command, "prove") or
-        std.mem.eql(u8, command, "mock") or
-        std.mem.eql(u8, command, "link") or
-        std.mem.eql(u8, command, "gen-tests") or
-        std.mem.eql(u8, command, "rollout") or
-        std.mem.eql(u8, command, "features") or
-        std.mem.eql(u8, command, "modules") or
-        std.mem.eql(u8, command, "restrictions") or
-        std.mem.eql(u8, command, "meta") or
-        std.mem.eql(u8, command, "verify-paths") or
-        std.mem.eql(u8, command, "verify-modules") or
-        std.mem.eql(u8, command, "verify-module-manifest") or
-        std.mem.eql(u8, command, "extension-status") or
-        std.mem.eql(u8, command, "edit-simulate") or
-        std.mem.eql(u8, command, "describe-rule") or
-        std.mem.eql(u8, command, "search") or
-        std.mem.eql(u8, command, "review-patch") or
-        std.mem.eql(u8, command, "prove-behavior"))
-    {
+    // Delegate the full shared analyzer surface to the same code path `zigts`
+    // uses. Membership lives in one place (`zigts_cli.commands`), so the two
+    // binaries can never expose a different command set. `compile` is handled
+    // separately below: it builds a binary here but precompiles to .zig in
+    // `zigts`, so it is deliberately excluded from the shared registry.
+    if (zigts_cli.isAnalyzerCommand(command)) {
         zigts_cli.run(allocator, user_args) catch |err| {
             if (err == error.NoProjectConfig) {
                 printNoProjectConfigDiagnostic(command);
