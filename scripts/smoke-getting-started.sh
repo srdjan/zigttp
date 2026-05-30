@@ -14,7 +14,9 @@ ZIGTTP="${ZIGTTP:-$REPO_ROOT/zig-out/bin/zigttp}"
 DEV_PORT=$((RANDOM % 1000 + 5600))
 DEPLOY_PORT=$((DEV_PORT + 1))
 
-TMP_DIR=$(mktemp -d -t zigttp-getting-started-XXXXXX)
+# Positional template (portable): GNU mktemp replaces the trailing X's; BSD
+# mktemp does too. Avoid `-t PREFIX`, where BSD leaves the X's literal.
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zigttp-getting-started.XXXXXX")
 APP_NAME="my-app"
 APP_DIR="$TMP_DIR/$APP_NAME"
 HTMX_DIR="$TMP_DIR/htmx-app"

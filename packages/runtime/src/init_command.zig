@@ -360,7 +360,19 @@ const htmxManifest =
 const basicHandler = zigts_cli.proof_quest_fixture.starter_source;
 
 const apiHandler =
-    \\function handler(req: Request): Response {
+    \\import type { Spec } from "zigttp:types";
+    \\
+    \\// Author-declared guardrails. Declaring an explicit Spec scopes the proof
+    \\// to these properties; without it every supported spec is active, and the
+    \\// /echo route below (which reflects the request body) cannot discharge
+    \\// pii_contained. Run `zigttp check` to see them proven at compile time.
+    \\type Guardrails = Spec<
+    \\    | "deterministic"
+    \\    | "no_secret_leakage"
+    \\    | "injection_safe"
+    \\>;
+    \\
+    \\function handler(req: Request): Response & Guardrails {
     \\    if (req.method === "GET" && req.path === "/health") {
     \\        return Response.json({ ok: true });
     \\    }
@@ -377,6 +389,18 @@ const apiHandler =
 ;
 
 const htmxHandler =
+    \\import type { Spec } from "zigttp:types";
+    \\
+    \\// Author-declared guardrails. Declaring an explicit Spec scopes the proof
+    \\// to these properties; without it every supported spec is active and the
+    \\// proof cannot be discharged. Run `zigttp check` to see them proven at
+    \\// compile time.
+    \\type Guardrails = Spec<
+    \\    | "deterministic"
+    \\    | "no_secret_leakage"
+    \\    | "injection_safe"
+    \\>;
+    \\
     \\function Page(): JSX.Element {
     \\    return (
     \\        <html>
@@ -391,7 +415,7 @@ const htmxHandler =
     \\    );
     \\}
     \\
-    \\function handler(req: Request): Response {
+    \\function handler(req: Request): Response & Guardrails {
     \\    if (req.method === "GET" && req.path === "/") {
     \\        return Response.html(renderToString(<Page />));
     \\    }
