@@ -690,9 +690,17 @@ const Stripper = struct {
     }
 
     fn looksLikeGenericArrow(self: *Self) bool {
-        // Check if <...> is followed by ( for arrow function
+        // Check if <...> is followed by ( for arrow function. This is a pure
+        // probe: skipBalancedAngles advances self.line/col across newlines, so
+        // restore all of pos/line/col (not just pos) to keep it side-effect-free.
         const saved_pos = self.pos;
-        defer self.pos = saved_pos;
+        const saved_line = self.line;
+        const saved_col = self.col;
+        defer {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            self.col = saved_col;
+        }
 
         // Skip <...>
         if (!self.skipBalancedAngles()) return false;
@@ -1242,9 +1250,22 @@ const Stripper = struct {
             return false;
         }
 
-        // Try to parse as generic params
+        // Try to parse as generic params. The probe below advances pos via
+        // skipBalancedAngles/skipWhitespaceTracked, both of which also advance
+        // self.line/self.col across newlines. If the probe fails we must rewind
+        // ALL of pos, line, and col - rewinding pos alone drifts the line
+        // counter, which corrupts the byte/line positions recorded for later
+        // type annotations. In TSX this fires on every multi-line JSX closing
+        // tag (`</body>` etc.): looksLikeJsx() rejects the `</` so we reach here,
+        // probe across the trailing newline, then bail - leaving self.line ahead
+        // and breaking declared-Spec extraction on the handler that follows.
         const start = self.pos;
+        const start_line = self.line;
+        const start_col = self.col;
         if (!self.skipBalancedAngles()) {
+            self.pos = start;
+            self.line = start_line;
+            self.col = start_col;
             return false;
         }
 
@@ -1269,8 +1290,10 @@ const Stripper = struct {
             }
         }
 
-        // Not generic params, restore
+        // Not generic params, restore position AND line/col tracking.
         self.pos = start;
+        self.line = start_line;
+        self.col = start_col;
         return false;
     }
 
@@ -2314,6 +2337,46 @@ test "tsx mode handles fragments" {
     // Fragment syntax preserved
     try std.testing.expect(std.mem.indexOf(u8, result.code, "<>") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "</>") != null);
+}
+
+test "multi-line JSX does not drift line tracking for later annotations" {
+    // Regression: a TSX closing tag like `</body>` is not recognized as JSX by
+    // looksLikeJsx() (the char after `<` is `/`), so it falls into the
+    // generic-params probe. That probe crosses the trailing newline via
+    // skipBalancedAngles/skipWhitespaceTracked and previously restored only
+    // `pos` on the not-generic path, leaving `self.line` advanced. The drift
+    // corrupted the recorded line of every annotation after the JSX, which broke
+    // declared-Spec extraction on the handler (getFnSigByLoc missed, so all
+    // specs activated). `handler` is on line 10; its return annotation must be
+    // recorded there.
+    const source =
+        \\function Page(): JSX.Element {
+        \\    return (
+        \\        <html>
+        \\            <body>
+        \\                <h1>x</h1>
+        \\            </body>
+        \\        </html>
+        \\    );
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.text("ok");
+        \\}
+    ;
+
+    const result = try strip(std.testing.allocator, source, .{ .tsx_mode = true });
+    defer @constCast(&result).deinit();
+
+    var found = false;
+    for (result.type_map.entries.items) |e| {
+        if (e.kind != .return_annotation) continue;
+        if (e.name_end <= e.name_start) continue;
+        if (std.mem.eql(u8, source[e.name_start..e.name_end], "handler")) {
+            try std.testing.expectEqual(@as(u32, 10), e.context_line);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
 }
 
 // ============================================================================
