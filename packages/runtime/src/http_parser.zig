@@ -1,5 +1,5 @@
 //! HTTP parsing helpers extracted from server.zig.
-//! Shared by streaming and buffer-based request parsing paths.
+//! Shared by the threaded server's buffer-based request parser.
 
 const std = @import("std");
 const http_types = @import("http_types.zig");

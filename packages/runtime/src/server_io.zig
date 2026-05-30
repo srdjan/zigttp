@@ -7,7 +7,6 @@
 //! request lifecycle.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const engine = @import("engine_adapter.zig");
 const http_types = @import("http_types.zig");
@@ -158,19 +157,4 @@ pub fn initIoBackend(io: anytype, allocator: std.mem.Allocator) !void {
     } else {
         try io.init(allocator);
     }
-}
-
-pub fn useEventedBackend() bool {
-    // Zig 0.16.0 release notes still describe Io.Evented as experimental and
-    // explicitly note that networking is not implemented yet.
-    //
-    // Evented backends lack networking support:
-    // - macOS Dispatch: all net* functions return error.NetworkDown
-    // - macOS/BSD Kqueue: netAccept/netListenIp are @panic("TODO")
-    // - Linux Uring: all net* functions return error.NetworkDown
-    //
-    // Revisit only after a dedicated probe confirms netListenIp, netAccept,
-    // netRead, and netWrite work on supported OSes.
-    _ = builtin.os.tag;
-    return false;
 }

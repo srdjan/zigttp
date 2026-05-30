@@ -56,7 +56,6 @@ pub fn build(b: *std.Build) void {
     });
     runtime_main.addImport("zigts", zigts_mod);
     runtime_main.addImport("project_config", project_config_mod);
-    runtime_main.addImport("zigttp_deploy", deploy_mod);
     runtime_main.addOptions("runtime_feature_options", runtime_features);
 
     const runtime_main_tests = b.addModule("runtime_main_tests", .{
@@ -66,7 +65,6 @@ pub fn build(b: *std.Build) void {
     });
     runtime_main_tests.addImport("zigts", zigts_mod);
     runtime_main_tests.addImport("project_config", project_config_mod);
-    runtime_main_tests.addImport("zigttp_deploy", deploy_mod);
     runtime_main_tests.addOptions("runtime_feature_options", runtime_features);
 
     const cli_main = b.addModule("cli_main", .{
@@ -100,11 +98,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     zruntime.addImport("zigts", zigts_mod);
-    // Threaded for consistency with the other runtime modules. zruntime.zig
-    // and its transitive imports don't reference zigttp_deploy today, but
-    // a future edit that adds one would otherwise break the runtime
-    // template build silently while leaving cli_main green.
-    zruntime.addImport("zigttp_deploy", deploy_mod);
     zruntime.addOptions("runtime_feature_options", runtime_features);
 
     const benchmark = b.addModule("benchmark", .{

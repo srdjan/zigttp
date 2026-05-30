@@ -1,7 +1,7 @@
 //! HTTP Server with JavaScript Request Handlers
 //!
 //! Architecture:
-//! - Evented I/O using Zig's std.Io with kqueue/io_uring backend
+//! - Threaded HTTP/1.1 using Zig's std.Io.Threaded backend
 //! - Per-request JS context isolation via LockFreePool-backed handler pool
 //! - Deno-compatible handler API
 
@@ -53,11 +53,9 @@ const writeAllFd = io_mod.writeAllFd;
 const etagMatchesIfNoneMatch = io_mod.etagMatchesIfNoneMatch;
 const createUnixSocketPair = io_mod.createUnixSocketPair;
 const writevAllFd = io_mod.writevAllFd;
-const isExpectedNetworkError = io_mod.isExpectedNetworkError;
 const findHeaderValue = io_mod.findHeaderValue;
 const defaultPoolSize = io_mod.defaultPoolSize;
 const initIoBackend = io_mod.initIoBackend;
-const useEventedBackend = io_mod.useEventedBackend;
 const formatETag = response_mod.formatETag;
 const connectionValue = response_mod.connectionValue;
 const formatStaticError = response_mod.formatStaticError;
@@ -67,23 +65,17 @@ const formatStaticOkHeader = response_mod.formatStaticOkHeader;
 const DynamicHeaderOrder = response_mod.DynamicHeaderOrder;
 const appendStatusLine = response_mod.appendStatusLine;
 const appendHeaderLine = response_mod.appendHeaderLine;
-const isFramingHeader = response_mod.isFramingHeader;
 const appendContentLengthHeader = response_mod.appendContentLengthHeader;
 const appendConnectionHeader = response_mod.appendConnectionHeader;
 const appendHeaderTerminator = response_mod.appendHeaderTerminator;
 const buildDynamicResponseHeader = response_mod.buildDynamicResponseHeader;
 const formatWellKnownHeaders = response_mod.formatWellKnownHeaders;
 const appendAttestationHeaders = response_mod.appendAttestationHeaders;
-const getStatusText = response_mod.getStatusText;
 const getStatusLine = response_mod.getStatusLine;
 
-const RequestLine = http_parser.RequestLine;
-const QueryParseResult = http_parser.QueryParseResult;
 const FastHeaderSlots = http_parser.FastHeaderSlots;
 const findHeaderEnd = http_parser.findHeaderEnd;
-const parseRequestLine = http_parser.parseRequestLine;
 const parseRequestLineBorrowed = http_parser.parseRequestLineBorrowed;
-const parseHeadersFromLines = http_parser.parseHeadersFromLines;
 const parseHeadersFromLinesBorrowed = http_parser.parseHeadersFromLinesBorrowed;
 const parseQueryString = http_parser.parseQueryString;
 const splitHeaderLine = http_parser.splitHeaderLine;
@@ -1069,8 +1061,7 @@ pub const Server = struct {
     ws_pool: ?websocket_pool.Pool = null,
 
     const Self = @This();
-    const ConnectionEvent = enum { done, timeout };
-    const IoBackend = if (useEventedBackend()) Io.Evented else Io.Threaded;
+    const IoBackend = Io.Threaded;
 
     pub fn init(allocator: std.mem.Allocator, config: ServerConfig) !Self {
         var cfg = config;
@@ -1454,14 +1445,12 @@ pub const Server = struct {
             .reuse_address = true,
         });
 
-        // Initialize connection thread pool on macOS (where we use threaded I/O)
-        // Use 2x CPU count for better throughput (workers may block on I/O)
-        if (!useEventedBackend()) {
-            const cpu_count = std.Thread.getCpuCount() catch 4;
-            const worker_count = cpu_count * 2;
-            self.conn_pool = try ConnectionPool.init(self.allocator, self, worker_count);
-            std.log.info("   Connection pool: {d} workers", .{worker_count});
-        }
+        // Threaded backend: a fixed connection pool avoids per-connection
+        // thread spawning while keeping the HTTP request path synchronous.
+        const cpu_count = std.Thread.getCpuCount() catch 4;
+        const worker_count = cpu_count * 2;
+        self.conn_pool = try ConnectionPool.init(self.allocator, self, worker_count);
+        std.log.info("   Connection pool: {d} workers", .{worker_count});
 
         self.running = true;
 
@@ -1494,8 +1483,6 @@ pub const Server = struct {
     fn acceptLoop(self: *Self) !void {
         const io = self.io_backend.io();
         var listener = self.listener orelse return error.NotStarted;
-        var group: Io.Group = .init;
-        defer group.cancel(io);
 
         while (self.running) {
             const stream = listener.accept(io) catch |err| {
@@ -1503,395 +1490,15 @@ pub const Server = struct {
                 return err;
             };
 
-            // On macOS: use connection pool to avoid per-connection thread spawn
+            const fd = stream.socket.handle;
             if (self.conn_pool) |cp| {
-                // Submit to thread pool - extract raw fd from stream
-                const fd = stream.socket.handle;
-                if (!cp.submit(fd)) {
-                    // Queue full - close connection
-                    std.Io.Threaded.closeFd(fd);
-                }
+                if (!cp.submit(fd)) std.Io.Threaded.closeFd(fd);
             } else {
-                // Evented path: use async I/O group
-                group.async(io, handleConnectionTask, .{ self, stream, io });
+                // start() initializes conn_pool before setting running=true.
+                std.Io.Threaded.closeFd(fd);
+                return error.NotStarted;
             }
         }
-    }
-
-    fn handleConnectionTask(self: *Self, stream: net.Stream, io: Io) void {
-        var stream_mut = stream;
-        if (self.config.timeout_ms == 0) {
-            self.handleConnection(&stream_mut, io) catch |err| {
-                // Only log unexpected errors, not normal disconnects
-                if (!isExpectedNetworkError(err)) {
-                    std.log.err("Connection error: {}", .{err});
-                }
-            };
-            stream_mut.close(io);
-            return;
-        }
-        self.handleConnectionWithTimeout(stream_mut, io);
-    }
-
-    fn handleConnectionWithTimeout(self: *Self, stream: net.Stream, io: Io) void {
-        var queue_buf: [2]ConnectionEvent = undefined;
-        var queue = Io.Queue(ConnectionEvent).init(&queue_buf);
-        var group: Io.Group = .init;
-        var timed_out = std.atomic.Value(bool).init(false);
-        defer group.cancel(io);
-
-        group.async(io, connectionRunner, .{ self, stream, io, &queue, &timed_out });
-        group.async(io, timeoutRunner, .{ self.config.timeout_ms, io, &queue, &timed_out });
-
-        _ = queue.getOne(io) catch return;
-        group.cancel(io);
-    }
-
-    fn connectionRunner(
-        self: *Self,
-        stream: net.Stream,
-        io: Io,
-        queue: *Io.Queue(ConnectionEvent),
-        timed_out: *std.atomic.Value(bool),
-    ) void {
-        var stream_mut = stream;
-        defer stream_mut.close(io);
-        self.handleConnection(&stream_mut, io) catch |err| {
-            if (err == error.RequestTimedOut and timed_out.load(.acquire)) {
-                self.sendErrorResponse(&stream_mut, io, 408, "Request Timeout") catch {};
-                return;
-            }
-            // Only log unexpected errors, not normal disconnects
-            if (!isExpectedNetworkError(err)) {
-                std.log.err("Connection error: {}", .{err});
-            }
-        };
-        _ = queue.putOneUncancelable(io, .done) catch {};
-    }
-
-    fn timeoutRunner(
-        timeout_ms: u32,
-        io: Io,
-        queue: *Io.Queue(ConnectionEvent),
-        timed_out: *std.atomic.Value(bool),
-    ) void {
-        if (timeout_ms == 0) return;
-        const duration = Io.Duration.fromMilliseconds(@intCast(timeout_ms));
-        const timeout = Io.Timeout{ .duration = .{ .raw = duration, .clock = .awake } };
-        _ = timeout.sleep(io) catch {};
-        timed_out.store(true, .release);
-        _ = queue.putOneUncancelable(io, .timeout) catch {};
-    }
-
-    fn handleConnection(self: *Self, stream: *net.Stream, io: Io) !void {
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-
-        var requests_on_connection: u32 = 0;
-
-        // Keep-alive loop: handle multiple requests on same connection
-        while (true) {
-            _ = arena.reset(.retain_capacity);
-            const req_allocator = arena.allocator();
-            const keep_alive = try self.handleSingleRequest(stream, io, requests_on_connection, req_allocator);
-            requests_on_connection += 1;
-
-            // Check if we should close the connection
-            if (!keep_alive) break;
-
-            // Check max requests limit
-            if (self.config.keep_alive_max_requests > 0 and
-                requests_on_connection >= self.config.keep_alive_max_requests)
-            {
-                break;
-            }
-        }
-    }
-
-    /// Handle a single HTTP request. Returns true if connection should be kept alive.
-    fn handleSingleRequest(
-        self: *Self,
-        stream: *net.Stream,
-        io: Io,
-        request_num: u32,
-        req_allocator: std.mem.Allocator,
-    ) !bool {
-        const start_instant = engine.Instant.now() catch null;
-
-        var request_started = false;
-        // Parse HTTP request
-        var request = self.parseRequest(req_allocator, stream, io, &request_started) catch |err| {
-            if (err == error.Canceled and request_started) {
-                return error.RequestTimedOut;
-            }
-            // Connection closed or parse error - don't keep alive
-            if (err == error.EndOfStream or err == error.ConnectionResetByPeer) {
-                return false;
-            }
-            if (err == error.UnsupportedTransferEncoding) {
-                self.sendErrorResponse(stream, io, 501, "Not Implemented") catch {};
-                return false;
-            }
-            if (err == error.FileTooBig) {
-                self.sendErrorResponse(stream, io, 413, "Payload Too Large") catch {};
-                return false;
-            }
-            if (err == error.UriTooLong or err == error.QueryTooLong) {
-                self.sendErrorResponse(stream, io, 414, "URI Too Long") catch {};
-                return false;
-            }
-            return err;
-        };
-        defer request.deinit(req_allocator);
-
-        // Determine if client wants keep-alive (HTTP/1.1 defaults to keep-alive)
-        // Uses fast header slot instead of O(n) lookup
-        const client_wants_keep_alive = blk: {
-            if (request.connection) |conn| {
-                break :blk std.ascii.eqlIgnoreCase(conn, "keep-alive");
-            }
-            // HTTP/1.1 defaults to keep-alive
-            break :blk true;
-        };
-
-        // Only keep alive if both client wants it AND server has it enabled AND not first request timeout
-        const keep_alive = self.config.keep_alive and client_wants_keep_alive;
-
-        if (self.config.studio and studio_mod.isStudioPath(request.path)) {
-            try self.handleStudioRequest(stream, io, request.method, request.path, request.body, keep_alive, req_allocator);
-            return keep_alive;
-        }
-
-        // Handle static files if configured
-        if (self.config.static_dir) |static_dir| {
-            if (std.mem.startsWith(u8, request.url, "/static/")) {
-                try self.serveStaticFile(stream, io, static_dir, request.url[7..], keep_alive, request.headers.items);
-                return keep_alive;
-            }
-        }
-
-        // Well-known proof-receipt endpoint (slice 2 item B). Intercept before
-        // the contract route filter so this fixed path is reachable on every
-        // attested binary.
-        if (self.well_known_doc) |*doc| {
-            if (std.mem.eql(u8, request.path, attest_well_known.route_path)) {
-                const inm = findHeaderValue(request.headers.items, "If-None-Match");
-                const cached = etagMatchesIfNoneMatch(inm, &doc.etag_hex);
-                var header_buf: [512]u8 = undefined;
-                const header_len = try formatWellKnownHeaders(doc, cached, keep_alive, &header_buf);
-                var out_buf: [8192]u8 = undefined;
-                var writer = stream.writer(io, &out_buf);
-                try writer.interface.writeAll(header_buf[0..header_len]);
-                if (!cached) try writer.interface.writeAll(doc.body);
-                try writer.interface.flush();
-                return keep_alive;
-            }
-        }
-
-        // Route pre-filtering: reject requests to unproven routes before JS execution.
-        // When the contract proves the handler only serves specific method+path combos,
-        // we can return 404 directly from Zig without entering the JS runtime.
-        if (self.contract) |*contract| {
-            if (!contract.matchesRoute(request.method, request.path)) {
-                proof_audit_ring.pushRouteBlocked(request.method, request.path);
-                try self.sendErrorResponse(stream, io, 404, "Not Found");
-                if (self.config.log_requests) {
-                    std.log.info("[pre-filter] {s} {s} -> 404 (no matching proven route)", .{
-                        request.method, request.url,
-                    });
-                }
-                return keep_alive;
-            }
-        }
-
-        // Proof-driven response memoization: serve cached response without entering JS
-        var proof_cache_key: ?u64 = null;
-        if (self.proof_cache) |*cache| {
-            if (cache.enabled and proof_adapter.ProofCache.shouldCache(request.method, request.headers)) {
-                const key = proof_adapter.ProofCache.computeKey(request.method, request.url);
-                var cached_opt = cache.get(key, req_allocator);
-                if (cached_opt != null) {
-                    defer cached_opt.?.deinit();
-                    proof_audit_ring.pushCacheHit(request.method, request.path);
-                    try self.sendResponse(stream, io, &cached_opt.?, keep_alive);
-                    if (self.config.log_requests) {
-                        const count = self.request_count.fetchAdd(1, .monotonic) + 1;
-                        std.log.info("[{d}] {s} {s} -> {d} [proof-cache hit]", .{
-                            count, request.method, request.url, cached_opt.?.status,
-                        });
-                    }
-                    return keep_alive;
-                }
-                proof_cache_key = key;
-            }
-        }
-
-        // Invoke JS handler via pool
-        if (self.pool) |*pool| {
-            var handle = engine.executeHandlerBorrowed(pool, HttpRequestView{
-                .url = request.url,
-                .method = request.method,
-                .path = request.path,
-                .query_params = request.query_params,
-                .headers = request.headers,
-                .body = request.body,
-            }) catch |err| {
-                // Return 503 Service Unavailable for pool exhaustion (allows load balancer retry)
-                // Return 500 for other errors
-                const status: u16 = if (err == error.PoolExhausted) 503 else 500;
-                const message = if (err == error.PoolExhausted)
-                    "Service Unavailable: Server at capacity, please retry"
-                else
-                    "Internal Server Error";
-                std.log.err(
-                    "Handler error: {} (responding with {}, in_use={d}/{d})",
-                    .{ err, status, engine.poolInUse(pool), engine.poolCapacity(pool) },
-                );
-                try self.sendErrorResponse(stream, io, status, message);
-                return false; // Close connection on error
-            };
-            defer handle.deinit();
-            var response = &handle.response;
-
-            // Store response in proof cache on miss
-            if (proof_cache_key) |key| {
-                if (self.proof_cache) |*cache| {
-                    cache.put(key, response);
-                }
-            }
-
-            // Add CORS headers if enabled
-            if (self.config.enable_cors) {
-                try response.putHeaderBorrowed("Access-Control-Allow-Origin", "*");
-                try response.putHeaderBorrowed("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-                try response.putHeaderBorrowed("Access-Control-Allow-Headers", "Content-Type, Authorization");
-            }
-
-            // Send response
-            try self.sendResponse(stream, io, response, keep_alive);
-
-            // Log request
-            if (self.config.log_requests) {
-                const elapsed_ms: i64 = if (start_instant) |start_time| blk: {
-                    const now = engine.Instant.now() catch break :blk 0;
-                    break :blk @intCast(now.since(start_time) / std.time.ns_per_ms);
-                } else 0;
-                const count = self.request_count.fetchAdd(1, .monotonic) + 1;
-                const ka_indicator: []const u8 = if (keep_alive and request_num > 0) " [ka]" else "";
-                std.log.info("[{d}] {s} {s} -> {d} ({d}ms){s}", .{
-                    count,
-                    request.method,
-                    request.url,
-                    response.status,
-                    elapsed_ms,
-                    ka_indicator,
-                });
-
-                if (self.config.pool_metrics_every > 0 and count % self.config.pool_metrics_every == 0) {
-                    const metrics = pool.getMetrics();
-                    std.log.info(
-                        "Pool metrics: in_use={d}/{d} exhausted={d} avg_wait_us={d} max_wait_us={d} avg_exec_us={d} max_exec_us={d}",
-                        .{
-                            engine.poolInUse(pool),
-                            engine.poolCapacity(pool),
-                            metrics.exhausted,
-                            metrics.avg_wait_ns / std.time.ns_per_us,
-                            metrics.max_wait_ns / std.time.ns_per_us,
-                            metrics.avg_exec_ns / std.time.ns_per_us,
-                            metrics.max_exec_ns / std.time.ns_per_us,
-                        },
-                    );
-                    std.log.info(
-                        "  Wait latency: p50={d}us p95={d}us p99={d}us | Exec latency: p50={d}us p95={d}us p99={d}us",
-                        .{
-                            metrics.wait_p50_ns / std.time.ns_per_us,
-                            metrics.wait_p95_ns / std.time.ns_per_us,
-                            metrics.wait_p99_ns / std.time.ns_per_us,
-                            metrics.exec_p50_ns / std.time.ns_per_us,
-                            metrics.exec_p95_ns / std.time.ns_per_us,
-                            metrics.exec_p99_ns / std.time.ns_per_us,
-                        },
-                    );
-                }
-            }
-
-            return keep_alive;
-        } else {
-            try self.sendErrorResponse(stream, io, 503, "Service Unavailable: runtime pool not initialized");
-            return false;
-        }
-    }
-
-    fn parseRequest(
-        self: *Self,
-        allocator: std.mem.Allocator,
-        stream: *net.Stream,
-        io: Io,
-        request_started: *bool,
-    ) !ParsedRequest {
-        var reader_buf: [8192]u8 = undefined;
-        var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
-        errdefer headers.deinit(allocator);
-        try headers.ensureTotalCapacity(allocator, self.config.max_headers);
-
-        var reader = BufferedReader.init(stream, io, &reader_buf);
-
-        const storage_size: usize = 8192;
-        const string_storage = try allocator.alloc(u8, storage_size);
-        errdefer allocator.free(string_storage);
-        var storage_offset: usize = 0;
-
-        // Read request line
-        const request_line = try reader.readLine();
-        request_started.* = true;
-        const parsed_line = try parseRequestLine(string_storage, &storage_offset, request_line, self.config.max_url_length);
-
-        const qr = try parseQueryString(allocator, parsed_line.query_string, self.config.max_query_length);
-        errdefer if (qr.storage) |s| allocator.free(s);
-        errdefer if (qr.decoded_storage) |ds| allocator.free(ds);
-
-        // Read headers with fast slot population
-        var fast_slots = FastHeaderSlots{};
-        var line_reader = HeaderLineReader{ .reader = &reader };
-        try parseHeadersFromLines(
-            allocator,
-            self.config.max_headers,
-            string_storage,
-            &storage_offset,
-            &headers,
-            &fast_slots,
-            &line_reader,
-        );
-
-        // Reject chunked transfer encoding (not supported in serverless runtime)
-        if (fast_slots.has_chunked_encoding) return error.UnsupportedTransferEncoding;
-
-        // Read body if Content-Length present
-        var body: ?[]u8 = null;
-        if (fast_slots.content_length) |len| {
-            if (len > self.config.max_body_size) return error.FileTooBig;
-            if (len > 0) {
-                body = try allocator.alloc(u8, len);
-                errdefer if (body) |b| allocator.free(b);
-
-                try reader.readExact(body.?);
-            }
-        }
-
-        return ParsedRequest{
-            .method = parsed_line.method,
-            .url = parsed_line.url,
-            .path = parsed_line.path,
-            .query_params = qr.params,
-            .headers = headers,
-            .body = body,
-            .string_storage = string_storage,
-            .query_params_storage = qr.storage,
-            .query_decoded_storage = qr.decoded_storage,
-            .connection = fast_slots.connection,
-            .content_length = fast_slots.content_length,
-            .content_type = fast_slots.content_type,
-        };
     }
 
     /// Parse HTTP request from a pre-read buffer (synchronous path for thread pool).
@@ -1956,216 +1563,11 @@ pub const Server = struct {
             .content_type = fast_slots.content_type,
         };
     }
-
-    fn handleStudioRequest(
-        self: *Self,
-        stream: *net.Stream,
-        io: Io,
-        method: []const u8,
-        path: []const u8,
-        body: ?[]const u8,
-        keep_alive: bool,
-        allocator: std.mem.Allocator,
-    ) !void {
-        if (std.mem.eql(u8, path, studio_mod.sse_path)) {
-            // SSE push is only wired through the threaded ConnectionPool;
-            // 503 sends the EventSource client to its polling fallback.
-            try self.sendErrorResponse(stream, io, 503, "SSE unavailable on event-loop backend");
-            return;
-        }
-
-        var response = HttpResponse.init(allocator);
-        defer response.deinit();
-
-        const studio_opt: ?*studio_mod.State = if (self.studio) |*s| s else null;
-        if (try populateStudioResponse(studio_opt, method, path, body, &response, allocator)) {
-            try self.sendResponse(stream, io, &response, keep_alive);
-        }
-    }
-
-    fn sendResponse(self: *Self, stream: *net.Stream, io: Io, response: *HttpResponse, keep_alive: bool) !void {
-        // Increased buffer to 8KB to fit headers + most response bodies in single flush
-        var out_buf: [8192]u8 = undefined;
-        var writer = stream.writer(io, &out_buf);
-        const out = &writer.interface;
-
-        // FAST PATH: If prebuilt_raw is available, write it directly (zero header construction).
-        // Slice 1 of proof receipts intentionally skips this path: cached
-        // static-file responses don't carry handler semantics, so omitting
-        // attestation headers there is the correct shape.
-        if (response.prebuilt_raw) |prebuilt| {
-            if (keep_alive) {
-                try out.writeAll(prebuilt);
-                try writer.interface.flush();
-                return;
-            }
-            // For close, we'd need to modify the prebuilt - fall through to normal path
-        }
-
-        // Build headers into a single buffer to reduce tiny writes.
-        var header_buf: [4096]u8 = undefined;
-        const status_text = getStatusText(response.status);
-
-        if (buildDynamicResponseHeader(
-            &header_buf,
-            response,
-            keep_alive,
-            self.attestation_headers,
-            .evented,
-        )) |header_len| {
-            try out.writeAll(header_buf[0..header_len]);
-        } else |_| {
-            // Fallback: stream headers directly if buffer is too small.
-            try out.print("HTTP/1.1 {d} {s}\r\n", .{ response.status, status_text });
-            try out.print("Content-Length: {d}\r\n", .{response.body.len});
-            if (keep_alive) {
-                try out.writeAll("Connection: keep-alive\r\n");
-            } else {
-                try out.writeAll("Connection: close\r\n");
-            }
-            for (response.headers.items) |header| {
-                if (isFramingHeader(header.key)) continue;
-                try out.print("{s}: {s}\r\n", .{ header.key, header.value });
-            }
-            try out.writeAll("\r\n");
-        }
-
-        // Body
-        if (response.body.len > 0) {
-            try out.writeAll(response.body);
-        }
-
-        try writer.interface.flush();
-    }
-
-    fn sendErrorResponse(self: *Self, stream: *net.Stream, io: Io, status: u16, message: []const u8) !void {
-        _ = self;
-        var out_buf: [1024]u8 = undefined;
-        var writer = stream.writer(io, &out_buf);
-        const out = &writer.interface;
-
-        var fmt_buf: [1024]u8 = undefined;
-        const formatted = formatHttpError(&fmt_buf, status, message, false, "text/plain") catch {
-            // Fallback: degrade to streaming if the message is too large for the stack buffer.
-            try out.print("HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n", .{ status, getStatusText(status), message.len });
-            try out.writeAll(message);
-            try writer.interface.flush();
-            return;
-        };
-        try out.writeAll(formatted);
-        try writer.interface.flush();
-    }
-
-    fn serveStaticFile(self: *Self, stream: *net.Stream, io: Io, static_dir: []const u8, path: []const u8, keep_alive: bool, headers: []const HttpHeader) !void {
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        var etag_buf: [34]u8 = undefined;
-        const resolved = try resolveStaticFile(self.allocator, io, static_dir, path, &path_buf, &etag_buf);
-        var file_info = switch (resolved) {
-            .forbidden => {
-                var writer_buf: [256]u8 = undefined;
-                var header_buf: [256]u8 = undefined;
-                var writer = stream.writer(io, &writer_buf);
-                const response = formatStaticError(&header_buf, 403, "Forbidden", keep_alive) catch return;
-                try writer.interface.writeAll(response);
-                try writer.interface.flush();
-                return;
-            },
-            .not_found => {
-                var writer_buf: [256]u8 = undefined;
-                var header_buf: [256]u8 = undefined;
-                var writer = stream.writer(io, &writer_buf);
-                const response = formatStaticError(&header_buf, 404, "Not Found", keep_alive) catch return;
-                try writer.interface.writeAll(response);
-                try writer.interface.flush();
-                return;
-            },
-            .ok => |info| info,
-        };
-        defer file_info.file.close(io);
-
-        // Check If-None-Match header for conditional request
-        if (findHeaderValue(headers, "if-none-match")) |client_etag| {
-            if (std.mem.eql(u8, client_etag, file_info.etag)) {
-                // 304 Not Modified - client has current version
-                var writer_buf: [256]u8 = undefined;
-                var header_buf: [256]u8 = undefined;
-                var writer = stream.writer(io, &writer_buf);
-                const response = formatStaticNotModified(&header_buf, file_info.etag, keep_alive) catch return;
-                try writer.interface.writeAll(response);
-                try writer.interface.flush();
-                return;
-            }
-        }
-
-        // Serve from cache if available
-        if (self.static_cache.get(file_info.full_path, file_info.size, file_info.mtime)) |handle| {
-            defer handle.release();
-            const entry = handle.entry;
-            var writer_buf: [4096]u8 = undefined;
-            var header_buf: [1024]u8 = undefined;
-            var writer = stream.writer(io, &writer_buf);
-            const header = formatStaticOkHeader(&header_buf, entry.data.len, entry.content_type, file_info.etag, keep_alive) catch return error.BufferOverflow;
-            try writer.interface.writeAll(header);
-            if (entry.data.len > 0) {
-                try writer.interface.writeAll(entry.data);
-            }
-            try writer.interface.flush();
-            return;
-        }
-
-        // Cache small files
-        if (self.static_cache.enabled() and file_info.size <= self.static_cache.max_file_size) {
-            const data = try self.allocator.alloc(u8, file_info.size);
-            errdefer self.allocator.free(data);
-            var read_buf: [4096]u8 = undefined;
-            var file_reader = file_info.file.reader(io, &read_buf);
-            try file_reader.interface.readSliceAll(data);
-
-            try self.static_cache.put(file_info.full_path, .{
-                .data = data,
-                .size = file_info.size,
-                .mtime = file_info.mtime,
-                .content_type = file_info.content_type,
-            });
-
-            var writer_buf: [4096]u8 = undefined;
-            var header_buf: [1024]u8 = undefined;
-            var writer = stream.writer(io, &writer_buf);
-            const header = formatStaticOkHeader(&header_buf, file_info.size, file_info.content_type, file_info.etag, keep_alive) catch return error.BufferOverflow;
-            try writer.interface.writeAll(header);
-            if (file_info.size > 0) {
-                try writer.interface.writeAll(data);
-            }
-            try writer.interface.flush();
-            return;
-        }
-
-        var writer_buf: [4096]u8 = undefined;
-        var header_buf: [1024]u8 = undefined;
-        var writer = stream.writer(io, &writer_buf);
-        const header = formatStaticOkHeader(&header_buf, file_info.size, file_info.content_type, file_info.etag, keep_alive) catch return error.BufferOverflow;
-        try writer.interface.writeAll(header);
-
-        if (file_info.size > 0) {
-            var file_buf: [16 * 1024]u8 = undefined;
-            var file_reader = file_info.file.reader(io, &file_buf);
-            _ = try writer.interface.sendFileAll(&file_reader, .limited(file_info.size));
-        }
-        try writer.interface.flush();
-    }
 };
 
 // ============================================================================
-// HTTP Parsing Helpers (shared between streaming and buffer-based paths)
+// HTTP Parsing Helpers
 // ============================================================================
-
-const HeaderLineReader = struct {
-    reader: *BufferedReader,
-
-    pub fn next(self: *HeaderLineReader) !?[]const u8 {
-        return try self.reader.readLine();
-    }
-};
 
 const HeaderLineIterator = struct {
     iter: std.mem.SplitIterator(u8, .sequence),
@@ -2455,38 +1857,6 @@ const StaticFileCache = struct {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Buffered reader for efficient HTTP parsing
-/// Uses the std.Io.Reader interface for reading from Stream
-const BufferedReader = struct {
-    reader: net.Stream.Reader,
-    max_line_len: usize,
-
-    pub fn init(stream: *net.Stream, io: Io, buffer: []u8) BufferedReader {
-        return .{
-            .reader = stream.reader(io, buffer),
-            .max_line_len = buffer.len,
-        };
-    }
-
-    /// Read a line ending with \r\n or \n
-    pub fn readLine(self: *BufferedReader) ![]const u8 {
-        const line = self.reader.interface.takeDelimiterExclusive('\n') catch |err| switch (err) {
-            error.StreamTooLong => return error.HeaderLineTooLong,
-            else => |e| return e,
-        };
-        if (line.len > self.max_line_len) return error.HeaderLineTooLong;
-        if (line.len > 0 and line[line.len - 1] == '\r') {
-            return line[0 .. line.len - 1];
-        }
-        return line;
-    }
-
-    /// Read exact number of bytes
-    pub fn readExact(self: *BufferedReader, out: []u8) !void {
-        try self.reader.interface.readSliceAll(out);
-    }
-};
 
 fn logContractSummary(contract: *const ValidatedRuntimeContract) void {
     const inner = contract.view();
@@ -2821,54 +2191,4 @@ test "findHeaderEnd handles short buffers" {
     try std.testing.expectEqual(@as(?usize, null), findHeaderEnd(""));
     try std.testing.expectEqual(@as(?usize, null), findHeaderEnd("\r\n\r"));
     try std.testing.expectEqual(@as(?usize, 0), findHeaderEnd("\r\n\r\n"));
-}
-
-test "parseRequest rejects long header lines (streaming)" {
-    // Io.Threaded does not terminate for long header lines on unix socket pairs.
-    // Rechecked on Zig 0.16.0 (2026-04-17): still hangs after 30s.
-    // Run explicitly with: ZTS_RUN_FLAKY_IO_TESTS=1 zig build test
-    // Legacy alias ZTS_RUN_FLAKY_NIGHTLY_TESTS remains supported.
-    if (std.c.getenv("ZTS_RUN_FLAKY_IO_TESTS") == null and
-        std.c.getenv("ZTS_RUN_FLAKY_NIGHTLY_TESTS") == null)
-    {
-        return error.SkipZigTest;
-    }
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var io_backend: Io.Threaded = undefined;
-    try initIoBackend(&io_backend, allocator);
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var server: Server = undefined;
-    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
-
-    const fds = try createUnixSocketPair();
-    defer std.Io.Threaded.closeFd(fds[0]);
-
-    const long_value = try allocator.alloc(u8, 9000);
-    defer allocator.free(long_value);
-    @memset(long_value, 'a');
-    const payload = try std.fmt.allocPrint(
-        allocator,
-        "GET / HTTP/1.1\r\nX-Long: {s}\r\n\r\n",
-        .{long_value},
-    );
-    defer allocator.free(payload);
-
-    try writeAllFd(fds[1], payload);
-    std.Io.Threaded.closeFd(fds[1]);
-
-    var stream = net.Stream{
-        .socket = .{
-            .handle = fds[0],
-            .address = .{ .ip4 = net.Ip4Address.unspecified(0) },
-        },
-    };
-
-    var request_started = false;
-    try std.testing.expectError(error.HeaderLineTooLong, server.parseRequest(allocator, &stream, io, &request_started));
 }
