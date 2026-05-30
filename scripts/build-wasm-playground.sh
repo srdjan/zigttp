@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Build the zigts analyzer as a wasm module and publish it to the marketing
-# site's static dir under a content-hashed, immutable filename. The hash is
-# patched into playground.js so the page always fetches the current build.
+# Build the zigts analyzer as a wasm module and publish it to the official
+# website repo's static dir under a content-hashed, immutable filename. The
+# hash is patched into playground.js so the page always fetches the current
+# build.
 #
 # Usage: bash scripts/build-wasm-playground.sh
 set -euo pipefail
