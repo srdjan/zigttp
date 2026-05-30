@@ -172,7 +172,7 @@ test "testCommand accepts relative explicit fixture path" {
     try tmp.dir.writeFile(io, .{
         .sub_path = "src/handler.ts",
         .data =
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
         \\    return Response.text("ok");
         \\}
         ,

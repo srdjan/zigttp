@@ -2222,11 +2222,13 @@ the next section).
 
 ## Author-Declared Specs
 
-`Spec<...>` is the source-level way to demand which compiler-proven properties
-a handler must satisfy. It rides the same TS generic-alias machinery as
-`Result<T>`, strips at runtime, and is read by the verifier after the analyzer
-pipeline runs. A handler that declares a spec the inferred `HandlerProperties`
-cannot satisfy fails the build with ZTS500.
+Compiler specs are active proof obligations. When a handler declares no
+`Spec<...>`, every supported v1 spec is active by default. Adding
+`Spec<...>` on the handler return type narrows the active set to exactly the
+names in that annotation. The marker rides the same TS generic-alias machinery
+as `Result<T>`, strips at runtime, and is read by the verifier after the
+analyzer pipeline runs. An active spec the inferred `HandlerProperties` cannot
+satisfy fails the build with ZTS500.
 
 ```typescript
 import type { Spec } from "zigttp:types";
@@ -2250,12 +2252,13 @@ string-literal union as the active spec set. Inline use also works:
 
 ### v1 spec names
 
-Eleven names are recognized; six produce cause-only failures with a per-property
-suggestion, five produce counterexample-rich failures with a falsifying request
-witness:
+Fifteen names are recognized; ten produce cause-only failures with a
+per-property suggestion, five produce counterexample-rich failures with a
+falsifying request witness:
 
 - *Cause-only*: `deterministic`, `read_only`, `retry_safe`, `idempotent`,
-  `state_isolated`, `fault_covered`.
+  `state_isolated`, `fault_covered`, `pure`, `stateless`, `result_safe`,
+  `optional_safe`.
 - *Counterexample-rich*: `no_secret_leakage`, `no_credential_leakage`,
   `input_validated`, `pii_contained`, `injection_safe`.
 
@@ -2330,13 +2333,13 @@ mode: it asks every exported helper to carry an explicit capsule
 (**ZTS507** for a missing `Effects<...>`, **ZTS508** for a missing
 `Proof<...>`). It is off by default and never changes the exit code.
 
-### Where declared specs surface
+### Where active specs surface
 
-- Live HUD pane under `zigttp serve --watch --prove`: a `Specs (declared)`
+- Live HUD pane under `zigttp serve --watch --prove`: a `Specs (active)`
   block beneath the inferred properties shows `[*] spec NAME` when discharged
   and `[-] spec NAME` when not.
-- Proof studio at `/_zigttp/studio`: a `Specs (declared)` heading after
-  Properties renders each declared spec as a green ✓ or red ✗ pill. A
+- Proof studio at `/_zigttp/studio`: a `Specs (active)` heading after
+  Properties renders each active spec as a green ✓ or red ✗ pill. A
   failed pill expands inline to its ZTS500/501/502 code, source line and
   column, and the snippet that demoted the property. The right pane
   shows the witness corpus with clickable rows that fetch
@@ -2350,12 +2353,13 @@ mode: it asks every exported helper to carry an explicit capsule
   historical entries diff without re-running the verifier. Only failed
   specs carry the diagnostic fields.
 - `zigts check --json` adds `declared_specs`, `spec_diagnostics`, and
-  `proofCapsules` arrays to the proof envelope. Capsule discharge failures
-  and ZTS606 appear in `spec_diagnostics` with a `function` field.
+  `proofCapsules` arrays to the proof envelope. `declared_specs` is the
+  effective active set: defaults when no `Spec<...>` exists, or the explicit
+  narrowed set when one does. Capsule discharge failures and ZTS606 appear in
+  `spec_diagnostics` with a `function` field.
 - `zigttp expert`: the `pi_specs_status` tool returns the active set and
   discharge state for a handler. Drive `pi_repair_plan` from this tool's
-  output rather than from the `--goal` CLI flag - the author's `Spec<...>` is
-  the obligation contract.
+  output rather than from the `--goal` CLI flag.
 
 The `/specs <handler.ts>` slash command is the REPL shortcut that calls
 `pi_specs_status` directly.

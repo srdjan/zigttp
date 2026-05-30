@@ -940,7 +940,7 @@ test "rollout degrades additive multi-route updates to needs_review when payload
     const old_gateway =
         \\import { serviceCall } from "zigttp:service";
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
         \\    if (user.status !== 200) {
         \\        return Response.json({ error: "upstream" }, { status: 502 });
@@ -959,7 +959,7 @@ test "rollout degrades additive multi-route updates to needs_review when payload
         \\    "GET /api/users/42": getUser,
         \\};
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -983,7 +983,7 @@ test "rollout degrades additive multi-route updates to needs_review when payload
         \\    "GET /health": health,
         \\};
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -1019,7 +1019,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
     const old_gateway =
         \\import { serviceCall } from "zigttp:service";
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
         \\    if (user.status !== 200) {
         \\        return Response.json({ error: "upstream" }, { status: 502 });
@@ -1030,7 +1030,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
     const new_gateway =
         \\import { serviceCall } from "zigttp:service";
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const user = serviceCall("users", "GET /api/profiles/42", {});
         \\    if (user.status !== 200) {
         \\        return Response.json({ error: "upstream" }, { status: 502 });
@@ -1049,7 +1049,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
         \\    "GET /api/users/42": getUser,
         \\};
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -1068,7 +1068,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
         \\    "GET /api/profiles/42": getProfile,
         \\};
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -1104,7 +1104,7 @@ test "rollout reports breaking when target system leaves an internal edge unreso
     const gateway =
         \\import { serviceCall } from "zigttp:service";
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
         \\    if (user.status !== 200) {
         \\        return Response.json({ error: "upstream" }, { status: 502 });
@@ -1123,7 +1123,7 @@ test "rollout reports breaking when target system leaves an internal edge unreso
         \\    "GET /api/users/42": getUser,
         \\};
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -1142,7 +1142,7 @@ test "rollout reports breaking when target system leaves an internal edge unreso
         \\    "GET /api/profiles/42": getProfile,
         \\};
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);
@@ -1170,7 +1170,7 @@ test "rollout rejects dynamic internal edges at compile time" {
     const old_gateway =
         \\import { serviceCall } from "zigttp:service";
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
         \\    if (user.status !== 200) {
         \\        return Response.json({ error: "upstream" }, { status: 502 });
@@ -1188,7 +1188,7 @@ test "rollout rejects dynamic internal edges at compile time" {
         \\    return Response.json(resp.json());
         \\}
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    return fetchJson(req);
         \\}
     ;
@@ -1203,7 +1203,7 @@ test "rollout rejects dynamic internal edges at compile time" {
         \\    "GET /api/users/42": getUser,
         \\};
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const found = routerMatch(routes, req);
         \\    if (found !== undefined) {
         \\        return found.handler(req);

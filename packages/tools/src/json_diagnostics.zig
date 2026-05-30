@@ -378,8 +378,8 @@ pub fn writeSuccessJson(
             try writer.writeAll(ptj);
         }
 
-        // declared_specs: surface the author's `Spec<...>` declaration so
-        // tools (pi_specs_status, the agent autoloop) can read intent
+        // declared_specs: surface the effective active set so tools
+        // (pi_specs_status, the agent autoloop) can read obligations
         // straight from the proof JSON.
         try writer.writeAll(",\"declared_specs\":[");
         for (c.declared_specs.items, 0..) |s, i| {

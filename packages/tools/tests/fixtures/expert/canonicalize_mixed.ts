@@ -7,7 +7,7 @@ const parse = (x: number): number => x;
 type Loader = (id: string) => Response;
 export const typed: Loader = (id: string): Response => Response.text(id);
 
-function handler(req: Request): Response {
+function handler(req: Request): Response & Spec<"state_isolated"> {
   let key = "API_KEY";
   const value = env(key);
   let count = 1;

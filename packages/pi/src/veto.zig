@@ -204,7 +204,7 @@ const testing = std.testing;
 test "clean handler passes the veto with an empty violations body" {
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response { return Response.json({ok: true}); }",
+        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }",
         .before = null,
     });
     defer result.deinit(testing.allocator);
@@ -221,7 +221,7 @@ test "clean handler passes the veto with an empty violations body" {
 test "broken handler (var) fails the veto and body surfaces ZTS001" {
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response { var x = 1; return Response.json({x}); }",
+        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }",
         .before = null,
     });
     defer result.deinit(testing.allocator);
@@ -236,8 +236,8 @@ test "broken handler (var) fails the veto and body surfaces ZTS001" {
 test "pre-existing violation with matching before passes the veto" {
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response { var x = 1; return Response.json({x, y: 2}); }",
-        .before = "function handler(req: Request): Response { var x = 1; return Response.json({x}); }",
+        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x, y: 2}); }",
+        .before = "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }",
     });
     defer result.deinit(testing.allocator);
 
@@ -251,7 +251,7 @@ test "pre-existing violation with matching before passes the veto" {
 test "runVeto output fits turn.TurnMachine edit_verified event path" {
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response { return Response.json({ok: true}); }",
+        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }",
         .before = null,
     });
     defer result.deinit(testing.allocator);

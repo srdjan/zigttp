@@ -1283,11 +1283,11 @@ pub const HandlerContract = struct {
     /// during build for the live-reload HUD's "Why" line. Snippets are
     /// borrowed static strings, so deinit is a no-op.
     property_provenance: PropertyProvenance = .{},
-    /// Specs the author declared via `Response & Spec<"name" | ...>` on the
-    /// handler return type. Each entry is an owned spec name string. Empty
-    /// when the handler has no `Spec<...>` annotation; the verifier treats
-    /// declared specs as the mandatory active set and emits ZTS500 for any
-    /// member whose corresponding `HandlerProperties` field is false.
+    /// Active handler specs. An explicit `Response & Spec<"name" | ...>` on
+    /// the handler return type narrows this set; without one, every supported
+    /// v1 spec is active by default. Each entry is an owned spec name string.
+    /// The verifier emits ZTS500 for any member whose corresponding
+    /// `HandlerProperties` field is false.
     declared_specs: std.ArrayList([]const u8) = .empty,
     /// Per-specifier proof facts produced by partner virtual-module manifest
     /// `contractExtractions`. Keys are owned specifier strings (e.g.

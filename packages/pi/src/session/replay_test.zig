@@ -18,7 +18,7 @@ const persister = @import("persister.zig");
 const testing = std.testing;
 
 const clean_handler =
-    "function handler(req: Request): Response { return Response.json({ok: true}); }";
+    "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }";
 
 // ---------------------------------------------------------------------------
 // Scaffolding

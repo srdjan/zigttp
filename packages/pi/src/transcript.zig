@@ -399,7 +399,7 @@ test "capToolResultBody truncates with a byte-count suffix when over the cap" {
 test "veto -> turn -> transcript pipeline still lands a proof entry" {
     var result = try veto.runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response { return Response.json({ok: true}); }",
+        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }",
         .before = null,
     });
     defer result.deinit(testing.allocator);

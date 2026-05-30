@@ -192,7 +192,7 @@ test "writeJsonEnvelope canonical diagnostics make ok false" {
 
     const fixture =
         \\const parse = (x: number): number => x;
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
         \\  return Response.json({ a, b });
@@ -224,7 +224,7 @@ test "writeJsonEnvelope canonical clean file keeps ok true" {
 
     const fixture =
         \\function parse(x: number): number { return x; }
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
         \\  return Response.json({ a, b });

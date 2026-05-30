@@ -659,7 +659,7 @@ test "doctorCommand passes configured sqlite path into analyzer" {
         \\
         \\sql("listUsers", "SELECT id, name FROM users ORDER BY id ASC");
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    return Response.json({ users: sqlMany("listUsers", {}) });
         \\}
         ,
@@ -788,4 +788,3 @@ test "first-run tour marker is durable: absent then created then detected" {
     cli_tour.touchTourMarkerAt(allocator, base);
     try testing.expect(cli_tour.tourMarkerExistsAt(allocator, base));
 }
-

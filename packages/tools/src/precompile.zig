@@ -3994,7 +3994,7 @@ test "runCheckOnly keeps mirrored properties aligned with finalized fault covera
     const source =
         \\import { jwtVerify } from "zigttp:auth";
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"fault_covered"> {
         \\  _ = req;
         \\  const auth = jwtVerify("token", "secret");
         \\  if (!auth.ok) {
@@ -4047,7 +4047,7 @@ test "runCheckOnlyFromSource accepts annotated TSX handler after JSX block" {
         \\    return <main><h1>zigttp</h1></main>;
         \\}
         \\
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    if (req.path === "/") {
         \\        return Response.html(renderToString(<Page />));
         \\    }
@@ -4060,6 +4060,76 @@ test "runCheckOnlyFromSource accepts annotated TSX handler after JSX block" {
 
     try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
     try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+}
+
+test "runCheckOnlyFromSource: no Spec activates all supported specs for TS" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  _ = req;
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "default-specs.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(zigts.spec_discharge.v1_specs.len, contract.declared_specs.items.len);
+    for (zigts.spec_discharge.v1_specs) |spec| {
+        try std.testing.expect(handler_contract.containsString(contract.declared_specs.items, spec.name));
+    }
+    try std.testing.expect(result.totalErrors() > 0);
+}
+
+test "runCheckOnlyFromSource: no Spec activates all supported specs for JS" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var contract = try buildTestContractForSource(allocator, source, "default-specs.js", null);
+    defer contract.deinit(allocator);
+
+    try std.testing.expectEqual(zigts.spec_discharge.v1_specs.len, contract.declared_specs.items.len);
+    for (zigts.spec_discharge.v1_specs) |spec| {
+        try std.testing.expect(handler_contract.containsString(contract.declared_specs.items, spec.name));
+    }
+}
+
+test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  _ = req;
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "declared-only.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), contract.declared_specs.items.len);
+    try std.testing.expectEqualStrings("deterministic", contract.declared_specs.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), contract.spec_diagnostics.items.len);
+}
+
+test "runCheckOnlyFromSource: explicit unknown Spec suppresses defaults and emits ZTS502" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response & Spec<"made_up"> {
+        \\  _ = req;
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "unknown-only.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), contract.declared_specs.items.len);
+    try std.testing.expectEqualStrings("made_up", contract.declared_specs.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), contract.spec_diagnostics.items.len);
+    try std.testing.expectEqual(handler_contract.SpecDiagnostic.Kind.unknown_name, contract.spec_diagnostics.items[0].kind);
 }
 
 test "compileHandler honors a registered partner manifest" {

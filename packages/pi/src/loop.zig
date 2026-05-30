@@ -645,9 +645,9 @@ fn tmpWorkspacePath(allocator: std.mem.Allocator, tmp: *const std.testing.TmpDir
 }
 
 const bad_handler =
-    "function handler(req: Request): Response { var x = 1; return Response.json({x}); }";
+    "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }";
 const clean_handler =
-    "function handler(req: Request): Response { return Response.json({ok: true}); }";
+    "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }";
 
 test "text reply path: user -> model text -> render" {
     var canned: CannedClient = .{ .reply = .{

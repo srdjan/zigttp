@@ -246,10 +246,9 @@ pub const ReviewFacts = struct {
     routes: []const Route,
     capabilities: []const []const u8,
     properties: Properties,
-    /// Author-declared specs from `Response & Spec<...>`. Each entry carries
-    /// the name plus its current discharge state. Empty when the handler
-    /// has no Spec<...> annotation; that is the back-compat path. The HUD
-    /// renders failed entries as `[FAIL]` with a per-property suggestion.
+    /// Active specs from the compiled contract. Each entry carries the name
+    /// plus its current discharge state. The HUD renders failed entries as
+    /// `[FAIL]` with a per-property suggestion.
     declared_specs: []const SpecState = &.{},
     /// Flattened intent + behavior summary, denormalised from the
     /// contract so the diff and review card can call out "intent added"
@@ -265,7 +264,7 @@ pub const ReviewFacts = struct {
     /// have already canonicalised). Capability strings come from
     /// `contract.capabilities.slice()` in the caller; we accept them as a
     /// borrowed list to keep this module free of zigts contract types.
-    /// Declared specs come from `contract.declared_specs.items` and the
+    /// Active specs come from `contract.declared_specs.items` and the
     /// matching not-discharged set is derived by the caller (the contract
     /// already classifies them via spec_discharge).
     pub fn fromProvenFacts(

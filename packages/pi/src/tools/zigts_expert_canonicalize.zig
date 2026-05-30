@@ -87,7 +87,7 @@ test "tool decodes simulate arg" {
 test "tool execute returns canonicalize JSON envelope" {
     const source =
         \\const parse = (x: number): number => x;
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
         \\  return Response.json({ a, b });

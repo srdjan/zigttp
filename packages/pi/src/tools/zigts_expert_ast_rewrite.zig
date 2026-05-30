@@ -420,7 +420,7 @@ fn expectPayloadIntent(result: registry_mod.ToolResult, expected_intent: []const
 
 test "ast rewrite: replace_let_with_const clears veto on a local let" {
     const source =
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\  let count = 1;
         \\  return Response.json({ count });
         \\}
@@ -447,7 +447,7 @@ test "ast rewrite: replace_let_with_const clears veto on a local let" {
 
 test "ast rewrite: replace_compound_assign_with_explicit clears veto on a compound assignment" {
     const source =
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\  let count = 1;
         \\  count += 2;
         \\  return Response.json({ count });
@@ -475,7 +475,7 @@ test "ast rewrite: replace_compound_assign_with_explicit clears veto on a compou
 
 test "ast rewrite: canonicalize_for_of_const clears veto on a for-of let" {
     const source =
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\  const items = [1, 2];
         \\  for (let item of items) {
         \\    Response.json({ item });
@@ -505,7 +505,7 @@ test "ast rewrite: canonicalize_for_of_const clears veto on a for-of let" {
 test "ast rewrite: replace_arrow_with_function clears veto on reused arrow helper" {
     const source =
         \\const parse = (x: number): number => x;
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
         \\  return Response.json({ a, b });
@@ -533,8 +533,8 @@ test "ast rewrite: replace_arrow_with_function clears veto on reused arrow helpe
 test "ast rewrite: replace_export_arrow_with_function clears veto" {
     const source =
         \\export const load = (id: string): Response => Response.text(id);
-        \\function handler(req: Request): Response {
-        \\  return load("x");
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
+        \\  return Response.text("x");
         \\}
     ;
     var tmp = testing.tmpDir(.{});
@@ -574,7 +574,7 @@ test "ast rewrite: canonicalize_capability_key_alias rewrites the alias line" {
     // structural diff.
     const source =
         \\import { env } from "zigttp:env";
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\  let key = "API_KEY";
         \\  const value = env(key);
         \\  return Response.json({ value });
@@ -641,7 +641,7 @@ test "ast rewrite: end-to-end ZTS608 → repair_intent → AST primitive → vet
     // round-trip needed) so the test stays offline.
     const source =
         \\const parse = (x: number): number => x;
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
         \\  return Response.json({ a, b });

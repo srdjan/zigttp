@@ -53,11 +53,13 @@ Up to 8 type parameters per alias are supported.
 **Built-in `Spec<...>` for proof obligations:**
 
 `zigttp:types` exposes a built-in generic alias `Spec<S>` that lets the
-author declare which compiler-proven properties their handler must
-satisfy. It is structurally a phantom marker - stripped at runtime,
-read at type-check time - and rides the same alias-resolution machinery
-as `Result<T>`. Declare a named alias and intersect it on the handler's
-return type:
+author narrow which compiler-proven properties their handler must satisfy.
+When no `Spec<...>` is present, every supported v1 spec is active by
+default; when a `Spec<...>` is present, only the named specs are active.
+It is structurally a phantom marker - stripped at runtime, read at
+type-check time - and rides the same alias-resolution machinery as
+`Result<T>`. Declare a named alias and intersect it on the handler's return
+type:
 
 ```typescript
 import type { Spec } from "zigttp:types";
@@ -76,7 +78,7 @@ function handler(req: Request): Response & Guardrails {
 
 The verifier walks the return-type intersection, follows the alias to
 the `Spec<...>` body, and emits ZTS500 / ZTS501 / ZTS502 diagnostics if
-any declared spec is not discharged, contradicts an import, or names a
+any active spec is not discharged, contradicts an import, or names a
 property outside the v1 set. The proof HUD, proof ledger, and
 `pi_specs_status` agent tool all read from this annotation.
 

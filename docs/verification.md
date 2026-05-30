@@ -198,11 +198,13 @@ The result feeds into `HandlerProperties.state_isolated`. When no module-scope m
 
 ### 8. Author-Declared Spec Discharge
 
-The verifier reads any `Spec<...>` declared on the handler's return type
-and discharges each name against the classified `HandlerProperties`. The
-machinery lives in `spec_discharge.zig` and runs after the analyzer
-pipeline so it has access to the full property set plus the imported
-module list.
+The verifier resolves the handler's active spec set and discharges each
+name against the classified `HandlerProperties`. When the handler declares
+no `Spec<...>`, every supported v1 spec is active by default. A
+`Spec<...>` on the handler return type narrows the active set to exactly
+the names in the annotation. The machinery lives in `spec_discharge.zig`
+and runs after the analyzer pipeline so it has access to the full property
+set plus the imported module list.
 
 ```typescript
 import type { Spec } from "zigttp:types";
@@ -218,8 +220,9 @@ Three diagnostic codes:
 
 - **ZTS500 - spec_not_discharged**: the corresponding property field is
   false. Cause-only specs (`deterministic`, `read_only`, `retry_safe`,
-  `idempotent`, `state_isolated`, `fault_covered`) include a
-  per-property `Try:` suggestion. Counterexample-rich specs
+  `idempotent`, `state_isolated`, `fault_covered`, `pure`, `stateless`,
+  `result_safe`, `optional_safe`) include a per-property `Try:`
+  suggestion. Counterexample-rich specs
   (`no_secret_leakage`, `no_credential_leakage`, `input_validated`,
   `pii_contained`, `injection_safe`) include a falsifying request body.
 - **ZTS501 - spec_incompatible_with_import**: the spec contradicts an
@@ -235,8 +238,8 @@ ZTS5xx code, source line, and snippet), the proof ledger
 (`declaredSpecs: [{name, discharged, diagnosticCode?,
 diagnosticMessage?, sourceLine?, sourceColumn?, sourceSnippet?}]` per
 swap event; the diagnostic fields appear only on failed specs),
-`zigts check --json` (`declared_specs` and `spec_diagnostics` arrays),
-and the `pi_specs_status` agent tool. See
+`zigts check --json` (`declared_specs` as the effective active set and
+`spec_diagnostics` arrays), and the `pi_specs_status` agent tool. See
 [user-guide.md](user-guide.md#author-declared-specs) for the author-side
 view.
 

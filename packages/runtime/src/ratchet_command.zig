@@ -2,23 +2,21 @@
 //!
 //! Slice 4 of the attest program. The compiler already infers and signs
 //! every handler's proven-property set (`provenSpecs` in contract.json,
-//! covered by the JWS payload) and extracts the author-declared
-//! obligations from the handler's return-type annotation
-//! (`Response & Spec<...>`) into `contract.declared_specs`. `ratchet
-//! check` ties the two together: it compiles the handler once, takes
-//! `declared_specs` as the obligation set, and fails when the proven
-//! set does not cover it.
+//! covered by the JWS payload) and records the active obligations in
+//! `contract.declared_specs`. An explicit handler `Spec<...>` narrows
+//! that active set; otherwise every supported spec is active by default.
+//! `ratchet check` ties the two together: it compiles the handler once,
+//! takes `declared_specs` as the obligation set, and fails when the
+//! proven set does not cover it.
 //!
 //! Subcommands:
 //!   show  <handler.ts>     print provenSpecs
-//!   check <handler.ts>     compile, diff declared vs proven, exit 1
-//!                          if any declared spec is not proven
+//!   check <handler.ts>     compile, diff active vs proven, exit 1
+//!                          if any active spec is not proven
 //!
 //! There is no `--baseline` file. The earlier hand-maintained baseline
-//! JSON has been retired: the obligation set lives in source, next to
-//! the handler that owes it. Handlers that declare no `Spec<...>`
-//! intersect a plain `Response` return type and exit clean — nothing
-//! to ratchet against.
+//! JSON has been retired: the obligation set lives in the compiled
+//! contract, with source `Spec<...>` acting as a narrowing override.
 //!
 //! Waiver signing (a signed file under `.zigttp/waivers/` that lets the
 //! operator accept a regression with a recorded reason) lands in a
@@ -151,10 +149,10 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
             // loud failure with a pointer to the new shape.
             std.debug.print(
                 \\zigttp ratchet check: `--baseline` has been removed.
-                \\The baseline is now derived from `Spec<...>` declared on
-                \\the handler's return type. Drop the flag and ensure the
-                \\handler imports `Spec` from "zigttp:types" and intersects
-                \\it onto the return type, e.g.
+                \\The baseline is now the active spec set in the compiled
+                \\contract. Drop the flag; use `Spec` from "zigttp:types"
+                \\on the handler return type only when you need to narrow
+                \\the default supported set, e.g.
                 \\
                 \\    import type {{ Spec }} from "zigttp:types";
                 \\    type Guardrails = Spec<"pure" | "deterministic">;
@@ -199,7 +197,7 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
     // ratchet is supposed to close.
     if (sets.dropped.names.items.len > 0) {
         std.debug.print(
-            "ratchet check for {s}: non-ratchetable declared spec(s) — these are not monotonic obligations:\n",
+            "ratchet check for {s}: non-ratchetable active spec(s) — these are not monotonic obligations:\n",
             .{handler},
         );
         for (sets.dropped.names.items) |name| {
@@ -213,11 +211,11 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
         return error.NonRatchetableSpec;
     }
 
-    // No declared obligations -> nothing to ratchet against. This is the
-    // clean exit for handlers that have not opted into Spec<...> yet.
+    // Empty active obligations are not expected for newly compiled
+    // contracts, but keep the branch for older/corrupt inputs.
     if (sets.declared.names.items.len == 0) {
         std.debug.print(
-            "ratchet check for {s}: no declared specs — nothing to ratchet.\n",
+            "ratchet check for {s}: no active specs — nothing to ratchet.\n",
             .{handler},
         );
         return;
@@ -260,9 +258,9 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
     if (extra.items.len > 0) {
         std.debug.print("  + extra (proven beyond declared): ", .{});
         printList(extra.items);
-        std.debug.print("\nratchet held — every declared spec is proven (extras above are informational).\n", .{});
+        std.debug.print("\nratchet held — every active spec is proven (extras above are informational).\n", .{});
     } else {
-        std.debug.print("\nratchet held — every declared spec is proven.\n", .{});
+        std.debug.print("\nratchet held — every active spec is proven.\n", .{});
     }
 }
 
@@ -279,7 +277,7 @@ fn printList(items: []const []const u8) void {
 }
 
 /// Heap-owned set of property names. Both the proven set (from
-/// `HandlerProperties.provenSpecNames`) and the declared set (from
+/// `HandlerProperties.provenSpecNames`) and the active set (from
 /// `contract.declared_specs`) live in this shape so the diff stays
 /// symmetric and deinit is uniform.
 const ProvenSet = struct {
@@ -293,10 +291,10 @@ const ProvenSet = struct {
 
 /// Triple of sets pulled out of a single compile pass:
 ///   - `proven`   — what the compiler classified as true on this build.
-///   - `declared` — author-declared `Spec<...>` names that are monotonic
-///                  (ratchetable). Filtered through
+///   - `declared` — active spec names that are monotonic (ratchetable).
+///                  Filtered through
 ///                  `HandlerProperties.isMonotonicProvenSpecName`.
-///   - `dropped`  — author-declared names that the filter rejected
+///   - `dropped`  — active names that the filter rejected
 ///                  (non-monotonic facts like `has_egress`, where "true"
 ///                  is a weakening, not a strengthening). Held as data
 ///                  so `runCheck` can surface them loudly as a hard
@@ -441,7 +439,7 @@ test "runCheck fails when a declared spec is not proven" {
     try std.testing.expectError(error.Regression, result);
 }
 
-test "runCheck is a no-op when the handler declares no Spec<...>" {
+test "runCheck enforces default specs when the handler declares no Spec<...>" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -461,9 +459,11 @@ test "runCheck is a no-op when the handler declares no Spec<...>" {
     const handler_path = try std.fs.path.join(allocator, &.{ tmp_path, "plain.ts" });
     defer allocator.free(handler_path);
 
-    // No `Spec<...>` -> declared_specs is empty -> ratchet exits clean
-    // with no diff, no regression.
-    try runCheck(allocator, &.{handler_path});
+    // No `Spec<...>` activates every supported spec by default. This
+    // plain handler does not prove the full set, so ratchet must surface
+    // the gap as a regression.
+    const result = runCheck(allocator, &.{handler_path});
+    try std.testing.expectError(error.Regression, result);
 }
 
 test "runCheck rejects the retired --baseline flag with a migration message" {
@@ -592,9 +592,9 @@ fn printHelp() void {
         \\      Compile the handler and print the property set it currently proves.
         \\
         \\  zigttp ratchet check <handler.ts>
-        \\      Compile the handler and diff the declared `Spec<...>` obligations
-        \\      against the proven property set. Exits 1 if any declared spec is
-        \\      not proven. Exits 0 (no-op) when the handler declares no Spec.
+        \\      Compile the handler and diff the active spec obligations against
+        \\      the proven property set. Exits 1 if any active spec is not proven.
+        \\      A handler with no `Spec<...>` activates every supported spec.
         \\
         \\Declaring obligations:
         \\
@@ -604,7 +604,7 @@ fn printHelp() void {
         \\
         \\The proven set is also written to contract.json under `provenSpecs`
         \\and rides inside the signed Zigttp-Attest JWS, so cross-build diffs
-        \\are mechanical and attestable. The declared set appears alongside it
+        \\are mechanical and attestable. The active set appears alongside it
         \\under `declaredSpecs`.
         \\
     , .{});

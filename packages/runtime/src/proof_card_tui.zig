@@ -464,14 +464,12 @@ fn buildPropertiesPane(
     );
     try lines.append(allocator, proof_line);
 
-    // Author-declared specs render directly under the inferred properties.
-    // Empty when the handler has no `Spec<...>` annotation - the back-compat
-    // path is invisible to keep the HUD quiet for handlers that haven't
-    // opted in. Failing specs use [-]; passing specs use [*] to distinguish
-    // them from the inferred property dots.
+    // Active specs render directly under the inferred properties. Failing
+    // specs use [-]; passing specs use [*] to distinguish them from the
+    // inferred property dots.
     if (card.current.declared_specs.len > 0) {
         try lines.append(allocator, try allocator.dupe(u8, ""));
-        try lines.append(allocator, try allocator.dupe(u8, "Specs (declared)"));
+        try lines.append(allocator, try allocator.dupe(u8, "Specs (active)"));
         for (card.current.declared_specs) |s| {
             const glyph: []const u8 = if (s.discharged) "[*]" else "[-]";
             const line = try std.fmt.allocPrint(allocator, "{s} spec {s}", .{ glyph, s.name });
@@ -631,7 +629,7 @@ pub fn buildProofCertificate(
     );
 
     if (card.current.declared_specs.len > 0) {
-        try w.writeAll("Declared specs\n");
+        try w.writeAll("Active specs\n");
         for (card.current.declared_specs) |s| {
             const glyph: []const u8 = if (s.discharged) "[*]" else "[-]";
             try w.print("  {s} {s}\n", .{ glyph, s.name });

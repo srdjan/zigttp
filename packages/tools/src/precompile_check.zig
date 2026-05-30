@@ -288,7 +288,6 @@ fn declaresProofSupportedSpec(specs: []const []const u8) bool {
 
 pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult) !void {
     const contract = if (result.contract) |*c| c else return;
-    if (contract.declared_specs.items.len == 0) return;
 
     // Re-discharge the handler's Spec<...> obligations against the freshly
     // classified properties. Capsule diagnostics - those carrying a

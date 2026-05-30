@@ -406,17 +406,19 @@ reachable helper (`ZTS503-ZTS508`, `ZTS607`).
 Every `contract.json` carries a top-level `provenSpecs` array (the
 canonical, ordered list of properties the compiler proves true)
 alongside the existing `properties` object, plus a `declaredSpecs`
-array sourced from `Spec<...>` on the handler's return type. Both ride
-inside the signed JWS payload, so a third party can diff two builds
-and see exactly which property moved.
+array containing the effective active spec set. If the handler has no
+`Spec<...>`, this array contains every supported v1 spec; an explicit
+`Spec<...>` narrows it to the named specs. Both ride inside the signed
+JWS payload, so a third party can diff two builds and see exactly which
+property moved.
 
 ```bash
 zigttp ratchet show <handler.ts>      # current proven set
-zigttp ratchet check <handler.ts>     # diff declared Spec against proven; exit 1 if any unmet
+zigttp ratchet check <handler.ts>     # diff active specs against proven; exit 1 if any unmet
 ```
 
-Handlers that declare no `Spec<...>` exit clean (nothing to ratchet
-against). Specs and follow-up backlog:
+Handlers that declare no `Spec<...>` ratchet against the default full
+supported set. Specs and follow-up backlog:
 [roadmap/attest-slice-4.md](roadmap/attest-slice-4.md).
 
 ## Behavioral contract

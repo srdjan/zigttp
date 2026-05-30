@@ -40,6 +40,12 @@ pub const SimulateResult = struct {
     properties: ?HandlerProperties = null,
 
     pub fn deinit(self: *SimulateResult, allocator: std.mem.Allocator) void {
+        for (self.violations.items) |v| {
+            allocator.free(v.code);
+            allocator.free(v.severity);
+            allocator.free(v.message);
+            if (v.help) |help| allocator.free(help);
+        }
         self.violations.deinit(allocator);
     }
 };
@@ -88,11 +94,20 @@ pub fn simulate(
         else
             true;
 
+        const code = try allocator.dupe(u8, diag.code);
+        errdefer allocator.free(code);
+        const severity = try allocator.dupe(u8, diag.severity);
+        errdefer allocator.free(severity);
+        const message = try allocator.dupe(u8, diag.message);
+        errdefer allocator.free(message);
+        const help = if (diag.suggestion) |suggestion| try allocator.dupe(u8, suggestion) else null;
+        errdefer if (help) |h| allocator.free(h);
+
         try result.violations.append(allocator, .{
-            .code = diag.code,
-            .severity = diag.severity,
-            .message = diag.message,
-            .help = diag.suggestion,
+            .code = code,
+            .severity = severity,
+            .message = message,
+            .help = help,
             .line = diag.line,
             .column = diag.column,
             .introduced_by_patch = is_new,
@@ -110,7 +125,7 @@ pub fn simulate(
 }
 
 /// Read EditSimulateInput from stdin JSON.
-pub fn readStdinJson(allocator: std.mem.Allocator) rule_error.RuleError!EditSimulateInput {
+pub fn readStdinJson(allocator: std.mem.Allocator) !EditSimulateInput {
     const stdin_data = readAllStdin(allocator) catch return error.StdinReadFailed;
     defer allocator.free(stdin_data);
 
@@ -133,10 +148,17 @@ pub fn readStdinJson(allocator: std.mem.Allocator) rule_error.RuleError!EditSimu
     else
         null;
 
+    const file = try allocator.dupe(u8, file_val.string);
+    errdefer allocator.free(file);
+    const content = try allocator.dupe(u8, content_val.string);
+    errdefer allocator.free(content);
+    const owned_before = if (before) |b| try allocator.dupe(u8, b) else null;
+    errdefer if (owned_before) |b| allocator.free(b);
+
     return .{
-        .file = file_val.string,
-        .content = content_val.string,
-        .before = before,
+        .file = file,
+        .content = content,
+        .before = owned_before,
     };
 }
 
@@ -215,14 +237,20 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         return error.InvalidArgument;
     }
 
-    var owned_content: ?[]u8 = null;
+    var owned_content: ?[]const u8 = null;
     defer if (owned_content) |c| allocator.free(c);
-    var owned_before: ?[]u8 = null;
+    var owned_before: ?[]const u8 = null;
     defer if (owned_before) |b| allocator.free(b);
+    var owned_file: ?[]const u8 = null;
+    defer if (owned_file) |f| allocator.free(f);
 
-    const input: EditSimulateInput = if (stdin_json)
-        try readStdinJson(allocator)
-    else blk: {
+    const input: EditSimulateInput = if (stdin_json) blk: {
+        const parsed = try readStdinJson(allocator);
+        owned_file = parsed.file;
+        owned_content = parsed.content;
+        if (parsed.before) |b| owned_before = b;
+        break :blk parsed;
+    } else blk: {
         const path = handler_path orelse return error.MissingArgument;
         owned_content = try file_io.readFile(allocator, path, 10 * 1024 * 1024);
         if (before_path) |bp| {
@@ -406,7 +434,7 @@ test "violationKey excludes line numbers" {
 test "simulate flags newly introduced canonical diagnostics" {
     const before =
         \\function parse(x: number): number { return x; }
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
         \\  return Response.json({ a, b });
@@ -414,7 +442,7 @@ test "simulate flags newly introduced canonical diagnostics" {
     ;
     const after =
         \\const parse = (x: number): number => x;
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
         \\  return Response.json({ a, b });

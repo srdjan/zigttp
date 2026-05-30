@@ -278,7 +278,7 @@ test "unsupported intent returns typed failure" {
 
 test "execute dry-runs an add_trailing_return intent" {
     const input =
-        \\{"path":"handler.ts","source":"function handler(req: Request): Response {\n  const data = auth.value;\n}","plan":{"id":"rp_002","edit_intent":{"kind":"add_trailing_return","line":3,"column":1,"template":"return Response.json({ data: auth.value });"}}}
+        \\{"path":"handler.ts","source":"function handler(req: Request): Response & Spec<\"deterministic\"> {\n  const data = auth.value;\n}","plan":{"id":"rp_002","edit_intent":{"kind":"add_trailing_return","line":3,"column":1,"template":"return Response.json({ data: auth.value });"}}}
     ;
     var result = try execute(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
@@ -310,7 +310,7 @@ test "execute returns typed failure for unsupported intent" {
 
 test "execute dry-runs a source-backed guard insertion" {
     const input =
-        \\{"path":"handler.ts","source":"function handler(req: Request): Response {\n  const data = auth.value;\n  return Response.json({ data });\n}","plan":{"id":"rp_001","edit_intent":{"kind":"insert_guard_before_line","line":2,"column":14,"template":"if (!auth.ok) return Response.json({ error: auth.error }, { status: 400 });"}}}
+        \\{"path":"handler.ts","source":"function handler(req: Request): Response & Spec<\"deterministic\"> {\n  const data = auth.value;\n  return Response.json({ data });\n}","plan":{"id":"rp_001","edit_intent":{"kind":"insert_guard_before_line","line":2,"column":14,"template":"if (!auth.ok) return Response.json({ error: auth.error }, { status: 400 });"}}}
     ;
     var result = try execute(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);

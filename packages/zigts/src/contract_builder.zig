@@ -483,10 +483,10 @@ pub const ContractBuilder = struct {
         contract.capabilities = computeCapabilityMatrix(contract.modules.items);
         contract.policy_hash = currentPolicyHashRaw();
 
-        // Phase 4: Extract author-declared specs from the handler return-type
-        // annotation (Response & Spec<"name" | ...>). The verifier reads
-        // declared_specs as the mandatory active set when discharging
-        // ZTS401/ZTS402/ZTS403 against HandlerProperties.
+        // Phase 4: Resolve active specs. An explicit handler Spec<...>
+        // narrows the set; otherwise every supported v1 spec is active.
+        // Downstream surfaces read declared_specs as the mandatory active
+        // set when discharging ZTS500/ZTS501/ZTS502.
         try self.populateDeclaredSpecs(&contract, handler_loc);
 
         // Phase 4b: Proof-carrying functions. Discharge each helper's
@@ -526,27 +526,29 @@ pub const ContractBuilder = struct {
     // Phase 4: Author-declared spec extraction
     // -----------------------------------------------------------------
 
-    /// Walk the handler's return-type annotation (looked up via
-    /// `TypeEnv.getFnSigByLoc`) and populate `contract.declared_specs`
-    /// with every spec name found inside a `Response & Spec<...>` (or
-    /// alias-hop equivalent) marker. No-op when the type env is absent
-    /// or the handler has no annotation.
+    /// Populate `contract.declared_specs` with the active handler spec set.
+    /// An explicit `Response & Spec<...>` (or alias-hop equivalent) narrows
+    /// the active set to the declared names. When the handler declares no
+    /// `Spec<...>`, every supported v1 spec is active by default.
     fn populateDeclaredSpecs(
         self: *ContractBuilder,
         contract: *HandlerContract,
         handler_loc: ?ir.SourceLocation,
     ) !void {
-        const env = self.type_env orelse return;
-        const loc = handler_loc orelse return;
-        if (loc.line == 0) return;
-
-        const sig = env.getFnSigByLoc(loc.line) orelse return;
-        if (sig.return_type == type_pool_mod.null_type_idx) return;
-
         var raw_names: std.ArrayListUnmanaged([]const u8) = .empty;
         defer raw_names.deinit(self.allocator);
-        env.extractSpecMembers(sig.return_type, &raw_names);
-        if (raw_names.items.len == 0) return;
+
+        if (self.type_env) |env| {
+            if (handler_loc) |loc| {
+                if (loc.line != 0) {
+                    if (env.getFnSigByLoc(loc.line)) |sig| {
+                        if (sig.return_type != type_pool_mod.null_type_idx) {
+                            env.extractSpecMembers(sig.return_type, &raw_names);
+                        }
+                    }
+                }
+            }
+        }
 
         // Owned string copies; sorted for stable contract.json output and
         // de-duplicated to keep ledger entries idempotent across saves.
@@ -556,7 +558,12 @@ pub const ContractBuilder = struct {
             owned.deinit(self.allocator);
         }
 
-        outer: for (raw_names.items) |raw| {
+        const active_names: []const []const u8 = if (raw_names.items.len > 0)
+            raw_names.items
+        else
+            &spec_discharge.v1_spec_names;
+
+        outer: for (active_names) |raw| {
             for (owned.items) |existing| {
                 if (std.mem.eql(u8, existing, raw)) continue :outer;
             }
@@ -573,7 +580,7 @@ pub const ContractBuilder = struct {
 
         contract.declared_specs = owned;
 
-        // Discharge: produce ZTS401 / ZTS402 / ZTS403 diagnostics into
+        // Discharge: produce ZTS500 / ZTS501 / ZTS502 diagnostics into
         // contract.spec_diagnostics. Downstream consumers (zigts check,
         // proof HUD, ledger) read from there. The verifier does not see
         // these because it runs before the contract is built.

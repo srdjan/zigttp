@@ -656,8 +656,8 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.print("  \"behaviorsExhaustive\": {s},\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
     }
 
-    // declaredSpecs: author-declared spec names from `Spec<...>` on the
-    // handler return type. Empty when the handler has no annotation.
+    // declaredSpecs: effective active spec names. Source `Spec<...>`
+    // narrows this set; without one it contains every supported v1 spec.
     try writer.writeAll("  \"declaredSpecs\": [");
     for (contract.declared_specs.items, 0..) |s, i| {
         if (i > 0) try writer.writeAll(", ");

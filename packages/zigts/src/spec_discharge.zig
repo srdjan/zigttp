@@ -147,7 +147,7 @@ pub fn suggestionForIncompatible(spec_name: []const u8, module: []const u8) ?[]c
 }
 
 /// v1 spec names, derived from `v1_specs` so the two cannot drift.
-const v1_spec_names = blk: {
+pub const v1_spec_names = blk: {
     var names: [v1_specs.len][]const u8 = undefined;
     for (v1_specs, 0..) |s, i| names[i] = s.name;
     break :blk names;

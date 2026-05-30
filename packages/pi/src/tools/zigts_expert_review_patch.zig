@@ -73,6 +73,11 @@ fn execute(
                 result.violations.items[write_idx] = v;
                 write_idx += 1;
                 new_count += 1;
+            } else {
+                allocator.free(v.code);
+                allocator.free(v.severity);
+                allocator.free(v.message);
+                if (v.help) |help| allocator.free(help);
             }
         }
         result.violations.items.len = write_idx;
@@ -165,7 +170,7 @@ test "missing arg returns not-ok body" {
 
 test "clean handler passes" {
     const payload =
-        \\{"file":"handler.ts","content":"function handler(req: Request): Response { return Response.json({ok: true}); }"}
+        \\{"file":"handler.ts","content":"function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }"}
     ;
     var result = try execute(testing.allocator, &.{payload});
     defer result.deinit(testing.allocator);
@@ -176,7 +181,7 @@ test "clean handler passes" {
 
 test "diff_only filter drops preexisting violations from body and summary" {
     const payload =
-        \\{"file":"handler.ts","content":"function handler(req: Request): Response { var x = 1; return Response.json({x, y: 2}); }","before":"function handler(req: Request): Response { var x = 1; return Response.json({x}); }","diff_only":true}
+        \\{"file":"handler.ts","content":"function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x, y: 2}); }","before":"function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }","diff_only":true}
     ;
     var result = try execute(testing.allocator, &.{payload});
     defer result.deinit(testing.allocator);
@@ -191,7 +196,7 @@ test "diff_only filter drops preexisting violations from body and summary" {
 
 test "diff_only flag off keeps preexisting in body but still passes veto" {
     const payload =
-        \\{"file":"handler.ts","content":"function handler(req: Request): Response { var x = 1; return Response.json({x, y: 2}); }","before":"function handler(req: Request): Response { var x = 1; return Response.json({x}); }"}
+        \\{"file":"handler.ts","content":"function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x, y: 2}); }","before":"function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }"}
     ;
     var result = try execute(testing.allocator, &.{payload});
     defer result.deinit(testing.allocator);

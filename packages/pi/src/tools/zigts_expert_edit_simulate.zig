@@ -107,7 +107,7 @@ test "missing file field returns not-ok body" {
 
 test "clean handler passes the veto" {
     const payload =
-        \\{"file":"handler.ts","content":"function handler(req: Request): Response { return Response.json({ok: true}); }"}
+        \\{"file":"handler.ts","content":"function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }"}
     ;
     var result = try execute(testing.allocator, &.{payload});
     defer result.deinit(testing.allocator);
@@ -118,7 +118,7 @@ test "clean handler passes the veto" {
 
 test "broken handler (var) fails the veto with a new violation" {
     const payload =
-        \\{"file":"handler.ts","content":"function handler(req: Request): Response { var x = 1; return Response.json({x}); }"}
+        \\{"file":"handler.ts","content":"function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }"}
     ;
     var result = try execute(testing.allocator, &.{payload});
     defer result.deinit(testing.allocator);
@@ -130,7 +130,7 @@ test "broken handler (var) fails the veto with a new violation" {
 
 test "pre-existing violation with matching before passes the veto" {
     const payload =
-        \\{"file":"handler.ts","content":"function handler(req: Request): Response { var x = 1; return Response.json({x, y: 2}); }","before":"function handler(req: Request): Response { var x = 1; return Response.json({x}); }"}
+        \\{"file":"handler.ts","content":"function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x, y: 2}); }","before":"function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }"}
     ;
     var result = try execute(testing.allocator, &.{payload});
     defer result.deinit(testing.allocator);

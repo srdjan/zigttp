@@ -1,8 +1,8 @@
 //! pi_specs_status - return the active spec set for a handler plus the
-//! current discharge state of each declared spec. The agent reads this
+//! current discharge state of each active spec. The agent reads this
 //! before drafting an edit so its repair plan targets the obligations the
-//! author has actually declared, not whatever the autoloop's CLI flag
-//! happened to be set to.
+//! compiler is enforcing, not whatever the autoloop's CLI flag happened
+//! to be set to.
 //!
 //! The tool shells out to `zigts check --json` to keep the implementation
 //! a single source of truth with the in-process verifier; the JSON output
@@ -30,12 +30,12 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "specs-status",
     .description =
-    \\Read the active spec set declared on the handler return type
-    \\(`Response & Spec<...>` or its alias-hop equivalent) and return
-    \\each declared spec's current discharge state. Use this before
-    \\drafting a repair plan: the discharge state plus the per-spec
-    \\suggestion is the agent's authoritative target list, not the
-    \\`--goal` CLI flag.
+    \\Read the handler's active spec set and return each active spec's
+    \\current discharge state. A source `Response & Spec<...>` narrows
+    \\the set; without one, all supported specs are active. Use this
+    \\before drafting a repair plan: the discharge state plus the
+    \\per-spec suggestion is the agent's authoritative target list, not
+    \\the `--goal` CLI flag.
     \\
     \\Output kinds:
     \\  - "not_discharged"          (ZTS500 - corresponding HandlerProperties
