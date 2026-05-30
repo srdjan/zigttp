@@ -92,7 +92,7 @@ persistent identity at `~/.zigttp/attest/keypair.bin`. Pass `--no-attest`
 to skip signing for one build. Full design: [deploy-tutorial.md](deploy-tutorial.md),
 [roadmap/attest-slice-2.md](roadmap/attest-slice-2.md).
 
-Hosted cloud deploy is deferred from v0.1.0-beta. `zigttp deploy --cloud`
+Hosted cloud deploy is out of core for v0.1.0-beta. `zigttp deploy --cloud`
 and the related account commands reject with a "not in this beta" message.
 
 ### `zigttp edge`

@@ -15,7 +15,7 @@ Everything in day-to-day use is one of five verbs:
 - `zigttp deploy` - build, prove, and deploy.
 
 Advanced commands (the proof ledger, project diagnostics, the analyzer,
-cloud capability grants, and more) stay out of the way until you need them.
+and more) stay out of the way until you need them.
 Run `zigttp help --all` to see them; each keeps its own `--help`.
 
 ## Proof Passport Demo

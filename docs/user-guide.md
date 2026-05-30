@@ -1720,11 +1720,10 @@ const config = ServerConfig{
 
 #### Hosted cloud deploy
 
-A hosted control-plane deploy is in development and deferred from
-v0.1.0-beta. `zigttp deploy --cloud` and the related account commands
-(`login`, `logout`, `review`, `grants`, `revoke-grant`) are not
-available in this release. The supported deploy path is the
-self-contained binary `zigttp deploy` produces.
+Hosted deploy is out of core for v0.1.0-beta. `zigttp deploy --cloud`
+and the related account commands (`login`, `logout`, `review`, `grants`,
+`revoke-grant`) are not available in this release. The supported deploy
+path is the self-contained binary `zigttp deploy` produces.
 
 #### Docker Container
 

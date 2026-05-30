@@ -161,7 +161,7 @@ pub fn build(b: *std.Build) void {
     const modules_test_step = b.step("test-modules", "Run zigttp-modules tests");
     modules_test_step.dependOn(&run_modules_tests.step);
 
-    // zigttp-deploy tests
+    // zigttp proof-review package tests
     // Pass perf_histogram so the build-graph dedups this dep with the one
     // runtime threads through its own modules. Without it the option-set
     // hashes diverge and Zig instantiates zigttp_deploy twice, splitting
@@ -184,7 +184,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_deploy_pkg_tests = b.addRunArtifact(deploy_pkg_tests);
-    const deploy_pkg_test_step = b.step("test-deploy", "Run zigttp-deploy tests");
+    const deploy_pkg_test_step = b.step("test-deploy", "Run zigttp proof-review package tests");
     deploy_pkg_test_step.dependOn(&run_deploy_pkg_tests.step);
 
     const precompile_tests = b.addTest(.{

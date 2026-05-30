@@ -19,8 +19,8 @@ notes document design contracts, governance, and roadmap work.
 - [TypeScript](typescript.md) - type stripping, type checking, and
   `comptime()`.
 - [JSX Guide](jsx-guide.md) - JSX/TSX handlers and server-side rendering.
-- [Deploy](deploy-tutorial.md) - `zigttp deploy`, sign-in, updates, and
-  self-hosted control-plane expectations.
+- [Deploy](deploy-tutorial.md) - local `zigttp deploy`, proof review, and
+  attestation.
 
 ## Reference
 
@@ -62,8 +62,6 @@ notes document design contracts, governance, and roadmap work.
   and native function extension notes.
 - [Module Capabilities](internals/capabilities.md) - built-in module
   capability governance and audit checks.
-- [Control Plane Contract](internals/control-plane-contract.md) - deploy
-  control-plane wire contract.
 - [zigts Expert Contract](internals/zigts-expert-contract.md) - stable
   structured-tool surface for compiler-in-the-loop workflows.
 

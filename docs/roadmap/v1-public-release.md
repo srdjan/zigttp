@@ -129,12 +129,11 @@ zigttp proofs show HEAD
 
 Status: deferred from v0.1.0-beta.
 
-The hosted control-plane deploy is feature-complete but lacks integration-test
-coverage, so it is hidden for the beta. `zigttp deploy --cloud`, `login`,
+Hosted deploy is out of core for the beta. `zigttp deploy --cloud`, `login`,
 `logout`, `review`, `grants`, and `revoke-grant` are gated at the CLI boundary
-and reject with a "not in this beta" message; the control-plane code stays in
-`packages/runtime/src/deploy/`. Re-enabling is a matter of restoring the CLI
-dispatch once the path has CI smoke coverage.
+and reject with a "not in this beta" message. Re-enabling should happen as a
+separate package or project with its own control-plane and provider test
+coverage.
 
 Required before re-enabling:
 

@@ -99,7 +99,7 @@ clarifying question.
 - `packages/runtime/src/counterexample_pipeline.zig` builds the preview
   from the contract and the diff. Single-file orchestrator. Owns
   nothing; borrows from contract, label table, and suggestion catalog.
-- `packages/runtime/src/deploy/review.zig` defines
+- `packages/deploy/src/review.zig` defines
   `CounterexamplePreview` and the optional `counterexample` field on
   `ProofCard`. The data type carries the flow-driven extension slots.
 - `packages/runtime/src/proof_card_tui.zig` renders the block under the

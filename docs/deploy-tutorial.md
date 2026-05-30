@@ -22,11 +22,10 @@ Pass `--no-attest` to skip signing for a single build (e.g. air-gapped or privac
 
 ## Hosted cloud deploy
 
-A hosted control-plane deploy is in development and deferred from
-v0.1.0-beta. `zigttp deploy --cloud`, `zigttp login`, and the related
-account commands are not available in this release. The supported path
-is the self-contained binary above - run it on any host, container, or
-FaaS target.
+Hosted deploy is out of core for v0.1.0-beta. `zigttp deploy --cloud`,
+`zigttp login`, and the related account commands are not available in
+this release. The supported path is the self-contained binary above -
+run it on any host, container, or FaaS target.
 
 ## Proof review card
 
