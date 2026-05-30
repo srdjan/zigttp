@@ -474,7 +474,7 @@ fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
             "  Session compaction (/compact)\n" ++
             "  Session branching: /fork, /tree, --fork, --continue\n" ++
             "  Session commands: /resume, /continue, /new, /compact, /fork, /tree\n" ++
-            "  Proof ledger mode: /ledger, /chat, /ledger export, zigts ledger replay/export\n" ++
+            "  Proof ledger mode: /ledger, /chat, /ledger export, zigttp ledger replay/export\n" ++
             "  Route Forge: /feature previews route plans, /forge proves route candidates\n" ++
             "  Author-declared specs: /specs reads Spec<...> obligations + discharge state\n" ++
             "  Skills catalog (/skill:<name>)\n" ++

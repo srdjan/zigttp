@@ -1,8 +1,12 @@
 const std = @import("std");
 const zigts_cli = @import("zigts_cli");
-const pi_app = @import("pi_app");
-const runtime_witness_replay = @import("runtime_witness_replay");
 
+// `zigts` is the pi-free compiler/analyzer CLI installed for IDE and CI
+// integrations that call the analyzer directly. Every command here is also
+// reachable as `zigttp <command>` with identical output. The interactive
+// `expert` agent and session `ledger` commands live only in the developer
+// `zigttp` binary, so the agent's network/credential surface is never linked
+// into this binary.
 pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.smp_allocator;
     const argv = try zigts_cli.collectArgs(allocator, init.args);
@@ -12,137 +16,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const user_args = argv[1..];
-    if (user_args.len > 0 and std.mem.eql(u8, user_args[0], "expert")) {
-        try runExpertCommand(user_args[1..], allocator);
-        return;
-    }
-    if (user_args.len > 0 and std.mem.eql(u8, user_args[0], "ledger")) {
-        try pi_app.runLedgerCommand(allocator, user_args[1..]);
-        return;
+    if (user_args.len > 0) {
+        const command = user_args[0];
+        if (std.mem.eql(u8, command, "expert") or std.mem.eql(u8, command, "ledger")) {
+            std.debug.print(
+                "`zigts {s}` moved to the developer CLI. Run `zigttp {s}` instead.\n",
+                .{ command, command },
+            );
+            std.process.exit(1);
+        }
     }
 
     try zigts_cli.run(allocator, user_args);
-}
-
-fn runExpertCommand(argv: []const []const u8, allocator: std.mem.Allocator) !void {
-    var i: usize = 0;
-    while (i < argv.len) : (i += 1) {
-        const arg = argv[i];
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help")) {
-            printExpertHelp();
-            return;
-        }
-        if (isExpertBareFlag(arg)) continue;
-        if (std.mem.startsWith(u8, arg, "--")) {
-            if (isExpertValueTakingFlag(arg)) {
-                if (i + 1 < argv.len) i += 1;
-                continue;
-            }
-            if (isExpertValueTakingFlagEq(arg)) continue;
-            std.debug.print("zigts expert does not accept flag '{s}'. See `zigts expert --help`.\n", .{arg});
-            std.process.exit(1);
-        }
-        std.debug.print("zigts expert does not accept subcommands; use direct commands like `zigts meta` or `zigts verify-paths`.\n", .{});
-        std.process.exit(1);
-    }
-    _ = pi_app.parseExpertFlags(argv) catch |err| {
-        std.debug.print("{s}", .{pi_app.flagErrorMessage(err)});
-        std.process.exit(2);
-    };
-
-    if (!pi_app.envHasModelBackend()) {
-        std.debug.print(
-            \\zigts expert needs a model backend.
-            \\
-            \\Set one of these environment variables, then run `zigts expert` again:
-            \\  ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
-            \\  OPENAI_API_KEY
-            \\
-            \\See `zigts expert --help` for details.
-            \\
-        , .{});
-        std.process.exit(1);
-    }
-
-    pi_app.setInvocationArgv(argv);
-    pi_app.witness_replay.setReplayFn(runtime_witness_replay.replayWitnessJsonl);
-    try pi_app.run(allocator);
-}
-
-fn isExpertBareFlag(arg: []const u8) bool {
-    return std.mem.eql(u8, arg, "--yes") or
-        std.mem.eql(u8, arg, "--no-edit") or
-        std.mem.eql(u8, arg, "--no-session") or
-        std.mem.eql(u8, arg, "--no-persist-tool-output") or
-        std.mem.eql(u8, arg, "--no-context-files") or
-        std.mem.eql(u8, arg, "--resume") or
-        std.mem.eql(u8, arg, "--continue");
-}
-
-fn isExpertValueTakingFlag(arg: []const u8) bool {
-    for (pi_app.value_taking_flags) |name| {
-        if (std.mem.eql(u8, arg, name)) return true;
-    }
-    return false;
-}
-
-fn isExpertValueTakingFlagEq(arg: []const u8) bool {
-    for (pi_app.value_taking_flags) |name| {
-        if (arg.len > name.len and
-            std.mem.startsWith(u8, arg, name) and
-            arg[name.len] == '=')
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-fn printExpertHelp() void {
-    const help =
-        \\zigts expert - interactive coding agent for zigttp
-        \\
-        \\Usage:
-        \\  zigts expert [--yes | --no-edit] [--no-session] [--no-persist-tool-output]
-        \\               [--session-id <id> | --resume | --continue | --fork <id>]
-        \\               [--tools minimal|full] [--no-context-files]
-        \\  zigts expert --print <prompt> [--mode json]
-        \\  zigts expert --mode rpc
-        \\  zigts expert --handler <handler.ts> --goal <goals> [--max-iters N]
-        \\
-        \\Flags:
-        \\  --yes                      auto-approve every verified edit (non-interactive)
-        \\  --no-edit                  auto-reject every verified edit (veto-only)
-        \\  --no-session               disable session persistence for this run
-        \\  --no-persist-tool-output   omit tool output bodies from persisted session
-        \\  --no-context-files         skip AGENTS.md / CLAUDE.md project context
-        \\  --session-id <id>          resume or create a session with this id
-        \\  --resume, --continue       resume the newest session for this cwd
-        \\  --fork <session-id>        branch from an existing session
-        \\  --tools minimal|full       select workspace-read-only or full tool preset
-        \\  --print <prompt>           run a single non-interactive turn and exit
-        \\  --mode json                with --print, emit NDJSON transcript events
-        \\                             instead of rendered text
-        \\  --mode rpc                 run line-delimited JSON-RPC 2.0 over stdio
-        \\  --handler <path>           handler path for autoloop repair
-        \\  --goal <csv>               property goals for autoloop repair
-        \\  --max-iters <N>            autoloop iteration budget
-        \\
-        \\Model backend:
-        \\  Set one of these environment variables before launching:
-        \\    ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
-        \\    OPENAI_API_KEY
-        \\  An empty value counts as missing; the command exits with a setup
-        \\  message instead of launching against an unconfigured backend.
-        \\
-        \\Launches the interactive compiler-in-the-loop expert session.
-        \\For machine-facing tooling, use direct commands such as:
-        \\  zigts meta
-        \\  zigts verify-paths <file>...
-        \\  zigts verify-modules --builtins --strict --json
-        \\  zigts ledger export --session <id> --out <path>
-        \\  zigts ledger replay --input <path> --onto <git-ref>
-        \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }

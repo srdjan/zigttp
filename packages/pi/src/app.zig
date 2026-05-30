@@ -1,4 +1,4 @@
-//! Top-level entrypoint for `zigttp expert` and `zigts expert`.
+//! Top-level entrypoint for `zigttp expert` (developer CLI).
 
 const std = @import("std");
 const registry_mod = @import("registry/registry.zig");
@@ -356,7 +356,7 @@ fn setMode(out: *ExpertFlags, val: []const u8) !void {
     return error.UnsupportedMode;
 }
 
-/// Flags parsed from `zigttp expert` / `zigts expert` argv. `policy == null` means the user
+/// Flags parsed from `zigttp expert` argv. `policy == null` means the user
 /// did not pass `--yes` or `--no-edit`; callers pick an appropriate default
 /// (`.ask` for interactive, `.auto_reject` for `--print`).
 pub const ExpertFlags = struct {

@@ -14,7 +14,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Preflight: the autoloop below runs `zigts expert`, which now requires a
+# Preflight: the autoloop below runs `zigttp expert`, which now requires a
 # model backend (it no longer falls back to the offline stub). Catch a
 # missing key here so the failure is named, not masked behind a downstream
 # "no session events file found" error.
@@ -47,12 +47,12 @@ echo "Building..."
 zig build >/dev/null
 
 echo "Running autoloop..."
-./zig-out/bin/zigts expert \
+./zig-out/bin/zigttp expert \
     --handler "$HANDLER_PATH" \
     --goal no_secret_leakage \
     --max-iters 2 \
     >/tmp/witness-theater-prep.log 2>&1 || {
-    echo "error: zigts expert autoloop failed. Log:" >&2
+    echo "error: zigttp expert autoloop failed. Log:" >&2
     cat /tmp/witness-theater-prep.log >&2
     exit 1
 }

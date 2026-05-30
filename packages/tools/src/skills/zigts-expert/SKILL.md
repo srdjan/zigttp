@@ -54,7 +54,7 @@ zigts prove old-contract.json new-contract.json
 
 **Always use `--json` when running from an interactive expert client.** Parse the result. Never guess at errors from unstructured stderr.
 
-## REPL (`zigts expert`)
+## REPL (`zigttp expert`)
 
 The interactive agent. Natural language is sent to the model by default. Slash commands run locally without a model call.
 
@@ -82,18 +82,18 @@ Explicit `zigts` subcommands (`zigts meta`, `zigts features`, etc.) also dispatc
 
 ```bash
 # Approval
-zigts expert --yes           # auto-approve all verified edits
-zigts expert --no-edit       # auto-reject all verified edits
+zigttp expert --yes           # auto-approve all verified edits
+zigttp expert --no-edit       # auto-reject all verified edits
 
 # Session
-zigts expert --session-id <id>           # named session (resume or create)
-zigts expert --resume                    # resume newest session for this cwd
-zigts expert --no-session                # disable session persistence
-zigts expert --no-persist-tool-output    # omit tool output from session log
+zigttp expert --session-id <id>           # named session (resume or create)
+zigttp expert --resume                    # resume newest session for this cwd
+zigttp expert --no-session                # disable session persistence
+zigttp expert --no-persist-tool-output    # omit tool output from session log
 
 # Non-interactive
-zigts expert --print "add a GET /health route"     # one-shot, plain text output
-zigts expert --print "..." --mode json             # one-shot, NDJSON events to stdout
+zigttp expert --print "add a GET /health route"     # one-shot, plain text output
+zigttp expert --print "..." --mode json             # one-shot, NDJSON events to stdout
 ```
 
 ### `--mode json` Event Format

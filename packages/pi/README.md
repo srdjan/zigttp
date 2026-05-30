@@ -1,7 +1,8 @@
 # pi
 
-The coding agent behind the primary `zigttp expert` CLI and the secondary
-`zigts expert` entry point. Built in Zig against the Anthropic
+The coding agent behind the `zigttp expert` and `zigttp ledger` CLI commands.
+Linked only into the developer `zigttp` binary, never into the pi-free `zigts`
+analyzer binary or the deployed `zigttp-runtime`. Built in Zig against the Anthropic
 Messages API, driven by a pure turn state machine with a compiler-aware
 tool registry and a mandatory compile-check veto on every edit.
 

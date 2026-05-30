@@ -47,12 +47,15 @@ pub fn build(b: *std.Build) void {
     });
     const zigts_bench_mod = zigts_bench_dep.module("zigts");
 
+    // Pi dependency: used for the in-process expert tool tests below. The
+    // `pi_app` module itself is linked into the developer `zigttp` binary via
+    // packages/runtime/build.zig (cli_main), not here — the standalone `zigts`
+    // analyzer binary is intentionally pi-free.
     const pi_dep = b.dependency("zigttp_pi", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
     });
-    const pi_app_mod = pi_dep.module("pi_app");
 
     // Sub-dependencies needed for zigts test module construction
     const zigttp_sdk_dep = b.dependency("zigttp_sdk", .{
@@ -427,18 +430,6 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(runtime_exe);
 
-    // Witness replay shim - lets pi_app reach the runtime's replay path
-    // without taking a build dependency on the runtime stack. Both
-    // `zigts` and `zigttp` binaries register the same implementation
-    // before launching the agent loop.
-    const runtime_witness_replay_mod = runtime_dep.module("witness_replay");
-    runtime_witness_replay_mod.addAnonymousImport("embedded_handler", .{
-        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
-        .imports = &.{
-            .{ .name = "zigts", .module = zigts_mod },
-        },
-    });
-
     // Developer CLI — the primary user-facing `zigttp` binary. Contains init,
     // dev, serve, check, compile, prove, mock, link, expert, local deploy,
     // doctor, and the proof/proof-ledger tools. Hosted deploy account verbs
@@ -465,7 +456,11 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(cli_exe);
 
-    // Compiler/analyzer + interactive expert CLI
+    // Compiler/analyzer CLI installed for IDE and CI integrations that call
+    // the analyzer directly. Pi-free by design: the interactive `expert` and
+    // session `ledger` commands live only in the developer `zigttp` binary, so
+    // the ~37 KLOC agent (and its network/credential surface) is compiled
+    // exactly once across the whole build.
     const zigts_exe = b.addExecutable(.{
         .name = "zigts",
         .root_module = b.createModule(.{
@@ -476,9 +471,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
     zigts_exe.root_module.addImport("zigts_cli", zigts_cli_mod);
-    zigts_exe.root_module.addImport("pi_app", pi_app_mod);
-    zigts_exe.root_module.addImport("runtime_witness_replay", runtime_witness_replay_mod);
     b.installArtifact(zigts_exe);
+
+    // Runtime purity guard: the deployable `zigttp-runtime` template and the
+    // pi-free `zigts` analyzer must carry no expert-agent / model-provider
+    // surface; the developer `zigttp` binary is the sole pi host. Enforces the
+    // invariant against future regressions. See scripts/check-runtime-purity.sh.
+    const runtime_purity_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-runtime-purity.sh" });
+    runtime_purity_cmd.addFileArg(cli_exe.getEmittedBin());
+    runtime_purity_cmd.addFileArg(runtime_exe.getEmittedBin());
+    runtime_purity_cmd.addFileArg(zigts_exe.getEmittedBin());
+    const runtime_purity_step = b.step("test-runtime-purity", "Assert the deployed runtime and analyzer carry no agent/provider surface");
+    runtime_purity_step.dependOn(&runtime_purity_cmd.step);
 
     // WebAssembly analyzer — the zigts static analysis pipeline compiled to
     // wasm64-freestanding for the in-browser proof playground. It runs the
@@ -561,12 +565,14 @@ pub fn build(b: *std.Build) void {
 
     // Exit-code contract for help/error paths. Stdout isn't pinned because
     // help text edits should not break tests; only the exit code is part of
-    // the contract.
-    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "--help" }, 0);
+    // the contract. The `expert` command now lives only in the developer
+    // `zigttp` binary (cli_exe); analyzer commands stay on `zigts` (zigts_exe).
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "expert", "--help" }, 0);
     addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "meta", "--help" }, 0);
     addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "verify-paths", "--help" }, 0);
     addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "verify-paths", fixtures_root ++ "/clean_handler.ts", "--help" }, 0);
-    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "no-such-sub" }, 1);
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "expert", "no-such-sub" }, 1);
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "ledger", "--help" }, 0);
     addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{"verify-paths"}, 1);
 
     // Run command: runs the runtime binary directly, without triggering the
@@ -637,6 +643,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_modules_tests.step);
     test_step.dependOn(&run_proof_review_pkg_tests.step);
     test_step.dependOn(expert_golden_step);
+    test_step.dependOn(&runtime_purity_cmd.step);
 
     // ZRuntime tests (native Zig runtime)
     const zruntime_tests = b.addTest(.{

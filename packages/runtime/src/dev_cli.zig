@@ -322,6 +322,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
         return;
     }
+    if (std.mem.eql(u8, command, "ledger")) {
+        // Session ledger management (list, resume, export, replay). Lives only
+        // in the developer CLI; the pi-free `zigts` analyzer binary does not
+        // carry it.
+        try pi_app.runLedgerCommand(allocator, user_args[1..]);
+        return;
+    }
     if (std.mem.eql(u8, command, "expert")) {
         if (hasHelpFlag(user_args[1..])) {
             cli_help.printExpertHelp();

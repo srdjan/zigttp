@@ -5,7 +5,7 @@
 #   vhs docs/witness-theater-demo.tape       # writes docs/witness-theater-demo.gif
 #
 # Requires ANTHROPIC_API_KEY (or OPENAI_API_KEY) in the recorder's env both
-# for the prep autoloop and for `zigts expert --resume` below: the CLI now
+# for the prep autoloop and for `zigttp expert --resume` below: the CLI now
 # exits with a setup message when no backend is configured.
 #
 # The prep script runs the autoloop ahead of time so the GIF stays under
@@ -25,7 +25,7 @@ Set PlaybackSpeed 1.0
 # Resume the autoloop session the prep script wrote. The session
 # carries one verified_patch with one defeated and one new witness for
 # the SECRET_KEY leak.
-Type "./zig-out/bin/zigts expert --resume --no-edit"
+Type "./zig-out/bin/zigttp expert --resume --no-edit"
 Enter
 Sleep 2000ms
 

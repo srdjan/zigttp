@@ -618,11 +618,11 @@ fn printReplayResult(result: ReplayResult) void {
 
 fn printHelp() void {
     const help =
-        \\zigts ledger - export or replay verified_patch ledgers
+        \\zigttp ledger - export or replay verified_patch ledgers
         \\
         \\Usage:
-        \\  zigts ledger export --session <id> --out <path>
-        \\  zigts ledger replay --input <path> --onto <git-ref>
+        \\  zigttp ledger export --session <id> --out <path>
+        \\  zigttp ledger replay --input <path> --onto <git-ref>
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

@@ -476,9 +476,9 @@ fn printHelp() void {
         \\  zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
         \\  zigts prove-behavior <before.ts> <after.ts> [--json]
         \\  zigts gen-tests [handler.ts] [-o output.jsonl]
-        \\  zigts expert                          (interactive coding agent)
-        \\  zigts ledger export --session <id> --out <path>
-        \\  zigts ledger replay --input <path> --onto <git-ref>
+        \\
+        \\The interactive `expert` agent and session `ledger` commands live in the
+        \\developer CLI: run `zigttp expert` / `zigttp ledger`.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

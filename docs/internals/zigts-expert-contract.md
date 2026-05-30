@@ -1,6 +1,6 @@
 # `zigts` v1 — Structured Tool Contract
 
-This document freezes the structured output of the direct `zigts` tool commands as **v1**. Two clients rely on this contract today (`zigts expert` and CI). Every field below is stable within v1. Additive changes are allowed; removals, renames, and semantic changes are not.
+This document freezes the structured output of the direct `zigts` tool commands as **v1**. Two clients rely on this contract today (`zigttp expert` and CI). Every field below is stable within v1. Additive changes are allowed; removals, renames, and semantic changes are not.
 
 The v1 surface is the minimum set of shapes needed to drive a compiler-in-the-loop workflow. It is not everything `zigts` can emit. Anything not listed here is explicitly outside v1 and may change without notice.
 
@@ -366,7 +366,7 @@ Substring search across rule names, descriptions, and help text.
 
 ## Proof-card envelope (from `zigts check --json`)
 
-`zigts check --json` is not reached via the direct verification commands, but it is part of the v1 contract because `zigts expert` calls the same underlying functions in-process. Two envelopes exist (`packages/tools/src/json_diagnostics.zig:284-440`).
+`zigts check --json` is not reached via the direct verification commands, but it is part of the v1 contract because `zigttp expert` calls the same underlying functions in-process. Two envelopes exist (`packages/tools/src/json_diagnostics.zig:284-440`).
 
 **Success envelope** (emitted when analysis completes with no error-severity diagnostics):
 
@@ -482,9 +482,9 @@ Two tripwires guard this contract and run under `zig build test`: the in-tree te
 - Anything reading from files other than `--stdin-json` on `edit-simulate` and `review-patch`.
 - Authentication, rate limiting, tracing, and the managed-task surface for `zigttp serve/dev/deploy`. All runtime and deploy commands are outside v1.
 
-## `zigts expert --print --mode json` event stream
+## `zigttp expert --print --mode json` event stream
 
-`zigts expert` picks its model backend from the environment: `ANTHROPIC_API_KEY` selects the Anthropic provider (streaming Messages API) and `OPENAI_API_KEY` selects the OpenAI provider (non-streaming Chat Completions). An empty value counts as missing; if neither variable is set to a non-empty value, the CLI exits with code 1 and a setup message instead of launching against an unconfigured backend. This is a v0.1.0-beta semantic change from the prior stub fallback - CI consumers that parsed the documented NDJSON event stream for an unset environment must now provide a real key (a test fixture key is enough to launch the binary). The system prompt comes entirely from the binary: the shipped persona and bundled references are embedded at compile time via `@embedFile`, and compiler metadata is rendered from the running binary's in-process registries. Startup does not read `AGENTS.md`, `CLAUDE.md`, external skill files, or any other workspace prompt files.
+`zigttp expert` picks its model backend from the environment: `ANTHROPIC_API_KEY` selects the Anthropic provider (streaming Messages API) and `OPENAI_API_KEY` selects the OpenAI provider (non-streaming Chat Completions). An empty value counts as missing; if neither variable is set to a non-empty value, the CLI exits with code 1 and a setup message instead of launching against an unconfigured backend. This is a v0.1.0-beta semantic change from the prior stub fallback - CI consumers that parsed the documented NDJSON event stream for an unset environment must now provide a real key (a test fixture key is enough to launch the binary). The system prompt comes entirely from the binary: the shipped persona and bundled references are embedded at compile time via `@embedFile`, and compiler metadata is rendered from the running binary's in-process registries. Startup does not read `AGENTS.md`, `CLAUDE.md`, external skill files, or any other workspace prompt files.
 
 `--print <prompt>` runs one turn and exits. `--mode json` switches output to an NDJSON event stream, one event per line. This surface falls outside the v1 tool contract above but appears here because CI scripts commonly use both together.
 
@@ -509,4 +509,4 @@ This surface is outside the v1 stability guarantee. New kinds may appear in futu
 
 ## Relationship to the TUI port
 
-`zigts expert` uses these commands from in-process function calls. The in-process API must remain a faithful representation of this contract so the non-interactive binary and the expert UI never diverge. The wire shapes above are the reference; the in-process Zig structs are an optimization that must round-trip through them without loss.
+`zigttp expert` uses these commands from in-process function calls. The in-process API must remain a faithful representation of this contract so the non-interactive binary and the expert UI never diverge. The wire shapes above are the reference; the in-process Zig structs are an optimization that must round-trip through them without loss.

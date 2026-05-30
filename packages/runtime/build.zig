@@ -116,15 +116,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     compile_benchmark.addImport("zigts", zigts_mod);
-
-    const witness_replay = b.addModule("witness_replay", .{
-        .root_source_file = b.path("src/witness_replay_lib.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    witness_replay.addImport("zigts", zigts_mod);
-    witness_replay.addImport("pi_app", pi_app_mod);
-    witness_replay.addImport("zigttp_proof_review", proof_review_mod);
 }
 
 fn runtimeFeatureOptions(b: *std.Build, config: RuntimeFeatureConfig) *std.Build.Step.Options {
