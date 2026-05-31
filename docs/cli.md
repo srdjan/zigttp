@@ -354,6 +354,7 @@ notification with method `"event"` before the final result.
 /studio <handler.ts>           show the browser proof workbench command
 /feature route file=<handler.ts> method=<VERB> path=</path>
 /forge route file=<handler.ts> method=<VERB> path=</path>
+/forge spec file=<handler.ts> specs=<csv> [effects=<csv>]
 /hotkeys                       list keyboard shortcuts
 /changelog                     recent expert subsystem additions
 ```
@@ -376,6 +377,23 @@ it introduces zero new compiler violations.
 In the TUI, press `A` on the selected forge result to apply it; the
 apply tool reruns the compiler veto and records the accepted change as
 a `verified_patch`.
+
+### Spec Forge
+
+Compiler-native path for proof intent. `/forge spec` adds source-level
+`Spec<...>` and optional `Effects<...>` return markers, applies narrow
+compiler-owned repairs where supported, and returns a candidate only after
+the compiler veto has run.
+
+```bash
+/forge spec file=handler.ts specs=deterministic,idempotent
+/forge spec file=handler.ts specs=no_secret_leakage,injection_safe effects=env
+```
+
+The first repair lane handles `Date.now()` / `Math.random()` by moving the
+call into `step(...)` from `zigttp:durable`, which lets the deterministic
+and idempotent proofs compose through durable replay. Unsupported structural
+repairs are reported as blockers instead of being silently rewritten.
 
 ### Property-goal autoloop
 

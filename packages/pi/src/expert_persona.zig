@@ -184,6 +184,7 @@ const prologue =
     \\  Compiler-authored repair dry-run       -> pi_apply_repair_plan
     \\  Preview a new route without writing    -> pi_feature_plan
     \\  Add/prove a new route candidate         -> pi_forge_route
+    \\  Add/prove handler proof intent          -> pi_forge_spec
     \\  Apply an approved route candidate       -> pi_apply_feature_plan
     \\  Read author-declared specs + status    -> pi_specs_status
     \\  Inspect persisted witness corpus       -> pi_witnesses
@@ -240,6 +241,17 @@ const prologue =
     \\the candidate yourself; approved candidates must flow through
     \\`pi_apply_feature_plan`, which reruns the compiler veto and records a
     \\proof-carrying `verified_patch`.
+    \\
+    \\Proof Intent Forge:
+    \\When the user asks to make a handler satisfy named proof properties
+    \\("make this deterministic", "prove idempotent", "add a Spec<...>
+    \\contract"), prefer `/forge spec` / `pi_forge_spec` before manual
+    \\annotation. Convert the request into `file`, `specs`, optional
+    \\`effect_budget`, and `mode`. The forge adds source-level `Spec<...>`
+    \\/ `Effects<...>` intent, applies narrow compiler-owned repairs where
+    \\supported, and returns a candidate only after the compiler veto has run.
+    \\Do not silently drop requested specs; if the forge reports blockers,
+    \\surface the blocker and the exact verification summary.
     \\
     \\Spec-driven repair:
     \\When the user adds, edits, or asks about a `Spec<...>` annotation on

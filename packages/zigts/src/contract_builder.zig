@@ -30,6 +30,7 @@ const spec_discharge = @import("spec_discharge.zig");
 const intent_extractor = @import("intent_extractor.zig");
 const effect_inference = @import("effect_inference.zig");
 const function_specs = @import("function_specs.zig");
+const JsParser = @import("parser/root.zig").JsParser;
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -1176,7 +1177,7 @@ pub const ContractBuilder = struct {
             }
 
             // Detect nondeterministic builtins: Date.now(), Math.random()
-            if (!self.has_nondeterministic_builtin and callee_tag == .member_access) {
+            if (!self.has_nondeterministic_builtin and callee_tag == .member_access and !self.isInsideDurableStepCallback(idx)) {
                 const member = self.ir_view.getMember(call.callee) orelse continue;
                 const obj_tag = self.ir_view.getTag(member.object) orelse continue;
                 if (obj_tag == .identifier) {
@@ -1203,6 +1204,138 @@ pub const ContractBuilder = struct {
                 }
             }
         }
+    }
+
+    fn isInsideDurableStepCallback(self: *ContractBuilder, target: NodeIndex) bool {
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            if (self.ir_view.getTag(idx) != .call) continue;
+            const call = self.ir_view.getCall(idx) orelse continue;
+            if (!self.isDurableStepCall(call) or call.args_count < 2) continue;
+            const callback = self.ir_view.getListIndex(call.args_start, 1);
+            if (!self.isFunctionNode(callback)) continue;
+            if (self.subtreeContains(callback, target)) return true;
+        }
+        return false;
+    }
+
+    fn isDurableStepCall(self: *ContractBuilder, call: Node.CallExpr) bool {
+        if (self.ir_view.getTag(call.callee) != .identifier) return false;
+        const binding = self.ir_view.getBinding(call.callee) orelse return false;
+        for (self.generic_bindings.items) |gb| {
+            if (gb.slot != binding.slot) continue;
+            return std.mem.eql(u8, gb.module_specifier, "zigttp:durable") and
+                std.mem.eql(u8, gb.binding_name, "step");
+        }
+        return false;
+    }
+
+    fn isFunctionNode(self: *const ContractBuilder, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        return tag == .function_decl or tag == .function_expr or tag == .arrow_function;
+    }
+
+    fn subtreeContains(self: *ContractBuilder, root: NodeIndex, target: NodeIndex) bool {
+        if (root == null_node) return false;
+        if (root == target) return true;
+        const tag = self.ir_view.getTag(root) orelse return false;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(root) orelse return false;
+                for (0..block.stmts_count) |i| {
+                    if (self.subtreeContains(self.ir_view.getListIndex(block.stmts_start, @intCast(i)), target)) return true;
+                }
+            },
+            .return_stmt, .expr_stmt => {
+                if (self.ir_view.getOptValue(root)) |value| return self.subtreeContains(value, target);
+            },
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(root) orelse return false;
+                return self.subtreeContains(decl.pattern, target) or self.subtreeContains(decl.init, target);
+            },
+            .if_stmt => {
+                const stmt = self.ir_view.getIfStmt(root) orelse return false;
+                return self.subtreeContains(stmt.condition, target) or
+                    self.subtreeContains(stmt.then_branch, target) or
+                    self.subtreeContains(stmt.else_branch, target);
+            },
+            .for_of_stmt => {
+                const stmt = self.ir_view.getForIter(root) orelse return false;
+                return self.subtreeContains(stmt.pattern, target) or
+                    self.subtreeContains(stmt.iterable, target) or
+                    self.subtreeContains(stmt.body, target);
+            },
+            .binary_op => {
+                const expr = self.ir_view.getBinary(root) orelse return false;
+                return self.subtreeContains(expr.left, target) or self.subtreeContains(expr.right, target);
+            },
+            .unary_op, .spread => {
+                const expr = self.ir_view.getUnary(root) orelse return false;
+                return self.subtreeContains(expr.operand, target);
+            },
+            .ternary => {
+                const expr = self.ir_view.getTernary(root) orelse return false;
+                return self.subtreeContains(expr.condition, target) or
+                    self.subtreeContains(expr.then_branch, target) or
+                    self.subtreeContains(expr.else_branch, target);
+            },
+            .call, .method_call => {
+                const call = self.ir_view.getCall(root) orelse return false;
+                if (self.subtreeContains(call.callee, target)) return true;
+                for (0..call.args_count) |i| {
+                    if (self.subtreeContains(self.ir_view.getListIndex(call.args_start, @intCast(i)), target)) return true;
+                }
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(root) orelse return false;
+                return self.subtreeContains(member.object, target) or self.subtreeContains(member.computed, target);
+            },
+            .assignment => {
+                const assign = self.ir_view.getAssignment(root) orelse return false;
+                return self.subtreeContains(assign.target, target) or self.subtreeContains(assign.value, target);
+            },
+            .array_literal => {
+                const arr = self.ir_view.getArray(root) orelse return false;
+                for (0..arr.elements_count) |i| {
+                    if (self.subtreeContains(self.ir_view.getListIndex(arr.elements_start, @intCast(i)), target)) return true;
+                }
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(root) orelse return false;
+                for (0..obj.properties_count) |i| {
+                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+                    if (self.subtreeContains(prop_idx, target)) return true;
+                }
+            },
+            .object_property => {
+                const prop = self.ir_view.getProperty(root) orelse return false;
+                return self.subtreeContains(prop.key, target) or self.subtreeContains(prop.value, target);
+            },
+            .function_decl, .function_expr, .arrow_function => {
+                const func = self.ir_view.getFunction(root) orelse return false;
+                return self.subtreeContains(func.body, target);
+            },
+            .template_literal => {
+                const tmpl = self.ir_view.getTemplate(root) orelse return false;
+                for (0..tmpl.parts_count) |i| {
+                    if (self.subtreeContains(self.ir_view.getListIndex(tmpl.parts_start, @intCast(i)), target)) return true;
+                }
+            },
+            .match_expr => {
+                const match = self.ir_view.getMatchExpr(root) orelse return false;
+                if (self.subtreeContains(match.discriminant, target)) return true;
+                for (0..match.arms_count) |i| {
+                    if (self.subtreeContains(self.ir_view.getListIndex(match.arms_start, @intCast(i)), target)) return true;
+                }
+            },
+            .match_arm => {
+                const arm = self.ir_view.getMatchArm(root) orelse return false;
+                return self.subtreeContains(arm.pattern, target) or self.subtreeContains(arm.body, target);
+            },
+            else => {},
+        }
+        return false;
     }
 
     /// Extract a literal string from the first argument of a call and append
@@ -3384,6 +3517,23 @@ fn appendTrackedFunction(
     });
 }
 
+fn buildTestContract(source: []const u8) !HandlerContract {
+    const allocator = std.testing.allocator;
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    var parser = JsParser.init(allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var builder = ContractBuilder.init(allocator, view, &atoms, null, null);
+    defer builder.deinit();
+
+    return try builder.build("handler.ts", null, null, root, null, false, null);
+}
+
 test "computeProperties pure handler stays pure" {
     var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
     defer builder.deinit();
@@ -3466,6 +3616,32 @@ test "computeProperties nondeterministic builtins clear idempotence" {
     try std.testing.expect(props.retry_safe);
     try std.testing.expect(!props.deterministic);
     try std.testing.expect(!props.has_egress);
+    try std.testing.expect(!props.idempotent);
+}
+
+test "contract builder preserves determinism for durable step callback" {
+    const source =
+        \\import { step } from "zigttp:durable";
+        \\function handler(req) { return step("ts", () => Date.now()); }
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(props.idempotent);
+}
+
+test "contract builder does not exempt eager durable step argument" {
+    const source =
+        \\import { step } from "zigttp:durable";
+        \\function handler(req) { return step("ts", Date.now()); }
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.deterministic);
     try std.testing.expect(!props.idempotent);
 }
 

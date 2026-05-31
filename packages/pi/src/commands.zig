@@ -37,6 +37,12 @@ pub const command_table = [_]CommandRow{
 pub fn lookup(argv: []const []const u8) ?LocalCommand {
     if (argv.len == 0) return null;
 
+    if (argv[0].len > 0 and argv[0][0] == '/' and std.mem.eql(u8, argv[0], "/forge")) {
+        if (argv.len > 1 and std.mem.eql(u8, argv[1], "spec")) {
+            return .{ .tool_name = "pi_forge_spec", .args = argv[1..] };
+        }
+    }
+
     if (argv[0].len > 0 and argv[0][0] == '/') {
         inline for (command_table) |row| {
             if (row.slash) |slash| {
@@ -186,6 +192,14 @@ test "lookup /forge forwards route spec" {
     try testing.expectEqualStrings("pi_forge_route", cmd.tool_name);
     try testing.expectEqual(@as(usize, 4), cmd.args.len);
     try testing.expectEqualStrings("route", cmd.args[0]);
+}
+
+test "lookup /forge spec routes to proof-intent forge" {
+    const argv = [_][]const u8{ "/forge", "spec", "file=handler.ts", "specs=deterministic" };
+    const cmd = lookup(&argv) orelse return error.TestFailed;
+    try testing.expectEqualStrings("pi_forge_spec", cmd.tool_name);
+    try testing.expectEqual(@as(usize, 3), cmd.args.len);
+    try testing.expectEqualStrings("spec", cmd.args[0]);
 }
 
 test "isQuit and isHelp recognize aliases" {

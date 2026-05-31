@@ -114,6 +114,7 @@ pub const Analyzer = struct {
     /// `fn_count + 1` entries with a trailing sentinel.
     callee_starts: std.ArrayListUnmanaged(u32),
     callee_storage: std.ArrayListUnmanaged(usize),
+    durable_callback_depth: u32,
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) Analyzer {
         return initWithManifestRegistry(allocator, ir_view, atoms, null);
@@ -135,6 +136,7 @@ pub const Analyzer = struct {
             .user_fn_by_slot = .empty,
             .callee_starts = .empty,
             .callee_storage = .empty,
+            .durable_callback_depth = 0,
         };
     }
 
@@ -349,9 +351,17 @@ pub const Analyzer = struct {
             .call, .method_call => {
                 try self.handleCall(node, owner, row, seen_users);
                 const call = self.ir_view.getCall(node) orelse return;
+                const durable_step = self.isDurableStepCall(call);
                 try self.walkBaseExpr(call.callee, owner, row, seen_users);
                 for (0..call.args_count) |i| {
-                    try self.walkBaseExpr(self.ir_view.getListIndex(call.args_start, @intCast(i)), owner, row, seen_users);
+                    const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
+                    if (durable_step and i == 1 and self.isFunctionNode(arg)) {
+                        self.durable_callback_depth += 1;
+                        defer self.durable_callback_depth -= 1;
+                        try self.walkBaseExpr(arg, owner, row, seen_users);
+                    } else {
+                        try self.walkBaseExpr(arg, owner, row, seen_users);
+                    }
                 }
             },
             .member_access, .optional_chain, .computed_access => {
@@ -415,7 +425,7 @@ pub const Analyzer = struct {
         const call = self.ir_view.getCall(node) orelse return;
 
         if (self.calleeObjectProperty(call.callee)) |op| {
-            if (isNonDeterministic(op.object, op.property)) {
+            if (self.durable_callback_depth == 0 and isNonDeterministic(op.object, op.property)) {
                 row.deterministic = false;
                 row.pure = false;
             }
@@ -449,6 +459,14 @@ pub const Analyzer = struct {
             const gop = try seen_users.getOrPut(self.allocator, callee_idx);
             if (!gop.found_existing) try self.callee_storage.append(self.allocator, callee_idx);
         }
+    }
+
+    fn isDurableStepCall(self: *const Analyzer, call: ir.Node.CallExpr) bool {
+        if (self.ir_view.getTag(call.callee) != .identifier) return false;
+        const binding = self.ir_view.getBinding(call.callee) orelse return false;
+        const imported = self.imports.get(binding.slot) orelse return false;
+        return std.mem.eql(u8, imported.module, "zigttp:durable") and
+            std.mem.eql(u8, imported.name, "step");
     }
 
     fn importEffect(self: *const Analyzer, module: []const u8, name: []const u8) module_binding.EffectClass {
@@ -615,6 +633,46 @@ test "Date.now marks the enclosing function non-deterministic" {
     const row = analyzer.lookup("nowSeconds") orelse return error.FunctionNotFound;
     try testing.expect(!row.deterministic);
     try testing.expect(!row.pure);
+}
+
+test "Date.now inside durable step callback preserves determinism" {
+    const allocator = std.testing.allocator;
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = JsParser.init(allocator,
+        \\import { step } from "zigttp:durable";
+        \\function handler(req) { return step("ts", () => Date.now()); }
+    );
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+    const row = analyzer.lookup("handler") orelse return error.FunctionNotFound;
+    try std.testing.expect(row.deterministic);
+    try std.testing.expect(!row.pure);
+}
+
+test "Date.now as eager durable step argument is non-deterministic" {
+    const allocator = std.testing.allocator;
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = JsParser.init(allocator,
+        \\import { step } from "zigttp:durable";
+        \\function handler(req) { return step("ts", Date.now()); }
+    );
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+    const row = analyzer.lookup("handler") orelse return error.FunctionNotFound;
+    try std.testing.expect(!row.deterministic);
+    try std.testing.expect(!row.pure);
 }
 
 test "transitive non-determinism flows through callers" {

@@ -115,6 +115,19 @@ run reports a new violation. Pre-existing violations do not block new
 edits, only newly introduced ones. Failures feed back as a `retry_draft`
 turn event.
 
+### Proof Intent Forge (`pi_forge_spec.zig`)
+
+`/forge spec` turns explicit proof intent into source-level
+`Spec<...>` and optional `Effects<...>` markers, then proves the candidate
+in memory. It reuses the `forge_run` payload used by Route Forge, so the
+TUI can inspect the generated source, diff, steps, and verification summary
+without a new renderer.
+
+The v1 repair lane supports deterministic/idempotent handlers by wrapping
+`Date.now()` and `Math.random()` in `step(...)` from `zigttp:durable`.
+Other unsupported structural repairs return typed blockers rather than
+writing speculative code.
+
 ### Post-apply verification (`loop.zig:postApplyCheck`)
 
 After an edit lands, `verify_paths` and `review_patch --diff-only` run
@@ -242,6 +255,7 @@ Slash commands in the interactive REPL:
 /skills /skill:<name>
 /templates /template:<name> [args...]
 /settings [theme [<name>]]
+/forge spec file=<handler.ts> specs=<csv> [effects=<csv>]
 /hotkeys /changelog
 ```
 
