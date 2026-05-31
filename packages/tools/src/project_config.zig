@@ -154,7 +154,11 @@ fn findStartDir(
 ) ![]u8 {
     const input = start_path orelse return try dupCurrentDir(allocator, io);
     const normalized = try normalizeAbsolutePath(allocator, io, input);
-    errdefer allocator.free(normalized);
+    // Freed on every path except the one that hands `normalized` back to the
+    // caller, which clears `owned` to transfer ownership. Covers the error
+    // paths too, so it replaces the old `errdefer`.
+    var owned = true;
+    defer if (owned) allocator.free(normalized);
 
     if (std.mem.eql(u8, std.fs.path.basename(input), "zigttp.json")) {
         const dir_name = std.fs.path.dirname(normalized) orelse return error.InvalidProjectConfig;
@@ -170,6 +174,7 @@ fn findStartDir(
         else => return err,
     };
     defer dir.close(io);
+    owned = false;
     return normalized;
 }
 

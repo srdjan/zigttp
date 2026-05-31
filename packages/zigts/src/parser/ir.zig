@@ -1733,8 +1733,15 @@ pub const IrView = struct {
             .ir_store => |ir| blk: {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
+                // `op` is a packed u4 but `UnaryOp` has fewer than 16 members,
+                // so an out-of-range value (e.g. when this node is not actually
+                // a unary op) would make `@enumFromInt` panic. Callers use
+                // `getUnary(...) orelse return`, so fail soft to null instead of
+                // aborting the whole analyzer process.
+                const op_raw: u4 = @truncate(d.a);
+                if (op_raw >= @typeInfo(UnaryOp).@"enum".fields.len) break :blk null;
                 break :blk .{
-                    .op = @enumFromInt(@as(u4, @truncate(d.a))),
+                    .op = @enumFromInt(op_raw),
                     .operand = d.b,
                 };
             },
