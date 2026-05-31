@@ -33,8 +33,8 @@ each runtime in its default configuration (measured 2026-05-22):
 | Node.js | 86,927  | 0.60 ms     | 1.20 ms     |
 
 zigttp runs at parity with Deno and roughly 30% ahead of Node.js on this
-workload. Full methodology and raw results:
-[v0.1.0-beta benchmarks](releases/v0.1.0-beta-benchmarks.md).
+workload. The benchmark harness and raw run-to-run results live in the
+`zigttp-bench` repository.
 
 JIT compilation is enabled by default for hot functions (after `JIT_THRESHOLD` executions).
 
@@ -61,8 +61,8 @@ Embedding the handler bytecode at build time (`zig build -Dhandler=...` or
 `zigttp build`) removes handler parsing and compilation from the floor; the
 self-extracting binary loads bytecode directly from memory.
 
-Raw measurements, the harness, and the full run-to-run distribution are in the
-[v0.1.0-beta benchmarks](releases/v0.1.0-beta-benchmarks.md).
+Raw measurements, the harness, and the full run-to-run distribution live in the
+`zigttp-bench` repository.
 
 ## FaaS Optimizations
 

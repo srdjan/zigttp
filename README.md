@@ -71,8 +71,8 @@ open proof-demo/passport/index.html
 That produces an offline Proof Passport showing the green baseline, unsafe
 secret-flow witness, verified repair, and local deploy receipt.
 
-For the full first project path, see
-[Getting Started](docs/getting-started.md). For the verdict that `dev`
+For the full first project path, see the
+[User Guide](docs/user-guide.md#quick-start). For the verdict that `dev`
 and `test` print on every save, see
 [Reading the Proof Card](docs/proof-card.md).
 
@@ -124,8 +124,8 @@ WebSocket, and more.
 
 - **Opinionated language subset.** TypeScript with the footguns
   removed. Each restriction buys a specific compiler guarantee.
-  [Language subset](docs/language-subset.md) - [Restrictions to
-  proofs](docs/restrictions-to-proofs.md).
+  [Language subset](docs/user-guide.md#javascript-subset-reference) -
+  [Restrictions to proofs](docs/restrictions-to-proofs.md).
 - **Compile-time verification.** Every code path returns a Response,
   Result values are checked before access, no unreachable code, no
   cross-request state leakage. [Verification](docs/verification.md).
@@ -142,7 +142,7 @@ WebSocket, and more.
 - **Proof receipts (default-on).** Every `zigttp deploy` signs a JWS
   over `(bytecode, contract, policy)` with a persistent Ed25519
   identity. `zigttp verify <url>` validates from any machine.
-  [Deploy](docs/deploy-tutorial.md).
+  [Deploy](docs/user-guide.md#proof-ledger-and-badge).
 - **Deterministic replay and proven evolution.** Record I/O with
   `--trace`, replay with `--replay`, compare contracts across
   versions with `-Dprove`. [Replay and
@@ -192,16 +192,16 @@ pages:
 - [Virtual Modules](docs/virtual-modules/README.md) - canonical module
   index and per-module API pages
 - [Verification](docs/verification.md), [Sound
-  Mode](docs/sound-mode.md), [TypeScript](docs/typescript.md), [JSX
-  Guide](docs/jsx-guide.md)
+  Mode](docs/sound-mode.md), [TypeScript](docs/typescript.md), [JSX and
+  TSX](docs/user-guide.md#jsx-and-tsx-handlers)
 - [Performance](docs/performance.md), [Reliability and
   Limits](docs/reliability.md)
 - [Architecture](docs/internals/architecture.md)
 
 ## Release Scope
 
-zigttp is at v0.1.0-beta. [v0.1.0 Scope](docs/releases/v0.1.0-scope.md)
-lists what is in this tag and what is deliberately deferred.
+zigttp is at v0.1.0-beta. The [Roadmap](docs/roadmap.md) lists what is in this
+tag and what is deliberately deferred.
 
 ## Contributing
 

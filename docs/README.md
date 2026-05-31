@@ -6,26 +6,20 @@ notes document architecture, governance, and audit material.
 
 ## Start
 
-- [User Guide](user-guide.md) - install, run handlers, routing, JSON, tests,
-  and troubleshooting.
-- [Getting Started](getting-started.md) - zero to local deploy, covered by
-  `zig build smoke-getting-started`.
-- [Language Subset](language-subset.md) - supported ZigTS syntax, unsupported
-  JavaScript/TypeScript features, and replacements.
+- [User Guide](user-guide.md) - the single guide: install, quick start, run
+  handlers, routing, JSON, the JS/TS subset, JSX/TSX, local deploy and proof
+  receipts, declarative tests, and troubleshooting.
 - [Reading the Proof Card](proof-card.md) - the verdict, proven surface, and
   counterexamples that `check` and `dev` print on every save.
 - [Proof Gate](proof-gate.md) - `zigttp proofs gate` and the GitHub Action
   that post a behavioral verdict for every changed handler on a pull request.
-- [TypeScript](typescript.md) - type stripping, type checking, and
-  `comptime()`.
-- [JSX Guide](jsx-guide.md) - JSX/TSX handlers and server-side rendering.
-- [Deploy](deploy-tutorial.md) - local `zigttp deploy`, proof review, and
-  attestation.
 
 ## Reference
 
 - [CLI Reference](cli.md) - the five-command workflow plus advanced analyzer,
   edge, proofs ledger, verify, and optional Studio commands.
+- [TypeScript](typescript.md) - type stripping, type checking, and
+  `comptime()`.
 - [Contracts and Auto-Sandboxing](contracts-and-sandboxing.md) -
   contract extraction, runtime sandboxing, policy override, OpenAPI
   and TypeScript SDK emit, deterministic replay, proven evolution,
@@ -47,10 +41,21 @@ notes document architecture, governance, and audit material.
 - [Restrictions to Proofs](restrictions-to-proofs.md) - every rejected
   feature mapped to the failure class it eliminates and the proof it
   unlocks. Generated from the same source as `zigts restrictions`.
+- [Canonical Profile](canonical-profile.md) - handler profiling and
+  benchmarking against the canonical workload.
+- [Edge Runtime](edge.md) - the in-process `zigttp edge` multitenant router
+  (opt-in build flag).
 - [Performance](performance.md) - benchmarks, cold starts, memory, and
   deployment tuning.
 - [Limits and Failure Behavior](reliability.md) - request, memory, and stack
   limits, and how the runtime reports handler errors, faults, and exit codes.
+- [Threat Model](threat-model.md) - assets, trust boundaries, and security
+  non-goals for the current release.
+
+## Roadmap
+
+- [Roadmap](roadmap.md) - what is deferred from the current beta and what comes
+  next. Shipped changes live in [CHANGELOG.md](../CHANGELOG.md).
 
 ## Internals
 

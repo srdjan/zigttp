@@ -18,16 +18,15 @@
 
 | File | Purpose |
 |------|---------|
-| `docs/user-guide.md` | Complete handler API reference, routing, virtual modules, CLI options |
+| `docs/user-guide.md` | The single guide: handler API, routing, virtual modules, CLI options, JS/TS subset, JSX/TSX, local deploy and proof receipts, troubleshooting |
 | `docs/internals/architecture.md` | System design, runtime model, project structure |
 | `docs/performance.md` | Benchmarks, cold starts, optimizations, deployment patterns |
 | `docs/internals/api-reference.md` | Zig embedding API, extending with native functions |
 | `docs/typescript.md` | Type stripping, compile-time evaluation (`comptime()`) |
-| `docs/jsx-guide.md` | JSX/TSX usage and server-side rendering |
 | `docs/feature-detection.md` | Unsupported feature detection matrix |
 | `docs/verification.md` | `-Dverify` compile-time proof of handler correctness |
 | `docs/sound-mode.md` | Type-directed analysis across operators (arithmetic, comparison, boolean) |
-| `docs/deploy-tutorial.md` | local `zigttp deploy`, proof review, and attestation |
+| `docs/roadmap.md` | What is deferred from the current beta and what comes next |
 
 ## Build, Test, and Development Commands
 - `zig build` - debug build.

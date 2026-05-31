@@ -290,8 +290,7 @@ Add a tool:
 `packages/pi/src/providers/openai/` mirroring the `anthropic/` file
 layout. The `loop.ModelClient` vtable already accepts a new provider
 without loop changes. The blocker is one live call to record a CI
-cassette; the replay harness itself builds cold. Full spec in
-[../../docs/pi-cassettes.md](../../docs/pi-cassettes.md).
+cassette; the replay harness itself builds cold.
 
 **Phase 5 (structured `ToolResult` split).** Deliberately skipped. The
 current `ToolResult.body` is JSON that Claude reads natively; splitting
@@ -303,7 +302,7 @@ list) lands and needs a typed payload for rendering.
 
 - [../../README.md](../../README.md) — repository overview; pi is
   linked from the zigts CLI section.
-- [../../docs/architecture.md](../../docs/architecture.md) — how
+- [../../docs/internals/architecture.md](../../docs/internals/architecture.md) — how
   `pi_app` fits alongside `zigts`, `zigttp`, and `zigttp-runtime`.
-- [../../docs/zigts-expert-contract.md](../../docs/zigts-expert-contract.md)
+- [../../docs/internals/zigts-expert-contract.md](../../docs/internals/zigts-expert-contract.md)
   — the v1 JSON contract for the `zigts` tool commands pi invokes.

@@ -248,6 +248,6 @@ Use the same explicitness for packed unions when representation matters.
 
 ## Detailed References
 
-- **[references/idioms.md](references/idioms.md)** - Data-oriented design, memory patterns, testing
-- **[references/async-io.md](references/async-io.md)** - New async/Io model, futures, cancellation
-- **[references/c-interop.md](references/c-interop.md)** - C FFI, build-system integration, ABI compatibility
+- **[idioms.md](idioms.md)** - Data-oriented design, memory patterns, testing
+- **[async-io.md](async-io.md)** - New async/Io model, futures, cancellation
+- **[c-interop.md](c-interop.md)** - C FFI, build-system integration, ABI compatibility

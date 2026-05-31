@@ -19,28 +19,40 @@ Functions, Cloudflare Workers), powered by Zig and zigts.
 10. [Virtual Modules](#virtual-modules)
 11. [JavaScript Subset Reference](#javascript-subset-reference)
 12. [TypeScript Support](#typescript-support)
-13. [Complete Examples](#complete-examples)
-14. [Performance Tuning](#performance-tuning-for-faas)
-15. [Compile-Time Verification](#compile-time-verification)
-16. [Contract Manifest](#contract-manifest)
-17. [OpenAPI Manifest](#openapi-manifest)
-18. [TypeScript SDK](#typescript-sdk)
-19. [Runtime Sandboxing](#runtime-sandboxing)
-20. [Declarative Handler Testing](#declarative-handler-testing)
-21. [Route Forge with zigttp expert](#route-forge-with-zigttp-expert)
-22. [Author-Declared Specs](#author-declared-specs)
-23. [Troubleshooting](#troubleshooting)
+13. [JSX and TSX Handlers](#jsx-and-tsx-handlers)
+14. [Complete Examples](#complete-examples)
+15. [Performance Tuning](#performance-tuning-for-faas)
+16. [Compile-Time Verification](#compile-time-verification)
+17. [Contract Manifest](#contract-manifest)
+18. [OpenAPI Manifest](#openapi-manifest)
+19. [TypeScript SDK](#typescript-sdk)
+20. [Runtime Sandboxing](#runtime-sandboxing)
+21. [Declarative Handler Testing](#declarative-handler-testing)
+22. [Route Forge with zigttp expert](#route-forge-with-zigttp-expert)
+23. [Author-Declared Specs](#author-declared-specs)
+24. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Installation
 
-### Prerequisites
+### Pre-built binary
 
-- **Zig 0.16.0**: Download from
-  [ziglang.org](https://ziglang.org/download/). Newer compiler releases are best-effort until revalidated.
+Pre-built binaries for macOS and Linux (x86_64, aarch64):
 
-### Build
+```bash
+curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
+zigttp --help
+```
+
+This installs the `zigttp` command, the only binary you need to follow this
+guide.
+
+### Build from source
+
+Building from source needs **Zig 0.16.0** (download from
+[ziglang.org](https://ziglang.org/download/); newer compiler releases are
+best-effort until revalidated):
 
 ```bash
 # Clone the repository
@@ -130,18 +142,48 @@ zigttp deploy
 
 `deploy` verifies the handler, emits the self-contained binary at
 `.zigttp/deploy/<project-name>`, and appends a `kind=deploy` row to
-`.zigttp/proofs.jsonl`. No credentials, no Docker, no network access. See
-[docs/deploy-tutorial.md](deploy-tutorial.md) for the full deploy flow.
+`.zigttp/proofs.jsonl`. No credentials, no Docker, no network access. `zigttp
+deploy --local` is the explicit spelling for the same target. See
+[Proof ledger and badge](#proof-ledger-and-badge) for the receipt flow and
+[Production Deployment](#production-deployment) for container and FaaS targets.
 
-Attestation is default-on. The build signs the contract and bytecode hashes into a JWS embedded in the binary, using the persistent identity at `~/.zigttp/attest/keypair.bin`. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request and serves `GET /.well-known/zigttp-attest` as cacheable JSON. `zigttp verify <url>` validates the signature from any third-party machine. Pass `--no-attest` to skip signing for a specific build. See [Deploy](deploy-tutorial.md) for the full flow.
+Attestation is default-on. The build signs the contract and bytecode hashes into a JWS embedded in the binary, using the persistent identity at `~/.zigttp/attest/keypair.bin`. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request and serves `GET /.well-known/zigttp-attest` as cacheable JSON. `zigttp verify <url>` validates the signature from any third-party machine. Pass `--no-attest` to skip signing for a specific build.
 
-### Proof badge
+### Proof ledger and badge
+
+After every successful `zigttp deploy`, the CLI prints a proof review card: the
+contract sha, proof level, proven properties, the route/env/egress/cache/
+capability surface, and a verdict against the previous deploy (`safe`,
+`safe_with_additions`, `breaking` - the same words `zigttp dev --watch --prove`
+uses). The row is appended to `.zigttp/proofs.jsonl` so the timeline survives
+across deploys:
 
 ```bash
-zigttp proofs badge
+zigttp proofs list                              # recent deploys and live-reload swaps
+zigttp proofs show HEAD                         # re-render the card from the latest entry
+zigttp proofs diff HEAD~1 HEAD                  # what changed between the last two entries
+zigttp proofs export --format md > receipt.md   # shareable receipt for a PR
+zigttp proofs badge                             # write ./zigttp-proof.svg + README snippet
 ```
 
-This writes `./zigttp-proof.svg` from the latest proof-ledger row and prints the README markdown snippet.
+Refs accept `HEAD`, `HEAD~N`, or a contract sha prefix. The ledger persists only
+contract-derived identifiers (env var names, egress hosts, cache namespaces,
+route patterns, capability names, the contract sha, boolean property flags); no
+env values, tokens, or PII enter the file.
+
+### Proof passport demo
+
+For a local, noninteractive walkthrough of the proof model:
+
+```bash
+zigttp demo --scripted --out proof-demo --export proof-demo/passport
+```
+
+Open `proof-demo/passport/index.html` to inspect the exported Proof Passport. It
+captures the baseline proof, an unsafe edit with a secret-flow witness, the
+repair, and the local deploy receipt. To carry the same proof to a pull request,
+see the [Proof Gate](proof-gate.md): `zigttp proofs gate` aggregates a behavioral
+verdict across every changed handler and posts it as a sticky PR comment.
 
 ### Quick one-off testing
 
@@ -549,7 +591,7 @@ const doc = (
 Response.html(renderToString(doc));
 ```
 
-**Note**: For HTML responses, prefer using JSX/TSX with `renderToString()` rather than string concatenation. See [JSX Guide](jsx-guide.md) for complete documentation.
+**Note**: For HTML responses, prefer using JSX/TSX with `renderToString()` rather than string concatenation. See [JSX and TSX Handlers](#jsx-and-tsx-handlers) for the full reference.
 
 ### HTTP Status Codes
 
@@ -1015,8 +1057,7 @@ For examples that combine modules in a handler, see
 
 zigts implements a restricted JavaScript subset optimized for FaaS workloads.
 The restrictions enable compile-time verification, deterministic replay, and
-contract extraction. For a compact supported/unsupported reference, see
-[language-subset.md](language-subset.md). See
+contract extraction. See
 [restrictions-to-proofs.md](restrictions-to-proofs.md) for each cut mapped to
 the failure class it eliminates and the proof it unlocks (also available as
 `zigts restrictions [--by proof|class]`).
@@ -1109,6 +1150,22 @@ zigts always runs in strict mode. Implicit globals and `with` are errors.
 zigts includes a native TypeScript/TSX stripper that removes type annotations at
 load time. Use `.ts` or `.tsx` files directly without a separate build step.
 
+### Supported TypeScript surface
+
+- Type aliases and generic type aliases
+- `distinct type`
+- Interfaces
+- Variable, parameter, and return annotations
+- Function generics
+- `import type` / `export type`
+- `Spec<T>`, `Proof<T, S>`, and `Effects<T, S>` from `zigttp:types`
+- Type guards with `x is T`
+- Readonly fields
+- Template literal types
+
+Type assertions (`as`, `satisfies`) and the `any` type are not supported; use
+control-flow narrowing or explicit annotations instead.
+
 ### How It Works
 
 The TypeScript stripper performs a single-pass transformation:
@@ -1157,36 +1214,8 @@ removed.
 
 ### TSX for Server-Side Rendering
 
-Combine TypeScript types with JSX syntax:
-
-```tsx
-// handler.tsx
-interface PageProps {
-    title: string;
-    children: any;
-}
-
-function Layout(props: PageProps) {
-    return (
-        <html>
-            <head>
-                <title>{props.title}</title>
-            </head>
-            <body>{props.children}</body>
-        </html>
-    );
-}
-
-function handler(request: Request): Response {
-    const page = (
-        <Layout title="My App">
-            <h1>Welcome</h1>
-            <p>Path: {request.url}</p>
-        </Layout>
-    );
-    return Response.html(renderToString(page));
-}
-```
+Combine TypeScript types with JSX syntax in `.tsx` files. See
+[JSX and TSX Handlers](#jsx-and-tsx-handlers) for the full reference.
 
 ### Compile-Time Evaluation with comptime()
 
@@ -1347,6 +1376,151 @@ Error messages include line and column information for debugging.
    time
 3. **Smaller output**: Type declarations don't appear in the stripped output
 4. **Single-pass**: Stripping happens in one pass, no AST construction
+
+---
+
+## JSX and TSX Handlers
+
+zigttp parses JSX/TSX natively for server-side rendering. JSX mode turns on from
+the `.jsx`/`.tsx` file extension, so no separate transformer is required. Use
+`class` (not `className`) for HTML class attributes.
+
+```tsx
+// handler.tsx
+function handler(req: Request): Response {
+    const page = <div class="hello">Hello JSX!</div>;
+    return Response.html(renderToString(page));
+}
+```
+
+### JSX runtime API
+
+The runtime is provided by `packages/zigts/src/http.zig`:
+
+- `h(tag, props, ...children)` - creates virtual DOM nodes. JSX codegen calls it
+  for you; you rarely call it directly. `<div class="foo">Hello</div>` compiles
+  to `h('div', {class: 'foo'}, 'Hello')`.
+- `renderToString(node)` - renders a node to an HTML string for `Response.html`.
+- `Fragment` (`<>...</>`) - groups elements without a wrapper element.
+
+| Feature       | Example                | Output                  |
+| ------------- | ---------------------- | ----------------------- |
+| Elements      | `<div>text</div>`      | `<div>text</div>`       |
+| Attributes    | `<div class="foo">`    | `<div class="foo">`     |
+| Expressions   | `<div>{value}</div>`   | `<div>...</div>`        |
+| Components    | `<Card title="x"/>`    | calls the Card function |
+| Fragments     | `<>a</>`               | `a` (no wrapper)        |
+| Self-closing  | `<br/>`                | `<br />`                |
+| Boolean attrs | `<input disabled/>`    | `<input disabled />`    |
+
+### Components
+
+Components are functions that return JSX and receive a single `props` object. The
+special `children` prop holds nested content:
+
+```jsx
+function Layout(props) {
+    return (
+        <html>
+            <head><title>{props.title}</title></head>
+            <body>
+                <h1>{props.title}</h1>
+                {props.children}
+            </body>
+        </html>
+    );
+}
+
+function handler(request) {
+    const page = (
+        <Layout title="My App">
+            <p>This is the page content</p>
+        </Layout>
+    );
+    return Response.html(renderToString(page));
+}
+```
+
+### Dynamic content and conditionals
+
+Use JavaScript expressions inside JSX. Both arrow and `function` callbacks work
+in `.map`:
+
+```jsx
+function ProductList(props) {
+    return (
+        <div class="product-list">
+            {props.products.map((p) => (
+                <div class="product" key={p.id}>
+                    <h3>{p.name}</h3>
+                    <p>Price: ${p.price}</p>
+                </div>
+            ))}
+        </div>
+    );
+}
+```
+
+Use ternaries or logical AND for conditional rendering (remember: `undefined`,
+not `null`, is the absent sentinel):
+
+```jsx
+function UserProfile(props) {
+    const user = props.user;
+    return (
+        <div class="profile">
+            <h2>{user.name}</h2>
+            {user.isPremium ? <span class="badge">Premium</span> : <span class="badge">Free</span>}
+            {user.email && <p>Email: {user.email}</p>}
+        </div>
+    );
+}
+```
+
+### Attributes
+
+```jsx
+// Dynamic class
+<div class={isActive ? "active" : "inactive"}>Status</div>
+
+// Boolean attributes
+<input type="checkbox" disabled />
+<button disabled={isLoading}>Submit</button>
+
+// Inline style as a string
+<div style="color: red; font-size: 16px;">Styled text</div>
+```
+
+### TSX
+
+Combine TypeScript types with JSX. Annotations strip at load time and are checked
+by the compiler pipeline:
+
+```tsx
+interface PageProps {
+    title: string;
+    children: any;
+}
+
+function Layout(props: PageProps) {
+    return (
+        <html>
+            <head><title>{props.title}</title></head>
+            <body>{props.children}</body>
+        </html>
+    );
+}
+
+function handler(request: Request): Response {
+    return Response.html(renderToString(<Layout title="Users"><h1>Welcome</h1></Layout>));
+}
+```
+
+The same JS subset applies inside JSX: arrow functions, template literals,
+destructuring, spread, `for...of`, optional chaining, and nullish coalescing are
+supported; classes, `var`, `while`, and `this` are rejected at parse time. For
+complete working files, see `examples/jsx/` and
+[`examples/handler/handler-full.tsx`](../examples/handler/handler-full.tsx).
 
 ---
 

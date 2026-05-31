@@ -31,11 +31,11 @@ The high-level boundaries enforced by zigttp:
 
 1. **Handler isolation.** Each request acquires a `Runtime` instance from a pool. Recycling under `reuse_unbounded` is only enabled when the compile-time contract proves `pure` + `deterministic`. Arena-escape and string-table audits run on every release; failures are logged via the runtime metrics (`arena_audit_failures`, `persistent_escape_failures`).
 
-2. **Capability boundary.** Virtual modules declare `required_capabilities` in their `ModuleBinding`. The set is aggregated into the handler's contract and used by deployment policy to refuse mounts that exceed the granted surface. See [docs/internals/capability-audit.md](docs/internals/capability-audit.md) for the per-module review and known caveats (only `.runtime_callback` is enforced at module call time; other capabilities are policy-level).
+2. **Capability boundary.** Virtual modules declare `required_capabilities` in their `ModuleBinding`. The set is aggregated into the handler's contract and used by deployment policy to refuse mounts that exceed the granted surface. See [docs/internals/capabilities.md](docs/internals/capabilities.md) for the enforcement map and the caveat that only `.runtime_callback` is enforced at module call time; other capabilities are policy-level.
 
 3. **HTTP boundary.** Headers reject CRLF and NUL bytes before allocation (commit `6e65bb7`, `packages/runtime/src/http_types.zig`). Body size defaults to 1 MiB and is rejected with 413 on overflow. Static-file paths reject traversal (`..`), absolute paths, drive letters, and NUL bytes (`isPathSafe`); a second-line canonical-realpath check (`isCanonicalPathInsideRoot`) catches symlink escapes.
 
-4. **WebSocket boundary.** RFC 6455 frame parsing is delegated to `std.http.Server.WebSocket`; runtime maps stdlib errors to wire-correct close codes (1002 for protocol error, 1009 for oversize). See [docs/internals/websocket-audit.md](docs/internals/websocket-audit.md) for the full checklist and the one documented gap (peer-sent close-code validation, deferred to W2).
+4. **WebSocket boundary.** RFC 6455 frame parsing is delegated to `std.http.Server.WebSocket`; runtime maps stdlib errors to wire-correct close codes (1002 for protocol error, 1009 for oversize). Peer-sent close-code validation is the one documented gap, deferred and tracked in the [Roadmap](docs/roadmap.md).
 
 5. **Attestation trust model.** The JWS protected header carries the full Ed25519 public key. `zigttp verify <url>` validates the signature against that embedded key and prints the key fingerprint. This proves "the holder of this key signed these claims" - not "this key belongs to a specific publisher." The well-known attestation document exposes the same claims for inspection; it does not establish publisher identity by itself. Third-party verifiers that care about identity should pin keys with `--trust-key <hex>` or apply an explicit trusted-origin policy.
 
@@ -49,6 +49,5 @@ The high-level boundaries enforced by zigttp:
 
 - [docs/threat-model.md](docs/threat-model.md) - public runtime and tooling threat model
 - [docs/verification.md](docs/verification.md) - compile-time verification invariants
-- [docs/internals/capability-audit.md](docs/internals/capability-audit.md) - per-module capability declaration audit
-- [docs/internals/websocket-audit.md](docs/internals/websocket-audit.md) - RFC 6455 compliance audit
+- [docs/internals/capabilities.md](docs/internals/capabilities.md) - capability enforcement map
 - [packages/zigts/src/module_binding.zig](packages/zigts/src/module_binding.zig) - capability enforcement surface

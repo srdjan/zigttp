@@ -115,7 +115,7 @@ All documented in detail in their source files and in `docs/`:
 
 ## TypeScript/JSX
 
-TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, rendered via `h()`/`renderToString()` in `packages/zigts/src/http.zig`. `comptime()` evaluates expressions at load time. See [docs/typescript.md](docs/typescript.md), [docs/jsx-guide.md](docs/jsx-guide.md).
+TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, rendered via `h()`/`renderToString()` in `packages/zigts/src/http.zig`. `comptime()` evaluates expressions at load time. See [docs/typescript.md](docs/typescript.md) and the JSX/TSX section of [docs/user-guide.md](docs/user-guide.md).
 
 ## CLI Options
 
@@ -137,7 +137,7 @@ always win; the file only fills gaps. Listed under `zigttp help --all`
 
 ### zigttp deploy
 
-`zigttp deploy` takes no arguments. It auto-detects the handler file and project name in the current directory, verifies the handler, and emits a self-contained binary at `.zigttp/deploy/<project-name>` with a `kind=deploy` row appended to `.zigttp/proofs.jsonl`. No credentials, Docker, or network. `zigttp deploy --local` and `--target local` are explicit aliases. Hosted cloud deploy (`--cloud`) is deferred from v0.1.0-beta. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
+`zigttp deploy` takes no arguments. It auto-detects the handler file and project name in the current directory, verifies the handler, and emits a self-contained binary at `.zigttp/deploy/<project-name>` with a `kind=deploy` row appended to `.zigttp/proofs.jsonl`. No credentials, Docker, or network. `zigttp deploy --local` and `--target local` are explicit aliases. Hosted cloud deploy (`--cloud`) is deferred from v0.1.0-beta. See [docs/user-guide.md](docs/user-guide.md).
 
 Proof receipts ship default-on: every fresh `compile`, `build`, or `deploy --local` signs the contract, bytecode, and rule-registry hashes with the persistent Ed25519 identity at `~/.zigttp/attest/keypair.bin` (generated on first use, mode 0600) and embeds the JWS in the self-extracting binary. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request and serves `GET /.well-known/zigttp-attest` with the full attestation envelope plus the JWK public key (ETag, `Cache-Control: max-age=3600`, 304 on `If-None-Match`). `zigttp verify <url>` validates the signature from any third-party machine. Opt out for a specific build with `--no-attest`.
 

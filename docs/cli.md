@@ -89,7 +89,7 @@ Attestation is default-on: the build signs a JWS that the running server
 emits on every response as `Zigttp-Attest` and serves at
 `GET /.well-known/zigttp-attest` as JSON. The signing key is the
 persistent identity at `~/.zigttp/attest/keypair.bin`. Pass `--no-attest`
-to skip signing for one build. Full flow: [deploy-tutorial.md](deploy-tutorial.md).
+to skip signing for one build. Full flow: [User Guide - Proof ledger and badge](user-guide.md#proof-ledger-and-badge).
 
 Hosted cloud deploy is out of core for v0.1.0-beta. `zigttp deploy --cloud`
 and the related account commands reject with a "not in this beta" message.
