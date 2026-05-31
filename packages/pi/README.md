@@ -27,7 +27,7 @@ apply. The model cannot emit text that bypasses the check.
 ```
 packages/pi/
   src/
-    app.zig               # entrypoint; parses ExpertFlags, dispatches to REPL / TUI / print / rpc
+    app.zig               # entrypoint; parses ExpertFlags, dispatches to REPL / print / rpc
     agent.zig             # AgentSession: transcript, backend union (stub|anthropic), session persistence
     loop.zig              # runTurnWith: drives turn.zig state machine, owns I/O + retries
     turn.zig              # pure state machine (idle → awaiting_model → verifying_edit → ...)
@@ -60,15 +60,6 @@ packages/pi/
     prompts/
       catalog.zig         # same shape, six templates
       *.md
-    tui/
-      app.zig             # raw-mode event loop
-      retained.zig        # bottom-anchored status + input manager
-      ansi.zig            # escape vocabulary (CSI ?2026h/l synchronized output)
-      theme.zig           # Theme struct + registry
-      themes/             # default + solarized-dark palettes
-      term.zig            # RawMode.enter / exit
-      line_editor.zig     # pure key-event → buffer state machine
-      widgets/            # status_line, box
     test_support/
       tmp.zig             # shared IsolatedTmp for filesystem tests
       env.zig             # EnvOverride for setenv/unsetenv
@@ -87,7 +78,6 @@ time. Each surface has exactly one source:
 | Slash commands     | `const` table in `commands.zig`                     |
 | Skills             | `@embedFile` + comptime parse of `skills/*.md`      |
 | Prompt templates   | `@embedFile` + comptime parse of `prompts/*.md`     |
-| Themes             | `tui/themes/*.zig`                                  |
 | Models             | `providers/models.zig`                              |
 | System prompt      | `expert_persona.buildSystemPromptWithContext`       |
 
@@ -103,7 +93,7 @@ truncates the project-context section first on overflow.
 
 `test_support/lockdown.zig` enforces the policy mechanically: a
 build-time seal test walks the source tree and fails if any `.zig`
-file contains `~/.zigttp/{skills,prompts,themes,extensions,models.json}`,
+file contains `~/.zigttp/{skills,prompts,extensions,models.json}`,
 `SYSTEM.md`, `APPEND_SYSTEM.md`, `dlopen`, `dlsym`, or `LoadLibrary`.
 
 ## Key features
@@ -120,8 +110,8 @@ turn event.
 `/forge spec` turns explicit proof intent into source-level
 `Spec<...>` and optional `Effects<...>` markers, then proves the candidate
 in memory. It reuses the `forge_run` payload used by Route Forge, so the
-TUI can inspect the generated source, diff, steps, and verification summary
-without a new renderer.
+REPL/RPC surfaces can inspect the generated source, diff, steps, and
+verification summary without a new payload.
 
 The v1 repair lane supports deterministic/idempotent handlers by wrapping
 `Date.now()` and `Math.random()` in `step(...)` from `zigttp:durable`.
@@ -165,38 +155,17 @@ clients. Methods: `turn`, `compact`, `session.info`, `tools.list`,
 `model.{list,set}`, `shutdown`. Turn events emit as `"event"`
 notifications using the same `{v,k,d}` envelope as `events.jsonl`.
 
-### Bottom-anchored retained TUI (`tui/`)
+### CLI REPL
 
-![zigttp expert TUI demo](../../docs/pi-tui-demo.gif)
+`zigttp expert` runs a line-buffered CLI REPL for interactive work.
+Natural-language lines go to the model; slash commands route to local
+compiler tools, session management, skills, templates, and ledger export.
+Non-interactive integrations use `--print`, `--mode json`, or
+`--mode rpc`.
 
-Status line (session id short, model, token totals) and input line stay
-anchored at the bottom of the terminal. Scrollback flows above them;
-the terminal's own buffer handles history. Redraws wrap in CSI
-`?2026h` / `?2026l` synchronized output
-so supporting terminals render each update atomically without flicker.
-The full-screen surface uses themed Workbench-style pane headers, row
-selection, tab accents, proof badges, witness verdicts, and modal
-chrome. Swap palettes with `/settings theme <name>`; two palettes ship:
-`default` and `solarized-dark`.
-
-The ledger inspector has eight tabs: Delta, Diff, Properties,
-Violations, Prove, System, Citations, Witnesses. Tab and Shift-Tab
-cycle. The Witnesses tab carries the full counterexample body for
-every witness the patch defeated or introduced; press `w` to jump to
-it directly. Witness keystrokes:
-
-- `r` replays the selected witness against the post-patch handler and
-  renders the verdict inline (`PASS`, `FIXED`, `ERROR`).
-- `g` runs the autoloop scoped to that witness's stable key, ending
-  the moment the focused witness is gone.
-- `m` mints the witness as a regression test in
-  `<handler-dir>/witness-regressions.jsonl`.
-
-Regenerate the demos with `vhs docs/pi-tui-demo.tape` and
-`vhs docs/witness-theater-demo.tape` from the repo root after any TUI
-change. The witness theater demo also requires
-`./scripts/witness-theater-demo-prep.sh` to stage the autoloop
-session.
+Proof deltas and witness details are persisted as session events. Inspect
+them with `/ledger export <path>`, `zigttp ledger`, `/witnesses <handler.ts>`,
+or the browser proof workbench surfaced by `/studio <handler.ts>`.
 
 ### Backends
 
@@ -254,7 +223,7 @@ Slash commands in the interactive REPL:
 /model [<id>]
 /skills /skill:<name>
 /templates /template:<name> [args...]
-/settings [theme [<name>]]
+/settings
 /forge spec file=<handler.ts> specs=<csv> [effects=<csv>]
 /hotkeys /changelog
 ```
@@ -281,14 +250,6 @@ Add a skill:
    `packages/pi/src/skills/catalog.zig`.
 3. Rebuild. `/skills` will list it, `/skill:<name>` will invoke it.
 
-Add a theme:
-
-1. Create `packages/pi/src/tui/themes/<name>.zig` exporting a
-   `pub const theme: theme_mod.Theme = .{ ... }`.
-2. Add `&@import("themes/<name>.zig").theme` to the `registry` array
-   in `packages/pi/src/tui/theme.zig`.
-3. Rebuild. `/settings theme` will list it.
-
 Add a tool:
 
 1. Write `packages/pi/src/tools/<name>.zig` exporting `pub const tool: ToolDef = .{ ... }`.
@@ -309,8 +270,7 @@ cassette; the replay harness itself builds cold.
 **Phase 5 (structured `ToolResult` split).** Deliberately skipped. The
 current `ToolResult.body` is JSON that Claude reads natively; splitting
 into `{llm_text, ui_payload}` would lose structure the model already
-uses. Reopen if a full-screen TUI widget (diff viewer, diagnostics
-list) lands and needs a typed payload for rendering.
+uses. Reopen if a future UI needs a typed payload for rendering.
 
 ## See also
 

@@ -4,7 +4,6 @@
 const std = @import("std");
 const turn = @import("turn.zig");
 const ui_payload = @import("ui_payload.zig");
-const box_widget = @import("tui/widgets/box.zig");
 
 /// Return an allocator-owned copy of `body`, capped at `max` bytes. When
 /// truncation happens, the returned slice ends with a note recording how many
@@ -240,24 +239,7 @@ fn renderAll(writer: anytype, transcript: *const Transcript) !void {
 }
 
 fn renderRich(writer: anytype, entry: *const OwnedEntry) !void {
-    switch (entry.*) {
-        .proof_card => |message| try box_widget.writeBox(
-            writer,
-            .{ .title = "proof", .color = .green },
-            message.llm_text,
-        ),
-        .diagnostic_box => |message| try box_widget.writeBox(
-            writer,
-            .{ .title = "veto", .color = .red },
-            message.llm_text,
-        ),
-        .verified_patch => |message| try box_widget.writeBox(
-            writer,
-            .{ .title = "patch", .color = .green },
-            message.llm_text,
-        ),
-        else => try renderPlain(writer, entry),
-    }
+    try renderPlain(writer, entry);
 }
 
 pub fn renderRichEntryToOwned(

@@ -35,12 +35,6 @@ comptime {
     _ = @import("memory_store.zig");
     _ = @import("repl.zig");
     _ = @import("commands.zig");
-    _ = @import("tui/term.zig");
-    _ = @import("tui/line_editor.zig");
-    _ = @import("tui/app.zig");
-    _ = @import("tui/widgets/box.zig");
-    _ = @import("tui/ansi.zig");
-    _ = @import("tui/theme.zig");
     _ = @import("turn.zig");
     _ = @import("veto.zig");
     _ = @import("transcript.zig");

@@ -18,7 +18,7 @@
 //!         `transcript.capToolResultBody` before writing. The input entry
 //!         is never mutated.
 //!
-//! This unit does not touch the loop, agent, transcript, or TUI; it is
+//! This unit does not touch the loop, agent, transcript, or REPL; it is
 //! a building block for later wiring.
 
 const std = @import("std");

@@ -14,7 +14,6 @@ const ledger = @import("ledger.zig");
 const skills_catalog = @import("skills/catalog.zig");
 const prompts_catalog = @import("prompts/catalog.zig");
 const models_registry = @import("providers/models.zig");
-const theme_mod = @import("tui/theme.zig");
 
 pub const Registry = registry_mod.Registry;
 const ToolResult = registry_mod.ToolResult;
@@ -29,13 +28,9 @@ pub const DispatchOutcome = union(enum) {
     session_new,
     session_compact,
     session_fork,
-    view_ledger,
-    view_chat,
 };
 
-/// Surface-agnostic result of processing one submitted line. Both the
-/// line-buffered REPL and the raw-mode TUI share this shape so the only
-/// per-surface code is how `rendered` / `tool_result` bytes are written.
+/// Surface-agnostic result of processing one submitted line.
 pub const SubmitOutcome = union(enum) {
     noop,
     quit,
@@ -47,14 +42,11 @@ pub const SubmitOutcome = union(enum) {
     session_new,
     session_compact,
     session_fork,
-    view_ledger,
-    view_chat,
 };
 
 /// Routes a single line through either the model (NL) or the dispatch
 /// table (slash/explicit/raw tool name). Returns a surface-agnostic
-/// outcome; the caller prints `rendered` / `tool_result.llm_text` using its
-/// own writer conventions (bare stdout for REPL, CRLF-translated for TUI).
+/// outcome; the caller prints `rendered` / `tool_result.llm_text`.
 pub fn processSubmit(
     allocator: std.mem.Allocator,
     session: *agent.AgentSession,
@@ -94,21 +86,6 @@ pub fn processSubmit(
         return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
     }
 
-    if (std.mem.startsWith(u8, trimmed, "/settings theme")) {
-        const rest_raw = trimmed["/settings theme".len..];
-        const rest = std.mem.trim(u8, rest_raw, " \t");
-        if (rest.len == 0) {
-            return .{ .tool_result = try renderThemes(allocator, session.theme) };
-        }
-        if (theme_mod.findByName(rest)) |t| {
-            session.theme = t;
-            const msg = try std.fmt.allocPrint(allocator, "Theme switched to: {s}\n", .{t.display_name});
-            return .{ .tool_result = .{ .ok = true, .llm_text = msg } };
-        }
-        const msg = try std.fmt.allocPrint(allocator, "Unknown theme: {s}\nAvailable: run /settings theme to list\n", .{rest});
-        return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
-    }
-
     if (std.mem.startsWith(u8, trimmed, "/template:")) {
         const rest = trimmed["/template:".len..];
         var it = std.mem.tokenizeAny(u8, rest, " \t");
@@ -132,11 +109,11 @@ pub fn processSubmit(
     }
 
     if (commands.isViewLedger(trimmed)) {
-        return .view_ledger;
+        return .{ .tool_result = try renderLedgerGuidance(allocator) };
     }
 
     if (commands.isViewChat(trimmed)) {
-        return .view_chat;
+        return .{ .tool_result = try renderChatGuidance(allocator) };
     }
 
     if (std.mem.startsWith(u8, trimmed, "/ledger export ")) {
@@ -166,8 +143,6 @@ pub fn processSubmit(
         .session_new => .session_new,
         .session_compact => .session_compact,
         .session_fork => .session_fork,
-        .view_ledger => .view_ledger,
-        .view_chat => .view_chat,
     };
 }
 
@@ -191,8 +166,8 @@ pub fn dispatchLine(
     if (commands.isCompact(argv[0])) return .session_compact;
     if (commands.isSessionFork(argv[0])) return .session_fork;
     if (commands.isSessionTree(argv[0])) return .{ .result = try renderTree(allocator, null) };
-    if (commands.isViewLedger(argv[0])) return .view_ledger;
-    if (commands.isViewChat(argv[0])) return .view_chat;
+    if (commands.isViewLedger(argv[0])) return .{ .result = try renderLedgerGuidance(allocator) };
+    if (commands.isViewChat(argv[0])) return .{ .result = try renderChatGuidance(allocator) };
     if (commands.isSettings(argv[0])) return .{ .result = try renderSettings(allocator) };
     if (commands.isHotkeys(argv[0])) return .{ .result = try renderHotkeys(allocator) };
     if (commands.isChangelog(argv[0])) return .{ .result = try renderChangelog(allocator) };
@@ -366,8 +341,7 @@ fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
             "  max_attempts:    3\n" ++
             "  roundtrips/turn: 8\n" ++
             "  tool_calls/turn: 16\n" ++
-            "  batch_size:      8\n" ++
-            "Theme: run /settings theme to list or switch.\n",
+            "  batch_size:      8\n",
         .{ request_mod.default_model, request_mod.default_max_tokens },
     );
     defer allocator.free(msg);
@@ -407,35 +381,32 @@ fn renderStatus(allocator: std.mem.Allocator, session: *const agent.AgentSession
     return ToolResult.withPlainText(allocator, true, msg);
 }
 
-fn renderThemes(allocator: std.mem.Allocator, current: *const theme_mod.Theme) !ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
-    try w.writeAll("Available themes (invoke with /settings theme <name>):\n");
-    for (theme_mod.registry) |t| {
-        const marker = if (t == current) "*" else " ";
-        try w.print("  {s} {s: <16}  {s}\n", .{ marker, t.name, t.display_name });
-    }
-    buf = aw.toArrayList();
-    return ToolResult.withPlainText(allocator, true, buf.items);
-}
-
 fn renderHotkeys(allocator: std.mem.Allocator) !ToolResult {
     const msg = try allocator.dupe(
         u8,
-        "Keyboard shortcuts (TUI mode):\n" ++
+        "Keyboard shortcuts (CLI REPL):\n" ++
             "  Enter          submit current line\n" ++
             "  Ctrl-C         interrupt / cancel\n" ++
-            "  Ctrl-D         quit (EOF)\n" ++
-            "  Left/Right     move cursor\n" ++
-            "  Home/End       jump to start/end of line\n" ++
-            "  Delete         delete under cursor\n" ++
-            "  Up/Down        history navigation or move the ledger rail\n" ++
-            "  Tab/Shift-Tab  cycle panes in chat or ledger detail tabs\n" ++
-            "  c / l          switch between chat and ledger views\n" ++
-            "  A              apply selected verified patch or forge candidate\n",
+            "  Ctrl-D         quit (EOF)\n",
     );
+    defer allocator.free(msg);
+    return ToolResult.withPlainText(allocator, true, msg);
+}
+
+fn renderLedgerGuidance(allocator: std.mem.Allocator) !ToolResult {
+    const msg = try allocator.dupe(
+        u8,
+        "Session ledger is available from the CLI:\n" ++
+            "  /ledger export <path>\n" ++
+            "  zigttp ledger export --session <id> --out <path>\n" ++
+            "  zigttp ledger replay --input <path> --onto <git-ref>\n",
+    );
+    defer allocator.free(msg);
+    return ToolResult.withPlainText(allocator, true, msg);
+}
+
+fn renderChatGuidance(allocator: std.mem.Allocator) !ToolResult {
+    const msg = try allocator.dupe(u8, "Already in the CLI REPL chat. Type help for local commands.\n");
     defer allocator.free(msg);
     return ToolResult.withPlainText(allocator, true, msg);
 }
@@ -734,14 +705,6 @@ pub fn run(
                 defer allocator.free(msg);
                 _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
             },
-            .view_ledger => {
-                const msg = "ledger view is available in the full-screen TUI\n";
-                _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
-            },
-            .view_chat => {
-                const msg = "chat view is the default in the line-buffered REPL\n";
-                _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
-            },
         }
     }
 }
@@ -835,7 +798,7 @@ test "hotkeys and changelog mention Route Forge apply flow" {
     defer reg.deinit(testing.allocator);
 
     var hotkeys = try dispatchLine(testing.allocator, &reg, "/hotkeys");
-    try expectResult(&hotkeys, testing.allocator, "forge candidate", true);
+    try expectResult(&hotkeys, testing.allocator, "CLI REPL", true);
 
     var changelog = try dispatchLine(testing.allocator, &reg, "/changelog");
     try expectResult(&changelog, testing.allocator, "Route Forge", true);
@@ -845,17 +808,11 @@ test "slash view commands route locally" {
     var reg = try buildMiniRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
 
-    const ledger_outcome = try dispatchLine(testing.allocator, &reg, "/ledger");
-    switch (ledger_outcome) {
-        .view_ledger => {},
-        else => return error.TestFailed,
-    }
+    var ledger_outcome = try dispatchLine(testing.allocator, &reg, "/ledger");
+    try expectResult(&ledger_outcome, testing.allocator, "zigttp ledger export --session", true);
 
-    const chat_outcome = try dispatchLine(testing.allocator, &reg, "/chat");
-    switch (chat_outcome) {
-        .view_chat => {},
-        else => return error.TestFailed,
-    }
+    var chat_outcome = try dispatchLine(testing.allocator, &reg, "/chat");
+    try expectResult(&chat_outcome, testing.allocator, "CLI REPL chat", true);
 }
 
 test "slash command routes locally" {
@@ -912,63 +869,22 @@ test "selectApprovalFn: ask resolves to the interactive approveEdit" {
     }
 }
 
-test "processSubmit: /settings theme lists themes and marks the current one" {
+test "processSubmit: /settings reports compile-time defaults without themes" {
     var reg = try buildMiniRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
     var session = agent.AgentSession.initStub();
     defer session.deinit(testing.allocator);
 
-    var outcome = try processSubmit(testing.allocator, &session, &reg, "/settings theme", null);
+    var outcome = try processSubmit(testing.allocator, &session, &reg, "/settings", null);
     switch (outcome) {
         .tool_result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "default") != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "solarized-dark") != null);
-            // The current theme gets a '*' marker.
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "* default") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "max_tokens") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "Theme") == null);
         },
         else => return error.TestFailed,
     }
-}
-
-test "processSubmit: /settings theme <name> swaps the session theme" {
-    var reg = try buildMiniRegistry(testing.allocator);
-    defer reg.deinit(testing.allocator);
-    var session = agent.AgentSession.initStub();
-    defer session.deinit(testing.allocator);
-
-    try testing.expect(session.theme == &theme_mod.default);
-
-    var outcome = try processSubmit(testing.allocator, &session, &reg, "/settings theme solarized-dark", null);
-    switch (outcome) {
-        .tool_result => |*r| {
-            defer r.deinit(testing.allocator);
-            try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "Solarized Dark") != null);
-        },
-        else => return error.TestFailed,
-    }
-    try testing.expect(session.theme == &theme_mod.solarized_dark);
-}
-
-test "processSubmit: /settings theme <unknown> returns an error result" {
-    var reg = try buildMiniRegistry(testing.allocator);
-    defer reg.deinit(testing.allocator);
-    var session = agent.AgentSession.initStub();
-    defer session.deinit(testing.allocator);
-
-    var outcome = try processSubmit(testing.allocator, &session, &reg, "/settings theme neon-pink", null);
-    switch (outcome) {
-        .tool_result => |*r| {
-            defer r.deinit(testing.allocator);
-            try testing.expect(!r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "Unknown theme") != null);
-        },
-        else => return error.TestFailed,
-    }
-    // Theme should not have changed.
-    try testing.expect(session.theme == &theme_mod.default);
 }
 
 test "processSubmit: /status reports provider auth and persistence state" {
@@ -996,15 +912,23 @@ test "processSubmit: /ledger and /chat switch views" {
     var session = agent.AgentSession.initStub();
     defer session.deinit(testing.allocator);
 
-    const ledger_outcome = try processSubmit(testing.allocator, &session, &reg, "/ledger", null);
+    var ledger_outcome = try processSubmit(testing.allocator, &session, &reg, "/ledger", null);
     switch (ledger_outcome) {
-        .view_ledger => {},
+        .tool_result => |*r| {
+            defer r.deinit(testing.allocator);
+            try testing.expect(r.ok);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "zigttp ledger export --session") != null);
+        },
         else => return error.TestFailed,
     }
 
-    const chat_outcome = try processSubmit(testing.allocator, &session, &reg, "/chat", null);
+    var chat_outcome = try processSubmit(testing.allocator, &session, &reg, "/chat", null);
     switch (chat_outcome) {
-        .view_chat => {},
+        .tool_result => |*r| {
+            defer r.deinit(testing.allocator);
+            try testing.expect(r.ok);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "CLI REPL chat") != null);
+        },
         else => return error.TestFailed,
     }
 }

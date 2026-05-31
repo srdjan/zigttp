@@ -22,14 +22,14 @@ pub const SessionInfo = struct {
     session_dir: []u8,
     events_path: []u8,
     meta_path: []u8,
-    tui_command: []u8,
+    expert_command: []u8,
 
     pub fn deinit(self: *SessionInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.session_id);
         allocator.free(self.session_dir);
         allocator.free(self.events_path);
         allocator.free(self.meta_path);
-        allocator.free(self.tui_command);
+        allocator.free(self.expert_command);
         self.* = undefined;
     }
 };
@@ -72,15 +72,15 @@ pub fn ensureSession(
         });
     }
 
-    const tui_command = try buildTuiCommand(allocator, realpath, session_id);
-    errdefer allocator.free(tui_command);
+    const expert_command = try buildExpertCommand(allocator, realpath, session_id);
+    errdefer allocator.free(expert_command);
 
     return .{
         .session_id = session_id,
         .session_dir = session_dir,
         .events_path = events_path,
         .meta_path = meta_path,
-        .tui_command = tui_command,
+        .expert_command = expert_command,
     };
 }
 
@@ -235,7 +235,7 @@ fn workspaceRealpath(allocator: std.mem.Allocator, workspace_root: []const u8) !
     return try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io_backend.io(), workspace_root, allocator);
 }
 
-fn buildTuiCommand(
+fn buildExpertCommand(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     session_id: []const u8,
@@ -270,9 +270,9 @@ fn nowUnixMs() i64 {
 
 const testing = std.testing;
 
-test "demo passport TUI command shell-quotes workspace and session" {
+test "demo passport expert command shell-quotes workspace and session" {
     const allocator = testing.allocator;
-    const command = try buildTuiCommand(allocator, "/tmp/proof demo", "abc'123");
+    const command = try buildExpertCommand(allocator, "/tmp/proof demo", "abc'123");
     defer allocator.free(command);
     try testing.expectEqualStrings("cd '/tmp/proof demo' && zigttp expert --session-id 'abc'\\''123'", command);
 }

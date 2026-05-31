@@ -234,8 +234,8 @@ pub fn writeStateJson(
     try json.write(config.handler_path);
     try json.objectField("sessionId");
     try json.write(passport.session_id);
-    try json.objectField("tuiCommand");
-    try json.write(passport.tui_command);
+    try json.objectField("expertCommand");
+    try json.write(passport.expert_command);
     if (caller_receipt) |receipt| {
         if (objectString(receipt, "verifyUrl")) |value| {
             try json.objectField("verifyUrl");
@@ -465,8 +465,8 @@ fn writeProofPassport(
     try json.write(step.toString());
     try json.objectField("sessionId");
     try json.write(passport.session_id);
-    try json.objectField("tuiCommand");
-    try json.write(passport.tui_command);
+    try json.objectField("expertCommand");
+    try json.write(passport.expert_command);
     try json.objectField("eventsPath");
     try json.write(passport.events_path);
     try json.objectField("ledgerReady");
@@ -478,7 +478,7 @@ fn writeProofPassport(
         try json.write(null);
     }
     try json.objectField("handoff");
-    try json.write("Open the seeded session in the TUI to inspect the same proof moment in the expert ledger.");
+    try json.write("Open the seeded session with zigttp expert or inspect it with zigttp ledger.");
     try json.endObject();
 }
 

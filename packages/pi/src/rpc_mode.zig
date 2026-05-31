@@ -1,6 +1,6 @@
 //! Line-delimited JSON-RPC 2.0 adapter over stdio. Runs one long-lived
 //! session and dispatches incoming requests to the same in-process surfaces
-//! the REPL and TUI use (agent.runOneTurn, registry.invokeJson, catalogs).
+//! the REPL uses (agent.runOneTurn, registry.invokeJson, catalogs).
 //!
 //! Protocol:
 //!   - One JSON object per line on stdin; one response line per request on

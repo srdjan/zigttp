@@ -1,5 +1,5 @@
 //! Both this tool and `zigts features --json` go through
-//! `json_diagnostics.writeFeaturesJson`, so the TUI and CLI stay
+//! `json_diagnostics.writeFeaturesJson`, so expert and CLI output stay
 //! byte-identical.
 
 const std = @import("std");

@@ -287,7 +287,7 @@ auto-injects it on launch; exporting the variable in your shell works
 too.
 
 The persona, reference material, skill catalog, prompt templates,
-themes, and compiler metadata are baked into the binary. The one
+and compiler metadata are baked into the binary. The one
 external input that reaches the system prompt is `AGENTS.md` /
 `CLAUDE.md`, walked up from cwd to the enclosing `.git/` directory and
 appended as a labelled read-only project-context section with a 128 KiB
@@ -350,7 +350,6 @@ notification with method `"event"` before the final result.
 /templates                     list available prompt templates
 /template:<name> [args...]     expand a template and send it as a prompt
 /settings                      show compile-time defaults (model, token limits)
-/settings theme [name]         list or switch the session's TUI theme
 /studio <handler.ts>           show the browser proof workbench command
 /feature route file=<handler.ts> method=<VERB> path=</path>
 /forge route file=<handler.ts> method=<VERB> path=</path>
@@ -374,9 +373,9 @@ it introduces zero new compiler violations.
 /forge route file=handler.ts method=POST path=/todos body=todo status=201
 ```
 
-In the TUI, press `A` on the selected forge result to apply it; the
-apply tool reruns the compiler veto and records the accepted change as
-a `verified_patch`.
+Apply a ready forge result by asking the expert to use the apply tool or by
+running the corresponding apply command from the REPL. The apply path reruns
+the compiler veto and records the accepted change as a `verified_patch`.
 
 ### Spec Forge
 
@@ -409,22 +408,15 @@ flow-oriented PropertyTags: `no_secret_leakage`, `no_credential_leakage`,
 
 ### Proof Delta Card and witnesses
 
-In the interactive TUI's ledger view, each `verified_patch` opens to a
-Proof Delta Card showing property-change badges (`+retry_safe`,
-`-pure`), violations before vs after, witness defeated/new counts, and
-the chain header (`patch <short> <- parent <short>`). Press `Enter` to
-expand the diff; `A` to approve when the witness gate is clean.
+Every accepted edit is persisted as a `verified_patch` event. Inspect
+session history with the REPL's `/ledger export <path>` command or the
+top-level `zigttp ledger` CLI. The exported ledger carries the same proof
+delta data: property changes, violations before vs after, witness counts,
+and the patch chain header.
 
-The Witnesses tab carries the full counterexample body for every
-witness the patch defeated or introduced. Press `w` to jump there. On
-the selected witness, `r` replays against the post-patch handler, `g`
-runs the autoloop scoped to that one witness, and `m` mints the witness
-as a regression test in `<handler-dir>/witness-regressions.jsonl`.
-
-The full-screen view uses themed Workbench-style pane headers. Two
-themes ship (`default`, `solarized-dark`); swap mid-session with
-`/settings theme <name>`. Redraws wrap in CSI `?2026h` / `?2026l`
-synchronized-output sequences for atomic frames.
+Witness commands stay CLI-driven: use `/witnesses <handler.ts>` to inspect
+counterexamples and `zigttp mock --replay` or generated witness regression
+files to replay them.
 
 On resume, the session's `meta.json` carries the `policy_hash` it was
 created under. If the current binary's hash differs, the REPL prepends

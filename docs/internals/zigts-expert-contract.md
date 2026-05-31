@@ -241,7 +241,7 @@ zigts extension-status <path> [<path>...] --json
 
 ## `zigts edit-simulate`
 
-Simulates running the analysis pipeline on a candidate file and, optionally, diffs the result against a baseline so the client can tell which violations are *new* vs. *pre-existing*. This is the call the TUI's compiler veto will hang from.
+Simulates running the analysis pipeline on a candidate file and, optionally, diffs the result against a baseline so the client can tell which violations are *new* vs. *pre-existing*. This is the call the expert compiler veto hangs from.
 
 **Invocation:**
 
@@ -259,7 +259,7 @@ Either a handler path on argv or `--stdin-json` must be supplied. With `--stdin-
 }
 ```
 
-`file` is a label, not a path on disk — the command writes the content to a temp file under `/tmp/zigts-edit-sim-*` with the same extension as the label and verifies that. This is the key property for the TUI: no file needs to be on disk for the veto to run.
+`file` is a label, not a path on disk — the command writes the content to a temp file under `/tmp/zigts-edit-sim-*` with the same extension as the label and verifies that. This is the key property for expert mode: no file needs to be on disk for the veto to run.
 
 **Output shape** (`packages/tools/src/edit_simulate.zig:137-166`):
 
@@ -477,7 +477,7 @@ Two tripwires guard this contract and run under `zig build test`: the in-tree te
 
 ## What is explicitly out of scope for v1
 
-- `zigts prove`, `zigts mock`, `zigts link`, `zigts rollout`, `zigts compile`: their outputs are either text-only or JSON not yet stabilized. The TUI will consume them through in-process Zig APIs, not through this contract. If a JSON form is later promoted, it becomes v2.
+- `zigts prove`, `zigts mock`, `zigts link`, `zigts rollout`, `zigts compile`: their outputs are either text-only or JSON not yet stabilized. If a JSON form is later promoted, it becomes v2.
 - Streaming output. v1 is request/response only.
 - Anything reading from files other than `--stdin-json` on `edit-simulate` and `review-patch`.
 - Authentication, rate limiting, tracing, and the managed-task surface for `zigttp serve/dev/deploy`. All runtime and deploy commands are outside v1.
@@ -507,6 +507,6 @@ The live stream and `events.jsonl` share the same `{"v","k","d"}` envelope for t
 
 This surface is outside the v1 stability guarantee. New kinds may appear in future releases; clients should ignore unknown `k` values.
 
-## Relationship to the TUI port
+## Relationship to expert mode
 
-`zigttp expert` uses these commands from in-process function calls. The in-process API must remain a faithful representation of this contract so the non-interactive binary and the expert UI never diverge. The wire shapes above are the reference; the in-process Zig structs are an optimization that must round-trip through them without loss.
+`zigttp expert` uses these commands from in-process function calls. The in-process API must remain a faithful representation of this contract so the non-interactive binary and expert mode never diverge. The wire shapes above are the reference; the in-process Zig structs are an optimization that must round-trip through them without loss.

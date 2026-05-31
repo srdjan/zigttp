@@ -1,7 +1,7 @@
 //! Non-interactive `--print` mode for `zigttp expert`.
 //!
 //! Runs exactly one turn through the agent, emits either the rendered text
-//! or an NDJSON event stream, and returns. Bypasses the REPL and TUI.
+//! or an NDJSON event stream, and returns. Bypasses the interactive REPL.
 //!
 //! JSON mode reuses the `{"v","k","d"}` envelope from `session/events.zig`
 //! for transcript events. Live stdout also appends a success-only `end`

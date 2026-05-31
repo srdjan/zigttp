@@ -664,7 +664,7 @@ fn factsJson(
     try json.objectField("frame");
     try json.write(if (frame_bytes) |b| b else "");
 
-    // Pre-rendered AI proof certificate. Same artifact the TUI shows in
+    // Pre-rendered AI proof certificate. Same artifact the terminal proof-card HUD shows in
     // its Handover lens and the Studio Copy button hands to the
     // clipboard. Failure to render degrades to an empty string.
     const cert_card = review.ProofCard{
@@ -1174,7 +1174,7 @@ pub const index_html =
     \\function replayRow(label,r){if(!r)return"";const body=r.error?`crashed - ${r.error}`:`${r.status} ${r.body||""}`;return `<dt>${esc(label)}</dt><dd>${esc(body)}</dd>`}
     \\function renderCounterexample(cx){const block=$("counterexampleBlock");const body=$("counterexampleBody");if(!cx){block.hidden=true;body.innerHTML="";return}block.hidden=false;const req=cx.failingRequest?`${cx.failingRequest.method} ${cx.failingRequest.url}${cx.failingRequest.body?" body="+cx.failingRequest.body:""}`:"structural proof cause";body.innerHTML=`<dl class="row"><dt>property</dt><dd><span class="bad">-${esc(cx.label||cx.field||"property")}</span></dd><dt>source</dt><dd><code>${esc(cx.handlerPath||"")}:${cx.line||0}:${cx.column||0}</code></dd><dt>snippet</dt><dd><code>${esc(cx.snippet||"")}</code></dd><dt>why</dt><dd class="hint">${esc(cx.suggestion||"inspect the demoted property and repair the source")}</dd><dt>request</dt><dd>${esc(req)}</dd>${replayRow("previous",cx.previousResponse)}${replayRow("current",cx.currentResponse)}<dt>next</dt><dd>[r] replay live · [s] pin regression · [a] ask expert</dd></dl>`}
     \\function demoButton(a){const label={introduce_bug:"Introduce unsafe edit",repair_bug:"Repair",deploy:"Deploy local",reset:"Reset"}[a]||a;return `<button data-demo-action="${esc(a)}">${esc(label)}</button>`}
-    \\function renderDemo(d){$("demoPanel").hidden=false;$("demoTitle").textContent=d.title||d.step||"";$("demoWorkspace").textContent=d.workspace?`workspace: ${d.workspace}`:"";$("demoActions").innerHTML=(d.availableActions||[]).map(demoButton).join("");const w=d.witness;const lines=[];if(w){lines.push(`property: ${esc(w.property)}<br>request: ${esc(w.request)}<br>span: ${esc(w.span)}<br>path: ${esc(w.failingPath)}`)}else if(d.receipt){lines.push(`receipt: ${esc(d.receipt.ledger)} · service ${esc(d.receipt.service)}`)}if(d.tuiCommand){lines.push(`open in TUI: <code>${esc(d.tuiCommand)}</code>`)}if(d.verifyCommand){lines.push(`verify caller receipt: <code>${esc(d.verifyCommand)}</code>`)}if(d.wellKnownUrl){lines.push(`well-known proof: <code>${esc(d.wellKnownUrl)}</code>`)}const p=d.proofPassport||{};if(p.ledgerReady){lines.push(`passport: session <code>${esc(p.sessionId||d.sessionId||"")}</code> has verified ledger context`)}$("demoWitness").hidden=lines.length===0;$("demoWitness").innerHTML=lines.join("<br>")}
+    \\function renderDemo(d){$("demoPanel").hidden=false;$("demoTitle").textContent=d.title||d.step||"";$("demoWorkspace").textContent=d.workspace?`workspace: ${d.workspace}`:"";$("demoActions").innerHTML=(d.availableActions||[]).map(demoButton).join("");const w=d.witness;const lines=[];if(w){lines.push(`property: ${esc(w.property)}<br>request: ${esc(w.request)}<br>span: ${esc(w.span)}<br>path: ${esc(w.failingPath)}`)}else if(d.receipt){lines.push(`receipt: ${esc(d.receipt.ledger)} · service ${esc(d.receipt.service)}`)}if(d.expertCommand){lines.push(`open in expert REPL: <code>${esc(d.expertCommand)}</code>`)}if(d.verifyCommand){lines.push(`verify caller receipt: <code>${esc(d.verifyCommand)}</code>`)}if(d.wellKnownUrl){lines.push(`well-known proof: <code>${esc(d.wellKnownUrl)}</code>`)}const p=d.proofPassport||{};if(p.ledgerReady){lines.push(`passport: session <code>${esc(p.sessionId||d.sessionId||"")}</code> has verified ledger context`)}$("demoWitness").hidden=lines.length===0;$("demoWitness").innerHTML=lines.join("<br>")}
     \\async function pullDemo(){try{const r=await fetch("/_zigttp/studio/demo/state.json",{cache:"no-store"});if(r.status===404){$("demoPanel").hidden=true;return}if(r.ok)renderDemo(await r.json())}catch(e){}}
     \\async function runDemoAction(action){const r=await fetch("/_zigttp/studio/demo/action",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action})});if(!r.ok){$("demoWitness").hidden=false;$("demoWitness").textContent=`action failed: HTTP ${r.status} ${await r.text()}`;return}await pull();await pullDemo()}
     \\document.addEventListener("click",ev=>{const b=ev.target.closest("[data-demo-action]");if(b)runDemoAction(b.dataset.demoAction)})
@@ -1426,7 +1426,7 @@ test "studio HTML wires the terminal-mirror frame" {
 
 test "studio HTML exposes the proof-lens tab bar and three lens panes" {
     // The tab bar is the user-facing affordance for the lens; its absence
-    // would silently break the parity with the TUI Tab keystroke.
+    // would silently break parity with the terminal proof-card tab order.
     try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"lensBar\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "data-lens=\"properties\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "data-lens=\"trade\"") != null);

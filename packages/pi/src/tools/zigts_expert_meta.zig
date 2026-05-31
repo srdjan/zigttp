@@ -1,5 +1,5 @@
 //! Both this tool and `zigts meta --json` go through
-//! `expert_meta.writeJson`, so the TUI and CLI stay byte-identical.
+//! `expert_meta.writeJson`, so expert and CLI output stay byte-identical.
 
 const std = @import("std");
 const expert_meta = @import("zigts_cli").expert_meta;

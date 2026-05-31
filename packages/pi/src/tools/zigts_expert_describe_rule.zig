@@ -1,5 +1,5 @@
 //! Both this tool and `zigts describe-rule --json` go through
-//! `describe_rule.writeRuleJson`, so the TUI and CLI stay byte-identical.
+//! `describe_rule.writeRuleJson`, so expert and CLI output stay byte-identical.
 
 const std = @import("std");
 const zigts = @import("zigts");

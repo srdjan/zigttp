@@ -1,7 +1,7 @@
 //! Tool definition and result types for the in-process tool registry.
 //!
 //! A ToolDef has two invocation surfaces:
-//! - `execute` for direct CLI/TUI dispatch with argv-style slices
+//! - `execute` for direct CLI/REPL dispatch with argv-style slices
 //! - `decode_json` + `input_schema` for LLM tool-use
 //!
 //! This lets the human-facing shell stay ergonomic while the model-facing
@@ -16,7 +16,7 @@ pub const UiPayload = ui_payload.UiPayload;
 
 /// Execution outcome. `llm_text` is the compact provider-facing payload that
 /// stays in the transcript. `ui_payload` is optional structured data for the
-/// TUI, session replay, RPC, and JSON mode.
+/// REPL, session replay, RPC, and JSON mode.
 pub const ToolResult = struct {
     ok: bool,
     llm_text: []u8,

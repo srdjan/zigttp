@@ -2380,10 +2380,10 @@ diff for approval.
 ```
 
 `/feature` never writes files. `/forge` returns a candidate marked ready only
-when it introduces zero new compiler violations. In the TUI, press `A` on the
-selected forge result to apply it. The apply step reruns the compiler veto
-against the current file and records the accepted change as a `verified_patch`
-in the session ledger.
+when it introduces zero new compiler violations. Apply a ready result from the
+CLI REPL with the corresponding apply command; the apply step reruns the
+compiler veto against the current file and records the accepted change as a
+`verified_patch` in the session ledger.
 
 V1 scope is intentionally narrow: route creation only. It can add router-based
 dispatch to a plain handler, extend an existing `routes` table, optionally wire

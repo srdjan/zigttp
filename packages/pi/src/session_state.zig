@@ -21,7 +21,7 @@ const ui_payload = @import("ui_payload.zig");
 /// Unwrap a transcript entry as a VerifiedPatchPayload, or null if it is
 /// not a verified_patch entry, has no payload, or carries a non-
 /// verified_patch payload. The shared predicate behind every "extract the
-/// patch from this entry" lookup in this module and in tui/app.zig.
+/// patch from this entry" lookup in this module and the REPL.
 pub fn patchPayload(
     entry: *const transcript_mod.OwnedEntry,
 ) ?ui_payload.VerifiedPatchPayload {

@@ -2,7 +2,7 @@
 //!
 //! Event schema `v2` keeps text fields provider-friendly (`llm_text`) while
 //! carrying optional structured `ui_payload` objects for replay, RPC, JSON
-//! mode, and the TUI.
+//! mode, and CLI rendering.
 
 const std = @import("std");
 const zigts = @import("zigts");

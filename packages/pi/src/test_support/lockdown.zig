@@ -1,8 +1,8 @@
 //! Lockdown seal test. Walks `packages/pi/src/` at test time and fails if
 //! any `.zig` file contains a substring that would signal a runtime
 //! extension-loader slipping in: external SYSTEM.md loaders, dynamic-
-//! library loading, or a scan of `~/.zigttp/{skills,prompts,themes,
-//! extensions,models.json}`.
+//! library loading, or a scan of
+//! `~/.zigttp/{skills,prompts,extensions,models.json}`.
 //!
 //! Rationale: the pi lockdown policy (docs: "One place, one file, one
 //! rebuild.") relies on nothing being loaded at runtime that was not in
@@ -18,7 +18,6 @@ const std = @import("std");
 const forbidden: []const []const u8 = &.{
     "~/.zigttp/skills",
     "~/.zigttp/prompts",
-    "~/.zigttp/themes",
     "~/.zigttp/extensions",
     "~/.zigttp/models.json",
     "SYSTEM.md",

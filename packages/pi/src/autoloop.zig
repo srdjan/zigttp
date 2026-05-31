@@ -9,9 +9,8 @@
 //! a budget trips.
 //!
 //! The orchestrator is intentionally decoupled from the turn state machine and
-//! from the LLM. The model is not in the loop here; the compiler is. A live
-//! TUI can still run `/goal` mid-session and fall back to conversational mode
-//! on exit, but that wiring lives in app.zig and is not this module's concern.
+//! from the LLM. The model is not in the loop here; the compiler is. The CLI
+//! entrypoint wires this module only for explicit `--goal` runs.
 //!
 //! Budgets are three independent stop conditions: max_iterations counts full
 //! goal-check + repair-plan cycles; max_wall_time_ms caps elapsed time; and
@@ -34,9 +33,8 @@ const json_writer = @import("providers/anthropic/json_writer.zig");
 
 pub const AutoloopVerdict = session_events.AutoloopVerdict;
 
-/// Cooperative cancel token shared between the TUI's main thread and
-/// the autoloop worker. The TUI calls `request()` (e.g. on Ctrl-C)
-/// and the worker checks `requested()` at phase boundaries: top of
+/// Cooperative cancel token for external drivers. The driver calls
+/// `request()` and the worker checks `requested()` at phase boundaries: top of
 /// each iteration, between plans in `applyPlans`, and between
 /// witnesses in `accumulateReplays`. There is no pre-emption inside a
 /// running compiler tool or interpreter step.
@@ -76,7 +74,7 @@ pub const DriveOptions = struct {
     focus_witness_key: ?[]const u8 = null,
     /// Optional cooperative cancel token. When `requested()` reads
     /// true, the loop short-circuits to `.cancelled` at the next phase
-    /// boundary. Null disables cancellation (test paths without a TUI).
+    /// boundary. Null disables cancellation.
     cancel: ?*const Cancel = null,
 };
 

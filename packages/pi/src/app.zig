@@ -3,7 +3,6 @@
 const std = @import("std");
 const registry_mod = @import("registry/registry.zig");
 const repl = @import("repl.zig");
-const tui_app = @import("tui/app.zig");
 const loop = @import("loop.zig");
 const print_mode = @import("print_mode.zig");
 const rpc_mode = @import("rpc_mode.zig");
@@ -167,13 +166,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         return;
     }
 
-    const interactive_policy = flags.policy orelse .ask;
-    const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
-    if (is_tty) {
-        try tui_app.run(allocator, &registry, flags, interactive_policy);
-    } else {
-        try repl.run(allocator, &registry, flags, interactive_policy);
-    }
+    try repl.run(allocator, &registry, flags, flags.policy orelse .ask);
 }
 
 pub fn runLedgerCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {

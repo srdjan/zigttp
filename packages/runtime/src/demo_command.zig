@@ -92,13 +92,13 @@ pub fn demoCommand(allocator: std.mem.Allocator, program_path: []const u8, argv:
         \\zigttp proof theater
         \\Workspace: {s}
         \\Studio:    {s}
-        \\TUI:       {s}
+        \\Expert:    {s}
         \\Verify:    zigttp verify {s}
         \\Well-known:{s}
         \\
         \\Flow: baseline -> unsafe edit -> witness -> repair -> local deploy receipt
         \\
-    , .{ workspace.root, url, passport.tui_command, verify_url, well_known_url });
+    , .{ workspace.root, url, passport.expert_command, verify_url, well_known_url });
 
     if (parsed.scripted) {
         const workspace_root = try resolveDemoPathFrom(allocator, old_cwd, workspace.root);
