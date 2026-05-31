@@ -11,6 +11,7 @@ const apply_edit = @import("apply_edit.zig");
 fn writeToolEntry(
     writer: anytype,
     tool: ToolDef,
+    is_last: bool,
 ) !void {
     try writer.writeAll("{\"name\":");
     try json_writer.writeString(writer, tool.name);
@@ -18,6 +19,13 @@ fn writeToolEntry(
     try json_writer.writeString(writer, tool.description);
     try writer.writeAll(",\"input_schema\":");
     try writer.writeAll(tool.input_schema);
+    // The tools array is large and identical on every round-trip. A
+    // cache_control breakpoint on the last tool tells the API to cache the
+    // whole tools block, so later turns read it at 0.1x input cost instead of
+    // re-billing the full schema each time.
+    if (is_last) {
+        try writer.writeAll(",\"cache_control\":{\"type\":\"ephemeral\"}");
+    }
     try writer.writeByte('}');
 }
 
@@ -25,7 +33,10 @@ pub fn writeToolsArray(
     writer: anytype,
     registry: *const registry_mod.Registry,
 ) !void {
+    const entries = registry.list();
     try writer.writeByte('[');
+    // apply_edit is the synthetic first tool; it is last only when no other
+    // tools are registered.
     try writeToolEntry(writer, .{
         .name = apply_edit.tool_name,
         .label = "apply edit",
@@ -33,10 +44,10 @@ pub fn writeToolsArray(
         .input_schema = apply_edit.input_schema_literal,
         .decode_json = registry_mod.helpers.decodeJsonPassthrough,
         .execute = unusedExecute,
-    });
-    for (registry.list()) |entry| {
+    }, entries.len == 0);
+    for (entries, 0..) |entry, i| {
         try writer.writeByte(',');
-        try writeToolEntry(writer, entry);
+        try writeToolEntry(writer, entry, i == entries.len - 1);
     }
     try writer.writeByte(']');
 }
@@ -122,6 +133,54 @@ test "writeToolsArray: registered tool appears alongside apply_edit, found by na
 
     // apply_edit is still present alongside registered tools.
     _ = findTool(parsed.value, apply_edit.tool_name) orelse return error.TestFailed;
+}
+
+test "writeToolsArray: only the last tool carries a cache_control breakpoint" {
+    var reg: registry_mod.Registry = .{};
+    defer reg.deinit(testing.allocator);
+    try reg.register(testing.allocator, .{
+        .name = "alpha",
+        .label = "a",
+        .description = "first",
+        .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .decode_json = registry_mod.helpers.decodeNoArgs,
+        .execute = unusedExecute,
+    });
+    try reg.register(testing.allocator, .{
+        .name = "beta",
+        .label = "b",
+        .description = "second",
+        .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .decode_json = registry_mod.helpers.decodeNoArgs,
+        .execute = unusedExecute,
+    });
+
+    const out = try serialize(&reg);
+    defer testing.allocator.free(out);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const items = parsed.value.array.items;
+    // apply_edit, alpha, beta: only beta (the last) is cached.
+    try testing.expect(items[0].object.get("cache_control") == null);
+    try testing.expect(items[1].object.get("cache_control") == null);
+    const cc = items[2].object.get("cache_control") orelse return error.TestFailed;
+    try testing.expectEqualStrings("ephemeral", cc.object.get("type").?.string);
+}
+
+test "writeToolsArray: apply_edit alone carries the cache_control breakpoint" {
+    var reg: registry_mod.Registry = .{};
+    defer reg.deinit(testing.allocator);
+
+    const out = try serialize(&reg);
+    defer testing.allocator.free(out);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const items = parsed.value.array.items;
+    try testing.expectEqual(@as(usize, 1), items.len);
+    const cc = items[0].object.get("cache_control") orelse return error.TestFailed;
+    try testing.expectEqualStrings("ephemeral", cc.object.get("type").?.string);
 }
 
 test "writeToolsArray: multiple registered tools preserve insertion order" {

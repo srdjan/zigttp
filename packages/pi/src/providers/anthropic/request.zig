@@ -6,7 +6,7 @@ const std = @import("std");
 const json_writer = @import("json_writer.zig");
 const transcript_mod = @import("../../transcript.zig");
 
-pub const default_model = "claude-opus-4-6";
+pub const default_model = "claude-sonnet-4-6";
 pub const default_max_tokens: u32 = 8192;
 
 pub const RequestParams = struct {

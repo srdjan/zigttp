@@ -1,6 +1,7 @@
 //! HTTPS wire layer for the Anthropic Messages API.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const loop = @import("../../loop.zig");
 const turn = @import("../../turn.zig");
 const transcript_mod = @import("../../transcript.zig");
@@ -134,6 +135,11 @@ fn postAnthropic(
         .redirect_behavior = .unhandled,
         .keep_alive = false,
         .connection = connection,
+        // std.http.Client otherwise advertises `accept-encoding: gzip,
+        // deflate` itself; `.omit` asks for an identity (uncompressed) body.
+        // We also decode transparently below, so a proxy that compresses
+        // anyway is still handled.
+        .headers = .{ .accept_encoding = .omit },
         .extra_headers = &extra_headers,
     });
     defer req.deinit();
@@ -145,11 +151,35 @@ fn postAnthropic(
     try req.connection.?.flush();
 
     var response = try req.receiveHead(&.{});
-    if (response.head.status != .ok) return ClientError.HttpNotOk;
+    const status = response.head.status;
 
-    var read_buf: [64]u8 = undefined;
-    var reader = response.reader(&read_buf);
-    return try reader.allocRemaining(arena, .limited(max_response_body_bytes));
+    // Decode `Content-Encoding`/`Transfer-Encoding` transparently. The plain
+    // `response.reader()` returns the raw (still-chunked, still-compressed)
+    // body; feeding a gzip stream to the SSE parser splits on stray newline
+    // bytes and surfaces as a bogus `MalformedSse`. `readerDecompressing`
+    // handles gzip/deflate/zstd; an identity body passes straight through.
+    var transfer_buf: [4096]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
+    const response_body = try reader.allocRemaining(arena, .limited(max_response_body_bytes));
+
+    if (status != .ok) {
+        // The success path is an SSE stream; an error is a small JSON body
+        // carrying the real reason (bad key, unknown model, rate limit).
+        // Surface the status and body instead of collapsing every failure
+        // into a bare `HttpNotOk`.
+        if (!builtin.is_test) {
+            std.log.err("anthropic API: HTTP {d} {s}: {s}", .{
+                @intFromEnum(status),
+                status.phrase() orelse "",
+                response_body,
+            });
+        }
+        return ClientError.HttpNotOk;
+    }
+
+    return response_body;
 }
 
 const testing = std.testing;
