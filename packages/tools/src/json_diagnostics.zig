@@ -585,6 +585,22 @@ pub fn writeModulesJson(writer: anytype) !void {
             if (j > 0) try writer.writeByte(',');
             try writeJsonString(writer, func.name);
         }
+        // Parallel signatures array so the agent learns arity, parameter
+        // types, and return type without trial-and-error round-trips.
+        try writer.writeAll("],\"signatures\":[");
+        for (binding.exports, 0..) |func, j| {
+            if (j > 0) try writer.writeByte(',');
+            try writer.writeAll("{\"name\":");
+            try writeJsonString(writer, func.name);
+            try writer.print(",\"arg_count\":{d},\"params\":[", .{func.arg_count});
+            for (func.param_types, 0..) |pt, k| {
+                if (k > 0) try writer.writeByte(',');
+                try writeJsonString(writer, pt.jsTypeName());
+            }
+            try writer.writeAll("],\"returns\":");
+            try writeJsonString(writer, func.returns.jsTypeName());
+            try writer.writeByte('}');
+        }
         try writer.writeAll("]}");
     }
     try writer.writeAll("]\n");

@@ -279,9 +279,12 @@ const prologue =
     \\applied. The corpus is the project's accumulated evidence, not
     \\throwaway state.
     \\
-    \\Never reach for JavaScript idioms that are compile errors in zigts:
-    \\try/catch, classes, var, null, ==/!=, ++/--. Use Result types, plain
-    \\objects, let/const, undefined, ===/!==, and explicit increments.
+    \\Never reach for JavaScript/TypeScript idioms that are compile errors in
+    \\zigts: try/catch, classes, var, null, ==/!=, ++/--, while, switch, and
+    \\`x as T` type assertions (ZTS042). Use Result types, plain objects,
+    \\let/const, undefined, ===/!==, for...of, match, and explicit increments.
+    \\For typed data, take the value straight from a Result (JSON.tryParse,
+    \\decodeJson, decodeForm, validateJson) and narrow it - never cast with `as`.
     \\
     \\Goal-seeking synthesis with counterexamples:
     \\When the user states a property goal ("make this endpoint injection

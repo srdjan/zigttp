@@ -40,6 +40,23 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     if (rule_name) |name| {
         const entry = rule_registry.findByName(name) orelse
             rule_registry.findByCode(name) orelse {
+            // Type-checker codes (ZTS200-205) live in json_diagnostics, not the
+            // rule_registry (the registry feeds the policy hash, so adding them
+            // there would shift it). Describe them from a built-in fallback so
+            // `describe-rule ZTS203` returns a real answer instead of "Unknown".
+            if (findTypeCheckerRule(name)) |tc| {
+                if (json_mode) {
+                    try writeTypeCheckerJson(&aw.writer, tc);
+                    try aw.writer.writeAll("\n");
+                } else {
+                    try writeTypeCheckerText(&aw.writer, tc);
+                }
+                buf = aw.toArrayList();
+                if (buf.items.len > 0) {
+                    _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+                }
+                return;
+            }
             try aw.writer.print("Unknown rule: {s}\n", .{name});
             buf = aw.toArrayList();
             _ = std.c.write(std.c.STDERR_FILENO, buf.items.ptr, buf.items.len);
@@ -118,6 +135,52 @@ fn writeRuleText(writer: anytype, entry: *const rule_registry.RuleEntry) !void {
     }
 }
 
+/// Built-in description for a type-checker diagnostic. These codes are produced
+/// by json_diagnostics.typeCheckerCode and are deliberately absent from the
+/// policy-hashed rule_registry, so they need their own lightweight table here.
+const TypeCheckerRule = struct {
+    name: []const u8,
+    code: []const u8,
+    description: []const u8,
+};
+
+const type_checker_rules = [_]TypeCheckerRule{
+    .{ .name = "type_mismatch", .code = "ZTS200", .description = "An expression's type does not match the type required by its context." },
+    .{ .name = "missing_field", .code = "ZTS201", .description = "An object literal is missing a field required by the expected type." },
+    .{ .name = "arg_count_mismatch", .code = "ZTS202", .description = "A call passes the wrong number of arguments for the callee's signature." },
+    .{ .name = "arg_type_mismatch", .code = "ZTS203", .description = "A call argument's type does not match the parameter type in the callee's signature." },
+    .{ .name = "return_type_mismatch", .code = "ZTS204", .description = "A returned value's type does not match the function's declared return type." },
+    .{ .name = "non_exhaustive_match", .code = "ZTS205", .description = "A match expression does not cover every possible case of the matched value." },
+};
+
+fn findTypeCheckerRule(query: []const u8) ?TypeCheckerRule {
+    for (type_checker_rules) |r| {
+        if (std.mem.eql(u8, r.code, query) or std.mem.eql(u8, r.name, query)) {
+            return r;
+        }
+    }
+    return null;
+}
+
+fn writeTypeCheckerJson(writer: anytype, rule: TypeCheckerRule) !void {
+    try writer.writeAll("{\"name\":");
+    try writeJsonString(writer, rule.name);
+    try writer.writeAll(",\"code\":");
+    try writeJsonString(writer, rule.code);
+    try writer.writeAll(",\"category\":");
+    try writeJsonString(writer, "type");
+    try writer.writeAll(",\"description\":");
+    try writeJsonString(writer, rule.description);
+    try writer.writeAll("}");
+}
+
+fn writeTypeCheckerText(writer: anytype, rule: TypeCheckerRule) !void {
+    try writer.print("Rule: {s}\n", .{rule.name});
+    try writer.print("Code: {s}\n", .{rule.code});
+    try writer.print("Category: {s}\n", .{"type"});
+    try writer.print("Description: {s}\n", .{rule.description});
+}
+
 fn printHelp() void {
     const help =
         \\zigts describe-rule - describe diagnostic rules
@@ -133,4 +196,29 @@ fn printHelp() void {
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+const testing = std.testing;
+
+test "findTypeCheckerRule resolves ZTS203 by code and name" {
+    const by_code = findTypeCheckerRule("ZTS203") orelse return error.TestExpectedRule;
+    try testing.expectEqualStrings("arg_type_mismatch", by_code.name);
+    try testing.expectEqualStrings("ZTS203", by_code.code);
+
+    const by_name = findTypeCheckerRule("arg_type_mismatch") orelse return error.TestExpectedRule;
+    try testing.expectEqualStrings("ZTS203", by_name.code);
+
+    try testing.expect(findTypeCheckerRule("ZTS999") == null);
+}
+
+test "writeTypeCheckerJson emits the rule-json shape with a real description" {
+    const rule = findTypeCheckerRule("ZTS203") orelse return error.TestExpectedRule;
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try writeTypeCheckerJson(fbs.writer(), rule);
+    const out = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, out, "\"code\":\"ZTS203\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"name\":\"arg_type_mismatch\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"description\":") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Unknown rule") == null);
 }

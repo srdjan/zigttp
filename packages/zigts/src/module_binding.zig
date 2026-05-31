@@ -1054,6 +1054,23 @@ pub const ReturnKind = enum {
 
     /// Result type ({ok, value, error}) - verifier requires .ok check
     result,
+
+    /// Lowercase JS-facing type name for signature advertisement (e.g. in
+    /// `zigts modules --json`). Maps the verifier-oriented tags onto the
+    /// shapes a handler author actually sees at the call site.
+    pub fn jsTypeName(self: ReturnKind) []const u8 {
+        return switch (self) {
+            .boolean => "boolean",
+            .number => "number",
+            .string => "string",
+            .object => "object",
+            .undefined => "undefined",
+            .unknown => "unknown",
+            .optional_string => "string?",
+            .optional_object => "object?",
+            .result => "Result",
+        };
+    }
 };
 
 // -------------------------------------------------------------------------

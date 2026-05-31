@@ -1596,26 +1596,14 @@ pub const TypeChecker = struct {
             if (tag == .t_function) {
                 const info = self.env.pool.getFunctionInfo(callee_type);
                 if (call.args_count != info.params.len) {
-                    self.addDiagnostic(.{
-                        .severity = .err,
-                        .kind = .arg_count_mismatch,
-                        .node = node,
-                        .message = "wrong number of arguments",
-                        .help = null,
-                    });
+                    self.addArgCountMismatch(node, info.params.len, @intCast(call.args_count));
                     return;
                 }
                 for (info.params, 0..) |param, i| {
                     const arg_idx = self.ir_view.getListIndex(call.args_start, @intCast(i));
                     const arg_type = self.inferType(arg_idx);
                     if (arg_type != null_type_idx and param.type_idx != null_type_idx and !self.env.pool.isAssignableTo(arg_type, param.type_idx)) {
-                        self.addDiagnostic(.{
-                            .severity = .err,
-                            .kind = .arg_type_mismatch,
-                            .node = arg_idx,
-                            .message = "argument type does not match parameter type",
-                            .help = null,
-                        });
+                        self.addArgTypeMismatch(arg_idx, param.type_idx, arg_type);
                     }
                 }
             } else if (tag == .t_union) {
@@ -1646,13 +1634,7 @@ pub const TypeChecker = struct {
                 }
 
                 if (call.args_count != param_count) {
-                    self.addDiagnostic(.{
-                        .severity = .err,
-                        .kind = .arg_count_mismatch,
-                        .node = node,
-                        .message = "wrong number of arguments",
-                        .help = null,
-                    });
+                    self.addArgCountMismatch(node, param_count, @intCast(call.args_count));
                     return;
                 }
 
@@ -1660,13 +1642,7 @@ pub const TypeChecker = struct {
                     const arg_idx = self.ir_view.getListIndex(call.args_start, @intCast(i));
                     const arg_type = self.inferType(arg_idx);
                     if (arg_type != null_type_idx and param_types[i] != null_type_idx and !self.env.pool.isAssignableTo(arg_type, param_types[i])) {
-                        self.addDiagnostic(.{
-                            .severity = .err,
-                            .kind = .arg_type_mismatch,
-                            .node = arg_idx,
-                            .message = "argument type does not match parameter type",
-                            .help = null,
-                        });
+                        self.addArgTypeMismatch(arg_idx, param_types[i], arg_type);
                     }
                 }
             }
@@ -1700,13 +1676,7 @@ pub const TypeChecker = struct {
         if (call.args_count < sig.param_count) {
             // Count required params (non-optional)
             // For now, treat all params as required
-            self.addDiagnostic(.{
-                .severity = .err,
-                .kind = .arg_count_mismatch,
-                .node = node,
-                .message = "wrong number of arguments",
-                .help = null,
-            });
+            self.addArgCountMismatch(node, sig.param_count, @intCast(call.args_count));
             return;
         }
 
@@ -1717,13 +1687,7 @@ pub const TypeChecker = struct {
             const arg_type = self.inferType(arg_idx);
             if (arg_type != null_type_idx and sig.param_types[i] != null_type_idx) {
                 if (!self.env.pool.isAssignableTo(arg_type, sig.param_types[i])) {
-                    self.addDiagnostic(.{
-                        .severity = .err,
-                        .kind = .arg_type_mismatch,
-                        .node = arg_idx,
-                        .message = "argument type does not match parameter type",
-                        .help = null,
-                    });
+                    self.addArgTypeMismatch(arg_idx, sig.param_types[i], arg_type);
                 }
             }
         }
@@ -1751,6 +1715,48 @@ pub const TypeChecker = struct {
             .message = msg,
             .help = null,
             .allocated = true,
+        });
+    }
+
+    /// Emit an arg-count mismatch (ZTS202) whose message names the expected and
+    /// actual counts, so a caller (human or agent) can fix it without guessing.
+    /// The detail rides in `.message` because `deinit` only frees `.message`
+    /// when `allocated`; `.help` is never freed, so an owned string there leaks.
+    fn addArgCountMismatch(self: *TypeChecker, node: NodeIndex, expected: usize, got: usize) void {
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "wrong number of arguments: expected {d}, got {d}",
+            .{ expected, got },
+        ) catch "wrong number of arguments";
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .arg_count_mismatch,
+            .node = node,
+            .message = msg,
+            .help = null,
+            .allocated = !std.mem.eql(u8, msg, "wrong number of arguments"),
+        });
+    }
+
+    /// Emit an arg-type mismatch (ZTS203) whose message names the expected
+    /// parameter type and the actual argument type. Same ownership rule as
+    /// `addArgCountMismatch`: the detail goes in `.message`, not `.help`.
+    fn addArgTypeMismatch(self: *TypeChecker, node: NodeIndex, expected: TypeIndex, got: TypeIndex) void {
+        var buf: [256]u8 = undefined;
+        const expected_str = self.env.pool.formatType(expected, buf[0..128]);
+        const got_str = self.env.pool.formatType(got, buf[128..256]);
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "argument type does not match parameter type: expected {s}, got {s}",
+            .{ expected_str, got_str },
+        ) catch "argument type does not match parameter type";
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .arg_type_mismatch,
+            .node = node,
+            .message = msg,
+            .help = null,
+            .allocated = !std.mem.eql(u8, msg, "argument type does not match parameter type"),
         });
     }
 
