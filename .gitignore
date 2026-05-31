@@ -62,3 +62,4 @@ demo/proof-review/.ffmpeg.log
 # never commit.
 /zigttp.d.ts
 demo/
+.playwright-mcp/
