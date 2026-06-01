@@ -1147,13 +1147,17 @@ pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !
                     }
                 }
 
-                if (name != null and path != null and base_url != null) {
-                    try entries.append(allocator, .{
-                        .name = try allocator.dupe(u8, name.?),
-                        .path = try allocator.dupe(u8, path.?),
-                        .base_url = try allocator.dupe(u8, base_url.?),
-                    });
+                // Fail closed: a handler entry missing any required field (e.g.
+                // a misspelled key) must error rather than be silently dropped,
+                // which would weaken the cross-handler proofs without any signal.
+                if (name == null or path == null or base_url == null) {
+                    return error.InvalidJson;
                 }
+                try entries.append(allocator, .{
+                    .name = try allocator.dupe(u8, name.?),
+                    .path = try allocator.dupe(u8, path.?),
+                    .base_url = try allocator.dupe(u8, base_url.?),
+                });
             }
         } else {
             parser.skipValue();

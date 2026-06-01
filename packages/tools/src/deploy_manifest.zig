@@ -268,7 +268,7 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     // Metadata
     try w.writeAll("  \"Metadata\": {\n");
     try w.writeAll("    \"zigttp\": {\n");
-    try w.writeAll("      \"version\": \"0.14.0\",\n");
+    try w.print("      \"version\": \"{s}\",\n", .{zigts.version.string});
     try w.writeAll("      \"proofLevel\": \"");
     try w.writeAll(facts.proof_level.toString());
     try w.writeAll("\",\n");

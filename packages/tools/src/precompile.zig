@@ -1389,7 +1389,10 @@ pub const CompileOptions = struct {
 /// Format `seconds_since_epoch` into ISO-8601 (UTC, second precision).
 /// Self-contained — does not depend on the platform/time module which is a
 /// runtime-only path.
-fn formatIsoTimestamp(buf: *[20]u8, seconds_since_epoch: i64) []const u8 {
+// Buffer is 24 bytes, not 20: year is a u16 so years >= 10000 need 5 digits
+// (21 chars total), and the `catch unreachable` below assumes the format always
+// fits. 24 leaves comfortable headroom.
+fn formatIsoTimestamp(buf: *[24]u8, seconds_since_epoch: i64) []const u8 {
     const total_secs: u64 = @intCast(@max(0, seconds_since_epoch));
     const es = std.time.epoch.EpochSeconds{ .secs = total_secs };
     const epoch_day = es.getEpochDay();
@@ -1407,7 +1410,7 @@ fn formatIsoTimestamp(buf: *[20]u8, seconds_since_epoch: i64) []const u8 {
 }
 
 test "formatIsoTimestamp produces ISO-8601 UTC" {
-    var buf: [20]u8 = undefined;
+    var buf: [24]u8 = undefined;
     const got = formatIsoTimestamp(&buf, 1_700_000_000);
     try std.testing.expectEqualStrings("2023-11-14T22:13:20Z", got);
 }
@@ -1441,7 +1444,7 @@ pub fn compileHandler(
         // the current wall clock and the sentinel "unknown" so the magic
         // identifiers documented in docs/typescript.md never evaluate to
         // `undefined`.
-        var iso_buf: [20]u8 = undefined;
+        var iso_buf: [24]u8 = undefined;
         const fallback_seconds: i64 = blk: {
             const ms = zigts.compat.realtimeNowMs() catch break :blk 0;
             break :blk @divTrunc(ms, 1000);

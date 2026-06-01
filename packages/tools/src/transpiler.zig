@@ -185,6 +185,8 @@ pub const IrTranspiler = struct {
     /// Properly escapes the string for Zig string literal context.
     fn emitMemcpyLiteral(self: *IrTranspiler, str: []const u8) void {
         self.emitIndent();
+        self.emitFmt("if (json_pos + {d} > json_buf.len) return error.AotBail;\n", .{str.len});
+        self.emitIndent();
         self.emitFmt("@memcpy(json_buf[json_pos..][0..{d}], ", .{str.len});
         self.emitZigString(str);
         self.emit(");\n");
@@ -597,9 +599,13 @@ pub const IrTranspiler = struct {
             \\    return src.len + extra;
             \\}
             \\
-            \\fn jsonEscapeInto(dest: []u8, src: []const u8) usize {
+            \\fn jsonEscapeInto(dest: []u8, src: []const u8) error{NoSpaceLeft}!usize {
             \\    var di: usize = 0;
             \\    for (src) |c| {
+            \\        // Reserve the worst-case single-char expansion (\u00XX = 6
+            \\        // bytes) before writing, so request-derived strings can never
+            \\        // overflow the fixed response buffer.
+            \\        if (di + 6 > dest.len) return error.NoSpaceLeft;
             \\        switch (c) {
             \\            '"' => {
             \\                dest[di] = '\\';
@@ -1115,7 +1121,14 @@ pub const IrTranspiler = struct {
         var status: u16 = 200;
         if (call.args_count >= 2) {
             const opts_arg = self.ir.getListIndex(call.args_start, 1);
-            status = self.extractStatusFromInit(opts_arg) orelse 200;
+            switch (self.extractStatusFromInit(opts_arg)) {
+                .none => {}, // no status key -> default 200
+                .literal => |s| status = s,
+                // A status that is present but not a compile-time literal cannot
+                // be baked in; bail to the interpreter rather than silently
+                // shipping 200 and diverging from runtime behavior.
+                .dynamic => return false,
+            }
         }
 
         if (is_json) {
@@ -1125,11 +1138,18 @@ pub const IrTranspiler = struct {
         }
     }
 
-    fn extractStatusFromInit(self: *IrTranspiler, idx: NodeIndex) ?u16 {
-        // Look for { status: <number> } in the init object
-        const tag = self.ir.getTag(idx) orelse return null;
-        if (tag != .object_literal) return null;
-        const obj = self.ir.getObject(idx) orelse return null;
+    const StatusResult = union(enum) {
+        none, // no status key present -> caller uses default 200
+        literal: u16, // resolvable compile-time status
+        dynamic, // status present but not a resolvable literal -> bail to interpreter
+    };
+
+    fn extractStatusFromInit(self: *IrTranspiler, idx: NodeIndex) StatusResult {
+        // Look for { status: <number> } in the init object. A non-object-literal
+        // opts arg (e.g. a variable) is not resolvable, so treat it as dynamic.
+        const tag = self.ir.getTag(idx) orelse return .dynamic;
+        if (tag != .object_literal) return .dynamic;
+        const obj = self.ir.getObject(idx) orelse return .dynamic;
 
         var i: u16 = 0;
         while (i < obj.properties_count) : (i += 1) {
@@ -1139,14 +1159,16 @@ pub const IrTranspiler = struct {
             // Check if key is "status" - parser stores property keys as lit_string
             const key_name = self.getPropertyKeyName(prop.key) orelse continue;
             if (std.mem.eql(u8, key_name, "status")) {
-                const val_tag = self.ir.getTag(prop.value) orelse continue;
+                const val_tag = self.ir.getTag(prop.value) orelse return .dynamic;
                 if (val_tag == .lit_int) {
-                    const val = self.ir.getIntValue(prop.value) orelse continue;
-                    return @intCast(val);
+                    const val = self.ir.getIntValue(prop.value) orelse return .dynamic;
+                    return .{ .literal = @intCast(val) };
                 }
+                // status key present but value is not an integer literal.
+                return .dynamic;
             }
         }
-        return null;
+        return .none;
     }
 
     fn emitJsonResponse(self: *IrTranspiler, body_arg: NodeIndex, status: u16, content_type: []const u8) bool {
@@ -1250,6 +1272,8 @@ pub const IrTranspiler = struct {
             const str_idx = self.ir.getStringIdx(idx) orelse return false;
             const str = self.ir.getString(str_idx) orelse return false;
             self.emitIndent();
+            self.emitFmt("if (body_pos + {d} > body_buf.len) return error.AotBail;\n", .{str.len});
+            self.emitIndent();
             self.emitFmt("@memcpy(body_buf[body_pos..][0..{d}], ", .{str.len});
             self.emitZigString(str);
             self.emit(");\n");
@@ -1260,6 +1284,10 @@ pub const IrTranspiler = struct {
         if (tag == .identifier) {
             const binding = self.ir.getBinding(idx) orelse return false;
             const name = self.localName(binding);
+            // Bail rather than overflow: the identifier may be request-derived
+            // (req.url/method/body) and unbounded.
+            self.emitIndent();
+            self.emitFmt("if (body_pos + {s}.len > body_buf.len) return error.AotBail;\n", .{name});
             self.emitIndent();
             self.emitFmt("@memcpy(body_buf[body_pos..][0..{s}.len], {s});\n", .{ name, name });
             self.emitIndent();
@@ -1425,6 +1453,8 @@ pub const IrTranspiler = struct {
         while (i < obj.properties_count) : (i += 1) {
             if (i > 0) {
                 self.emitIndent();
+                self.emit("if (json_pos + 1 > json_buf.len) return error.AotBail;\n");
+                self.emitIndent();
                 self.emit("json_buf[json_pos] = ',';\n");
                 self.emitIndent();
                 self.emit("json_pos += 1;\n");
@@ -1465,6 +1495,8 @@ pub const IrTranspiler = struct {
         }
 
         // Emit closing brace
+        self.emitIndent();
+        self.emit("if (json_pos + 1 > json_buf.len) return error.AotBail;\n");
         self.emitIndent();
         self.emit("json_buf[json_pos] = '}';\n");
         self.emitIndent();
@@ -1510,6 +1542,8 @@ pub const IrTranspiler = struct {
             },
             .lit_null => {
                 self.emitIndent();
+                self.emit("if (json_pos + 4 > json_buf.len) return error.AotBail;\n");
+                self.emitIndent();
                 self.emit("@memcpy(json_buf[json_pos..][0..4], \"null\");\n");
                 self.emitIndent();
                 self.emit("json_pos += 4;\n");
@@ -1521,13 +1555,20 @@ pub const IrTranspiler = struct {
                 const inferred = self.inferExprType(idx);
 
                 if (inferred == .string_type) {
-                    // String variable - needs quoting and escaping
+                    // String variable - needs quoting and escaping. Each write is
+                    // bounds-guarded (the escaper bails internally) so a long,
+                    // possibly request-derived value falls back to the interpreter
+                    // instead of overflowing the fixed buffer.
+                    self.emitIndent();
+                    self.emit("if (json_pos + 1 > json_buf.len) return error.AotBail;\n");
                     self.emitIndent();
                     self.emit("json_buf[json_pos] = '\"';\n");
                     self.emitIndent();
                     self.emit("json_pos += 1;\n");
                     self.emitIndent();
-                    self.emitFmt("json_pos += jsonEscapeInto(json_buf[json_pos..], {s});\n", .{name});
+                    self.emitFmt("json_pos += jsonEscapeInto(json_buf[json_pos..], {s}) catch return error.AotBail;\n", .{name});
+                    self.emitIndent();
+                    self.emit("if (json_pos + 1 > json_buf.len) return error.AotBail;\n");
                     self.emitIndent();
                     self.emit("json_buf[json_pos] = '\"';\n");
                     self.emitIndent();
@@ -1732,12 +1773,16 @@ pub const IrTranspiler = struct {
 
         // String concatenation in JSON value - wrap with quotes
         self.emitIndent();
+        self.emit("if (json_pos + 1 > json_buf.len) return error.AotBail;\n");
+        self.emitIndent();
         self.emit("json_buf[json_pos] = '\"';\n");
         self.emitIndent();
         self.emit("json_pos += 1;\n");
 
         if (!self.emitDynamicJsonConcat(idx)) return false;
 
+        self.emitIndent();
+        self.emit("if (json_pos + 1 > json_buf.len) return error.AotBail;\n");
         self.emitIndent();
         self.emit("json_buf[json_pos] = '\"';\n");
         self.emitIndent();
@@ -1760,6 +1805,8 @@ pub const IrTranspiler = struct {
             const str_idx = self.ir.getStringIdx(idx) orelse return false;
             const str = self.ir.getString(str_idx) orelse return false;
             self.emitIndent();
+            self.emitFmt("if (json_pos + {d} > json_buf.len) return error.AotBail;\n", .{str.len});
+            self.emitIndent();
             self.emitFmt("@memcpy(json_buf[json_pos..][0..{d}], ", .{str.len});
             self.emitZigString(str);
             self.emit(");\n");
@@ -1772,9 +1819,9 @@ pub const IrTranspiler = struct {
             const name = self.localName(binding);
             const inferred = self.inferExprType(idx);
             if (inferred == .string_type) {
-                // String variable - needs JSON escaping
+                // String variable - needs JSON escaping (escaper bails on overflow)
                 self.emitIndent();
-                self.emitFmt("json_pos += jsonEscapeInto(json_buf[json_pos..], {s});\n", .{name});
+                self.emitFmt("json_pos += jsonEscapeInto(json_buf[json_pos..], {s}) catch return error.AotBail;\n", .{name});
                 return true;
             } else if (inferred == .i32_type) {
                 // Integer variable - format inline
@@ -1790,7 +1837,10 @@ pub const IrTranspiler = struct {
                 self.emit("}\n");
                 return true;
             }
-            // Unknown type - direct copy (assume string-like)
+            // Unknown type - direct copy (assume string-like). May be
+            // request-derived and unbounded, so bail rather than overflow.
+            self.emitIndent();
+            self.emitFmt("if (json_pos + {s}.len > json_buf.len) return error.AotBail;\n", .{name});
             self.emitIndent();
             self.emitFmt("@memcpy(json_buf[json_pos..][0..{s}.len], {s});\n", .{ name, name });
             self.emitIndent();
