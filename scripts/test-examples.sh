@@ -65,6 +65,7 @@ run_tests "examples/modules/modules_all.ts"  "examples/modules/modules_all.test.
 
 # fetch/
 run_tests "examples/fetch/weather-forecasts.ts" "examples/fetch/weather-forecasts.test.jsonl"
+run_tests "examples/fetch/webhook.ts"           "examples/fetch/webhook.test.jsonl"
 
 # routing/
 run_tests "examples/routing/router.ts"         "examples/routing/router.test.jsonl"

@@ -1,0 +1,17 @@
+{"type":"test","name":"POST /charge forwards to upstream and returns the receipt"}
+{"type":"request","method":"POST","url":"/charge","headers":{"idempotency-key":"charge-abc-123"},"body":"{\"amount\":100}"}
+{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":["http://billing.example/charge"],"result":{"status":200,"statusText":"OK","headers":{"content-type":"application/json"},"body":"{\"receiptId\":\"rcpt-789\",\"status\":\"charged\",\"amount\":100}"}}
+{"type":"expect","status":200,"bodyContains":"rcpt-789"}
+
+{"type":"test","name":"POST /charge surfaces upstream failure as 503"}
+{"type":"request","method":"POST","url":"/charge","headers":{"idempotency-key":"charge-def-456"},"body":"{\"amount\":50}"}
+{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":["http://billing.example/charge"],"result":{"status":503,"statusText":"Service Unavailable","headers":{"content-type":"application/json"},"body":"{\"error\":\"upstream_down\"}"}}
+{"type":"expect","status":503,"bodyContains":"retry later"}
+
+{"type":"test","name":"POST /charge without an idempotency key is rejected"}
+{"type":"request","method":"POST","url":"/charge","headers":{},"body":"{\"amount\":100}"}
+{"type":"expect","status":400,"bodyContains":"idempotency-key"}
+
+{"type":"test","name":"POST to an unknown path returns 404 without fetching"}
+{"type":"request","method":"POST","url":"/elsewhere","headers":{},"body":null}
+{"type":"expect","status":404,"bodyContains":"not found"}
