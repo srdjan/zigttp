@@ -543,18 +543,38 @@ pub fn arraySlice(ctx: *context.Context, this: value.JSValue, args: []const valu
 /// Array.prototype.concat(...items) - Merge arrays
 pub fn arrayConcat(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const pool = ctx.hidden_class_pool;
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    var total_len = getArrayLength(obj, pool);
+    const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
 
-    for (args) |arg| {
-        if (getObject(arg)) |arr| {
-            total_len += getArrayLength(arr, pool);
-        } else {
-            total_len += 1;
+    // Copy the receiver's elements first.
+    if (getObject(this)) |obj| {
+        const len = getArrayLength(obj, pool);
+        const ulen: u32 = if (len > 0) @intCast(len) else 0;
+        var i: u32 = 0;
+        while (i < ulen) : (i += 1) {
+            const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
+            result.arrayPush(ctx.allocator, elem) catch return value.JSValue.undefined_val;
         }
     }
 
-    return value.JSValue.fromInt(total_len);
+    // Per spec: array arguments are flattened one level; every other value is
+    // appended as a single element.
+    for (args) |arg| {
+        const maybe_arr = getObject(arg);
+        if (maybe_arr != null and maybe_arr.?.class_id == .array) {
+            const arr = maybe_arr.?;
+            const len = getArrayLength(arr, pool);
+            const ulen: u32 = if (len > 0) @intCast(len) else 0;
+            var i: u32 = 0;
+            while (i < ulen) : (i += 1) {
+                const elem = arr.getIndex(i) orelse value.JSValue.undefined_val;
+                result.arrayPush(ctx.allocator, elem) catch return value.JSValue.undefined_val;
+            }
+        } else {
+            result.arrayPush(ctx.allocator, arg) catch return value.JSValue.undefined_val;
+        }
+    }
+
+    return result.toValue();
 }
 
 /// Array.prototype.map(callback, thisArg?) - Map to new array
