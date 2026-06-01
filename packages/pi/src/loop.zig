@@ -108,7 +108,7 @@ pub const RunOptions = struct {
     max_attempts: u8 = 3,
     workspace_root: []const u8 = ".",
     approval_fn: ?ApprovalFn = null,
-    max_model_roundtrips_per_turn: u8 = 12,
+    max_model_roundtrips_per_turn: u8 = 18,
     max_tool_calls_per_turn: usize = 16,
     max_tool_batch_size: usize = 8,
     replay_mode: bool = false,
@@ -184,7 +184,28 @@ pub fn runTurnWith(
                 next_event = .{ .model_replied = result.reply };
             },
             .run_veto => |edit| {
-                const prepared = try prepareEdit(ta, options.workspace_root, edit);
+                const prepared = prepareEdit(ta, options.workspace_root, edit) catch |err| switch (err) {
+                    // A path that resolves outside the workspace root is the
+                    // model's mistake, not a fatal agent error. Surface it as a
+                    // failed edit so the turn machine re-prompts the model to
+                    // fix the path, instead of propagating out of the turn and
+                    // crashing the whole agent. Other errors (OOM, unreadable
+                    // `before` file) remain fatal.
+                    error.EditPathOutsideWorkspace => {
+                        const msg = try std.fmt.allocPrint(
+                            ta,
+                            "edit rejected: the file path `{s}` resolves outside the workspace " ++
+                                "root. Use a path relative to the workspace (for example " ++
+                                "`src/handler.ts`), not an absolute path or one that escapes the " ++
+                                "project directory.",
+                            .{edit.file},
+                        );
+                        try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = msg } });
+                        next_event = .{ .edit_verified = .{ .ok = false, .llm_text = msg } };
+                        continue;
+                    },
+                    else => return err,
+                };
                 const veto_result = try veto.runVeto(ta, .{
                     .file = prepared.edit.file,
                     .content = prepared.edit.content,
@@ -301,16 +322,39 @@ fn containsApplyEdit(calls: []const turn.ToolCall) bool {
     return false;
 }
 
+/// Resolve `workspace_root` to an ABSOLUTE path. `std.fs.path.resolve` is
+/// purely lexical in this std - it never converts a relative path (like the
+/// default ".") into an absolute one - so a relative root leaves
+/// `isPathInsideRoot` comparing an absolute-ish target against "." and every
+/// relative edit path (e.g. "src/handler.ts") is wrongly rejected. Anchor a
+/// relative root at the real cwd, the same root the workspace read tools use,
+/// so the apply path and those tools agree on where the workspace is. Falls
+/// back to a lexical resolve if the cwd lookup fails.
+fn resolveWorkspaceRootAbs(allocator: std.mem.Allocator, workspace_root: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(workspace_root)) {
+        return std.fs.path.resolve(allocator, &.{workspace_root});
+    }
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const cwd = std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io_backend.io(), ".", allocator) catch {
+        return std.fs.path.resolve(allocator, &.{workspace_root});
+    };
+    defer allocator.free(cwd);
+    return std.fs.path.resolve(allocator, &.{ cwd, workspace_root });
+}
+
 fn prepareEdit(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     edit: turn.Edit,
 ) !PreparedEdit {
-    const root_path = try std.fs.path.resolve(allocator, &.{workspace_root});
+    const root_path = try resolveWorkspaceRootAbs(allocator, workspace_root);
+    defer allocator.free(root_path);
     const target_path = if (std.fs.path.isAbsolute(edit.file))
         try std.fs.path.resolve(allocator, &.{edit.file})
     else
         try std.fs.path.resolve(allocator, &.{ root_path, edit.file });
+    errdefer allocator.free(target_path);
 
     if (!isPathInsideRoot(root_path, target_path)) return error.EditPathOutsideWorkspace;
 
@@ -847,7 +891,7 @@ test "approval callback can block an otherwise verified edit from being written"
     try testing.expect(!file_io.fileExists(testing.allocator, written_path));
 }
 
-test "edit path outside the workspace is rejected" {
+test "edit path outside the workspace is surfaced as a recoverable diagnostic, not a crash" {
     var canned: CannedClient = .{ .reply = .{
         .response = .{ .edit = .{
             .file = "../outside-handler.ts",
@@ -860,10 +904,53 @@ test "edit path outside the workspace is rejected" {
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
 
-    try testing.expectError(
-        error.EditPathOutsideWorkspace,
-        runTurnWith(testing.allocator, canned.asClient(), &registry, &tr, "escape the workspace", .{}),
+    // An out-of-workspace path is the model's mistake, not a fatal agent
+    // error: the turn must complete (re-prompting the model) instead of
+    // propagating the error and crashing the whole agent.
+    const result = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "escape the workspace",
+        .{},
     );
+    _ = result;
+
+    var saw_path_diag = false;
+    for (tr.entries.items) |*entry| {
+        switch (entry.*) {
+            .diagnostic_box => |box| {
+                if (std.mem.indexOf(u8, box.llm_text, "outside the workspace") != null) {
+                    saw_path_diag = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_path_diag);
+}
+
+test "resolveWorkspaceRootAbs converts a relative root to absolute" {
+    const abs = try resolveWorkspaceRootAbs(testing.allocator, ".");
+    defer testing.allocator.free(abs);
+    try testing.expect(std.fs.path.isAbsolute(abs));
+}
+
+test "prepareEdit accepts an in-tree relative path under the default '.' root" {
+    // Regression guard: std.fs.path.resolve is lexical, so a relative
+    // workspace_root (".") used to leave every relative edit path rejected as
+    // "outside the workspace" - which meant the agent could never apply an
+    // edit in --print mode. The root must be anchored at the real cwd.
+    const prepared = try prepareEdit(testing.allocator, ".", .{
+        .file = "src/handler.ts",
+        .content = "x",
+        .before = null,
+    });
+    defer testing.allocator.free(prepared.resolved_path);
+    defer if (prepared.edit.before) |b| testing.allocator.free(b);
+    try testing.expect(std.fs.path.isAbsolute(prepared.resolved_path));
+    try testing.expect(std.mem.endsWith(u8, prepared.resolved_path, "src/handler.ts"));
 }
 
 test "autoApprove returns true for any file" {

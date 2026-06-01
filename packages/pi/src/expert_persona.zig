@@ -286,6 +286,24 @@ const prologue =
     \\For typed data, take the value straight from a Result (JSON.tryParse,
     \\decodeJson, decodeForm, validateJson) and narrow it - never cast with `as`.
     \\
+    \\Stateful handlers and the Spec idiom: a handler whose return type is a
+    \\plain `Response` (no `Spec<...>`) carries an IMPLICIT default profile that
+    \\demands every property - read_only, retry_safe, idempotent, pure. A handler
+    \\that writes to zigttp:cache or zigttp:sql cannot hold those, so it fails
+    \\ZTS500/ZTS501 even though you wrote no Spec. The fix is to declare a NARROW
+    \\Spec on the return type listing only the properties it holds, e.g.
+    \\`function handler(req: Request): Response & Spec<"deterministic" | "injection_safe" | "no_secret_leakage">`.
+    \\Omit read_only/retry_safe/idempotent for any handler that mutates cache or
+    \\sql state. When you rewrite a scaffolded handler, keep its existing
+    \\`Spec<...>` annotation rather than dropping it.
+    \\
+    \\Building HTML lists: when the handler return type is annotated, prefer a
+    \\`for...of` loop with a `let` string accumulator over `.map`/`.filter`.
+    \\Array HOF callbacks with inline-typed params (`(todo: Todo) => ...`) or
+    \\`function` expressions are rejected (ZTS001/ZTS003), and `.filter` on a
+    \\typed array loses the element type (ZTS204). A plain loop with `+=`-free
+    \\concatenation (`acc = acc + line`) is the canonical, always-provable form.
+    \\
     \\Goal-seeking synthesis with counterexamples:
     \\When the user states a property goal ("make this endpoint injection
     \\safe", "prove no secrets leak here", "remove credential leakage"),

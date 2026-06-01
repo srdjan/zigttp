@@ -126,6 +126,18 @@ pub const Tag = std.meta.Tag(OwnedEntry);
 
 pub const Transcript = struct {
     entries: std.ArrayListUnmanaged(OwnedEntry) = .empty,
+    /// Optional observer fired after each successful append, with the entry
+    /// just stored. `--print --mode json` uses it to stream NDJSON events live,
+    /// so a turn that later crashes or is killed still leaves its transcript on
+    /// stdout instead of losing everything to the post-turn replay.
+    observer: ?Observer = null,
+
+    pub const Observer = struct {
+        context: *anyopaque,
+        /// Best-effort: must not fail the turn, so it returns void and swallows
+        /// its own write errors.
+        on_append: *const fn (context: *anyopaque, entry: *const OwnedEntry) void,
+    };
 
     pub fn deinit(self: *Transcript, allocator: std.mem.Allocator) void {
         for (self.entries.items) |*entry| entry.deinit(allocator);
@@ -139,6 +151,9 @@ pub const Transcript = struct {
         message: turn.Message,
     ) !void {
         try self.entries.append(allocator, try ownMessage(allocator, message));
+        if (self.observer) |obs| {
+            obs.on_append(obs.context, &self.entries.items[self.entries.items.len - 1]);
+        }
     }
 
     pub fn len(self: *const Transcript) usize {

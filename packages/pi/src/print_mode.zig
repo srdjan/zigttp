@@ -20,6 +20,21 @@ const Registry = registry_mod.Registry;
 const ExpertFlags = app.ExpertFlags;
 const EventRecord = session_events.EventRecord;
 
+/// Streams transcript entries to the NDJSON sink as they are appended, so a
+/// `--print --mode json` turn that later crashes or is killed still leaves its
+/// events on stdout. The leading `user_text` is emitted before the turn, so the
+/// observer skips it to avoid a duplicate.
+const JsonStreamCtx = struct {
+    allocator: std.mem.Allocator,
+    out: ?*std.Io.Writer,
+
+    fn onAppend(context: *anyopaque, entry: *const transcript_mod.OwnedEntry) void {
+        const self: *JsonStreamCtx = @ptrCast(@alignCast(context));
+        if (entry.* == .user_text) return; // already emitted before the turn
+        emitEntry(self.allocator, self.out, entry) catch {};
+    }
+};
+
 pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
@@ -71,7 +86,19 @@ fn runWithSession(
     // before the user_text entry lands.
     if (flags.json_mode) try emitRecord(allocator, out_writer, .{ .user_text = prompt });
 
-    const start_len = session.transcript.len();
+    // In JSON mode, stream every transcript entry the moment it is appended,
+    // via a Transcript observer, rather than replaying the transcript after the
+    // turn returns. A turn that crashes or is killed mid-flight then still
+    // leaves its events on stdout. The initial user_text is emitted above, so
+    // the observer skips it. Cleared before return so it never outlives ctx.
+    var stream_ctx = JsonStreamCtx{ .allocator = allocator, .out = out_writer };
+    if (flags.json_mode) {
+        session.transcript.observer = .{
+            .context = &stream_ctx,
+            .on_append = JsonStreamCtx.onAppend,
+        };
+    }
+    defer session.transcript.observer = null;
 
     const rendered = if (client_override) |client|
         try runOneTurnWithClient(allocator, session, registry, client, prompt, approval_fn)
@@ -87,14 +114,7 @@ fn runWithSession(
         return;
     }
 
-    const tr = &session.transcript;
-    var idx: usize = start_len;
-    while (idx < tr.len()) : (idx += 1) {
-        const entry = tr.at(idx);
-        if (entry.* == .user_text) continue; // already emitted above
-        try emitEntry(allocator, out_writer, entry);
-    }
-
+    // Entries were streamed live by the observer; just close the stream.
     try emitEndEvent(allocator, out_writer);
 }
 
