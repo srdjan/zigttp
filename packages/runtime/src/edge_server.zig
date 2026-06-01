@@ -232,6 +232,15 @@ pub const EdgeServer = struct {
         defer std.Io.Threaded.closeFd(fd);
         std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
 
+        // Bound slow clients so a partial-header connection cannot hold this
+        // thread open indefinitely (the read path drops it on WouldBlock).
+        const recv_timeout = std.posix.timeval{
+            .sec = @intCast(self.config.timeout_ms / 1000),
+            .usec = @intCast((self.config.timeout_ms % 1000) * 1000),
+        };
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&recv_timeout)) catch {};
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&recv_timeout)) catch {};
+
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const allocator = arena.allocator();

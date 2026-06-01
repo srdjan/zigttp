@@ -381,6 +381,18 @@ const ConnectionPool = struct {
         // This reduces response latency by sending data immediately
         std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
 
+        // Bound how long a slow client can occupy this worker thread. SO_RCVTIMEO
+        // makes a blocking read return error.WouldBlock once an idle gap exceeds
+        // the timeout, so a slowloris / partial-header connection is dropped
+        // (the WouldBlock path closes it) instead of pinning the thread forever.
+        // SO_SNDTIMEO bounds a slow-reading peer on the write side.
+        const recv_timeout = std.posix.timeval{
+            .sec = @intCast(self.server.config.timeout_ms / 1000),
+            .usec = @intCast((self.server.config.timeout_ms % 1000) * 1000),
+        };
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&recv_timeout)) catch {};
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&recv_timeout)) catch {};
+
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
 
@@ -470,8 +482,11 @@ const ConnectionPool = struct {
 
         // Handle static files
         if (self.server.config.static_dir) |static_dir| {
-            if (std.mem.startsWith(u8, request.url, "/static/")) {
-                self.serveStaticFileSync(fd, static_dir, request.url[7..], keep_alive, request.headers.items) catch |err| {
+            if (std.mem.startsWith(u8, request.path, "/static/")) {
+                // Strip the full "/static/" prefix (8 chars) off request.path,
+                // not request.url[7..]: the old slice kept a leading slash (so the
+                // file resolved as absolute -> 403) and carried the query string.
+                self.serveStaticFileSync(fd, static_dir, request.path["/static/".len..], keep_alive, request.headers.items) catch |err| {
                     std.log.warn("static file error for {s}: {}", .{ request.url, err });
                     self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
                 };
@@ -1298,8 +1313,12 @@ pub const Server = struct {
         // which a later reload frees; own a copy so in-flight runtimes stay safe.
         if (egress.values.len > 0) {
             egress.values = dupeHostList(self.allocator, egress.values) catch {
-                // OOM: fail open rather than crash the dev server.
-                pool.setDevEgressPolicy(.{});
+                // OOM: fail CLOSED, not open. The contract proved a restricted
+                // host set, so install a deny-all policy (enabled with no allowed
+                // hosts) rather than the permissive default, which would let a
+                // proven-restricted handler reach any host after an allocation
+                // failure - contradicting the stated fail-closed posture.
+                pool.setDevEgressPolicy(.{ .enabled = true, .values = &.{} });
                 return;
             };
             self.dev_egress_hosts_current = egress.values;

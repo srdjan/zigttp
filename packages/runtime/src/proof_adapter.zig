@@ -108,14 +108,27 @@ pub const ProofCache = struct {
             return false;
         }
 
-        // Respect Cache-Control: no-cache / no-store
         for (headers.items) |header| {
+            // Respect Cache-Control: no-cache / no-store
             if (std.ascii.eqlIgnoreCase(header.key, "cache-control")) {
                 if (std.mem.indexOf(u8, header.value, "no-cache") != null or
                     std.mem.indexOf(u8, header.value, "no-store") != null)
                 {
                     return false;
                 }
+            }
+            // Never cache a request carrying per-user credentials. The cache key
+            // is method+URL only, and "pure"/"deterministic+read_only" do NOT
+            // prove the response is independent of these headers, so caching an
+            // authenticated/session response under the URL would replay one
+            // user's body (or a 200-vs-401 decision) to every other caller.
+            // (A future contract `input_independent` property could restore
+            // caching for handlers proven not to read request state.)
+            if (std.ascii.eqlIgnoreCase(header.key, "authorization") or
+                std.ascii.eqlIgnoreCase(header.key, "proxy-authorization") or
+                std.ascii.eqlIgnoreCase(header.key, "cookie"))
+            {
+                return false;
             }
         }
 
@@ -234,7 +247,17 @@ pub const ProofCache = struct {
                     self.freeEntry(&entry);
                 }
             }
-            self.insertion_order.append(self.allocator, key) catch {};
+            // Track insertion order for eviction. On append failure, roll the
+            // just-inserted map slot back instead of keeping an entry the
+            // eviction queue can never reach - otherwise entries.count() drifts
+            // above insertion_order.len and the cache grows past max_entries
+            // unboundedly.
+            self.insertion_order.append(self.allocator, key) catch {
+                _ = self.entries.remove(key);
+                var copy = new_entry;
+                self.freeEntry(&copy);
+                return;
+            };
         }
 
         gop.value_ptr.* = new_entry;
