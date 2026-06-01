@@ -1075,6 +1075,7 @@ const Stripper = struct {
 
         const colon_pos = self.pos;
         const colon_col = self.col;
+        const colon_line = self.line;
 
         self.pos += 1;
         self.col += 1;
@@ -1087,6 +1088,10 @@ const Stripper = struct {
         if (!self.looksLikeTypeStart()) {
             self.pos = colon_pos;
             self.col = colon_col;
+            // Restore the line too: skipWhitespaceTracked above may have crossed
+            // a newline, and leaving self.line advanced drifts every later
+            // source position (proof cards, diagnostics) by those lines.
+            self.line = colon_line;
             return false;
         }
 
@@ -1171,11 +1176,17 @@ const Stripper = struct {
 
     fn tryEvaluateComptime(self: *Self, keyword_start: usize) StripError!bool {
         // We just scanned 'comptime', now expect (
+        const entry_col = self.col;
+        const entry_line = self.line;
         self.skipWhitespaceTracked();
 
         if (self.pos >= self.source.len or self.source[self.pos] != '(') {
-            // Not a comptime() call, restore and treat as regular identifier
+            // Not a comptime() call, restore and treat as regular identifier.
+            // Restore col/line too: skipWhitespaceTracked may have crossed a
+            // newline, and leaving them advanced drifts later source positions.
             self.pos = keyword_start + 8; // "comptime".len
+            self.col = entry_col;
+            self.line = entry_line;
             return false;
         }
 
@@ -1749,6 +1760,20 @@ const Stripper = struct {
                     var depth: usize = 1;
                     while (self.pos < self.source.len and depth > 0) {
                         const ic = self.source[self.pos];
+                        // Strings and nested templates inside the interpolation
+                        // may contain unbalanced braces; delegate to skipString
+                        // (recursively, so nested `${...}` is handled too) so a
+                        // `}` inside a string does not close the interpolation
+                        // early. Also honor backslash escapes.
+                        if (ic == '"' or ic == '\'' or ic == '`') {
+                            self.skipString(ic) catch {};
+                            continue;
+                        }
+                        if (ic == '\\' and self.pos + 1 < self.source.len) {
+                            self.pos += 2;
+                            self.col += 2;
+                            continue;
+                        }
                         if (ic == '{') depth += 1;
                         if (ic == '}') depth -= 1;
                         if (ic == '\n') {

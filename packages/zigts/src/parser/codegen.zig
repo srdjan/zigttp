@@ -847,15 +847,11 @@ pub const CodeGen = struct {
                     return;
                 }
             }
-            // small_constant + x -> add_const_i8 (commutative)
-            if (self.tryGetConstantInt(binary.left)) |val| {
-                if (val >= -128 and val <= 127) {
-                    try self.emitNode(binary.right);
-                    try self.emit(.add_const_i8);
-                    try self.emitByte(@bitCast(@as(i8, @intCast(val))));
-                    return;
-                }
-            }
+            // No `small_constant + x -> add_const_i8` fast path: `+` is only
+            // commutative on numbers. add_const_i8 computes `operand + const`, so
+            // for a literal-int LHS it would evaluate `x + const` and reverse
+            // string concatenation (e.g. `5 + x` would yield x+"5" not "5"+x).
+            // Fall through to generic two-operand emission, which preserves order.
         }
 
         // Pattern: x - small_constant -> sub_const_i8
