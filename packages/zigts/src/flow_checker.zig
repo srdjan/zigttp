@@ -685,6 +685,60 @@ pub const FlowChecker = struct {
         return null;
     }
 
+    /// Conservatively attach `labels` to every binding bound by a destructuring
+    /// pattern (object/array, nested patterns, and rest elements). Without this,
+    /// taint pulled out via `const { apiKey } = secretProducingCall()` is keyed
+    /// only on the dummy whole-declaration binding and the destructured local is
+    /// untracked, so the secret leaks unflagged.
+    fn applyPatternLabels(self: *FlowChecker, pattern: NodeIndex, labels: LabelSet) void {
+        if (pattern == null_node) return;
+        const tag = self.ir_view.getTag(pattern) orelse return;
+        switch (tag) {
+            .object_pattern, .array_pattern => {
+                const arr = self.ir_view.getArray(pattern) orelse return;
+                var i: u16 = 0;
+                while (i < arr.elements_count) : (i += 1) {
+                    self.applyPatternLabels(self.ir_view.getListIndex(arr.elements_start, i), labels);
+                }
+            },
+            .pattern_element, .pattern_rest => {
+                const pe = self.ir_view.getPatternElem(pattern) orelse return;
+                switch (pe.kind) {
+                    .simple, .rest => {
+                        const key = packBindingKey(pe.binding.scope_id, pe.binding.slot);
+                        self.binding_labels.put(self.allocator, key, labels) catch {};
+                    },
+                    // Nested pattern: recurse into pe.key.
+                    .object, .array => self.applyPatternLabels(pe.key, labels),
+                }
+            },
+            .identifier => {
+                const binding = self.ir_view.getBinding(pattern) orelse return;
+                const key = packBindingKey(binding.scope_id, binding.slot);
+                self.binding_labels.put(self.allocator, key, labels) catch {};
+            },
+            else => {},
+        }
+    }
+
+    /// Walk a (possibly nested) member-access assignment target down to its root
+    /// identifier binding, so `obj.field = secret` / `obj.a.b = secret` taints
+    /// the base object rather than dropping the label entirely.
+    fn assignmentRootBinding(self: *const FlowChecker, target: NodeIndex) ?ir.BindingRef {
+        var node = target;
+        while (true) {
+            const tag = self.ir_view.getTag(node) orelse return null;
+            switch (tag) {
+                .identifier => return self.ir_view.getBinding(node),
+                .member_access, .optional_chain => {
+                    const member = self.ir_view.getMember(node) orelse return null;
+                    node = member.object;
+                },
+                else => return null,
+            }
+        }
+    }
+
     fn walkStmt(self: *FlowChecker, node: NodeIndex) void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
@@ -727,8 +781,14 @@ pub const FlowChecker = struct {
                 if (vd.init != null_node) {
                     const labels = self.inferLabels(vd.init);
                     if (!labels.isEmpty()) {
-                        const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
-                        self.binding_labels.put(self.allocator, key, labels) catch {};
+                        if (vd.pattern != null_node) {
+                            // Destructuring declaration: propagate RHS labels to
+                            // every bound local conservatively.
+                            self.applyPatternLabels(vd.pattern, labels);
+                        } else {
+                            const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
+                            self.binding_labels.put(self.allocator, key, labels) catch {};
+                        }
                     }
                     self.trackModuleCallInit(vd);
                     // Track result bindings from validation calls for .value label narrowing
@@ -751,6 +811,17 @@ pub const FlowChecker = struct {
                     } else {
                         // Simple assignment: replace
                         self.binding_labels.put(self.allocator, key, labels) catch {};
+                    }
+                } else if (target_tag == .member_access or target_tag == .optional_chain) {
+                    // `obj.field = secret` / `obj[k] = secret`: taint the base
+                    // object so a later read of `obj` keeps the label. Merge
+                    // rather than replace, since other fields may already taint it.
+                    if (!labels.isEmpty()) {
+                        if (self.assignmentRootBinding(asgn.target)) |binding| {
+                            const key = packBindingKey(binding.scope_id, binding.slot);
+                            const existing = self.binding_labels.get(key) orelse LabelSet.empty;
+                            self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch {};
+                        }
                     }
                 }
             },

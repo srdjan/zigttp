@@ -664,30 +664,30 @@ pub const HandlerVerifier = struct {
                 // Check if condition is a result.ok check
                 const checked_slot = self.extractResultOkCheck(if_stmt.condition);
 
-                if (checked_slot) |slot| {
+                if (checked_slot) |binding| {
                     // Mark the result as checked in the then-branch scope
-                    self.setResultChecked(slot, true);
+                    self.setResultChecked(binding, true);
                     self.walkForResultsAndRefs(if_stmt.then_branch);
-                    self.setResultChecked(slot, false);
+                    self.setResultChecked(binding, false);
 
                     // In the else branch, .ok is known to be false
                     if (if_stmt.else_branch != null_node) {
                         self.walkForResultsAndRefs(if_stmt.else_branch);
                     }
-                } else if (self.extractNegatedResultOkCheck(if_stmt.condition)) |slot| {
+                } else if (self.extractNegatedResultOkCheck(if_stmt.condition)) |binding| {
                     // Negated pattern: if (!result.ok) { return ...; }
                     self.walkForResultsAndRefs(if_stmt.then_branch);
 
                     // If the then branch always returns, code after is the ok path
                     const then_returns = self.stmtReturnsQuick(if_stmt.then_branch);
                     if (then_returns == .always) {
-                        self.setResultChecked(slot, true);
+                        self.setResultChecked(binding, true);
                     }
 
                     if (if_stmt.else_branch != null_node) {
-                        self.setResultChecked(slot, true);
+                        self.setResultChecked(binding, true);
                         self.walkForResultsAndRefs(if_stmt.else_branch);
-                        self.setResultChecked(slot, false);
+                        self.setResultChecked(binding, false);
                     }
                 } else if (self.extractOptionalNarrowingCheck(if_stmt.condition)) |info| {
                     // Check 6: optional narrowing via if (val) or if (val !== undefined)
@@ -911,7 +911,7 @@ pub const HandlerVerifier = struct {
     /// Extract the binding slot from a `result.ok` condition check.
     /// Recognizes: `result.ok`, `result.ok === true`, `result.ok !== false`,
     ///             `result.isOk()` (method call on member access)
-    fn extractResultOkCheck(self: *HandlerVerifier, cond_node: NodeIndex) ?u16 {
+    fn extractResultOkCheck(self: *HandlerVerifier, cond_node: NodeIndex) ?ir.BindingRef {
         const tag = self.ir_view.getTag(cond_node) orelse return null;
 
         // Direct: result.ok or result.isOk
@@ -931,8 +931,8 @@ pub const HandlerVerifier = struct {
         if (tag == .binary_op) {
             const binary = self.ir_view.getBinary(cond_node) orelse return null;
             if (binary.op == .strict_eq or binary.op == .eq) {
-                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |slot| return slot;
-                if (self.extractResultMemberSlot(binary.right, &ok_atoms)) |slot| return slot;
+                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| return binding;
+                if (self.extractResultMemberSlot(binary.right, &ok_atoms)) |binding| return binding;
             }
         }
 
@@ -941,7 +941,7 @@ pub const HandlerVerifier = struct {
 
     /// Extract the binding slot from `!result.ok`, `result.ok === false`,
     /// or `result.isErr()`.
-    fn extractNegatedResultOkCheck(self: *HandlerVerifier, cond_node: NodeIndex) ?u16 {
+    fn extractNegatedResultOkCheck(self: *HandlerVerifier, cond_node: NodeIndex) ?ir.BindingRef {
         const tag = self.ir_view.getTag(cond_node) orelse return null;
 
         // Negation: !result.ok
@@ -965,14 +965,14 @@ pub const HandlerVerifier = struct {
             const binary = self.ir_view.getBinary(cond_node) orelse return null;
             if (binary.op == .strict_neq or binary.op == .neq) {
                 // result.ok !== true
-                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |slot| {
-                    if (self.isTrueLiteral(binary.right)) return slot;
+                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| {
+                    if (self.isTrueLiteral(binary.right)) return binding;
                 }
             }
             if (binary.op == .strict_eq or binary.op == .eq) {
                 // result.ok === false
-                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |slot| {
-                    if (self.isFalseLiteral(binary.right)) return slot;
+                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| {
+                    if (self.isFalseLiteral(binary.right)) return binding;
                 }
             }
         }
@@ -980,10 +980,14 @@ pub const HandlerVerifier = struct {
         return null;
     }
 
-    /// Find a result binding by slot, or null if not tracked.
-    fn findResultBinding(self: *HandlerVerifier, slot: u16) ?*BindingState {
+    /// Find a result binding by (scope_id, slot), or null if not tracked.
+    /// Keying on the slot alone would let a `.ok` check in one branch clear the
+    /// unchecked-value state of a same-slot binding in a sibling scope, yielding
+    /// a false "verified" verdict.
+    fn findResultBinding(self: *HandlerVerifier, binding: ir.BindingRef) ?*BindingState {
+        const want = bindingKey(binding.scope_id, binding.slot);
         for (self.result_bindings.items) |*rb| {
-            if (rb.slot == slot) return rb;
+            if (rb.key() == want) return rb;
         }
         return null;
     }
@@ -991,9 +995,9 @@ pub const HandlerVerifier = struct {
     const ok_atoms = [_]u16{ @intFromEnum(object.Atom.ok), @intFromEnum(object.Atom.isOk) };
     const err_atoms = [_]u16{@intFromEnum(object.Atom.isErr)};
 
-    /// Given a member_access node, return the object's binding slot if the property
+    /// Given a member_access node, return the object's binding if the property
     /// matches one of `accepted_atoms` and the object is a tracked result binding.
-    fn extractResultMemberSlot(self: *HandlerVerifier, node: NodeIndex, accepted_atoms: []const u16) ?u16 {
+    fn extractResultMemberSlot(self: *HandlerVerifier, node: NodeIndex, accepted_atoms: []const u16) ?ir.BindingRef {
         const tag = self.ir_view.getTag(node) orelse return null;
         if (tag != .member_access and tag != .optional_chain) return null;
 
@@ -1014,7 +1018,7 @@ pub const HandlerVerifier = struct {
         if (obj_tag != .identifier) return null;
         const binding = self.ir_view.getBinding(member.object) orelse return null;
 
-        if (self.findResultBinding(binding.slot)) |_| return binding.slot;
+        if (self.findResultBinding(binding)) |_| return binding;
         return null;
     }
 
@@ -1045,7 +1049,7 @@ pub const HandlerVerifier = struct {
         if (obj_tag != .identifier) return;
         const binding = self.ir_view.getBinding(member.object) orelse return;
 
-        const rb = self.findResultBinding(binding.slot) orelse return;
+        const rb = self.findResultBinding(binding) orelse return;
         if (!rb.ok_checked) {
             self.addDiagnostic(.{
                 .severity = .err,
@@ -1060,9 +1064,9 @@ pub const HandlerVerifier = struct {
         }
     }
 
-    /// Set the ok_checked state for a result binding slot.
-    fn setResultChecked(self: *HandlerVerifier, slot: u16, checked: bool) void {
-        if (self.findResultBinding(slot)) |rb| {
+    /// Set the ok_checked state for a result binding, keyed by (scope_id, slot).
+    fn setResultChecked(self: *HandlerVerifier, binding: ir.BindingRef, checked: bool) void {
+        if (self.findResultBinding(binding)) |rb| {
             rb.ok_checked = checked;
         }
     }
