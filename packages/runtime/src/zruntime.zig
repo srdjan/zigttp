@@ -3259,11 +3259,11 @@ fn fetchModuleReplay(rt: *Runtime) !zq.JSValue {
             zq.trace.findJsonStringValue(headers, "\"Content-Type\"")
     else
         zq.trace.findJsonStringValue(entry.result_json, "\"contentType\"");
-    const content_type_owned = if (content_type_raw) |raw|
+    const content_type_owned: ?[]u8 = if (content_type_raw) |raw|
         try zq.trace.unescapeJson(rt.allocator, raw)
     else
-        try rt.allocator.dupe(u8, "application/json");
-    defer rt.allocator.free(content_type_owned);
+        null;
+    defer if (content_type_owned) |content_type| rt.allocator.free(content_type);
 
     const created = try createFetchResponse(rt, status, status_text, body, content_type_owned);
     if (headers_json) |headers| {
@@ -6220,6 +6220,70 @@ test "zigttp fetch replay consumes traced inner and outer rows and preserves hea
     try std.testing.expectEqual(@as(i64, 21), obj.get("temperature").?.integer);
     try std.testing.expectEqualStrings("after-fetch", obj.get("next").?.string);
     try std.testing.expectEqual(@as(u32, 3), replay_state.cursor);
+    try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
+}
+
+test "zigttp fetch replay preserves missing content-type header" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .replay_file_path = "test",
+        .enforce_arena_escape = false,
+    });
+    defer rt.deinit();
+
+    const io_calls = [_]zq.trace.IoEntry{
+        .{
+            .seq = 0,
+            .module = "fetch",
+            .func = "fetch",
+            .args_json = "[\"http://example.com/plain\"]",
+            .result_json = "{\"status\":200,\"statusText\":\"OK\",\"ok\":true,\"headers\":{},\"body\":\"plain\"}",
+        },
+    };
+    var replay_state = zq.trace.ReplayState{
+        .io_calls = &io_calls,
+        .cursor = 0,
+        .divergences = 0,
+    };
+    rt.ctx.setModuleState(
+        zq.trace.REPLAY_STATE_SLOT,
+        @ptrCast(&replay_state),
+        &zq.trace.ReplayState.deinitOpaque,
+    );
+    defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
+
+    const handler_code =
+        \\import { fetch } from "zigttp:fetch";
+        \\function handler(req) {
+        \\  const response = fetch("http://example.com/plain");
+        \\  return Response.json({
+        \\    hasContentType: response.headers.has("content-type"),
+        \\    contentType: response.headers.get("content-type") ?? "missing"
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<fetch-replay-missing-content-type>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(false, obj.get("hasContentType").?.bool);
+    try std.testing.expectEqualStrings("missing", obj.get("contentType").?.string);
+    try std.testing.expectEqual(@as(u32, 1), replay_state.cursor);
     try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
 }
 

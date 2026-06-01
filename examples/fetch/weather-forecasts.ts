@@ -37,13 +37,13 @@ function handler(req: Request): Response & WeatherProof {
   }
 
   const forecast = upstream.json();
-    return Response.json({
-        app: "Weather Forecasts",
-        source: "open-meteo",
-        upstreamRequestId: upstream.headers.get("x-request-id") ?? "none",
-        coordinates: {
-            latitude: forecast.latitude,
-            longitude: forecast.longitude,
+  return Response.json({
+    app: "Weather Forecasts",
+    source: "open-meteo",
+    upstreamRequestId: upstream.headers.get("x-request-id") ?? "none",
+    coordinates: {
+      latitude: forecast.latitude,
+      longitude: forecast.longitude,
     },
     timezone: forecast.timezone,
     current: {
