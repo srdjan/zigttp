@@ -43,7 +43,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Run all tests
-        run: zig build test test-zigts test-zruntime test-expert test-expert-app test-capability-audit test-docs-drift test-module-governance
+        run: zig build test test-zigts test-zruntime test-expert test-expert-app test-capability-audit test-docs-drift test-doc-links test-module-governance
 
       - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast

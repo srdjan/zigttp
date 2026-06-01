@@ -120,6 +120,7 @@ zigttp proofs show <ref>                   # re-render the review card
 zigttp proofs diff <a> <b>                 # render b with a as baseline
 zigttp proofs watch                        # tail new entries (Ctrl+C to exit)
 zigttp proofs export [--format md|html|svg] [--ref HEAD]
+zigttp proofs badge [--out PATH] [--inline] [--public-url URL] [--ref HEAD]  # SVG verdict badge
 zigttp proofs bundle --contract PATH --out DIR [--binary PATH] [--replay PATH]
 zigttp proofs verify <bundle-dir>          # re-check every sha256
 zigttp proofs gate [--base REF] [--head REF] [--format md|json]  # PR gate; exit 1 on breaking

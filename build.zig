@@ -307,6 +307,10 @@ pub fn build(b: *std.Build) void {
     const docs_drift_step = b.step("test-docs-drift", "Check docs against current registry and build paths");
     docs_drift_step.dependOn(&docs_drift.step);
 
+    const doc_links = b.addSystemCommand(&.{ "/bin/bash", "scripts/audit-docs.sh" });
+    const doc_links_step = b.step("test-doc-links", "Check docs for broken relative links");
+    doc_links_step.dependOn(&doc_links.step);
+
     // Internal precompile tool used by build steps and the zigts CLI.
     const precompile_exe = b.addExecutable(.{
         .name = "precompile",
