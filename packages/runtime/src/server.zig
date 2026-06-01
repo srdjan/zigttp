@@ -2125,7 +2125,7 @@ test "parseRequestFromBuffer rejects chunked transfer encoding" {
     try std.testing.expectError(error.UnsupportedTransferEncoding, server.parseRequestFromBuffer(allocator, data));
 }
 
-test "buildDynamicResponseHeader preserves backend header layouts" {
+test "buildDynamicResponseHeader filters handler supplied framing headers" {
     const allocator = std.testing.allocator;
     var response = HttpResponse.init(allocator);
     defer response.deinit();
@@ -2135,6 +2135,7 @@ test "buildDynamicResponseHeader preserves backend header layouts" {
     try response.putHeader("X-Test", "one");
     try response.putHeader("Content-Length", "999");
     try response.putHeader("Connection", "close");
+    try response.putHeader("Transfer-Encoding", "chunked");
 
     const attestation = attest_header_strings.HeaderStrings{
         .proofs_value = "pure",
@@ -2144,13 +2145,17 @@ test "buildDynamicResponseHeader preserves backend header layouts" {
     var sync_buf: [512]u8 = undefined;
     const sync_len = try buildDynamicResponseHeader(&sync_buf, &response, true, attestation, .sync);
     const sync = sync_buf[0..sync_len];
-    try std.testing.expect(std.mem.startsWith(u8, sync, "HTTP/1.1 201 Created\r\nX-Test: one\r\nContent-Length: 999\r\nConnection: close\r\nZigttp-Proofs: pure\r\nZigttp-Attest: jws\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\n"));
+    try std.testing.expect(std.mem.startsWith(u8, sync, "HTTP/1.1 201 Created\r\nX-Test: one\r\nZigttp-Proofs: pure\r\nZigttp-Attest: jws\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, sync, "Content-Length: 999") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sync, "Connection: close") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sync, "Transfer-Encoding: chunked") == null);
 
     var evented_buf: [512]u8 = undefined;
     const evented_len = try buildDynamicResponseHeader(&evented_buf, &response, false, attestation, .evented);
     const evented = evented_buf[0..evented_len];
     try std.testing.expect(std.mem.startsWith(u8, evented, "HTTP/1.1 201 Created\r\nContent-Length: 7\r\nConnection: close\r\nX-Test: one\r\nZigttp-Proofs: pure\r\nZigttp-Attest: jws\r\n\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, evented, "Content-Length: 999") == null);
+    try std.testing.expect(std.mem.indexOf(u8, evented, "Transfer-Encoding: chunked") == null);
 }
 
 test "parseRequestFromBuffer rejects invalid content length" {

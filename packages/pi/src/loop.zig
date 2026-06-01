@@ -191,7 +191,7 @@ pub fn runTurnWith(
                     // fix the path, instead of propagating out of the turn and
                     // crashing the whole agent. Other errors (OOM, unreadable
                     // `before` file) remain fatal.
-                    error.EditPathOutsideWorkspace => {
+                    error.PathOutsideWorkspace => {
                         const msg = try std.fmt.allocPrint(
                             ta,
                             "edit rejected: the file path `{s}` resolves outside the workspace " ++
@@ -322,42 +322,13 @@ fn containsApplyEdit(calls: []const turn.ToolCall) bool {
     return false;
 }
 
-/// Resolve `workspace_root` to an ABSOLUTE path. `std.fs.path.resolve` is
-/// purely lexical in this std - it never converts a relative path (like the
-/// default ".") into an absolute one - so a relative root leaves
-/// `isPathInsideRoot` comparing an absolute-ish target against "." and every
-/// relative edit path (e.g. "src/handler.ts") is wrongly rejected. Anchor a
-/// relative root at the real cwd, the same root the workspace read tools use,
-/// so the apply path and those tools agree on where the workspace is. Falls
-/// back to a lexical resolve if the cwd lookup fails.
-fn resolveWorkspaceRootAbs(allocator: std.mem.Allocator, workspace_root: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(workspace_root)) {
-        return std.fs.path.resolve(allocator, &.{workspace_root});
-    }
-    // Anchor a relative root at the real cwd via the same helper the workspace
-    // read tools use, so the apply path and those tools agree. Fall back to a
-    // lexical resolve if the cwd lookup fails.
-    const cwd = tools_common.realCwd(allocator) catch {
-        return std.fs.path.resolve(allocator, &.{workspace_root});
-    };
-    defer allocator.free(cwd);
-    return std.fs.path.resolve(allocator, &.{ cwd, workspace_root });
-}
-
 fn prepareEdit(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
     edit: turn.Edit,
 ) !PreparedEdit {
-    const root_path = try resolveWorkspaceRootAbs(allocator, workspace_root);
-    defer allocator.free(root_path);
-    const target_path = if (std.fs.path.isAbsolute(edit.file))
-        try std.fs.path.resolve(allocator, &.{edit.file})
-    else
-        try std.fs.path.resolve(allocator, &.{ root_path, edit.file });
+    const target_path = try tools_common.resolveInsideWorkspace(allocator, workspace_root, edit.file);
     errdefer allocator.free(target_path);
-
-    if (!isPathInsideRoot(root_path, target_path)) return error.EditPathOutsideWorkspace;
 
     const before = edit.before orelse blk: {
         const current = file_io.readFile(allocator, target_path, 1024 * 1024) catch |err| switch (err) {
@@ -599,12 +570,6 @@ fn repairLinksFromCandidate(
         },
         else => null,
     };
-}
-
-fn isPathInsideRoot(root: []const u8, candidate: []const u8) bool {
-    if (!std.mem.startsWith(u8, candidate, root)) return false;
-    if (candidate.len == root.len) return true;
-    return candidate[root.len] == std.fs.path.sep;
 }
 
 const testing = std.testing;
@@ -932,10 +897,11 @@ test "edit path outside the workspace is surfaced as a recoverable diagnostic, n
     try testing.expect(saw_path_diag);
 }
 
-test "resolveWorkspaceRootAbs converts a relative root to absolute" {
-    const abs = try resolveWorkspaceRootAbs(testing.allocator, ".");
+test "resolveInsideWorkspace converts a relative root to absolute" {
+    const abs = try tools_common.resolveInsideWorkspace(testing.allocator, ".", "build.zig");
     defer testing.allocator.free(abs);
     try testing.expect(std.fs.path.isAbsolute(abs));
+    try testing.expect(std.mem.endsWith(u8, abs, "build.zig"));
 }
 
 test "prepareEdit accepts an in-tree relative path under the default '.' root" {

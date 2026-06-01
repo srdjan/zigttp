@@ -7,6 +7,8 @@ const zruntime = @import("zruntime.zig");
 const http_parser = @import("http_parser.zig");
 const http_types = @import("http_types.zig");
 const contract_runtime = @import("contract_runtime.zig");
+const response_mod = @import("server_response.zig");
+const io_mod = @import("server_io.zig");
 
 const Io = std.Io;
 const net = std.Io.net;
@@ -751,7 +753,7 @@ fn sendResponse(fd: std.posix.fd_t, response: *HttpResponse) !void {
     const status_line = try std.fmt.bufPrint(header_buf[pos..], "HTTP/1.1 {d} {s}\r\n", .{ response.status, statusText(response.status) });
     pos += status_line.len;
     for (response.headers.items) |header| {
-        if (isHopByHopHeader(header.key)) continue;
+        if (isHopByHopHeader(header.key) or response_mod.isFramingHeader(header.key)) continue;
         const line = try std.fmt.bufPrint(header_buf[pos..], "{s}: {s}\r\n", .{ header.key, header.value });
         pos += line.len;
     }
@@ -911,4 +913,39 @@ test "path prefix does not match partial segment" {
     try std.testing.expect(matchesPathPrefix("/api", "/api/users"));
     try std.testing.expect(matchesPathPrefix("/api", "/api"));
     try std.testing.expect(!matchesPathPrefix("/api", "/apix"));
+}
+
+test "edge sendResponse drops handler supplied framing headers" {
+    const allocator = std.testing.allocator;
+    var response = HttpResponse.init(allocator);
+    defer response.deinit();
+
+    response.status = 200;
+    response.body = "ok";
+    try response.putHeader("X-Test", "one");
+    try response.putHeader("Content-Length", "999");
+    try response.putHeader("Connection", "keep-alive");
+    try response.putHeader("Transfer-Encoding", "chunked");
+
+    const fds = try io_mod.createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    try sendResponse(fds[0], &response);
+    _ = std.c.shutdown(fds[0], 1);
+
+    var buf: [512]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = try std.posix.read(fds[1], buf[total..]);
+        if (n == 0) break;
+        total += n;
+    }
+    const out = buf[0..total];
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "X-Test: one\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Content-Length: 999") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Transfer-Encoding: chunked") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Connection: keep-alive") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Content-Length: 2\r\nConnection: close\r\n\r\nok") != null);
 }

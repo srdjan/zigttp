@@ -44,6 +44,14 @@ pub fn workspaceRoot(allocator: std.mem.Allocator) ![]u8 {
     return realCwd(allocator) catch try std.fs.path.resolve(allocator, &.{"."});
 }
 
+fn realPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const path_z = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io_backend.io(), path, allocator);
+    defer allocator.free(path_z);
+    return try allocator.dupe(u8, path_z);
+}
+
 /// Current unix time in milliseconds. `std.time.milliTimestamp` is unavailable
 /// in the zig 0.16 dev builds this project targets, so both the turn loop and
 /// the autoloop reach through `std.c.clock_gettime` here.
@@ -58,14 +66,59 @@ pub fn resolveInsideWorkspace(
     root: []const u8,
     requested_path: []const u8,
 ) ![]u8 {
+    const root_real = realPathAlloc(allocator, root) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return error.PathOutsideWorkspace,
+        else => return err,
+    };
+    defer allocator.free(root_real);
+    const root_lexical = if (std.fs.path.isAbsolute(root))
+        try std.fs.path.resolve(allocator, &.{root})
+    else
+        try allocator.dupe(u8, root_real);
+    defer allocator.free(root_lexical);
+
     const resolved = if (std.fs.path.isAbsolute(requested_path))
         try std.fs.path.resolve(allocator, &.{requested_path})
     else
-        try std.fs.path.resolve(allocator, &.{ root, requested_path });
-    errdefer allocator.free(resolved);
+        try std.fs.path.resolve(allocator, &.{ root_real, requested_path });
+    defer allocator.free(resolved);
 
-    if (!isPathInsideRoot(root, resolved)) return error.PathOutsideWorkspace;
-    return resolved;
+    if (!isPathInsideRoot(root_real, resolved) and !isPathInsideRoot(root_lexical, resolved)) {
+        return error.PathOutsideWorkspace;
+    }
+    return resolveCanonicalTargetInsideWorkspace(allocator, root_real, resolved);
+}
+
+fn resolveCanonicalTargetInsideWorkspace(
+    allocator: std.mem.Allocator,
+    root_real: []const u8,
+    lexical_target: []const u8,
+) ![]u8 {
+    var current_len = lexical_target.len;
+    while (current_len > 0) {
+        const current = lexical_target[0..current_len];
+        const current_real = realPathAlloc(allocator, current) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => {
+                const parent = std.fs.path.dirname(current) orelse return error.PathOutsideWorkspace;
+                if (parent.len >= current_len) return error.PathOutsideWorkspace;
+                current_len = parent.len;
+                continue;
+            },
+            else => return err,
+        };
+        defer allocator.free(current_real);
+
+        if (!isPathInsideRoot(root_real, current_real)) return error.PathOutsideWorkspace;
+        if (current_len == lexical_target.len) return try allocator.dupe(u8, current_real);
+
+        var suffix = lexical_target[current_len..];
+        if (suffix.len > 0 and suffix[0] == std.fs.path.sep) suffix = suffix[1..];
+        const resolved = try std.fs.path.resolve(allocator, &.{ current_real, suffix });
+        errdefer allocator.free(resolved);
+        if (!isPathInsideRoot(root_real, resolved)) return error.PathOutsideWorkspace;
+        return resolved;
+    }
+    return error.PathOutsideWorkspace;
 }
 
 pub fn relativeToRoot(root: []const u8, absolute: []const u8) []const u8 {
@@ -217,6 +270,18 @@ pub fn commandOutcomeToToolResult(
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
+
+fn createSymlinkAbsolute(
+    allocator: std.mem.Allocator,
+    target_path: []const u8,
+    link_path: []const u8,
+    flags: std.Io.Dir.SymLinkFlags,
+) !void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try std.Io.Dir.symLinkAbsolute(io_backend.io(), target_path, link_path, flags);
+}
 
 test "isPathInsideRoot: exact match is inside" {
     try testing.expect(isPathInsideRoot("/a/b", "/a/b"));
@@ -241,39 +306,148 @@ test "isPathInsideRoot: unrelated path is outside" {
 
 test "resolveInsideWorkspace: plain relative path resolves inside" {
     const allocator = testing.allocator;
-    const resolved = try resolveInsideWorkspace(allocator, "/tmp/ws", "handler.ts");
+    var tmp = try IsolatedTmp.init(allocator, "resolve-inside-plain");
+    defer tmp.cleanup(allocator);
+    const root_real = try realPathAlloc(allocator, tmp.abs_path);
+    defer allocator.free(root_real);
+    const expected = try std.fs.path.resolve(allocator, &.{ root_real, "handler.ts" });
+    defer allocator.free(expected);
+
+    const resolved = try resolveInsideWorkspace(allocator, tmp.abs_path, "handler.ts");
     defer allocator.free(resolved);
-    try testing.expectEqualStrings("/tmp/ws/handler.ts", resolved);
+    try testing.expectEqualStrings(expected, resolved);
 }
 
 test "resolveInsideWorkspace: rejects ../ escape" {
     const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "resolve-inside-dotdot");
+    defer tmp.cleanup(allocator);
+
     try testing.expectError(
         error.PathOutsideWorkspace,
-        resolveInsideWorkspace(allocator, "/tmp/ws", "../etc/passwd"),
+        resolveInsideWorkspace(allocator, tmp.abs_path, "../etc/passwd"),
     );
 }
 
 test "resolveInsideWorkspace: rejects absolute path outside root" {
     const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "resolve-inside-absolute-out");
+    defer tmp.cleanup(allocator);
+
     try testing.expectError(
         error.PathOutsideWorkspace,
-        resolveInsideWorkspace(allocator, "/tmp/ws", "/etc/passwd"),
+        resolveInsideWorkspace(allocator, tmp.abs_path, "/etc/passwd"),
     );
 }
 
 test "resolveInsideWorkspace: accepts absolute path inside root" {
     const allocator = testing.allocator;
-    const resolved = try resolveInsideWorkspace(allocator, "/tmp/ws", "/tmp/ws/deep/handler.ts");
+    var tmp = try IsolatedTmp.init(allocator, "resolve-inside-absolute-in");
+    defer tmp.cleanup(allocator);
+    const root_real = try realPathAlloc(allocator, tmp.abs_path);
+    defer allocator.free(root_real);
+    const requested = try tmp.childPath(allocator, "deep/handler.ts");
+    defer allocator.free(requested);
+    const expected = try std.fs.path.resolve(allocator, &.{ root_real, "deep/handler.ts" });
+    defer allocator.free(expected);
+
+    const resolved = try resolveInsideWorkspace(allocator, tmp.abs_path, requested);
     defer allocator.free(resolved);
-    try testing.expectEqualStrings("/tmp/ws/deep/handler.ts", resolved);
+    try testing.expectEqualStrings(expected, resolved);
 }
 
 test "resolveInsideWorkspace: collapses redundant path segments within root" {
     const allocator = testing.allocator;
-    const resolved = try resolveInsideWorkspace(allocator, "/tmp/ws", "sub/../handler.ts");
+    var tmp = try IsolatedTmp.init(allocator, "resolve-inside-redundant");
+    defer tmp.cleanup(allocator);
+    const root_real = try realPathAlloc(allocator, tmp.abs_path);
+    defer allocator.free(root_real);
+    const expected = try std.fs.path.resolve(allocator, &.{ root_real, "handler.ts" });
+    defer allocator.free(expected);
+
+    const resolved = try resolveInsideWorkspace(allocator, tmp.abs_path, "sub/../handler.ts");
     defer allocator.free(resolved);
-    try testing.expectEqualStrings("/tmp/ws/handler.ts", resolved);
+    try testing.expectEqualStrings(expected, resolved);
+}
+
+test "resolveInsideWorkspace: accepts symlink when final target stays inside root" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "resolve-inside-symlink-in");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "target.txt", "ok");
+    const target = try tmp.childPath(allocator, "target.txt");
+    defer allocator.free(target);
+    const link = try tmp.childPath(allocator, "link-in");
+    defer allocator.free(link);
+    try createSymlinkAbsolute(allocator, target, link, .{});
+    const target_real = try realPathAlloc(allocator, target);
+    defer allocator.free(target_real);
+
+    const resolved = try resolveInsideWorkspace(allocator, tmp.abs_path, "link-in");
+    defer allocator.free(resolved);
+    try testing.expectEqualStrings(target_real, resolved);
+}
+
+test "resolveInsideWorkspace: rejects symlink when final target leaves root" {
+    const allocator = testing.allocator;
+    var workspace = try IsolatedTmp.init(allocator, "resolve-inside-symlink-out-root");
+    defer workspace.cleanup(allocator);
+    var outside = try IsolatedTmp.init(allocator, "resolve-inside-symlink-out-target");
+    defer outside.cleanup(allocator);
+    try outside.writeFile(allocator, "secret.txt", "secret");
+    const target = try outside.childPath(allocator, "secret.txt");
+    defer allocator.free(target);
+    const link = try workspace.childPath(allocator, "link-out");
+    defer allocator.free(link);
+    try createSymlinkAbsolute(allocator, target, link, .{});
+
+    try testing.expectError(
+        error.PathOutsideWorkspace,
+        resolveInsideWorkspace(allocator, workspace.abs_path, "link-out"),
+    );
+}
+
+test "resolveInsideWorkspace: new file under inside symlinked directory resolves to target directory" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "resolve-inside-symlink-dir");
+    defer tmp.cleanup(allocator);
+    try tmp.mkdir(allocator, "real-dir");
+    const real_dir = try tmp.childPath(allocator, "real-dir");
+    defer allocator.free(real_dir);
+    const link_dir = try tmp.childPath(allocator, "link-dir");
+    defer allocator.free(link_dir);
+    try createSymlinkAbsolute(allocator, real_dir, link_dir, .{ .is_directory = true });
+    const real_dir_canonical = try realPathAlloc(allocator, real_dir);
+    defer allocator.free(real_dir_canonical);
+    const expected = try std.fs.path.resolve(allocator, &.{ real_dir_canonical, "new.txt" });
+    defer allocator.free(expected);
+
+    const resolved = try resolveInsideWorkspace(allocator, tmp.abs_path, "link-dir/new.txt");
+    defer allocator.free(resolved);
+    try testing.expectEqualStrings(expected, resolved);
+}
+
+test "resolveInsideWorkspace: write through outside symlink is rejected before write" {
+    const allocator = testing.allocator;
+    var workspace = try IsolatedTmp.init(allocator, "resolve-inside-write-out-root");
+    defer workspace.cleanup(allocator);
+    var outside = try IsolatedTmp.init(allocator, "resolve-inside-write-out-target");
+    defer outside.cleanup(allocator);
+    try outside.writeFile(allocator, "secret.txt", "before");
+    const target = try outside.childPath(allocator, "secret.txt");
+    defer allocator.free(target);
+    const link = try workspace.childPath(allocator, "link-out");
+    defer allocator.free(link);
+    try createSymlinkAbsolute(allocator, target, link, .{});
+
+    try testing.expectError(
+        error.PathOutsideWorkspace,
+        resolveInsideWorkspace(allocator, workspace.abs_path, "link-out"),
+    );
+
+    const content = try @import("zigts").file_io.readFile(allocator, target, 1024);
+    defer allocator.free(content);
+    try testing.expectEqualStrings("before", content);
 }
 
 test "relativeToRoot: self is rendered as '.'" {

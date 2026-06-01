@@ -122,7 +122,8 @@ pub fn appendHeaderLine(buf: []u8, pos: *usize, key: []const u8, value: []const 
 /// server emits itself. Returns true when the header should NOT be relayed.
 pub fn isFramingHeader(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name, "Content-Length") or
-        std.ascii.eqlIgnoreCase(name, "Connection");
+        std.ascii.eqlIgnoreCase(name, "Connection") or
+        std.ascii.eqlIgnoreCase(name, "Transfer-Encoding");
 }
 
 pub fn appendContentLengthHeader(buf: []u8, pos: *usize, body_len: usize) !void {
@@ -156,6 +157,7 @@ pub fn buildDynamicResponseHeader(
     switch (order) {
         .sync => {
             for (response.headers.items) |header| {
+                if (isFramingHeader(header.key)) continue;
                 try appendHeaderLine(buf, &pos, header.key, header.value);
             }
             pos = try appendAttestationHeaders(attestation_headers, buf, pos);
