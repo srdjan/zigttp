@@ -173,7 +173,7 @@ pub fn appendSpecDiagnosticsJson(
     const contract = if (result.contract) |*c| c else return;
     for (contract.spec_diagnostics.items) |diag| {
         const code: []const u8 = diag.kind.code();
-        const message: []const u8 = switch (diag.kind) {
+        var message: []const u8 = switch (diag.kind) {
             .not_discharged => "declared Spec was not discharged by handler proof",
             .incompatible_with_import => "declared Spec is incompatible with imported module",
             .unknown_name => "declared Spec name is not recognized",
@@ -186,6 +186,15 @@ pub fn appendSpecDiagnosticsJson(
             .missing_effects_capsule => "exported helper carries no Effects<...> capsule",
             .missing_proof_capsule_export => "exported helper carries no Proof<...> capsule",
         };
+        // The implicit default profile never "declared" anything; say so, so
+        // the agent (and authors) stop hunting for a Spec<...> they never wrote.
+        if (diag.implicit_default) {
+            message = switch (diag.kind) {
+                .not_discharged => "handler declares no Spec<...>; the default proof profile demands a property this handler does not hold",
+                .incompatible_with_import => "handler declares no Spec<...>; the default profile's read_only conflicts with a stateful module import",
+                else => message,
+            };
+        }
         result.json_diagnostics.append(allocator, .{
             .code = code,
             .severity = if (diag.kind.severity() == .warn) "warning" else "error",
@@ -303,6 +312,7 @@ pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult
         contract.declared_specs.items,
         contract.properties,
         contract.modules.items,
+        contract.declared_specs_implicit,
     );
     errdefer {
         for (refreshed.items) |*d| d.deinit(allocator);

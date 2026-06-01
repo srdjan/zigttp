@@ -227,12 +227,24 @@ pub fn dischargeSpecs(
     declared: []const []const u8,
     properties: ?HandlerProperties,
     modules: []const []const u8,
+    /// True when `declared` is the implicit default profile (the handler
+    /// declared no `Spec<...>`). Every emitted ZTS500/ZTS501 then carries the
+    /// "declare a narrow Spec" remedy instead of the per-property hint, and is
+    /// flagged so downstream surfaces stop claiming a spec was "declared".
+    implicit_default: bool,
 ) !std.ArrayList(SpecDiagnostic) {
     var out: std.ArrayList(SpecDiagnostic) = .empty;
     errdefer {
         for (out.items) |*d| @constCast(d).deinit(allocator);
         out.deinit(allocator);
     }
+
+    // Computed once; duped per diagnostic so each entry owns its suggestion.
+    const implicit_remedy: ?[]u8 = if (implicit_default)
+        try implicitDefaultSuggestion(allocator, properties)
+    else
+        null;
+    defer if (implicit_remedy) |s| allocator.free(s);
 
     for (declared) |name| {
         const spec = lookupV1(name);
@@ -264,7 +276,9 @@ pub fn dischargeSpecs(
                     errdefer allocator.free(spec_name);
                     const owned_module = try allocator.dupe(u8, module_name);
                     errdefer allocator.free(owned_module);
-                    const suggestion = if (suggestionForIncompatible(name, module_name)) |s|
+                    const suggestion = if (implicit_remedy) |r|
+                        try allocator.dupe(u8, r)
+                    else if (suggestionForIncompatible(name, module_name)) |s|
                         try allocator.dupe(u8, s)
                     else
                         null;
@@ -274,6 +288,7 @@ pub fn dischargeSpecs(
                         .spec_name = spec_name,
                         .incompatible_module = owned_module,
                         .suggestion = suggestion,
+                        .implicit_default = implicit_default,
                     });
                     emitted_incompat = true;
                     break;
@@ -288,12 +303,12 @@ pub fn dischargeSpecs(
         // that is still actionable: it tells the user the classifier did
         // not run for this build.
         const props = properties orelse {
-            try appendNotDischarged(allocator, &out, name);
+            try appendNotDischarged(allocator, &out, name, implicit_default, implicit_remedy);
             continue;
         };
 
         if (!spec.?.field.lookup(props)) {
-            try appendNotDischarged(allocator, &out, name);
+            try appendNotDischarged(allocator, &out, name, implicit_default, implicit_remedy);
         }
     }
 
@@ -304,16 +319,73 @@ fn appendNotDischarged(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(SpecDiagnostic),
     name: []const u8,
+    implicit_default: bool,
+    /// When set (implicit default profile), used verbatim in place of the
+    /// per-property `suggestionFor` hint so the agent is told to declare a
+    /// narrow Spec rather than to chase an individual property.
+    override_suggestion: ?[]const u8,
 ) !void {
     const spec_name = try allocator.dupe(u8, name);
     errdefer allocator.free(spec_name);
-    const suggestion = if (suggestionFor(name)) |s| try allocator.dupe(u8, s) else null;
+    const suggestion = if (override_suggestion) |o|
+        try allocator.dupe(u8, o)
+    else if (suggestionFor(name)) |s|
+        try allocator.dupe(u8, s)
+    else
+        null;
     errdefer if (suggestion) |s| allocator.free(s);
     try out.append(allocator, .{
         .kind = .not_discharged,
         .spec_name = spec_name,
         .suggestion = suggestion,
+        .implicit_default = implicit_default,
     });
+}
+
+/// Build the actionable remedy shown when the undischarged spec set is the
+/// IMPLICIT default profile (the handler declared no `Spec<...>`). Lists the
+/// commonly-declared properties the handler currently holds so the author can
+/// copy a clean, already-satisfiable narrow Spec onto the return type. Caller
+/// owns the result.
+fn implicitDefaultSuggestion(
+    allocator: std.mem.Allocator,
+    properties: ?HandlerProperties,
+) ![]u8 {
+    // Curated shortlist of the properties a typical stateful handler keeps;
+    // filtered to those that actually hold so we never recommend one the
+    // handler cannot satisfy. Mirrors the scaffold's narrow Spec.
+    const curated = [_][]const u8{
+        "deterministic",
+        "injection_safe",
+        "no_secret_leakage",
+        "state_isolated",
+        "input_validated",
+    };
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(allocator);
+    var count: usize = 0;
+    for (curated) |cn| {
+        if (properties) |props| {
+            const spec = lookupV1(cn) orelse continue;
+            if (!spec.field.lookup(props)) continue;
+        }
+        if (count > 0) try joined.appendSlice(allocator, " | ");
+        try joined.appendSlice(allocator, "\"");
+        try joined.appendSlice(allocator, cn);
+        try joined.appendSlice(allocator, "\"");
+        count += 1;
+    }
+    if (count == 0) try joined.appendSlice(allocator, "\"injection_safe\"");
+
+    return std.fmt.allocPrint(
+        allocator,
+        "this handler declares no Spec<...>, so the compiler must prove the full " ++
+            "default profile (read_only, retry_safe, idempotent, pure) - which a " ++
+            "handler that writes zigttp:cache/zigttp:sql cannot hold. Declare a narrow " ++
+            "Spec on the return type with only the properties it holds, e.g. " ++
+            "`function handler(req: Request): Response & Spec<{s}>`.",
+        .{joined.items},
+    );
 }
 
 fn lookupV1(name: []const u8) ?V1Spec {
@@ -581,7 +653,7 @@ test "dischargeSpecs all-discharged returns empty" {
     const declared: [3][]const u8 = .{ "idempotent", "deterministic", "state_isolated" };
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -607,7 +679,7 @@ test "dischargeSpecs unmet idempotent emits ZTS401 not_discharged" {
     const declared: [1][]const u8 = .{"idempotent"};
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -632,7 +704,7 @@ test "dischargeSpecs read_only with cache import emits ZTS402" {
     const declared: [1][]const u8 = .{"read_only"};
     const modules: [1][]const u8 = .{"zigttp:cache"};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -661,7 +733,7 @@ test "dischargeSpecs unknown name emits ZTS403" {
     const declared: [2][]const u8 = .{ "made_up_name", "idempotent" };
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -670,6 +742,50 @@ test "dischargeSpecs unknown name emits ZTS403" {
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.unknown_name, diags.items[0].kind);
     try std.testing.expectEqualStrings("made_up_name", diags.items[0].spec_name);
+}
+
+test "dischargeSpecs implicit default profile gives the narrow-Spec remedy" {
+    const allocator = std.testing.allocator;
+    // A cache-writing handler: read_only/retry_safe/idempotent/pure are false,
+    // but deterministic/injection_safe/state_isolated hold.
+    const props = HandlerProperties{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = true,
+        .has_egress = false,
+        .idempotent = false,
+        .state_isolated = true,
+        .fault_covered = false,
+        .injection_safe = true,
+    };
+    const modules: [1][]const u8 = .{"zigttp:cache"};
+
+    // The implicit path passes the full v1 set as `declared` with the flag.
+    var diags = try dischargeSpecs(allocator, &v1_spec_names, props, &modules, true);
+    defer {
+        for (diags.items) |*d| @constCast(d).deinit(allocator);
+        diags.deinit(allocator);
+    }
+
+    try std.testing.expect(diags.items.len > 0);
+    var saw_remedy = false;
+    for (diags.items) |d| {
+        try std.testing.expect(d.implicit_default);
+        const s = d.suggestion orelse continue;
+        if (std.mem.indexOf(u8, s, "declares no Spec") != null and
+            std.mem.indexOf(u8, s, "Response & Spec<") != null)
+        {
+            saw_remedy = true;
+            // The example lists held properties and never an unheld one.
+            try std.testing.expect(std.mem.indexOf(u8, s, "\"deterministic\"") != null);
+            try std.testing.expect(std.mem.indexOf(u8, s, "\"injection_safe\"") != null);
+            try std.testing.expect(std.mem.indexOf(u8, s, "\"read_only\"") == null);
+            try std.testing.expect(std.mem.indexOf(u8, s, "\"idempotent\"") == null);
+        }
+    }
+    try std.testing.expect(saw_remedy);
 }
 
 test "dischargeEffects ceiling matching the inferred row returns empty" {
@@ -739,7 +855,7 @@ test "dischargeSpecs ZTS402 suppresses ZTS401 for the same spec" {
     const declared: [1][]const u8 = .{"read_only"};
     const modules: [1][]const u8 = .{"zigttp:cache"};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -784,7 +900,7 @@ test "dischargeSpecs recognises pure/stateless/result_safe/optional_safe" {
     const declared: [4][]const u8 = .{ "pure", "stateless", "result_safe", "optional_safe" };
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props_all_false, &modules);
+    var diags = try dischargeSpecs(allocator, &declared, props_all_false, &modules, false);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -813,7 +929,7 @@ test "dischargeSpecs ZTS502 unknown name carries a nearest-match suggestion" {
     const declared: [1][]const u8 = .{"idemptoent"};
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -838,7 +954,7 @@ test "dischargeSpecs ZTS502 with far-off name yields no suggestion" {
     const declared: [1][]const u8 = .{"completely_unrelated_name"};
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -861,7 +977,7 @@ test "dischargeSpecs ZTS501 incompatible carries an actionable suggestion" {
     const declared: [1][]const u8 = .{"read_only"};
     const modules: [1][]const u8 = .{"zigttp:sql"};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);

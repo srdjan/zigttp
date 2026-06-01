@@ -781,6 +781,14 @@ pub const SpecDiagnostic = struct {
     /// Owned when present; null for handler-level Spec diagnostics, where
     /// the handler is implied.
     function: ?[]const u8 = null,
+    /// True when this diagnostic comes from the IMPLICIT default spec set:
+    /// the handler declared no `Spec<...>`, so the full v1 profile is active
+    /// and every unsatisfiable property trips ZTS500/ZTS501. Lets downstream
+    /// surfaces explain that no Spec was authored and recommend declaring a
+    /// narrow one, instead of claiming the author "declared" a spec they
+    /// never wrote. Transient: not serialized to contract.json; recomputed
+    /// on each fresh check.
+    implicit_default: bool = false,
 
     pub const Severity = enum { err, warn };
 
@@ -873,6 +881,7 @@ pub const SpecDiagnostic = struct {
             .incompatible_module = incompatible_module,
             .suggestion = suggestion,
             .function = function,
+            .implicit_default = self.implicit_default,
         };
     }
 };
@@ -1289,6 +1298,11 @@ pub const HandlerContract = struct {
     /// The verifier emits ZTS500 for any member whose corresponding
     /// `HandlerProperties` field is false.
     declared_specs: std.ArrayList([]const u8) = .empty,
+    /// True when `declared_specs` is the IMPLICIT default profile (the
+    /// handler return type carried no `Spec<...>`), rather than an
+    /// author-declared set. Drives the actionable "declare a narrow Spec"
+    /// diagnostic. Transient: not serialized; recomputed each build.
+    declared_specs_implicit: bool = false,
     /// Per-specifier proof facts produced by partner virtual-module manifest
     /// `contractExtractions`. Keys are owned specifier strings (e.g.
     /// `"zigttp-ext:stripe"`); values own all nested data. Emitted under

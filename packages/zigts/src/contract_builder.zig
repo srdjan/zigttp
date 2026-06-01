@@ -559,7 +559,8 @@ pub const ContractBuilder = struct {
             owned.deinit(self.allocator);
         }
 
-        const active_names: []const []const u8 = if (raw_names.items.len > 0)
+        const declared_specs_implicit = raw_names.items.len == 0;
+        const active_names: []const []const u8 = if (!declared_specs_implicit)
             raw_names.items
         else
             &spec_discharge.v1_spec_names;
@@ -580,6 +581,7 @@ pub const ContractBuilder = struct {
         }.lessThan);
 
         contract.declared_specs = owned;
+        contract.declared_specs_implicit = declared_specs_implicit;
 
         // Discharge: produce ZTS500 / ZTS501 / ZTS502 diagnostics into
         // contract.spec_diagnostics. Downstream consumers (zigts check,
@@ -590,6 +592,7 @@ pub const ContractBuilder = struct {
             contract.declared_specs.items,
             contract.properties,
             contract.modules.items,
+            declared_specs_implicit,
         );
     }
 
