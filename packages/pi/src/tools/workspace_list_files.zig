@@ -20,6 +20,11 @@ fn execute(
 ) anyerror!registry_mod.ToolResult {
     var path: []const u8 = ".";
     var limit: usize = 200;
+    // A JSON-derived path must outlive `parsed.deinit()` (it is used below for
+    // resolveInsideWorkspace); the raw `args` slices are caller-owned and outlive
+    // this call, so only the parsed value is duped.
+    var owned_path: ?[]u8 = null;
+    defer if (owned_path) |p| allocator.free(p);
 
     if (args.len > 0 and args[0].len > 0 and args[0][0] == '{') {
         var parsed = std.json.parseFromSlice(std.json.Value, allocator, args[0], .{}) catch {
@@ -30,7 +35,8 @@ fn execute(
         const obj = parsed.value.object;
         if (obj.get("path")) |value| {
             if (value != .string) return registry_mod.ToolResult.err(allocator, name ++ ": path must be a string\n");
-            path = value.string;
+            owned_path = try allocator.dupe(u8, value.string);
+            path = owned_path.?;
         }
         if (obj.get("limit")) |value| {
             if (value != .integer or value.integer <= 0) return registry_mod.ToolResult.err(allocator, name ++ ": limit must be a positive integer\n");

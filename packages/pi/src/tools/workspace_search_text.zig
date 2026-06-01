@@ -21,6 +21,13 @@ fn execute(
     var query_opt: ?[]const u8 = null;
     var path: []const u8 = ".";
     var limit: usize = 50;
+    // JSON-derived strings must outlive `parsed.deinit()`; the raw `args` slices
+    // are owned by the caller and outlive this call, so only the parsed values
+    // are duped.
+    var owned_query: ?[]u8 = null;
+    defer if (owned_query) |q| allocator.free(q);
+    var owned_path: ?[]u8 = null;
+    defer if (owned_path) |p| allocator.free(p);
 
     if (args.len > 0 and args[0].len > 0 and args[0][0] == '{') {
         var parsed = std.json.parseFromSlice(std.json.Value, allocator, args[0], .{}) catch {
@@ -31,10 +38,12 @@ fn execute(
         const obj = parsed.value.object;
         const query_val = obj.get("query") orelse return registry_mod.ToolResult.err(allocator, name ++ ": missing query\n");
         if (query_val != .string) return registry_mod.ToolResult.err(allocator, name ++ ": query must be a string\n");
-        query_opt = query_val.string;
+        owned_query = try allocator.dupe(u8, query_val.string);
+        query_opt = owned_query;
         if (obj.get("path")) |value| {
             if (value != .string) return registry_mod.ToolResult.err(allocator, name ++ ": path must be a string\n");
-            path = value.string;
+            owned_path = try allocator.dupe(u8, value.string);
+            path = owned_path.?;
         }
         if (obj.get("limit")) |value| {
             if (value != .integer or value.integer <= 0) return registry_mod.ToolResult.err(allocator, name ++ ": limit must be a positive integer\n");

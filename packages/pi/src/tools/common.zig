@@ -80,6 +80,34 @@ pub fn isPathInsideRoot(root: []const u8, candidate: []const u8) bool {
     return candidate[root.len] == std.fs.path.sep;
 }
 
+/// PATH used to resolve a bare command name when the parent process has no
+/// PATH of its own (e.g. a headless/cron host). Covers the common locations
+/// for `rg` and `zig` on macOS/Linux.
+const default_search_path = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin";
+
+/// Resolve a bare command name (e.g. `rg`, `zig`) to an absolute executable
+/// path using the PARENT process's PATH. `runCommand` spawns children with an
+/// EMPTY environ for sandbox isolation, so a child cannot resolve a bare name
+/// itself - the exec fails with FileNotFound. Resolving it here keeps the child
+/// environ empty while letting the exec succeed. Returns an owned absolute
+/// path, or null when the name already contains '/' (use as-is) or is not found
+/// on PATH (fall back to the original name, preserving prior behavior).
+fn resolveBinaryPath(allocator: std.mem.Allocator, io: std.Io, name: []const u8) !?[]u8 {
+    if (name.len == 0 or std.mem.indexOfScalar(u8, name, '/') != null) return null;
+    const path = if (std.c.getenv("PATH")) |p| std.mem.span(p) else default_search_path;
+    var it = std.mem.tokenizeScalar(u8, path, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        const candidate = std.fs.path.join(allocator, &.{ dir, name }) catch continue;
+        std.Io.Dir.accessAbsolute(io, candidate, .{}) catch {
+            allocator.free(candidate);
+            continue;
+        };
+        return candidate;
+    }
+    return null;
+}
+
 pub fn runCommand(
     allocator: std.mem.Allocator,
     cwd: []const u8,
@@ -87,9 +115,29 @@ pub fn runCommand(
 ) !CommandOutcome {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
+    const io = io_backend.io();
 
-    const run_result = try std.process.run(allocator, io_backend.io(), .{
-        .argv = argv,
+    // The child runs with an empty environ (no PATH) for sandboxing, so resolve
+    // a bare argv[0] to an absolute path up front; otherwise bare names like
+    // `rg`/`zig` fail to exec with FileNotFound.
+    const resolved_binary: ?[]u8 = if (argv.len > 0)
+        try resolveBinaryPath(allocator, io, argv[0])
+    else
+        null;
+    defer if (resolved_binary) |b| allocator.free(b);
+
+    var argv_storage: ?[][]const u8 = null;
+    defer if (argv_storage) |s| allocator.free(s);
+    const exec_argv: []const []const u8 = if (resolved_binary) |abs| blk: {
+        const s = try allocator.alloc([]const u8, argv.len);
+        s[0] = abs;
+        @memcpy(s[1..], argv[1..]);
+        argv_storage = s;
+        break :blk s;
+    } else argv;
+
+    const run_result = try std.process.run(allocator, io, .{
+        .argv = exec_argv,
         .cwd = .{ .path = cwd },
         .stdout_limit = .limited(default_output_limit),
         .stderr_limit = .limited(default_output_limit),
@@ -243,4 +291,28 @@ test "workspaceRoot: returns an absolute cwd path" {
     defer allocator.free(root);
     try testing.expect(root.len > 0);
     try testing.expect(std.fs.path.isAbsolute(root));
+}
+
+test "resolveBinaryPath resolves a bare command name to an absolute path" {
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    // `sh` lives in /bin, which is on PATH and in default_search_path.
+    const resolved = try resolveBinaryPath(testing.allocator, io_backend.io(), "sh");
+    defer if (resolved) |r| testing.allocator.free(r);
+    try testing.expect(resolved != null);
+    try testing.expect(std.fs.path.isAbsolute(resolved.?));
+    try testing.expect(std.mem.endsWith(u8, resolved.?, "/sh"));
+}
+
+test "resolveBinaryPath returns null when the name already contains a slash" {
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try testing.expect((try resolveBinaryPath(testing.allocator, io_backend.io(), "./foo")) == null);
+    try testing.expect((try resolveBinaryPath(testing.allocator, io_backend.io(), "/usr/bin/env")) == null);
+}
+
+test "resolveBinaryPath returns null for a name not on PATH" {
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try testing.expect((try resolveBinaryPath(testing.allocator, io_backend.io(), "definitely_not_a_real_binary_zzqx")) == null);
 }

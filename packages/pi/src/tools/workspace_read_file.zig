@@ -22,6 +22,11 @@ fn execute(
     var path_opt: ?[]const u8 = null;
     var start_line: usize = 1;
     var end_line: ?usize = null;
+    // A JSON-derived path must outlive `parsed.deinit()` (it is used below for
+    // resolveInsideWorkspace + the file read); the raw `args` slices are
+    // caller-owned and outlive this call, so only the parsed value is duped.
+    var owned_path: ?[]u8 = null;
+    defer if (owned_path) |p| allocator.free(p);
 
     if (args.len > 0 and args[0].len > 0 and args[0][0] == '{') {
         var parsed = std.json.parseFromSlice(std.json.Value, allocator, args[0], .{}) catch {
@@ -32,7 +37,8 @@ fn execute(
         const obj = parsed.value.object;
         const path_val = obj.get("path") orelse return registry_mod.ToolResult.err(allocator, name ++ ": missing path\n");
         if (path_val != .string) return registry_mod.ToolResult.err(allocator, name ++ ": path must be a string\n");
-        path_opt = path_val.string;
+        owned_path = try allocator.dupe(u8, path_val.string);
+        path_opt = owned_path;
         if (obj.get("start_line")) |value| {
             if (value != .integer or value.integer <= 0) return registry_mod.ToolResult.err(allocator, name ++ ": start_line must be a positive integer\n");
             start_line = @intCast(value.integer);
