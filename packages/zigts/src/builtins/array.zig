@@ -541,19 +541,26 @@ pub fn arraySlice(ctx: *context.Context, this: value.JSValue, args: []const valu
 }
 
 /// Array.prototype.concat(...items) - Merge arrays
+/// Append every element of `src` (an array object) onto `dst`. Returns false
+/// if a push allocation fails. Shared by arrayConcat's receiver and array-arg
+/// copies.
+fn appendArrayElements(ctx: *context.Context, dst: *object.JSObject, src: *object.JSObject) bool {
+    const len = getArrayLength(src, ctx.hidden_class_pool);
+    const ulen: u32 = if (len > 0) @intCast(len) else 0;
+    var i: u32 = 0;
+    while (i < ulen) : (i += 1) {
+        const elem = src.getIndex(i) orelse value.JSValue.undefined_val;
+        dst.arrayPush(ctx.allocator, elem) catch return false;
+    }
+    return true;
+}
+
 pub fn arrayConcat(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const pool = ctx.hidden_class_pool;
     const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
 
     // Copy the receiver's elements first.
     if (getObject(this)) |obj| {
-        const len = getArrayLength(obj, pool);
-        const ulen: u32 = if (len > 0) @intCast(len) else 0;
-        var i: u32 = 0;
-        while (i < ulen) : (i += 1) {
-            const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
-            result.arrayPush(ctx.allocator, elem) catch return value.JSValue.undefined_val;
-        }
+        if (!appendArrayElements(ctx, result, obj)) return value.JSValue.undefined_val;
     }
 
     // Per spec: array arguments are flattened one level; every other value is
@@ -561,14 +568,7 @@ pub fn arrayConcat(ctx: *context.Context, this: value.JSValue, args: []const val
     for (args) |arg| {
         const maybe_arr = getObject(arg);
         if (maybe_arr != null and maybe_arr.?.class_id == .array) {
-            const arr = maybe_arr.?;
-            const len = getArrayLength(arr, pool);
-            const ulen: u32 = if (len > 0) @intCast(len) else 0;
-            var i: u32 = 0;
-            while (i < ulen) : (i += 1) {
-                const elem = arr.getIndex(i) orelse value.JSValue.undefined_val;
-                result.arrayPush(ctx.allocator, elem) catch return value.JSValue.undefined_val;
-            }
+            if (!appendArrayElements(ctx, result, maybe_arr.?)) return value.JSValue.undefined_val;
         } else {
             result.arrayPush(ctx.allocator, arg) catch return value.JSValue.undefined_val;
         }

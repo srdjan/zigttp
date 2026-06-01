@@ -560,10 +560,10 @@ pub const ContractBuilder = struct {
         }
 
         const declared_specs_implicit = raw_names.items.len == 0;
-        const active_names: []const []const u8 = if (!declared_specs_implicit)
-            raw_names.items
+        const active_names: []const []const u8 = if (declared_specs_implicit)
+            &spec_discharge.v1_spec_names
         else
-            &spec_discharge.v1_spec_names;
+            raw_names.items;
 
         outer: for (active_names) |raw| {
             for (owned.items) |existing| {

@@ -334,9 +334,10 @@ fn resolveWorkspaceRootAbs(allocator: std.mem.Allocator, workspace_root: []const
     if (std.fs.path.isAbsolute(workspace_root)) {
         return std.fs.path.resolve(allocator, &.{workspace_root});
     }
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const cwd = std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io_backend.io(), ".", allocator) catch {
+    // Anchor a relative root at the real cwd via the same helper the workspace
+    // read tools use, so the apply path and those tools agree. Fall back to a
+    // lexical resolve if the cwd lookup fails.
+    const cwd = tools_common.realCwd(allocator) catch {
         return std.fs.path.resolve(allocator, &.{workspace_root});
     };
     defer allocator.free(cwd);

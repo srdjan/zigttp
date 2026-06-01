@@ -1135,44 +1135,34 @@ const Stripper = struct {
     // Assertion Stripping (Phase 5)
     // ========================================================================
 
-    fn tryStripAsAssertion(self: *Self, _: usize) StripError!bool {
-        // We just scanned 'as' - check if it's an assertion
-        self.skipWhitespaceTracked();
-
-        if (!self.looksLikeTypeStart()) {
-            return false;
-        }
-
+    /// Shared tail of the `as`/`satisfies` assertion handlers: record the
+    /// rejection, then either recover (collect mode: drop the asserted type and
+    /// keep scanning so EVERY later site is reported too - output is
+    /// diagnostics-only) or abort with `err`.
+    fn rejectTypeAssertion(self: *Self, kind: StripDiagnosticKind, err: StripError) StripError!bool {
         if (self.report_errors) {
-            std.log.err("{}:{}: {s}", .{ self.line, self.col, StripDiagnosticKind.as_assertion.message() });
+            std.log.err("{}:{}: {s}", .{ self.line, self.col, kind.message() });
         }
-        self.recordDiagnostic(.as_assertion);
+        self.recordDiagnostic(kind);
         if (self.collect_all_diagnostics) {
-            // Drop the asserted type and keep scanning so EVERY later cast is
-            // also reported in this pass. Output is diagnostics-only here.
             self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', ',', ')', ']', '}' }, false) catch {};
             return true;
         }
-        return StripError.UnsupportedAsAssertion;
+        return err;
+    }
+
+    fn tryStripAsAssertion(self: *Self, _: usize) StripError!bool {
+        // We just scanned 'as' - check if it's an assertion
+        self.skipWhitespaceTracked();
+        if (!self.looksLikeTypeStart()) return false;
+        return self.rejectTypeAssertion(.as_assertion, StripError.UnsupportedAsAssertion);
     }
 
     fn tryStripSatisfiesAssertion(self: *Self, _: usize) StripError!bool {
         // We just scanned 'satisfies'
         self.skipWhitespaceTracked();
-
-        if (!self.looksLikeTypeStart()) {
-            return false;
-        }
-
-        if (self.report_errors) {
-            std.log.err("{}:{}: {s}", .{ self.line, self.col, StripDiagnosticKind.satisfies_assertion.message() });
-        }
-        self.recordDiagnostic(.satisfies_assertion);
-        if (self.collect_all_diagnostics) {
-            self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', ',', ')', ']', '}' }, false) catch {};
-            return true;
-        }
-        return StripError.UnsupportedSatisfiesAssertion;
+        if (!self.looksLikeTypeStart()) return false;
+        return self.rejectTypeAssertion(.satisfies_assertion, StripError.UnsupportedSatisfiesAssertion);
     }
 
     // ========================================================================
