@@ -458,6 +458,13 @@ pub const ReviewFacts = struct {
         const declared_specs = try parseSpecArray(allocator, obj);
         errdefer freeSpecList(allocator, declared_specs);
 
+        // Read back the intent-summary fields writeJson emits; without this they
+        // silently reset to 0/false on every round-trip through deploy-state.json.
+        const intent_assertion_count: usize = @intCast(@max(0, json_util.getI64(obj, "intentAssertionCount") orelse 0));
+        const behavior_path_count: usize = @intCast(@max(0, json_util.getI64(obj, "behaviorPathCount") orelse 0));
+        const failure_path_count: usize = @intCast(@max(0, json_util.getI64(obj, "failurePathCount") orelse 0));
+        const intent_dynamic = if (obj.get("intentDynamic")) |v| (v == .bool and v.bool) else false;
+
         return .{
             .contract_sha = sha,
             .proof_level = level,
@@ -468,6 +475,10 @@ pub const ReviewFacts = struct {
             .capabilities = capabilities,
             .properties = props,
             .declared_specs = declared_specs,
+            .intent_assertion_count = intent_assertion_count,
+            .intent_dynamic = intent_dynamic,
+            .behavior_path_count = behavior_path_count,
+            .failure_path_count = failure_path_count,
         };
     }
 };
@@ -612,6 +623,14 @@ pub fn deriveDelta(
     else
         .{ .old = b.proof_level, .new = current.proof_level };
 
+    // Convert both lists into owned slices before assembling the struct, with an
+    // errdefer covering the window between the two conversions: once promoted is
+    // toOwnedSlice'd its ArrayList errdefer above no longer frees the returned
+    // slice, so a failing demoted conversion would otherwise leak it.
+    const promoted_slice = try promoted.toOwnedSlice(allocator);
+    errdefer allocator.free(promoted_slice);
+    const demoted_slice = try demoted.toOwnedSlice(allocator);
+
     return .{
         .added_env = added_env,
         .removed_env = removed_env,
@@ -624,8 +643,8 @@ pub fn deriveDelta(
         .added_capabilities = added_caps,
         .removed_capabilities = removed_caps,
         .proof_level_change = level_change,
-        .promoted_properties = try promoted.toOwnedSlice(allocator),
-        .demoted_properties = try demoted.toOwnedSlice(allocator),
+        .promoted_properties = promoted_slice,
+        .demoted_properties = demoted_slice,
     };
 }
 

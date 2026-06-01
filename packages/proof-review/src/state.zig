@@ -175,16 +175,36 @@ fn parseEntry(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Entry {
         }
     }
 
+    // Allocate each owned field into a named local with its own errdefer: in the
+    // old struct-literal form, a later dupe failing leaked the already-duped
+    // earlier fields (fields evaluate left to right, and the literal as a whole
+    // has no cleanup).
+    const name = json_util.dupeRequired(allocator, obj, "name") catch return error.InvalidDeployState;
+    errdefer allocator.free(name);
+    const scope_id = json_util.dupeRequired(allocator, obj, "scopeId") catch return error.InvalidDeployState;
+    errdefer allocator.free(scope_id);
+    const service_id = json_util.dupeRequired(allocator, obj, "serviceId") catch return error.InvalidDeployState;
+    errdefer allocator.free(service_id);
+    const region = try json_util.dupeOptional(allocator, obj, "region");
+    errdefer if (region) |v| allocator.free(v);
+    const plan_id = try json_util.dupeOptional(allocator, obj, "planId");
+    errdefer if (plan_id) |v| allocator.free(v);
+    const url = try json_util.dupeOptional(allocator, obj, "url");
+    errdefer if (url) |v| allocator.free(v);
+    const last_image_digest = try json_util.dupeOptional(allocator, obj, "lastImageDigest");
+    errdefer if (last_image_digest) |v| allocator.free(v);
+    const managed_env_keys = try managed.toOwnedSlice(allocator);
+
     return .{
         .provider = provider,
-        .name = json_util.dupeRequired(allocator, obj, "name") catch return error.InvalidDeployState,
-        .scope_id = json_util.dupeRequired(allocator, obj, "scopeId") catch return error.InvalidDeployState,
-        .service_id = json_util.dupeRequired(allocator, obj, "serviceId") catch return error.InvalidDeployState,
-        .region = try json_util.dupeOptional(allocator, obj, "region"),
-        .plan_id = try json_util.dupeOptional(allocator, obj, "planId"),
-        .url = try json_util.dupeOptional(allocator, obj, "url"),
-        .last_image_digest = try json_util.dupeOptional(allocator, obj, "lastImageDigest"),
-        .managed_env_keys = try managed.toOwnedSlice(allocator),
+        .name = name,
+        .scope_id = scope_id,
+        .service_id = service_id,
+        .region = region,
+        .plan_id = plan_id,
+        .url = url,
+        .last_image_digest = last_image_digest,
+        .managed_env_keys = managed_env_keys,
         .last_review_facts = last_review_facts,
     };
 }
