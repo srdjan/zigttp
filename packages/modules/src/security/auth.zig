@@ -132,15 +132,19 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
 
     const now = @divTrunc(sdk.nowMs(handle) catch return sdk.resultErr(handle, "clock error"), 1000);
 
+    // A present-but-non-numeric (or non-finite) exp/nbf must be rejected, not
+    // silently treated as unconstrained: otherwise `{"exp":"9"}` bypasses
+    // expiry. Only a wholly-absent claim skips the check. lossyCast clamps the
+    // in-range conversion so a huge value cannot panic.
     if (sdk.objectGet(handle, claims_val, "exp")) |exp_val| {
-        if (sdk.extractFloat(exp_val)) |exp_f| {
-            if (now > @as(i64, @intFromFloat(exp_f))) return sdk.resultErr(handle, "token expired");
-        }
+        const exp_f = sdk.extractFloat(exp_val) orelse return sdk.resultErr(handle, "invalid exp claim");
+        if (!std.math.isFinite(exp_f)) return sdk.resultErr(handle, "invalid exp claim");
+        if (now > std.math.lossyCast(i64, exp_f)) return sdk.resultErr(handle, "token expired");
     }
     if (sdk.objectGet(handle, claims_val, "nbf")) |nbf_val| {
-        if (sdk.extractFloat(nbf_val)) |nbf_f| {
-            if (now < @as(i64, @intFromFloat(nbf_f))) return sdk.resultErr(handle, "token not yet valid");
-        }
+        const nbf_f = sdk.extractFloat(nbf_val) orelse return sdk.resultErr(handle, "invalid nbf claim");
+        if (!std.math.isFinite(nbf_f)) return sdk.resultErr(handle, "invalid nbf claim");
+        if (now < std.math.lossyCast(i64, nbf_f)) return sdk.resultErr(handle, "token not yet valid");
     }
 
     return sdk.resultOk(handle, claims_val);

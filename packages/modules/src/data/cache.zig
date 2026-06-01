@@ -180,6 +180,14 @@ pub const CacheStore = struct {
             existing.expires_at = if (ttl) |t| now_s + t else null;
             self.total_bytes += existing.byte_size;
             self.promoteToHead(existing);
+            // Overwriting with a larger value can push total_bytes past the
+            // budget; shed LRU entries like the insert path does. The just-
+            // written entry is at the head, so evictLru (tail-first) sheds
+            // others first; the total_entries > 1 guard keeps us from evicting
+            // it when it is the sole entry.
+            while (self.total_entries > 1 and self.total_bytes >= self.max_bytes) {
+                if (!self.evictLru()) break;
+            }
             return;
         }
 

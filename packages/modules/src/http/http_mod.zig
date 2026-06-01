@@ -38,10 +38,41 @@ fn parseCookiesImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk
     return obj;
 }
 
+/// True if `s` carries a cookie-injection vector: a control char (incl. CR/LF,
+/// which would split the Set-Cookie header) or a ';' (the cookie-attribute
+/// separator, which would let a value forge extra attributes). Commas and
+/// spaces are allowed so legitimate Expires dates still pass.
+fn cookieFieldHasInjection(s: []const u8) bool {
+    for (s) |c| {
+        if (c < 0x20 or c == 0x7F) return true;
+        if (c == ';') return true;
+    }
+    return false;
+}
+
+/// A cookie name must be a valid RFC 6265 token: no controls, whitespace, or
+/// separator characters.
+fn cookieNameInvalid(name: []const u8) bool {
+    if (name.len == 0) return true;
+    for (name) |c| {
+        if (c <= 0x20 or c >= 0x7F) return true;
+        switch (c) {
+            '(', ')', '<', '>', '@', ',', ';', ':', '\\', '"', '/', '[', ']', '?', '=', '{', '}' => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn setCookieImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
     if (args.len < 2) return sdk.JSValue.undefined_val;
     const name = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
     const val = sdk.extractString(args[1]) orelse return sdk.JSValue.undefined_val;
+
+    // Reject forged names/values up front so a malicious value can never inject
+    // extra cookie attributes or split the response header.
+    if (cookieNameInvalid(name)) return sdk.JSValue.undefined_val;
+    if (cookieFieldHasInjection(val)) return sdk.JSValue.undefined_val;
 
     const allocator = sdk.getAllocator(handle);
     var buf = std.ArrayList(u8).empty;
@@ -55,20 +86,23 @@ fn setCookieImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
         const opts = args[2];
 
         if (getStringProp(handle, opts, "path")) |path| {
+            if (cookieFieldHasInjection(path)) return sdk.JSValue.undefined_val;
             try buf.appendSlice(allocator, "; Path=");
             try buf.appendSlice(allocator, path);
         }
         if (getStringProp(handle, opts, "domain")) |domain| {
+            if (cookieFieldHasInjection(domain)) return sdk.JSValue.undefined_val;
             try buf.appendSlice(allocator, "; Domain=");
             try buf.appendSlice(allocator, domain);
         }
         if (getNumberProp(handle, opts, "maxAge")) |max_age| {
             try buf.appendSlice(allocator, "; Max-Age=");
             var num_buf: [20]u8 = undefined;
-            const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{@as(i64, @intFromFloat(max_age))}) catch "";
+            const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{std.math.lossyCast(i64, max_age)}) catch "";
             try buf.appendSlice(allocator, num_str);
         }
         if (getStringProp(handle, opts, "expires")) |expires| {
+            if (cookieFieldHasInjection(expires)) return sdk.JSValue.undefined_val;
             try buf.appendSlice(allocator, "; Expires=");
             try buf.appendSlice(allocator, expires);
         }
@@ -79,6 +113,10 @@ fn setCookieImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
             if (secure) try buf.appendSlice(allocator, "; Secure");
         }
         if (getStringProp(handle, opts, "sameSite")) |same_site| {
+            // Constrain to the three valid values rather than reflecting raw input.
+            if (!std.mem.eql(u8, same_site, "Strict") and
+                !std.mem.eql(u8, same_site, "Lax") and
+                !std.mem.eql(u8, same_site, "None")) return sdk.JSValue.undefined_val;
             try buf.appendSlice(allocator, "; SameSite=");
             try buf.appendSlice(allocator, same_site);
         }

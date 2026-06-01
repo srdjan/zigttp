@@ -174,8 +174,11 @@ fn rateCheckImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     if (limit_i < 1) return sdk.JSValue.undefined_val;
     const limit: u32 = @intCast(limit_i);
     const window_f = sdk.extractFloat(args[2]) orelse return sdk.JSValue.undefined_val;
-    if (window_f < 1) return sdk.JSValue.undefined_val;
-    const window_sec: i64 = @intFromFloat(window_f);
+    // NaN < 1 is false, so guard non-finite explicitly before the cast; an
+    // out-of-range @intFromFloat would otherwise be illegal behavior. lossyCast
+    // saturates the in-range conversion.
+    if (!std.math.isFinite(window_f) or window_f < 1) return sdk.JSValue.undefined_val;
+    const window_sec: i64 = std.math.lossyCast(i64, window_f);
 
     const now_ms = sdk.nowMs(handle) catch return sdk.JSValue.undefined_val;
     const now_s = @divTrunc(now_ms, 1000);
