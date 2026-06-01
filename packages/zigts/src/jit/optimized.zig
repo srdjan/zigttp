@@ -76,15 +76,40 @@ const HoistedFieldGuard = struct {
 };
 
 /// Maximum number of locals that can be register-allocated for a loop
-pub const MAX_LOOP_REG_LOCALS: usize = if (is_x86_64) 4 else 6;
+pub const MAX_LOOP_REG_LOCALS: usize = if (is_x86_64) 1 else 6;
 
-/// x86-64 registers available for loop variable allocation
-/// These are callee-saved registers not used by baseline JIT:
-/// rbx = context pointer, r12-r15 = available for loop locals
-const X86_LOOP_REGS = [_]x86.Register{ .r12, .r13, .r14, .r15 };
+/// x86-64 registers available for loop variable allocation.
+/// These must be callee-saved registers that are NOT already reserved for the
+/// JIT's fixed roles: rbp = native frame pointer, rbx = context pointer, and
+/// r13/r14/r15 cache ctx.sp/ctx.stack/ctx.fp (see getSpCacheReg/
+/// getStackPtrCacheReg/getFramePointerReg). That leaves only r12 free. Handing
+/// a loop local any of r13/r14/r15 would alias the operand-stack machinery and
+/// corrupt memory on every push/pop or local access inside the loop.
+const X86_LOOP_REGS = [_]x86.Register{.r12};
 
-/// ARM64 registers available for loop variable allocation
+/// ARM64 registers available for loop variable allocation. Disjoint from the
+/// cache registers x20/x21/x22 (stack/sp/fp).
 const ARM64_LOOP_REGS = [_]arm64.Register{ .x23, .x24, .x25, .x26, .x27, .x28 };
+
+// The loop-local register pool must never alias the stack-cache registers, or
+// every operand-stack push/pop and local access inside a loop would corrupt a
+// live loop variable (or vice versa). Enforced at compile time so the
+// invariant cannot silently regress.
+comptime {
+    if (is_x86_64) {
+        for (X86_LOOP_REGS) |r| {
+            if (r == getSpCacheReg() or r == getStackPtrCacheReg() or r == getFramePointerReg()) {
+                @compileError("X86_LOOP_REGS aliases a stack-cache register (r13/r14/r15)");
+            }
+        }
+    } else if (is_aarch64) {
+        for (ARM64_LOOP_REGS) |r| {
+            if (r == getSpCacheReg() or r == getStackPtrCacheReg() or r == getFramePointerReg()) {
+                @compileError("ARM64_LOOP_REGS aliases a stack-cache register (x20/x21/x22)");
+            }
+        }
+    }
+}
 
 /// Loop optimization state
 pub const OptimizedLoop = struct {
@@ -2507,11 +2532,17 @@ test "OptimizedLoop register assignment" {
     var loop = OptimizedLoop.init(loop_info);
     loop.assignRegisters();
 
-    try std.testing.expectEqual(@as(u8, 3), loop.reg_local_count);
+    // The pool is greedy in local-index order. x86_64 has a single safe loop
+    // register (r12), so only the first accessed local (0) is register-allocated;
+    // aarch64 has six, so all three accessed locals (0, 2, 5) get registers.
+    const pool_len: u8 = if (is_x86_64) @intCast(X86_LOOP_REGS.len) else @intCast(ARM64_LOOP_REGS.len);
+    try std.testing.expectEqual(@min(@as(u8, 3), pool_len), loop.reg_local_count);
     try std.testing.expect(loop.local_to_reg[0] != null);
-    try std.testing.expect(loop.local_to_reg[2] != null);
-    try std.testing.expect(loop.local_to_reg[5] != null);
     try std.testing.expect(loop.local_to_reg[1] == null);
+    if (pool_len >= 3) {
+        try std.testing.expect(loop.local_to_reg[2] != null);
+        try std.testing.expect(loop.local_to_reg[5] != null);
+    }
 }
 
 test "LoopInfo accessed locals" {
