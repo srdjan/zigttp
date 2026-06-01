@@ -1256,7 +1256,8 @@ pub const StrictChecker = struct {
 
 fn literalRequiredArg(module: []const u8, name: []const u8) ?u8 {
     if (std.mem.eql(u8, module, "zigttp:env") and std.mem.eql(u8, name, "env")) return 0;
-    if (std.mem.eql(u8, module, "zigttp:fetch") and std.mem.eql(u8, name, "fetchSync")) return 0;
+    if (std.mem.eql(u8, module, "zigttp:fetch") and
+        (std.mem.eql(u8, name, "fetch") or std.mem.eql(u8, name, "fetchSync"))) return 0;
     if (std.mem.eql(u8, module, "zigttp:service") and std.mem.eql(u8, name, "serviceCall")) return 0;
     if (std.mem.eql(u8, module, "zigttp:sql")) return 0;
     if (std.mem.eql(u8, module, "zigttp:cache")) return 0;

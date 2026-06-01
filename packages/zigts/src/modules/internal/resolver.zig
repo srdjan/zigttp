@@ -95,7 +95,9 @@ pub fn registerVirtualModuleReplay(comptime binding: mb.ModuleBinding, ctx: *con
 
     inline for (binding.exports) |exp| {
         const base_func = comptime wrappedExportFn(binding, exp);
-        const func = if (comptime shouldWrapExport(binding, exp))
+        const func = if (comptime isFetchExport(binding, exp))
+            base_func
+        else if (comptime shouldWrapExport(binding, exp))
             comptime trace.makeReplayStub(binding.name, exp.name)
         else
             base_func;
@@ -144,6 +146,10 @@ fn registerNativeExport(
 
 fn shouldWrapExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) bool {
     return !binding.comptime_only and !binding.self_managed_io and func_binding.traceable;
+}
+
+fn isFetchExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) bool {
+    return std.mem.eql(u8, binding.specifier, "zigttp:fetch") and std.mem.eql(u8, func_binding.name, "fetch");
 }
 
 fn wrappedExportFn(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) object.NativeFn {

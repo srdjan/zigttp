@@ -17,9 +17,12 @@
 //   # The second call replays from <durable>/fetch/<hash>.step —
 //   # upstream sees exactly one request for key charge-abc-123.
 
+import type { Spec } from "zigttp:types";
 import { fetch } from "zigttp:fetch";
 
-export function handler(req: Request): Response {
+type WebhookProof = Spec<"state_isolated" | "no_secret_leakage">;
+
+function handler(req: Request): Response & WebhookProof {
   if (req.path !== "/charge") {
     return Response.text("not found", { status: 404 });
   }

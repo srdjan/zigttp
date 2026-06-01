@@ -49,10 +49,17 @@ Calling into the virtual modules (the in-binary stdlib that replaces npm).
 - [modules.ts](modules/modules.ts) - imports a handful of modules and uses them in one handler.
 - [modules_all.ts](modules/modules_all.ts) - touches every shipped virtual module so the contract extractor exercises each binding.
 
+### fetch/
+
+Outbound HTTP through the `zigttp:fetch` module. Start these examples
+with an explicit outbound host allow-list.
+
+- [weather-forecasts.ts](fetch/weather-forecasts.ts) - calls the keyless Open-Meteo API and parses the JSON response.
+- [webhook.ts](fetch/webhook.ts) - durable POST forwarding with idempotency-key replay.
+
 ### Advanced surfaces
 
 - **durable/** - `run`, `step`, `waitSignal` from `zigttp:durable`. Replay-safe execution. See [approval.ts](durable/approval.ts).
-- **fetch/** - the `fetch` web-standard binding from `zigttp:fetch`.
 - **parallel/** - `parallel` and `race` from `zigttp:io`.
 - **websocket/** - WebSocket events with `serializeAttachment` and rooms.
 - **sql/** - the `sql` tagged template from `zigttp:sql`.

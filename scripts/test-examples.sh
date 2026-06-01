@@ -63,6 +63,9 @@ run_tests "examples/jsx/jsx-ssr.tsx"       "examples/jsx/jsx-ssr.test.jsonl"
 run_tests "examples/modules/modules.ts"      "examples/modules/modules.test.jsonl"
 run_tests "examples/modules/modules_all.ts"  "examples/modules/modules_all.test.jsonl"
 
+# fetch/
+run_tests "examples/fetch/weather-forecasts.ts" "examples/fetch/weather-forecasts.test.jsonl"
+
 # routing/
 run_tests "examples/routing/router.ts"         "examples/routing/router.test.jsonl"
 run_tests "examples/routing/guard-compose.ts"  "examples/routing/guard-compose.test.jsonl"

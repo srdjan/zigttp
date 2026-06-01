@@ -42,6 +42,50 @@ fn mapReturnKind(
     };
 }
 
+fn addParam(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8, type_idx: TypeIndex) FuncParam {
+    const n = pool.addName(allocator, name);
+    return .{
+        .name_start = n.start,
+        .name_len = n.len,
+        .type_idx = type_idx,
+        .optional = false,
+    };
+}
+
+fn addField(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8, type_idx: TypeIndex) type_pool_mod.RecordField {
+    const n = pool.addName(allocator, name);
+    return .{
+        .name_start = n.start,
+        .name_len = n.len,
+        .type_idx = type_idx,
+        .optional = false,
+    };
+}
+
+fn addFetchResponseType(pool: *TypePool, allocator: std.mem.Allocator, optional_string: TypeIndex) TypeIndex {
+    const name_param = addParam(pool, allocator, "name", pool.idx_string);
+    const headers_get = pool.addFunctionWithReturn(allocator, &.{name_param}, optional_string);
+    const headers_has = pool.addFunctionWithReturn(allocator, &.{name_param}, pool.idx_boolean);
+    const headers = pool.addRecord(allocator, &.{
+        addField(pool, allocator, "get", headers_get),
+        addField(pool, allocator, "has", headers_has),
+    });
+
+    const no_params: []const FuncParam = &.{};
+    const json_fn = pool.addFunctionWithReturn(allocator, no_params, pool.idx_unknown);
+    const text_fn = pool.addFunctionWithReturn(allocator, no_params, pool.idx_string);
+
+    return pool.addRecord(allocator, &.{
+        addField(pool, allocator, "ok", pool.idx_boolean),
+        addField(pool, allocator, "status", pool.idx_number),
+        addField(pool, allocator, "statusText", pool.idx_string),
+        addField(pool, allocator, "body", pool.idx_string),
+        addField(pool, allocator, "headers", headers),
+        addField(pool, allocator, "json", json_fn),
+        addField(pool, allocator, "text", text_fn),
+    });
+}
+
 /// Populate the TypeEnv with full type signatures for all virtual module exports.
 /// Reads from the builtin_modules registry instead of hardcoded tables.
 pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
@@ -59,11 +103,14 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
     const optional_string = pool.addNullable(allocator, pool.idx_string);
     const object_ref = pool.addRef(allocator, "object");
     const optional_object = pool.addNullable(allocator, object_ref);
+    const fetch_response = addFetchResponseType(pool, allocator, optional_string);
 
     // Register all function signatures from the module registry
     for (builtin_modules.all) |binding| {
         for (binding.exports) |func| {
-            const return_type_idx = mapReturnKind(
+            const is_fetch = std.mem.eql(u8, binding.specifier, "zigttp:fetch") and
+                std.mem.eql(u8, func.name, "fetch");
+            const return_type_idx = if (is_fetch) fetch_response else mapReturnKind(
                 func.returns,
                 pool,
                 result_type,
@@ -74,7 +121,8 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
 
             var sig = type_env_mod.FunctionSig{};
             sig.return_type = return_type_idx;
-            const param_count: u8 = @intCast(@min(func.param_types.len, 16));
+            const param_len = if (is_fetch) @min(func.param_types.len, 1) else func.param_types.len;
+            const param_count: u8 = @intCast(@min(param_len, 16));
             sig.param_count = param_count;
             for (func.param_types[0..param_count], 0..) |pt, i| {
                 sig.param_types[i] = mapReturnKind(

@@ -493,6 +493,16 @@ pub const TypePool = struct {
         return self.members.items[start .. start + count];
     }
 
+    /// Get tuple elements.
+    pub fn getTupleElements(self: *const TypePool, idx: TypeIndex) []const TypeIndex {
+        const data = self.getData(idx) orelse return &.{};
+        if (self.getTag(idx) != .t_tuple) return &.{};
+        const start = data.a;
+        const count = data.b;
+        if (start + count > self.members.items.len) return &.{};
+        return self.members.items[start .. start + count];
+    }
+
     /// Look up a record field by name. Returns the field if found.
     pub fn lookupRecordField(self: *const TypePool, idx: TypeIndex, field_name: []const u8) ?RecordField {
         const fields = self.getRecordFields(idx);
@@ -748,6 +758,16 @@ pub const TypePool = struct {
         if (src_tag == .t_literal_string and tgt_tag == .t_string) return true;
         if (src_tag == .t_literal_number and tgt_tag == .t_number) return true;
         if (src_tag == .t_literal_bool and tgt_tag == .t_boolean) return true;
+
+        // Heterogeneous array literals infer as tuples. They are assignable
+        // to T[] when every element is assignable to T.
+        if (src_tag == .t_tuple and tgt_tag == .t_array) {
+            const target_element = self.getArrayElement(target);
+            for (self.getTupleElements(source)) |element| {
+                if (!self.isAssignableTo(element, target_element)) return false;
+            }
+            return true;
+        }
 
         // Literal string assignable to template literal type if it matches the pattern
         if (src_tag == .t_literal_string and tgt_tag == .t_template_literal) {
@@ -1683,6 +1703,37 @@ test "isAssignableTo record structural" {
 
     try std.testing.expect(pool.isAssignableTo(src, tgt));
     try std.testing.expect(!pool.isAssignableTo(tgt, src)); // missing required field y
+}
+
+test "isAssignableTo tuple literal to array target" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const text = pool.addName(allocator, "text");
+    const done = pool.addName(allocator, "done");
+    const todo = pool.addRecord(allocator, &.{
+        .{ .name_start = text.start, .name_len = text.len, .type_idx = pool.idx_string, .optional = false },
+        .{ .name_start = done.start, .name_len = done.len, .type_idx = pool.idx_boolean, .optional = false },
+    });
+
+    const text_a = pool.addName(allocator, "text");
+    const done_a = pool.addName(allocator, "done");
+    const item_a = pool.addRecord(allocator, &.{
+        .{ .name_start = text_a.start, .name_len = text_a.len, .type_idx = pool.addLiteralString(allocator, "Learn Zig"), .optional = false },
+        .{ .name_start = done_a.start, .name_len = done_a.len, .type_idx = pool.addLiteralBool(allocator, true), .optional = false },
+    });
+
+    const text_b = pool.addName(allocator, "text");
+    const done_b = pool.addName(allocator, "done");
+    const item_b = pool.addRecord(allocator, &.{
+        .{ .name_start = text_b.start, .name_len = text_b.len, .type_idx = pool.addLiteralString(allocator, "Deploy"), .optional = false },
+        .{ .name_start = done_b.start, .name_len = done_b.len, .type_idx = pool.addLiteralBool(allocator, false), .optional = false },
+    });
+
+    const tuple = pool.addTuple(allocator, &.{ item_a, item_b });
+    const array = pool.addArray(allocator, todo);
+    try std.testing.expect(pool.isAssignableTo(tuple, array));
 }
 
 test "isAssignableTo nullable" {

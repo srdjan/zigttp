@@ -3201,6 +3201,10 @@ fn fetchModuleCallback(
     const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
     const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
+    if (rt.config.replay_file_path != null) {
+        return fetchModuleReplay(rt);
+    }
+
     const init_obj: ?*zq.JSObject = blk: {
         if (args.len >= 1 and args[0].isObject()) break :blk args[0].toPtr(zq.JSObject);
         if (args.len >= 2 and args[1].isObject()) break :blk args[1].toPtr(zq.JSObject);
@@ -3215,6 +3219,133 @@ fn fetchModuleCallback(
         }
     }
     return fetchSyncNative(@ptrCast(rt.ctx), zq.JSValue.undefined_val, args);
+}
+
+fn fetchModuleReplay(rt: *Runtime) !zq.JSValue {
+    const state = rt.ctx.getModuleState(zq.trace.ReplayState, zq.trace.REPLAY_STATE_SLOT) orelse {
+        return createFetchErrorResponse(rt, "ReplayNotConfigured", "fetch replay state is not installed");
+    };
+    const entry_opt = if (replayNextIs(state, "http", "fetchSync")) blk: {
+        const inner = state.nextIO("http", "fetchSync");
+        // Traced zigttp:fetch records fetchSync first, then the outer module
+        // wrapper. Replay executes the module implementation directly, so it
+        // must consume both rows to keep the cursor aligned.
+        if (replayNextIs(state, "fetch", "fetch")) {
+            _ = state.nextIO("fetch", "fetch");
+        }
+        break :blk inner;
+    } else state.nextIO("fetch", "fetch");
+    const entry = entry_opt orelse {
+        return createFetchErrorResponse(rt, "ReplayMiss", "no recorded zigttp:fetch response");
+    };
+
+    const status_raw = zq.trace.findJsonIntValue(entry.result_json, "\"status\"") orelse 200;
+    const status: u16 = @intCast(@max(100, @min(599, status_raw)));
+
+    const status_text_raw = zq.trace.findJsonStringValue(entry.result_json, "\"statusText\"") orelse "OK";
+    const status_text = try zq.trace.unescapeJson(rt.allocator, status_text_raw);
+    defer rt.allocator.free(status_text);
+
+    const body_raw = zq.trace.findJsonStringValue(entry.result_json, "\"body\"");
+    const body = if (body_raw) |raw|
+        try zq.trace.unescapeJson(rt.allocator, raw)
+    else
+        try rt.allocator.dupe(u8, entry.result_json);
+    defer rt.allocator.free(body);
+
+    const headers_json = zq.trace.findJsonObjectValue(entry.result_json, "\"headers\"");
+    const content_type_raw = if (headers_json) |headers|
+        zq.trace.findJsonStringValue(headers, "\"content-type\"") orelse
+            zq.trace.findJsonStringValue(headers, "\"Content-Type\"")
+    else
+        zq.trace.findJsonStringValue(entry.result_json, "\"contentType\"");
+    const content_type_owned = if (content_type_raw) |raw|
+        try zq.trace.unescapeJson(rt.allocator, raw)
+    else
+        try rt.allocator.dupe(u8, "application/json");
+    defer rt.allocator.free(content_type_owned);
+
+    const created = try createFetchResponse(rt, status, status_text, body, content_type_owned);
+    if (headers_json) |headers| {
+        try copyRecordedFetchHeaders(rt, created.headers, headers);
+    }
+    return created.value;
+}
+
+fn replayNextIs(state: *const zq.trace.ReplayState, module_name: []const u8, fn_name: []const u8) bool {
+    const cursor: usize = @intCast(state.cursor);
+    if (cursor >= state.io_calls.len) return false;
+    const entry = state.io_calls[cursor];
+    return std.mem.eql(u8, entry.module, module_name) and std.mem.eql(u8, entry.func, fn_name);
+}
+
+fn copyRecordedFetchHeaders(rt: *Runtime, headers_obj: *zq.JSObject, headers_json: []const u8) !void {
+    var pos = skipJsonWhitespace(headers_json, 0);
+    if (pos >= headers_json.len or headers_json[pos] != '{') return;
+    pos += 1;
+
+    while (pos < headers_json.len) {
+        pos = skipJsonWhitespace(headers_json, pos);
+        if (pos >= headers_json.len or headers_json[pos] == '}') return;
+        if (headers_json[pos] != '"') return;
+
+        const key_raw = jsonStringSlice(headers_json, pos) orelse return;
+        pos = key_raw.end;
+        pos = skipJsonWhitespace(headers_json, pos);
+        if (pos >= headers_json.len or headers_json[pos] != ':') return;
+        pos += 1;
+        pos = skipJsonWhitespace(headers_json, pos);
+        if (pos >= headers_json.len or headers_json[pos] != '"') return;
+
+        const value_raw = jsonStringSlice(headers_json, pos) orelse return;
+        pos = value_raw.end;
+
+        const key = try zq.trace.unescapeJson(rt.allocator, key_raw.data);
+        defer rt.allocator.free(key);
+        const value = try zq.trace.unescapeJson(rt.allocator, value_raw.data);
+        defer rt.allocator.free(value);
+
+        const key_atom = try getHeaderAtom(rt.ctx, key);
+        const value_str = try rt.ctx.createString(value);
+        try rt.ctx.setPropertyChecked(headers_obj, key_atom, value_str);
+
+        pos = skipJsonWhitespace(headers_json, pos);
+        if (pos < headers_json.len and headers_json[pos] == ',') {
+            pos += 1;
+            continue;
+        }
+        if (pos < headers_json.len and headers_json[pos] == '}') return;
+    }
+}
+
+const JsonStringSlice = struct {
+    data: []const u8,
+    end: usize,
+};
+
+fn jsonStringSlice(json: []const u8, start: usize) ?JsonStringSlice {
+    if (start >= json.len or json[start] != '"') return null;
+    var pos = start + 1;
+    const data_start = pos;
+    while (pos < json.len) : (pos += 1) {
+        if (json[pos] == '\\') {
+            pos += 1;
+            continue;
+        }
+        if (json[pos] == '"') {
+            return .{ .data = json[data_start..pos], .end = pos + 1 };
+        }
+    }
+    return null;
+}
+
+fn skipJsonWhitespace(json: []const u8, start: usize) usize {
+    var pos = start;
+    while (pos < json.len and switch (json[pos]) {
+        ' ', '\t', '\r', '\n' => true,
+        else => false,
+    }) : (pos += 1) {}
+    return pos;
 }
 
 const DurableFetchOpts = durable_fetch.Options;
@@ -5811,8 +5942,7 @@ test "parallel fetch allows allowlisted host and drops disallowed one" {
         .egress = .{ .enabled = true, .values = &[_][]const u8{"127.0.0.1"} },
     };
 
-    const handler_code = try std.fmt.allocPrint(
-        allocator,
+    const handler_code = try std.fmt.allocPrint(allocator,
         \\import {{ parallel }} from "zigttp:io";
         \\function allowed() {{ return fetchSync("{s}"); }}
         \\function blocked() {{ return fetchSync("http://example.com/x"); }}
@@ -6007,6 +6137,90 @@ test "fetchSync sends request data and exposes response helpers" {
     try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "Content-Type: text/plain\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "X-Test: alpha\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "\r\n\r\nping") != null);
+}
+
+test "zigttp fetch replay consumes traced inner and outer rows and preserves headers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .replay_file_path = "test",
+        .enforce_arena_escape = false,
+    });
+    defer rt.deinit();
+
+    const io_calls = [_]zq.trace.IoEntry{
+        .{
+            .seq = 0,
+            .module = "http",
+            .func = "fetchSync",
+            .args_json = "[\"http://example.com/weather\"]",
+            .result_json = "{\"status\":200,\"statusText\":\"OK\",\"ok\":true,\"headers\":{\"content-type\":\"application/json\",\"x-request-id\":\"trace-123\"},\"body\":\"{\\\"temperature\\\":21}\"}",
+        },
+        .{
+            .seq = 1,
+            .module = "fetch",
+            .func = "fetch",
+            .args_json = "[\"http://example.com/weather\"]",
+            .result_json = "{\"status\":200,\"statusText\":\"OK\",\"ok\":true,\"headers\":{\"content-type\":\"application/json\",\"x-request-id\":\"trace-123\"},\"body\":\"{\\\"temperature\\\":21}\"}",
+        },
+        .{
+            .seq = 2,
+            .module = "env",
+            .func = "env",
+            .args_json = "[\"NEXT\"]",
+            .result_json = "\"after-fetch\"",
+        },
+    };
+    var replay_state = zq.trace.ReplayState{
+        .io_calls = &io_calls,
+        .cursor = 0,
+        .divergences = 0,
+    };
+    rt.ctx.setModuleState(
+        zq.trace.REPLAY_STATE_SLOT,
+        @ptrCast(&replay_state),
+        &zq.trace.ReplayState.deinitOpaque,
+    );
+    defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
+
+    const handler_code =
+        \\import { fetch } from "zigttp:fetch";
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const response = fetch("http://example.com/weather");
+        \\  const body = response.json();
+        \\  return Response.json({
+        \\    requestId: response.headers.get("x-request-id"),
+        \\    contentType: response.headers.get("content-type"),
+        \\    temperature: body.temperature,
+        \\    next: env("NEXT")
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<fetch-replay-trace>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("trace-123", obj.get("requestId").?.string);
+    try std.testing.expectEqualStrings("application/json", obj.get("contentType").?.string);
+    try std.testing.expectEqual(@as(i64, 21), obj.get("temperature").?.integer);
+    try std.testing.expectEqualStrings("after-fetch", obj.get("next").?.string);
+    try std.testing.expectEqual(@as(u32, 3), replay_state.cursor);
+    try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
 }
 
 test "buildServiceUrl renders service params and query" {
