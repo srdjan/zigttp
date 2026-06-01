@@ -140,13 +140,25 @@ fn extractFromInit(deps: Deps, init_idx: NodeIndex) !IntentInfo {
     return info;
 }
 
+/// Honor the documented invariant that `dynamic = true` implies an empty
+/// assertion list: free and clear any assertions collected so far before
+/// flagging the intent as dynamic. Without this, a literal array whose final
+/// element is non-literal would leave the earlier (already-appended) assertions
+/// in the list while also reporting dynamic, contradicting the contract and
+/// leaking those assertions' owned strings if the caller trusts `dynamic`.
+fn markDynamic(deps: Deps, info: *IntentInfo) void {
+    for (info.assertions.items) |*a| a.deinit(deps.allocator);
+    info.assertions.clearRetainingCapacity();
+    info.dynamic = true;
+}
+
 fn collectAssertions(deps: Deps, array_idx: NodeIndex, info: *IntentInfo) !void {
     const arr = deps.ir_view.getArray(array_idx) orelse {
-        info.dynamic = true;
+        markDynamic(deps, info);
         return;
     };
     if (arr.has_spread) {
-        info.dynamic = true;
+        markDynamic(deps, info);
         return;
     }
 
@@ -154,17 +166,17 @@ fn collectAssertions(deps: Deps, array_idx: NodeIndex, info: *IntentInfo) !void 
     while (i < arr.elements_count) : (i += 1) {
         const elem_idx = deps.ir_view.getListIndex(arr.elements_start, @intCast(i));
         const elem_tag = deps.ir_view.getTag(elem_idx) orelse {
-            info.dynamic = true;
+            markDynamic(deps, info);
             return;
         };
         if (elem_tag != .object_literal) {
-            info.dynamic = true;
+            markDynamic(deps, info);
             return;
         }
 
         const assertion = parseAssertion(deps, elem_idx) catch |err| switch (err) {
             error.NotLiteral, error.MissingField => {
-                info.dynamic = true;
+                markDynamic(deps, info);
                 return;
             },
             else => return err,

@@ -821,6 +821,9 @@ fn parseSqlQueries(
             if (std.mem.eql(u8, key, "name")) {
                 allocator.free(query.name);
                 query.name = try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "statement")) {
+                allocator.free(query.statement);
+                query.statement = try allocator.dupe(u8, parser.readString() orelse "");
             } else if (std.mem.eql(u8, key, "operation")) {
                 query.operation = parseOwnedStaticOperation(parser.readString() orelse "");
             } else if (std.mem.eql(u8, key, "tables")) {
@@ -830,8 +833,8 @@ fn parseSqlQueries(
             }
         }
 
-        allocator.free(query.statement);
-        query.statement = try allocator.dupe(u8, "");
+        // statement is now read back above when present; the prior unconditional
+        // reset here is what made `prove` see a changed query body as equivalent.
         try list.append(allocator, query);
     }
 }

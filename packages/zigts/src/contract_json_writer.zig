@@ -186,6 +186,11 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("        \"name\": ");
         try writeJsonString(writer, query.name);
         try writer.writeAll(",\n");
+        // Persist the statement text: it is the identity discriminator that lets
+        // `prove` classify a same-name query whose body changed as breaking.
+        try writer.writeAll("        \"statement\": ");
+        try writeJsonString(writer, query.statement);
+        try writer.writeAll(",\n");
         try writer.writeAll("        \"operation\": ");
         try writeJsonString(writer, query.operation);
         try writer.writeAll(",\n");
