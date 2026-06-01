@@ -1002,8 +1002,10 @@ pub fn createStringWithArena(arena: *arena_mod.Arena, s: []const u8) ?*JSString 
 
 /// Concatenate two strings using arena allocation
 pub fn concatStringsWithArena(arena: *arena_mod.Arena, a: *const JSString, b: *const JSString) ?*JSString {
-    const total_len = a.len + b.len;
-    const total_size = @sizeOf(JSString) + total_len;
+    // Checked add: a wraparound here would under-allocate and let the memcpy
+    // below write past the buffer (heap corruption).
+    const total_len = std.math.add(u32, a.len, b.len) catch return null;
+    const total_size = @sizeOf(JSString) + @as(usize, total_len);
     const mem = arena.alloc(total_size) orelse return null;
 
     const str: *JSString = @ptrCast(@alignCast(mem));
@@ -1030,8 +1032,11 @@ pub fn concatStringsWithArena(arena: *arena_mod.Arena, a: *const JSString, b: *c
 
 /// Concatenate two strings
 pub fn concatStrings(allocator: std.mem.Allocator, a: *const JSString, b: *const JSString) !*JSString {
-    const total_len = a.len + b.len;
-    const total_size = @sizeOf(JSString) + total_len;
+    // Checked add: a wraparound here would under-allocate and let the memcpy
+    // below write past the buffer (heap corruption). A length that overflows u32
+    // cannot be represented in JSString.len, so surface it as OutOfMemory.
+    const total_len = std.math.add(u32, a.len, b.len) catch return error.OutOfMemory;
+    const total_size = @sizeOf(JSString) + @as(usize, total_len);
     const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
 
     const str: *JSString = @ptrCast(@alignCast(mem.ptr));
@@ -1071,16 +1076,17 @@ pub fn concatMany(allocator: std.mem.Allocator, strings: []const *const JSString
         return try concatStrings(allocator, strings[0], strings[1]);
     }
 
-    // Calculate total length and check ASCII
+    // Calculate total length and check ASCII (checked add: a wraparound would
+    // under-allocate and let the per-string memcpy below run past the buffer).
     var total_len: u32 = 0;
     var all_ascii = true;
     for (strings) |s| {
-        total_len += s.len;
+        total_len = std.math.add(u32, total_len, s.len) catch return error.OutOfMemory;
         all_ascii = all_ascii and s.flags.is_ascii;
     }
 
     // Single allocation for result
-    const total_size = @sizeOf(JSString) + total_len;
+    const total_size = @sizeOf(JSString) + @as(usize, total_len);
     const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
 
     const str: *JSString = @ptrCast(@alignCast(mem.ptr));
@@ -1120,16 +1126,17 @@ pub fn concatManyWithArena(arena: *arena_mod.Arena, strings: []const *const JSSt
         return concatStringsWithArena(arena, strings[0], strings[1]);
     }
 
-    // Calculate total length and check ASCII
+    // Calculate total length and check ASCII (checked add: a wraparound would
+    // under-allocate and let the per-string memcpy below run past the buffer).
     var total_len: u32 = 0;
     var all_ascii = true;
     for (strings) |s| {
-        total_len += s.len;
+        total_len = std.math.add(u32, total_len, s.len) catch return null;
         all_ascii = all_ascii and s.flags.is_ascii;
     }
 
     // Single allocation for result
-    const total_size = @sizeOf(JSString) + total_len;
+    const total_size = @sizeOf(JSString) + @as(usize, total_len);
     const mem = arena.alloc(total_size) orelse return null;
 
     const str: *JSString = @ptrCast(@alignCast(mem));

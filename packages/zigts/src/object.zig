@@ -1983,7 +1983,13 @@ pub const JSObject = extern struct {
     fn ensureOverflowCapacity(self: *JSObject, allocator: std.mem.Allocator, min_capacity: u16) !void {
         if (self.overflow_capacity >= min_capacity) return;
 
-        const new_capacity = @max(min_capacity, self.overflow_capacity * 2, 4);
+        // Grow geometrically but compute in u32 so the doubling cannot overflow
+        // the u16 capacity before being clamped to its ceiling. setIndex caps
+        // index < MAX_DENSE_ARRAY_LEN, so min_capacity always fits a u16 and the
+        // clamp can never drop below it.
+        const doubled: u32 = @as(u32, self.overflow_capacity) *| 2;
+        const want: u32 = @max(@as(u32, min_capacity), doubled, 4);
+        const new_capacity: u16 = @intCast(@min(want, @as(u32, std.math.maxInt(u16))));
 
         // Use arena for arena objects, standard allocator otherwise
         const new_slots: []value.JSValue = if (self.arena_ptr) |arena| blk: {
@@ -2276,9 +2282,23 @@ pub const JSObject = extern struct {
         return self.overflow_slots.?[slot - INLINE_SLOT_COUNT];
     }
 
+    /// Highest index a dense array can store. The overflow backing is addressed
+    /// by a u16 capacity, so element slot = index + 1 must stay within u16; we
+    /// also reserve headroom for the slot-0 length, giving maxInt(u16) usable
+    /// indices. Larger indices are rejected rather than silently truncated.
+    pub const MAX_DENSE_ARRAY_LEN: u32 = std.math.maxInt(u16);
+
     /// Set element at index (for arrays)
     pub fn setIndex(self: *JSObject, allocator: std.mem.Allocator, index: u32, val: value.JSValue) !void {
         if (self.class_id != .array) return;
+
+        // Reject indices the dense u16-capacity backing cannot address. This
+        // runs BEFORE setArrayLength so the recorded length can never exceed the
+        // backing, and before the narrowing @intCast below so a request near
+        // 2^32 can never truncate into a wrong (in-bounds) overflow slot and
+        // corrupt the heap. Surfaced as OutOfMemory (already in every caller's
+        // error set) so it cleanly becomes a JS exception via setIndexChecked.
+        if (index >= MAX_DENSE_ARRAY_LEN) return error.OutOfMemory;
 
         // Update length if needed
         const current_len = self.getArrayLength();
@@ -2635,6 +2655,28 @@ test "JSObject getIndex and setIndex" {
     const val = arr.getIndex(0);
     try std.testing.expect(val != null);
     try std.testing.expectEqual(@as(i32, 42), val.?.getInt());
+}
+
+test "JSObject setIndex rejects out-of-range index without truncating" {
+    const allocator = std.testing.allocator;
+
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
+
+    var arr = try JSObject.createArray(allocator, pool.getEmptyClass());
+    defer arr.destroy(allocator);
+
+    // An index at/above the dense ceiling must fail cleanly rather than
+    // truncate into an in-bounds overflow slot (heap corruption) or panic.
+    try std.testing.expectError(error.OutOfMemory, arr.setIndex(allocator, JSObject.MAX_DENSE_ARRAY_LEN, value.JSValue.fromInt(1)));
+    try std.testing.expectError(error.OutOfMemory, arr.setIndex(allocator, 0xFFFFFFFF, value.JSValue.fromInt(1)));
+    // The rejected store must not have advanced the array length.
+    try std.testing.expectEqual(@as(u32, 0), arr.getArrayLength());
+
+    // A large-but-addressable index still works and grows the backing safely.
+    try arr.setIndex(allocator, 40000, value.JSValue.fromInt(7));
+    try std.testing.expectEqual(@as(u32, 40001), arr.getArrayLength());
+    try std.testing.expectEqual(@as(i32, 7), arr.getIndex(40000).?.getInt());
 }
 
 test "JSObject arrayPush" {

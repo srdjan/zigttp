@@ -19,6 +19,7 @@ const bytecode = @import("bytecode.zig");
 const value = @import("value.zig");
 const string = @import("string.zig");
 const heap = @import("heap.zig");
+const ic = @import("interpreter/ic.zig");
 
 /// Cache key derived from source content
 pub const CacheKey = [32]u8;
@@ -692,6 +693,12 @@ pub fn validateBytecode(func: *const bytecode.FunctionBytecodeCompact, total_siz
             .make_closure => {
                 const func_idx = std.mem.readInt(u16, code[pos + 1 ..][0..2], .little);
                 if (func_idx >= func.const_count) return error.InvalidBytecode;
+            },
+            // cache_idx (at pos+3) indexes Interpreter.pic_cache directly; reject
+            // an out-of-range value rather than allow an OOB read/write at run time.
+            .get_field_ic, .put_field_ic => {
+                const cache_idx = std.mem.readInt(u16, code[pos + 3 ..][0..2], .little);
+                if (cache_idx >= ic.IC_CACHE_SIZE) return error.InvalidBytecode;
             },
             else => {},
         }

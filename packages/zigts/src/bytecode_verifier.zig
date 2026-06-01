@@ -13,6 +13,7 @@
 const std = @import("std");
 const bytecode = @import("bytecode.zig");
 const value = @import("value.zig");
+const ic = @import("interpreter/ic.zig");
 
 const Opcode = bytecode.Opcode;
 const FunctionBytecode = bytecode.FunctionBytecode;
@@ -27,6 +28,7 @@ pub const VerifyError = error{
     StackOverflow,
     LocalIndexOutOfBounds,
     UpvalueIndexOutOfBounds,
+    CacheIndexOutOfBounds,
     EmptyBytecode,
 };
 
@@ -125,6 +127,22 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
                 if (upvalue_count > 0 and func.upvalue_count == 0) {
                     // This is a closure creation, not a self-reference check
                     // The upvalue_count in the instruction refers to the child function's upvalues
+                }
+            },
+            // Inline-cache index validation. get_field_ic/put_field_ic index
+            // Interpreter.pic_cache[cache_idx] directly (and the JIT intrinsics
+            // do too), so an out-of-range index is a hard OOB read/write. The
+            // compiler never emits one, but corrupted/crafted bytecode could.
+            // Layout: opcode + u16 atom + u16 cache_idx, so cache_idx is at pc+3.
+            .get_field_ic, .put_field_ic => {
+                const cache_idx = readU16(code, pc + 3);
+                if (cache_idx >= ic.IC_CACHE_SIZE) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.CacheIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "inline-cache index out of bounds",
+                    };
                 }
             },
             // Local variable index validation (Phase 5)
@@ -345,6 +363,10 @@ fn verifyWithoutBoundaries(func: *const FunctionBytecode) VerifyResult {
                 if (readU16(code, pc + 1) >= constants_len)
                     return .{ .valid = false, .err = VerifyError.ConstantIndexOutOfBounds, .offset = pc, .message = "constant index out of bounds" };
             },
+            .get_field_ic, .put_field_ic => {
+                if (readU16(code, pc + 3) >= ic.IC_CACHE_SIZE)
+                    return .{ .valid = false, .err = VerifyError.CacheIndexOutOfBounds, .offset = pc, .message = "inline-cache index out of bounds" };
+            },
             else => {},
         }
 
@@ -502,6 +524,28 @@ test "verify: local index out of bounds rejected" {
     const result = verify(&func);
     try std.testing.expect(!result.valid);
     try std.testing.expectEqual(VerifyError.LocalIndexOutOfBounds, result.err.?);
+}
+
+test "verify: inline-cache index out of bounds rejected" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.get_field_ic),
+            0, 0, // atom index 0
+            0x58, 0x02, // cache_idx = 600, >= IC_CACHE_SIZE (512)
+            @intFromEnum(Opcode.ret_undefined),
+        },
+        .constants = &.{},
+        .source_map = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.CacheIndexOutOfBounds, result.err.?);
 }
 
 test "verify: valid local access passes" {
