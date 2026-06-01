@@ -46,8 +46,19 @@ pub fn containsString(haystack: []const []const u8, needle: []const u8) bool {
 /// returned literal to label the rejection so the user sees the flag they
 /// actually typed, not a hardcoded `--cloud`.
 pub fn deployArgsRequestCloud(argv: []const []const u8) ?[]const u8 {
-    for (argv) |arg| {
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
         if (std.mem.eql(u8, arg, "--cloud")) return "--cloud";
+        // `--target <value>` (and `--target=<value>`) with any non-local target
+        // means cloud, which is deferred this beta: route it to the same clean
+        // rejection as --cloud rather than a confusing "unknown argument".
+        if (std.mem.eql(u8, arg, "--target")) {
+            if (i + 1 < argv.len and !std.mem.eql(u8, argv[i + 1], "local")) return "--target";
+        }
+        if (std.mem.startsWith(u8, arg, "--target=")) {
+            if (!std.mem.eql(u8, arg["--target=".len..], "local")) return "--target";
+        }
         if (containsString(&cloud_only_deploy_flags, arg)) return arg;
     }
     return null;

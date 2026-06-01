@@ -548,15 +548,13 @@ test "Store: save then load roundtrip via tmp HOME" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const fake_home = try tmp.dir.realpathAlloc(std.testing.io, allocator, ".");
-    defer allocator.free(fake_home);
-    const home_z = try allocator.dupeZ(u8, fake_home);
+    const home_z = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(home_z);
 
     const previous_home = std.c.getenv("HOME");
     _ = setenv("HOME", home_z.ptr, 1);
     defer if (previous_home) |p| {
-        _ = std.c.setenv("HOME", p, 1);
+        _ = setenv("HOME", p, 1);
     } else {
         _ = unsetenv("HOME");
     };

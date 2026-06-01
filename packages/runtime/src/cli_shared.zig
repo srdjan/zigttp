@@ -129,6 +129,9 @@ pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
             std.mem.eql(u8, arg, "--outbound-host") or
             std.mem.eql(u8, arg, "--outbound-timeout-ms") or
             std.mem.eql(u8, arg, "--outbound-max-response") or
+            std.mem.eql(u8, arg, "--max-body-size") or
+            std.mem.eql(u8, arg, "--security-log") or
+            std.mem.eql(u8, arg, "--lifecycle") or
             std.mem.eql(u8, arg, "--sqlite") or
             std.mem.eql(u8, arg, "--trace") or
             std.mem.eql(u8, arg, "--replay") or

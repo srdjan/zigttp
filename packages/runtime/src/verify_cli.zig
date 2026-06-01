@@ -115,7 +115,10 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     defer result.deinit();
 
     if (opts.trust_key_fingerprint_hex) |expected| {
-        if (!std.mem.eql(u8, expected, &result.fingerprint_hex)) {
+        // Hex is case-insensitive, so compare case-insensitively: an uppercase
+        // or mixed-case --trust-key copy of the (lowercase) fingerprint must
+        // still match. A genuinely different key still fails closed.
+        if (!std.ascii.eqlIgnoreCase(expected, &result.fingerprint_hex)) {
             writeStderrFmt(
                 "verify: key fingerprint does not match --trust-key\n  expected: {s}\n  actual:   {s}\n",
                 .{ expected, result.fingerprint_hex },

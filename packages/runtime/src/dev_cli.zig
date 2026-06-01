@@ -52,6 +52,11 @@ test {
     _ = @import("build_command.zig");
     _ = @import("dev_command.zig");
     _ = @import("cli_help.zig");
+    // cli_auth and verify_cli are likewise only reached via main's dispatch;
+    // reference them so their tests (API-key store 0600 perms/masking, and the
+    // Ed25519 verifier arg parsing incl. trust-key validation) actually run.
+    _ = @import("cli_auth.zig");
+    _ = @import("verify_cli.zig");
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -197,7 +202,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (std.mem.eql(u8, command, "serve")) {
         // Convenience: dev CLI can also serve a handler locally for quick testing.
-        try runtime_cli.serveCommand(allocator, user_args[1..]);
+        // Map parse/usage failures to a clean nonzero exit with a hint instead of
+        // propagating a raw Zig error (which prints a stack trace).
+        runtime_cli.serveCommand(allocator, user_args[1..]) catch |err| {
+            std.debug.print("serve: {s}. Run `zigttp serve --help` for usage.\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
         return;
     }
     if (std.mem.eql(u8, command, "edge")) {
