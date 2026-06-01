@@ -14,49 +14,92 @@ pub const tool: registry_mod.ToolDef = .{
     .execute = execute,
 };
 
+/// Resolved invocation args. When the input is JSON, `query`/`path` point into
+/// `owned_query`/`owned_path`, which the caller frees via `deinit`. When the
+/// input is positional, they alias the caller-owned `args` slices and the owned
+/// buffers are null. Either way the slices outlive the JSON parse tree.
+const ParsedArgs = struct {
+    query: []const u8,
+    path: []const u8,
+    limit: usize,
+    owned_query: ?[]u8 = null,
+    owned_path: ?[]u8 = null,
+
+    fn deinit(self: *const ParsedArgs, allocator: std.mem.Allocator) void {
+        if (self.owned_query) |q| allocator.free(q);
+        if (self.owned_path) |p| allocator.free(p);
+    }
+};
+
+const ParseResult = union(enum) {
+    ok: ParsedArgs,
+    /// A structured error to hand straight back to the caller (owns its text).
+    err: registry_mod.ToolResult,
+};
+
+/// Parse and validate the tool input. JSON-derived strings are duped only after
+/// every field validates, so no error path leaks an allocation, and the duped
+/// query/path outlive `parsed.deinit()` (the use-after-free fixed in ae881b6).
+fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseResult {
+    if (args.len > 0 and args[0].len > 0 and args[0][0] == '{') {
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, args[0], .{}) catch {
+            return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": invalid JSON input\n") };
+        };
+        defer parsed.deinit();
+        if (parsed.value != .object) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": expected JSON object\n") };
+        const obj = parsed.value.object;
+        const query_val = obj.get("query") orelse return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": missing query\n") };
+        if (query_val != .string) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": query must be a string\n") };
+
+        var path_str: ?[]const u8 = null;
+        if (obj.get("path")) |value| {
+            if (value != .string) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": path must be a string\n") };
+            path_str = value.string;
+        }
+        var limit: usize = 50;
+        if (obj.get("limit")) |value| {
+            if (value != .integer or value.integer <= 0) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": limit must be a positive integer\n") };
+            limit = @intCast(value.integer);
+        }
+
+        // Everything validated: dupe the strings out of the parse tree before it
+        // is torn down on return.
+        const owned_query = try allocator.dupe(u8, query_val.string);
+        errdefer allocator.free(owned_query);
+        const owned_path: ?[]u8 = if (path_str) |ps| try allocator.dupe(u8, ps) else null;
+
+        return .{ .ok = .{
+            .query = owned_query,
+            .path = owned_path orelse ".",
+            .limit = limit,
+            .owned_query = owned_query,
+            .owned_path = owned_path,
+        } };
+    } else if (args.len > 0) {
+        return .{ .ok = .{
+            .query = args[0],
+            .path = if (args.len > 1) args[1] else ".",
+            .limit = 50,
+        } };
+    } else {
+        return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": missing query\n") };
+    }
+}
+
 fn execute(
     allocator: std.mem.Allocator,
     args: []const []const u8,
 ) anyerror!registry_mod.ToolResult {
-    var query_opt: ?[]const u8 = null;
-    var path: []const u8 = ".";
-    var limit: usize = 50;
-    // JSON-derived strings must outlive `parsed.deinit()`; the raw `args` slices
-    // are owned by the caller and outlive this call, so only the parsed values
-    // are duped.
-    var owned_query: ?[]u8 = null;
-    defer if (owned_query) |q| allocator.free(q);
-    var owned_path: ?[]u8 = null;
-    defer if (owned_path) |p| allocator.free(p);
+    const parsed_args = switch (try parseArgs(allocator, args)) {
+        .err => |e| return e,
+        .ok => |p| p,
+    };
+    defer parsed_args.deinit(allocator);
 
-    if (args.len > 0 and args[0].len > 0 and args[0][0] == '{') {
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, args[0], .{}) catch {
-            return registry_mod.ToolResult.err(allocator, name ++ ": invalid JSON input\n");
-        };
-        defer parsed.deinit();
-        if (parsed.value != .object) return registry_mod.ToolResult.err(allocator, name ++ ": expected JSON object\n");
-        const obj = parsed.value.object;
-        const query_val = obj.get("query") orelse return registry_mod.ToolResult.err(allocator, name ++ ": missing query\n");
-        if (query_val != .string) return registry_mod.ToolResult.err(allocator, name ++ ": query must be a string\n");
-        owned_query = try allocator.dupe(u8, query_val.string);
-        query_opt = owned_query;
-        if (obj.get("path")) |value| {
-            if (value != .string) return registry_mod.ToolResult.err(allocator, name ++ ": path must be a string\n");
-            owned_path = try allocator.dupe(u8, value.string);
-            path = owned_path.?;
-        }
-        if (obj.get("limit")) |value| {
-            if (value != .integer or value.integer <= 0) return registry_mod.ToolResult.err(allocator, name ++ ": limit must be a positive integer\n");
-            limit = @intCast(value.integer);
-        }
-    } else if (args.len > 0) {
-        query_opt = args[0];
-        if (args.len > 1) path = args[1];
-    } else {
-        return registry_mod.ToolResult.err(allocator, name ++ ": missing query\n");
-    }
+    const query = parsed_args.query;
+    const path = parsed_args.path;
+    const limit = parsed_args.limit;
 
-    const query = query_opt.?;
     const root = try common.workspaceRoot(allocator);
     defer allocator.free(root);
     const absolute = try common.resolveInsideWorkspace(allocator, root, path);
@@ -158,4 +201,39 @@ test "workspace_search_text: ../ escape is rejected by resolveInsideWorkspace" {
         error.PathOutsideWorkspace,
         execute(testing.allocator, &.{ "needle", "../../etc" }),
     );
+}
+
+// Unwrap a successful parse for tests, freeing the error and failing the test
+// on a structured error. The returned ParsedArgs owns its buffers; the caller
+// deinits it.
+fn parseOk(allocator: std.mem.Allocator, args: []const []const u8) !ParsedArgs {
+    var result = try parseArgs(allocator, args);
+    switch (result) {
+        .err => |*e| {
+            e.deinit(allocator);
+            return error.UnexpectedParseError;
+        },
+        .ok => |p| return p,
+    }
+}
+
+test "workspace_search_text: JSON-derived query survives parse-tree teardown (ae881b6 use-after-free)" {
+    // The values must still read correctly after the JSON tree they were parsed
+    // from is freed. Before ae881b6 the query was a dangling slice into that
+    // freed tree, reaching `rg` as garbage (zero matches). The testing allocator
+    // also flags a leak if the owned buffers escape.
+    const p = try parseOk(testing.allocator, &.{"{\"query\":\"needle-xyz\",\"path\":\"src\",\"limit\":5}"});
+    defer p.deinit(testing.allocator);
+    try testing.expectEqualStrings("needle-xyz", p.query);
+    try testing.expectEqualStrings("src", p.path);
+    try testing.expectEqual(@as(usize, 5), p.limit);
+}
+
+test "workspace_search_text: positional args do not allocate owned buffers" {
+    const p = try parseOk(testing.allocator, &.{ "needle", "sub/dir" });
+    defer p.deinit(testing.allocator);
+    try testing.expectEqualStrings("needle", p.query);
+    try testing.expectEqualStrings("sub/dir", p.path);
+    try testing.expect(p.owned_query == null);
+    try testing.expect(p.owned_path == null);
 }
