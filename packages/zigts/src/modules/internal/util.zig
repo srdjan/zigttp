@@ -46,8 +46,11 @@ pub fn extractInt(val: value.JSValue) ?i32 {
     }
     if (val.isNumber()) {
         const f = val.getFloat64();
-        const i: i32 = @intFromFloat(f);
-        if (@as(f64, @floatFromInt(i)) == f) return i;
+        // Range/finiteness check BEFORE @intFromFloat: a NaN or out-of-i32
+        // float would be illegal behavior (panic / UB) otherwise.
+        if (std.math.isFinite(f) and @floor(f) == f and f >= -2147483648.0 and f <= 2147483647.0) {
+            return @intFromFloat(f);
+        }
     }
     return null;
 }

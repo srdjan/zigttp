@@ -93,8 +93,12 @@ pub const JSValue = packed struct(u64) {
 pub fn extractInt(val: JSValue) ?i32 {
     if (val.toInt()) |i| return i;
     if (val.toFloat()) |f| {
-        const i: i32 = @intFromFloat(f);
-        if (@as(f64, @floatFromInt(i)) == f) return i;
+        // Range/finiteness check BEFORE @intFromFloat: converting a NaN or an
+        // out-of-i32 float is illegal behavior (panic in safe builds, UB in
+        // ReleaseFast). Mirrors numberFromF64's guard below.
+        if (std.math.isFinite(f) and @floor(f) == f and f >= -2147483648.0 and f <= 2147483647.0) {
+            return @intFromFloat(f);
+        }
     }
     return null;
 }
