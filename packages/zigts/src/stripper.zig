@@ -74,10 +74,16 @@ pub const StripResult = struct {
     allocator: std.mem.Allocator,
     /// Type annotations extracted during stripping.
     type_map: TypeMap,
+    /// Recovered type-assertion diagnostics, populated only under
+    /// `StripOptions.collect_all_diagnostics`. Owned by this result. Empty in
+    /// the default abort-on-first-rejection mode (those still surface as a
+    /// `StripError` instead).
+    diagnostics: []const StripDiagnostic = &.{},
 
     pub fn deinit(self: *StripResult) void {
         @constCast(&self.type_map).deinit(self.allocator);
         self.allocator.free(self.code);
+        if (self.diagnostics.len > 0) self.allocator.free(self.diagnostics);
     }
 };
 
@@ -105,12 +111,21 @@ pub const StripOptions = struct {
     /// unsupported-feature rejection here before returning the StripError.
     /// Left null for OOM and other location-free failures.
     diagnostic_out: ?*?StripDiagnostic = null,
+    /// When true, type-assertion rejections (`as` / `satisfies` / `any`) do
+    /// NOT abort the strip: each site is recorded into `StripResult.diagnostics`
+    /// and stripping continues, so a single pass surfaces EVERY offending site
+    /// instead of just the first. The analysis path (`runCheckOnly`,
+    /// `edit-simulate`) opts in so the agent fixes all casts in one round-trip;
+    /// compile/verify/runtime paths leave it off so an `as` still fails hard.
+    /// The recovered code is diagnostics-only and must not be parsed as-is.
+    collect_all_diagnostics: bool = false,
 };
 
 /// Strip TypeScript types from source code
 pub fn strip(allocator: std.mem.Allocator, source: []const u8, options: StripOptions) StripError!StripResult {
     var stripper = Stripper.init(allocator, source, options);
     errdefer stripper.output.deinit(allocator);
+    errdefer stripper.diagnostics.deinit(allocator);
     defer stripper.brace_stack.deinit(allocator);
     return stripper.strip();
 }
@@ -131,6 +146,10 @@ const Stripper = struct {
     comptime_env: ?ComptimeEnv,
     report_errors: bool,
     diagnostic_out: ?*?StripDiagnostic,
+    collect_all_diagnostics: bool,
+    /// All recorded type-assertion diagnostics. In abort mode only the first is
+    /// recorded before the StripError; in collect mode every site lands here.
+    diagnostics: std.ArrayListUnmanaged(StripDiagnostic),
 
     // State
     line: u32,
@@ -169,6 +188,8 @@ const Stripper = struct {
             .comptime_env = options.comptime_env,
             .report_errors = options.report_errors,
             .diagnostic_out = options.diagnostic_out,
+            .collect_all_diagnostics = options.collect_all_diagnostics,
+            .diagnostics = .empty,
             .line = 1,
             .col = 1,
             .in_expression = false,
@@ -193,10 +214,13 @@ const Stripper = struct {
         }
 
         const code = self.output.toOwnedSlice(self.allocator) catch return StripError.OutOfMemory;
+        errdefer self.allocator.free(code);
+        const diags = self.diagnostics.toOwnedSlice(self.allocator) catch return StripError.OutOfMemory;
         return StripResult{
             .code = code,
             .allocator = self.allocator,
             .type_map = self.type_map,
+            .diagnostics = diags,
         };
     }
 
@@ -1123,6 +1147,12 @@ const Stripper = struct {
             std.log.err("{}:{}: {s}", .{ self.line, self.col, StripDiagnosticKind.as_assertion.message() });
         }
         self.recordDiagnostic(.as_assertion);
+        if (self.collect_all_diagnostics) {
+            // Drop the asserted type and keep scanning so EVERY later cast is
+            // also reported in this pass. Output is diagnostics-only here.
+            self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', ',', ')', ']', '}' }, false) catch {};
+            return true;
+        }
         return StripError.UnsupportedAsAssertion;
     }
 
@@ -1138,6 +1168,10 @@ const Stripper = struct {
             std.log.err("{}:{}: {s}", .{ self.line, self.col, StripDiagnosticKind.satisfies_assertion.message() });
         }
         self.recordDiagnostic(.satisfies_assertion);
+        if (self.collect_all_diagnostics) {
+            self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', ',', ')', ']', '}' }, false) catch {};
+            return true;
+        }
         return StripError.UnsupportedSatisfiesAssertion;
     }
 
@@ -1336,9 +1370,10 @@ const Stripper = struct {
     /// that requested structured diagnostics. A no-op when `diagnostic_out`
     /// is null. The matching `StripError` is still returned by the caller.
     fn recordDiagnostic(self: *Self, kind: StripDiagnosticKind) void {
-        if (self.diagnostic_out) |out| {
-            out.* = .{ .line = self.line, .column = self.col, .kind = kind };
-        }
+        const d: StripDiagnostic = .{ .line = self.line, .column = self.col, .kind = kind };
+        if (self.diagnostic_out) |out| out.* = d;
+        // Best-effort: an OOM here will resurface at the next allocating step.
+        self.diagnostics.append(self.allocator, d) catch {};
     }
 
     fn checkForAnyType(self: *Self) StripError!void {
@@ -1352,6 +1387,7 @@ const Stripper = struct {
             if (after >= self.source.len or !isIdentifierContinue(self.source[after])) {
                 if (self.report_errors) std.log.err("{}:{}: {s}", .{ self.line, self.col, StripDiagnosticKind.any_type.message() });
                 self.recordDiagnostic(.any_type);
+                if (self.collect_all_diagnostics) return; // recorded; keep scanning for more
                 return StripError.UnsupportedAnyType;
             }
         }
@@ -2231,6 +2267,33 @@ test "as assertion rejected" {
 test "satisfies assertion rejected" {
     const result = strip(std.testing.allocator, "const cfg = { port: 8080 } satisfies Config;", .{});
     try std.testing.expectError(StripError.UnsupportedSatisfiesAssertion, result);
+}
+
+test "collect_all_diagnostics: every as/satisfies site reported in one pass" {
+    const src =
+        \\const a = (x as string);
+        \\const b = (y as number);
+        \\const c = (z satisfies Config);
+    ;
+    var result = try strip(std.testing.allocator, src, .{ .collect_all_diagnostics = true });
+    defer @constCast(&result).deinit();
+
+    // All three rejections are reported; none aborts the strip.
+    try std.testing.expectEqual(@as(usize, 3), result.diagnostics.len);
+    var as_count: usize = 0;
+    var sat_count: usize = 0;
+    for (result.diagnostics) |d| switch (d.kind) {
+        .as_assertion => as_count += 1,
+        .satisfies_assertion => sat_count += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), as_count);
+    try std.testing.expectEqual(@as(usize, 1), sat_count);
+}
+
+test "collect_all_diagnostics off: first as still aborts (default unchanged)" {
+    const result = strip(std.testing.allocator, "const a = (x as string); const b = (y as number);", .{});
+    try std.testing.expectError(StripError.UnsupportedAsAssertion, result);
 }
 
 // ============================================================================

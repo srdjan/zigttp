@@ -947,6 +947,10 @@ pub fn runCheckOnlyFromSourceWithOptions(
             .enable_comptime = true,
             .comptime_env = .{},
             .diagnostic_out = &strip_diag,
+            // Report EVERY `as`/`satisfies`/`any` site in one pass instead of
+            // aborting at the first, so an agent (or `check`) fixes them all in
+            // a single round-trip rather than one per round-trip.
+            .collect_all_diagnostics = true,
         }) catch |err| {
             if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
             if (strip_diag) |d| {
@@ -955,6 +959,16 @@ pub fn runCheckOnlyFromSourceWithOptions(
             result.parse_errors = 1;
             return result;
         };
+        // Recovered type-assertion diagnostics: surface them all and stop before
+        // parse. The recovered code has the assertions dropped, so parsing it
+        // would analyze a different program than the author wrote.
+        if (strip_result.?.diagnostics.len > 0) {
+            for (strip_result.?.diagnostics) |d| {
+                result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
+            }
+            result.parse_errors = @intCast(strip_result.?.diagnostics.len);
+            return result;
+        }
         source_to_parse = strip_result.?.code;
     }
 
