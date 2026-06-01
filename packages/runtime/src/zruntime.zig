@@ -87,6 +87,11 @@ pub const Runtime = struct {
     cached_handler_arg_count: u8,
     cached_dispatch: ?*const zq.bytecode.PatternDispatchTable,
     config: RuntimeConfig,
+    /// The pool reload-generation this runtime was compiled for. The pool's
+    /// live-reload / egress-policy swap bumps the pool counter; ensureRuntime
+    /// rebuilds this runtime when it falls behind. Defaults to 0 so existing
+    /// initializers need not set it.
+    pool_generation: u64 = 0,
     outbound_io_backend: ?std.Io.Threaded,
     owns_resources: bool,
     active_request_id: std.atomic.Value(u64),

@@ -60,6 +60,10 @@ pub const HandlerPool = struct {
     /// mismatch that is, by definition, only visible on cache hits.
     cache_disabled: std.atomic.Value(bool),
     runtime_init_mutex: compat.Mutex,
+    /// Bumped by reloadHandler / setDevEgressPolicy so idle runtimes rebuild
+    /// lazily on their next acquire (under runtime_init_mutex) instead of being
+    /// torn down from the reload thread while a worker may be executing on them.
+    reload_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     /// Pre-compiled bytecode embedded at build time (from -Dhandler option)
     embedded_bytecode: ?[]const u8,
     /// Runtime-provided dependency bytecodes (from self-extracting binary)
@@ -219,14 +223,17 @@ pub const HandlerPool = struct {
         self.cache_mutex.unlock();
         self.runtime_init_mutex.unlock();
 
-        // Checked-out runtimes (slot == null) are skipped here - they
-        // get reinitialized on next acquire because the cache is cleared.
+        // Bump the reload generation rather than tearing idle runtimes down from
+        // this (watcher) thread: a worker may have just CAS-acquired a slot and
+        // be executing on its user_data, so freeing it here is a use-after-free /
+        // double-free. ensureRuntime rebuilds any runtime whose generation lags,
+        // under runtime_init_mutex, on its next acquire. In-flight requests
+        // finish on the old generation. We count currently-idle runtimes purely
+        // for the caller's log line.
+        _ = self.reload_generation.fetchAdd(1, .acq_rel);
         var invalidated: usize = 0;
         for (self.pool.slots) |*slot| {
-            if (slot.load(.acquire)) |base_rt| {
-                self.invalidateRuntime(base_rt);
-                invalidated += 1;
-            }
+            if (slot.load(.acquire) != null) invalidated += 1;
         }
 
         return invalidated;
@@ -243,11 +250,11 @@ pub const HandlerPool = struct {
         self.config.dev_egress_policy = policy;
         self.runtime_init_mutex.unlock();
 
-        for (self.pool.slots) |*slot| {
-            if (slot.load(.acquire)) |base_rt| {
-                self.invalidateRuntime(base_rt);
-            }
-        }
+        // Same rationale as reloadHandler: bump the generation so idle runtimes
+        // rebuild lazily (reading the new config) under runtime_init_mutex on
+        // their next acquire, instead of being freed from this thread underneath
+        // an in-flight request.
+        _ = self.reload_generation.fetchAdd(1, .acq_rel);
     }
 
     fn nextRequestId(self: *Self) u64 {
@@ -697,18 +704,30 @@ pub const HandlerPool = struct {
     }
 
     fn ensureRuntime(self: *Self, base_rt: *zq.LockFreePool.Runtime) !*Runtime {
+        const cur_gen = self.reload_generation.load(.acquire);
         if (base_rt.user_data) |ptr| {
-            return @ptrCast(@alignCast(ptr));
+            const rt: *Runtime = @ptrCast(@alignCast(ptr));
+            // Fresh runtime: fast path. A stale one (a reload/egress swap bumped
+            // the generation while it was idle) falls through to rebuild below.
+            if (rt.pool_generation == cur_gen) return rt;
         }
 
         self.runtime_init_mutex.lock();
         defer self.runtime_init_mutex.unlock();
 
+        // Re-read under the lock; only the owning (acquiring) worker reaches here
+        // for this base_rt, so the stale teardown cannot race an in-flight request.
+        const gen = self.reload_generation.load(.acquire);
         if (base_rt.user_data) |ptr| {
-            return @ptrCast(@alignCast(ptr));
+            const rt: *Runtime = @ptrCast(@alignCast(ptr));
+            if (rt.pool_generation == gen) return rt;
+            // Stale: tear down the old generation's runtime before rebuilding so
+            // it picks up the new handler code / egress policy.
+            runtimeUserDeinit(base_rt, self.allocator);
         }
 
         const rt = try Runtime.initFromPool(base_rt, self.config);
+        rt.pool_generation = gen;
         errdefer rt.deinit();
 
         // Inject shared trace file/mutex from pool
