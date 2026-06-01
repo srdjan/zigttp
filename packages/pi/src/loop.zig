@@ -12,6 +12,7 @@ const zigts = @import("zigts");
 const file_io = zigts.file_io;
 const apply_edit = @import("providers/anthropic/apply_edit.zig");
 const tools_common = @import("tools/common.zig");
+const json_writer = @import("providers/anthropic/json_writer.zig");
 
 const PostApplyReport = struct {
     ok: bool,
@@ -434,11 +435,20 @@ fn postApplyCheck(
     var report: PostApplyReport = .{ .ok = true, .summary = null };
     errdefer if (report.summary) |s| allocator.free(s);
 
-    const verify_paths_args = try std.fmt.allocPrint(
-        arena,
-        "{{\"paths\":[\"{s}\"]}}",
-        .{prepared.edit.file},
-    );
+    // Build the args JSON with the escaping writer rather than raw {s}
+    // interpolation: edit.file is model-controlled, so a quote/backslash/control
+    // char would otherwise produce malformed JSON and silently disable this
+    // post-apply regression gate.
+    const verify_paths_args = blk: {
+        var buf: std.ArrayList(u8) = .empty;
+        var aw: std.Io.Writer.Allocating = .fromArrayList(arena, &buf);
+        const w = &aw.writer;
+        try w.writeAll("{\"paths\":[");
+        try json_writer.writeString(w, prepared.edit.file);
+        try w.writeAll("]}");
+        buf = aw.toArrayList();
+        break :blk buf.items;
+    };
     runPostApplyTool(allocator, arena, registry, transcript, &report, .{
         .tool_name = "zigts_expert_verify_paths",
         .args_json = verify_paths_args,
@@ -448,11 +458,16 @@ fn postApplyCheck(
     }) catch return report;
 
     if (prepared.edit.before != null) {
-        const review_args = try std.fmt.allocPrint(
-            arena,
-            "{{\"file\":\"{s}\",\"diff_only\":true}}",
-            .{prepared.edit.file},
-        );
+        const review_args = blk: {
+            var buf: std.ArrayList(u8) = .empty;
+            var aw: std.Io.Writer.Allocating = .fromArrayList(arena, &buf);
+            const w = &aw.writer;
+            try w.writeAll("{\"file\":");
+            try json_writer.writeString(w, prepared.edit.file);
+            try w.writeAll(",\"diff_only\":true}");
+            buf = aw.toArrayList();
+            break :blk buf.items;
+        };
         runPostApplyTool(allocator, arena, registry, transcript, &report, .{
             .tool_name = "zigts_expert_review_patch",
             .args_json = review_args,

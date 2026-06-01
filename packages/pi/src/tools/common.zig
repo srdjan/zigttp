@@ -151,6 +151,10 @@ fn resolveBinaryPath(allocator: std.mem.Allocator, io: std.Io, name: []const u8)
     var it = std.mem.tokenizeScalar(u8, path, ':');
     while (it.next()) |dir| {
         if (dir.len == 0) continue;
+        // accessAbsolute asserts an absolute path; a relative PATH entry (e.g. a
+        // stray "." or "bin") would panic. Skip those - we only resolve against
+        // absolute PATH dirs.
+        if (!std.fs.path.isAbsolute(dir)) continue;
         const candidate = std.fs.path.join(allocator, &.{ dir, name }) catch continue;
         std.Io.Dir.accessAbsolute(io, candidate, .{}) catch {
             allocator.free(candidate);

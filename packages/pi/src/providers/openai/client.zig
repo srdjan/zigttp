@@ -10,6 +10,7 @@
 //! Anthropic's "watch tool calls assemble in real time" experience.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const loop = @import("../../loop.zig");
 const turn = @import("../../turn.zig");
 const transcript_mod = @import("../../transcript.zig");
@@ -250,6 +251,10 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]u8 {
         .redirect_behavior = .unhandled,
         .keep_alive = false,
         .connection = connection,
+        // Ask for an identity (uncompressed) body; std.http.Client otherwise
+        // advertises gzip/deflate itself. We also decode transparently below so
+        // a proxy that compresses anyway is still handled.
+        .headers = .{ .accept_encoding = .omit },
         .extra_headers = &extra_headers,
     });
     defer req.deinit();
@@ -261,11 +266,33 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]u8 {
     try req.connection.?.flush();
 
     var response = try req.receiveHead(&.{});
-    if (response.head.status != .ok) return ClientError.HttpNotOk;
+    const status = response.head.status;
 
-    var read_buf: [64]u8 = undefined;
-    var reader = response.reader(&read_buf);
-    return try reader.allocRemaining(arena, .limited(max_response_body_bytes));
+    // Decode Content-Encoding/Transfer-Encoding transparently: a raw gzip/chunked
+    // body fed to the SSE parser splits on stray newline bytes and surfaces as a
+    // bogus parse error. readerDecompressing handles gzip/deflate/zstd; identity
+    // passes straight through.
+    var transfer_buf: [4096]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
+    const response_body = try reader.allocRemaining(arena, .limited(max_response_body_bytes));
+
+    if (status != .ok) {
+        // The error body is a small JSON payload carrying the real reason (bad
+        // key, exceeded quota, rate limit). Surface it instead of collapsing
+        // every failure into a bare HttpNotOk.
+        if (!builtin.is_test) {
+            std.log.err("openai API: HTTP {d} {s}: {s}", .{
+                @intFromEnum(status),
+                status.phrase() orelse "",
+                response_body,
+            });
+        }
+        return ClientError.HttpNotOk;
+    }
+
+    return response_body;
 }
 
 // -----------------------------------------------------------------------
@@ -275,18 +302,40 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]u8 {
 
 fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => {
-                try writer.print("\\u{x:0>4}", .{@as(u16, c)});
-            },
-            else => try writer.writeByte(c),
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        if (c < 0x80) {
+            switch (c) {
+                '"' => try writer.writeAll("\\\""),
+                '\\' => try writer.writeAll("\\\\"),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => {
+                    try writer.print("\\u{x:0>4}", .{@as(u16, c)});
+                },
+                else => try writer.writeByte(c),
+            }
+            i += 1;
+            continue;
         }
+        // Emit a multi-byte sequence only if it is a complete, valid UTF-8
+        // codepoint. SSE deltas can split a surrogate pair, which the JSON
+        // parser decodes to invalid CESU-8 the API rejects ("surrogates not
+        // allowed"); replace any invalid byte with U+FFFD so the body stays valid.
+        const seq_len = std.unicode.utf8ByteSequenceLength(c) catch {
+            try writer.writeAll("\u{FFFD}");
+            i += 1;
+            continue;
+        };
+        if (i + seq_len > s.len or !std.unicode.utf8ValidateSlice(s[i .. i + seq_len])) {
+            try writer.writeAll("\u{FFFD}");
+            i += 1;
+            continue;
+        }
+        try writer.writeAll(s[i .. i + seq_len]);
+        i += seq_len;
     }
     try writer.writeByte('"');
 }

@@ -4,6 +4,7 @@
 //! message. Blocks are keyed by their SSE `index` and assembled independently.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const turn = @import("../../turn.zig");
 const events = @import("events.zig");
 
@@ -40,7 +41,12 @@ pub fn assemble(
 
     for (event_list) |ev| {
         switch (ev) {
-            .api_error => return AssembleError.ApiError,
+            .api_error => |info| {
+                // Surface the captured kind/message to operators instead of
+                // collapsing the in-stream error into a bare ApiError.
+                if (!builtin.is_test) std.log.warn("anthropic api error: kind={s} message={s}", .{ info.kind, info.message });
+                return AssembleError.ApiError;
+            },
             .message_start => |start_usage| {
                 usage.input_tokens = start_usage.input_tokens;
                 usage.cache_read_input_tokens = start_usage.cache_read_input_tokens;
