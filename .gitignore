@@ -10,6 +10,10 @@ zig-pkg/
 # probes, etc. Never commit.
 /temp/
 
+# Demo artifacts (screencasts, recordings) and their recording scripts.
+# Never commit.
+/demos/
+
 # Secrets. .env is the classic dotenv convention; .envrc is direnv's.
 # Both are mentioned in docs/pi-cassettes.md and the repo's key-hygiene
 # guidance, so block them at the repo level rather than relying on a
