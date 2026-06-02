@@ -230,6 +230,12 @@ const property_info = [_]PropertyInfo{
         .passing = "No unvalidated user input reaches a SQL or HTML sink.",
         .failing = generic_failing,
     },
+    .{
+        .name = "canonical",
+        .family = .structural,
+        .passing = "The handler is in Canonical Normal Form: zero ZTS6xx canonical-profile diagnostics.",
+        .failing = "A non-canonical construct remains; run `zigts normalize` to rewrite it.",
+    },
 };
 
 /// Fallback for a property with no `property_info` row. The comptime check

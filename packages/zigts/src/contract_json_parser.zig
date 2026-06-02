@@ -1704,6 +1704,8 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
             props.result_safe = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "optionalSafe")) {
             props.optional_safe = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "canonical")) {
+            props.canonical = parser.readBool() orelse false;
         } else {
             parser.skipValue();
         }

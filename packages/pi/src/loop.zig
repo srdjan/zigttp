@@ -225,7 +225,18 @@ pub fn runTurnWith(
                             return .{ .final_state = .done, .attempt = machine.attempt, .usage = turn_usage };
                         }
                     }
-                    try applyPreparedEdit(ta, prepared);
+                    // Normalize-on-apply: the veto already reduced the edit to
+                    // Canonical Normal Form (only when it passed the veto, and
+                    // only changing bytes the model just introduced — canonical
+                    // violations are hard errors, so a compiling before-file
+                    // carries none). Bind ONE `applied_content` and feed it to
+                    // BOTH the disk write and the verified-patch entry, so the
+                    // file on disk, the equivalence receipt (after=applied),
+                    // and the transcript attest the same bytes. normalizeSource
+                    // is behavior-preserving and equivalence is transitive, so
+                    // the verdict against the pre-edit handler is unchanged.
+                    const applied_content = veto_result.report.normalized_content orelse prepared.edit.content;
+                    try applyPreparedEdit(ta, prepared, applied_content);
                     const post_apply = try postApplyCheck(allocator, ta, registry, transcript, prepared);
                     defer if (post_apply.summary) |s| allocator.free(s);
                     try appendVerifiedPatchEntry(
@@ -233,6 +244,7 @@ pub fn runTurnWith(
                         transcript,
                         options.workspace_root,
                         prepared,
+                        applied_content,
                         veto_result.report,
                         post_apply,
                     );
@@ -352,6 +364,7 @@ fn prepareEdit(
 fn applyPreparedEdit(
     allocator: std.mem.Allocator,
     prepared: PreparedEdit,
+    content: []const u8,
 ) !void {
     const parent = std.fs.path.dirname(prepared.resolved_path);
     if (parent) |dir_path| {
@@ -359,7 +372,7 @@ fn applyPreparedEdit(
         defer io_backend.deinit();
         try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), dir_path);
     }
-    try file_io.writeFile(allocator, prepared.resolved_path, prepared.edit.content);
+    try file_io.writeFile(allocator, prepared.resolved_path, content);
 }
 
 /// One post-apply tool check. The tool name + args + diagnostic prefix +
@@ -485,11 +498,16 @@ fn appendVerifiedPatchEntry(
     transcript: *transcript_mod.Transcript,
     workspace_root: []const u8,
     prepared: PreparedEdit,
+    applied_content: []const u8,
     report: veto.VetoReport,
     post_apply: PostApplyReport,
 ) !void {
     const workspace_root_abs = try std.fs.path.resolve(allocator, &.{workspace_root});
     defer allocator.free(workspace_root_abs);
+    // The repair-link match keys on the model's *proposed* content (what the
+    // candidate tool emitted), not the post-normalize bytes — a candidate that
+    // the model echoed verbatim should still link even if normalize then
+    // canonicalized it on the way to disk.
     var repair_links = try collectRecentRepairLinks(
         allocator,
         transcript,
@@ -499,13 +517,15 @@ fn appendVerifiedPatchEntry(
     );
     defer repair_links.deinit(allocator);
 
+    // `after` (the equivalence-receipt after-image), the disk write, and the
+    // transcript all attest `applied_content` — the canonicalized bytes.
     const payload: ui_payload_mod.UiPayload = .{ .verified_patch = try proof_enrichment.buildVerifiedPatchPayload(
         allocator,
         .{
             .workspace_root = workspace_root_abs,
             .file = prepared.edit.file,
             .before = prepared.edit.before,
-            .after = prepared.edit.content,
+            .after = applied_content,
             .policy_hash = report.policy_hash,
             .applied_at_unix_ms = tools_common.nowUnixMs(),
             .post_apply_ok = post_apply.ok,
@@ -513,6 +533,8 @@ fn appendVerifiedPatchEntry(
             .transcript = transcript,
             .repair_plan_ids = repair_links.repair_plan_ids,
             .emit_perf_receipt = true,
+            .is_canonical = report.is_canonical,
+            .rewrite_trace = report.rewrite_trace,
         },
     ) };
     errdefer {
@@ -1115,6 +1137,75 @@ test "verified edit path appends a verified_patch entry before the proof card" {
         },
         else => return error.TestFailed,
     }
+}
+
+// A legal first-draft a model would naturally emit (an arrow-form handler)
+// that passes the veto on the first attempt. The applied bytes are normalized
+// on the way to disk; the file content, the attested `after`, and the
+// `is_canonical` flag must all agree. Because every canonical-band rule is a
+// hard `check` error that would itself fail the veto, an edit that reaches the
+// green arm is already canonical, so normalize is a behavior-preserving no-op
+// and the attested bytes equal the model's draft byte-for-byte.
+const arrow_handler =
+    "const handler = (req: Request): Response & Spec<\"deterministic\"> => Response.json({ok: true});";
+
+test "non-canonical-but-legal first draft lands in one attempt; disk == attested bytes and is_canonical" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    defer testing.allocator.free(written_path);
+
+    var canned: CannedClient = .{ .reply = .{
+        .response = .{ .edit = .{
+            .file = "handler.ts",
+            .content = arrow_handler,
+            .before = null,
+        } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const result = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "add an ok response",
+        .{ .workspace_root = workspace_root },
+    );
+
+    // One attempt: the draft passed the veto without any retry_draft round.
+    try testing.expectEqual(turn.TurnState.done, result.final_state);
+    try testing.expectEqual(@as(u8, 1), result.attempt);
+
+    // The verified_patch entry sits directly before the final proof card.
+    switch (tr.at(tr.len() - 1).*) {
+        .proof_card => {},
+        else => return error.TestFailed,
+    }
+    const attested = switch (tr.at(tr.len() - 2).*) {
+        .verified_patch => |message| blk: {
+            switch (message.ui_payload.?) {
+                .verified_patch => |payload| {
+                    try testing.expect(payload.is_canonical);
+                    break :blk payload.after;
+                },
+                else => return error.TestFailed,
+            }
+        },
+        else => return error.TestFailed,
+    };
+
+    // Disk bytes == attested `after` bytes == the model's draft (normalize was
+    // a behavior-preserving no-op for this veto-passing edit).
+    const written = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
+    defer testing.allocator.free(written);
+    try testing.expectEqualStrings(attested, written);
+    try testing.expectEqualStrings(arrow_handler, written);
 }
 
 test "verified patch does not infer links from broad repair plan result" {

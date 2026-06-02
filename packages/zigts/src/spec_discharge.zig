@@ -34,6 +34,7 @@ pub const v1_specs = [_]V1Spec{
     .{ .name = "input_validated", .field = .input_validated, .cause_only = false },
     .{ .name = "pii_contained", .field = .pii_contained, .cause_only = false },
     .{ .name = "injection_safe", .field = .injection_safe, .cause_only = false },
+    .{ .name = "canonical", .field = .canonical, .cause_only = true },
 };
 
 pub const V1Spec = struct {
@@ -61,6 +62,7 @@ pub const PropertyField = enum {
     input_validated,
     pii_contained,
     injection_safe,
+    canonical,
 
     pub fn lookup(self: PropertyField, properties: HandlerProperties) bool {
         return switch (self) {
@@ -79,6 +81,7 @@ pub const PropertyField = enum {
             .input_validated => properties.input_validated,
             .pii_contained => properties.pii_contained,
             .injection_safe => properties.injection_safe,
+            .canonical => properties.canonical,
         };
     }
 };
@@ -126,6 +129,9 @@ pub fn suggestionFor(name: []const u8) ?[]const u8 {
     }
     if (std.mem.eql(u8, name, "optional_safe")) {
         return "guard every optional access with `?? fallback` or an explicit `if (x != undefined)` check.";
+    }
+    if (std.mem.eql(u8, name, "canonical")) {
+        return "run `zigts normalize <file> --write` to rewrite the handler into Canonical Normal Form, or fix the flagged ZTS6xx constructs by hand.";
     }
     return null;
 }

@@ -599,6 +599,14 @@ pub const HandlerProperties = struct {
     /// Proven: every optional value from virtual modules is narrowed before use.
     /// False = unproven (verification not run). True = verified safe.
     optional_safe: bool = false,
+    // --- Canonical normal form (from the strict_checker ZTS6xx gate) ---
+    /// The handler source is in Canonical Normal Form: zero canonical-profile
+    /// (ZTS6xx) diagnostics. Because those diagnostics are hard `check` errors,
+    /// a contract is only ever built for an already-canonical handler, so the
+    /// contract builder sets this true unconditionally. The chip makes the
+    /// always-on gate explicit and attestable; `Spec<"canonical">` discharges
+    /// against it. Declared last so `provenSpecNames` ordering stays stable.
+    canonical: bool = false,
 
     /// Canonical list of property names that are currently proven true. The
     /// order is stable across builds (struct-field declaration order) so

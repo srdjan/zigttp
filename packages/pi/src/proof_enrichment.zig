@@ -72,6 +72,13 @@ pub const BuildVerifiedPatchOptions = struct {
     /// handler (best-effort; emits a signed `kind=perf` ledger row). Only the
     /// real apply paths set this; dry-run and demo callers leave it false.
     emit_perf_receipt: bool = false,
+    /// Canonical normalize-on-apply outputs from the veto. `is_canonical` is
+    /// true when the applied (`after`) bytes carry zero residual canonical-band
+    /// diagnostics; `rewrite_trace` lists the canonical rewrites that produced
+    /// them. The caller has already normalized `after` to match — these only
+    /// surface the result on the payload, they do not re-run normalization.
+    is_canonical: bool = false,
+    rewrite_trace: []const []const u8 = &.{},
 };
 
 pub fn buildVerifiedPatchPayload(
@@ -112,6 +119,8 @@ pub fn buildVerifiedPatchPayload(
     errdefer ui_payload.freeWitnessBodySlice(allocator, witnesses_defeated_copy);
     const witnesses_new_copy = try ui_payload.cloneWitnessBodySlice(allocator, options.witnesses_new);
     errdefer ui_payload.freeWitnessBodySlice(allocator, witnesses_new_copy);
+    const rewrite_trace_copy = try cloneStringSlice(allocator, options.rewrite_trace);
+    errdefer freeStringSlice(allocator, rewrite_trace_copy);
 
     const patch_hash_value: [32]u8 = options.patch_hash orelse computePatchHash(options.before, analysis.unified_diff);
 
@@ -138,6 +147,8 @@ pub fn buildVerifiedPatchPayload(
         .witnesses_new = witnesses_new_copy,
         .post_apply_ok = options.post_apply_ok,
         .post_apply_summary = post_apply_summary_copy,
+        .is_canonical = options.is_canonical,
+        .rewrite_trace = rewrite_trace_copy,
     };
     analysis.unified_diff = &.{};
     analysis.hunks = &.{};
@@ -414,6 +425,7 @@ pub fn propertiesSnapshot(properties: HandlerProperties) ui_payload.PropertiesSn
         .fault_covered = properties.fault_covered,
         .result_safe = properties.result_safe,
         .optional_safe = properties.optional_safe,
+        .canonical = properties.canonical,
     };
 }
 

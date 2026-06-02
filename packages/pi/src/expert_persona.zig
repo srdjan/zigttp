@@ -427,6 +427,9 @@ pub fn buildSystemPromptFull(
     try writeBanner(w, "LIVE SNAPSHOT: RULES (ZTS0xx-ZTS3xx)");
     try writeRuleSnapshot(w);
 
+    try writeBanner(w, "CANONICAL NORMAL FORM (ZTS6xx)");
+    try writeCanonicalNote(w);
+
     try writeBanner(w, "LIVE SNAPSHOT: FEATURES MATRIX");
     try json_diagnostics.writeFeaturesText(w);
 
@@ -614,6 +617,30 @@ fn writeRuleSnapshot(writer: anytype) !void {
     }
 }
 
+/// The ZTS6xx rules above already list each canonical-form violation and its
+/// fix. This note frames them as one principle and points at the normalize
+/// tool, so the agent writes canonical form directly instead of discovering it
+/// one veto rejection at a time.
+fn writeCanonicalNote(writer: anytype) !void {
+    try writer.writeAll(
+        \\zigts has a single Canonical Normal Form. The ZTS6xx rules above are not
+        \\style preferences - they are hard `check` errors, so the compiler veto
+        \\rejects any edit that introduces a non-canonical construct. Write
+        \\canonical form directly:
+        \\  - if/else or a `match` expression instead of a `?:` ternary
+        \\  - `x = x + 1` instead of `x += 1`
+        \\  - a named `function` helper instead of a reused arrow
+        \\  - `const` instead of a `let` that never reassigns
+        \\  - explicit fields instead of default parameters or deep destructuring
+        \\
+        \\When unsure, call `zigts_expert_normalize` on your draft file: it returns
+        \\the unique canonical source, an `is_canonical` flag, and the rewrite
+        \\trace. Apply that source instead of guessing, so the veto never bounces
+        \\your edit on a canonical-form violation.
+        \\
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -651,6 +678,15 @@ test "persona contains live rule-registry entries" {
     try testing.expect(std.mem.indexOf(u8, prompt, "LIVE SNAPSHOT: RULES") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "ZTS001") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "ZTS303") != null);
+}
+
+test "persona teaches the canonical normal form and the normalize tool" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "CANONICAL NORMAL FORM (ZTS6xx)") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Canonical Normal Form") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zigts_expert_normalize") != null);
+    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
 }
 
 test "persona contains the features matrix section" {

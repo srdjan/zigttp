@@ -3390,6 +3390,11 @@ pub const ContractBuilder = struct {
             .deterministic = deterministic,
             .has_egress = s.has_egress,
             .idempotent = deterministic and retry_safe,
+            // The contract builder runs only after strict checking passed
+            // (canonical-profile violations are hard `check` errors that block
+            // contract construction upstream), so a built contract is always in
+            // Canonical Normal Form. See HandlerProperties.canonical.
+            .canonical = true,
         };
     }
 

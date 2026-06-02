@@ -6,6 +6,7 @@ comptime {
     _ = @import("tools/zigts_expert_meta.zig");
     _ = @import("tools/zigts_expert_verify_paths.zig");
     _ = @import("tools/zigts_expert_canonicalize.zig");
+    _ = @import("tools/zigts_expert_normalize.zig");
     _ = @import("tools/zigts_expert_describe_rule.zig");
     _ = @import("tools/zigts_expert_search.zig");
     _ = @import("tools/zigts_expert_edit_simulate.zig");

@@ -62,6 +62,7 @@ pub const commands = [_]Command{
     .{ .name = "review-patch", .run = review_patch.runWithArgs, .category = .analyze, .args = "<file>", .blurb = "Review a patch for new violations", .usage = "review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]" },
     .{ .name = "rollout", .run = system_rollout.runWithArgs, .category = .analyze, .args = "<old-system> <new>", .blurb = "System-level deployment manifest", .usage = "rollout <old-system.json> <new-system.json> [--output-dir <dir>]" },
     .{ .name = "canonicalize", .run = canonicalize.runWithArgs, .category = .analyze, .args = "<file> --json", .blurb = "Canonicalize a handler and report refactors", .usage = "canonicalize <file> --json [--simulate]" },
+    .{ .name = "normalize", .run = canonicalize.runNormalizeWithArgs, .category = .analyze, .args = "<file>", .blurb = "Rewrite a handler into Canonical Normal Form", .usage = "normalize <file> [--write] [--check] [--json]" },
     .{ .name = "features", .run = runFeaturesCommand, .category = .machine, .args = "", .blurb = "List supported language features", .usage = "features [--json]" },
     .{ .name = "modules", .run = runModulesCommand, .category = .machine, .args = "", .blurb = "List virtual module exports", .usage = "modules [--json]" },
     .{ .name = "restrictions", .run = runRestrictionsCommand, .category = .machine, .args = "", .blurb = "Show language restrictions and the proofs they unlock", .usage = "restrictions [--json] [--by proof|class]" },

@@ -17,6 +17,7 @@ const tools_common = @import("tools/common.zig");
 const meta_tool = @import("tools/zigts_expert_meta.zig");
 const verify_paths_tool = @import("tools/zigts_expert_verify_paths.zig");
 const canonicalize_tool = @import("tools/zigts_expert_canonicalize.zig");
+const normalize_tool = @import("tools/zigts_expert_normalize.zig");
 const describe_rule_tool = @import("tools/zigts_expert_describe_rule.zig");
 const search_tool = @import("tools/zigts_expert_search.zig");
 const edit_simulate_tool = @import("tools/zigts_expert_edit_simulate.zig");
@@ -92,6 +93,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, meta_tool.tool);
     try reg.register(allocator, verify_paths_tool.tool);
     try reg.register(allocator, canonicalize_tool.tool);
+    try reg.register(allocator, normalize_tool.tool);
     try reg.register(allocator, describe_rule_tool.tool);
     try reg.register(allocator, search_tool.tool);
     try reg.register(allocator, edit_simulate_tool.tool);
@@ -509,6 +511,7 @@ test "buildRegistry registers every first-party compiler primitive" {
         "zigts_expert_meta",
         "zigts_expert_verify_paths",
         "zigts_expert_canonicalize",
+        "zigts_expert_normalize",
         "zigts_expert_describe_rule",
         "zigts_expert_search",
         "zigts_expert_edit_simulate",

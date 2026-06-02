@@ -201,6 +201,22 @@ pub fn build(b: *std.Build) void {
     const precompile_test_step = b.step("test-precompile", "Run precompile tool tests");
     precompile_test_step.dependOn(&run_precompile_tests.step);
 
+    // Canonicalize/normalize tool tests. The tools `canonicalize.zig` is only
+    // reached through the `zigts_cli` named module, so its `test {}` blocks are
+    // not collected by any other test root; this step roots at it directly.
+    const canonicalize_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = tools_dep.path("src/canonicalize.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    canonicalize_tests.root_module.addImport("zigts", zigts_host_mod);
+    const run_canonicalize_tests = b.addRunArtifact(canonicalize_tests);
+    const canonicalize_test_step = b.step("test-canonicalize", "Run canonicalize/normalize tool tests");
+    canonicalize_test_step.dependOn(&run_canonicalize_tests.step);
+
     const prop_expect_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = tools_dep.path("src/property_expectations.zig"),
@@ -638,6 +654,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_cli_tests.step);
     test_step.dependOn(&run_precompile_tests.step);
+    test_step.dependOn(&run_canonicalize_tests.step);
     test_step.dependOn(&run_prop_expect_tests.step);
     test_step.dependOn(&run_rollout_tests.step);
     test_step.dependOn(&run_expert_tests.step);

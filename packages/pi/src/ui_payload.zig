@@ -535,6 +535,7 @@ pub const PropertiesSnapshot = struct {
     fault_covered: bool,
     result_safe: bool,
     optional_safe: bool,
+    canonical: bool = false,
 
     pub const ChangeKind = enum { promoted, demoted };
 
@@ -912,6 +913,13 @@ pub const VerifiedPatchPayload = struct {
     /// changed behavior on a recorded request. Scalar, no ownership.
     capsule_total: u32 = 0,
     capsule_regressed: u32 = 0,
+    /// Canonical normalize-on-apply outputs. `is_canonical` is true when the
+    /// applied (attested) bytes carry zero residual canonical-band diagnostics.
+    /// `rewrite_trace` lists the typed canonical rewrites the normalize pass
+    /// applied to reach that form, in application order (empty when the model's
+    /// draft was already canonical). Owned (each string and the slice).
+    is_canonical: bool = false,
+    rewrite_trace: [][]u8 = &.{},
 
     pub fn clone(self: VerifiedPatchPayload, allocator: std.mem.Allocator) !VerifiedPatchPayload {
         const file_copy = try allocator.dupe(u8, self.file);
@@ -967,6 +975,8 @@ pub const VerifiedPatchPayload = struct {
         else
             null;
         errdefer if (post_apply_summary_copy) |s| allocator.free(s);
+        const rewrite_trace_copy = try cloneStringSlice(allocator, self.rewrite_trace);
+        errdefer freeStringSlice(allocator, rewrite_trace_copy);
         return .{
             .file = file_copy,
             .policy_hash = policy_copy,
@@ -993,6 +1003,8 @@ pub const VerifiedPatchPayload = struct {
             .post_apply_summary = post_apply_summary_copy,
             .capsule_total = self.capsule_total,
             .capsule_regressed = self.capsule_regressed,
+            .is_canonical = self.is_canonical,
+            .rewrite_trace = rewrite_trace_copy,
         };
     }
 
@@ -1014,6 +1026,7 @@ pub const VerifiedPatchPayload = struct {
         freeWitnessBodySlice(allocator, self.witnesses_defeated);
         freeWitnessBodySlice(allocator, self.witnesses_new);
         if (self.post_apply_summary) |s| allocator.free(s);
+        freeStringSlice(allocator, self.rewrite_trace);
         self.* = .{
             .file = &.{},
             .policy_hash = &.{},
@@ -1543,6 +1556,9 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
                 try writer.writeAll(",\"post_apply_summary\":");
                 try json_writer.writeString(writer, s);
             }
+            try writer.writeAll(",\"is_canonical\":");
+            try writer.writeAll(if (patch.is_canonical) "true" else "false");
+            try writeOptionalStringArray(writer, "rewrite_trace", patch.rewrite_trace);
         },
     }
     try writer.writeByte('}');
@@ -1878,6 +1894,9 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             break :blk if (s) |text| try allocator.dupe(u8, text) else null;
         };
         errdefer if (post_apply_summary_copy) |s| allocator.free(s);
+        const is_canonical = getBool(obj, "is_canonical") orelse false;
+        const rewrite_trace = try parseStringArrayField(allocator, obj.get("rewrite_trace"));
+        errdefer freeStringSlice(allocator, rewrite_trace);
 
         return .{ .verified_patch = .{
             .file = file_copy,
@@ -1910,6 +1929,8 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             .witnesses_new = witnesses_new,
             .post_apply_ok = post_apply_ok,
             .post_apply_summary = post_apply_summary_copy,
+            .is_canonical = is_canonical,
+            .rewrite_trace = rewrite_trace,
         } };
     }
 
@@ -2056,6 +2077,7 @@ fn parsePropertiesSnapshot(value_opt: ?std.json.Value) !?PropertiesSnapshot {
             .fault_covered = getBoolOrDefault(obj, "fault_covered", false),
             .result_safe = getBoolOrDefault(obj, "result_safe", false),
             .optional_safe = getBoolOrDefault(obj, "optional_safe", false),
+            .canonical = getBoolOrDefault(obj, "canonical", false),
         },
         else => error.InvalidUiPayload,
     };
