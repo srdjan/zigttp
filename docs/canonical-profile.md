@@ -2,7 +2,7 @@
 
 ZigTS already trims most of TypeScript. The canonical profile trims further: for every operation there is exactly one canonical spelling, and the compiler rejects the alternates as ZTS6xx diagnostics. This page is the reference for each canonical rule, its rationale, and how to migrate code that violates it.
 
-The profile is enforced unconditionally on every `zigttp check` and `zigttp verify-paths` run; there is no opt-in flag. Existing code that does not yet conform should be migrated rule by rule.
+The profile is enforced unconditionally on every `zigttp check` and `zigttp verify-paths` run; there is no opt-in flag. Run `zigttp normalize <file> --write` to apply the canonical form automatically for the rewritable rules below; migrate the rest by hand. Conformance is itself an attestable property: a handler with zero ZTS6xx diagnostics carries the `canonical` proof chip, and `Response & Spec<"canonical">` discharges against it.
 
 ## Why narrow the grammar further
 
@@ -101,7 +101,7 @@ if (ok) {
 }
 ```
 
-Ternary expressions compete with `if`/`else` and `match` for the same role and tend to nest in agent-generated code. The canonical form uses statement-level branching. For closed alternatives prefer `match`; for guard-style branching use `if`/`else`. When the result feeds a single binding, a tail `if`/`else` chain or an immediately-invoked function expression keeps the intent local.
+Ternary expressions compete with `if`/`else` and `match` for the same role and tend to nest in agent-generated code. The canonical form uses statement-level branching. For closed alternatives prefer `match`; for guard-style branching use `if`/`else`. When the result feeds a single binding, a tail `if`/`else` chain or an immediately-invoked function expression keeps the intent local. `zigttp normalize` rewrites a ternary to the expression-position `match` form, `match (!!(cond)) { when true: a, default: b }`, which is valid wherever the ternary was (including a `const` initializer).
 
 ### ZTS613 - compound assignment
 
@@ -239,8 +239,9 @@ Both will land when their respective infrastructure is in place.
 
 1. The `canonical-style` skill (`packages/pi/src/skills/canonical-style.md`) is embedded into the persona on every prompt assembly. It lists every canonical form with before/after pairs.
 2. Live rule snapshots ride into the system prompt via `zigts_expert_describe_rule` and `zigts_expert_features`. The agent calls these tools rather than answering from memory, so any future rule change reaches the agent the next time a session starts.
+3. The `zigts_expert_normalize` tool returns a draft's unique canonical form - the canonicalized source, an `is_canonical` flag, and the rewrite trace - so the agent can canonicalize a draft before applying it rather than learning the form one veto rejection at a time.
 
-Every proposed edit passes through the existing veto (`packages/pi/src/veto.zig`), which rejects any patch that introduces new diagnostics. Canonical violations are diagnostics like any other, so the veto blocks them automatically.
+Every proposed edit passes through the existing veto (`packages/pi/src/veto.zig`), which rejects any patch that introduces new diagnostics. Canonical violations are diagnostics like any other, so the veto blocks them automatically. When an edit would be blocked *only* by a rewritable canonical violation, the veto salvages it: it normalizes the draft, re-checks, and applies the canonicalized bytes instead of bouncing the model, surfacing the rewrite trace so a canonical slip lands in one shot.
 
 ## Verification
 
@@ -249,6 +250,7 @@ zig build test-zigts                              # unit tests for each detector
 zig build test                                    # full test suite + golden fixtures
 zigttp describe-rule --hash                       # current policy hash
 zigttp check --json examples/handler/handler.ts   # canonical lane on a known-clean handler
+zigttp normalize <handler.ts> --check             # exit 1 if a handler is not already canonical (CI gate)
 ```
 
 When the policy hash changes (every time a rule is added, retired, or moved between categories), the golden fixtures under `packages/tools/tests/fixtures/expert/` need a one-line bump alongside the source change.

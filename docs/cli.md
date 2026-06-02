@@ -225,6 +225,7 @@ zigttp verify-module-manifest <manifest.json> [--json]  # validate a partner mod
 zigttp extension-status --module-manifest <path>... [--json]  # registered partner-module summary
 zigttp edit-simulate [handler.ts] [--before old.ts]
 zigttp canonicalize <file> --json [--simulate] # local canonical refactor intents
+zigttp normalize <file> [--write] [--check] [--json]  # rewrite into Canonical Normal Form
 zigttp describe-rule [name|code] [--json] [--hash]
 zigttp search <keyword> [--json]
 zigttp review-patch <file> [--before <old>] [--diff-only]
