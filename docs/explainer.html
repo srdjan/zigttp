@@ -440,6 +440,7 @@
           <tr><td><code>null</code></td><td>dual absent-value sentinels</td><td class="unlock">optional-narrowing totality (use <code>undefined</code>)</td></tr>
           <tr><td><code>==</code> / <code>!=</code></td><td>implicit coercion paths</td><td class="unlock">sound type-directed comparison</td></tr>
           <tr><td><code>regex</code></td><td>opaque accept set, catastrophic backtracking</td><td class="unlock">shape-checkable validation via schemas</td></tr>
+          <tr><td>ternary, <code>+=</code>, default params, nested destructure</td><td>many spellings for one operation</td><td class="unlock">Canonical Normal Form - one spelling per operation, mechanical diffs, <code>zigttp normalize</code> auto-fix</td></tr>
         </tbody>
       </table>
       <div class="callout">
@@ -689,6 +690,13 @@ my-app/
         <span class="inline-code">Response.json()</span>, <span class="inline-code">.text()</span>,
         <span class="inline-code">.html()</span>, <span class="inline-code">.redirect()</span>.
       </p>
+      <p class="muted" style="margin-top:0.9rem;font-size:0.85rem">
+        The strict profile narrows further to a <strong>Canonical Normal Form</strong>: one spelling per
+        operation - an <span class="inline-code">if</span> or <span class="inline-code">match</span> instead of a
+        ternary, <span class="inline-code">x = x + 1</span> instead of <span class="inline-code">+=</span>.
+        <span class="inline-code">zigttp normalize</span> rewrites a handler into that form automatically, and a
+        handler with zero such diagnostics carries the <span class="inline-code">canonical</span> proof chip.
+      </p>
     </div>
   </section>
 
@@ -756,6 +764,7 @@ my-app/
         <div class="card"><h3>injection_safe</h3><p>User input cannot flow unescaped into a sink that would interpret it as code or query.</p></div>
         <div class="card"><h3>idempotent</h3><p>Re-running the handler produces no additional observable state change.</p></div>
         <div class="card"><h3>state_isolated</h3><p>Nothing written during one request is visible to another. The pool guarantees it; the compiler checks it.</p></div>
+        <div class="card"><h3>canonical</h3><p>The handler is in Canonical Normal Form: one canonical spelling per operation. Run <code>zigttp normalize</code> to rewrite a handler into it.</p></div>
       </div>
     </div>
   </section>
@@ -789,6 +798,10 @@ my-app/
         <div class="card">
           <h3>Fits your workflow</h3>
           <p>Interactive by default; <span class="inline-code">--print</span> for one-shot and <span class="inline-code">--mode rpc</span> for CI. Sessions persist - pick up with <span class="inline-code">--resume</span>. Backed by Claude or OpenAI.</p>
+        </div>
+        <div class="card">
+          <h3>Idiomatic by construction</h3>
+          <p>A draft that slips into a non-canonical form - a ternary, a <span class="inline-code">+=</span> - is auto-normalized to its canonical spelling and applied in one shot, instead of bouncing back for a retry.</p>
         </div>
       </div>
       <div class="terminal">
