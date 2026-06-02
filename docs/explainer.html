@@ -1,0 +1,883 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zigttp - Compile-time proof you can see</title>
+<meta name="description" content="zigttp is a pure-Zig JavaScript engine plus a serverless runtime. One binary, no dependencies, instant cold starts. The compiler is the whole product: every restriction buys a compile-time proof.">
+<meta name="color-scheme" content="light">
+<style>
+  :root {
+    /* Palette mirrored from the project site (home.css). */
+    --z-bg: #f7f3ea;
+    --z-bg-deep: #f3e7d3;
+    --z-paper: #fffdf8;
+    --z-paper-muted: #f6f0e6;
+    --z-ink: #151a21;
+    --z-ink-soft: #303944;
+    --z-muted: #687381;
+    --z-accent: #6eaddb;
+    --z-accent-dark: #2a6796;
+    --z-accent-soft: #e1eef8;
+    --z-green: #2f8a4f;
+    --z-yellow: #9a6a00;
+    --z-red: #c43f5f;
+    --z-terminal: #151a21;
+    --z-terminal-2: #202731;
+    --z-terminal-3: #2a3340;
+    --z-line: #ded6c8;
+    --z-line-strong: #c9bdad;
+    --z-radius-lg: 24px;
+    --z-radius-md: 16px;
+    --z-radius-sm: 10px;
+    --z-shadow-sm: 0 6px 18px rgb(35 29 21 / 0.06);
+    --z-shadow-md: 0 14px 40px rgb(35 29 21 / 0.09);
+    --z-shadow-lg: 0 24px 80px rgb(35 29 21 / 0.12);
+    --z-max: 1080px;
+    --z-mono: "JetBrains Mono", "SF Mono", Consolas, ui-monospace, monospace;
+    --z-sans: "Outfit", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    margin: 0;
+    font-family: var(--z-sans);
+    color: var(--z-ink);
+    background:
+      radial-gradient(120% 80% at 80% -10%, #fbf8f1 0%, var(--z-bg) 45%, var(--z-bg-deep) 130%);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  a { color: var(--z-accent-dark); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .wrap { width: min(100% - 3rem, var(--z-max)); margin-inline: auto; }
+
+  /* ---------- Nav ---------- */
+  header.site {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: rgb(247 243 234 / 0.82);
+    backdrop-filter: blur(18px);
+    border-bottom: 1px solid var(--z-line);
+  }
+  header.site .wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding-block: 0.7rem;
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-weight: 700;
+    font-size: 1.18rem;
+    letter-spacing: -0.01em;
+  }
+  .brand .mark {
+    width: 30px; height: 30px;
+    border-radius: 9px;
+    background: linear-gradient(150deg, var(--z-accent) 0%, var(--z-accent-dark) 100%);
+    color: #fff;
+    display: grid; place-items: center;
+    font-family: var(--z-mono);
+    font-size: 0.9rem; font-weight: 700;
+    box-shadow: var(--z-shadow-sm);
+  }
+  .pill {
+    font-family: var(--z-mono);
+    font-size: 0.7rem;
+    color: var(--z-accent-dark);
+    background: var(--z-accent-soft);
+    border: 1px solid #cfe2f2;
+    padding: 0.12rem 0.5rem;
+    border-radius: 999px;
+  }
+  header.site nav { margin-left: auto; display: flex; gap: 1.1rem; font-size: 0.92rem; }
+  header.site nav a { color: var(--z-ink-soft); }
+  @media (max-width: 720px) { header.site nav { display: none; } }
+
+  /* ---------- Hero ---------- */
+  .hero { padding-block: clamp(3rem, 8vw, 6rem) clamp(2rem, 5vw, 3.5rem); }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: 1.1fr 0.9fr;
+    gap: clamp(1.5rem, 4vw, 3rem);
+    align-items: center;
+  }
+  @media (max-width: 880px) { .hero-grid { grid-template-columns: 1fr; } }
+
+  .eyebrow {
+    font-family: var(--z-mono);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--z-accent-dark);
+    margin: 0 0 0.9rem;
+  }
+  h1 {
+    font-size: clamp(2.3rem, 5.4vw, 3.9rem);
+    line-height: 1.04;
+    letter-spacing: -0.02em;
+    margin: 0 0 1rem;
+  }
+  .lede { font-size: clamp(1.05rem, 1.7vw, 1.22rem); color: var(--z-ink-soft); margin: 0 0 1.6rem; max-width: 36ch; }
+  .lede strong { color: var(--z-ink); font-weight: 600; }
+
+  .cta-row { display: flex; flex-wrap: wrap; gap: 0.7rem; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 0.45rem;
+    font-weight: 600; font-size: 0.95rem;
+    padding: 0.7rem 1.15rem;
+    border-radius: var(--z-radius-sm);
+    border: 1px solid transparent;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+  }
+  .btn:hover { text-decoration: none; transform: translateY(-1px); }
+  .btn-primary { background: var(--z-accent-dark); color: #fff; box-shadow: var(--z-shadow-sm); }
+  .btn-ghost { background: var(--z-paper); color: var(--z-ink); border-color: var(--z-line-strong); }
+
+  /* ---------- Terminal / proof card ---------- */
+  .terminal {
+    background: var(--z-terminal);
+    border-radius: var(--z-radius-md);
+    box-shadow: var(--z-shadow-lg);
+    overflow: hidden;
+    border: 1px solid #0c0f14;
+  }
+  .terminal .bar {
+    display: flex; align-items: center; gap: 0.45rem;
+    padding: 0.6rem 0.9rem;
+    background: var(--z-terminal-2);
+    border-bottom: 1px solid #0c0f14;
+  }
+  .terminal .bar i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+  .dot-r { background: #ec6a5e; } .dot-y { background: #f4bf4f; } .dot-g { background: #61c554; }
+  .terminal .bar span { margin-left: 0.5rem; font-family: var(--z-mono); font-size: 0.72rem; color: #8c97a5; }
+  .terminal pre, .proof-card {
+    margin: 0;
+    padding: 1rem 1.1rem;
+    font-family: var(--z-mono);
+    font-size: 0.83rem;
+    line-height: 1.65;
+    color: #d7dde5;
+    overflow-x: auto;
+  }
+  .terminal .prompt { color: #6eaddb; }
+  .terminal .cmt { color: #6c7785; }
+
+  .proof-card { display: grid; gap: 0.5rem; }
+  .proof-head { color: #aeb8c4; letter-spacing: 0.05em; font-size: 0.72rem; text-transform: uppercase; margin-bottom: 0.2rem; }
+  .chip { display: flex; align-items: center; gap: 0.55rem; }
+  .chip b { color: #e8edf2; font-weight: 600; }
+  .chip .ok { color: #6fd089; } .chip .bad { color: #f0728c; }
+  .chip .glyph { font-weight: 700; width: 1.1em; display: inline-block; text-align: center; }
+  .why { color: #f0728c; padding-left: 1.65em; font-size: 0.78rem; }
+  .why .ln { color: #8c97a5; }
+
+  /* ---------- Section scaffolding ---------- */
+  section.block { padding-block: clamp(2.4rem, 5vw, 4rem); }
+  section.block > .wrap > h2 {
+    font-size: clamp(1.5rem, 3vw, 2.1rem);
+    letter-spacing: -0.015em;
+    margin: 0 0 0.4rem;
+  }
+  .section-kicker {
+    font-family: var(--z-mono);
+    font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.14em;
+    color: var(--z-accent-dark); margin: 0 0 0.5rem;
+  }
+  .section-intro { color: var(--z-ink-soft); max-width: 64ch; margin: 0 0 1.6rem; }
+
+  .alt { background: var(--z-paper-muted); border-block: 1px solid var(--z-line); }
+
+  /* ---------- Numbers strip ---------- */
+  .numbers { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--z-line); border: 1px solid var(--z-line); border-radius: var(--z-radius-md); overflow: hidden; }
+  @media (max-width: 720px) { .numbers { grid-template-columns: repeat(2, 1fr); } }
+  .numbers .cell { background: var(--z-paper); padding: 1.1rem 1.2rem; }
+  .numbers .n { font-size: clamp(1.4rem, 2.4vw, 1.9rem); font-weight: 700; letter-spacing: -0.02em; font-family: var(--z-mono); }
+  .numbers .l { color: var(--z-muted); font-size: 0.85rem; }
+
+  /* ---------- Cards ---------- */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 1rem; }
+  .card {
+    background: var(--z-paper);
+    border: 1px solid var(--z-line);
+    border-radius: var(--z-radius-md);
+    padding: 1.2rem 1.25rem;
+    box-shadow: var(--z-shadow-sm);
+  }
+  .card h3 { margin: 0 0 0.3rem; font-size: 1.05rem; display: flex; align-items: baseline; gap: 0.5rem; }
+  .card h3 code { font-family: var(--z-mono); font-size: 0.9rem; color: var(--z-accent-dark); background: var(--z-accent-soft); padding: 0.08rem 0.4rem; border-radius: 6px; }
+  .card p { margin: 0 0 0.6rem; color: var(--z-ink-soft); font-size: 0.92rem; }
+  .card .run { font-family: var(--z-mono); font-size: 0.8rem; color: var(--z-ink); background: var(--z-paper-muted); border: 1px solid var(--z-line); padding: 0.4rem 0.6rem; border-radius: 8px; display: block; overflow-x: auto; }
+
+  /* ---------- Numbered steps ---------- */
+  .steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; counter-reset: step; }
+  .step {
+    counter-increment: step;
+    position: relative;
+    background: var(--z-paper);
+    border: 1px solid var(--z-line);
+    border-radius: var(--z-radius-md);
+    padding: 1.2rem 1.3rem 1.25rem 3.7rem;
+    box-shadow: var(--z-shadow-sm);
+  }
+  .step::before {
+    content: counter(step);
+    position: absolute;
+    left: 1.15rem; top: 1.2rem;
+    width: 1.75rem; height: 1.75rem;
+    border-radius: 50%;
+    background: var(--z-accent-dark);
+    color: #fff;
+    font-family: var(--z-mono); font-weight: 700; font-size: 0.85rem;
+    display: grid; place-items: center;
+  }
+  .step h3 { margin: 0 0 0.45rem; font-size: 1.1rem; }
+  .step p { margin: 0 0 0.65rem; color: var(--z-ink-soft); font-size: 0.93rem; }
+  .step pre.src { margin: 0 0 0.7rem; font-size: 0.78rem; }
+  .step > *:last-child { margin-bottom: 0; }
+  @media (max-width: 520px) {
+    .step { padding-left: 1.3rem; }
+    .step::before { position: static; margin-bottom: 0.6rem; }
+  }
+
+  /* ---------- Tables ---------- */
+  .tbl { width: 100%; border-collapse: collapse; font-size: 0.9rem; background: var(--z-paper); border: 1px solid var(--z-line); border-radius: var(--z-radius-md); overflow: hidden; }
+  .tbl th, .tbl td { text-align: left; padding: 0.65rem 0.85rem; border-bottom: 1px solid var(--z-line); vertical-align: top; }
+  .tbl thead th { background: var(--z-paper-muted); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--z-muted); }
+  .tbl tr:last-child td { border-bottom: 0; }
+  .tbl code { font-family: var(--z-mono); font-size: 0.82rem; color: var(--z-accent-dark); }
+  .tbl .unlock { color: var(--z-green); }
+
+  /* ---------- Code blocks ---------- */
+  figure.code { margin: 0; }
+  figure.code figcaption { font-family: var(--z-mono); font-size: 0.76rem; color: var(--z-muted); margin-bottom: 0.4rem; }
+  pre.src {
+    margin: 0;
+    background: var(--z-terminal);
+    color: #d7dde5;
+    border-radius: var(--z-radius-md);
+    padding: 1.1rem 1.2rem;
+    font-family: var(--z-mono);
+    font-size: 0.82rem;
+    line-height: 1.6;
+    overflow-x: auto;
+    box-shadow: var(--z-shadow-md);
+  }
+  pre.src .kw { color: #6eaddb; }
+  pre.src .str { color: #9ed99a; }
+  pre.src .cmt { color: #6c7785; }
+  pre.src .fn { color: #e6c07b; }
+  pre.src .typ { color: #c39ff0; }
+
+  /* ---------- Two-column support lists ---------- */
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 720px) { .two { grid-template-columns: 1fr; } }
+  .listbox { background: var(--z-paper); border: 1px solid var(--z-line); border-radius: var(--z-radius-md); padding: 1.1rem 1.25rem; }
+  .listbox h4 { margin: 0 0 0.7rem; display: flex; align-items: center; gap: 0.5rem; font-size: 1rem; }
+  .listbox ul { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .listbox li { font-family: var(--z-mono); font-size: 0.8rem; padding: 0.25rem 0.55rem; border-radius: 7px; border: 1px solid var(--z-line); }
+  .listbox.good li { background: #effaf1; border-color: #cfead6; color: #226b3c; }
+  .listbox.bad li { background: #fdeef1; border-color: #f3d3da; color: #a8324e; }
+  .badge-ok { color: var(--z-green); } .badge-no { color: var(--z-red); }
+
+  .callout {
+    background: var(--z-paper);
+    border: 1px solid var(--z-line);
+    border-left: 3px solid var(--z-accent);
+    border-radius: var(--z-radius-sm);
+    padding: 1rem 1.2rem;
+    margin-top: 1.4rem;
+    color: var(--z-ink-soft);
+    font-size: 0.93rem;
+  }
+  .callout strong { color: var(--z-ink); }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem; align-items: start; }
+  @media (max-width: 880px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  /* ---------- Footer ---------- */
+  footer.site { border-top: 1px solid var(--z-line); padding-block: 2rem; color: var(--z-muted); font-size: 0.88rem; }
+  footer.site .wrap { display: flex; flex-wrap: wrap; gap: 0.8rem 1.5rem; align-items: baseline; }
+  footer.site code { font-family: var(--z-mono); color: var(--z-ink-soft); }
+
+  .muted { color: var(--z-muted); }
+  .inline-code { font-family: var(--z-mono); font-size: 0.86em; background: var(--z-paper-muted); border: 1px solid var(--z-line); padding: 0.05rem 0.35rem; border-radius: 6px; color: var(--z-accent-dark); }
+</style>
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="zigttp home">
+      <span class="mark">z</span>zigttp
+    </a>
+    <span class="pill">v0.1.0-beta</span>
+    <nav>
+      <a href="#idea">The idea</a>
+      <a href="#quickstart">Get started</a>
+      <a href="#commands">Commands</a>
+      <a href="#handler">Handlers</a>
+      <a href="#modules">Modules</a>
+      <a href="#expert">Expert</a>
+      <a href="#deploy">Deploy</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- 1. HERO -->
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <p class="eyebrow">Pure-Zig JS engine + serverless runtime</p>
+        <h1>Compile-time proof you can see</h1>
+        <p class="lede">
+          One binary, no dependencies, instant cold starts. The compiler is the whole product:
+          every JavaScript restriction buys a specific compile-time proof.
+          <strong>Your handler code is the spec.</strong>
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="#quickstart">Get started →</a>
+          <a class="btn btn-ghost" href="#idea">How it works</a>
+        </div>
+      </div>
+
+      <div class="terminal" aria-label="Live proof card example">
+        <div class="bar">
+          <i class="dot-r"></i><i class="dot-y"></i><i class="dot-g"></i>
+          <span>zigttp dev - src/handler.ts</span>
+        </div>
+        <div class="proof-card">
+          <div class="proof-head">Proof card - rebuilt on every save</div>
+          <div class="chip"><span class="glyph ok">✓</span><b>deterministic</b></div>
+          <div class="chip"><span class="glyph ok">✓</span><b>no_secret_leakage</b></div>
+          <div class="chip"><span class="glyph ok">✓</span><b>injection_safe</b></div>
+          <div class="chip"><span class="glyph ok">✓</span><b>state_isolated</b></div>
+          <div class="chip"><span class="glyph bad">✗</span><b>idempotent</b></div>
+          <div class="why"><span class="ln">handler.ts:14</span> Why: cacheSet writes shared state on a GET path</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. NUMBERS -->
+  <section class="block">
+    <div class="wrap">
+      <div class="numbers">
+        <div class="cell"><div class="n">~3.5ms</div><div class="l">cold-start floor</div></div>
+        <div class="cell"><div class="n">~7-15ms</div><div class="l">typical cold start</div></div>
+        <div class="cell"><div class="n">4.8MB</div><div class="l">deployed binary</div></div>
+        <div class="cell"><div class="n">~13MB</div><div class="l">memory baseline</div></div>
+      </div>
+      <p class="muted" style="margin:0.7rem 0 0;font-size:0.85rem">
+        Measured figures from the project's performance docs - pre-warmed handler pool with per-request isolation.
+      </p>
+    </div>
+  </section>
+
+  <!-- WHAT IT IS -->
+  <section class="block alt" id="what">
+    <div class="wrap">
+      <p class="section-kicker">What it is</p>
+      <h2>A JavaScript runtime where the compiler proves your code before it ships</h2>
+      <p class="section-intro">
+        zigttp is a pure-Zig JavaScript engine paired with a serverless HTTP runtime for FaaS workloads.
+        It targets AWS Lambda, Azure Functions, Cloudflare Workers, and the edge. The design goals are
+        instant cold starts, a small binary, request isolation, and zero dependencies. You write a single
+        handler function; the compiler extracts a contract from it, derives a least-privilege sandbox, and
+        verifies a set of properties at build time - so a deploy is something you can hand someone a receipt for.
+      </p>
+      <div class="cards">
+        <div class="card">
+          <h3>One binary</h3>
+          <p>The runtime, the engine, and your handler compile into a single self-extracting executable. No Docker image, no node_modules, no runtime to install on the host.</p>
+        </div>
+        <div class="card">
+          <h3>Per-request isolation</h3>
+          <p>Each request gets an isolated runtime from a pre-warmed pool. State cannot leak across requests, and the compiler proves it rather than asking you to trust it.</p>
+        </div>
+        <div class="card">
+          <h3>The compiler is the product</h3>
+          <p>The interesting work happens at build time: contract extraction, type and flow checking, fault coverage, and signed proof receipts - not just bundling.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. THE CORE IDEA -->
+  <section class="block" id="idea">
+    <div class="wrap">
+      <p class="section-kicker">The core idea</p>
+      <h2>Restrictions are not limitations - they are proofs</h2>
+      <p class="section-intro">
+        zigttp runs an opinionated subset of TypeScript: the footguns are removed. Each cut is deliberate,
+        and each one buys a specific soundness guarantee the analyzer could not otherwise make. Take away
+        unbounded loops and you can enumerate every path; take away exceptions and every return is visible
+        to the type system. The proof card in <span class="inline-code">zigttp dev</span> renders this table
+        against your actual handler, so you see exactly which restriction earned each green chip.
+      </p>
+      <table class="tbl">
+        <thead>
+          <tr><th>Restriction</th><th>Failure class it prevents</th><th>Proof it unlocks</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>try/catch</code>, <code>throw</code></td><td>hidden exceptional control flow</td><td class="unlock">Result narrowing, exhaustive path enumeration</td></tr>
+          <tr><td><code>while</code>, <code>for(;;)</code></td><td>unbounded back-edges, non-termination</td><td class="unlock">finite path enumeration and termination</td></tr>
+          <tr><td><code>async/await</code></td><td>non-deterministic interleavings</td><td class="unlock">deterministic effect boundary, replayable I/O</td></tr>
+          <tr><td><code>class</code>, <code>this</code></td><td>implicit mutable receivers, hidden state</td><td class="unlock">explicit data flow and effect analysis</td></tr>
+          <tr><td><code>switch/case</code></td><td>implicit fallthrough, non-exhaustive flow</td><td class="unlock">match coverage, exhaustive return analysis</td></tr>
+          <tr><td><code>null</code></td><td>dual absent-value sentinels</td><td class="unlock">optional-narrowing totality (use <code>undefined</code>)</td></tr>
+          <tr><td><code>==</code> / <code>!=</code></td><td>implicit coercion paths</td><td class="unlock">sound type-directed comparison</td></tr>
+          <tr><td><code>regex</code></td><td>opaque accept set, catastrophic backtracking</td><td class="unlock">shape-checkable validation via schemas</td></tr>
+        </tbody>
+      </table>
+      <div class="callout">
+        <strong>See it fail in real time.</strong> Drop a <span class="inline-code">Date.now()</span> into a
+        handler that declares <span class="inline-code">deterministic</span> and the chip lights up red with a
+        <span class="inline-code">Why:</span> row pointing at the source line. Wrap it in
+        <span class="inline-code">step("ts", () =&gt; Date.now())</span> from <span class="inline-code">zigttp:durable</span>
+        and the chip flips back green. The full cut-to-proof map is available at the terminal with
+        <span class="inline-code">zigttp restrictions</span>.
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. QUICKSTART -->
+  <section class="block alt" id="quickstart">
+    <div class="wrap">
+      <p class="section-kicker">Get started</p>
+      <h2>From zero to a proven, running handler</h2>
+      <p class="section-intro">
+        Install the binary, scaffold a project, and you are editing a handler with live proofs in under a
+        minute. Every command after install auto-detects the project from
+        <span class="inline-code">zigttp.json</span>, so the steps take no arguments.
+      </p>
+
+      <ol class="steps">
+        <li class="step">
+          <h3>Install zigttp</h3>
+          <p>Pre-built binaries for macOS and Linux (x86_64 and aarch64). One line:</p>
+          <pre class="src"><span class="prompt" style="color:#6eaddb">$</span> curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh</pre>
+          <p class="muted" style="margin-bottom:0.5rem">
+            Prefer a tarball? Grab one from <a href="https://github.com/srdjan/zigttp/releases">GitHub Releases</a>.
+            Or build from source with Zig 0.16.0:
+          </p>
+          <pre class="src"><span class="prompt" style="color:#6eaddb">$</span> git clone https://github.com/srdjan/zigttp.git && cd zigttp
+<span class="prompt" style="color:#6eaddb">$</span> zig build -Doptimize=ReleaseFast</pre>
+        </li>
+
+        <li class="step">
+          <h3>Scaffold a project</h3>
+          <p>Create a project and step into it. A new project is a handler, a manifest, a starter test, and a static dir:</p>
+          <pre class="src"><span class="prompt" style="color:#6eaddb">$</span> zigttp init my-app && cd my-app
+
+my-app/
+  zigttp.json            <span class="cmt"># entry + port</span>
+  src/handler.ts         <span class="cmt"># your handler fn</span>
+  tests/handler.test.jsonl
+  public/                <span class="cmt"># static assets</span>
+  README.md</pre>
+          <p class="muted" style="margin-bottom:0">
+            Templates: <span class="inline-code">--template basic</span> (default),
+            <span class="inline-code">api</span>, or <span class="inline-code">htmx</span> (JSX, <span class="inline-code">src/handler.tsx</span>).
+          </p>
+        </li>
+
+        <li class="step">
+          <h3>Build the handler with the expert agent</h3>
+          <p>
+            <span class="inline-code">zigttp expert</span> is a compiler-in-the-loop coding agent - the way to
+            write a new handler or reshape the template one. Describe the goal and the proof obligations the
+            result must meet; it proposes edits and the compiler re-proves after each until they hold. Point it
+            at a provider key first, then describe what you want:
+          </p>
+          <pre class="src"><span class="prompt" style="color:#6eaddb">$</span> zigttp auth claude     <span class="cmt"># store an Anthropic key (or export ANTHROPIC_API_KEY)</span>
+<span class="prompt" style="color:#6eaddb">$</span> zigttp expert
+  <span class="cmt">goal: add GET /api/users/:id, proven no_secret_leakage</span>
+  <span class="cmt">re-proving after each edit ... 4/4 discharged - apply? [y/N]</span></pre>
+          <p class="muted" style="margin-bottom:0">
+            See the full loop in <a href="#expert">The expert agent</a> below.
+          </p>
+        </li>
+
+        <li class="step">
+          <h3>Run with live proofs</h3>
+          <p>
+            Start proof-aware live reload on <span class="inline-code">http://localhost:3000</span>. Edit
+            <span class="inline-code">src/handler.ts</span> and the proof card rebuilds on every save - see
+            <a href="#handler">Writing a handler</a> and <a href="#idea">the proof model</a>.
+          </p>
+          <pre class="src"><span class="prompt" style="color:#6eaddb">$</span> zigttp dev
+  <span class="cmt">listening on http://localhost:3000</span>
+  <span class="cmt">watching src/handler.ts - proving on save</span></pre>
+        </li>
+
+        <li class="step">
+          <h3>Run the tests</h3>
+          <p>The starter ships a declarative fixture - request in, expected response out, no test framework to wire up.</p>
+          <pre class="src"><span class="prompt" style="color:#6eaddb">$</span> zigttp test
+  <span class="cmt">tests/handler.test.jsonl - 1 passed</span></pre>
+        </li>
+
+        <li class="step">
+          <h3>Deploy a signed binary</h3>
+          <p>
+            Build, prove, and emit a self-contained signed binary under
+            <span class="inline-code">.zigttp/deploy/</span>. No cloud, Docker, or network - see
+            <a href="#deploy">Deploy + verify</a>.
+          </p>
+          <pre class="src"><span class="prompt" style="color:#6eaddb">$</span> zigttp deploy
+  <span class="cmt">wrote .zigttp/deploy/my-app  (signed)</span></pre>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- 5. FIVE CORE COMMANDS -->
+  <section class="block" id="commands">
+    <div class="wrap">
+      <p class="section-kicker">The five core commands</p>
+      <h2>The whole daily workflow</h2>
+      <p class="section-intro">
+        These five are what <span class="inline-code">zigttp --help</span> advertises. Everything else -
+        the analyzer surface (<span class="inline-code">check</span>, <span class="inline-code">prove</span>,
+        <span class="inline-code">proofs</span>, <span class="inline-code">verify</span>), the edge runtime,
+        and machine-readable JSON tools - stays out of the way under
+        <span class="inline-code">zigttp help --all</span> until you need it.
+      </p>
+      <div class="cards">
+        <div class="card">
+          <h3><code>init</code></h3>
+          <p>Scaffold a new project: handler, manifest, starter test, static dir. Pick a template.</p>
+          <code class="run">zigttp init my-app</code>
+        </div>
+        <div class="card">
+          <h3><code>dev</code></h3>
+          <p>Proof-aware live reload. Recompiles and re-proves on every save; the proof card flips live. Defaults to port 3000.</p>
+          <code class="run">zigttp dev</code>
+        </div>
+        <div class="card">
+          <h3><code>test</code></h3>
+          <p>Run declarative handler tests from a JSONL file - request in, expected response out. No test framework to wire up.</p>
+          <code class="run">zigttp test</code>
+        </div>
+        <div class="card">
+          <h3><code>expert</code></h3>
+          <p>Interactive compiler-in-the-loop agent. The compiler, not the model, drives convergence on your declared property goals.</p>
+          <code class="run">zigttp expert</code>
+        </div>
+        <div class="card">
+          <h3><code>deploy</code></h3>
+          <p>Build, prove, and emit a self-contained signed binary under <span class="inline-code">.zigttp/deploy/</span>. No cloud, Docker, or network.</p>
+          <code class="run">zigttp deploy</code>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6. WRITING A HANDLER -->
+  <section class="block alt" id="handler">
+    <div class="wrap">
+      <p class="section-kicker">Writing a handler</p>
+      <h2>A handler is one function: Request in, Response out</h2>
+      <p class="section-intro">
+        No framework, no router class, no lifecycle hooks. You export a <span class="inline-code">handler</span>
+        function. Start minimal, then reach for virtual modules and an author-declared
+        <span class="inline-code">Spec&lt;...&gt;</span> as the handler grows.
+      </p>
+
+      <div class="grid-2">
+        <figure class="code">
+          <figcaption>src/handler.ts - minimal</figcaption>
+          <pre class="src"><span class="kw">function</span> <span class="fn">handler</span>(req) {
+  <span class="kw">if</span> (req.method === <span class="str">"GET"</span> &amp;&amp; req.path === <span class="str">"/"</span>) {
+    <span class="kw">return</span> Response.<span class="fn">text</span>(<span class="str">"hello from zigttp"</span>);
+  }
+  <span class="kw">return</span> Response.<span class="fn">text</span>(<span class="str">"Not Found"</span>, { status: <span class="str">404</span> });
+}</pre>
+        </figure>
+
+        <figure class="code">
+          <figcaption>examples/system/users.ts - router, cache, and declared proofs</figcaption>
+          <pre class="src"><span class="kw">import type</span> { <span class="typ">Spec</span> } <span class="kw">from</span> <span class="str">"zigttp:types"</span>;
+<span class="kw">import</span> { cacheGet, cacheSet } <span class="kw">from</span> <span class="str">"zigttp:cache"</span>;
+<span class="kw">import</span> { routerMatch } <span class="kw">from</span> <span class="str">"zigttp:router"</span>;
+
+<span class="kw">type</span> <span class="typ">Guardrails</span> = <span class="typ">Spec</span>&lt;
+  | <span class="str">"injection_safe"</span>
+  | <span class="str">"state_isolated"</span>
+  | <span class="str">"no_secret_leakage"</span>
+&gt;;
+
+<span class="kw">const</span> routes = {
+  <span class="str">"GET /api/users/:id"</span>: getUserById,
+  <span class="str">"GET /api/users"</span>: listUsers,
+};
+
+<span class="kw">function</span> <span class="fn">handler</span>(req: <span class="typ">Request</span>): <span class="typ">Response</span> &amp; <span class="typ">Guardrails</span> {
+  <span class="kw">const</span> found = <span class="fn">routerMatch</span>(routes, req);
+  <span class="kw">if</span> (found !== <span class="kw">undefined</span>) {
+    req.params = found.params;
+    <span class="kw">return</span> found.<span class="fn">handler</span>(req);
+  }
+  <span class="kw">return</span> Response.<span class="fn">json</span>({ error: <span class="str">"not found"</span> }, { status: <span class="str">404</span> });
+}</pre>
+        </figure>
+      </div>
+
+      <h3 style="margin:2rem 0 0.8rem">The JavaScript / TypeScript subset</h3>
+      <p class="muted" style="margin-top:0;max-width:64ch">
+        TS and TSX files run directly through a native type stripper. The unsupported features below are
+        detected at parse time with a suggested replacement - they are the cuts that earn the proofs above.
+      </p>
+      <div class="two">
+        <div class="listbox good">
+          <h4><span class="badge-ok">●</span> Supported</h4>
+          <ul>
+            <li>arrow functions</li>
+            <li>function declarations</li>
+            <li>for...of (arrays)</li>
+            <li>if / else</li>
+            <li>match expression</li>
+            <li>destructuring</li>
+            <li>spread</li>
+            <li>template literals</li>
+            <li>optional chaining</li>
+            <li>nullish coalescing</li>
+            <li>typed arrays</li>
+            <li>array HOFs</li>
+            <li>Object.keys/values/entries</li>
+            <li>range()</li>
+            <li>TS / TSX / JSX</li>
+            <li>ES6 modules</li>
+          </ul>
+        </div>
+        <div class="listbox bad">
+          <h4><span class="badge-no">●</span> Not supported (with suggestions)</h4>
+          <ul>
+            <li>class</li>
+            <li>async / await</li>
+            <li>Promise</li>
+            <li>this / new</li>
+            <li>try / catch</li>
+            <li>throw</li>
+            <li>var</li>
+            <li>while</li>
+            <li>switch</li>
+            <li>for...in</li>
+            <li>null</li>
+            <li>== / !=</li>
+            <li>++ / --</li>
+            <li>regex</li>
+            <li>delete</li>
+          </ul>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:0.9rem;font-size:0.85rem">
+        Use <span class="inline-code">undefined</span> as the sole absent-value sentinel. Response helpers:
+        <span class="inline-code">Response.json()</span>, <span class="inline-code">.text()</span>,
+        <span class="inline-code">.html()</span>, <span class="inline-code">.redirect()</span>.
+      </p>
+    </div>
+  </section>
+
+  <!-- 7. VIRTUAL MODULES -->
+  <section class="block" id="modules">
+    <div class="wrap">
+      <p class="section-kicker">Virtual modules</p>
+      <h2>Batteries, implemented in Zig, governed by capabilities</h2>
+      <p class="section-intro">
+        Import platform functionality from <span class="inline-code">zigttp:*</span> modules. They are
+        implemented natively in Zig - not JS shims - and each declares the capabilities it needs
+        (clock, crypto, random, network egress). Those declarations are enforced at call time and feed the
+        handler's least-privilege sandbox, so importing <span class="inline-code">zigttp:sql</span> is what
+        grants database authority, and nothing else gets it.
+      </p>
+      <pre class="src" style="margin-bottom:1.2rem"><span class="kw">import</span> { jwtVerify, parseBearer } <span class="kw">from</span> <span class="str">"zigttp:auth"</span>;
+<span class="kw">import</span> { sql, sqlOne } <span class="kw">from</span> <span class="str">"zigttp:sql"</span>;
+<span class="kw">import</span> { parallel, race } <span class="kw">from</span> <span class="str">"zigttp:io"</span>;</pre>
+      <table class="tbl">
+        <thead><tr><th>Module</th><th>Key exports</th></tr></thead>
+        <tbody>
+          <tr><td><code>zigttp:env</code></td><td><code>env</code></td></tr>
+          <tr><td><code>zigttp:crypto</code></td><td><code>sha256</code>, <code>hmacSha256</code>, <code>base64Encode/Decode</code></td></tr>
+          <tr><td><code>zigttp:auth</code></td><td><code>parseBearer</code>, <code>jwtVerify</code>, <code>jwtSign</code>, <code>timingSafeEqual</code></td></tr>
+          <tr><td><code>zigttp:validate</code></td><td><code>schemaCompile</code>, <code>validateJson</code>, <code>coerceJson</code></td></tr>
+          <tr><td><code>zigttp:cache</code></td><td><code>cacheGet</code>, <code>cacheSet</code>, <code>cacheIncr</code>, <code>cacheStats</code></td></tr>
+          <tr><td><code>zigttp:sql</code></td><td><code>sql</code>, <code>sqlOne</code>, <code>sqlMany</code>, <code>sqlExec</code></td></tr>
+          <tr><td><code>zigttp:fetch</code></td><td><code>fetch</code> (web-standard <code>fetch(url, init?)</code>)</td></tr>
+          <tr><td><code>zigttp:io</code></td><td><code>parallel</code>, <code>race</code> (concurrent I/O, no async/await)</td></tr>
+          <tr><td><code>zigttp:durable</code></td><td><code>run</code>, <code>step</code>, <code>sleep</code>, <code>waitSignal</code></td></tr>
+          <tr><td><code>zigttp:router</code></td><td><code>routerMatch</code></td></tr>
+          <tr><td><code>zigttp:http</code></td><td><code>parseCookies</code>, <code>setCookie</code>, <code>cors</code>, <code>negotiate</code></td></tr>
+          <tr><td><code>zigttp:ratelimit</code></td><td><code>rateCheck</code>, <code>rateReset</code></td></tr>
+          <tr><td><code>zigttp:types</code></td><td><code>Spec</code> (type-only proof declarations)</td></tr>
+        </tbody>
+      </table>
+      <p class="muted" style="margin-top:0.8rem;font-size:0.85rem">
+        The full registry (22 modules) covers id generation, URL parsing, time, text, logging, websockets,
+        scope, and compose. Run <span class="inline-code">zigttp modules</span> for the live list.
+      </p>
+    </div>
+  </section>
+
+  <!-- 8. SPEC -->
+  <section class="block alt" id="spec">
+    <div class="wrap">
+      <p class="section-kicker">Author-declared proofs</p>
+      <h2>Declare what must hold, in the return type</h2>
+      <p class="section-intro">
+        Intersect your handler's <span class="inline-code">Response</span> return type with
+        <span class="inline-code">Spec&lt;...&gt;</span> to name the properties it must satisfy. The compiler
+        either discharges every obligation or fails the build - a declared property that no longer holds is a
+        compile error, not a runtime surprise. <span class="inline-code">Spec</span> is a type-only import, so
+        it strips away cleanly and costs nothing at runtime.
+      </p>
+      <pre class="src"><span class="kw">import type</span> { <span class="typ">Spec</span> } <span class="kw">from</span> <span class="str">"zigttp:types"</span>;
+
+<span class="kw">function</span> <span class="fn">handler</span>(req: <span class="typ">Request</span>): <span class="typ">Response</span> &amp; <span class="typ">Spec</span>&lt;<span class="str">"idempotent"</span> | <span class="str">"deterministic"</span>&gt; {
+  <span class="cmt">// the compiler now proves both properties on every path</span>
+  <span class="kw">return</span> Response.<span class="fn">json</span>({ ok: <span class="kw">true</span> });
+}</pre>
+      <div class="cards" style="margin-top:1.4rem">
+        <div class="card"><h3>deterministic</h3><p>Same input, same output. No ambient clock, randomness, or unrecorded I/O on any path.</p></div>
+        <div class="card"><h3>no_secret_leakage</h3><p>Values labelled secret or credential never reach the response body.</p></div>
+        <div class="card"><h3>injection_safe</h3><p>User input cannot flow unescaped into a sink that would interpret it as code or query.</p></div>
+        <div class="card"><h3>idempotent</h3><p>Re-running the handler produces no additional observable state change.</p></div>
+        <div class="card"><h3>state_isolated</h3><p>Nothing written during one request is visible to another. The pool guarantees it; the compiler checks it.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 9. THE EXPERT AGENT -->
+  <section class="block" id="expert">
+    <div class="wrap">
+      <p class="section-kicker">Compiler-in-the-loop</p>
+      <h2>The expert agent: the model proposes, the compiler decides</h2>
+      <p class="section-intro">
+        <span class="inline-code">zigttp expert</span> is a coding agent built around the analyzer, and the
+        primary way to develop a handler in zigttp - whether you are writing one from scratch or evolving the
+        template that <span class="inline-code">init</span> scaffolded. You give it a goal and the properties
+        the result must satisfy; it proposes an edit, and the compiler re-proves the handler after every
+        change. The loop runs until each obligation is discharged or the agent reports it cannot get there.
+        What lands is something the compiler has already proven - not just something that looked plausible.
+      </p>
+      <div class="cards" style="margin-bottom:1.4rem">
+        <div class="card">
+          <h3>The compiler drives convergence</h3>
+          <p>A property-goal autoloop: the model proposes an edit, the analyzer re-proves it, and the loop repeats. Progress is measured by the proof result, not the model's confidence.</p>
+        </div>
+        <div class="card">
+          <h3>You stay in control</h3>
+          <p>Review and approve or reject each edit interactively. Pass <span class="inline-code">--yes</span> to auto-apply only the edits that pass verification.</p>
+        </div>
+        <div class="card">
+          <h3>Every edit is provable</h3>
+          <p>Each applied edit is checked for behavioral equivalence and logged as a signed <span class="inline-code">kind=equivalence</span> receipt in <span class="inline-code">.zigttp/proofs.jsonl</span>.</p>
+        </div>
+        <div class="card">
+          <h3>Fits your workflow</h3>
+          <p>Interactive by default; <span class="inline-code">--print</span> for one-shot and <span class="inline-code">--mode rpc</span> for CI. Sessions persist - pick up with <span class="inline-code">--resume</span>. Backed by Claude or OpenAI.</p>
+        </div>
+      </div>
+      <div class="terminal">
+        <div class="bar"><i class="dot-r"></i><i class="dot-y"></i><i class="dot-g"></i><span>zigttp expert - src/handler.ts</span></div>
+        <pre><span class="prompt">$</span> zigttp expert
+  <span class="cmt">provider: claude   session: new</span>
+
+<span class="prompt">&gt;</span> add GET /api/users/:id returning a cached user,
+  proven no_secret_leakage and state_isolated
+
+  <span class="cmt">reading src/handler.ts ... contract extracted</span>
+  <span class="cmt">proposing edit 1 -&gt; src/handler.ts</span>
+
+  re-proving:
+    <span style="color:#6fd089">[+] injection_safe</span>
+    <span style="color:#6fd089">[+] state_isolated</span>
+    <span style="color:#6fd089">[+] no_secret_leakage</span>
+    <span style="color:#f0728c">[-] idempotent      cacheSet on a GET path</span>
+
+  <span class="cmt">3/4 hold - tightening ...</span>
+  <span class="cmt">proposing edit 2 -&gt; guard cacheSet behind a write path</span>
+
+  re-proving: <span style="color:#6fd089">4/4 discharged</span>   equivalence: additive
+  apply? [y/N] y
+  <span class="cmt">applied - signed kind=equivalence receipt -&gt; .zigttp/proofs.jsonl</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 10. DEPLOY + VERIFY -->
+  <section class="block alt" id="deploy">
+    <div class="wrap">
+      <p class="section-kicker">Deploy + verify</p>
+      <h2>A deploy you can hand someone a receipt for</h2>
+      <p class="section-intro">
+        <span class="inline-code">zigttp deploy</span> auto-detects the handler and project name, verifies the
+        handler, and emits a self-contained binary at <span class="inline-code">.zigttp/deploy/&lt;project&gt;</span>.
+        No credentials, Docker, or network. Proof receipts ship default-on and travel inside the binary.
+      </p>
+      <div class="grid-2">
+        <div>
+          <h3 style="margin-top:0">Verifiable from any machine</h3>
+          <p class="muted" style="margin-top:0.3rem">
+            Every fresh build signs its receipt and embeds it. Deploy, then verify the running service from
+            anywhere - no shared secret, just the embedded public key:
+          </p>
+          <pre class="src"><span class="prompt" style="color:#6eaddb">$</span> zigttp deploy
+  <span class="cmt">wrote .zigttp/deploy/my-app  (signed)</span>
+
+<span class="prompt" style="color:#6eaddb">$</span> zigttp verify https://my-app.example.com
+  <span class="cmt">signature OK - contract + bytecode + policy</span></pre>
+        </div>
+        <div>
+          <h3 style="margin-top:0">What every receipt signs</h3>
+          <p class="muted" style="margin-top:0.3rem">
+            A JWS over three hashes, signed with a persistent Ed25519 identity generated on first use:
+          </p>
+          <ul style="margin:0 0 1rem;padding-left:1.15rem;color:var(--z-ink-soft);font-size:0.93rem;line-height:1.85">
+            <li>the extracted <strong>contract</strong></li>
+            <li>the compiled <strong>bytecode</strong></li>
+            <li>the derived sandbox <strong>policy</strong></li>
+          </ul>
+          <p class="muted" style="margin:0">
+            The running server returns <span class="inline-code">Zigttp-Proofs</span> and
+            <span class="inline-code">Zigttp-Attest</span> headers on every request, and serves the full
+            envelope plus the public JWK at <span class="inline-code">/.well-known/zigttp-attest</span>.
+          </p>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>Build from source.</strong> Validated on Zig 0.16.0 stable.
+        <span class="inline-code">zig build</span> produces the three binaries (debug);
+        <span class="inline-code">zig build -Doptimize=ReleaseFast</span> for release;
+        <span class="inline-code">zig build run -- examples/handler/handler.ts -p 3000</span> to run a handler directly.
+        Hosted cloud deploy is deferred from this beta - the self-contained binary is the supported path.
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span class="brand" style="font-size:1rem"><span class="mark" style="width:24px;height:24px;font-size:0.75rem">z</span>zigttp</span>
+    <span class="muted">v0.1.0-beta - MIT licensed</span>
+    <span class="muted">Pure-Zig JS engine (<code>zigts</code>) + serverless runtime</span>
+    <span class="muted" style="margin-left:auto">Compile-time proof you can see.</span>
+  </div>
+</footer>
+
+</body>
+</html>
