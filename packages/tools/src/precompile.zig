@@ -1095,13 +1095,12 @@ pub fn runCheckOnlyFromSourceWithOptions(
         result.strict_errors = @intCast(resolved.strict_error_count);
         result.strict_warnings = @intCast(strict_diags.len -| result.strict_errors);
         if (strict_diags.len > 0) {
-            if (json_mode) {
-                for (strict_diags) |diag| {
-                    if (json_diag.fromStrictDiagnostic(diag, ir_view, handler_path)) |jd| {
-                        result.json_diagnostics.append(allocator, jd) catch {};
-                    }
+            for (strict_diags) |diag| {
+                if (json_diag.fromStrictDiagnostic(diag, ir_view, handler_path)) |jd| {
+                    result.json_diagnostics.append(allocator, jd) catch {};
                 }
-            } else {
+            }
+            if (!json_mode) {
                 var buf: std.ArrayList(u8) = .empty;
                 defer buf.deinit(allocator);
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
@@ -3832,6 +3831,33 @@ test "formatProofCard: canonical public helper diagnostics are visible in text m
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS610") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "one-way-effects-text.ts") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Effects<...>") != null);
+}
+
+test "formatProofCard: strict canonical diagnostics are visible in text mode" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const parse = (x: number): number => x;
+        \\
+        \\function handler(req: Request): Response {
+        \\  const a = parse(1);
+        \\  const b = parse(2);
+        \\  return Response.json({ a, b });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-arrow-text.ts", .{});
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.canonical_errors);
+    try std.testing.expect(result.strict_errors > 0);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    formatProofCard(&aw.writer, &result, "one-way-arrow-text.ts");
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Canonical diagnostics") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS608") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "one-way-arrow-text.ts") != null);
 }
 
 test "runCheckOnlyFromSource: composed Spec and Effects preserves handler budget diagnostics" {

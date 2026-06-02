@@ -1,10 +1,10 @@
 //! Reduce a handler file to its unique Canonical Normal Form.
 //!
-//! Read-only: returns the canonical source, an `is_canonical` flag (true iff
-//! the input was already canonical), and the rewrite trace. The agent applies
-//! the canonical source through its normal `apply_edit` path; this tool never
-//! writes the file. Distinct from `zigts_expert_canonicalize`, which previews
-//! single per-node refactor intents - this returns the fixed point.
+//! Read-only: returns the canonical source, the `fullyCanonical` fixed-point
+//! flag, any residual diagnostics, and the rewrite trace. The agent applies the
+//! canonical source through its normal `apply_edit` path; this tool never writes
+//! the file. Distinct from `zigts_expert_canonicalize`, which previews single
+//! per-node refactor intents - this returns the fixed point.
 
 const std = @import("std");
 const canonicalize = @import("zigts_cli").canonicalize;
@@ -15,7 +15,7 @@ const name = "zigts_expert_normalize";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "normalize",
-    .description = "Reduce a handler file to its unique Canonical Normal Form and return the canonical source, an is_canonical flag, and the rewrite trace. Read-only: never writes the file. Use it to canonicalize a draft before applying, so the compiler veto never rejects it on a ZTS6xx canonical-form violation.",
+    .description = "Reduce a handler file to its unique Canonical Normal Form and return the canonical source, fullyCanonical, residualDiagnostics, and the rewrite trace. Read-only: never writes the file. Use it to canonicalize a draft before applying, so the compiler veto never rejects it on a ZTS6xx canonical-form violation.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\",\"description\":\"Handler file to normalize.\"}},\"required\":[\"file\"]}",
     .decode_json = decodeJson,
     .execute = execute,

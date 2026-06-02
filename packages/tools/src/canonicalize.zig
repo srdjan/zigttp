@@ -866,6 +866,24 @@ fn buildStatementRewrites(
                 else => return err,
             };
             try appendStatementRewriteUnique(allocator, result, rw);
+        } else if (std.mem.eql(u8, diag.code, "ZTS617")) {
+            const rw = defaultParamLiftRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
+                error.UnsupportedRefactor => continue,
+                else => return err,
+            };
+            try appendStatementRewriteUnique(allocator, result, rw);
+        } else if (std.mem.eql(u8, diag.code, "ZTS618")) {
+            const rw = nestedDestructureRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
+                error.UnsupportedRefactor => continue,
+                else => return err,
+            };
+            try appendStatementRewriteUnique(allocator, result, rw);
+        } else if (std.mem.eql(u8, diag.code, "ZTS619")) {
+            const rw = unusedIndexAliasRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
+                error.UnsupportedRefactor => continue,
+                else => return err,
+            };
+            try appendStatementRewriteUnique(allocator, result, rw);
         }
     }
 }
@@ -1372,6 +1390,561 @@ fn isSimpleTemplateInterpText(s: []const u8) bool {
     return isSimpleLvalue(s);
 }
 
+/// ZTS617 canonical_default_parameter: remove a simple signature-site default
+/// and make the fallback a first statement in the function body.
+///
+/// Supported shape is deliberately narrow:
+///   `function f(name: T = expr): R {`
+///   `function f(name = expr) {`
+///
+/// The opening brace must end the physical line so inserting the guard cannot
+/// reorder an existing same-line statement. The parameter must be a simple
+/// identifier. When an explicit type annotation is present, the type is widened
+/// to include `undefined`. The body starts with `if (name === undefined) {
+/// name = expr; }`, preserving the runtime behavior of omitted/undefined
+/// arguments while moving the default into visible statement position.
+fn defaultParamLiftRewrite(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    line: u32,
+    column: u16,
+) !StatementRewrite {
+    const param_pos = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
+    const line_start = lineStartOffset(source, param_pos);
+    const line_end = lineEndOffset(source, param_pos);
+    if (param_pos >= line_end) return error.UnsupportedRefactor;
+
+    const param_open = findByteBack(source, param_pos, line_start, '(') orelse return error.UnsupportedRefactor;
+    const param_close = matchingDelimiter(source, param_open, '(', ')', line_end) orelse return error.UnsupportedRefactor;
+    const brace = std.mem.indexOfScalarPos(u8, source, param_close, '{') orelse return error.UnsupportedRefactor;
+    if (brace >= line_end) return error.UnsupportedRefactor;
+    if (std.mem.trim(u8, source[brace + 1 .. line_end], " \t").len != 0) return error.UnsupportedRefactor;
+
+    const line_text = source[line_start..line_end];
+    const indent = line_text[0..leadingSpaces(line_text)];
+
+    var params: std.ArrayListUnmanaged(CanonicalParam) = .empty;
+    defer {
+        for (params.items) |*param| param.deinit(allocator);
+        params.deinit(allocator);
+    }
+    try collectCanonicalParams(allocator, source, param_open + 1, param_close, &params);
+
+    var default_count: usize = 0;
+    for (params.items) |param| {
+        if (param.default_expr != null) default_count += 1;
+    }
+    if (default_count == 0) return error.UnsupportedRefactor;
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, source[line_start .. param_open + 1]);
+    for (params.items, 0..) |param, idx| {
+        if (idx > 0) try out.appendSlice(allocator, ", ");
+        try out.appendSlice(allocator, param.canonical);
+    }
+    try out.appendSlice(allocator, source[param_close .. brace + 1]);
+    for (params.items) |param| {
+        const default_expr = param.default_expr orelse continue;
+        try out.append(allocator, '\n');
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, "  if (");
+        try out.appendSlice(allocator, param.name);
+        try out.appendSlice(allocator, " === undefined) { ");
+        try out.appendSlice(allocator, param.name);
+        try out.appendSlice(allocator, " = ");
+        try out.appendSlice(allocator, default_expr);
+        try out.appendSlice(allocator, "; }");
+    }
+
+    const replacement = try out.toOwnedSlice(allocator);
+    errdefer allocator.free(replacement);
+    const original = try allocator.dupe(u8, source[line_start..line_end]);
+    errdefer allocator.free(original);
+
+    return .{
+        .intent = .lift_default_to_body,
+        .start_offset = line_start,
+        .end_offset = line_end,
+        .replacement = replacement,
+        .original = original,
+    };
+}
+
+const CanonicalParam = struct {
+    name: []u8,
+    canonical: []u8,
+    default_expr: ?[]u8 = null,
+
+    fn deinit(self: *CanonicalParam, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.canonical);
+        if (self.default_expr) |expr| allocator.free(expr);
+        self.* = undefined;
+    }
+};
+
+fn collectCanonicalParams(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    params_start: usize,
+    params_end: usize,
+    out: *std.ArrayListUnmanaged(CanonicalParam),
+) !void {
+    var start = params_start;
+    while (start <= params_end) {
+        const end = nextParamEnd(source, start, params_end) orelse return error.UnsupportedRefactor;
+        const raw = std.mem.trim(u8, source[start..end], " \t");
+        if (raw.len == 0) return error.UnsupportedRefactor;
+        var param = try canonicalParamFromText(allocator, raw);
+        errdefer param.deinit(allocator);
+        try out.append(allocator, param);
+        if (end == params_end) break;
+        start = end + 1;
+    }
+}
+
+fn canonicalParamFromText(allocator: std.mem.Allocator, raw: []const u8) !CanonicalParam {
+    const eq = findTopLevelChar(raw, 0, raw.len, '=');
+    const head = std.mem.trim(u8, if (eq) |idx| raw[0..idx] else raw, " \t");
+    if (head.len == 0) return error.UnsupportedRefactor;
+
+    const name_end = scanIdentEnd(head, 0, head.len) orelse return error.UnsupportedRefactor;
+    const name = head[0..name_end];
+    if (!isSimpleIdentifier(name)) return error.UnsupportedRefactor;
+    const after_name = std.mem.trim(u8, head[name_end..], " \t");
+
+    var canonical: []u8 = undefined;
+    if (after_name.len == 0) {
+        canonical = try allocator.dupe(u8, name);
+    } else {
+        if (after_name[0] != ':') return error.UnsupportedRefactor;
+        const type_text = std.mem.trim(u8, after_name[1..], " \t");
+        if (type_text.len == 0) return error.UnsupportedRefactor;
+        if (std.mem.indexOf(u8, type_text, "undefined") != null) {
+            canonical = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ name, type_text });
+        } else {
+            canonical = try std.fmt.allocPrint(allocator, "{s}: {s} | undefined", .{ name, type_text });
+        }
+    }
+    errdefer allocator.free(canonical);
+
+    const default_expr = if (eq) |idx| blk: {
+        const expr = std.mem.trim(u8, raw[idx + 1 ..], " \t");
+        if (expr.len == 0) return error.UnsupportedRefactor;
+        break :blk try allocator.dupe(u8, expr);
+    } else null;
+    errdefer if (default_expr) |expr| allocator.free(expr);
+
+    return .{
+        .name = try allocator.dupe(u8, name),
+        .canonical = canonical,
+        .default_expr = default_expr,
+    };
+}
+
+fn nextParamEnd(source: []const u8, start: usize, end: usize) ?usize {
+    var i = start;
+    var depth: i32 = 0;
+    while (i < end) {
+        const c = source[i];
+        switch (c) {
+            '(', '[', '{' => {
+                depth += 1;
+                i += 1;
+            },
+            ')', ']', '}' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                i += 1;
+            },
+            ',' => {
+                if (depth == 0) return i;
+                i += 1;
+            },
+            '"', '\'', '`' => {
+                const after = scanStringForward(source, i, c) orelse return null;
+                if (after > end) return null;
+                i = after;
+            },
+            else => i += 1,
+        }
+    }
+    return end;
+}
+
+/// ZTS618 canonical_destructure_depth: flatten a simple nested object pattern.
+///
+/// Supported shape:
+///   `const {outer: {inner}} = expr;`
+///
+/// The output names the intermediate object, then destructures the nested
+/// fields from that name:
+///   `const {outer} = expr;`
+///   `const {inner} = outer;`
+fn nestedDestructureRewrite(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    line: u32,
+    column: u16,
+) !StatementRewrite {
+    const pos = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
+    const line_start = lineStartOffset(source, pos);
+    const line_end = lineEndOffset(source, pos);
+    const line_text = source[line_start..line_end];
+    const trimmed_left = trimLeft(line_text, " \t");
+    const indent = line_text[0 .. line_text.len - trimmed_left.len];
+    if (!std.mem.startsWith(u8, trimmed_left, "const ")) return error.UnsupportedRefactor;
+
+    const open = std.mem.indexOfScalar(u8, line_text, '{') orelse return error.UnsupportedRefactor;
+    const close_abs = matchingDelimiter(source, line_start + open, '{', '}', line_end) orelse return error.UnsupportedRefactor;
+    const close = close_abs - line_start;
+    const eq = findTopLevelChar(source, close_abs + 1, line_end, '=') orelse return error.UnsupportedRefactor;
+    const rhs = std.mem.trim(u8, source[eq + 1 .. line_end], " \t");
+    if (rhs.len == 0) return error.UnsupportedRefactor;
+
+    const pattern = std.mem.trim(u8, line_text[open + 1 .. close], " \t");
+    const colon = topLevelColon(pattern) orelse return error.UnsupportedRefactor;
+    const outer = std.mem.trim(u8, pattern[0..colon], " \t");
+    if (!isSimpleIdentifier(outer)) return error.UnsupportedRefactor;
+    if (bindingDeclaredBefore(source, line_start, outer)) return error.UnsupportedRefactor;
+
+    const nested = std.mem.trim(u8, pattern[colon + 1 ..], " \t");
+    if (nested.len < 2 or nested[0] != '{' or nested[nested.len - 1] != '}') return error.UnsupportedRefactor;
+    const inner = std.mem.trim(u8, nested[1 .. nested.len - 1], " \t");
+    if (!isFlatIdentifierList(inner)) return error.UnsupportedRefactor;
+
+    const replacement = try std.fmt.allocPrint(
+        allocator,
+        "{s}const {{{s}}} = {s}\n{s}const {{{s}}} = {s};",
+        .{ indent, outer, rhs, indent, inner, outer },
+    );
+    errdefer allocator.free(replacement);
+    const original = try allocator.dupe(u8, source[line_start..line_end]);
+    errdefer allocator.free(original);
+
+    return .{
+        .intent = .flatten_destructure,
+        .start_offset = line_start,
+        .end_offset = line_end,
+        .replacement = replacement,
+        .original = original,
+    };
+}
+
+/// ZTS619 canonical_unused_index_alias: collapse
+/// `for (const pair of items.entries()) { const [_i, item] = pair; ... }`
+/// to `for (const item of items) { ... }`.
+fn unusedIndexAliasRewrite(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    line: u32,
+    column: u16,
+) !StatementRewrite {
+    const pos = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
+    const for_start = lineStartOffset(source, pos);
+    const for_end = lineEndOffset(source, pos);
+    const for_line = source[for_start..for_end];
+    const for_shape = parseForEntriesLine(for_line) orelse return error.UnsupportedRefactor;
+
+    if (for_end >= source.len or source[for_end] != '\n') return error.UnsupportedRefactor;
+    const destructure_start = for_end + 1;
+    const destructure_end = lineEndOffset(source, destructure_start);
+    const destructure_line = source[destructure_start..destructure_end];
+    const destructure = parseIndexAliasDestructure(destructure_line, for_shape.binding) orelse return error.UnsupportedRefactor;
+
+    const span_end = if (destructure_end < source.len and source[destructure_end] == '\n')
+        destructure_end + 1
+    else
+        destructure_end;
+    const loop_close = matchingDelimiter(source, for_start + (std.mem.indexOfScalar(u8, for_line, '{') orelse return error.UnsupportedRefactor), '{', '}', source.len) orelse return error.UnsupportedRefactor;
+    if (identifierTokenAppears(source[span_end..loop_close], for_shape.binding)) return error.UnsupportedRefactor;
+
+    const replacement = try std.fmt.allocPrint(
+        allocator,
+        "{s}for (const {s} of {s}) {{\n",
+        .{ for_shape.indent, destructure.value, for_shape.iterable },
+    );
+    errdefer allocator.free(replacement);
+    const original = try allocator.dupe(u8, source[for_start..span_end]);
+    errdefer allocator.free(original);
+
+    return .{
+        .intent = .drop_unused_index_alias,
+        .start_offset = for_start,
+        .end_offset = span_end,
+        .replacement = replacement,
+        .original = original,
+    };
+}
+
+fn lineEndOffset(source: []const u8, pos: usize) usize {
+    return std.mem.indexOfScalarPos(u8, source, pos, '\n') orelse source.len;
+}
+
+fn findByteBack(source: []const u8, pos: usize, min: usize, target: u8) ?usize {
+    var i = pos;
+    while (i > min) {
+        i -= 1;
+        if (source[i] == target) return i;
+    }
+    return null;
+}
+
+fn skipSpacesInRange(source: []const u8, start: usize, end: usize) usize {
+    var i = start;
+    while (i < end and (source[i] == ' ' or source[i] == '\t')) i += 1;
+    return i;
+}
+
+fn scanIdentEnd(source: []const u8, start: usize, end: usize) ?usize {
+    if (start >= end or !isIdentStart(source[start])) return null;
+    var i = start + 1;
+    while (i < end and isIdentContinue(source[i])) i += 1;
+    return i;
+}
+
+fn isSimpleIdentifier(s: []const u8) bool {
+    if (s.len == 0 or !isIdentStart(s[0])) return false;
+    for (s[1..]) |c| {
+        if (!isIdentContinue(c)) return false;
+    }
+    return true;
+}
+
+fn identifierTokenAppears(source: []const u8, ident: []const u8) bool {
+    if (ident.len == 0) return false;
+    var i: usize = 0;
+    while (i < source.len) {
+        if (!isIdentStart(source[i])) {
+            i += 1;
+            continue;
+        }
+        const start = i;
+        i += 1;
+        while (i < source.len and isIdentContinue(source[i])) i += 1;
+        if (std.mem.eql(u8, source[start..i], ident)) return true;
+    }
+    return false;
+}
+
+fn bindingDeclaredBefore(source: []const u8, stop: usize, ident: []const u8) bool {
+    var line_start: usize = 0;
+    while (line_start < stop) {
+        const raw_end = std.mem.indexOfScalarPos(u8, source, line_start, '\n') orelse stop;
+        const line_end = @min(raw_end, stop);
+        if (lineDeclaresIdentifier(source[line_start..line_end], ident)) return true;
+        if (raw_end >= stop) break;
+        line_start = raw_end + 1;
+    }
+    return false;
+}
+
+fn lineDeclaresIdentifier(line: []const u8, ident: []const u8) bool {
+    var trimmed = trimLeft(line, " \t");
+    if (std.mem.startsWith(u8, trimmed, "export ")) trimmed = trimLeft(trimmed["export ".len..], " \t");
+
+    inline for (.{ "const ", "let ", "var " }) |kw| {
+        if (std.mem.startsWith(u8, trimmed, kw)) {
+            const decl_start = kw.len;
+            const eq = findTopLevelChar(trimmed, decl_start, trimmed.len, '=') orelse trimmed.len;
+            return identifierTokenAppears(trimmed[decl_start..eq], ident);
+        }
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "function ")) {
+        const rest = trimmed["function ".len..];
+        const name_end = scanIdentEnd(rest, 0, rest.len);
+        if (name_end) |end| {
+            if (std.mem.eql(u8, rest[0..end], ident)) return true;
+        }
+        const open = std.mem.indexOfScalar(u8, rest, '(') orelse return false;
+        const close = std.mem.indexOfScalarPos(u8, rest, open + 1, ')') orelse return false;
+        return identifierTokenAppears(rest[open + 1 .. close], ident);
+    }
+
+    return false;
+}
+
+fn findTopLevelChar(source: []const u8, start: usize, end: usize, target: u8) ?usize {
+    var i = start;
+    var depth: i32 = 0;
+    while (i < end) {
+        const c = source[i];
+        switch (c) {
+            '(', '[', '{' => {
+                depth += 1;
+                i += 1;
+            },
+            ')', ']', '}' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                i += 1;
+            },
+            '"', '\'', '`' => {
+                const after = scanStringForward(source, i, c) orelse return null;
+                if (after > end) return null;
+                i = after;
+            },
+            else => {
+                if (depth == 0 and c == target) return i;
+                i += 1;
+            },
+        }
+    }
+    return null;
+}
+
+fn findParamBoundary(source: []const u8, start: usize, end: usize) ?usize {
+    var i = start;
+    var depth: i32 = 0;
+    while (i < end) {
+        const c = source[i];
+        switch (c) {
+            '(', '[', '{' => {
+                depth += 1;
+                i += 1;
+            },
+            ')', ']', '}' => {
+                if (depth == 0) return if (c == ')') i else null;
+                depth -= 1;
+                i += 1;
+            },
+            ',' => {
+                if (depth == 0) return i;
+                i += 1;
+            },
+            '"', '\'', '`' => {
+                const after = scanStringForward(source, i, c) orelse return null;
+                if (after > end) return null;
+                i = after;
+            },
+            else => i += 1,
+        }
+    }
+    return null;
+}
+
+fn matchingDelimiter(source: []const u8, open: usize, open_ch: u8, close_ch: u8, limit: usize) ?usize {
+    if (open >= limit or source[open] != open_ch) return null;
+    var i = open + 1;
+    var depth: u32 = 0;
+    while (i < limit) {
+        const c = source[i];
+        if (c == open_ch) {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if (c == close_ch) {
+            if (depth == 0) return i;
+            depth -= 1;
+            i += 1;
+            continue;
+        }
+        if (c == '"' or c == '\'' or c == '`') {
+            const after = scanStringForward(source, i, c) orelse return null;
+            if (after > limit) return null;
+            i = after;
+            continue;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+fn topLevelColon(source: []const u8) ?usize {
+    var i: usize = 0;
+    var depth: i32 = 0;
+    while (i < source.len) {
+        const c = source[i];
+        switch (c) {
+            '{', '[', '(' => {
+                depth += 1;
+                i += 1;
+            },
+            '}', ']', ')' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                i += 1;
+            },
+            ':' => {
+                if (depth == 0) return i;
+                i += 1;
+            },
+            else => i += 1,
+        }
+    }
+    return null;
+}
+
+fn isFlatIdentifierList(source: []const u8) bool {
+    var rest = std.mem.trim(u8, source, " \t");
+    if (rest.len == 0) return false;
+    while (true) {
+        const comma = std.mem.indexOfScalar(u8, rest, ',');
+        const item = std.mem.trim(u8, if (comma) |c| rest[0..c] else rest, " \t");
+        if (!isSimpleIdentifier(item)) return false;
+        if (comma == null) return true;
+        rest = std.mem.trim(u8, rest[comma.? + 1 ..], " \t");
+        if (rest.len == 0) return false;
+    }
+}
+
+const ForEntriesLine = struct {
+    indent: []const u8,
+    binding: []const u8,
+    iterable: []const u8,
+};
+
+fn parseForEntriesLine(line: []const u8) ?ForEntriesLine {
+    const trimmed = trimLeft(line, " \t");
+    const indent = line[0 .. line.len - trimmed.len];
+    const prefix = "for (const ";
+    if (!std.mem.startsWith(u8, trimmed, prefix)) return null;
+    var rest = trimmed[prefix.len..];
+    const binding_end = scanIdentEnd(rest, 0, rest.len) orelse return null;
+    const binding = rest[0..binding_end];
+    if (!isSimpleIdentifier(binding)) return null;
+    rest = rest[binding_end..];
+    rest = trimLeft(rest, " \t");
+    if (!std.mem.startsWith(u8, rest, "of ")) return null;
+    rest = trimLeft(rest["of ".len..], " \t");
+
+    const entries = std.mem.lastIndexOf(u8, rest, ".entries()") orelse return null;
+    const iterable = std.mem.trim(u8, rest[0..entries], " \t");
+    if (iterable.len == 0) return null;
+    var tail = trimLeft(rest[entries + ".entries()".len ..], " \t");
+    if (tail.len == 0 or tail[0] != ')') return null;
+    tail = trimLeft(tail[1..], " \t");
+    if (tail.len == 0 or tail[0] != '{') return null;
+    if (std.mem.trim(u8, tail[1..], " \t").len != 0) return null;
+    return .{ .indent = indent, .binding = binding, .iterable = iterable };
+}
+
+const IndexAliasDestructure = struct {
+    value: []const u8,
+};
+
+fn parseIndexAliasDestructure(line: []const u8, pair_binding: []const u8) ?IndexAliasDestructure {
+    const trimmed = trimLeft(line, " \t");
+    const prefix = "const [";
+    if (!std.mem.startsWith(u8, trimmed, prefix)) return null;
+    const close = std.mem.indexOfScalar(u8, trimmed, ']') orelse return null;
+    const pattern = trimmed[prefix.len..close];
+    const comma = std.mem.indexOfScalar(u8, pattern, ',') orelse return null;
+    if (std.mem.indexOfScalarPos(u8, pattern, comma + 1, ',') != null) return null;
+    const index_name = std.mem.trim(u8, pattern[0..comma], " \t");
+    const value_name = std.mem.trim(u8, pattern[comma + 1 ..], " \t");
+    if (!isSimpleIdentifier(index_name) or !isSimpleIdentifier(value_name)) return null;
+
+    var tail = trimLeft(trimmed[close + 1 ..], " \t");
+    if (tail.len == 0 or tail[0] != '=') return null;
+    tail = std.mem.trim(u8, tail[1..], " \t;");
+    if (!std.mem.eql(u8, tail, pair_binding)) return null;
+    return .{ .value = value_name };
+}
+
 fn appendStatementRewriteUnique(
     allocator: std.mem.Allocator,
     result: *StatementRewriteResult,
@@ -1460,23 +2033,8 @@ pub fn simulateRefactors(
 /// leaves `converged = false`.
 pub const max_normalize_iterations: u32 = 64;
 
-/// ZTS codes the strict checker emits for canonical-form violations. A handler
-/// is in Canonical Normal Form iff none of these remain. Only four single-line
-/// rewriters land in v1 (ZTS602/604/608/609/613); the rest are detected but
-/// rewritten in later phases, so `normalize` can converge (no more refactors)
-/// while still reporting `fully_canonical = false` for an unrewritten ZTS612
-/// ternary. This is the honest predicate: "zero canonical diagnostics", not
-/// "zero refactors".
-const canonical_band_codes = [_][]const u8{
-    "ZTS602", "ZTS604", "ZTS608", "ZTS609", "ZTS610", "ZTS611", "ZTS612", "ZTS613",
-    "ZTS614", "ZTS615", "ZTS616", "ZTS617", "ZTS618", "ZTS619", "ZTS620",
-};
-
 fn isCanonicalBandCode(code: []const u8) bool {
-    for (canonical_band_codes) |c| {
-        if (std.mem.eql(u8, code, c)) return true;
-    }
-    return false;
+    return zigts.rule_registry.isCanonicalProfileCode(code);
 }
 
 /// Map a `Refactor.kind` string to the typed `RepairIntent` it realizes, so a
@@ -1510,10 +2068,36 @@ pub const NormalizeResult = struct {
     /// Canonical-band diagnostics still present after normalization (0 when
     /// `fully_canonical`).
     residual: u32,
+    /// Owned details for the remaining canonical-profile diagnostics. Empty
+    /// when `fully_canonical`.
+    residual_diagnostics: std.ArrayListUnmanaged(ResidualDiagnostic) = .empty,
 
     pub fn deinit(self: *NormalizeResult, allocator: std.mem.Allocator) void {
         allocator.free(self.canonical_source);
         self.rewrite_trace.deinit(allocator);
+        for (self.residual_diagnostics.items) |*diag| diag.deinit(allocator);
+        self.residual_diagnostics.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const ResidualDiagnostic = struct {
+    code: []u8,
+    severity: []u8,
+    message: []u8,
+    file: []u8,
+    line: u32,
+    column: u16,
+    suggestion: ?[]u8,
+    repair_intent: ?[]const u8,
+    reason: []const u8,
+
+    pub fn deinit(self: *ResidualDiagnostic, allocator: std.mem.Allocator) void {
+        allocator.free(self.code);
+        allocator.free(self.severity);
+        allocator.free(self.message);
+        allocator.free(self.file);
+        if (self.suggestion) |s| allocator.free(s);
         self.* = undefined;
     }
 };
@@ -1639,7 +2223,12 @@ pub fn normalizeSource(
         iterations += 1;
     }
 
-    const residual = try countCanonicalResidual(allocator, current, virtual_path);
+    var residual_diagnostics = try collectCanonicalResidualDiagnostics(allocator, current, virtual_path);
+    errdefer {
+        for (residual_diagnostics.items) |*diag| diag.deinit(allocator);
+        residual_diagnostics.deinit(allocator);
+    }
+    const residual: u32 = @intCast(residual_diagnostics.items.len);
     return .{
         .canonical_source = current,
         .rewrite_trace = trace,
@@ -1647,6 +2236,7 @@ pub fn normalizeSource(
         .fully_canonical = residual == 0,
         .iterations = iterations,
         .residual = residual,
+        .residual_diagnostics = residual_diagnostics,
     };
 }
 
@@ -1659,15 +2249,51 @@ fn countBand(diagnostics: []const precompile.json_diag.JsonDiagnostic) u32 {
     return n;
 }
 
-/// Count canonical-band diagnostics remaining in `source`.
-fn countCanonicalResidual(
+/// Collect canonical-band diagnostics remaining in `source`.
+fn collectCanonicalResidualDiagnostics(
     allocator: std.mem.Allocator,
     source: []const u8,
     virtual_path: []const u8,
-) !u32 {
+) !std.ArrayListUnmanaged(ResidualDiagnostic) {
     var check = try precompile.runCheckOnlyFromSource(allocator, source, virtual_path, null, true, null, false);
     defer check.deinit(allocator);
-    return countBand(check.json_diagnostics.items);
+
+    var out: std.ArrayListUnmanaged(ResidualDiagnostic) = .empty;
+    errdefer {
+        for (out.items) |*diag| diag.deinit(allocator);
+        out.deinit(allocator);
+    }
+    for (check.json_diagnostics.items) |diag| {
+        if (!isCanonicalBandCode(diag.code)) continue;
+        var owned = try cloneResidualDiagnostic(allocator, diag);
+        errdefer owned.deinit(allocator);
+        try out.append(allocator, owned);
+    }
+    return out;
+}
+
+fn cloneResidualDiagnostic(
+    allocator: std.mem.Allocator,
+    diag: precompile.json_diag.JsonDiagnostic,
+) !ResidualDiagnostic {
+    const rule = zigts.rule_registry.findByCode(diag.code);
+    var out = ResidualDiagnostic{
+        .code = try allocator.dupe(u8, diag.code),
+        .severity = &.{},
+        .message = &.{},
+        .file = &.{},
+        .line = diag.line,
+        .column = diag.column,
+        .suggestion = null,
+        .repair_intent = if (rule) |r| if (r.repair) |intent| intent.asString() else null else null,
+        .reason = "no behavior-preserving normalizer rewrite applied",
+    };
+    errdefer out.deinit(allocator);
+    out.severity = try allocator.dupe(u8, diag.severity);
+    out.message = try allocator.dupe(u8, diag.message);
+    out.file = try allocator.dupe(u8, diag.file);
+    if (diag.suggestion) |s| out.suggestion = try allocator.dupe(u8, s);
+    return out;
 }
 
 pub fn writeNormalizeJson(
@@ -1690,9 +2316,41 @@ pub fn writeNormalizeJson(
         if (i > 0) try writer.writeByte(',');
         try writeJsonString(writer, intent.asString());
     }
+    try writer.writeAll("],\"residualDiagnostics\":[");
+    for (nr.residual_diagnostics.items, 0..) |*diag, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writeResidualDiagnosticJson(writer, diag);
+    }
     try writer.writeAll("],\"canonicalSource\":");
     try writeJsonString(writer, nr.canonical_source);
     try writer.writeAll("}\n");
+}
+
+fn writeResidualDiagnosticJson(writer: anytype, diag: *const ResidualDiagnostic) !void {
+    try writer.writeAll("{\"code\":");
+    try writeJsonString(writer, diag.code);
+    try writer.writeAll(",\"severity\":");
+    try writeJsonString(writer, diag.severity);
+    try writer.writeAll(",\"message\":");
+    try writeJsonString(writer, diag.message);
+    try writer.writeAll(",\"file\":");
+    try writeJsonString(writer, diag.file);
+    try writer.print(",\"line\":{d},\"column\":{d}", .{ diag.line, diag.column });
+    try writer.writeAll(",\"suggestion\":");
+    if (diag.suggestion) |s| {
+        try writeJsonString(writer, s);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"repairIntent\":");
+    if (diag.repair_intent) |intent| {
+        try writeJsonString(writer, intent);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"reason\":");
+    try writeJsonString(writer, diag.reason);
+    try writer.writeByte('}');
 }
 
 /// `zigts normalize <file> [--write] [--check] [--json]` — the gofmt-for-
@@ -2899,4 +3557,177 @@ test "normalizeSource refuses to hoist a multi-line template (left as residual)"
     try std.testing.expect(nr.converged);
     try std.testing.expect(!nr.fully_canonical);
     try std.testing.expect(nr.residual >= 1);
+}
+
+test "normalizeSource reports dynamic computed access as residual diagnostic" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const key = req.headers["x-key"];
+        \\  const value = req.headers[key];
+        \\  return Response.text(value);
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(nr.converged);
+    try std.testing.expect(!nr.fully_canonical);
+    try std.testing.expect(nr.residual >= 1);
+
+    var found = false;
+    for (nr.residual_diagnostics.items) |diag| {
+        if (std.mem.eql(u8, diag.code, "ZTS605")) {
+            found = true;
+            try std.testing.expect(diag.repair_intent == null);
+        }
+    }
+    try std.testing.expect(found);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    try writeNormalizeJson(&aw.writer, "handler.ts", &nr, false);
+    buf = aw.toArrayList();
+    const json = try buf.toOwnedSlice(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const residual = (parsed.value.object.get("residualDiagnostics") orelse return error.MissingResidualDiagnostics).array;
+    try std.testing.expect(residual.items.len >= 1);
+    try std.testing.expectEqualStrings("ZTS605", residual.items[0].object.get("code").?.string);
+}
+
+test "normalizeSource lifts a simple default parameter into the body" {
+    const source =
+        \\function greet(name = "world") {
+        \\  return name;
+        \\}
+        \\function handler(req) {
+        \\  const msg = greet(undefined);
+        \\  return Response.text(msg);
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.js");
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(nr.converged);
+    try std.testing.expect(nr.fully_canonical);
+    try std.testing.expectEqual(@as(u32, 0), nr.residual);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "function greet(name) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "if (name === undefined) { name = \"world\"; }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "function greet(name =") == null);
+
+    var found = false;
+    for (nr.rewrite_trace.items) |intent| {
+        if (intent == .lift_default_to_body) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "normalizeSource preserves default-parameter guard order" {
+    const source =
+        \\function pick(a = "first", b = a) {
+        \\  return b;
+        \\}
+        \\function handler(req) {
+        \\  return Response.text(pick(undefined, undefined));
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.js");
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(nr.converged);
+    try std.testing.expect(nr.fully_canonical);
+    try std.testing.expectEqual(@as(u32, 0), nr.residual);
+
+    const first = std.mem.indexOf(u8, nr.canonical_source, "if (a === undefined)") orelse return error.MissingFirstDefaultGuard;
+    const second = std.mem.indexOf(u8, nr.canonical_source, "if (b === undefined)") orelse return error.MissingSecondDefaultGuard;
+    try std.testing.expect(first < second);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "function pick(a =") == null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, ", b =") == null);
+}
+
+test "normalizeSource flattens a simple nested object destructure" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user: {name}} = payload;
+        \\  return Response.text(name);
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(nr.converged);
+    try std.testing.expect(nr.fully_canonical);
+    try std.testing.expectEqual(@as(u32, 0), nr.residual);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const {user} = payload;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const {name} = user;") != null);
+
+    var found = false;
+    for (nr.rewrite_trace.items) |intent| {
+        if (intent == .flatten_destructure) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "normalizeSource refuses nested destructure flattening that would shadow a live binding" {
+    const source =
+        \\const user = "global";
+        \\function handler(req: Request): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user: {name}} = payload;
+        \\  return Response.text(user + name);
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(nr.converged);
+    try std.testing.expect(!nr.fully_canonical);
+    try std.testing.expect(nr.residual >= 1);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const {user: {name}} = payload;") != null);
+}
+
+test "normalizeSource drops an unused entries index alias" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const items = ["a", "b"];
+        \\  for (const pair of items.entries()) {
+        \\    const [_i, item] = pair;
+        \\    Response.text(item);
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(nr.converged);
+    try std.testing.expect(nr.fully_canonical);
+    try std.testing.expectEqual(@as(u32, 0), nr.residual);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "for (const item of items) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const [_i, item]") == null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, ".entries()") == null);
+
+    var found = false;
+    for (nr.rewrite_trace.items) |intent| {
+        if (intent == .drop_unused_index_alias) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "normalizeSource refuses entries alias rewrite when pair binding is still read" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const items = ["a", "b"];
+        \\  for (const pair of items.entries()) {
+        \\    const [_i, item] = pair;
+        \\    Response.text(pair[1]);
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(nr.converged);
+    try std.testing.expect(!nr.fully_canonical);
+    try std.testing.expect(nr.residual >= 1);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "for (const pair of items.entries())") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "Response.text(pair[1]);") != null);
 }

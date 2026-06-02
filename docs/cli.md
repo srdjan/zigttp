@@ -258,6 +258,10 @@ Code ranges: ZTS0xx parser, ZTS1xx sound mode, ZTS2xx type checker,
 ZTS3xx handler verifier, ZTS4xx flow checker, ZTS5xx author-declared
 specs, ZTS6xx strict ZigTS profile and one-way canonical diagnostics.
 
+`zigttp normalize --json` includes `fullyCanonical`, `rewriteTrace`,
+`residual`, and `residualDiagnostics` so CI and agents can distinguish
+successful rewrites from remaining canonical blockers.
+
 ## `zigttp auth` provider keys
 
 Stores API keys for the LLM providers `zigttp expert` and handler-side

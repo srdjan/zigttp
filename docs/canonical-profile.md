@@ -239,7 +239,7 @@ Both will land when their respective infrastructure is in place.
 
 1. The `canonical-style` skill (`packages/pi/src/skills/canonical-style.md`) is embedded into the persona on every prompt assembly. It lists every canonical form with before/after pairs.
 2. Live rule snapshots ride into the system prompt via `zigts_expert_describe_rule` and `zigts_expert_features`. The agent calls these tools rather than answering from memory, so any future rule change reaches the agent the next time a session starts.
-3. The `zigts_expert_normalize` tool returns a draft's unique canonical form - the canonicalized source, an `is_canonical` flag, and the rewrite trace - so the agent can canonicalize a draft before applying it rather than learning the form one veto rejection at a time.
+3. The `zigts_expert_normalize` tool returns a draft's unique canonical form - the canonicalized source, `fullyCanonical`, `residualDiagnostics`, and the rewrite trace - so the agent can canonicalize a draft before applying it rather than learning the form one veto rejection at a time.
 
 Every proposed edit passes through the existing veto (`packages/pi/src/veto.zig`), which rejects any patch that introduces new diagnostics. Canonical violations are diagnostics like any other, so the veto blocks them automatically. When an edit would be blocked *only* by a rewritable canonical violation, the veto salvages it: it normalizes the draft, re-checks, and applies the canonicalized bytes instead of bouncing the model, surfacing the rewrite trace so a canonical slip lands in one shot.
 

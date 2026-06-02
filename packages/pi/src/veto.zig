@@ -112,7 +112,7 @@ pub fn runVeto(
         if (canonicalize.normalizeSource(allocator, edit.content, edit.file)) |nr_value| {
             var nr = nr_value;
             defer nr.deinit(allocator);
-            if (!std.mem.eql(u8, nr.canonical_source, edit.content)) {
+            if (nr.converged and nr.fully_canonical and !std.mem.eql(u8, nr.canonical_source, edit.content)) {
                 if (edit_simulate.simulate(allocator, .{
                     .file = edit.file,
                     .content = nr.canonical_source,

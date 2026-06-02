@@ -789,6 +789,24 @@ pub fn findByCode(code: []const u8) ?*const RuleEntry {
     return null;
 }
 
+/// True when `code` belongs to the compiler-enforced canonical ZigTS profile.
+///
+/// This is intentionally keyed through the rule registry instead of duplicating
+/// a ZTS-code list in every caller. `fullyCanonical`, proof-card rendering, and
+/// agent tooling all depend on the same predicate: zero remaining diagnostics
+/// from these rule names means the source is in Canonical Normal Form.
+pub fn isCanonicalProfileCode(code: []const u8) bool {
+    const rule = findByCode(code) orelse return false;
+    return isCanonicalProfileName(rule.name);
+}
+
+fn isCanonicalProfileName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "dynamic_capability_access") or
+        std.mem.eql(u8, name, "avoidable_let") or
+        std.mem.eql(u8, name, "computed_property_access") or
+        std.mem.startsWith(u8, name, "canonical_");
+}
+
 pub const SearchResults = struct {
     buf: [total_count]usize = undefined,
     len: usize = 0,
@@ -999,6 +1017,14 @@ test "findByCode returns entry" {
     const entry = findByCode("ZTS303");
     try std.testing.expect(entry != null);
     try std.testing.expectEqualStrings("unchecked_result_value", entry.?.name);
+}
+
+test "isCanonicalProfileCode follows the registry rule names" {
+    try std.testing.expect(isCanonicalProfileCode("ZTS604"));
+    try std.testing.expect(isCanonicalProfileCode("ZTS605"));
+    try std.testing.expect(isCanonicalProfileCode("ZTS612"));
+    try std.testing.expect(!isCanonicalProfileCode("ZTS600"));
+    try std.testing.expect(!isCanonicalProfileCode("ZTS603"));
 }
 
 test "findByName unknown returns null" {

@@ -421,7 +421,7 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         writer.print("  Max I/O depth: {d}\n", .{depth}) catch return;
     }
 
-    if (r.canonical_errors > 0) {
+    if (hasCanonicalDiagnostic(r.json_diagnostics.items)) {
         writer.print("\n  Canonical diagnostics:\n", .{}) catch return;
         for (r.json_diagnostics.items) |d| {
             if (!isCanonicalDiagnostic(d.code)) continue;
@@ -439,10 +439,14 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
 }
 
 fn isCanonicalDiagnostic(code: []const u8) bool {
-    return std.mem.eql(u8, code, "ZTS608") or
-        std.mem.eql(u8, code, "ZTS609") or
-        std.mem.eql(u8, code, "ZTS610") or
-        std.mem.eql(u8, code, "ZTS611");
+    return zigts.rule_registry.isCanonicalProfileCode(code);
+}
+
+fn hasCanonicalDiagnostic(diagnostics: []const json_diag.JsonDiagnostic) bool {
+    for (diagnostics) |d| {
+        if (isCanonicalDiagnostic(d.code)) return true;
+    }
+    return false;
 }
 
 const dots = "." ** 32;
