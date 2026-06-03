@@ -121,7 +121,7 @@ TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, r
 
 ### zigttp (server)
 
-`-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (memory limit), `-n N` (pool size), `--cors`, `--static DIR`, `--watch` (live reload), `--prove` (contract-diff before swap), `--force-swap` (apply breaking changes), `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`, `--no-env-check`. `zigttp dev --record-proof` desugars to `--trace` aimed inside a capsule (`.zigttp/capsules/default/`) and writes the capsule manifest up front (the manifest pins the handler/contract/policy hashes; it is written before the session so Ctrl+C, which signals the whole process group, cannot skip it). Replay the capsule against a later edit with `zigttp proof replay default` (exit 0 reproduced, 1 regression; fails closed on schema/policy-hash drift, `--allow-version-mismatch` overrides).
+`-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (memory limit), `-n N` (pool size), `--static DIR`, `--watch` (live reload), `--prove` (contract-diff before swap), `--force-swap` (apply breaking changes), `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`, `--no-env-check`. `zigttp dev --record-proof` desugars to `--trace` aimed inside a capsule (`.zigttp/capsules/default/`) and writes the capsule manifest up front (the manifest pins the handler/contract/policy hashes; it is written before the session so Ctrl+C, which signals the whole process group, cannot skip it). Replay the capsule against a later edit with `zigttp proof replay default` (exit 0 reproduced, 1 regression; fails closed on schema/policy-hash drift, `--allow-version-mismatch` overrides).
 
 ### zigttp auth
 
