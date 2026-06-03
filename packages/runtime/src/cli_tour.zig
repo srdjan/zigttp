@@ -81,11 +81,18 @@ pub fn touchTourMarker(allocator: std.mem.Allocator) void {
     touchTourMarkerAt(allocator, ".");
 }
 
+/// True when the user opted out of the first-run tour and quest. `--no-quest`
+/// is the documented name; `--no-tour` is kept as an alias. Defined here so the
+/// alias set lives in one place for both the tour gate and the dev quest gate.
+pub fn skipRequested(argv: []const []const u8) bool {
+    return shared.hasFlag(argv, "--no-tour") or shared.hasFlag(argv, "--no-quest");
+}
+
 /// Render the first-run tour exactly once, the first time `zigttp dev` is
 /// invoked in a project. Dismissal is durable (marker file). Skipped when
-/// stderr is not a TTY (CI, redirected logs) or `--no-tour` is passed.
+/// stderr is not a TTY (CI, redirected logs) or `--no-quest`/`--no-tour` passed.
 pub fn maybeShowFirstRunTour(allocator: std.mem.Allocator, argv: []const []const u8) void {
-    if (shared.hasFlag(argv, "--no-tour")) return;
+    if (skipRequested(argv)) return;
     if (!shared.stderrIsTty()) return;
     if (tourMarkerExists(allocator)) return;
     _ = std.c.write(std.c.STDERR_FILENO, tour_text.ptr, tour_text.len);

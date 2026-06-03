@@ -9,6 +9,7 @@ const request_mod = @import("request.zig");
 const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");
 const apply_edit = @import("apply_edit.zig");
+const http_errors = @import("../http_errors.zig");
 
 const default_base_url = "https://api.anthropic.com/v1/messages";
 const default_anthropic_version = "2023-06-01";
@@ -114,15 +115,7 @@ fn postAnthropic(
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedProtocol;
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
     const host = try uri.getHost(&host_buf);
-    const connection = try client.connectTcpOptions(.{
-        .host = host,
-        .port = uri.port orelse switch (protocol) {
-            .plain => 80,
-            .tls => 443,
-        },
-        .protocol = protocol,
-        .timeout = .none,
-    });
+    const connection = try http_errors.connect(&client, host, uri.port, protocol);
 
     const extra_headers = [_]std.http.Header{
         .{ .name = "x-api-key", .value = config.api_key },
@@ -161,14 +154,15 @@ fn postAnthropic(
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    var reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
-    const response_body = try reader.allocRemaining(arena, .limited(max_response_body_bytes));
+    const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
+    const response_body = try http_errors.readBody(reader, arena, max_response_body_bytes);
 
     if (status != .ok) {
         // The success path is an SSE stream; an error is a small JSON body
-        // carrying the real reason (bad key, unknown model, rate limit).
-        // Surface the status and body instead of collapsing every failure
-        // into a bare `HttpNotOk`.
+        // carrying the real reason (bad key, unknown model, rate limit). Surface
+        // the status and body (at `err` level so it survives ReleaseFast), then
+        // map the status to a typed error so the catch sites can print one-line
+        // remediation instead of collapsing every failure into bare `HttpNotOk`.
         if (!builtin.is_test) {
             std.log.err("anthropic API: HTTP {d} {s}: {s}", .{
                 @intFromEnum(status),
@@ -176,7 +170,7 @@ fn postAnthropic(
                 response_body,
             });
         }
-        return ClientError.HttpNotOk;
+        return http_errors.classify(@intFromEnum(status), response_body);
     }
 
     return response_body;

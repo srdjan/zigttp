@@ -42,9 +42,11 @@ pub fn assemble(
     for (event_list) |ev| {
         switch (ev) {
             .api_error => |info| {
-                // Surface the captured kind/message to operators instead of
-                // collapsing the in-stream error into a bare ApiError.
-                if (!builtin.is_test) std.log.warn("anthropic api error: kind={s} message={s}", .{ info.kind, info.message });
+                // Surface the captured kind/message at `err` level so it
+                // survives the documented ReleaseFast ship build (where `warn`
+                // and below are compiled out), instead of collapsing the
+                // in-stream error into a silent bare ApiError.
+                if (!builtin.is_test) std.log.err("anthropic api error: kind={s} message={s}", .{ info.kind, info.message });
                 return AssembleError.ApiError;
             },
             .message_start => |start_usage| {

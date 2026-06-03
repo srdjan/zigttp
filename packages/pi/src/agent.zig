@@ -20,6 +20,7 @@ const registry_mod = @import("registry/registry.zig");
 const anthropic_client = @import("providers/anthropic/client.zig");
 const tools_schema = @import("providers/anthropic/tools_schema.zig");
 const openai_client = @import("providers/openai/client.zig");
+const models_registry = @import("providers/models.zig");
 const expert_persona = @import("expert_persona.zig");
 const zigts_cli = @import("zigts_cli");
 const expert_meta = zigts_cli.expert_meta;
@@ -386,6 +387,54 @@ pub fn initFromEnvWithSessionConfig(
 /// hash), append a `system_note` to the transcript so the model is aware the
 /// reasoning in prior turns was produced under a different rule set.
 pub const POLICY_DRIFT_PREFIX = "[policy drift]";
+
+/// Token budget reserved for everything in a request that is NOT the transcript:
+/// the system prompt (persona + project context + witnesses) and the tools
+/// schema. Added to the transcript estimate so compaction triggers before the
+/// assembled request actually overflows the model's context window.
+const non_transcript_token_allowance: usize = 20_000;
+
+/// Rough estimate of how many tokens the current transcript would contribute to
+/// the next request, plus a fixed allowance for the system prompt and tools.
+/// Uses a discarding writer to count rendered bytes without allocating, then the
+/// standard ~4-bytes-per-token approximation. Good enough to decide when to
+/// compact; it is never treated as exact.
+pub fn estimateContextTokens(session: *const AgentSession) usize {
+    var scratch: [256]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&scratch);
+    for (session.transcript.entries.items) |*entry| {
+        transcript_mod.renderPlain(&discarding.writer, entry) catch break;
+    }
+    const bytes: usize = @intCast(discarding.fullCount());
+    return bytes / 4 + non_transcript_token_allowance;
+}
+
+/// Fraction of the active model's context window at which a session is
+/// auto-compacted so a long conversation cannot dead-end on a 400 "prompt is too
+/// long".
+const compaction_threshold_pct: usize = 70;
+
+/// The active model's context window in tokens, or a conservative default.
+fn contextWindowTokens(session: *const AgentSession) usize {
+    if (session.currentModel()) |id| {
+        if (models_registry.findById(id)) |m| return m.context_window;
+    }
+    return 200_000;
+}
+
+/// Compact the session in place when the estimated context size reaches the
+/// threshold for the active model's window; returns true if it compacted (the
+/// caller can then surface a one-line notice). Lives here next to the estimate
+/// and `compact` so every multi-turn surface gets the same proactive guard, not
+/// just the interactive REPL. Compaction is local (summarizes the transcript
+/// into one note), so this is cheap and never makes a model call.
+pub fn maybeAutoCompact(allocator: std.mem.Allocator, session: *AgentSession) !bool {
+    const window = contextWindowTokens(session);
+    if (estimateContextTokens(session) * 100 < window * compaction_threshold_pct) return false;
+    const msg = try compact(allocator, session);
+    allocator.free(msg);
+    return true;
+}
 
 /// The policy-drift `system_note` carried by a resumed transcript, if any. The
 /// returned slice borrows from the transcript. Lets an interactive surface echo
@@ -806,6 +855,20 @@ test "envHasModelBackend: a non-empty env var is detected" {
     var anth = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-fixture-key");
     defer anth.restore(allocator);
     try testing.expect(envHasModelBackend());
+}
+
+test "estimateContextTokens grows with transcript and includes the fixed allowance" {
+    var session = AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    // An empty transcript still reserves the non-transcript allowance.
+    const empty = estimateContextTokens(&session);
+    try testing.expectEqual(non_transcript_token_allowance, empty);
+
+    try session.transcript.append(testing.allocator, .{ .user_text = "a" ** 4000 });
+    const grown = estimateContextTokens(&session);
+    // ~4000 bytes of text adds on the order of 1000 tokens over the allowance.
+    try testing.expect(grown > empty + 500);
 }
 
 test "compact: empty transcript returns early message" {

@@ -100,10 +100,18 @@ fn runWithSession(
     }
     defer session.transcript.observer = null;
 
-    const rendered = if (client_override) |client|
-        try runOneTurnWithClient(allocator, session, registry, client, prompt, approval_fn)
+    const turn_result = if (client_override) |client|
+        runOneTurnWithClient(allocator, session, registry, client, prompt, approval_fn)
     else
-        try agent.runOneTurn(allocator, session, registry, prompt, approval_fn);
+        agent.runOneTurn(allocator, session, registry, prompt, approval_fn);
+    const rendered = turn_result catch |err| {
+        // --print is the non-interactive/CI entrypoint: emit a clean, parseable
+        // error (and close the JSON stream) and exit non-zero, rather than
+        // aborting the process with a Zig error-return trace.
+        loop.writeTurnErrorToStderr(err);
+        if (flags.json_mode) emitEndEvent(allocator, out_writer) catch {};
+        std.process.exit(1);
+    };
     defer allocator.free(rendered);
 
     if (!flags.json_mode) {

@@ -39,7 +39,7 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
     const user_has_watch = shared.hasFlag(argv, "--watch");
     const user_has_prove = shared.hasFlag(argv, "--prove");
     const user_has_quest = shared.hasFlag(argv, "--quest");
-    const user_no_tour = shared.hasFlag(argv, "--no-tour");
+    const user_no_tour = cli_tour.skipRequested(argv);
     const user_record_proof = shared.hasFlag(argv, "--record-proof");
     const default_quest = !user_no_tour and !user_has_quest and shared.stderrIsTty() and !cli_tour.tourMarkerExists(allocator);
 
@@ -63,6 +63,7 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--no-prove")) continue;
         if (std.mem.eql(u8, arg, "--no-tour")) continue;
+        if (std.mem.eql(u8, arg, "--no-quest")) continue;
         // `--record-proof` is a dev-layer flag; the runtime sees only --trace.
         if (std.mem.eql(u8, arg, "--record-proof")) continue;
         try child_args.append(allocator, arg);
@@ -84,6 +85,14 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
         std.debug.print("Recording a proof capsule to .zigttp/capsules/{s}/ — requests this session are captured.\n", .{capsule_name});
         std.debug.print("After an edit, replay it with: zigttp proof replay {s}\n", .{capsule_name});
     }
+
+    // Render the four-property explanation once, just before the serve child's
+    // proof-card HUD (and the guided quest) start streaming, so a first-time
+    // user reads what a proof / deterministic / injection_safe mean before the
+    // quest drops them into "[quest] press b to preview...". Touches the marker;
+    // `default_quest` above already captured the pre-touch (first-run) state, so
+    // the tour and the quest appear together exactly once.
+    cli_tour.maybeShowFirstRunTour(allocator, argv);
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -344,7 +353,8 @@ pub fn printDevHelp() void {
         \\  --no-prove            Watch and reload without contract proof gating
         \\  --record-proof        Capture this session's requests into a replayable
         \\                        proof capsule (.zigttp/capsules/default/)
-        \\  --no-tour             Skip the first-run proof tour
+        \\  --no-quest            Skip the first-run proof tour and guided quest
+        \\                        (alias: --no-tour)
         \\  --quest               Replay the guided proof quest
         \\  --outbound-http       Enable native outbound HTTP bridge
         \\  --sqlite <FILE>       SQLite database for zigttp:sql

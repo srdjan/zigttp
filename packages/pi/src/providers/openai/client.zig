@@ -17,6 +17,7 @@ const transcript_mod = @import("../../transcript.zig");
 const registry_mod = @import("../../registry/registry.zig");
 const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");
+const http_errors = @import("../http_errors.zig");
 
 const default_base_url = "https://api.openai.com/v1/responses";
 pub const default_model = "gpt-4o-mini";
@@ -230,15 +231,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]u8 {
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedProtocol;
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
     const host = try uri.getHost(&host_buf);
-    const connection = try client.connectTcpOptions(.{
-        .host = host,
-        .port = uri.port orelse switch (protocol) {
-            .plain => 80,
-            .tls => 443,
-        },
-        .protocol = protocol,
-        .timeout = .none,
-    });
+    const connection = try http_errors.connect(&client, host, uri.port, protocol);
 
     const auth_header = try std.fmt.allocPrint(arena, "Bearer {s}", .{config.api_key});
     const extra_headers = [_]std.http.Header{
@@ -275,8 +268,8 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]u8 {
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    var reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
-    const response_body = try reader.allocRemaining(arena, .limited(max_response_body_bytes));
+    const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
+    const response_body = try http_errors.readBody(reader, arena, max_response_body_bytes);
 
     if (status != .ok) {
         // The error body is a small JSON payload carrying the real reason (bad
@@ -289,7 +282,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]u8 {
                 response_body,
             });
         }
-        return ClientError.HttpNotOk;
+        return http_errors.classify(@intFromEnum(status), response_body);
     }
 
     return response_body;

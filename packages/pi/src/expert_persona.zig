@@ -102,6 +102,10 @@ const prologue =
     \\                                local refactors; request simulated
     \\                                previews before applying through
     \\                                edit-simulate, never directly
+    \\  zigts_expert_normalize      - reduce a file to Canonical Normal Form
+    \\                                (auto-fix the ZTS6xx canonical band);
+    \\                                prefer this over hand-fixing ternary,
+    \\                                compound-assign, redundant-bool slips
     \\  zigts_expert_edit_simulate  - dry-run a proposed edit
     \\  zigts_expert_review_patch   - diff-aware violation review
     \\  zigts_expert_prove_patch    - classify a before/after contract pair
@@ -178,6 +182,7 @@ const prologue =
     \\  Rule search by keyword                 -> zigts_expert_search
     \\  Violation baseline before editing      -> zigts_expert_verify_paths
     \\  Canonical refactor preview             -> zigts_expert_canonicalize
+    \\  Auto-fix canonical (ZTS6xx) slips      -> zigts_expert_normalize
     \\  Contract-pair compatibility proof      -> zigts_expert_prove_patch
     \\  Cross-handler system proof             -> zigts_expert_system_proof
     \\  Proof-guided repair plan               -> pi_repair_plan

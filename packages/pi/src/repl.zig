@@ -7,6 +7,7 @@
 const std = @import("std");
 const zigts = @import("zigts");
 const registry_mod = @import("registry/registry.zig");
+const transcript_mod = @import("transcript.zig");
 const agent = @import("agent.zig");
 const commands = @import("commands.zig");
 const loop = @import("loop.zig");
@@ -61,6 +62,7 @@ pub fn processSubmit(
     if (std.mem.startsWith(u8, trimmed, "/skill:")) {
         const skill_name = trimmed["/skill:".len..];
         if (skills_catalog.findByName(skill_name)) |skill| {
+            writeWorking();
             const rendered = try agent.runOneTurn(allocator, session, registry, skill.body, approval_fn);
             return .{ .rendered = rendered };
         }
@@ -98,6 +100,7 @@ pub fn processSubmit(
         if (prompts_catalog.findByName(tmpl_name)) |tmpl| {
             const expanded = try prompts_catalog.expand(allocator, tmpl.body, tmpl_args.items);
             defer allocator.free(expanded);
+            writeWorking();
             const rendered = try agent.runOneTurn(allocator, session, registry, expanded, approval_fn);
             return .{ .rendered = rendered };
         }
@@ -131,6 +134,7 @@ pub fn processSubmit(
     }
 
     if (!shouldDispatchTool(registry, trimmed)) {
+        writeWorking();
         const rendered = try agent.runOneTurn(allocator, session, registry, trimmed, approval_fn);
         return .{ .rendered = rendered };
     }
@@ -685,6 +689,11 @@ pub fn run(
         writeResumeDisclosure(&session, flags.fork_session_id != null);
     }
 
+    // Live streaming of transcript entries during a turn, for interactive TTY
+    // sessions only (piped output keeps the original post-turn render so its
+    // ordering is unchanged).
+    var stream_ctx = InteractiveStreamCtx{ .allocator = allocator };
+
     var line_buf: [64 * 1024]u8 = undefined;
     while (true) {
         if (is_tty) {
@@ -695,19 +704,29 @@ pub fn run(
         const maybe_line = try readLine(&line_buf);
         const line = maybe_line orelse break;
 
+        // Stream entries live during interactive turns. Cleared right after so
+        // session rebuilds (resume/new/fork) don't replay the restored history.
+        stream_ctx.streamed = false;
+        if (is_tty) {
+            session.transcript.observer = .{ .context = &stream_ctx, .on_append = InteractiveStreamCtx.onAppend };
+        }
         var outcome = processSubmit(allocator, &session, registry, line, approval_fn) catch |err| {
-            var msg_buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\n", .{@errorName(err)}) catch "error\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            session.transcript.observer = null;
+            loop.writeTurnErrorToStderr(err);
             continue;
         };
+        session.transcript.observer = null;
 
         switch (outcome) {
             .noop => {},
             .quit => break,
             .rendered => |rendered| {
                 defer allocator.free(rendered);
-                _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+                // When the entries were streamed live, the last one is already
+                // on screen; printing `rendered` again would duplicate it.
+                if (!stream_ctx.streamed) {
+                    _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+                }
                 if (is_tty) {
                     const tok = session.token_totals;
                     var token_buf: [128]u8 = undefined;
@@ -722,6 +741,7 @@ pub fn run(
                         },
                     ) catch "";
                     _ = std.c.write(std.c.STDOUT_FILENO, token_line.ptr, token_line.len);
+                    maybeAutoCompact(allocator, &session);
                 }
             },
             .tool_result => |*result| {
@@ -779,6 +799,48 @@ fn workspaceHasHandler(allocator: std.mem.Allocator) bool {
         if (zigts.file_io.fileExists(allocator, path)) return true;
     }
     return false;
+}
+
+/// Streams each transcript entry to stdout the moment it is appended during a
+/// turn, so the user watches the compiler-in-the-loop work (the model's prose,
+/// each tool call, each veto retry) as it happens instead of staring at a frozen
+/// prompt until the whole turn returns. Reuses the same per-entry renderer as
+/// the post-turn path, so the live output matches what was shown before. Marks
+/// `streamed` so the caller skips the duplicate post-turn print.
+const InteractiveStreamCtx = struct {
+    allocator: std.mem.Allocator,
+    streamed: bool = false,
+
+    fn onAppend(context: *anyopaque, entry: *const transcript_mod.OwnedEntry) void {
+        const self: *InteractiveStreamCtx = @ptrCast(@alignCast(context));
+        // The user just typed their prompt; no need to echo it back.
+        switch (entry.*) {
+            .user_text => return,
+            else => {},
+        }
+        const rendered = transcript_mod.renderRichEntryToOwned(self.allocator, entry) catch return;
+        defer self.allocator.free(rendered);
+        _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+        self.streamed = true;
+    }
+};
+
+/// Immediate feedback for the gap between submitting a prompt and the first
+/// streamed entry arriving, so the terminal is never silently frozen. TTY only.
+fn writeWorking() void {
+    if (std.c.isatty(std.c.STDOUT_FILENO) == 0) return;
+    const msg = "working...\n";
+    _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
+}
+
+/// Surface a one-line notice when the shared auto-compaction guard fired, so the
+/// user knows earlier turns were summarized. The decision and the compaction
+/// itself live in `agent.maybeAutoCompact`; this only prints.
+fn maybeAutoCompact(allocator: std.mem.Allocator, session: *agent.AgentSession) void {
+    const compacted = agent.maybeAutoCompact(allocator, session) catch return;
+    if (!compacted) return;
+    const notice = "[auto-compacted: the conversation neared the model's context window; earlier turns were summarized into one note]\n";
+    _ = std.c.write(std.c.STDOUT_FILENO, notice.ptr, notice.len);
 }
 
 /// One-line confirmation that a resumed/forked session was restored, plus an
@@ -1036,6 +1098,23 @@ test "selectApprovalFn: ask resolves to the interactive approveEdit" {
         .bare => |func| try testing.expect(func == approveEdit),
         else => return error.TestFailed,
     }
+}
+
+test "InteractiveStreamCtx skips user_text and marks streamed for model entries" {
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var ctx = InteractiveStreamCtx{ .allocator = testing.allocator };
+
+    // The user's own prompt is not echoed back, so streamed stays false.
+    try tr.append(testing.allocator, .{ .user_text = "hi" });
+    InteractiveStreamCtx.onAppend(&ctx, &tr.entries.items[tr.entries.items.len - 1]);
+    try testing.expect(!ctx.streamed);
+
+    // A model entry is streamed live and marks streamed so the caller skips the
+    // duplicate post-turn print.
+    try tr.append(testing.allocator, .{ .model_text = "inspecting the handler" });
+    InteractiveStreamCtx.onAppend(&ctx, &tr.entries.items[tr.entries.items.len - 1]);
+    try testing.expect(ctx.streamed);
 }
 
 test "processSubmit: /settings reports compile-time defaults without themes" {

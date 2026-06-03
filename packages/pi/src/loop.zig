@@ -103,6 +103,39 @@ pub fn autoReject(preview: ApprovalPreview) anyerror!bool {
     return false;
 }
 
+/// One-line, actionable remediation for a model-backend error, or null for
+/// errors that are not provider failures (local I/O, parse, etc.). The wire
+/// layer maps HTTP status and in-stream errors to these typed errors; the
+/// interactive and `--print` catch sites render this hint so the user sees what
+/// to do instead of a bare CamelCase error name.
+pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.AuthFailed => "Authentication failed. Check your key with `zigttp auth status`, or re-run `zigttp auth claude`.",
+        error.InsufficientCredit => "The provider rejected the request for insufficient credit. Check your account credit balance.",
+        error.RateLimited => "Rate limited by the provider. Wait a moment and try again.",
+        error.ModelNotFound => "The configured model was not found. Switch with `/model <id>` or check the model name.",
+        error.ProviderOverloaded => "The provider is overloaded. Try again shortly.",
+        error.ProviderServerError => "The provider returned a server error. Try again shortly.",
+        error.ApiError => "The provider returned an error mid-response (details logged above).",
+        error.PromptTooLong => "The conversation is too large for the model's context window. Run `/compact` to shrink it, then retry.",
+        error.RequestTimedOut => "The request timed out with no response. Check your network and try again.",
+        else => null,
+    };
+}
+
+/// Write a failed turn's error name to stderr, followed by one-line remediation
+/// when it is a known provider error. Shared by the interactive REPL and
+/// `--print` so both surface the same actionable message instead of a bare
+/// error name (or, for `--print`, a Zig error-return trace).
+pub fn writeTurnErrorToStderr(err: anyerror) void {
+    var buf: [512]u8 = undefined;
+    const text = if (providerErrorRemediation(err)) |hint|
+        std.fmt.bufPrint(&buf, "error: {s}\n{s}\n", .{ @errorName(err), hint }) catch "error\n"
+    else
+        std.fmt.bufPrint(&buf, "error: {s}\n", .{@errorName(err)}) catch "error\n";
+    _ = std.c.write(std.c.STDERR_FILENO, text.ptr, text.len);
+}
+
 pub fn resolveApprovalFn(policy: ApprovalPolicy, ask_fn: ?ApprovalFn) ApprovalFn {
     return switch (policy) {
         .auto_approve => ApprovalFn.fromFn(autoApprove),
