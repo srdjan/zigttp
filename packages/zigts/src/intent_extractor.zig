@@ -218,6 +218,9 @@ fn parseAssertion(deps: Deps, obj_idx: NodeIndex) ParseError!IntentAssertion {
         const key = propKeyName(deps, prop.key) orelse return error.NotLiteral;
 
         if (std.mem.eql(u8, key, "name")) {
+            // A duplicate key would overwrite (and leak) the prior allocation;
+            // the strict-literal surface rejects it instead.
+            if (name_str != null) return error.NotLiteral;
             const s = literalString(deps, prop.value) orelse return error.NotLiteral;
             name_str = try deps.allocator.dupe(u8, s);
         } else if (std.mem.eql(u8, key, "request")) {
@@ -265,15 +268,20 @@ fn parseRequest(
         if (prop.is_computed) return error.NotLiteral;
         const key = propKeyName(deps, prop.key) orelse return error.NotLiteral;
 
+        // Duplicate keys would overwrite (and leak) the prior allocation; the
+        // strict-literal surface rejects them instead.
         if (std.mem.eql(u8, key, "method")) {
+            if (method_out.* != null) return error.NotLiteral;
             const s = literalString(deps, prop.value) orelse return error.NotLiteral;
             const upper = try deps.allocator.alloc(u8, s.len);
             _ = std.ascii.upperString(upper, s);
             method_out.* = upper;
         } else if (std.mem.eql(u8, key, "path")) {
+            if (path_out.* != null) return error.NotLiteral;
             const s = literalString(deps, prop.value) orelse return error.NotLiteral;
             path_out.* = try deps.allocator.dupe(u8, s);
         } else if (std.mem.eql(u8, key, "body")) {
+            if (body_out.* != null) return error.NotLiteral;
             body_out.* = try jsonSerializeLiteral(deps, prop.value);
         } else {
             return error.NotLiteral;
@@ -292,6 +300,7 @@ fn parseExpect(
     if (tag != .object_literal) return error.NotLiteral;
     const obj = deps.ir_view.getObject(value_idx) orelse return error.NotLiteral;
 
+    var headers_seen = false;
     var p: u32 = 0;
     while (p < obj.properties_count) : (p += 1) {
         const prop_idx = deps.ir_view.getListIndex(obj.properties_start, @intCast(p));
@@ -300,13 +309,19 @@ fn parseExpect(
         if (prop.is_computed) return error.NotLiteral;
         const key = propKeyName(deps, prop.key) orelse return error.NotLiteral;
 
+        // Duplicate keys are rejected: `json` would overwrite (and leak) the
+        // prior allocation, and a repeated `headers` would silently double-fill.
         if (std.mem.eql(u8, key, "status")) {
+            if (status_out.* != null) return error.NotLiteral;
             const n = literalInt(deps, prop.value) orelse return error.NotLiteral;
             if (n < 0 or n > 65535) return error.NotLiteral;
             status_out.* = @intCast(n);
         } else if (std.mem.eql(u8, key, "json")) {
+            if (body_out.* != null) return error.NotLiteral;
             body_out.* = try jsonSerializeLiteral(deps, prop.value);
         } else if (std.mem.eql(u8, key, "headers")) {
+            if (headers_seen) return error.NotLiteral;
+            headers_seen = true;
             try parseHeaders(deps, prop.value, headers_out);
         } else {
             return error.NotLiteral;

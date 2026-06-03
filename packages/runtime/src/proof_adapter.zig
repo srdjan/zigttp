@@ -9,6 +9,11 @@
 //!
 //! Activation: automatic when contract proves `pure` OR (`deterministic` AND `read_only`).
 //! No configuration required. The proof IS the configuration.
+//!
+//! Cache key: method+URL only. The proven properties do not establish that the
+//! response is independent of request headers, so requests carrying credential
+//! headers (authorization/cookie) and responses declaring a non-empty `Vary`
+//! are not cached - the key cannot capture the headers those responses vary on.
 
 const std = @import("std");
 const compat = @import("zigts").compat;
@@ -178,11 +183,24 @@ pub const ProofCache = struct {
     }
 
     /// Store a response in the cache. Deep-copies all data from the response.
-    /// Silently drops entries whose body exceeds max_body_size, or if the cache
-    /// is not enabled.
+    /// Silently drops entries whose body exceeds max_body_size, that declare a
+    /// non-empty `Vary` (see below), or if the cache is not enabled.
     pub fn put(self: *ProofCache, key: u64, response: *const HttpResponse) void {
         if (!self.enabled) return;
         if (response.body.len > self.max_body_size) return;
+
+        // A response that declares `Vary` is content-negotiated: its body
+        // depends on request headers (e.g. Accept) that the cache key
+        // (method+URL only) does not carry. Caching it would replay one
+        // variant to every caller regardless of those headers, so skip it -
+        // the standard HTTP-cache rule. An empty Vary value does not vary.
+        for (response.headers.items) |h| {
+            if (std.ascii.eqlIgnoreCase(h.key, "vary") and
+                std.mem.trim(u8, h.value, " \t").len != 0)
+            {
+                return;
+            }
+        }
 
         // Deep-copy outside the lock. Manual cleanup on failure since errdefer
         // does not fire in void functions (no error return path).
@@ -516,6 +534,45 @@ test "max_body_size enforcement" {
 
     // Should not be cached
     try std.testing.expect(cache.get(key, allocator) == null);
+}
+
+test "Vary response is not cached" {
+    const allocator = std.testing.allocator;
+    var cache = ProofCache.init(allocator, .{ .pure = true }, .{});
+    defer cache.deinit();
+
+    var resp = HttpResponse.init(allocator);
+    defer resp.deinit();
+    resp.status = 200;
+    const body = try allocator.dupe(u8, "{\"ok\":true}");
+    resp.setBodyOwned(body);
+    try resp.putHeader("vary", "Accept");
+
+    const key = ProofCache.computeKey("GET", "/negotiated");
+    cache.put(key, &resp);
+
+    // Content-negotiated response must not be served from a method+URL key.
+    try std.testing.expect(cache.get(key, allocator) == null);
+}
+
+test "empty Vary value still caches" {
+    const allocator = std.testing.allocator;
+    var cache = ProofCache.init(allocator, .{ .pure = true }, .{});
+    defer cache.deinit();
+
+    var resp = HttpResponse.init(allocator);
+    defer resp.deinit();
+    resp.status = 200;
+    const body = try allocator.dupe(u8, "ok");
+    resp.setBodyOwned(body);
+    try resp.putHeader("vary", "");
+
+    const key = ProofCache.computeKey("GET", "/plain");
+    cache.put(key, &resp);
+
+    var cached = cache.get(key, allocator) orelse return error.TestUnexpectedResult;
+    defer cached.deinit();
+    try std.testing.expectEqual(@as(u16, 200), cached.status);
 }
 
 test "deep copy independence" {

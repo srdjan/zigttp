@@ -1504,6 +1504,34 @@ fn collectCanonicalParams(
     }
 }
 
+/// True when `type_text` already has a top-level `undefined` union member, so
+/// the canonical optional form needs no extra `| undefined`. Splits on `|` at
+/// bracket/angle depth 0 only and matches the member exactly, so an identifier
+/// that merely contains the run `undefined` (e.g. `undefinedish`) and a nested
+/// `Array<T | undefined>` (an array of optionals, not itself optional) are
+/// correctly treated as not-yet-optional.
+fn typeIsAlreadyOptional(type_text: []const u8) bool {
+    var depth: i32 = 0;
+    var seg_start: usize = 0;
+    var i: usize = 0;
+    while (i <= type_text.len) : (i += 1) {
+        if (i == type_text.len or (type_text[i] == '|' and depth == 0)) {
+            const seg = std.mem.trim(u8, type_text[seg_start..i], " \t");
+            if (std.mem.eql(u8, seg, "undefined")) return true;
+            seg_start = i + 1;
+            continue;
+        }
+        switch (type_text[i]) {
+            '<', '(', '[', '{' => depth += 1,
+            '>', ')', ']', '}' => if (depth > 0) {
+                depth -= 1;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn canonicalParamFromText(allocator: std.mem.Allocator, raw: []const u8) !CanonicalParam {
     const eq = findTopLevelChar(raw, 0, raw.len, '=');
     const head = std.mem.trim(u8, if (eq) |idx| raw[0..idx] else raw, " \t");
@@ -1521,7 +1549,7 @@ fn canonicalParamFromText(allocator: std.mem.Allocator, raw: []const u8) !Canoni
         if (after_name[0] != ':') return error.UnsupportedRefactor;
         const type_text = std.mem.trim(u8, after_name[1..], " \t");
         if (type_text.len == 0) return error.UnsupportedRefactor;
-        if (std.mem.indexOf(u8, type_text, "undefined") != null) {
+        if (typeIsAlreadyOptional(type_text)) {
             canonical = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ name, type_text });
         } else {
             canonical = try std.fmt.allocPrint(allocator, "{s}: {s} | undefined", .{ name, type_text });
@@ -1573,6 +1601,35 @@ fn nextParamEnd(source: []const u8, start: usize, end: usize) ?usize {
     return end;
 }
 
+/// True when `text` has balanced `()`, `[]`, and `{}` delimiters and no
+/// unterminated string/template literal. Used to detect an expression that does
+/// not finish on its own line, so a single-line rewrite refuses it instead of
+/// silently truncating. Strings are skipped with the same `scanStringForward`
+/// idiom `nextParamEnd` uses, so a delimiter inside a literal does not count.
+fn delimitersBalanced(text: []const u8) bool {
+    var depth: i32 = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        switch (c) {
+            '(', '[', '{' => {
+                depth += 1;
+                i += 1;
+            },
+            ')', ']', '}' => {
+                depth -= 1;
+                if (depth < 0) return false;
+                i += 1;
+            },
+            '"', '\'', '`' => {
+                i = scanStringForward(text, i, c) orelse return false;
+            },
+            else => i += 1,
+        }
+    }
+    return depth == 0;
+}
+
 /// ZTS618 canonical_destructure_depth: flatten a simple nested object pattern.
 ///
 /// Supported shape:
@@ -1602,6 +1659,12 @@ fn nestedDestructureRewrite(
     const eq = findTopLevelChar(source, close_abs + 1, line_end, '=') orelse return error.UnsupportedRefactor;
     const rhs = std.mem.trim(u8, source[eq + 1 .. line_end], " \t");
     if (rhs.len == 0) return error.UnsupportedRefactor;
+    // The replacement captures the RHS only up to this line's newline. If the
+    // expression does not finish on this line (an unbalanced `(`/`[`/`{` or an
+    // unterminated string, e.g. `= makeUser(\n ...\n)`), refuse rather than emit
+    // a truncated, broken two-line replacement. Mirrors the multiline guard the
+    // ZTS617 lift rewriter applies to its signature.
+    if (!delimitersBalanced(rhs)) return error.UnsupportedRefactor;
 
     const pattern = std.mem.trim(u8, line_text[open + 1 .. close], " \t");
     const colon = topLevelColon(pattern) orelse return error.UnsupportedRefactor;
@@ -3730,4 +3793,56 @@ test "normalizeSource refuses entries alias rewrite when pair binding is still r
     try std.testing.expect(nr.residual >= 1);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "for (const pair of items.entries())") != null);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "Response.text(pair[1]);") != null);
+}
+
+test "delimitersBalanced detects expressions that do not finish on the line" {
+    try std.testing.expect(delimitersBalanced("makeUser(1, 2)"));
+    try std.testing.expect(delimitersBalanced("payload"));
+    try std.testing.expect(delimitersBalanced("{ a: 1 };"));
+    // A delimiter inside a string literal does not count toward the balance.
+    try std.testing.expect(delimitersBalanced("f(\")\")"));
+    // Unbalanced openers (a multiline RHS) and unterminated strings are refused.
+    try std.testing.expect(!delimitersBalanced("makeUser("));
+    try std.testing.expect(!delimitersBalanced("{"));
+    try std.testing.expect(!delimitersBalanced("f(\"unterminated"));
+}
+
+test "typeIsAlreadyOptional matches only an exact top-level undefined member" {
+    try std.testing.expect(typeIsAlreadyOptional("undefined"));
+    try std.testing.expect(typeIsAlreadyOptional("string | undefined"));
+    try std.testing.expect(typeIsAlreadyOptional("undefined | string"));
+    // A substring of an identifier is not a match (the prior bug).
+    try std.testing.expect(!typeIsAlreadyOptional("undefinedish"));
+    try std.testing.expect(!typeIsAlreadyOptional("string | undefinedValue"));
+    // A nested optional is not a top-level optional.
+    try std.testing.expect(!typeIsAlreadyOptional("Array<T | undefined>"));
+    try std.testing.expect(!typeIsAlreadyOptional("number"));
+}
+
+test "nestedDestructureRewrite refuses a multiline right-hand side" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const {user: {name}} = makeUser(
+        \\    1,
+        \\  );
+        \\  return Response.json({ name });
+        \\}
+    ;
+    try std.testing.expectError(
+        error.UnsupportedRefactor,
+        nestedDestructureRewrite(std.testing.allocator, source, 2, 3),
+    );
+}
+
+test "nestedDestructureRewrite flattens a single-line nested pattern" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const {user: {name}} = makeUser(1);
+        \\  return Response.json({ name });
+        \\}
+    ;
+    var rw = try nestedDestructureRewrite(std.testing.allocator, source, 2, 3);
+    defer rw.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, rw.replacement, "const {user} = makeUser(1);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rw.replacement, "const {name} = user;") != null);
 }
