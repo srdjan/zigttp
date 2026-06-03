@@ -5,6 +5,7 @@
 //! routed locally.
 
 const std = @import("std");
+const zigts = @import("zigts");
 const registry_mod = @import("registry/registry.zig");
 const agent = @import("agent.zig");
 const commands = @import("commands.zig");
@@ -160,7 +161,11 @@ pub fn dispatchLine(
     if (argv.len == 0) return .noop;
 
     if (commands.isQuit(argv[0])) return .quit;
-    if (commands.isHelp(argv[0])) return .{ .result = try renderHelp(allocator, registry) };
+    if (commands.isHelp(argv[0])) {
+        const show_tools = argv.len > 1 and
+            (std.mem.eql(u8, argv[1], "--tools") or std.mem.eql(u8, argv[1], "tools"));
+        return .{ .result = try renderHelp(allocator, registry, show_tools) };
+    }
     if (commands.isSessionResume(argv[0])) return .session_resume;
     if (commands.isSessionNew(argv[0])) return .session_new;
     if (commands.isCompact(argv[0])) return .session_compact;
@@ -237,13 +242,24 @@ fn tokenizeLine(
     return tokens;
 }
 
-fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResult {
+fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tools: bool) !ToolResult {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     const w = &aw.writer;
 
-    try w.writeAll("Natural language is sent to the expert backend by default.\n");
+    // Lead with how to drive the loop, not with a wall of internal tool names.
+    // A new user who types `help` needs the two things they actually do: state a
+    // goal in plain English, and approve the verified edit.
+    try w.writeAll(
+        \\How to use zigttp expert:
+        \\  1. Type what you want in plain English, e.g. "add a GET /health route to handler.ts".
+        \\  2. The expert drafts an edit; the analyzer verifies it and rejects any draft that fails.
+        \\  3. You review the change and approve with y/N before anything is written to disk.
+        \\
+        \\
+    );
+
     try w.writeAll("Explicit local commands:\n");
     for (commands.command_table) |row| {
         if (row.slash) |slash| {
@@ -282,11 +298,23 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     try w.writeAll("  --no-persist-tool-output   omit tool output bodies from persisted session\n");
     try w.writeAll("Non-interactive flags (pass on launch):\n");
     try w.writeAll("  --print <prompt>           run a single turn and exit\n");
-    try w.writeAll("  --mode json                with --print, emit NDJSON events to stdout\n\n");
-    try w.writeAll("Registered tools:\n");
-    for (registry.list()) |entry| {
-        try w.print("  {s: <36}  {s}\n", .{ entry.name, entry.description });
+    try w.writeAll("  --mode json                with --print, emit NDJSON events to stdout\n");
+
+    // The ~32 registered tool names are agent-facing dispatch names a user
+    // almost never types (NL is the default), so keep them behind `help --tools`
+    // instead of burying the how-to above under them.
+    if (show_tools) {
+        try w.writeAll("\nRegistered tools (you rarely call these directly):\n");
+        for (registry.list()) |entry| {
+            try w.print("  {s: <36}  {s}\n", .{ entry.name, entry.description });
+        }
+    } else {
+        try w.print(
+            "\n{d} analyzer and agent tools back the expert; you rarely call them directly. Run `help --tools` to list them.\n",
+            .{registry.list().len},
+        );
     }
+
     try w.writeAll("\nMeta commands: help (:h), quit (:q)\n");
     try w.writeAll("Info commands: /model  /status  /settings  /hotkeys  /changelog\n");
     try w.writeAll("Session:       /compact  /resume  /continue  /new  /fork  /tree\n");
@@ -333,16 +361,25 @@ fn renderStudio(allocator: std.mem.Allocator, handler_path: []const u8) !ToolRes
 }
 
 fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
+    // Source every figure from the actual defaults so this display cannot drift.
+    const defaults = loop.RunOptions{};
     const msg = try std.fmt.allocPrint(
         allocator,
         "Settings (compile-time defaults):\n" ++
             "  model:           {s}\n" ++
             "  max_tokens:      {d}\n" ++
-            "  max_attempts:    3\n" ++
-            "  roundtrips/turn: 8\n" ++
-            "  tool_calls/turn: 16\n" ++
-            "  batch_size:      8\n",
-        .{ request_mod.default_model, request_mod.default_max_tokens },
+            "  max_attempts:    {d}\n" ++
+            "  roundtrips/turn: {d}\n" ++
+            "  tool_calls/turn: {d}\n" ++
+            "  batch_size:      {d}\n",
+        .{
+            request_mod.default_model,
+            request_mod.default_max_tokens,
+            loop.interactive_max_attempts,
+            defaults.max_model_roundtrips_per_turn,
+            defaults.max_tool_calls_per_turn,
+            defaults.max_tool_batch_size,
+        },
     );
     defer allocator.free(msg);
     return ToolResult.withPlainText(allocator, true, msg);
@@ -630,10 +667,7 @@ pub fn run(
 ) !void {
     const approval_fn = selectApprovalFn(policy);
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
-    if (is_tty) {
-        const banner = "zigttp expert — NL by default, 'help' for commands, or 'quit'\n";
-        _ = std.c.write(std.c.STDOUT_FILENO, banner.ptr, banner.len);
-    }
+    if (is_tty) writeBanner(allocator);
 
     var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
         .no_session = flags.no_session,
@@ -644,6 +678,12 @@ pub fn run(
         .fork_session_id = flags.fork_session_id,
     });
     defer session.deinit(allocator);
+
+    // Confirm a restore the user asked for (otherwise resume is silent), and
+    // surface any policy-drift note that would otherwise reach only the model.
+    if (is_tty and (flags.resume_latest or flags.fork_session_id != null)) {
+        writeResumeDisclosure(&session, flags.fork_session_id != null);
+    }
 
     var line_buf: [64 * 1024]u8 = undefined;
     while (true) {
@@ -709,17 +749,125 @@ pub fn run(
     }
 }
 
-fn approveEdit(file: []const u8) !bool {
-    var prompt_buf: [512]u8 = undefined;
-    const prompt = std.fmt.bufPrint(&prompt_buf, "Apply verified edit to {s}? [y/N] ", .{file}) catch "Apply verified edit? [y/N] ";
-    _ = std.c.write(std.c.STDOUT_FILENO, prompt.ptr, prompt.len);
+/// First-run orientation for the interactive expert. Leads with the value
+/// proposition (compiler-verified edits), a copyable starter prompt, and how to
+/// drive the loop, so a new user is never met with a bare prompt. TTY-only.
+const expert_banner =
+    "zigttp expert: I propose compiler-verified edits to your handler. Every draft is\n" ++
+    "checked by the analyzer and rejected if it fails, so you only approve edits that pass.\n" ++
+    "\n" ++
+    "Try: add a GET /health route to handler.ts\n" ++
+    "Type a goal in plain English, 'help' for commands, or 'quit' to exit.\n";
 
-    var line_buf: [256]u8 = undefined;
-    const maybe_line = try readLine(&line_buf);
-    const line = maybe_line orelse return false;
-    const trimmed = std.mem.trim(u8, line, " \t\r\n");
-    if (trimmed.len == 0) return false;
-    return trimmed[0] == 'y' or trimmed[0] == 'Y';
+const expert_no_workspace_hint =
+    "\nNo handler found here. Run 'zigttp init <name>' to scaffold a project first.\n";
+
+fn writeBanner(allocator: std.mem.Allocator) void {
+    _ = std.c.write(std.c.STDOUT_FILENO, expert_banner.ptr, expert_banner.len);
+    if (!workspaceHasHandler(allocator)) {
+        _ = std.c.write(std.c.STDOUT_FILENO, expert_no_workspace_hint.ptr, expert_no_workspace_hint.len);
+    }
+}
+
+/// Best-effort detection of an editable handler in the current directory so the
+/// banner can nudge a user who launched expert outside a project.
+fn workspaceHasHandler(allocator: std.mem.Allocator) bool {
+    const candidates = [_][]const u8{
+        "zigttp.json", "src/handler.ts", "handler.ts", "src/handler.tsx", "handler.tsx",
+    };
+    for (candidates) |path| {
+        if (zigts.file_io.fileExists(allocator, path)) return true;
+    }
+    return false;
+}
+
+/// One-line confirmation that a resumed/forked session was restored, plus an
+/// echo of any policy-drift note so the user (not just the model) sees it.
+fn writeResumeDisclosure(session: *const agent.AgentSession, forked: bool) void {
+    var buf: [256]u8 = undefined;
+    const id = session.session_id orelse "(ephemeral)";
+    const verb = if (forked) "forked" else "resumed";
+    const line = std.fmt.bufPrint(
+        &buf,
+        "{s} session {s}: {d} entries restored\n",
+        .{ verb, id, session.transcript.len() },
+    ) catch "session restored\n";
+    _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+
+    if (agent.policyDriftNote(session)) |note| {
+        _ = std.c.write(std.c.STDOUT_FILENO, note.ptr, note.len);
+    }
+}
+
+fn approveEdit(preview: loop.ApprovalPreview) !bool {
+    // Show what is being approved before asking: change size and the proven
+    // properties the edit establishes (the differentiator), with `d` to dump the
+    // full proposed file. Approving a verified change sight-unseen defeats the
+    // human-in-the-loop gate, so the preview comes before the prompt.
+    var hdr_buf: [512]u8 = undefined;
+    const header = std.fmt.bufPrint(
+        &hdr_buf,
+        "\nVerified edit to {s}  ({d} -> {d} lines)\n",
+        .{ preview.file, lineCount(preview.before orelse ""), lineCount(preview.after) },
+    ) catch "\nVerified edit\n";
+    _ = std.c.write(std.c.STDOUT_FILENO, header.ptr, header.len);
+    if (preview.properties) |props| writeProvenProperties(props);
+
+    while (true) {
+        const prompt = "Apply this edit? [y/N, d=show proposed file] ";
+        _ = std.c.write(std.c.STDOUT_FILENO, prompt.ptr, prompt.len);
+
+        var line_buf: [256]u8 = undefined;
+        const maybe_line = try readLine(&line_buf);
+        const line = maybe_line orelse return false;
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0) return false;
+        switch (trimmed[0]) {
+            'y', 'Y' => return true,
+            'd', 'D' => {
+                _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+                _ = std.c.write(std.c.STDOUT_FILENO, preview.after.ptr, preview.after.len);
+                if (preview.after.len == 0 or preview.after[preview.after.len - 1] != '\n') {
+                    _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+                }
+                continue;
+            },
+            else => return false,
+        }
+    }
+}
+
+/// Rough logical line count for the approval change-size hint.
+fn lineCount(text: []const u8) usize {
+    if (text.len == 0) return 0;
+    var n: usize = 1;
+    for (text) |c| {
+        if (c == '\n') n += 1;
+    }
+    // A trailing newline terminates the last line rather than starting a new one.
+    if (text[text.len - 1] == '\n') n -= 1;
+    return n;
+}
+
+/// Write the held (true) properties of the verified edit as a single line, e.g.
+/// "  proven: deterministic, read_only, input_validated". This is the trust
+/// signal that distinguishes an approved edit from a blind write.
+fn writeProvenProperties(props: anytype) void {
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    w.writeAll("  proven: ") catch {};
+    var first = true;
+    inline for (@typeInfo(@TypeOf(props)).@"struct".fields) |field| {
+        if (field.type == bool and @field(props, field.name)) {
+            if (!first) w.writeAll(", ") catch {};
+            w.writeAll(field.name) catch {};
+            first = false;
+        }
+    }
+    if (first) w.writeAll("(no properties established)") catch {};
+    w.writeAll("\n") catch {};
+    const out = w.buffered();
+    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
 }
 
 fn readLine(buf: []u8) !?[]const u8 {
@@ -788,6 +936,27 @@ test "help renders local command guidance" {
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "/feature route") != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "/forge route") != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "/specs <handler.ts>") != null);
+            // Leads with how-to guidance and gates the tool dump behind --tools.
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "How to use zigttp expert") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "help --tools") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "Registered tools") == null);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "help --tools lists the registered tool names" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+
+    var outcome = try dispatchLine(testing.allocator, &reg, "help --tools");
+    switch (outcome) {
+        .result => |*r| {
+            defer r.deinit(testing.allocator);
+            try testing.expect(r.ok);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "Registered tools") != null);
+            // Still leads with the how-to block.
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "How to use zigttp expert") != null);
         },
         else => return error.TestFailed,
     }

@@ -28,6 +28,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help")) {
+            std.debug.print(
+                \\Usage: prove <old-contract.json> <new-contract.json> [output-dir/]
+                \\
+                \\Diffs two pre-extracted contract.json files and classifies the change.
+                \\Exit codes: 0 safe, 1 breaking, 2 usage or error.
+                \\
+            , .{});
+            return;
+        }
+    }
     const old_path = if (argv.len > 0) argv[0] else {
         std.debug.print("Usage: prove <old-contract.json> <new-contract.json> [output-dir/]\n", .{});
         std.process.exit(2);

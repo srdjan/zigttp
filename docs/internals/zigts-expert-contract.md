@@ -83,21 +83,42 @@ ordering.
 `zigttp expert --print <prompt> --mode json` emits newline-delimited events:
 
 ```json
-{ "v": 1, "k": "assistant_delta", "d": { "text": "..." } }
+{ "v": 2, "k": "model_text", "d": "..." }
 ```
 
 The event envelope uses:
 
 | Field | Meaning |
 |---|---|
-| `v` | Event schema version. |
+| `v` | Event schema version (currently `2`). |
 | `k` | Event kind. |
-| `d` | Kind-specific payload. |
+| `d` | Kind-specific payload (omitted on the terminal `end` event). |
+
+Event kinds and their `d` payloads:
+
+| Kind | `d` payload |
+|---|---|
+| `user_text` | bare string (the submitted prompt) |
+| `model_text` | bare string (assistant prose) |
+| `system_note` | bare string (e.g. a policy-drift notice) |
+| `tool_use` | object: `{ "id", "name", "args_json" }` |
+| `tool_result` | object: `{ "tool_use_id", "tool_name", "ok", "llm_text", "body", "ui_payload"? }` |
+| `proof_card` | object: `{ "llm_text", "ui_payload"? }` |
+| `diagnostic_box` | object: `{ "llm_text", "ui_payload"? }` |
+| `verified_patch` | object: `{ "llm_text", "ui_payload"? }` |
+| `autoloop_outcome` | object: `{ "verdict", "iterations", "goals_met", "goals_unmet", ... }` |
+| `end` | none (terminal sentinel: `{ "v": 2, "k": "end" }`) |
 
 `zigttp expert --mode rpc` exposes a line-delimited JSON-RPC 2.0 interface over
 stdio for long-lived clients. The agent loads its model backend from
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `~/.zigttp/providers.json`; missing
 configuration exits with setup guidance.
+
+Edits in RPC mode are proposed only through the model-mediated `turn` method:
+the model emits an `apply_edit`, the compiler veto runs, and a `verified_patch`
+event is returned. `apply_edit` is not a directly invocable entry in
+`tools.list` / `tools.invoke` (those expose the read-only analyzer tools); a
+client cannot apply an unverified edit out of band.
 
 ## Compatibility
 

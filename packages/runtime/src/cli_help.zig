@@ -131,6 +131,7 @@ const expert_help =
     \\  --no-persist-tool-output   omit tool output bodies from persisted session
     \\  --no-context-files         skip AGENTS.md / CLAUDE.md project context
     \\  --no-perf-receipt          do not sign a perf receipt on applied edits
+    \\  --no-equivalence-receipt   do not sign an equivalence receipt on applied edits
     \\  --session-id <id>          resume or create a session with this id
     \\  --resume, --continue       resume the newest session for this cwd
     \\  --fork <session-id>        branch from an existing session

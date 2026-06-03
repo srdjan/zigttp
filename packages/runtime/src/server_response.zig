@@ -244,6 +244,7 @@ pub fn getStatusText(status: u16) []const u8 {
         414 => "URI Too Long",
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",
         502 => "Bad Gateway",

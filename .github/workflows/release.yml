@@ -97,6 +97,7 @@ jobs:
           DIR="zigttp-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
           mkdir -p "${DIR}"
           cp zig-out/bin/zigttp "${DIR}/"
+          cp zig-out/bin/zigttp-runtime "${DIR}/"
           cp zig-out/bin/zigts "${DIR}/"
           cp build.zig "${DIR}/"
           tar czf "${DIR}.tar.gz" "${DIR}"

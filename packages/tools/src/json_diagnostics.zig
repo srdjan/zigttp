@@ -84,6 +84,7 @@ fn parserErrorCode(kind: ErrorKind) []const u8 {
         .invalid_export => "ZTS038",
         .duplicate_export => "ZTS039",
         .unexpected_character => "ZTS040",
+        .nesting_too_deep => "ZTS041",
     };
 }
 

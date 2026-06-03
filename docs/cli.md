@@ -62,7 +62,6 @@ Common `dev` and `serve` flags:
 | `--system <file>` | Internal service registry. |
 | `--outbound-http` / `--outbound-host <host>` | Enable outbound HTTP. |
 | `--static <dir>` | Serve static files. |
-| `--cors` | Add CORS headers. |
 | `--no-env-check` | Skip startup env validation. |
 
 ## Deploy And Proof Receipts
@@ -122,6 +121,8 @@ zigttp extension-status --module-manifest <path>... [--json]
 ```
 
 Use JSON mode for IDEs, CI, and review-bot integrations.
+
+Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove` and `prove-behavior` return 0 (safe), 1 (breaking), or 2 (usage or error).
 
 ## Expert Mode
 

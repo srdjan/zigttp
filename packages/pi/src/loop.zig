@@ -53,41 +53,53 @@ pub const ModelClient = struct {
     }
 };
 
+/// What the user sees before approving a verified edit. Carries enough to make
+/// an informed decision: the target file, the pre- and post-edit bytes (so a
+/// surface can show a diff or change size), and the proven properties the edit
+/// established. Built only on the interactive `.ask` path; auto policies ignore
+/// it. `after` is the exact bytes that will be written if approved.
+pub const ApprovalPreview = struct {
+    file: []const u8,
+    before: ?[]const u8 = null,
+    after: []const u8 = "",
+    properties: ?ui_payload_mod.PropertiesSnapshot = null,
+};
+
 pub const ApprovalFn = union(enum) {
-    bare: *const fn (file: []const u8) anyerror!bool,
+    bare: *const fn (preview: ApprovalPreview) anyerror!bool,
     contextual: struct {
         context: *anyopaque,
-        func: *const fn (context: *anyopaque, file: []const u8) anyerror!bool,
+        func: *const fn (context: *anyopaque, preview: ApprovalPreview) anyerror!bool,
     },
 
-    pub fn fromFn(func: *const fn (file: []const u8) anyerror!bool) ApprovalFn {
+    pub fn fromFn(func: *const fn (preview: ApprovalPreview) anyerror!bool) ApprovalFn {
         return .{ .bare = func };
     }
 
     pub fn withContext(
         context: *anyopaque,
-        func: *const fn (context: *anyopaque, file: []const u8) anyerror!bool,
+        func: *const fn (context: *anyopaque, preview: ApprovalPreview) anyerror!bool,
     ) ApprovalFn {
         return .{ .contextual = .{ .context = context, .func = func } };
     }
 
-    pub fn call(self: ApprovalFn, file: []const u8) anyerror!bool {
+    pub fn call(self: ApprovalFn, preview: ApprovalPreview) anyerror!bool {
         return switch (self) {
-            .bare => |func| func(file),
-            .contextual => |wrapped| wrapped.func(wrapped.context, file),
+            .bare => |func| func(preview),
+            .contextual => |wrapped| wrapped.func(wrapped.context, preview),
         };
     }
 };
 
 pub const ApprovalPolicy = enum { ask, auto_approve, auto_reject };
 
-pub fn autoApprove(file: []const u8) anyerror!bool {
-    _ = file;
+pub fn autoApprove(preview: ApprovalPreview) anyerror!bool {
+    _ = preview;
     return true;
 }
 
-pub fn autoReject(file: []const u8) anyerror!bool {
-    _ = file;
+pub fn autoReject(preview: ApprovalPreview) anyerror!bool {
+    _ = preview;
     return false;
 }
 
@@ -114,6 +126,13 @@ pub const RunOptions = struct {
     max_tool_batch_size: usize = 8,
     replay_mode: bool = false,
 };
+
+/// Verification attempts granted to interactive and `--print` turns. Higher
+/// than the conservative library default (3): a non-trivial edit often needs
+/// several retry rounds because the first diagnostic surfaces only one of
+/// multiple issues, and three attempts ends the turn "failed" with nothing
+/// applied. Sourced here so the REPL `/settings` display cannot drift from it.
+pub const interactive_max_attempts: u8 = 5;
 
 const PreparedEdit = struct {
     edit: turn.Edit,
@@ -153,6 +172,10 @@ pub fn runTurnWith(
     var model_roundtrips: u8 = 0;
     var tool_calls_used: usize = 0;
     var turn_usage: turn.Usage = .{};
+    // Accumulated diagnostics across failed verification attempts. The retry
+    // prompt feeds the whole history (not just the latest envelope) so the model
+    // does not re-introduce a violation it already fixed on an earlier attempt.
+    var diag_history: []const u8 = "";
 
     while (true) {
         const action = machine.transition(next_event);
@@ -173,12 +196,18 @@ pub fn runTurnWith(
                     continue;
                 }
                 model_roundtrips += 1;
+                diag_history = try std.fmt.allocPrint(
+                    ta,
+                    "{s}--- attempt {d} diagnostic ---\n{s}\n\n",
+                    .{ diag_history, payload.attempt, payload.diagnostic },
+                );
                 const prompt = try std.fmt.allocPrint(
                     ta,
                     "Your previous edit failed compiler verification (attempt {d}/{d}). " ++
-                        "Here is the diagnostic envelope. Fix the flagged violations and " ++
-                        "emit a new edit.\n\n{s}",
-                    .{ payload.attempt, payload.max_attempts, payload.diagnostic },
+                        "Below are the diagnostics from every failed attempt so far. Fix all " ++
+                        "flagged violations and do NOT re-introduce one you already fixed in an " ++
+                        "earlier attempt. Emit a new, complete edit.\n\n{s}",
+                    .{ payload.attempt, payload.max_attempts, diag_history },
                 );
                 const result = try callModel(allocator, ta, client, transcript, prompt);
                 turn_usage.add(result.usage);
@@ -213,8 +242,17 @@ pub fn runTurnWith(
                     .before = prepared.edit.before,
                 });
                 if (veto_result.outcome.ok and !options.replay_mode) {
+                    // The bytes that will actually be written (post-normalization).
+                    // Bound here so the approval preview shows exactly what lands.
+                    const applied_content = veto_result.report.normalized_content orelse prepared.edit.content;
                     if (options.approval_fn) |approve| {
-                        if (!try approve.call(prepared.edit.file)) {
+                        const preview: ApprovalPreview = .{
+                            .file = prepared.edit.file,
+                            .before = prepared.edit.before,
+                            .after = applied_content,
+                            .properties = veto_result.report.after_properties,
+                        };
+                        if (!try approve.call(preview)) {
                             try transcript.append(allocator, .{ .tool_result = .{
                                 .tool_use_id = "approval",
                                 .tool_name = "apply_edit",
@@ -225,17 +263,13 @@ pub fn runTurnWith(
                             return .{ .final_state = .done, .attempt = machine.attempt, .usage = turn_usage };
                         }
                     }
-                    // Normalize-on-apply: the veto already reduced the edit to
-                    // Canonical Normal Form (only when it passed the veto, and
-                    // only changing bytes the model just introduced — canonical
-                    // violations are hard errors, so a compiling before-file
-                    // carries none). Bind ONE `applied_content` and feed it to
-                    // BOTH the disk write and the verified-patch entry, so the
-                    // file on disk, the equivalence receipt (after=applied),
-                    // and the transcript attest the same bytes. normalizeSource
-                    // is behavior-preserving and equivalence is transitive, so
-                    // the verdict against the pre-edit handler is unchanged.
-                    const applied_content = veto_result.report.normalized_content orelse prepared.edit.content;
+                    // Normalize-on-apply: `applied_content` (bound above for the
+                    // preview) is the veto's Canonical Normal Form reduction, fed
+                    // to BOTH the disk write and the verified-patch entry so the
+                    // file on disk, the equivalence receipt (after=applied), and
+                    // the transcript attest the same bytes. normalizeSource is
+                    // behavior-preserving and equivalence is transitive, so the
+                    // verdict against the pre-edit handler is unchanged.
                     try applyPreparedEdit(ta, prepared, applied_content);
                     const post_apply = try postApplyCheck(allocator, ta, registry, transcript, prepared);
                     defer if (post_apply.summary) |s| allocator.free(s);
@@ -957,12 +991,12 @@ test "prepareEdit accepts an in-tree relative path under the default '.' root" {
     try testing.expect(std.mem.endsWith(u8, prepared.resolved_path, "src/handler.ts"));
 }
 
-test "autoApprove returns true for any file" {
-    try testing.expect(try autoApprove("any/file.zig"));
+test "autoApprove returns true for any preview" {
+    try testing.expect(try autoApprove(.{ .file = "any/file.zig", .after = "x" }));
 }
 
-test "autoReject returns false for any file" {
-    try testing.expect(!try autoReject("any/file.zig"));
+test "autoReject returns false for any preview" {
+    try testing.expect(!try autoReject(.{ .file = "any/file.zig", .after = "x" }));
 }
 
 test "ApprovalPolicy enum is exported" {

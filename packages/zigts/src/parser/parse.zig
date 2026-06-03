@@ -98,6 +98,17 @@ pub const Parser = struct {
     // Pipe composition: binding slot for `pipe` imported from zigttp:compose
     pipe_binding_slot: ?u16 = null,
 
+    // Recursive-descent depth, shared across statement and expression nesting.
+    // Bounds stack growth so pathological input (minified/generated JS with
+    // thousands of nested parens, unary ops, or blocks) yields a clean
+    // diagnostic instead of a stack-overflow SIGSEGV that crashes the host.
+    recursion_depth: u32 = 0,
+
+    /// Maximum recursive-descent nesting. Far above any hand-written handler
+    /// (real code rarely nests past ~30) yet well under the worker-thread stack
+    /// budget. Roughly V8's parser nesting tolerance.
+    const max_recursion_depth: u32 = 512;
+
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Parser {
         return initFallible(allocator, source) catch unreachable;
     }
@@ -172,6 +183,12 @@ pub const Parser = struct {
     // ============ Statement Parsing ============
 
     fn parseStatement(self: *Parser) anyerror!NodeIndex {
+        self.recursion_depth += 1;
+        defer self.recursion_depth -= 1;
+        if (self.recursion_depth > max_recursion_depth) {
+            self.errors.addErrorAt(.nesting_too_deep, self.current, "statements nest too deeply; simplify or split (nesting limit is 512)");
+            return error.ParseError;
+        }
         return switch (self.current.type) {
             .kw_var, .kw_let, .kw_const => self.parseVarDeclaration(),
             .kw_function => self.parseFunctionDeclaration(),
@@ -1629,6 +1646,13 @@ pub const Parser = struct {
     /// min_prec controls how tightly we bind to the right. For example:
     ///   1 + 2 * 3 parses as 1 + (2 * 3) because * has higher precedence than +
     fn parseExpression(self: *Parser, min_prec: Precedence) anyerror!NodeIndex {
+        self.recursion_depth += 1;
+        defer self.recursion_depth -= 1;
+        if (self.recursion_depth > max_recursion_depth) {
+            self.errors.addErrorAt(.nesting_too_deep, self.current, "expression nests too deeply; simplify or split it (nesting limit is 512)");
+            return error.ParseError;
+        }
+
         // Check for arrow function
         if (self.isArrowFunction()) {
             return self.parseArrowFunction();
@@ -2262,27 +2286,17 @@ pub const Parser = struct {
     }
 
     fn parseAsyncExpression(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
+        const async_token = self.current;
+        const loc = async_token.location();
         self.advance(); // consume 'async'
 
-        if (self.check(.kw_function)) {
-            self.advance();
-            var flags = FunctionFlags{ .is_async = true };
-            if (self.match(.star)) {
-                flags.is_generator = true;
-            }
-            var name_atom: u16 = 0;
-            if (self.check(.identifier)) {
-                const name = self.current;
-                self.advance();
-                name_atom = try self.addAtom(name.text(self.source));
-            }
-            return try self.parseFunctionBody(name_atom, flags);
-        }
-
-        // async arrow function
-        if (self.isArrowFunction()) {
-            return self.parseArrowFunction();
+        // `async function` / `async (...) =>` are unsupported: handlers run
+        // synchronously. Reject at parse time so the analyzer never accepts an
+        // async handler the runtime would otherwise execute as an empty 200.
+        // (Bare `async` as an identifier or property name is still fine.)
+        if (self.check(.kw_function) or self.isArrowFunction()) {
+            self.errors.addErrorAt(.unsupported_feature, async_token, "'async' functions are not supported; handlers run synchronously - use 'fetchSync', or 'parallel'/'race' from zigttp:io for concurrency");
+            return error.ParseError;
         }
 
         // Just 'async' as identifier
@@ -2313,15 +2327,10 @@ pub const Parser = struct {
     }
 
     fn parseAwaitExpression(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance(); // consume 'await'
-
-        const operand = try self.parseExpression(.unary);
-        return try self.nodes.add(.{
-            .tag = .await_expr,
-            .loc = loc,
-            .data = .{ .opt_value = operand },
-        });
+        // `await` is unsupported: handlers run synchronously. Reject at parse
+        // time rather than executing it as a no-op that yields an empty 200.
+        self.errors.addErrorAt(.invalid_await, self.current, "'await' is not supported; handlers run synchronously - use 'fetchSync', or 'parallel'/'race' from zigttp:io for concurrency");
+        return error.ParseError;
     }
 
     fn parseGroupedOrArrowParams(self: *Parser) anyerror!NodeIndex {
@@ -3967,8 +3976,70 @@ test "parse array destructuring" {
 }
 
 // ============================================================================
+// Resource-limit Tests
+// ============================================================================
+
+test "resource limit: deeply nested parentheses yield a diagnostic, not a crash" {
+    const allocator = std.testing.allocator;
+    // Far beyond max_recursion_depth. Before the depth guard this recursed once
+    // per paren and stack-overflowed (SIGSEGV), taking down the host process.
+    const depth = 5000;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.appendNTimes(allocator, '(', depth);
+    try buf.append(allocator, '1');
+    try buf.appendNTimes(allocator, ')', depth);
+
+    var parser = Parser.init(allocator, buf.items);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        var saw_depth = false;
+        for (parser.getErrors()) |e| {
+            if (e.kind == .nesting_too_deep) saw_depth = true;
+        }
+        try std.testing.expect(saw_depth);
+        return;
+    };
+    // Pathological nesting must not parse successfully.
+    try std.testing.expect(false);
+}
+
+// ============================================================================
 // Unsupported Feature Detection Tests
 // ============================================================================
+
+test "unsupported: async function rejected at parse time" {
+    const allocator = std.testing.allocator;
+    const source = "const h = async function() { return 1; };";
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
+        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "async") != null);
+        return;
+    };
+    try std.testing.expect(false);
+}
+
+test "unsupported: await rejected at parse time" {
+    const allocator = std.testing.allocator;
+    const source = "function handler(req) { const x = await foo(); return Response.json({x}); }";
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        try std.testing.expectEqual(error_mod.ErrorKind.invalid_await, errors[0].kind);
+        return;
+    };
+    try std.testing.expect(false);
+}
 
 test "unsupported: class statement" {
     const allocator = std.testing.allocator;

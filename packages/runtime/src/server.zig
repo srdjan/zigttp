@@ -437,7 +437,14 @@ const ConnectionPool = struct {
             }
             return err;
         };
-        var request = self.server.parseRequestFromBuffer(req_allocator, request_data) catch return .close;
+        var request = self.server.parseRequestFromBuffer(req_allocator, request_data) catch |err| {
+            // Send an HTTP response for a malformed request instead of silently
+            // resetting the connection, so clients, scanners, and test harnesses
+            // see a diagnostic rather than ECONNRESET.
+            const status = parseErrorStatus(err);
+            self.sendErrorSync(fd, status, response_mod.getStatusText(status)) catch {};
+            return .close;
+        };
         defer request.deinit(req_allocator);
 
         // Check keep-alive using fast header slot
@@ -740,6 +747,21 @@ const ConnectionPool = struct {
         }
     }
 
+    /// Map a request-parse error to an HTTP status. Takes `anyerror` so it can
+    /// name errors from across the parser without coupling to one error set.
+    fn parseErrorStatus(err: anyerror) u16 {
+        return switch (err) {
+            error.OutOfMemory => 500,
+            error.UriTooLong, error.QueryTooLong => 414,
+            error.TooManyHeaders, error.HeaderStorageExhausted, error.HeaderKeyTooLong => 431,
+            error.FileTooBig => 413,
+            error.UnsupportedTransferEncoding => 501,
+            // InvalidRequest, DuplicateContentLength, InvalidContentLength,
+            // IncompleteBody, and anything else: a malformed request.
+            else => 400,
+        };
+    }
+
     fn sendErrorSync(self: *ConnectionPool, fd: std.posix.fd_t, status: u16, message: []const u8) !void {
         _ = self;
         var buf: [512]u8 = undefined;
@@ -955,9 +977,6 @@ pub const ServerConfig = struct {
     /// Log requests to stdout
     log_requests: bool = true,
 
-    /// Enable CORS headers
-    enable_cors: bool = false,
-
     /// Static file directory (null = disabled)
     static_dir: ?[]const u8 = null,
 
@@ -1058,6 +1077,22 @@ fn freeHostList(allocator: std.mem.Allocator, hosts: []const []const u8) void {
     allocator.free(hosts);
 }
 
+/// Ignore SIGPIPE process-wide so a client that disconnects mid-response turns
+/// a write into EPIPE (surfaced as error.BrokenPipe, an expected network error)
+/// instead of delivering SIGPIPE, whose default disposition kills the whole
+/// server. This covers every write path uniformly (writeAllFd, writevAllFd, and
+/// the evented std writer) on both macOS and Linux, where a per-socket
+/// SO_NOSIGPIPE / per-call MSG_NOSIGNAL would each leave gaps. Idempotent.
+fn ignoreSigpipe() void {
+    if (comptime builtin.os.tag == .windows) return;
+    var act = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &act, null);
+}
+
 pub const Server = struct {
     config: ServerConfig,
     allocator: std.mem.Allocator,
@@ -1105,6 +1140,9 @@ pub const Server = struct {
     const IoBackend = Io.Threaded;
 
     pub fn init(allocator: std.mem.Allocator, config: ServerConfig) !Self {
+        // A disconnecting client must never take down the server with SIGPIPE.
+        ignoreSigpipe();
+
         var cfg = config;
         if (cfg.pool_size == 0) {
             cfg.pool_size = defaultPoolSize();

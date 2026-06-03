@@ -123,6 +123,18 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
 
     const command = argv[0];
+
+    if (std.mem.eql(u8, command, "version") or
+        std.mem.eql(u8, command, "--version") or
+        std.mem.eql(u8, command, "-v"))
+    {
+        std.debug.print("zigts {s}\n", .{expert_meta.compiler_version});
+        return;
+    }
+
+    // Note: `expert`/`ledger` are intercepted with a developer-CLI pointer in
+    // zigts_main.zig before this runs, so they never reach the dispatch here.
+
     // `compile` names different operations in `zigts` (precompile to .zig) and
     // `zigttp` (build a binary), so it stays out of the shared registry.
     if (std.mem.eql(u8, command, "compile")) {
@@ -135,8 +147,11 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
             return;
         }
     }
-    printHelp();
-    return error.UnknownCommand;
+
+    // Unknown command: a clean message and non-zero exit, not a Zig error trace
+    // that IDE/CI integrations parsing stderr cannot read.
+    std.debug.print("Unknown command: {s}\nRun `zigts --help` for the command list.\n", .{command});
+    std.process.exit(1);
 }
 
 fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -500,6 +515,11 @@ fn printCheckHelp() void {
         \\                   helper carries no Effects<...> / Proof<...> capsule
         \\
         \\If no handler is specified, uses the entry from zigttp.json.
+        \\
+        \\Exit codes:
+        \\  0  ok (no errors)
+        \\  1  one or more errors
+        \\  2  warnings only (no errors)
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

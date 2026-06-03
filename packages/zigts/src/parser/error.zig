@@ -48,6 +48,7 @@ pub const ErrorKind = enum {
     too_many_upvalues,
     too_many_constants,
     jump_too_large,
+    nesting_too_deep,
 
     // JSX errors
     mismatched_jsx_tag,

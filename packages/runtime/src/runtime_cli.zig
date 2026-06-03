@@ -223,7 +223,7 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
 
     var server = Server.init(allocator, config) catch |err| {
         std.log.err("Failed to initialize server: {}", .{err});
-        return;
+        std.process.exit(1);
     };
     defer server.deinit();
 
@@ -233,13 +233,13 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
             .file_path => |path| path,
             else => {
                 std.log.err("--watch requires a file-based handler (not --eval or embedded)", .{});
-                return;
+                std.process.exit(1);
             },
         };
 
         var watch_set = shared.buildWatchSet(allocator, argv) catch |err| {
             std.log.err("Failed to build watch set: {}", .{err});
-            return;
+            std.process.exit(1);
         };
         defer watch_set.deinit(allocator);
 
@@ -258,12 +258,12 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
 
         server.runWithBackgroundWork(&live_reload, watcherThread) catch |err| {
             std.log.err("Server error: {}", .{err});
-            return;
+            std.process.exit(1);
         };
     } else {
         server.run() catch |err| {
             std.log.err("Server error: {}", .{err});
-            return;
+            std.process.exit(1);
         };
     }
 }
@@ -318,10 +318,6 @@ fn parseCommonServeFlag(
     }
     if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--host")) {
         config.host = try shared.takeArg(i, argv, error.MissingHostValue);
-        return true;
-    }
-    if (std.mem.eql(u8, arg, "--cors")) {
-        config.enable_cors = true;
         return true;
     }
     if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
@@ -389,7 +385,6 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
     if (project) |*cfg| {
         config.port = cfg.port;
         config.host = cfg.host;
-        config.enable_cors = cfg.cors;
         config.static_dir = cfg.static_dir;
         config.runtime_config.sqlite_path = cfg.sqlite;
         config.runtime_config.durable_oplog_dir = cfg.durable_dir;
@@ -505,7 +500,7 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
         const arg = argv[i];
         if (try parseCommonServeFlag(arg, &i, argv, &config)) continue;
         if (std.mem.eql(u8, arg, "--help")) {
-            const help = "Usage: <binary> [-p PORT] [-h HOST] [--cors] [-q] [--no-env-check] [--security-log FILE] [--lifecycle ephemeral|bounded|reuse] [--system FILE]\n";
+            const help = "Usage: <binary> [-p PORT] [-h HOST] [-q] [--no-env-check] [--security-log FILE] [--lifecycle ephemeral|bounded|reuse] [--system FILE]\n";
             _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
             return;
         }
@@ -514,7 +509,7 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
 
     var server = Server.init(allocator, config) catch |err| {
         std.log.err("Failed to initialize server: {}", .{err});
-        return;
+        std.process.exit(1);
     };
     defer server.deinit();
 
@@ -572,7 +567,6 @@ fn printServeHelp() void {
         \\  -m, --memory <SIZE>   JS runtime memory limit
         \\  -n, --pool <N>        Runtime pool size
         \\  -q, --quiet           Disable request logging
-        \\  --cors                Enable CORS headers
         \\  --static <DIR>        Serve static files from directory
         \\  --outbound-http       Enable native outbound HTTP bridge
         \\  --outbound-host <H>   Restrict outbound bridge to exact host H
@@ -628,15 +622,6 @@ test "parseServeFeatureFlags: studio and demo imply proof watch loop" {
     try std.testing.expect(demo.studio_enabled);
     try std.testing.expect(demo.watch_enabled);
     try std.testing.expect(demo.prove_enabled);
-}
-
-test "parseCommonServeFlag: --cors toggles enable_cors, no value consumed" {
-    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
-    const argv = [_][]const u8{"--cors"};
-    var i: usize = 0;
-    try std.testing.expect(try parseCommonServeFlag(argv[0], &i, &argv, &config));
-    try std.testing.expect(config.enable_cors);
-    try std.testing.expectEqual(@as(usize, 0), i);
 }
 
 test "parseCommonServeFlag: returns false for unrelated flag" {

@@ -360,6 +360,26 @@ test "appendEvent round-trips a user_text event as NDJSON" {
     try testing.expect(std.mem.indexOf(u8, raw, "\"hello world\"") != null);
 }
 
+test "model_text event matches the documented v2 envelope" {
+    // Guards docs/internals/zigts-expert-contract.md: the documented example is
+    // { "v": 2, "k": "model_text", "d": "..." } with a bare-string payload.
+    const allocator = testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try writeEventLine(&aw.writer, .{ .model_text = "hello" });
+    buf = aw.toArrayList();
+
+    const line = std.mem.trim(u8, buf.items, "\n");
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqual(@as(i64, 2), obj.get("v").?.integer);
+    try testing.expectEqualStrings("model_text", obj.get("k").?.string);
+    // `d` is a bare string for model_text (not an object), as documented.
+    try testing.expectEqualStrings("hello", obj.get("d").?.string);
+}
+
 test "appendEvent serializes tool_result with llm_text body alias and ui_payload" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);

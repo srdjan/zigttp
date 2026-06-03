@@ -341,7 +341,7 @@ fn preserveDuringSpecRefresh(diag: handler_contract.SpecDiagnostic) bool {
 
 /// Format a structured proof card showing what the compiler proved.
 pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const u8) void {
-    writer.print("\nzts check: {s}\n\n", .{filename}) catch return;
+    writer.print("\ncheck: {s}\n\n", .{filename}) catch return;
 
     // Parse
     writeDotted(writer, "Parse", 24);

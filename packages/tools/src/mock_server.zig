@@ -36,6 +36,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help")) {
+            std.debug.print(
+                \\Usage: mock <tests.jsonl> [--port PORT]
+                \\
+                \\Serves a mock HTTP server that replays recorded test cases (default port 3001).
+                \\
+            , .{});
+            return;
+        }
+    }
     const test_path = if (argv.len > 0) argv[0] else {
         std.debug.print("Usage: mock <tests.jsonl> [--port PORT]\n", .{});
         std.process.exit(2);

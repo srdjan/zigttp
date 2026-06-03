@@ -135,7 +135,11 @@ fn runOneTurnWithClient(
         registry,
         &session.transcript,
         user_text,
-        .{ .approval_fn = approval_fn, .replay_mode = replay },
+        .{
+            .approval_fn = approval_fn,
+            .replay_mode = replay,
+            .max_attempts = loop.interactive_max_attempts,
+        },
     );
     const tr = &session.transcript;
     std.debug.assert(tr.len() >= 1);

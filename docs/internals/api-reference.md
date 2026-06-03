@@ -34,9 +34,9 @@ pub fn main() !void {
         .quiet = false,                         // Disable request logging
 
         // Features
-        .cors = false,                          // Enable CORS headers
         .static_dir = null,                     // Static file directory
     };
+    // For CORS, import `cors` from the `zigttp:http` virtual module in the handler.
 
     var server = try Server.init(allocator, config);
     defer server.deinit();

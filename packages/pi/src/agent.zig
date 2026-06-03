@@ -385,7 +385,22 @@ pub fn initFromEnvWithSessionConfig(
 /// binary's hash. On mismatch (or on a pre-Phase-2 session with no stamped
 /// hash), append a `system_note` to the transcript so the model is aware the
 /// reasoning in prior turns was produced under a different rule set.
-const POLICY_DRIFT_PREFIX = "[policy drift]";
+pub const POLICY_DRIFT_PREFIX = "[policy drift]";
+
+/// The policy-drift `system_note` carried by a resumed transcript, if any. The
+/// returned slice borrows from the transcript. Lets an interactive surface echo
+/// the warning to the user instead of leaving it visible only to the model.
+pub fn policyDriftNote(session: *const AgentSession) ?[]const u8 {
+    for (session.transcript.entries.items) |entry| {
+        switch (entry) {
+            .system_note => |note| {
+                if (std.mem.indexOf(u8, note, POLICY_DRIFT_PREFIX) != null) return note;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
 
 fn injectDriftNote(
     allocator: std.mem.Allocator,
@@ -502,7 +517,11 @@ pub fn runOneTurn(
         registry,
         &session.transcript,
         user_text,
-        .{ .approval_fn = approval_fn, .replay_mode = replay },
+        .{
+            .approval_fn = approval_fn,
+            .replay_mode = replay,
+            .max_attempts = loop.interactive_max_attempts,
+        },
     );
     session.token_totals.add(turn_result.usage);
     const tr = &session.transcript;

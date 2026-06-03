@@ -327,7 +327,7 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
     std.debug.print(
         \\
         \\Deployed: {s}
-        \\Run:      ./{s}
+        \\Run:      {s}
         \\Try:      curl http://{s}:{d}/
         \\Ledger:   .zigttp/proofs.jsonl (kind=deploy)
         \\

@@ -55,8 +55,15 @@ pub const LiveReloadState = struct {
     handler_path: []const u8,
     config: LiveReloadConfig,
     current_contract: ?HandlerContract,
-    /// Previous handler code kept alive for in-flight requests
+    /// The handler code the pool is currently running. Owned here; the pool
+    /// holds a borrowed reference (see runtime_pool.reloadHandler).
     previous_code: ?[]const u8,
+    /// The generation one swap back. The pool's reloadHandler contract requires
+    /// the just-superseded code stay alive for in-flight requests still running
+    /// on it; we retain it one extra cycle and free it only when the next swap
+    /// has fully drained it. Without this, freeing the active generation at swap
+    /// time is a use-after-free on concurrent workers.
+    superseded_code: ?[]const u8,
     previous_stamp: u64,
     watch_paths: []const []const u8,
     /// Last source-bytes sha logged to .zigttp/proofs.jsonl. Suppresses
@@ -94,6 +101,7 @@ pub const LiveReloadState = struct {
             .config = config,
             .current_contract = null,
             .previous_code = null,
+            .superseded_code = null,
             .previous_stamp = 0,
             .watch_paths = watch_paths,
             .last_ledger_sha = null,
@@ -117,6 +125,7 @@ pub const LiveReloadState = struct {
         }
         if (self.current_contract) |*c| c.deinit(self.allocator);
         if (self.previous_code) |code| self.allocator.free(code);
+        if (self.superseded_code) |code| self.allocator.free(code);
         if (self.proof_trace_json) |ptj| self.allocator.free(ptj);
     }
 
@@ -704,17 +713,30 @@ pub const LiveReloadState = struct {
         stderr_writer.interface.flush() catch {};
     }
 
+    /// Rotate the two retained handler-code generations: the code that was
+    /// active becomes one swap back (it may still serve in-flight requests, so
+    /// keep it), and the code already one swap back has drained and is freed.
+    /// Must run only after the pool no longer points at `previous_code`.
+    fn rotateGenerations(self: *LiveReloadState, new_code: []const u8) void {
+        if (self.superseded_code) |drained| self.allocator.free(drained);
+        self.superseded_code = self.previous_code;
+        self.previous_code = new_code;
+    }
+
     /// Take ownership of new_code and swap the handler pool.
     /// Nulls the caller's pointer so the defer cleanup is a no-op.
     fn doSwap(self: *LiveReloadState, new_code_ptr: *?[]const u8, update_contract: bool) void {
         const new_code = new_code_ptr.* orelse return;
         new_code_ptr.* = null;
 
-        if (self.previous_code) |old| self.allocator.free(old);
-        self.previous_code = new_code;
-
         if (self.server.pool) |*pool| {
+            // Switch the pool to the new generation FIRST, under the pool's
+            // runtime_init_mutex. Only once the pool no longer points at the
+            // prior generation is it safe to retire older code. Freeing before
+            // the swap (the previous bug) raced a concurrent worker reading the
+            // freed handler_code in ensureRuntime on a rapid second save.
             const invalidated = pool.reloadHandler(new_code, self.handler_path);
+            self.rotateGenerations(new_code);
 
             if (update_contract) {
                 if (self.current_contract) |*hc| {
@@ -742,6 +764,9 @@ pub const LiveReloadState = struct {
 
             printReload("Handler swapped. {d} runtime(s) invalidated.\n", .{invalidated});
         } else {
+            // No pool references the generations, but keep the same rotation so
+            // the retain/free discipline (and deinit cleanup) stays uniform.
+            self.rotateGenerations(new_code);
             printReload("No handler pool available. Swap skipped.\n", .{});
         }
     }

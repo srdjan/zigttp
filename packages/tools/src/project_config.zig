@@ -12,7 +12,6 @@ pub const ProjectConfig = struct {
     sqlite: ?[]const u8 = null,
     durable_dir: ?[]const u8 = null,
     system: ?[]const u8 = null,
-    cors: bool = false,
     outbound_http: bool = false,
     outbound_hosts: []const []const u8 = &.{},
 
@@ -122,7 +121,6 @@ pub fn loadAbsolute(
         .sqlite = try dupOptionalStringField(allocator, obj, "sqlite"),
         .durable_dir = try dupOptionalStringField(allocator, obj, "durableDir"),
         .system = try dupOptionalStringField(allocator, obj, "system"),
-        .cors = try parseBoolField(obj, "cors", false),
         .outbound_http = try parseBoolField(obj, "outboundHttp", false),
         .outbound_hosts = try dupStringArrayField(allocator, obj, "outboundHosts"),
     };
@@ -276,7 +274,6 @@ test "project config parses and defaults public directory" {
         \\  "entry": "src/app.ts",
         \\  "port": 4000,
         \\  "host": "0.0.0.0",
-        \\  "cors": true,
         \\  "outboundHttp": true,
         \\  "outboundHosts": ["api.internal"]
         \\}
@@ -292,7 +289,6 @@ test "project config parses and defaults public directory" {
     try std.testing.expectEqualStrings("src/app.ts", config.entry);
     try std.testing.expectEqual(@as(u16, 4000), config.port);
     try std.testing.expectEqualStrings("0.0.0.0", config.host);
-    try std.testing.expect(config.cors);
     try std.testing.expect(config.outbound_http);
     try std.testing.expectEqual(@as(usize, 1), config.outbound_hosts.len);
     try std.testing.expectEqualStrings("api.internal", config.outbound_hosts[0]);
