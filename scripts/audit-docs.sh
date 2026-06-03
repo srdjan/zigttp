@@ -17,6 +17,7 @@ while IFS= read -r -d '' file; do
   esac
 
   full_file="$ROOT/$file"
+  [ -f "$full_file" ] || continue
   base_dir="$(dirname "$full_file")"
 
   while IFS= read -r entry; do

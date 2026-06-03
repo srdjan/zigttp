@@ -1,512 +1,108 @@
-# `zigts` v1 — Structured Tool Contract
+# zigts Structured Tool Contract
 
-This document freezes the structured output of the direct `zigts` tool commands as **v1**. Two clients rely on this contract today (`zigttp expert` and CI). Every field below is stable within v1. Additive changes are allowed; removals, renames, and semantic changes are not.
+This page documents the stable machine-facing analyzer surfaces used by
+`zigttp expert`, IDE integrations, and CI. The live command list comes from
+`packages/tools/src/zigts_cli.zig`.
 
-The v1 surface is the minimum set of shapes needed to drive a compiler-in-the-loop workflow. It is not everything `zigts` can emit. Anything not listed here is explicitly outside v1 and may change without notice.
+## Version Metadata
 
-## Version identifiers
+Use:
 
-Three identifiers appear in almost every response:
+```bash
+zigts meta --json
+zigttp meta --json
+```
 
-- `compiler_version` — the embedded zigts compiler version. Currently `"0.1.0-beta"` (see `packages/tools/src/expert_meta.zig`).
-- `policy_version` — the rule-set calendar version. Currently `"2026.04.2"` (see `packages/tools/src/expert_meta.zig`).
-- `policy_hash` — a content hash over the full rule registry, computed at startup from `zigts.rule_registry.policyHash()`. Stable across runs of the same binary; changes when rules are added, removed, or edited.
-- `module_registry_hash` — a content hash over the accepted virtual-module registry metadata. This is additive in v1 and lets clients detect proof metadata changes independently of rule text.
+The metadata includes compiler version, policy version/hash, rule counts, and
+feature/module summaries. Clients should compare `policy_hash` when resuming
+cached analysis.
 
-A client that pins to v1 should also pin to a `policy_hash` and re-verify when it changes. The hash is the fastest way to detect that a rule's text or code moved without a version bump.
+## Diagnostics
 
-## Delivery
-
-All commands below print JSON to stdout when invoked with `--json` and a trailing newline. All commands print a textual form without `--json`. Errors not modeled as diagnostics (argument errors, help requests) exit with non-zero and write to stderr or stdout depending on the subcommand — none of that is part of the v1 JSON contract. Only the `--json` outputs are covered.
-
-All JSON documents are a single line followed by `\n`. No pretty-printing. Clients must not rely on formatting; parse with a JSON parser.
-
-Exit codes are part of v1:
-
-- `0` — command succeeded, no error-severity diagnostics.
-- `1` — command ran to completion, one or more error-severity diagnostics were produced **or** (for `describe-rule` with a specific name) the rule was not found.
-- Any other non-zero — argument error, I/O error, internal failure. Not part of v1 semantics; treat as "unknown failure."
-
-## Core type: `JsonDiagnostic`
-
-Every diagnostic-producing command emits objects conforming to this shape (`packages/tools/src/json_diagnostics.zig:28-36` and `packages/tools/src/json_diagnostics.zig:217-234`):
+Machine commands emit diagnostics with this shape:
 
 ```json
 {
-  "code": "ZTS303",
+  "code": "ZTS300",
   "severity": "error",
-  "message": "Result value used without checking .ok",
-  "file": "handler.ts",
-  "line": 23,
-  "column": 7,
-  "suggestion": "check result.ok before accessing result.value"
+  "message": "all handler paths must return Response",
+  "file": "src/handler.ts",
+  "line": 12,
+  "column": 5,
+  "suggestion": "return a Response on this path"
 }
 ```
 
-Fields:
+Code ranges:
 
-- `code` (string) — stable diagnostic identifier. See "Diagnostic code ranges" below. v1 guarantees the code string and its meaning do not change for the lifetime of v1.
-- `severity` (string) — one of `"error"`, `"warning"`, or `"info"`. v1 guarantees this set is closed; new severities would be a v2 change.
-- `message` (string) — human-readable, single-line. Content may be tuned across minor releases.
-- `file` (string) — the file the diagnostic applies to. Always present, may be a path or a synthetic name.
-- `line` (integer ≥ 0) — 1-based line number. `0` means "file-level, no source location."
-- `column` (integer ≥ 0) — 1-based column. `0` allowed with `line == 0` or when the checker has no column.
-- `suggestion` (string or `null`) — an actionable fix. Always present; `null` when no suggestion is available. Clients that drive a coding agent should feed this directly back to the model.
+| Range | Owner |
+|---|---|
+| ZTS0xx | Syntax and unsupported feature detection |
+| ZTS1xx | TypeScript stripping and module parsing |
+| ZTS2xx | Type checking |
+| ZTS3xx | Handler verification |
+| ZTS4xx | Flow and data-safety checks |
+| ZTS5xx | Active spec discharge |
+| ZTS6xx | Canonical profile |
 
-Diagnostics carry no trailing comma, no extra fields today, but clients **must ignore unknown fields** so v1 can grow additively.
+## Stable Commands
 
-## Diagnostic code ranges
+| Command | Purpose |
+|---|---|
+| `meta --json` | Compiler and policy metadata. |
+| `features --json` | Supported and rejected language feature catalog. |
+| `modules --json` | Virtual module exports from the built binary. |
+| `restrictions --json` | Language cuts mapped to proof value. |
+| `describe-rule [name|code] --json` | Rule detail and fix guidance. |
+| `search <keyword> --json` | Rule search. |
+| `check <handler.ts> --json` | Analyzer result, proof envelope, diagnostics, and optional contract. |
+| `verify-paths <file>... --json` | Path and flow verification. |
+| `verify-modules --builtins --strict --json` | Built-in module governance. |
+| `verify-module-manifest <manifest.json> --json` | Extension manifest validation. |
+| `extension-status --module-manifest <path>... --json` | Extension status summary. |
+| `edit-simulate [handler.ts] --stdin-json` | Pre-apply edit simulation. |
+| `review-patch <file> --json` | Diff-aware post-edit review. |
 
-Frozen in v1 (`packages/tools/src/json_diagnostics.zig:42-129`):
+Commands such as `prove`, `mock`, `link`, `rollout`, and `compile` are useful
+CLI tools, but their text output is not the structured v1 contract.
 
-- `ZTS000` — file-level error envelope used by `verify-paths` when a file cannot be read or processed at all. `line` and `column` are `0`, `message` contains the Zig error name.
-- `ZTS001`–`ZTS0xx` — parser errors (unsupported feature, unexpected token, invalid import, JSX mismatches, etc.). `ZTS041`–`ZTS043` within this block are TypeScript type-stripper rejections (`any` type, `as` assertion, `satisfies` assertion), emitted from the strip stage before parsing.
-- `ZTS100`–`ZTS1xx` — bool-checker diagnostics (non-boolean condition, nullish misuse, arithmetic on non-numeric).
-- `ZTS200`–`ZTS2xx` — type-checker diagnostics (type mismatch, arg count, return type, non-exhaustive match).
-- `ZTS300`–`ZTS3xx` — handler verifier (missing return path, unchecked result, unused imports, module-scope mutation, unchecked optional access).
-- `ZTS400`–`ZTS4xx` — flow checker (secret/credential reaching response/log/egress, unvalidated input at egress).
-- `ZTS500`–`ZTS5xx` — active spec discharge (`spec_not_discharged`, `spec_incompatible_with_import`, `spec_unknown_name`). Surfaced in `zigts check --json` two ways: as structured entries in `proof.spec_diagnostics` (with `kind`, `spec_name`, optional `incompatible_module`, optional `suggestion`) and as standard error-severity entries in the top-level `diagnostics` array (with `file`/`line`/`column`/`suggestion`, the same shape every other ZTS code emits). The structured form is preferred for agent dispatch; the standard form is what gates exit code and what `verify-paths` / `edit-simulate` consume. See [verification.md](../verification.md) and [user-guide.md](../user-guide.md#author-declared-specs).
-- `ZTS600`–`ZTS6xx` — strict ZigTS profile diagnostics plus one-way canonical diagnostics. ZTS600-ZTS607 keep their existing meanings. ZTS608+ entries are default-on error diagnostics covering canonical authoring rules such as named reusable helpers, `export function` for public functions, and explicit `Effects<...>` / `Proof<...>` capsules on public helpers. `ZTS606` (`missing_proof_capsule`) is the proof-carrying-functions check: a handler-reachable helper breaks a capsule property (`total` / `pure` / `read_only` / `deterministic`) the handler's `Spec<...>` demands and carries no `Proof<T, "...">` capsule declaring it. It is surfaced through `proof.spec_diagnostics` as a `missing_capsule` entry carrying a `function` attribution, alongside helper capsule discharge failures (`ZTS500` / `ZTS502` likewise carrying `function`).
-- `ZVM001`+ — virtual-module audit diagnostics from `verify-modules` (direct effect usage, missing checked helpers, spec drift). See `packages/tools/src/module_audit.zig`.
+## Proof Envelope
 
-New codes may be added in v1. Existing codes cannot move ranges or change meaning.
+`check --json` includes:
 
-## `zigts meta`
+- `diagnostics`: standard diagnostics.
+- `contract`: handler contract when analysis can produce one.
+- `proof`: proof-card data, active specs, proof traces, and witness counts.
+- `features` and `modules`: optional catalogs on commands that request them.
 
-Emits compiler and policy metadata. Use it to record which policy a session or CI run was verified against.
+Clients should ignore unknown additive fields and must not depend on object key
+ordering.
 
-**Invocation:** `zigts meta --json`
+## Expert Event Stream
 
-**Output shape** (`packages/tools/src/expert.zig:101-105`):
-
-```json
-{
-  "compiler_version": "0.1.0-beta",
-  "policy_version": "2026.04.2",
-  "policy_hash": "<hex>",
-  "module_registry_hash": "<hex>",
-  "rule_count": 65,
-  "categories": {
-    "verifier": 43,
-    "policy": 8,
-    "property": 14
-  },
-  "mode": "embedded"
-}
-```
-
-Fields:
-
-- `compiler_version`, `policy_version`, `policy_hash`, `module_registry_hash` — as described above.
-- `rule_count` (integer) — number of rules in the registry. Matches `categories.verifier + categories.policy + categories.property`.
-- `categories` (object, closed in v1) — rule counts by category. The three keys `verifier`, `policy`, `property` are guaranteed; new categories would be a v2 change.
-- `mode` (string) — always `"embedded"` in v1. Reserved for a future out-of-process mode.
-
-**Exit code:** `0` on success.
-
-## `zigts verify-paths`
-
-Runs the full analysis pipeline on one or more handler files. This is the primary "compile everything and tell me what's wrong" call.
-
-**Invocation:** `zigts verify-paths <file>... --json`
-
-**Output shape** (`packages/tools/src/expert.zig:197-212`):
+`zigttp expert --print <prompt> --mode json` emits newline-delimited events:
 
 ```json
-{
-  "ok": true,
-  "policy_version": "2026.04.2",
-  "policy_hash": "<hex>",
-  "checked_files": ["handler.ts", "admin.ts"],
-  "violations": [ /* JsonDiagnostic, ... */ ]
-}
+{ "v": 1, "k": "assistant_delta", "d": { "text": "..." } }
 ```
 
-Fields:
-
-- `ok` (boolean) — `true` iff no error-severity diagnostic was produced for any file. Warnings do not flip this to `false`.
-- `policy_version`, `policy_hash` — pin so the client can correlate violations with a specific rule set.
-- `checked_files` (string array) — the files the command attempted to analyze. Order matches the argv order.
-- `violations` (array of `JsonDiagnostic`) — all diagnostics across all files, in an unspecified but stable-per-run order. Each diagnostic's `file` field identifies which input it belongs to.
-
-**File-level failure envelope:** if a file cannot be opened or processed, `verify-paths` emits a `ZTS000` diagnostic with `line: 0`, `column: 0`, `message` set to the Zig error name, and `suggestion: null`, then continues with the remaining files (`packages/tools/src/expert.zig:156-172`). `ok` becomes `false`.
-
-**Exit code:** `0` if `ok == true`, `1` if any error-severity diagnostic is present.
-
-## `zigts verify-modules`
-
-Audits zigts built-in virtual module source files and their JSON specs. The authoritative public built-in set comes from `packages/zigts/src/builtin_modules.zig`; editor hooks may still point at individual files under `packages/zigts/src/modules/`, but files outside that public set are ignored so helper edits do not produce governance noise.
-
-**Invocation:**
-
-```text
-zigts verify-modules <file>... [--strict] --json
-zigts verify-modules --builtins [--strict] --json
-```
-
-**Output shape** (`packages/tools/src/expert.zig:271-286`):
-
-```json
-{
-  "ok": true,
-  "policy_version": "2026.04.2",
-  "policy_hash": "<hex>",
-  "checked_files": ["packages/modules/src/platform/env.zig"],
-  "violations": [ /* JsonDiagnostic with ZVM00x codes */ ]
-}
-```
-
-Identical shape to `verify-paths`. The only differences are the accepted input paths and the diagnostic codes produced (`ZVM00x` series).
-
-Mode semantics:
-
-- Positional-path mode audits the supplied public built-in module/spec files only.
-- `--builtins` audits the full authoritative public built-in set and reports every built-in module/spec file in `checked_files`.
-- Positional paths and `--builtins` are mutually exclusive.
-- `--strict` upgrades governance warnings that must block CI into errors. In v1 that means `ZVM003` ("built-in module has no module spec artifact") becomes error-severity instead of warning-severity.
-
-**Exit code:** `0` if no errors, `1` otherwise.
-
-## `zigts verify-module-manifest`
-
-Validates a proof-carrying virtual module manifest without requiring a Zig backend to be built.
-
-**Invocation:**
-
-```text
-zigts verify-module-manifest <manifest.json> --json
-```
-
-**Output shape:** identical to `verify-modules`:
-
-```json
-{
-  "ok": true,
-  "policy_version": "2026.04.2",
-  "policy_hash": "<hex>",
-  "checked_files": ["zigttp-module.json"],
-  "violations": [ /* JsonDiagnostic with ZVM00x codes */ ]
-}
-```
-
-The validator checks schema version, specifier prefix, backend/state model, capabilities, exports, effects, return kinds, labels, contract extraction rules, contract flags, laws, and duplicate export names within the module.
-
-**Exit code:** `0` if no errors, `1` otherwise.
-
-## `zigts extension-status`
-
-Reports the partner virtual-module manifests that have been registered for this session, plus a per-manifest summary of specifier, backend, state model, capabilities, exports, and any validation issues. Mirrors the validator used by `verify-module-manifest`, so a manifest that fails validation reports the same diagnostics.
-
-**Invocation:**
-
-```text
-zigts extension-status --module-manifest <path> [--module-manifest <path>...] --json
-zigts extension-status <path> [<path>...] --json
-```
-
-**Output shape:**
-
-```json
-{
-  "ok": true,
-  "manifests": [
-    {
-      "path": "zigttp-module.json",
-      "valid": true,
-      "specifier": "zigttp-ext:stripe",
-      "backend": "native_zig",
-      "stateModel": "none",
-      "requiredCapabilities": ["clock"],
-      "contractSection": "math",
-      "exports": [
-        {
-          "name": "double",
-          "effect": "read",
-          "returns": "number",
-          "failureSeverity": "none",
-          "traceable": true,
-          "returnLabels": [],
-          "contractExtractions": []
-        }
-      ],
-      "issues": []
-    }
-  ]
-}
-```
-
-`requiredCapabilities` entries are either plain strings (a built-in `ModuleCapability` enum tag) or `{ "name": "...", "inherits": "..." }` objects for partner-declared semantic labels. `contractSection` is present only when the partner manifest declares one. The `issues` array carries the same `JsonDiagnostic` shape as `verify-module-manifest`.
-
-**Exit code:** `0` if every manifest validates cleanly, `1` if any manifest fails validation.
-
-## `zigts edit-simulate`
-
-Simulates running the analysis pipeline on a candidate file and, optionally, diffs the result against a baseline so the client can tell which violations are *new* vs. *pre-existing*. This is the call the expert compiler veto hangs from.
-
-**Invocation:**
-
-```
-zigts edit-simulate [<handler.ts>] [--before <old.ts>] [--stdin-json]
-```
-
-Either a handler path on argv or `--stdin-json` must be supplied. With `--stdin-json`, the command reads the following shape from stdin (`packages/tools/src/edit_simulate.zig:106-134`):
-
-```json
-{
-  "file": "handler.ts",
-  "content": "<full new file contents>",
-  "before": "<full old file contents, optional>"
-}
-```
-
-`file` is a label, not a path on disk — the command writes the content to a temp file under `/tmp/zigts-edit-sim-*` with the same extension as the label and verifies that. This is the key property for expert mode: no file needs to be on disk for the veto to run.
-
-**Output shape** (`packages/tools/src/edit_simulate.zig:137-166`):
-
-```json
-{
-  "violations": [
-    {
-      "code": "ZTS303",
-      "severity": "error",
-      "message": "Result value used without checking .ok",
-      "line": 23,
-      "column": 7,
-      "introduced_by_patch": true,
-      "suggestion": "check result.ok before accessing result.value"
-    }
-  ],
-  "summary": {
-    "total": 1,
-    "new": 1,
-    "preexisting": 0
-  }
-}
-```
-
-Fields on each violation:
-
-- `code`, `severity`, `message`, `line`, `column`, `suggestion` — as in `JsonDiagnostic`, except `file` is omitted (edit-simulate is scoped to a single file).
-- `introduced_by_patch` (boolean) — `true` if the violation does not appear in the baseline (`before`) analysis. If no baseline was supplied, every violation is `true`.
-- `suggestion` — field is **omitted entirely** when there is no suggestion, unlike `JsonDiagnostic` which emits `"suggestion": null`. This difference is part of v1; clients must handle both "absent" and "null." v2 may unify them.
-
-Fields on `summary`:
-
-- `total` (integer) — count of violations reported.
-- `new` (integer) — count with `introduced_by_patch: true`.
-- `preexisting` (integer) — count with `introduced_by_patch: false`. Zero when no baseline is supplied.
-
-**Violation identity for diffing:** two violations are considered "the same" across the before/after analyses if they share a `(code, message)` pair. Line and column are explicitly ignored so that edits which shift code around are not counted as new violations (`packages/tools/src/edit_simulate.zig:242-252`). This is a v1 heuristic and is documented as such in the source; clients should expect some false positives for pathological cases (identical messages at different locations will be collapsed).
-
-**Exit code:** `0` always from the command itself — the surface is designed for a hook that never wants to fail the tool call. Failure signal is the presence of `summary.new > 0` or `summary.total > 0`, which the client reads.
-
-## `zigts review-patch`
-
-A thin wrapper over `edit-simulate` that adds `--diff-only` for filtering to new violations and has a file-driven path mode. With `--json`, the output shape is **byte-identical** to `edit-simulate`'s output (same `violations`/`summary` envelope).
-
-**Invocation:**
-
-```
-zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
-```
-
-`--diff-only` filters `violations` to entries with `introduced_by_patch: true` and rewrites `summary.total` and `summary.new` to the filtered count, `summary.preexisting` to `0` (`packages/tools/src/review_patch.zig:73-88`).
-
-**Exit code:** `0` if `summary.total == 0`, `1` otherwise (`packages/tools/src/review_patch.zig:105`). This is the one place in v1 where a non-zero exit means "the client should surface this," not "the tool broke." Clients running under hooks that should not fail must either catch the exit or use `edit-simulate` directly.
-
-## `zigts describe-rule`
-
-Rule catalog introspection. Lists all rules, a specific rule by name or code, or emits just the `policy_hash` for CI assertions.
-
-**Invocation:**
-
-```
-zigts describe-rule [<name-or-code>] [--json] [--hash]
-```
-
-**`--hash` output:** a single line containing the hex `policy_hash` followed by `\n`. This is not JSON and has no `--json` variant. It is a v1 primitive for CI scripts that want to pin rule versions. Not part of the JSON contract; treat as a separate format.
-
-**List mode** (`describe-rule --json`, no name): a JSON array of `Rule` objects.
-
-**Single mode** (`describe-rule <name-or-code> --json`): a single `Rule` object, not wrapped in an array.
-
-**`Rule` shape** (`packages/tools/src/describe_rule.zig:81-97`):
-
-```json
-{
-  "name": "unchecked-result",
-  "code": "ZTS303",
-  "category": "verifier",
-  "description": "Result value used without checking .ok",
-  "example": "const r = parse(input); use(r.value);",
-  "help": "Check result.ok before accessing result.value. Result types..."
-}
-```
-
-Fields:
-
-- `name` (string) — stable, kebab-case identifier.
-- `code` (string) — matches the `code` field on a `JsonDiagnostic` with the same rule.
-- `category` (string) — one of `"verifier"`, `"policy"`, `"property"` in v1.
-- `description` (string) — single-line summary.
-- `example` (string or absent) — optional short code snippet. **Absent, not `null`**, when the rule has no example.
-- `help` (string) — multi-paragraph prose explaining why the rule exists and how to fix violations. Always present.
-
-**Exit code:** `0` on list, `0` when a named rule is found, `1` when a named rule is not found (`packages/tools/src/describe_rule.zig:46`).
-
-## `zigts search`
-
-Substring search across rule names, descriptions, and help text.
-
-**Invocation:** `zigts search <keyword> [--json]`
-
-**Output** (`packages/tools/src/search_rules.zig:36-44`): a JSON array of `Rule` objects matching the keyword, using the exact shape from `describe-rule`. An empty array is a valid result and is returned as `[]`.
-
-**Exit code:** `0` always.
-
-## Proof-card envelope (from `zigts check --json`)
-
-`zigts check --json` is not reached via the direct verification commands, but it is part of the v1 contract because `zigttp expert` calls the same underlying functions in-process. Two envelopes exist (`packages/tools/src/json_diagnostics.zig:284-440`).
-
-**Success envelope** (emitted when analysis completes with no error-severity diagnostics):
-
-```json
-{
-  "success": true,
-  "proof": {
-    "env_vars": ["JWT_SECRET"],
-    "outbound_hosts": ["api.stripe.com"],
-    "virtual_modules": ["zigttp:auth", "zigttp:cache"],
-    "properties": {
-      "retry_safe": true,
-      "idempotent": true,
-      "injection_safe": true,
-      "deterministic": false,
-      "read_only": false,
-      "state_isolated": true,
-      "fault_covered": true
-    },
-    "proofTrace": {
-      "deterministic": {
-        "holds": false,
-        "kind": "structural",
-        "summary": "Date.now() reads a clock or RNG: two runs of the same request can differ.",
-        "counterexample": {
-          "kind": "offending-node",
-          "location": { "line": 14, "column": 9 },
-          "snippet": "Date.now()",
-          "fix": "move the call inside a durable step() from zigttp:durable, or take the value from the request."
-        }
-      },
-      "retry_safe": {
-        "holds": true,
-        "kind": "path-enumeration",
-        "summary": "Read-only, or every write is inside a durable step: safe to retry.",
-        "facts": { "pathsEnumerated": 4, "pathsExhaustive": true, "failableSites": 0, "coveredSites": 0 }
-      }
-    },
-    "declared_specs": ["idempotent", "deterministic"],
-    "spec_diagnostics": []
-  },
-  "diagnostics": [ /* warnings only */ ]
-}
-```
-
-Fields:
-
-- `success` (boolean) — `true` on this envelope.
-- `proof` (object) — present when a handler contract was produced. Absent when the tool ran in a mode that does not produce a contract. Clients must not assume `proof` exists.
-  - `env_vars` (string array) — environment variables the handler reads literally.
-  - `outbound_hosts` (string array) — static egress destinations extracted from the contract.
-  - `virtual_modules` (string array) — `zigttp:*` module specifiers the handler imports.
-  - `properties` (object, closed set in v1) — seven boolean flags, all keys guaranteed: `retry_safe`, `idempotent`, `injection_safe`, `deterministic`, `read_only`, `state_isolated`, `fault_covered`. New property flags would be a v2 change.
-  - `proofTrace` (object) — per-property reasoning keyed by UI-facing snake_case property names. Each entry has `holds` (boolean), `kind` (`path-enumeration` / `flow-trace` / `structural`), and `summary` (one-line explanation). Path-enumeration entries also carry `facts` (`pathsEnumerated`, `pathsExhaustive`, `failableSites`, `coveredSites`). Failing entries that have a concrete counterexample carry `counterexample`: either `offending-node` (a `location`, `snippet`, and `fix`) or `flow-chain` (the source-to-sink `flow` steps, the synthesized `request`, and a `fix`). Additive: clients that read only `properties` are unaffected. Omitted when no contract was produced. The internal `HandlerProperties.result_safe` field is emitted as `results_safe`, matching `properties.resultsSafe` and the proof-card key.
-  - `declared_specs` (string array) — effective active spec names. Defaults to every supported v1 spec when no handler `Spec<...>` is declared; otherwise it is the narrowed set from the return type. Always present on the success envelope.
-  - `spec_diagnostics` (array of objects) — per-spec and per-capsule discharge results in their structured form. Each entry has `code` (`ZTS500`-`ZTS506`, `ZTS606`, `ZTS607`), `kind` (`not_discharged` / `incompatible_with_import` / `unknown_name` / `missing_capsule` / `effect_undeclared` / `effect_unknown_capability` / `effect_over_declared` / `budget_exceeded` / `helper_budget_exceeded`), `severity` (`error` / `warning`), `spec_name` (a spec, capsule property, or capability name depending on `kind`), optional `function` (present on helper capsule diagnostics, `ZTS606`, and `ZTS607`, naming the user-defined function the diagnostic is attributed to), optional `incompatible_module` (ZTS501 only), optional `suggestion`. Empty when every active spec and capsule is satisfied. Note that error-severity entries also produce matching entries in the top-level `diagnostics` array, which is what gates exit code and what `verify-paths` consumes; the structured form here exists so agent dispatch can branch on `kind` without parsing message strings.
-  - `proofCapsules` (array of objects) — per-helper proof-carrying-function discharge results. Each entry has `function`, `line`, `declared` (capsule property names from the helper's `Proof<T, "...">` annotation), `proven` (object with `total` / `pure` / `read_only` / `deterministic` booleans the compiler proved about the helper), and `discharged` (true when the helper declared a capsule and every property held). Transient analysis output: present in the `--json` envelope but never written to `contract.json` or the signed attestation surface. Empty when the module has no user-defined helpers.
-  - `effectCapsules` (array of objects) — per-helper capability-capsule discharge results. Each entry has `function`, `line`, `declared` (capability names from the helper's `Effects<T, "...">` ceiling), `inferred` (capability names effect inference computed for the helper), and `discharged` (true when the helper declared a ceiling and no error-severity diagnostic fired). Transient analysis output, like `proofCapsules`.
-- `diagnostics` (array of `JsonDiagnostic`) — warning-severity diagnostics only. An empty array is normal.
-
-**Error envelope** (emitted when analysis produced one or more error-severity diagnostics):
-
-```json
-{
-  "success": false,
-  "proof": { /* same shape as the success envelope, when a contract was produced */ },
-  "diagnostics": [ /* errors and warnings */ ]
-}
-```
-
-The `proof` key is present when analysis produced a `HandlerContract`, even on the error envelope. This lets clients inspect active specs that failed discharge alongside the standard diagnostics. The key is omitted when no contract was produced (parse failures, missing handler, etc.). Clients must branch on `success` to know whether the check passed; they can read `proof` independently of `success` to inspect the surface the verifier saw.
-
-## Virtual-module and feature catalogs
-
-Two ancillary JSON outputs exist and are covered by v1 (`packages/tools/src/json_diagnostics.zig:317-430`):
-
-- `zigts modules --json` emits an array of `{ specifier, exports }` objects, where `exports` is an array of function-name strings.
-- `zigts features --json` emits an array of `{ name, status, alternative }` objects, where `status` is `"allowed"` or `"blocked"` and `alternative` is a string or `null`.
-
-These are both additive: new specifiers, exports, features, or statuses can appear, but existing entries cannot change meaning.
-
-## Stability guarantees
-
-For as long as v1 is advertised by `zigts meta` (via `mode: "embedded"` and the `compiler_version` / `policy_version` fields), clients may rely on:
-
-1. Every field and type documented above.
-2. Every `ZTS0xx`/`ZTS1xx`/`ZTS2xx`/`ZTS3xx`/`ZTS4xx`/`ZTS5xx`/`ZTS6xx`/`ZVM0xx` code number retaining its meaning.
-3. Exit codes as specified per-command.
-4. Unknown fields being ignored by all first-party clients — the contract is open for extension.
-5. Stable JSON output ordering within a single invocation (across invocations the order is not guaranteed).
-
-Clients may **not** rely on:
-
-1. Human-readable `message` strings being byte-stable.
-2. Diagnostic `suggestion` strings being byte-stable.
-3. The non-JSON textual outputs of any command.
-4. Error messages on stderr.
-5. Anything not listed in this document.
-
-## Freezing procedure
-
-This document is v1 as of `2026-04-14`. The file is the source of truth. Any change to `packages/tools/src/expert.zig`, `packages/tools/src/json_diagnostics.zig`, `packages/tools/src/edit_simulate.zig`, `packages/tools/src/review_patch.zig`, `packages/tools/src/describe_rule.zig`, `packages/tools/src/search_rules.zig`, or `packages/tools/src/module_audit.zig` that alters the shape of a documented response must either:
-
-1. Be additive (a new field, a new code, a new category) and leave v1 intact, or
-2. Ship as v2, bumping `compiler_version` or an explicit `contract_version` field and updating this document.
-
-Two tripwires guard this contract and run under `zig build test`: the in-tree tests in `packages/tools/src/expert.zig` pin versions and rule-count invariants, and the `test-expert-golden` step asserts byte-identical stdout from the built `zigts` binary against fixtures in `packages/tools/tests/fixtures/expert/`. Regenerate a fixture only after a deliberate contract change and update this document in the same commit.
-
-## What is explicitly out of scope for v1
-
-- `zigts prove`, `zigts mock`, `zigts link`, `zigts rollout`, `zigts compile`: their outputs are either text-only or JSON not yet stabilized. If a JSON form is later promoted, it becomes v2.
-- Streaming output. v1 is request/response only.
-- Anything reading from files other than `--stdin-json` on `edit-simulate` and `review-patch`.
-- Authentication, rate limiting, tracing, and the managed-task surface for `zigttp serve/dev/deploy`. All runtime and deploy commands are outside v1.
-
-## `zigttp expert --print --mode json` event stream
-
-`zigttp expert` picks its model backend from the environment: `ANTHROPIC_API_KEY` selects the Anthropic provider (streaming Messages API) and `OPENAI_API_KEY` selects the OpenAI provider (non-streaming Chat Completions). An empty value counts as missing; if neither variable is set to a non-empty value, the CLI exits with code 1 and a setup message instead of launching against an unconfigured backend. This is a v0.1.0-beta semantic change from the prior stub fallback - CI consumers that parsed the documented NDJSON event stream for an unset environment must now provide a real key (a test fixture key is enough to launch the binary). The system prompt comes entirely from the binary: the shipped persona and bundled references are embedded at compile time via `@embedFile`, and compiler metadata is rendered from the running binary's in-process registries. Startup does not read `AGENTS.md`, `CLAUDE.md`, external skill files, or any other workspace prompt files.
-
-`--print <prompt>` runs one turn and exits. `--mode json` switches output to an NDJSON event stream, one event per line. This surface falls outside the v1 tool contract above but appears here because CI scripts commonly use both together.
-
-**Event schema:** `{"v":1,"k":"<kind>","d":<payload>}`
-
-```json
-{"v":1,"k":"user_text","d":"add a GET /health route"}
-{"v":1,"k":"tool_use","d":{"id":"tu_01","name":"zigts_check","args_json":"{\"path\":\"handler.ts\"}"}}
-{"v":1,"k":"tool_result","d":{"tool_use_id":"tu_01","tool_name":"zigts_check","ok":true,"body":"..."}}
-{"v":1,"k":"model_text","d":"Added the route. Proof: retry_safe=true, idempotent=true."}
-{"v":1,"k":"end"}
-```
-
-Fields:
-- `v` (integer) - schema version, currently `1`.
-- `k` (string) - event kind. Defined kinds: `user_text`, `model_text`, `tool_use`, `tool_result`, `proof_card`, `diagnostic_box`, `end`.
-- `d` (any) - payload. String for `user_text`, `model_text`, `proof_card`, `diagnostic_box`. Object for `tool_use` and `tool_result`. Absent for `end`.
-
-The live stream and `events.jsonl` share the same `{"v","k","d"}` envelope for transcript events, so one parser can handle both if it treats `end` as a live-only sentinel. `end` appears last only on successful one-turn runs; errored runs may terminate without it, and session files neither write nor reconstruct it. Ignore unknown kinds; treat their `d` as a string or object.
-
-This surface is outside the v1 stability guarantee. New kinds may appear in future releases; clients should ignore unknown `k` values.
-
-## Relationship to expert mode
-
-`zigttp expert` uses these commands from in-process function calls. The in-process API must remain a faithful representation of this contract so the non-interactive binary and expert mode never diverge. The wire shapes above are the reference; the in-process Zig structs are an optimization that must round-trip through them without loss.
+The event envelope uses:
+
+| Field | Meaning |
+|---|---|
+| `v` | Event schema version. |
+| `k` | Event kind. |
+| `d` | Kind-specific payload. |
+
+`zigttp expert --mode rpc` exposes a line-delimited JSON-RPC 2.0 interface over
+stdio for long-lived clients. The agent loads its model backend from
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `~/.zigttp/providers.json`; missing
+configuration exits with setup guidance.
+
+## Compatibility
+
+- Additive JSON fields are allowed.
+- Removing or renaming documented fields requires a contract version bump.
+- Unknown event kinds must be ignored by clients that do not understand them.
+- In-process expert tools must round-trip through the same JSON shapes exposed
+  by the CLI commands.

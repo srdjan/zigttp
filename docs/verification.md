@@ -281,7 +281,7 @@ is **ZTS504**, and a declared-but-unreached capability is the warning
 The same annotation on the handler's return type is a **budget** that
 bounds every reachable helper. A capability the handler reaches directly
 outside the budget is **ZTS506**; one a reachable helper introduces is
-**ZTS607**, attributed to that helper (`contract_builder.zig` Phase 4c).
+**ZTS607**, attributed to that helper by `contract_builder.zig`.
 The declared budget is recorded in `contract.json` under
 `sandbox.declaredBudget`. `zigts check --json` adds an `effectCapsules`
 array alongside `proofCapsules`.

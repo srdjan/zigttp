@@ -6,10 +6,10 @@ fail() {
   exit 1
 }
 
-scope_file="docs/releases/v0.1.0-scope.md"
+modules_doc="docs/virtual-modules/README.md"
 registry_file="packages/zigts/src/builtin_modules.zig"
 
-[[ -f "$scope_file" ]] || fail "missing $scope_file"
+[[ -f "$modules_doc" ]] || fail "missing $modules_doc"
 [[ -f "$registry_file" ]] || fail "missing $registry_file"
 
 module_count=$(
@@ -22,12 +22,39 @@ module_count=$(
 
 [[ -n "$module_count" ]] || fail "could not count builtin governance entries"
 
-scope_count=$(
-  sed -n 's/^\*\*Virtual modules\.\*\* \([0-9][0-9]*\) modules .*/\1/p' "$scope_file"
+doc_count=$(
+  awk '
+    /^## Module Catalog/ { in_catalog = 1; next }
+    /^## / && in_catalog { exit }
+    in_catalog && /^\| `zigttp:/ { count += 1 }
+    END { print count + 0 }
+  ' "$modules_doc"
 )
 
-[[ "$scope_count" == "$module_count" ]] ||
-  fail "$scope_file says $scope_count modules, registry has $module_count"
+[[ "$doc_count" == "$module_count" ]] ||
+  fail "$modules_doc lists $doc_count modules, registry has $module_count"
+
+while IFS= read -r specifier; do
+  if ! awk -v specifier="$specifier" '
+    /^## Module Catalog/ { in_catalog = 1; next }
+    /^## / && in_catalog { exit }
+    in_catalog && index($0, "| `" specifier "` |") > 0 { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$modules_doc"; then
+    fail "$modules_doc is missing $specifier"
+  fi
+done < <(
+  awk '
+    /pub const builtin_governance_entries/ { in_entries = 1 }
+    in_entries && /\.specifier = "zigttp:/ {
+      line = $0
+      sub(/^.*\.specifier = "/, "", line)
+      sub(/".*$/, "", line)
+      print line
+    }
+    in_entries && /^};/ { exit }
+  ' "$registry_file"
+)
 
 if grep -R "packages/runtime/src/generated/embedded_handler.zig" docs README.md CHANGELOG.md SECURITY.md RELEASE_CHECKLIST.md >/dev/null; then
   fail "docs reference obsolete packages/runtime/src/generated/embedded_handler.zig"

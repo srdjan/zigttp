@@ -1,2664 +1,333 @@
-# zigttp User Guide
+# User Guide
 
-A serverless JavaScript runtime for FaaS deployments (AWS Lambda, Azure
-Functions, Cloudflare Workers), powered by Zig and zigts.
+zigttp runs JavaScript, TypeScript, and TSX HTTP handlers from a single Zig
+binary. The language surface is intentionally restricted so the compiler can
+prove handler properties before and during local development.
 
----
+## Install
 
-## Table of Contents
-
-1. [Installation](#installation)
-2. [Quick Start](#quick-start)
-3. [Command Line Reference](#command-line-reference)
-4. [Handler API](#handler-api)
-5. [Request Object](#request-object)
-6. [Response Object](#response-object)
-7. [Routing Patterns](#routing-patterns)
-8. [Working with JSON](#working-with-json)
-9. [Error Handling](#error-handling)
-10. [Virtual Modules](#virtual-modules)
-11. [JavaScript Subset Reference](#javascript-subset-reference)
-12. [TypeScript Support](#typescript-support)
-13. [JSX and TSX Handlers](#jsx-and-tsx-handlers)
-14. [Complete Examples](#complete-examples)
-15. [Performance Tuning](#performance-tuning-for-faas)
-16. [Compile-Time Verification](#compile-time-verification)
-17. [Contract Manifest](#contract-manifest)
-18. [OpenAPI Manifest](#openapi-manifest)
-19. [TypeScript SDK](#typescript-sdk)
-20. [Runtime Sandboxing](#runtime-sandboxing)
-21. [Declarative Handler Testing](#declarative-handler-testing)
-22. [Route Forge with zigttp expert](#route-forge-with-zigttp-expert)
-23. [Author-Declared Specs](#author-declared-specs)
-24. [Troubleshooting](#troubleshooting)
-
----
-
-## Installation
-
-### Pre-built binary
-
-Pre-built binaries for macOS and Linux (x86_64, aarch64):
+Install a release build:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
 zigttp --help
 ```
 
-This installs the `zigttp` command, the only binary you need to follow this
-guide.
-
-### Build from source
-
-Building from source needs **Zig 0.16.0** (download from
-[ziglang.org](https://ziglang.org/download/); newer compiler releases are
-best-effort until revalidated):
+Build from source with Zig `0.16.0`:
 
 ```bash
-# Clone the repository
-git clone https://github.com/srdjan/zigttp
+git clone https://github.com/srdjan/zigttp.git
 cd zigttp
-
-# Build release version (optimized for deployment)
 zig build -Doptimize=ReleaseFast
-
-# Or debug version
-zig build
-
-# Verify installation
 ./zig-out/bin/zigttp --help
 ```
 
-### Deployment Package
-
-The resulting release binary is ~4.8MB, has zero runtime dependencies, and can be deployed
-directly to FaaS platforms or container environments.
-
----
-
-## Quick Start
-
-The v1 user flow is `init` -> `dev` -> edit -> `test` -> `deploy`. Each command
-auto-detects the project from `zigttp.json`, so most steps take no arguments.
-Local deploy is the default; `--local` is accepted when you want the target to
-be explicit.
-
-### Scaffold a project
+## First Project
 
 ```bash
-zigttp init my-app && cd my-app
-```
-
-This creates `src/handler.ts`, `tests/handler.test.jsonl`, `public/`, `zigttp.json`, a starter `README.md`, and a `.gitignore`. The HTMX template uses `src/handler.tsx`.
-
-### Start proof-aware live reload
-
-```bash
+zigttp init my-app
+cd my-app
 zigttp dev
 ```
 
-Edit `src/handler.ts` in your editor; HTMX projects use `src/handler.tsx`. The
-terminal proof card re-verifies on save and shows the verdict, proven surface,
-proof deltas, counterexamples, and `Why:` rows for attributed property
-demotions. If a save fails, the reload banner names the failing analyzer stage
-and keeps the previous handler serving. Press `Tab` to rotate the proof card's
-left pane through three lenses: `Properties` (the default `[+]`/`[-]` pills),
-`Trade` (each proof paired with the substrate restrictions that earned it), and
-`Handover` (a copy-pasteable AI proof certificate).
+The scaffold writes `zigttp.json`, `src/handler.ts` or `src/handler.tsx`, and
+starter tests. `zigttp dev` reads the project config, starts the local server,
+watches the handler, and prints a proof card on every save.
 
-For a browser mirror of the same live state, run `zigttp studio` or pass
-`--studio` to `zigttp dev`. Studio is optional; the terminal loop is the default
-first-run experience.
-
-### Test
+Run tests and build a local deploy artifact:
 
 ```bash
 zigttp test
-```
-
-`test` runs the analyzer first, then runs the project fixture at
-`tests/handler.test.jsonl`. Pass a path to run a different fixture.
-
-### The expert
-
-```bash
-zigttp auth claude     # one-time setup: paste an Anthropic API key
-zigttp expert
-```
-
-`expert` opens the interactive compiler-in-the-loop agent. It runs the same
-analyzers the compiler uses, so it can explain a diagnostic, verify an edit,
-and propose a fix against your handler as you work. `auth claude` stores the
-key at `~/.zigttp/providers.json` (mode 0600) and the runtime auto-injects it
-into `ANTHROPIC_API_KEY` on launch; a shell-exported value also works and
-wins over the stored one.
-
-### Verified local deploy
-
-```bash
 zigttp deploy
 ./.zigttp/deploy/my-app
 ```
 
-`deploy` verifies the handler, emits the self-contained binary at
-`.zigttp/deploy/<project-name>`, and appends a `kind=deploy` row to
-`.zigttp/proofs.jsonl`. No credentials, no Docker, no network access. `zigttp
-deploy --local` is the explicit spelling for the same target. See
-[Proof ledger and badge](#proof-ledger-and-badge) for the receipt flow and
-[Production Deployment](#production-deployment) for container and FaaS targets.
+`deploy` verifies the handler, emits a self-contained binary, writes
+`.zigttp/proofs.jsonl`, and signs a proof receipt unless `--no-attest` is
+passed.
 
-Attestation is default-on. The build signs the contract and bytecode hashes into a JWS embedded in the binary, using the persistent identity at `~/.zigttp/attest/keypair.bin`. The running server emits `Zigttp-Proofs` and `Zigttp-Attest` response headers on every request and serves `GET /.well-known/zigttp-attest` as cacheable JSON. `zigttp verify <url>` validates the signature from any third-party machine. Pass `--no-attest` to skip signing for a specific build.
-
-### Proof ledger and badge
-
-After every successful `zigttp deploy`, the CLI prints a proof review card: the
-contract sha, proof level, proven properties, the route/env/egress/cache/
-capability surface, and a verdict against the previous deploy (`safe`,
-`safe_with_additions`, `breaking` - the same words `zigttp dev --watch --prove`
-uses). The row is appended to `.zigttp/proofs.jsonl` so the timeline survives
-across deploys:
+For a one-file experiment:
 
 ```bash
-zigttp proofs list                              # recent deploys and live-reload swaps
-zigttp proofs show HEAD                         # re-render the card from the latest entry
-zigttp proofs diff HEAD~1 HEAD                  # what changed between the last two entries
-zigttp proofs export --format md > receipt.md   # shareable receipt for a PR
-zigttp proofs badge                             # write ./zigttp-proof.svg + README snippet
+zigttp serve -e "function handler(req) { return Response.json({ ok: true }) }"
+zigttp serve examples/handler/handler.ts -p 3000
 ```
 
-Refs accept `HEAD`, `HEAD~N`, or a contract sha prefix. The ledger persists only
-contract-derived identifiers (env var names, egress hosts, cache namespaces,
-route patterns, capability names, the contract sha, boolean property flags); no
-env values, tokens, or PII enter the file.
-
-### Proof passport demo
-
-For a local, noninteractive walkthrough of the proof model:
-
-```bash
-zigttp demo --scripted --out proof-demo --export proof-demo/passport
-```
-
-Open `proof-demo/passport/index.html` to inspect the exported Proof Passport. It
-captures the baseline proof, an unsafe edit with a secret-flow witness, the
-repair, and the local deploy receipt. To carry the same proof to a pull request,
-see the [Proof Gate](proof-gate.md): `zigttp proofs gate` aggregates a behavioral
-verdict across every changed handler and posts it as a sticky PR comment.
-
-### Quick one-off testing
-
-For inline experimentation outside a project:
-
-```bash
-zigttp serve -e "function handler(req) { return Response.text('Hello World!') }"
-zigttp serve hello.js
-```
-
-### Multi-handler edge
-
-`zigttp edge` runs an in-process edge that loads multiple handler pools behind one listener and routes incoming requests to a named target by host, method, and path prefix:
-
-```bash
-zigttp edge --config zigttp.edge.json
-```
-
-Useful for multitenant routing, internal request fan-out, or A/B routing during a migration. Each handler entry is verified at load time, so the edge only listens after every handler in the config is provably safe. See [docs/edge.md](edge.md) for the full config reference.
-
----
-
-## Command Line Reference
-
-Day-to-day use is five commands:
-
-```
-zigttp init <name> [--template basic|api|htmx]
-zigttp dev [options] [handler.ts]
-zigttp test [tests.jsonl]
-zigttp expert
-zigttp deploy [--no-attest]
-```
-
-Run `zigttp help --all` for the advanced commands - the analyzer commands
-(`check`, `prove`, `mock`, `link`, `gen-tests`), `serve`, `build`, `compile`,
-`doctor`, `studio`, `edge`, `proofs`, and `verify`. Each keeps its own
-`zigttp <command> --help`.
-
-Project commands discover `zigttp.json` from the current directory or any
-parent. The default scaffold sets `"port": 3000`; raw `serve` without a project
-uses the runtime default of 8080.
-
-### Project Commands
-
-```
-zigttp init <name> [--template basic|api|htmx]
-```
-
-Creates `zigttp.json`, `src/handler.ts` for basic/API projects or
-`src/handler.tsx` for HTMX projects, `tests/handler.test.jsonl`,
-`public/`, `.gitignore`, and a starter README. Project names may contain
-letters, numbers, `-`, and `_`; path-like names are rejected.
-
-```
-zigttp dev [options] [handler.ts]
-```
-
-Runs the analyzer, starts the server, watches the handler and local imports,
-and hot-swaps safe changes. By default, `dev` implies `--watch --prove`, so
-breaking contract changes are blocked and the old handler keeps serving.
-
-Common `dev` options:
-
-```
-  -p, --port <PORT>     Port to listen on (project default: 3000)
-  -h, --host <HOST>     Host/IP to bind to
-  --studio              Also serve the optional /_zigttp/studio mirror
-  --no-prove            Watch and reload without proof gating
-  --no-tour             Skip the first-run tour
-  --quest               Replay the proof quest
-```
-
-```
-zigttp test [tests.jsonl]
-zigttp expert
-zigttp deploy [--no-attest]
-```
-
-`test` verifies first, then runs declarative request fixtures through the local
-runtime. `expert` opens the interactive compiler-in-the-loop agent.
-Bare `deploy` is local by default and writes `.zigttp/deploy/<project-name>`
-plus a `kind=deploy` row in `.zigttp/proofs.jsonl`. The advanced `doctor`
-command (under `zigttp help --all`) prints a checklist
-for the manifest, runtime template, entry file, analyzer result, tests fixture,
-optional system/static paths, and runtime-affecting settings. Release owners
-can run `zigttp doctor --release [--json] [--out FILE]` from the repo root to
-emit the v0.1.0-beta proof passport: version alignment, release evidence,
-gate wiring, public performance-claim drift, unresolved launch blockers, known
-reliability gaps, and proof-surface readiness.
-
-### Ad Hoc Serve
-
-```
-OPTIONS:
-  -p, --port <PORT>     Port to listen on
-                        Project default: 3000; raw serve default: 8080
-                        Example: -p 3000
-
-  -h, --host <HOST>     Host/IP to bind to
-                        Default: 127.0.0.1
-                        Example: -h 0.0.0.0 (all interfaces)
-
-  -e, --eval <CODE>     Inline JavaScript handler code
-                        Example: -e "function handler(r) { return Response.json({ok:true}) }"
-
-  -m, --memory <SIZE>   JavaScript runtime memory limit
-                        Default: 0 (no limit)
-                        Supports: k/kb, m/mb, g/gb suffixes
-                        Example: -m 512k, -m 1m
-
-  -n, --pool <N>        Runtime pool size
-                        Default: auto (2 * cpu count, min 8)
-
-  -q, --quiet           Disable request logging
-                        Useful for production/benchmarks
-
-  --trace <FILE>        Record handler I/O traces to JSONL
-                        Useful for replay and verification
-
-  --replay <FILE>       Replay recorded traces instead of serving traffic
-
-  --sqlite <FILE>       SQLite database path for zigttp:sql
-                        Required for zigttp:sql query execution
-
-  --test <FILE>         Run declarative handler tests from JSONL file
-                        Exit code 1 on any test failure
-
-  --durable <DIR>       Enable durable run/step oplogs in a directory
-                        Required for zigttp:durable
-
-  --system <FILE>       System registry for zigttp:service
-                        Required for named internal service calls
-
-  --watch               Watch handler files, hot-swap on change
-                        Requires a file-based handler (not --eval)
-
-  --prove               With --watch: diff behavioral contracts before swapping
-                        Safe changes apply automatically; breaking changes block
-
-  --force-swap          With --watch --prove: apply breaking changes anyway
-
-  --no-env-check        Skip startup env var validation from contract
-                        Useful during development when env vars aren't set
-
-  --security-log <FILE> Append security events (policy denies, panics) to FILE
-                        One JSON object per line
-
-  --lifecycle <MODE>    Runtime pooling policy for self-contained binaries
-                        Values: ephemeral, bounded, reuse
-                        Overrides the contract-derived default
-
-  --cors                Enable CORS headers on all responses
-
-  --static <DIR>        Serve static files from directory
-
-  --outbound-http       Enable native outbound HTTP bridge
-
-  --outbound-host <H>   Restrict outbound bridge to exact host H
-
-  --outbound-timeout-ms Connect timeout for outbound bridge in ms
-
-  --outbound-max-response <SIZE>
-                        Maximum outbound response size
-
-  --help                Show help message
-```
-
-### Examples
-
-```bash
-# Custom port
-./zig-out/bin/zigttp serve -p 3000 handler.js
-
-# Bind to all interfaces (accessible from network)
-./zig-out/bin/zigttp serve -h 0.0.0.0 handler.js
-
-# Increased memory for complex handlers
-./zig-out/bin/zigttp serve -m 1m handler.js
-
-# Quiet mode with custom port
-./zig-out/bin/zigttp serve -q -p 8000 handler.js
-
-# Record traces for replay
-./zig-out/bin/zigttp serve --trace traces.jsonl handler.js
-
-# Durable execution with persisted oplogs
-./zig-out/bin/zigttp serve --durable .zigttp-durable handler.js
-
-# Named internal service calls
-./zig-out/bin/zigttp serve --system examples/system/system.json examples/system/gateway.ts
-
-# Run declarative handler tests
-./zig-out/bin/zigttp serve --test tests.jsonl handler.js
-
-# Inline with all options
-./zig-out/bin/zigttp serve -p 3000 -m 512k -e "function handler(r) { return Response.json({ok:true}) }"
-```
-
----
-
-## Handler API
-
-Every handler file must define a `handler` function:
-
-```javascript
-function handler(request) {
-    // Process request
-    // Return a Response
-    return Response.text("OK");
-}
-```
-
-The function receives a `request` object and must return a `Response`.
-
-### Handler Lifecycle
-
-A handler runs once per request, start to finish:
-
-1. The server accepts the connection and parses the HTTP request.
-2. It checks out an isolated JavaScript runtime from the handler pool.
-3. Your `handler` function runs synchronously and must return a `Response`.
-4. The server writes the response, frees the request-scoped memory, and
-   returns the runtime to the pool for the next request.
-
-There is no middleware layer and no per-request init or teardown hook - the
-handler function is the whole request lifecycle. There is no shared mutable
-state between requests except where a virtual module is explicitly designed to
-persist it (for example `zigttp:cache`). If the handler throws or returns an
-error the server responds `500` and stays up - see
-[Limits and Failure Behavior](reliability.md). Runtime internals are covered in
-[the architecture doc](internals/architecture.md).
-
----
-
-## Request Object
-
-The request object contains all information about the incoming HTTP request:
-
-```javascript
-{
-    method: string,      // HTTP method: "GET", "POST", "PUT", "DELETE", etc.
-    url: string,         // Full URL including query string
-    path: string,        // URL path: "/api/users", "/", "/search"
-    query: object,       // Parsed query parameters
-    headers: object,     // HTTP headers as key-value pairs, plus headers.get(name)
-    body: string | null  // Request body (for POST, PUT, PATCH) or null
-}
-```
-
-### Accessing Request Properties
-
-```javascript
-function handler(request) {
-    // Method
-    console.log(request.method); // "GET", "POST", etc.
-
-    // Full URL (including query string)
-    console.log(request.url); // "/api/users?id=1"
-
-    // Path (without query string)
-    console.log(request.path); // "/api/users"
-
-    // Parsed query parameters
-    console.log(request.query.id); // 1
-
-    // Headers
-    console.log(request.headers.get("Content-Type")); // "application/json"
-    console.log(request.headers.get("Authorization")); // "Bearer xxx"
-
-    // Body (may be null for GET requests)
-    if (request.body) {
-        console.log(request.body); // Raw body string
+## Handler Shape
+
+A handler is a function named `handler` that receives a request and returns a
+`Response`.
+
+```ts
+function handler(req: Request): Response {
+    if (req.path === "/health") {
+        return Response.json({ ok: true });
     }
-    console.log(request.text()); // Raw body string or ""
-    // request.json() reads the same body stream, so call either text() or json()
-    console.log(request.json()); // Parsed JSON or undefined
-
-    return Response.text("OK");
-}
-```
-
-Current helper semantics:
-- `request.headers.get(name)` is case-insensitive and returns the last observed value for that header name, or `null`.
-- `request.text()` returns the raw body string, or `""` when no body is present.
-- `request.json()` returns parsed JSON, or `undefined` when the body is empty or invalid JSON.
-- `request.text()` and `request.json()` are single-use body readers. After either one runs, further body reads throw. Use `request.body` if you need the raw string without consuming it.
-
-### Common Header Access
-
-```javascript
-function handler(request) {
-    let contentType = request.headers.get("Content-Type") || "";
-    let auth = request.headers.get("Authorization") || "";
-    let userAgent = request.headers.get("User-Agent") || "";
-    let accept = request.headers.get("Accept") || "";
-
-    return Response.json({
-        contentType: contentType,
-        hasAuth: auth.length > 0,
-        userAgent: userAgent,
-    });
-}
-```
-
----
-
-## Response Object
-
-Factory-style HTTP types are also available:
-
-```javascript
-const headers = Headers({ "Content-Type": "application/json" });
-headers.append("X-Trace", "abc123");
-
-const request = Request("/items?id=1", {
-    method: "POST",
-    headers: headers,
-    body: "{\"ok\":true}",
-});
-
-const response = Response("Created", {
-    status: 201,
-    headers: { "X-Reply": "ok" },
-});
-```
-
-`new` is not supported by zigttp's parser, so `Headers`, `Request`, and `Response`
-are called as plain factory functions.
-
-### Response Helpers
-
-#### `Response.text(body, init?)`
-
-Create a basic response with optional configuration. `Response(body, init?)`
-creates the same response-shaped object for local composition, while
-`Response.text/json/html` remain the primary direct-return helpers.
-
-```javascript
-// Simple text response
-Response.text("Hello World");
-
-// With status code
-Response.text("Not Found", { status: 404 });
-
-// With headers
-Response.text("OK", {
-    status: 200,
-    headers: {
-        "Content-Type": "text/plain",
-        "X-Custom-Header": "value",
-    },
-});
-
-// Empty response
-Response.text("", { status: 204 });
-```
-
-#### `Response.json(data, init?)`
-
-Create a JSON response. Automatically sets `Content-Type: application/json`.
-
-```javascript
-// Object
-Response.json({ message: "Hello", count: 42 });
-
-// Array
-Response.json([1, 2, 3, 4, 5]);
-
-// With status
-Response.json({ error: "Not found" }, { status: 404 });
-
-// With additional headers
-Response.json({ data: "value" }, {
-    status: 201,
-    headers: { "X-Request-Id": "12345" },
-});
-```
-
-#### `Response.text(text, init?)`
-
-Create a plain text response. Sets `Content-Type: text/plain`.
-
-```javascript
-Response.text("Hello World");
-Response.text("Error occurred", { status: 500 });
-```
-
-#### `Response.html(html, init?)`
-
-Create an HTML response. Sets `Content-Type: text/html`.
-
-```javascript
-// Simple JSX component
-const page = <h1>Hello World</h1>;
-Response.html(renderToString(page));
-
-// Full HTML document
-const doc = (
-    <html>
-        <head><title>My Page</title></head>
-        <body>Page content</body>
-    </html>
-);
-Response.html(renderToString(doc));
-```
-
-**Note**: For HTML responses, prefer using JSX/TSX with `renderToString()` rather than string concatenation. See [JSX and TSX Handlers](#jsx-and-tsx-handlers) for the full reference.
-
-### HTTP Status Codes
-
-Common status codes:
-
-| Code | Meaning               | Usage                   |
-| ---- | --------------------- | ----------------------- |
-| 200  | OK                    | Successful request      |
-| 201  | Created               | Resource created (POST) |
-| 204  | No Content            | Success with no body    |
-| 301  | Moved Permanently     | Redirect                |
-| 302  | Found                 | Temporary redirect      |
-| 400  | Bad Request           | Invalid input           |
-| 401  | Unauthorized          | Authentication required |
-| 403  | Forbidden             | Access denied           |
-| 404  | Not Found             | Resource doesn't exist  |
-| 405  | Method Not Allowed    | Wrong HTTP method       |
-| 500  | Internal Server Error | Server error            |
-
----
-
-## Routing Patterns
-
-### Simple Path Matching
-
-```javascript
-function handler(request) {
-    let path = request.url;
-    let method = request.method;
-
-    // Exact match
-    if (path === "/") {
-        return Response.text("Home page");
-    }
-
-    if (path === "/about") {
-        return Response.text("About page");
-    }
-
-    if (path === "/api/health") {
-        return Response.json({ status: "ok" });
-    }
-
     return Response.text("Not Found", { status: 404 });
 }
 ```
 
-### Method-Based Routing
+Request fields used by examples:
 
-```javascript
-function handler(request) {
-    let path = request.url;
-    let method = request.method;
+| Field | Meaning |
+|---|---|
+| `req.method` | HTTP method, for example `GET` or `POST`. |
+| `req.url` | Raw URL path and query as received by the server. |
+| `req.path` | Path without query string. |
+| `req.query` | Query string object when available. |
+| `req.headers` | Lowercase header map. |
+| `req.body` | Request body as a string. |
 
-    if (path === "/api/users") {
-        if (method === "GET") {
-            return getUsers();
-        }
-        if (method === "POST") {
-            return createUser(request);
-        }
-        return Response.text("Method Not Allowed", { status: 405 });
-    }
+Response helpers:
 
-    return Response.text("Not Found", { status: 404 });
-}
-
-function getUsers() {
-    return Response.json([
-        { id: 1, name: "Alice" },
-        { id: 2, name: "Bob" },
-    ]);
-}
-
-function createUser(request) {
-    let data = JSON.parse(request.body);
-    return Response.json({ id: 3, name: data.name }, { status: 201 });
-}
+```ts
+Response.text("ok")
+Response.json({ ok: true }, { status: 201 })
+Response.html("<h1>Hello</h1>")
 ```
 
-### Path Parameters (Manual Extraction)
+## Routing
 
-```javascript
-function handler(request) {
-    let path = request.url;
+Small handlers can branch directly:
 
-    // Match /api/users/:id
-    if (path.indexOf("/api/users/") === 0) {
-        let id = path.substring("/api/users/".length);
-        return getUserById(id);
-    }
-
-    // Match /api/posts/:id/comments
-    if (path.indexOf("/api/posts/") === 0 && path.indexOf("/comments") > 0) {
-        let parts = path.split("/");
-        let postId = parts[3]; // ['', 'api', 'posts', 'id', 'comments']
-        return getComments(postId);
-    }
-
-    return Response.text("Not Found", { status: 404 });
-}
-
-function getUserById(id) {
-    return Response.json({ id: id, name: "User " + id });
-}
-
-function getComments(postId) {
-    return Response.json({ postId: postId, comments: [] });
-}
-```
-
-### Prefix Matching
-
-```javascript
-function handler(request) {
-    let path = request.url;
-
-    // All /api/* routes
-    if (path.indexOf("/api/") === 0) {
-        return handleApi(request);
-    }
-
-    // All /admin/* routes
-    if (path.indexOf("/admin/") === 0) {
-        return handleAdmin(request);
-    }
-
-    // Static pages
-    return handleStatic(request);
-}
-
-function handleApi(request) {
-    let subpath = request.url.substring(4); // Remove '/api'
-    return Response.json({ api: true, subpath: subpath });
-}
-
-function handleAdmin(request) {
-    // Check auth header
-    if (!request.headers["Authorization"]) {
-        return Response.text("Unauthorized", { status: 401 });
-    }
-    return Response.json({ admin: true });
-}
-
-function handleStatic(request) {
-    return Response.html(renderToString(<h1>Welcome</h1>));
-}
-```
-
-### Router Helper Function
-
-```javascript
-// Simple router implementation
-function createRouter() {
-    let routes = [];
-
-    return {
-        get: function (path, handler) {
-            routes.push({ method: "GET", path: path, handler: handler });
-        },
-        post: function (path, handler) {
-            routes.push({ method: "POST", path: path, handler: handler });
-        },
-        put: function (path, handler) {
-            routes.push({ method: "PUT", path: path, handler: handler });
-        },
-        delete: function (path, handler) {
-            routes.push({ method: "DELETE", path: path, handler: handler });
-        },
-        handle: function (request) {
-            for (let i = 0; i < routes.length; i++) {
-                let route = routes[i];
-                if (
-                    route.method === request.method &&
-                    route.path === request.url
-                ) {
-                    return route.handler(request);
-                }
-            }
-            return Response.text("Not Found", { status: 404 });
-        },
-    };
-}
-
-// Usage
-let router = createRouter();
-
-router.get("/", function (req) {
-    return Response.html(renderToString(<h1>Home</h1>));
-});
-
-router.get("/api/users", function (req) {
-    return Response.json([{ id: 1, name: "Alice" }]);
-});
-
-router.post("/api/users", function (req) {
-    let data = JSON.parse(req.body);
-    return Response.json(data, { status: 201 });
-});
-
-function handler(request) {
-    return router.handle(request);
-}
-```
-
-### Match Expression Routing
-
-The `match` expression provides declarative pattern matching for request dispatch. Each arm tests a pattern against the discriminant and returns a single expression.
-
-```typescript
+```ts
 function handler(req: Request): Response {
-    return match (req) {
-        when { method: "GET", path: "/health" }:
-            Response.json({ ok: true })
-        when { method: "GET", path: "/version" }:
-            Response.json({ version: "1.0.0" })
-        when { method: "POST", path: "/echo" }:
-            Response.json(req.body)
-        default:
-            Response.text("Not Found", { status: 404 })
-    };
-}
-```
-
-Match is an expression - it always produces a value. You can assign it to a variable, return it, or pass it as an argument.
-
-**Pattern types:**
-- **Object patterns**: `when { key: "value" }` - tests properties of the discriminant with strict equality
-- **Literal patterns**: `when "GET"` - tests the discriminant directly
-- **Wildcard**: `when _` - matches anything (equivalent to `default`)
-- **default**: catch-all arm
-
-Arms are tested top-to-bottom. The first matching arm's expression is returned. If no arm matches and there is no default, the result is `undefined`.
-
-The `-Dverify` flag will warn about match expressions without a default arm, since they may not produce a value. The `-Dcontract` flag extracts route patterns from match arms with `method`/`path` properties.
-
----
-
-## Working with JSON
-
-### Parsing JSON Request Body
-
-```javascript
-function handler(request) {
-    if (request.method !== "POST") {
-        return Response.text("Method Not Allowed", { status: 405 });
+    if (req.method === "GET" && req.path === "/todos") {
+        return Response.json({ items: [] });
     }
-
-    // Check content type
-    let contentType = request.headers["Content-Type"] || "";
-    if (contentType.indexOf("application/json") === -1) {
-        return Response.json(
-            { error: "Content-Type must be application/json" },
-            { status: 400 },
-        );
+    if (req.method === "POST" && req.path === "/todos") {
+        const body = JSON.parse(req.body);
+        return Response.json({ title: body.title }, { status: 201 });
     }
-
-    // Check for body
-    if (!request.body) {
-        return Response.json({ error: "Request body is required" }, {
-            status: 400,
-        });
-    }
-
-    // Parse JSON
-    try {
-        let data = JSON.parse(request.body);
-        return Response.json({ received: data, ok: true });
-    } catch (e) {
-        return Response.json({ error: "Invalid JSON: " + e.message }, {
-            status: 400,
-        });
-    }
-}
-```
-
-### Building JSON Responses
-
-```javascript
-function handler(request) {
-    // Simple object
-    let user = {
-        id: 1,
-        name: "Alice",
-        email: "alice@example.com",
-        active: true,
-    };
-
-    // Nested objects
-    let response = {
-        user: user,
-        metadata: {
-            timestamp: Date.now(),
-            version: "1.0",
-        },
-    };
-
-    // Arrays
-    let list = {
-        items: [
-            { id: 1, name: "Item 1" },
-            { id: 2, name: "Item 2" },
-        ],
-        total: 2,
-    };
-
-    return Response.json(response);
-}
-```
-
-### JSON Validation Helper
-
-```javascript
-function validateJson(body, requiredFields) {
-    if (!body) {
-        return { valid: false, error: "Body is required" };
-    }
-
-    try {
-        let data = JSON.parse(body);
-
-        for (let i = 0; i < requiredFields.length; i++) {
-            let field = requiredFields[i];
-            if (data[field] === undefined) {
-                return { valid: false, error: "Missing field: " + field };
-            }
-        }
-
-        return { valid: true, data: data };
-    } catch (e) {
-        return { valid: false, error: "Invalid JSON" };
-    }
-}
-
-function handler(request) {
-    if (request.url === "/api/users" && request.method === "POST") {
-        let result = validateJson(request.body, ["name", "email"]);
-
-        if (!result.valid) {
-            return Response.json({ error: result.error }, { status: 400 });
-        }
-
-        // Use result.data
-        return Response.json({
-            id: 1,
-            name: result.data.name,
-            email: result.data.email,
-        }, { status: 201 });
-    }
-
     return Response.text("Not Found", { status: 404 });
 }
 ```
 
----
+Use `zigttp:router` when you need path parameters:
 
-## Error Handling
-
-zigts has no try/catch. All errors flow through two patterns: Result types and optional narrowing.
-
-### Result Types
-
-Functions like `jwtVerify`, `decodeJson`, `decodeForm`, `decodeQuery`,
-`validateJson`, `validateObject`, and `coerceJson` return Result-shaped values.
-The handler verifier enforces that `.ok` is checked before `.value` is accessed.
-
-You can define a generic `Result<T>` alias for your own annotations:
-
-```typescript
-type Result<T> = { ok: boolean; value: T; error: string };
-```
-
-The type checker instantiates this when used - `Result<object>` becomes `{ ok: boolean; value: object; error: string }`.
-
-```typescript
-import { jwtVerify } from "zigttp:auth";
-import { schemaCompile } from "zigttp:validate";
-import { decodeJson } from "zigttp:decode";
-
-type Result<T> = { ok: boolean; value: T; error: string };
-
-schemaCompile("user", JSON.stringify({
-    type: "object",
-    properties: {
-        name: { type: "string" }
-    },
-    required: ["name"]
-}));
+```ts
+import { routerMatch } from "zigttp:router";
 
 function handler(req: Request): Response {
-    const token = req.headers["authorization"];
-    const auth: Result<object> = jwtVerify(token, "secret");
-    if (!auth.ok) return Response.json({ error: auth.error }, { status: 401 });
-
-    const body = decodeJson("user", req.body ?? "{}");
-    if (!body.ok) return Response.json({ errors: body.errors }, { status: 400 });
-
-    return Response.json({ user: body.value, claims: auth.value });
-}
-```
-
-### Optional Narrowing
-
-Functions like `env()`, `cacheGet()`, `parseBearer()`, and `routerMatch()` return
-`T | undefined`. The verifier enforces narrowing before use.
-
-```typescript
-import { env } from "zigttp:env";
-
-function handler(req: Request): Response {
-    const apiKey = env("API_KEY");
-    if (!apiKey) return Response.json({ error: "unconfigured" }, { status: 500 });
-
-    const dbUrl = env("DATABASE_URL") ?? "postgres://localhost";
-
-    return Response.json({ configured: true });
-}
-```
-
-### Error Response Helper
-
-```typescript
-function errorResponse(status: number, message: string): Response {
-    return Response.json({ error: true, status, message, timestamp: Date.now() }, { status });
-}
-
-function handler(req: Request): Response {
-    if (!req.headers["authorization"]) {
-        return errorResponse(401, "Authentication required");
+    const match = routerMatch("GET /users/:id", req.method, req.path);
+    if (match) {
+        return Response.json({ id: match.params.id });
     }
+    return Response.text("Not Found", { status: 404 });
+}
+```
 
-    if (req.method === "POST" && !req.body) {
-        return errorResponse(400, "Request body is required");
+For multi-handler routing behind one listener, see [Edge Runtime](edge.md).
+
+## JSON And Validation
+
+Use normal `JSON.parse` and `Response.json` for basic JSON. Use
+`zigttp:validate` or `zigttp:decode` when the handler needs schema-backed
+validation.
+
+```ts
+import { schemaCompile, validateJson } from "zigttp:validate";
+
+schemaCompile("todo", '{"type":"object","required":["title"]}');
+
+function handler(req: Request): Response {
+    const parsed = validateJson("todo", req.body);
+    if (!parsed.ok) {
+        return Response.json({ error: "invalid body" }, { status: 400 });
     }
+    return Response.json(parsed.value, { status: 201 });
+}
+```
 
+Result-producing virtual-module calls must be checked before `.value` access.
+Optional-producing calls must be narrowed before use. The verifier enforces both
+patterns.
+
+## JavaScript And TypeScript
+
+zigts supports a practical server-side JS/TS subset and rejects constructs that
+weaken analysis. Commonly rejected constructs include `var`, `while`, `class`,
+`try/catch`, implicit globals, and unsupported module forms.
+
+Use:
+
+- `const` by default, `let` only when reassigned.
+- `for...of` loops.
+- `if`/`else` and `match` for branching.
+- Explicit Result and optional checks.
+- Type-only imports from `zigttp:types` for proof annotations.
+
+```ts
+import type { Spec } from "zigttp:types";
+
+type Safe = Spec<"deterministic" | "state_isolated">;
+
+function handler(req: Request): Response & Safe {
     return Response.json({ ok: true });
 }
 ```
 
----
+References:
+
+- [TypeScript](typescript.md)
+- [Feature Detection](feature-detection.md)
+- [Restrictions to Proofs](restrictions-to-proofs.md)
+- [Canonical Profile](canonical-profile.md)
+- [Sound Mode](sound-mode.md)
+
+## JSX And TSX
+
+TSX handlers can render server-side HTML without a build step.
+
+```tsx
+function Page(props) {
+    return (
+        <html>
+            <body><h1>{props.title}</h1></body>
+        </html>
+    );
+}
+
+function handler(req: Request): Response {
+    return Response.html(renderToString(<Page title="Hello" />));
+}
+```
+
+Use the `htmx` template for an HTML-first scaffold:
+
+```bash
+zigttp init htmx-app --template htmx
+cd htmx-app
+zigttp dev
+```
+
+See `examples/jsx/` and `examples/handler/handler-full.tsx`.
 
 ## Virtual Modules
 
-zigttp exposes native modules through `import { ... } from "zigttp:*"`.
-Use them for environment access, crypto, validation, cache, SQLite, outbound
-HTTP, service calls, WebSockets, durable workflows, and structured concurrent
-I/O.
-
-The maintained module index is [Virtual Modules](virtual-modules/README.md).
-It links to each per-module API page and records the effect classification used
-by contract extraction. The source of truth for built-in modules is
-`packages/zigts/src/builtin_modules.zig`, with public specs under
-`packages/modules/module-specs/`.
-
-For examples that combine modules in a handler, see
-[`examples/modules/modules_all.ts`](../examples/modules/modules_all.ts),
-[`examples/sql/sql-crud.ts`](../examples/sql/sql-crud.ts), and
-[`examples/websocket/chat.ts`](../examples/websocket/chat.ts).
-
----
-
-## JavaScript Subset Reference
-
-zigts implements a restricted JavaScript subset optimized for FaaS workloads.
-The restrictions enable compile-time verification, deterministic replay, and
-contract extraction. See
-[restrictions-to-proofs.md](restrictions-to-proofs.md) for each cut mapped to
-the failure class it eliminates and the proof it unlocks (also available as
-`zigts restrictions [--by proof|class]`).
-
-### Supported Features
-
-```typescript
-// Variables
-let x = 1;
-const y = 2;
-
-// Functions
-function foo() {}
-const bar = (a, b) => a + b;     // arrow functions
-const add = (a: number): number => a + 1;  // with TypeScript annotations
-
-// Objects and Arrays
-const obj = { a: 1, b: 2 };
-const arr = [1, 2, 3];
-const { a, ...rest } = obj;      // destructuring with rest
-const [first, ...tail] = arr;
-
-// Template literals
-const msg = `Hello ${name}, you have ${count} items`;
-
-// Loops
-for (const item of array) {}     // for-of with break/continue
-for (const i of range(10)) {}    // range-based iteration
-
-// Operators
-const piped = value |> transform |> format;  // pipe operator
-score += 10;                     // compound assignment (+=, -=, *=, /=, etc.)
-
-// Array HOFs
-const evens = items.filter((n) => n % 2 === 0);
-const doubled = items.map((n) => n * 2);
-const sum = items.reduce((acc, n) => acc + n, 0);
-
-// Object methods
-const keys = Object.keys(obj);
-const vals = Object.values(obj);
-const entries = Object.entries(obj);
-
-// Optional chaining and nullish coalescing
-const name = user?.profile?.name ?? "Anonymous";
-
-// Pattern matching
-const result = match (req) {
-    when { method: "GET", path: "/health" }: Response.json({ ok: true })
-    default: Response.text("Not Found", { status: 404 })
-};
-
-// Built-in objects
-JSON.parse(str); JSON.stringify(obj);
-Math.floor(x); Math.random();
-Date.now();                      // only Date.now(), no other Date methods
-console.log(value);
-```
-
-### NOT Supported (compile-time errors)
-
-All unsupported features produce helpful error messages with alternatives:
-
-- `class` - use plain objects and functions
-- `var` - use `let` or `const`
-- `while`, `do...while` - use `for (const x of range(n))`
-- C-style `for (;;)` - use `for (const i of range(n))`
-- `for...in` - use `for (const k of Object.keys(obj))`
-- `try`/`catch`/`throw` - use Result types (check `.ok`)
-- `async`/`await`/`Promise` - use `fetchSync()`, `parallel()`, `race()`
-- `null` - use `undefined`
-- `==`, `!=` - use `===`, `!==`
-- `++`, `--` - use `x = x + 1`
-- `this`, `new` - use explicit params and factory functions
-- `delete` - use `const { key, ...rest } = obj`
-- Regular expressions - use string methods
-- `any` type (TS) - use specific types
-- `as` type assertions (TS) - use control flow narrowing
-
-See [feature-detection.md](feature-detection.md) for the full 54-feature detection matrix.
-
-### Strict Mode
-
-zigts always runs in strict mode. Implicit globals and `with` are errors.
-
----
-
-## TypeScript Support
-
-zigts includes a native TypeScript/TSX stripper that removes type annotations at
-load time. Use `.ts` or `.tsx` files directly without a separate build step.
-
-### Supported TypeScript surface
-
-- Type aliases and generic type aliases
-- `distinct type`
-- Interfaces
-- Variable, parameter, and return annotations
-- Function generics
-- `import type` / `export type`
-- `Spec<T>`, `Proof<T, S>`, and `Effects<T, S>` from `zigttp:types`
-- Type guards with `x is T`
-- Readonly fields
-- Template literal types
-
-Type assertions (`as`, `satisfies`) and the `any` type are not supported; use
-control-flow narrowing or explicit annotations instead.
-
-### How It Works
-
-The TypeScript stripper performs a single-pass transformation:
-
-1. Removes type annotations (`: Type`, `as Type`)
-2. Removes interface and type declarations
-3. Removes generics (`<T>`) and generic type aliases (`type Result<T> = ...`)
-4. Preserves all runtime code unchanged
-5. Optionally evaluates `comptime()` expressions
-
-Generic type aliases are resolved by the type checker. When you write `type Result<T> = { ok: boolean; value: T }` and use `Result<string>` in an annotation, the checker instantiates it to `{ ok: boolean; value: string }` for structural validation.
-
-### Basic TypeScript Handler
-
-```typescript
-// handler.ts
-interface Request {
-    method: string;
-    path: string;
-    headers: Record<string, string>;
-    body: string | null;
-}
-
-interface User {
-    id: number;
-    name: string;
-    email: string;
-}
-
-function handler(request: Request): Response {
-    const users: User[] = [
-        { id: 1, name: "Alice", email: "alice@example.com" },
-        { id: 2, name: "Bob", email: "bob@example.com" },
-    ];
-
-    if (request.url === "/api/users") {
-        return Response.json(users);
-    }
-
-    return Response.json({ error: "Not found" }, { status: 404 });
-}
-```
-
-After stripping, this becomes valid ES5 JavaScript with all type annotations
-removed.
-
-### TSX for Server-Side Rendering
-
-Combine TypeScript types with JSX syntax in `.tsx` files. See
-[JSX and TSX Handlers](#jsx-and-tsx-handlers) for the full reference.
-
-### Compile-Time Evaluation with comptime()
-
-The `comptime()` function evaluates expressions at load time and replaces them
-with literal values. This is useful for:
-
-- Pre-computing constants
-- Embedding build metadata
-- Generating hash-based ETags
-- Parsing JSON configuration
-
-#### Basic Usage
-
-```typescript
-// Arithmetic - computed at load time
-const x = comptime(1 + 2 * 3); // -> const x = 7;
-const bits = comptime(1 << 10); // -> const bits = 1024;
-
-// String operations
-const upper = comptime("hello".toUpperCase()); // -> const upper = "HELLO";
-const parts = comptime("a,b,c".split(",")); // -> const parts = ["a","b","c"];
-
-// Math constants and functions
-const pi = comptime(Math.PI); // -> const pi = 3.141592653589793;
-const max = comptime(Math.max(1, 5, 3)); // -> const max = 5;
-const root = comptime(Math.sqrt(2)); // -> const root = 1.4142135623730951;
-
-// Objects and arrays
-const config = comptime({ timeout: 30 }); // -> const config = ({timeout:30});
-const arr = comptime([1, 2, 3]); // -> const arr = [1,2,3];
-```
-
-#### Hash Function
-
-Generate deterministic hashes for cache keys or ETags:
-
-```typescript
-// FNV-1a hash returns 8-character hex string
-const etag = comptime(hash("content-v1")); // -> const etag = "a1b2c3d4";
-
-function handler(request: Request): Response {
-    return Response.text("Content", {
-        headers: { "ETag": etag },
-    });
-}
-```
-
-#### JSON Parsing
-
-Parse JSON at compile time:
-
-```typescript
-const config = comptime(JSON.parse('{"debug":false,"maxItems":100}'));
-// -> const config = ({debug:false,maxItems:100});
-```
-
-#### Method Chaining
-
-String method chaining works in comptime:
-
-```typescript
-const cleaned = comptime("  Hello World  ".trim().toUpperCase());
-// -> const cleaned = "HELLO WORLD";
-
-const slug = comptime("My Blog Post".toLowerCase().replace(" ", "-"));
-// -> const slug = "my-blog-post";
-```
-
-#### comptime in TSX
-
-Expressions inside JSX are also evaluated:
-
-```tsx
-const el = (
-    <div class={comptime("container-" + hash("v1"))}>
-        {comptime(Math.PI.toFixed(2))}
-    </div>
-);
-// -> <div class="container-a1b2c3d4">3.14</div>
-```
-
-### Supported comptime Operations
-
-#### Literals
-
-- Numbers: `42`, `3.14`, `-1`, `0xFF`
-- Strings: `"hello"`, `'world'`
-- Booleans: `true`, `false`
-- Special: `null`, `undefined`, `NaN`, `Infinity`
-
-#### Operators
-
-| Type       | Operators                 |
-| ---------- | ------------------------- |
-| Unary      | `+ - ! ~`                 |
-| Arithmetic | `+ - * / % **`            |
-| Bitwise    | `\| & ^ << >> >>>`        |
-| Comparison | `== != === !== < <= > >=` |
-| Logical    | `&& \|\| ??`              |
-| Ternary    | `cond ? a : b`            |
-| Pipe       | `a \|> f` (desugars to `f(a)`) |
-| Compound   | `+= -= *= /= %= **= &= \|= ^= <<= >>= >>>=` |
-
-#### Math Constants
-
-- `Math.PI`, `Math.E`, `Math.LN2`, `Math.LN10`
-- `Math.LOG2E`, `Math.LOG10E`, `Math.SQRT2`, `Math.SQRT1_2`
-
-#### Math Functions
-
-- `abs`, `floor`, `ceil`, `round`, `trunc`
-- `sqrt`, `cbrt`, `pow`, `exp`, `log`, `log2`, `log10`
-- `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`
-- `min`, `max`, `sign`, `hypot`
-- `clz32`, `imul`, `fround`
-
-#### String Properties and Methods
-
-- `.length`
-- `toUpperCase()`, `toLowerCase()`
-- `trim()`, `trimStart()`, `trimEnd()`
-- `slice(start, end?)`, `substring(start, end?)`
-- `includes(search)`, `startsWith(search)`, `endsWith(search)`
-- `indexOf(search)`, `charAt(index)`
-- `split(delimiter)`, `repeat(count)`
-- `replace(search, replacement)`, `replaceAll(search, replacement)`
-- `padStart(length, padStr?)`, `padEnd(length, padStr?)`
-
-#### Array Properties
-
-- `.length`
-
-#### Built-in Functions
-
-- `parseInt(str, radix?)`, `parseFloat(str)`
-- `JSON.parse(str)` - parses JSON string to comptime value
-- `hash(str)` - FNV-1a hash, returns 8-char hex string
-
-### comptime Errors
-
-Certain operations are not allowed in comptime and will produce errors:
-
-```typescript
-// These will fail at load time:
-comptime(foo + 1); // Error: unknown identifier 'foo'
-comptime(Date.now()); // Error: Date.now() not allowed (non-deterministic)
-comptime(Math.random()); // Error: Math.random() not allowed (non-deterministic)
-comptime(() => 1); // Error: function literals not allowed
-comptime(x = 1); // Error: assignments not allowed
-```
-
-Error messages include line and column information for debugging.
-
-### Performance Benefits
-
-1. **Zero-cost types**: Type annotations are stripped with no runtime overhead
-2. **Pre-computed values**: `comptime()` shifts computation from runtime to load
-   time
-3. **Smaller output**: Type declarations don't appear in the stripped output
-4. **Single-pass**: Stripping happens in one pass, no AST construction
-
----
-
-## JSX and TSX Handlers
-
-zigttp parses JSX/TSX natively for server-side rendering. JSX mode turns on from
-the `.jsx`/`.tsx` file extension, so no separate transformer is required. Use
-`class` (not `className`) for HTML class attributes.
-
-```tsx
-// handler.tsx
-function handler(req: Request): Response {
-    const page = <div class="hello">Hello JSX!</div>;
-    return Response.html(renderToString(page));
-}
-```
-
-### JSX runtime API
-
-The runtime is provided by `packages/zigts/src/http.zig`:
-
-- `h(tag, props, ...children)` - creates virtual DOM nodes. JSX codegen calls it
-  for you; you rarely call it directly. `<div class="foo">Hello</div>` compiles
-  to `h('div', {class: 'foo'}, 'Hello')`.
-- `renderToString(node)` - renders a node to an HTML string for `Response.html`.
-- `Fragment` (`<>...</>`) - groups elements without a wrapper element.
-
-| Feature       | Example                | Output                  |
-| ------------- | ---------------------- | ----------------------- |
-| Elements      | `<div>text</div>`      | `<div>text</div>`       |
-| Attributes    | `<div class="foo">`    | `<div class="foo">`     |
-| Expressions   | `<div>{value}</div>`   | `<div>...</div>`        |
-| Components    | `<Card title="x"/>`    | calls the Card function |
-| Fragments     | `<>a</>`               | `a` (no wrapper)        |
-| Self-closing  | `<br/>`                | `<br />`                |
-| Boolean attrs | `<input disabled/>`    | `<input disabled />`    |
-
-### Components
-
-Components are functions that return JSX and receive a single `props` object. The
-special `children` prop holds nested content:
-
-```jsx
-function Layout(props) {
-    return (
-        <html>
-            <head><title>{props.title}</title></head>
-            <body>
-                <h1>{props.title}</h1>
-                {props.children}
-            </body>
-        </html>
-    );
-}
-
-function handler(request) {
-    const page = (
-        <Layout title="My App">
-            <p>This is the page content</p>
-        </Layout>
-    );
-    return Response.html(renderToString(page));
-}
-```
-
-### Dynamic content and conditionals
-
-Use JavaScript expressions inside JSX. Both arrow and `function` callbacks work
-in `.map`:
-
-```jsx
-function ProductList(props) {
-    return (
-        <div class="product-list">
-            {props.products.map((p) => (
-                <div class="product" key={p.id}>
-                    <h3>{p.name}</h3>
-                    <p>Price: ${p.price}</p>
-                </div>
-            ))}
-        </div>
-    );
-}
-```
-
-Use ternaries or logical AND for conditional rendering (remember: `undefined`,
-not `null`, is the absent sentinel):
-
-```jsx
-function UserProfile(props) {
-    const user = props.user;
-    return (
-        <div class="profile">
-            <h2>{user.name}</h2>
-            {user.isPremium ? <span class="badge">Premium</span> : <span class="badge">Free</span>}
-            {user.email && <p>Email: {user.email}</p>}
-        </div>
-    );
-}
-```
-
-### Attributes
-
-```jsx
-// Dynamic class
-<div class={isActive ? "active" : "inactive"}>Status</div>
-
-// Boolean attributes
-<input type="checkbox" disabled />
-<button disabled={isLoading}>Submit</button>
-
-// Inline style as a string
-<div style="color: red; font-size: 16px;">Styled text</div>
-```
-
-### TSX
-
-Combine TypeScript types with JSX. Annotations strip at load time and are checked
-by the compiler pipeline:
-
-```tsx
-interface PageProps {
-    title: string;
-    children: any;
-}
-
-function Layout(props: PageProps) {
-    return (
-        <html>
-            <head><title>{props.title}</title></head>
-            <body>{props.children}</body>
-        </html>
-    );
-}
-
-function handler(request: Request): Response {
-    return Response.html(renderToString(<Layout title="Users"><h1>Welcome</h1></Layout>));
-}
-```
-
-The same JS subset applies inside JSX: arrow functions, template literals,
-destructuring, spread, `for...of`, optional chaining, and nullish coalescing are
-supported; classes, `var`, `while`, and `this` are rejected at parse time. For
-complete working files, see `examples/jsx/` and
-[`examples/handler/handler-full.tsx`](../examples/handler/handler-full.tsx).
-
----
-
-## Complete Examples
-
-### REST API Server
-
-```javascript
-// In-memory data store
-let users = [
-    { id: 1, name: "Alice", email: "alice@example.com" },
-    { id: 2, name: "Bob", email: "bob@example.com" },
-];
-let nextId = 3;
-
-function handler(request) {
-    let path = request.url;
-    let method = request.method;
-
-    // GET /api/users - List all users
-    if (path === "/api/users" && method === "GET") {
-        return Response.json(users);
-    }
-
-    // POST /api/users - Create user
-    if (path === "/api/users" && method === "POST") {
-        try {
-            let data = JSON.parse(request.body);
-            if (!data.name || !data.email) {
-                return Response.json({ error: "name and email required" }, {
-                    status: 400,
-                });
-            }
-            let user = { id: nextId++, name: data.name, email: data.email };
-            users.push(user);
-            return Response.json(user, { status: 201 });
-        } catch (e) {
-            return Response.json({ error: "Invalid JSON" }, { status: 400 });
-        }
-    }
-
-    // GET /api/users/:id - Get single user
-    if (path.indexOf("/api/users/") === 0 && method === "GET") {
-        let id = parseInt(path.substring("/api/users/".length), 10);
-        let user = findUser(id);
-        if (!user) {
-            return Response.json({ error: "User not found" }, { status: 404 });
-        }
-        return Response.json(user);
-    }
-
-    // PUT /api/users/:id - Update user
-    if (path.indexOf("/api/users/") === 0 && method === "PUT") {
-        let id = parseInt(path.substring("/api/users/".length), 10);
-        let user = findUser(id);
-        if (!user) {
-            return Response.json({ error: "User not found" }, { status: 404 });
-        }
-        try {
-            let data = JSON.parse(request.body);
-            if (data.name) user.name = data.name;
-            if (data.email) user.email = data.email;
-            return Response.json(user);
-        } catch (e) {
-            return Response.json({ error: "Invalid JSON" }, { status: 400 });
-        }
-    }
-
-    // DELETE /api/users/:id - Delete user
-    if (path.indexOf("/api/users/") === 0 && method === "DELETE") {
-        let id = parseInt(path.substring("/api/users/".length), 10);
-        let index = findUserIndex(id);
-        if (index === -1) {
-            return Response.json({ error: "User not found" }, { status: 404 });
-        }
-        users.splice(index, 1);
-        return Response.text("", { status: 204 });
-    }
-
-    return Response.json({ error: "Not Found" }, { status: 404 });
-}
-
-function findUser(id) {
-    for (let i = 0; i < users.length; i++) {
-        if (users[i].id === id) return users[i];
-    }
-    return null;
-}
-
-function findUserIndex(id) {
-    for (let i = 0; i < users.length; i++) {
-        if (users[i].id === id) return i;
-    }
-    return -1;
-}
-```
-
-### HTML Web Application
-
-```jsx
-function Layout(props) {
-    return (
-        <html lang="en">
-            <head>
-                <meta charset="UTF-8" />
-                <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-                <title>{props.title} | My Site</title>
-                <style>{`
-                    body {
-                        font-family: -apple-system, "San Francisco", "Roboto", "Segoe UI", sans-serif;
-                        max-width: 800px;
-                        margin: 0 auto;
-                        padding: 20px;
-                    }
-                    nav { margin-bottom: 20px; }
-                    nav a { margin-right: 15px; }
-                    .success { color: green; }
-                    .error { color: red; }
-                `}</style>
-            </head>
-            <body>
-                <nav>
-                    <a href="/">Home</a>
-                    <a href="/about">About</a>
-                    <a href="/contact">Contact</a>
-                </nav>
-                <main>{props.children}</main>
-            </body>
-        </html>
-    );
-}
-
-function HomePage() {
-    return (
-        <Layout title="Home">
-            <h1>Welcome to My Site</h1>
-            <p>This is a simple web application powered by zigttp.</p>
-            <p>Built with Zig and zigts for serverless deployments.</p>
-        </Layout>
-    );
-}
-
-function AboutPage() {
-    return (
-        <Layout title="About">
-            <h1>About</h1>
-            <p>zigttp is a serverless JavaScript runtime powered by zigts.</p>
-            <h2>Features</h2>
-            <ul>
-                <li>Instant cold starts</li>
-                <li>Zero dependencies</li>
-                <li>ES5 JavaScript with select ES6+ features</li>
-            </ul>
-        </Layout>
-    );
-}
-
-function ContactPage() {
-    return (
-        <Layout title="Contact">
-            <h1>Contact Us</h1>
-            <form method="POST" action="/contact">
-                <p>
-                    <label>Name:<br /><input type="text" name="name" required /></label>
-                </p>
-                <p>
-                    <label>Email:<br /><input type="email" name="email" required /></label>
-                </p>
-                <p>
-                    <label>Message:<br /><textarea name="message" rows="5" required></textarea></label>
-                </p>
-                <p><button type="submit">Send Message</button></p>
-            </form>
-        </Layout>
-    );
-}
-
-function ThankYouPage() {
-    return (
-        <Layout title="Thank You">
-            <h1>Thank You!</h1>
-            <p class="success">Your message has been received.</p>
-            <p><a href="/">Return to Home</a></p>
-        </Layout>
-    );
-}
-
-function NotFoundPage() {
-    return (
-        <Layout title="Not Found">
-            <h1>404 - Page Not Found</h1>
-            <p>The page you requested does not exist.</p>
-            <p><a href="/">Return to Home</a></p>
-        </Layout>
-    );
-}
-
-function handler(request) {
-    const path = request.url;
-    const method = request.method;
-
-    if (path === "/" && method === "GET") {
-        return Response.html(renderToString(<HomePage />));
-    }
-
-    if (path === "/about" && method === "GET") {
-        return Response.html(renderToString(<AboutPage />));
-    }
-
-    if (path === "/contact" && method === "GET") {
-        return Response.html(renderToString(<ContactPage />));
-    }
-
-    if (path === "/contact" && method === "POST") {
-        // Log form submission (simplified)
-        console.log("Contact form submitted:", request.body);
-        return Response.html(renderToString(<ThankYouPage />));
-    }
-
-    return Response.html(renderToString(<NotFoundPage />), { status: 404 });
-}
-```
-
-### Health Check / Metrics Endpoint
-
-```javascript
-let startTime = Date.now();
-let requestCount = 0;
-
-function handler(request) {
-    requestCount++;
-
-    if (request.url === "/health") {
-        return Response.json({
-            status: "healthy",
-            timestamp: Date.now(),
-        });
-    }
-
-    if (request.url === "/metrics") {
-        let uptime = Date.now() - startTime;
-        return Response.json({
-            uptime_ms: uptime,
-            uptime_seconds: Math.floor(uptime / 1000),
-            total_requests: requestCount,
-            runtime: "zigts",
-        });
-    }
-
-    if (request.url === "/ready") {
-        // Readiness check - could include dependency checks
-        return Response.json({ ready: true });
-    }
-
-    return Response.json({
-        message: "Hello",
-        request_number: requestCount,
-    });
-}
-```
-
----
-
-## Performance Tuning for FaaS
-
-### Benchmarks
-
-zigts outperforms QuickJS in our historical benchmark runs (QuickJS is used only
-as an external baseline). See `benchmarks/*.json` for raw results.
-
-| Operation      | zigts         | QuickJS    | Improvement |
-| -------------- | ----------- | ---------- | ----------- |
-| stringOps      | 16.3M ops/s | 258K ops/s | 63x faster  |
-| objectCreate   | 8.1M ops/s  | 1.7M ops/s | 4.8x faster |
-| propertyAccess | 13.2M ops/s | 3.4M ops/s | 3.9x faster |
-| httpHandler    | 1.0M ops/s  | 332K ops/s | 3.1x faster |
-| functionCalls  | 12.4M ops/s | 5.1M ops/s | 2.4x faster |
-
-Run benchmarks: `./zig-out/bin/zigttp-bench`
-
-Note: Optional instrumentation (perf), parallel compiler, and JIT modules exist
-in `packages/zigts/src/` but are not enabled by default.
-
-### Memory Configuration
+Virtual modules are native Zig APIs exposed through `import { ... } from
+"zigttp:*"`. The current module list and runtime requirements are in
+[Virtual Modules](virtual-modules/README.md).
+
+Common runtime flags:
+
+| Need | Flag |
+|---|---|
+| SQLite queries | `--sqlite <file>` |
+| Outbound HTTP | `--outbound-http` or `--outbound-host <host>` |
+| Durable workflows | `--durable <dir>` |
+| Internal service registry | `--system <file>` |
+| Skip env startup check in development | `--no-env-check` |
+
+## Compile-Time Proofs
+
+`zigttp dev`, `zigttp test`, `zigttp check`, and build-time precompile paths run
+the analyzer. It checks:
+
+- every path returns a `Response`;
+- Result and optional values are checked before access;
+- unreachable code and unused values are reported;
+- module-scope mutations that can leak request state are rejected;
+- declared `Spec<...>` obligations are discharged;
+- virtual-module imports derive a least-privilege runtime policy;
+- flow checks catch secret, credential, validation, injection, and PII issues
+  where enough structure is visible.
+
+The proof card shows the current verdict and the property chips. See
+[Proof Card](proof-card.md), [Verification](verification.md), and
+[Contracts and Auto-Sandboxing](contracts-and-sandboxing.md).
+
+## Tests And Replay
+
+Declarative tests are JSONL files. A scaffolded project writes a starter file
+under `tests/`.
 
 ```bash
-# Default (256KB) - typical API handlers
-./zig-out/bin/zigttp serve handler.js
-
-# Larger (1MB) - complex processing, large JSON
-./zig-out/bin/zigttp serve -m 1m handler.js
-
-# Smaller (64KB) - minimal functions
-./zig-out/bin/zigttp serve -m 64k handler.js
+zigttp test
+zigttp serve --test tests/handler.test.jsonl src/handler.ts
+zig build -Dhandler=src/handler.ts -Dtest-file=tests/handler.test.jsonl
 ```
 
-### Cold Start Optimization
-
-zigttp is optimized for FaaS cold starts:
-
-- Cold-start floor: ~3.5ms in the v0.1.0-beta benchmark pass
-- Typical cold start: ~7-15ms, depending on host load
-- No JIT warm-up required by default
-
-### Hybrid Arena Allocation
-
-For request-scoped workloads, zigts uses a hybrid memory model that eliminates GC
-latency spikes:
-
-- **Arena allocator**: All request-scoped objects are allocated from a
-  contiguous memory region
-- **O(1) reset**: Between requests, the arena is reset in constant time (no
-  per-object deallocation)
-- **No GC pauses**: Garbage collection is disabled during request handling
-- **Escape detection**: Write barriers prevent arena objects from leaking into
-  persistent storage
-
-This design is ideal for FaaS environments where predictable latency matters
-more than throughput.
-
-### Optimize Handler Code
-
-```javascript
-// GOOD: Reuse objects across requests
-let responseTemplate = { status: "ok" };
-
-function handler(request) {
-    responseTemplate.timestamp = Date.now();
-    return Response.json(responseTemplate);
-}
-
-// AVOID: Creating large objects per request
-function handler(request) {
-    // This creates garbage every request
-    let bigArray = [];
-    for (let i = 0; i < 10000; i++) {
-        bigArray.push({ index: i });
-    }
-    return Response.json(bigArray);
-}
-```
-
-### Production Deployment
-
-#### Server Options
-
-CLI options for the standalone server:
+Record and replay handler I/O:
 
 ```bash
-zigttp serve -p 8080 -h 127.0.0.1 -n 8 --cors --static ./public handler.js
+zigttp serve --trace traces.jsonl src/handler.ts
+zigttp serve --replay traces.jsonl src/handler.ts
+zig build -Dhandler=src/handler.ts -Dreplay=traces.jsonl
 ```
 
-Advanced options are available through `ServerConfig` when embedding `Server`
-directly in Zig:
+Persisted counterexamples live in the witness corpus and can be inspected with
+`zigttp witnesses`. See [Witnesses](witnesses.md).
 
-```zig
-const config = ServerConfig{
-    .pool_wait_timeout_ms = 5,
-    .pool_metrics_every = 1000,
-    .static_cache_max_bytes = 2 * 1024 * 1024,
-    .static_cache_max_file_size = 128 * 1024,
-};
-```
-
-#### Standalone Server
+## Deploy And Verify
 
 ```bash
-# Quiet mode, bind to all interfaces
-./zig-out/bin/zigttp serve -q -h 0.0.0.0 -p 8080 handler.js
+zigttp deploy
+./.zigttp/deploy/my-app -p 8080
+zigttp verify http://127.0.0.1:8080
 ```
 
-#### Hosted cloud deploy
+The running server emits `Zigttp-Proofs` and `Zigttp-Attest` headers and serves
+`/.well-known/zigttp-attest`. `zigttp verify <url>` validates the signed
+attestation from another machine. Use `zigttp proofs` to inspect local ledger
+entries and `zigttp proofs gate` for pull-request checks.
 
-Hosted deploy is out of core for v0.1.0-beta. `zigttp deploy --cloud`
-and the related account commands (`login`, `logout`, `review`, `grants`,
-`revoke-grant`) are not available in this release. The supported deploy
-path is the self-contained binary `zigttp deploy` produces.
+## Expert Mode
 
-#### Docker Container
-
-```dockerfile
-FROM scratch
-COPY zig-out/bin/zigttp /zigttp
-COPY handler.js /handler.js
-EXPOSE 8080
-ENTRYPOINT ["/zigttp", "serve", "-q", "-h", "0.0.0.0", "/handler.js"]
-```
-
-#### AWS Lambda (Custom Runtime)
+`zigttp expert` is the compiler-in-the-loop coding agent. It uses a configured
+Anthropic or OpenAI key, proposes edits, and routes edits through the same
+compiler checks before they land.
 
 ```bash
-# Build for Lambda
-zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux
-
-# Package as Lambda deployment
-zip function.zip bootstrap handler.js
-aws lambda create-function --function-name my-function \
-  --zip-file fileb://function.zip --runtime provided.al2 \
-  --handler handler.handler --role arn:aws:iam::...
+zigttp auth claude
+zigttp expert
+zigttp expert --print "add a GET /health route"
+zigttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
 
-#### Cloudflare Workers (via Wasm)
-
-Build with wasm32 target for edge deployment (experimental).
-
----
-
-## Compile-Time Verification
-
-zigttp can statically prove your handler is correct at build time. Add `-Dverify` to any build command:
-
-```bash
-zig build -Dhandler=handler.ts -Dverify
-```
-
-The verifier checks six properties:
-
-1. **Exhaustive returns** - every code path through the handler returns a Response
-2. **Result safety** - Result values from `jwtVerify`, `decodeJson`, `decodeForm`, `decodeQuery`, etc. have `.ok` checked before `.value` is accessed
-3. **Unreachable code** - statements after unconditional returns are flagged (warning)
-4. **Unused variables** - declared variables that are never referenced (warning, suppress with `_` prefix)
-5. **Non-exhaustive match** - match expressions without a default arm (warning)
-6. **Optional safety** - optional values from `env()`, `cacheGet()`, `parseBearer()`, and `routerMatch()` must be narrowed before use
-
-This is possible because zigttp's JS subset bans most non-trivial control flow (`while`, `try/catch`). `break` and `continue` are allowed within `for-of` (forward jumps only). The IR tree is the control flow graph.
-
-Example diagnostics:
-
-```
-verify error: not all code paths return a Response
-  --> handler.ts:2:17
-   |
-  2 | function handler(req) {
-   |                 ^
-   = help: ensure every branch (if/else) ends with a return statement
-```
-
-```
-verify error: optional value used without checking for undefined
-  --> handler.ts:6:14
-   |
-  6 |         app: appName,
-   |              ^
-   = help: check before use: if (val !== undefined) { ... }
-           or provide a default: val ?? "fallback"
-```
-
-Optional values are narrowed by `if (val)`, `if (!val) return`, `val !== undefined`, `val ?? default`, or reassignment. Optional chaining (`val?.prop`) is safe.
-
-See [verification.md](verification.md) for the full specification, recognized patterns, and test fixtures.
-
-## Contract Manifest
-
-Every precompilation automatically extracts a contract from the handler's IR,
-describing what the handler does. Add `-Dcontract` to also emit the contract as
-a `contract.json` file:
-
-```bash
-zig build -Dhandler=handler.ts -Dcontract
-```
-
-The contract extracts from the handler's IR:
-
-- Which `zigttp:*` virtual modules are imported and which functions are used
-- Literal env var names from `env("NAME")` calls
-- Outbound hosts from `fetchSync("https://...")` URL arguments
-- Named internal service calls from `serviceCall("name", "METHOD /path", init)`
-- System-level payload proof for named internal links, including explicit payload-proof gaps
-- Cache namespace strings from `cacheGet`/`cacheSet`/etc.
-- Registered SQL query names, operations, and touched tables from `sql("name", "...")`
-- Scope names, whether any scope callback remains dynamic, and maximum nested scope depth from `scope("name", fn)`
-- Durable run keys, whether durable keys are dynamic, literal `step()` names, timer usage, signal names, and producer keys (targets of `signal()`/`signalAt()`)
-- Durable workflow proof data: `workflowId`, `proofLevel`, extracted nodes, and extracted edges for `run()` callbacks when zigttp can recover them
-- API route facts: method/path, path params, query params, header params, JSON request bodies, response variants, and auth requirements when they are statically proven
-- Handler effect properties derived from virtual module effect classification (pure, read_only, stateless, retry_safe, deterministic, has_egress). `retry_safe` is cleared when scope-managed cleanup is used.
-- Verification results (when combined with `-Dverify`)
-
-Non-literal arguments (e.g., `env(someVariable)`) set `"dynamic": true` as an
-honest signal that static analysis cannot enumerate all values.
-
-For internal service composition, `system.json` entries must include `name`,
-`path`, and `baseUrl`. `serviceCall()` uses `name`; raw `fetchSync()` linking
-continues to match by `baseUrl`.
-
-```bash
-# Combine verification and contract
-zig build -Dhandler=handler.ts -Dverify -Dcontract
-```
-
-The contract is written to `src/generated/contract.json` alongside the embedded
-bytecode.
-
-For a route-focused example:
-
-```bash
-zig build -Dhandler=examples/routing/api-surface.ts -Dcontract
-```
-
-Route entries can include additive API fields like:
-
-```json
-{
-  "method": "POST",
-  "path": "/profiles/:id",
-  "pathParams": [
-    { "name": "id", "location": "path", "required": true, "schema": { "type": "string" } }
-  ],
-  "queryParams": [
-    { "name": "verbose", "location": "query", "required": false, "schema": { "type": "string" } }
-  ],
-  "headerParams": [
-    { "name": "x-client-id", "location": "header", "required": false, "schema": { "type": "string" } }
-  ],
-  "requestBodies": [
-    { "contentType": "application/json", "schemaRef": "profile.update", "schema": null, "dynamic": false }
-  ],
-  "responses": [
-    { "status": 200, "contentType": "application/json", "schemaRef": null, "schema": { "type": "object" }, "dynamic": false }
-  ],
-  "queryParamsDynamic": false,
-  "headerParamsDynamic": false,
-  "requestBodiesDynamic": false,
-  "responsesDynamic": false
-}
-```
-
-The legacy summary fields (`responseStatus`, `responseContentType`, `responseSchemaRef`, `responseSchema`) are still emitted for compatibility. The `*Dynamic` flags remain the honest signal that the compiler saw part of the surface but could not enumerate it completely.
-
-## OpenAPI Manifest
-
-Add `-Dopenapi` to emit a compiler-derived `openapi.json` alongside the
-embedded bytecode:
-
-```bash
-zig build -Dhandler=handler.ts -Dopenapi
-```
-
-The current emitter only includes facts the compiler can prove:
-
-- `schemaCompile("name", JSON.stringify({...}))` schemas become component schemas
-- `validateJson("name", ...)`, `coerceJson("name", ...)`, and `decodeJson("name", ...)` become JSON request bodies
-- `decodeForm("name", ...)` becomes an `application/x-www-form-urlencoded` request body
-- `decodeQuery("name", ...)` contributes typed query parameters
-- `parseBearer()` / `jwtVerify()` enable bearer auth metadata
-- `routerMatch()` route tables with literal `"METHOD /path"` keys become OpenAPI paths
-- literal request access becomes path, query, and header parameters
-- proven response variants become OpenAPI `responses`
-
-Dynamic schemas or routes are preserved as `x-zigttp-*` hints instead of guessed
-OpenAPI operations. The manifest is written to `src/generated/openapi.json`.
-
-```bash
-zig build -Dhandler=examples/routing/api-surface.ts -Dopenapi
-```
-
-When those facts are proven, the generated manifest includes:
-
-- `POST /profiles/{id}`
-- path/query/header parameters
-- `requestBody.content["application/json"]`
-- response entries under `responses`
-- `x-zigttp-*` flags if any part of the route stays dynamic
-
-## TypeScript SDK
-
-Add `-Dsdk=ts` to emit a dependency-free TypeScript client beside the embedded
-handler:
-
-```bash
-zig build -Dhandler=examples/routing/api-surface.ts -Dsdk=ts
-```
-
-The generated file is written to `src/generated/client.ts`.
-The standalone compiler CLI accepts the matching flag:
-
-```bash
-zigts compile --sdk ts examples/routing/api-surface.ts /tmp/embedded_handler.zig
-```
-
-Typed helpers are generated only for routes the compiler can prove end to end:
-
-- non-dynamic path/query params
-- zero or one proven JSON or form request body
-- one proven JSON response shape
-
-Routes that do not meet those constraints are still accessible through
-`requestRaw()` and are listed in `skippedOperations`.
-
-Generated method shape:
-
-```ts
-method({ params?, query?, body?, headers?, signal? })
-```
-
-Example consumer for a fully proven route:
-
-```ts
-import { createClient } from "./src/generated/client";
-
-const api = createClient({
-    baseUrl: "https://api.example.com",
-});
-
-const result = await api.postProfilesId({
-    params: { id: "user_123" },
-    query: { verbose: true },
-    body: { displayName: "Ada" },
-    headers: { "x-client-id": "cli-42" },
-});
-
-console.log(result.status);
-console.log(result.data.displayName);
-```
-
-The generated client deliberately prefers omission over approximation. If the
-compiler cannot prove a clean typed helper, it records the reason instead of
-inventing a broad type.
-
-## Handler Effect Properties
-
-Every virtual module function carries a compile-time effect annotation: read (does
-not modify external state), write (modifies external state), or none (compile-time
-only, like `guard`). During precompilation, the contract builder reduces those
-calls into an internal effect summary, then derives handler-level properties from
-that summary:
-
-This handler-facing effect metadata is separate from module-level
-`required_capabilities`, which record what runtime resources (clock, crypto,
-stderr, etc.) a virtual module's Zig implementation actually uses. Built-in
-and extension modules route sensitive operations through shared checked
-helpers, so a mismatch between the declaration and the code panics
-at call time rather than silently misbehaving.
-
-| Property | Meaning |
-|----------|---------|
-| `pure` | No virtual module calls and no fetchSync. Handler is a function of the request only. |
-| `readOnly` | All imported functions are read-classified. No state mutations through virtual modules. |
-| `stateless` | Read-only and no `cacheGet`. Handler does not depend on mutable external state. |
-| `retrySafe` | Read-only, or writes are confined to durable-managed operations with no proven bare writes, and no scope-managed cleanup is present. Safe for Lambda auto-retry on timeout. |
-| `deterministic` | No `Date.now()` or `Math.random()` calls detected. |
-| `hasEgress` | Handler uses `fetchSync` (conservatively classified as write). |
-
-These properties appear in the build output:
-
-```
-Handler Properties:
-  PROVEN pure            handler is a deterministic function of the request
-  PROVEN read_only       no state mutations via virtual modules
-  PROVEN stateless       independent of mutable state
-  ---    retry_safe      disabled when scope-managed cleanup or bare writes are present
-  ---    deterministic   no Date.now() or Math.random()
-```
-
-They are also included in contract.json under the `"properties"` key, in AWS
-deployment manifests as `zigttp:retrySafe` and `zigttp:readOnly` tags, and in
-OpenAPI specs as the `x-zigttp-properties` extension.
-
-**Effect classifications by module:**
-
-Read-effect functions: `env`, `sha256`, `hmacSha256`, `base64Encode`,
-`base64Decode`, `routerMatch`, `parseBearer`, `jwtVerify`, `jwtSign`,
-`verifyWebhookSignature`, `timingSafeEqual`, `schemaCompile`, `validateJson`,
-`validateObject`, `coerceJson`, `schemaDrop`, `decodeJson`, `decodeForm`,
-`decodeQuery`, `cacheGet`, `cacheStats`, `sql`, `sqlOne`, `sqlMany`.
-
-Write-effect functions: `cacheSet`, `cacheDelete`, `cacheIncr`, `sqlExec`,
-`parallel`, `race`, `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`,
-`signal`, `signalAt`.
-
-None-effect: `guard` (compile-time macro, no runtime execution).
-
-## Runtime Sandboxing
-
-Every precompiled handler is automatically sandboxed based on its contract. No
-configuration required. The compiler derives a `RuntimePolicy` from the contract
-and embeds it in the generated code.
-
-### How It Works
-
-The contract records whether each capability section (env, egress, cache, sql) uses
-only literal string arguments or includes dynamic (computed) access:
-
-- **Static access** (`dynamic: false`): the compiler proved all calls use string
-  literals. The sandbox restricts to exactly those values. Any runtime access to
-  an unlisted value throws a `CapabilityPolicyError`.
-- **Dynamic access** (`dynamic: true`): some calls use computed arguments. That
-  section remains unrestricted because the compiler cannot enumerate all possible
-  values.
-
-The build prints a sandbox report:
-
-```
-Sandbox: complete (all access statically proven)
-  env: restricted to [API_KEY, DATABASE_URL] (2 proven, no dynamic access)
-  egress: restricted to [api.stripe.com] (1 proven, no dynamic access)
-  cache: restricted to [sessions] (1 proven, no dynamic access)
-  sql: restricted to [listTodos, createTodo] (2 proven, no dynamic access)
-```
-
-Or for partial proof:
-
-```
-Sandbox derived from contract:
-  env: restricted to [API_KEY] (1 proven, no dynamic access)
-  egress: unrestricted (dynamic access detected)
-  cache: restricted to [] (none proven, no dynamic access)
-  sql: restricted to [] (none proven, no dynamic access)
-```
-
-### Explicit Policy Override
-
-Add `-Dpolicy=policy.json` to override auto-derived sandboxing with an explicit
-least-privilege capability policy:
-
-```bash
-zig build -Dhandler=handler.ts -Dpolicy=policy.json
-```
-
-```json
-{
-  "env": { "allow": ["JWT_SECRET"] },
-  "egress": { "allow_hosts": ["api.example.com"] },
-  "cache": { "allow_namespaces": ["sessions"] },
-  "sql": { "allow_queries": ["listTodos", "createTodo"] }
-}
-```
-
-Explicit policy rules:
-
-- Omit a section to leave that capability unrestricted.
-- If a section is present, only the listed literals are allowed.
-- Dynamic access in a restricted category fails the build because zigttp cannot
-  enumerate it soundly.
-- Local file imports are aggregated before validation, so helper modules count
-  toward the same policy.
-
-### Contract-Aware Startup
-
-Self-extracting binaries (built with `zigttp compile handler.ts -o binary`)
-embed the contract JSON alongside bytecode and policy. At startup, the runtime
-parses this contract and uses it for three things:
-
-1. **Env var validation.** Proven env vars are checked via `getenv()` before
-   the server starts listening. If any are missing, the binary exits immediately
-   with a clear error instead of returning a 500 on the first request that
-   hits that code path. Skip with `--no-env-check` during development.
-
-2. **Route pre-filtering.** When the contract proves the handler only serves
-   specific method+path combinations, requests to other routes are rejected
-   with 404 at the HTTP layer without entering JS execution.
-
-3. **Property logging.** Proven handler properties (retry_safe, deterministic,
-   injection_safe, etc.) are logged at startup for operator visibility.
-
-4. **Response memoization.** When the contract proves the handler is `pure` or
-   `deterministic`+`read_only`, GET/HEAD responses are cached in memory and
-   served without entering JS on subsequent identical requests. Cached responses
-   include an `X-Zigttp-Proof-Cache: hit` header. The cache uses FIFO eviction
-   (default 1024 entries, 5-minute TTL, 256KB max body). Requests with
-   `Cache-Control: no-cache` or `no-store` bypass the cache.
-
-5. **Attestation response headers (default-on).** The runtime emits
-   `Zigttp-Proofs: <chip list>` and `Zigttp-Attest: <compact JWS>` on
-   every response unless the build was compiled with `--no-attest`. Both
-   strings are built once at startup from the embedded JWS and the
-   proven properties, so per-request cost is one `bufPrint` per header.
-   The signing key is the persistent identity at
-   `~/.zigttp/attest/keypair.bin`, generated on first use.
-
-6. **Well-known attestation endpoint.** Attested binaries serve
-   `GET /.well-known/zigttp-attest` with the full JWS, embedded
-   contract, and JWK public key. Content-addressed via ETag,
-   `Cache-Control: public, max-age=3600`, 304 on `If-None-Match`.
-   Third parties can run `zigttp verify <url>` against any handler
-   route to read the response headers, or fetch the well-known doc
-   directly to inspect the full contract surface offline.
-
-### Non-Precompiled Handlers
-
-Handlers run via `zig build run --` (dev mode) are not sandboxed. Sandboxing
-requires precompilation (`-Dhandler=...`) because contract extraction runs as
-part of the compile pipeline.
-
----
-
-## Declarative Handler Testing
-
-Handler tests use a JSONL format with four entry types. Because handlers are pure functions of (Request, VirtualModuleResponses), testing requires no mocking frameworks or infrastructure - just declare inputs and expected outputs.
-
-### Running Tests
-
-```bash
-# Runtime mode
-./zig-out/bin/zigttp serve --test tests.jsonl handler.ts
-
-# Build-time mode (fails the build on test failure)
-zig build -Dhandler=handler.ts -Dtest-file=tests.jsonl
-```
-
-### Test Format
-
-Each test is a group of JSONL lines:
-
-```jsonl
-{"type":"test","name":"GET /health returns 200"}
-{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
-{"type":"expect","status":200,"bodyContains":"ok"}
-
-{"type":"test","name":"POST /users validates body"}
-{"type":"request","method":"POST","url":"/users","headers":{"content-type":"application/json"},"body":"{\"invalid\":true}"}
-{"type":"expect","status":400,"bodyContains":"errors"}
-
-{"type":"test","name":"JWT auth with stubbed verify"}
-{"type":"request","method":"GET","url":"/secure","headers":{"authorization":"Bearer test-token"},"body":null}
-{"type":"io","seq":0,"module":"auth","fn":"jwtVerify","args":["test-token","secret"],"result":{"ok":true,"value":{"sub":"user-123"}}}
-{"type":"expect","status":200,"bodyContains":"user-123"}
-```
-
-Entry types:
-- `test` - Test case header with a name
-- `request` - HTTP request (method, url, headers, body). Use `null` for absent body (JSON has no `undefined`)
-- `io` - Virtual module stub. The `seq` field orders multiple stubs within a test. The handler receives this recorded return value instead of calling the real module
-- `expect` - Assertions: `status` (exact match) and/or `bodyContains` (substring match)
-
-### Deterministic Replay
-
-Record handler I/O traces during live traffic, then replay them for regression testing:
-
-```bash
-# Record traces
-./zig-out/bin/zigttp serve --trace traces.jsonl handler.ts
-
-# Replay against a handler (offline verification)
-./zig-out/bin/zigttp serve --replay traces.jsonl handler.ts
-
-# Build-time replay (fails on regressions)
-zig build -Dhandler=handler.ts -Dreplay=traces.jsonl
-```
-
-Tracing captures every virtual module call (with args and return values), `fetchSync` responses, `Date.now()` timestamps, and `Math.random()` values. Because virtual modules are the only I/O boundary, handlers become deterministic pure functions of (Request, VirtualModuleResponses). Replay substitutes recorded values for all I/O and compares actual vs expected Response.
-
----
-
-## Route Forge with zigttp expert
-
-`zigttp expert` can add routes through a compiler-native forge flow. The model
-does not write the route directly when this path is used; the forge tool
-synthesizes a candidate, runs the compiler analysis in memory, and exposes the
-diff for approval.
-
-```bash
-# Preview only: plan, candidate source, diff, and verification summary
-/feature route file=handler.ts method=GET path=/health
-
-# Forge: synthesize, prove, and attempt a verifier repair if needed
-/forge route file=handler.ts method=POST path=/todos body=todo status=201
-```
-
-`/feature` never writes files. `/forge` returns a candidate marked ready only
-when it introduces zero new compiler violations. Apply a ready result from the
-CLI REPL with the corresponding apply command; the apply step reruns the
-compiler veto against the current file and records the accepted change as a
-`verified_patch` in the session ledger.
-
-V1 scope is intentionally narrow: route creation only. It can add router-based
-dispatch to a plain handler, extend an existing `routes` table, optionally wire
-schema-backed body validation, and return a JSON response with the requested
-status. Forge-synthesized handlers ship with a default `Spec<...>` set declared
-on the dispatcher, so the proof obligation lives in source from day one (see
-the next section).
-
-## Author-Declared Specs
-
-Compiler specs are active proof obligations. When a handler declares no
-`Spec<...>`, every supported v1 spec is active by default. Adding
-`Spec<...>` on the handler return type narrows the active set to exactly the
-names in that annotation. The marker rides the same TS generic-alias machinery
-as `Result<T>`, strips at runtime, and is read by the verifier after the
-analyzer pipeline runs. An active spec the inferred `HandlerProperties` cannot
-satisfy fails the build with ZTS500.
-
-```typescript
-import type { Spec } from "zigttp:types";
-
-type Guardrails = Spec<
-    | "idempotent"
-    | "deterministic"
-    | "no_secret_leakage"
-    | "injection_safe"
->;
-
-function handler(req: Request): Response & Guardrails {
-    return Response.json({ ok: true });
-}
-```
-
-The alias name (`Guardrails`) is your own; the type checker follows alias
-resolution to find the built-in `Spec<...>` marker and extracts the
-string-literal union as the active spec set. Inline use also works:
-`function handler(req: Request): Response & Spec<"idempotent">`.
-
-### v1 spec names
-
-Fifteen names are recognized; ten produce cause-only failures with a
-per-property suggestion, five produce counterexample-rich failures with a
-falsifying request witness:
-
-- *Cause-only*: `deterministic`, `read_only`, `retry_safe`, `idempotent`,
-  `state_isolated`, `fault_covered`, `pure`, `stateless`, `result_safe`,
-  `optional_safe`.
-- *Counterexample-rich*: `no_secret_leakage`, `no_credential_leakage`,
-  `input_validated`, `pii_contained`, `injection_safe`.
-
-### Diagnostics
-
-- **ZTS500 - spec_not_discharged**: the corresponding `HandlerProperties` field
-  is false. Cause-only specs include a `Try:` suggestion in the HUD; data-flow
-  specs include a falsifying request body produced by the counterexample
-  solver.
-- **ZTS501 - spec_incompatible_with_import**: the spec contradicts an imported
-  virtual-module function. Today this fires for `Spec<"read_only">` against
-  imports of `zigttp:cache` or `zigttp:sql` writes. ZTS500 is suppressed for the
-  same name; resolve the import or drop the spec before the agent enters
-  repair.
-- **ZTS502 - spec_unknown_name**: the declared name is not in the v1 set.
-  Correct the typo or pick one of the eleven.
-
-### Proof capsules for helpers
-
-`Spec<...>` covers the handler; `Proof<T, S>` covers the helpers it calls.
-A helper annotates its return type with `Proof<T, "...">`, which resolves
-to `T` for type checking while declaring a capsule the compiler discharges
-against the helper's own body:
-
-```typescript
-import type { Proof } from "zigttp:types";
-
-function fullName(u: User): Proof<string, "pure" | "total"> {
-    return `${u.first} ${u.last}`;
-}
-```
-
-Four capsule properties ship in v1: `total` (every path returns a value),
-`pure`, `read_only`, `deterministic`. A helper that declares a capsule it
-cannot satisfy fails with ZTS500; an unknown name fails with ZTS502 - both
-carry a `function` field naming the helper. A handler-reachable helper that
-breaks a property the handler's `Spec<...>` demands, while carrying no
-capsule for it, fails with **ZTS606**. Proven helpers compose: the
-handler's property accounts for every helper it transitively calls.
-
-### Capability capsules with `Effects<...>`
-
-`Effects<T, "...">` declares a least-privilege *ceiling* on a function's
-capabilities - the inferred effect row may be no wider than the named
-set. It resolves to `T` for type checking, opt-in like `Proof<...>`:
-
-```typescript
-import type { Effects } from "zigttp:types";
-
-function loadRegion(): Effects<string, "env"> {
-    return env("REGION");
-}
-```
-
-A function reaching a capability outside its ceiling fails with
-**ZTS503**; an unknown capability name fails with **ZTS504**; a declared
-capability the function never reaches is the warning **ZTS505**. The
-vocabulary is the runtime capability set: `env`, `clock`, `random`,
-`crypto`, `stderr`, `runtime_callback`, `sqlite`, `filesystem`,
-`network`, `policy_check`, `websocket`.
-
-`Effects<...>` on the handler's return type is a **budget** that bounds
-every reachable helper. A capability the handler reaches directly outside
-the budget fails with **ZTS506**; one a reachable helper introduces fails
-with **ZTS607**, attributed to that helper. The budget is recorded in
-`contract.json` under `sandbox.declaredBudget`. Because the effect marker
-is distinct from the proof marker, the two capsules compose:
-`Proof<Effects<string, "crypto">, "total">`.
-
-`zigts check --require-export-capsules` is an opt-in, warning-only docs
-mode: it asks every exported helper to carry an explicit capsule
-(**ZTS507** for a missing `Effects<...>`, **ZTS508** for a missing
-`Proof<...>`). It is off by default and never changes the exit code.
-
-### Where active specs surface
-
-- Live HUD pane under `zigttp serve --watch --prove`: a `Specs (active)`
-  block beneath the inferred properties shows `[*] spec NAME` when discharged
-  and `[-] spec NAME` when not.
-- Proof studio at `/_zigttp/studio`: a `Specs (active)` heading after
-  Properties renders each active spec as a green ✓ or red ✗ pill. A
-  failed pill expands inline to its ZTS500/501/502 code, source line and
-  column, and the snippet that demoted the property. The right pane
-  shows the witness corpus with clickable rows that fetch
-  `/_zigttp/studio/witness/<key>.json` and render the falsifying
-  request, IO stubs, and pinned status without a CLI hop. Generated path
-  tests download with a one-click link. A verdict timeline above the
-  Verdict pane shows the last ten rebuilds with sha and recompile time.
-- Proof ledger: every `swap` and `deploy` event records
-  `declaredSpecs: [{name, discharged, diagnosticCode?,
-  diagnosticMessage?, sourceLine?, sourceColumn?, sourceSnippet?}]` so
-  historical entries diff without re-running the verifier. Only failed
-  specs carry the diagnostic fields.
-- `zigts check --json` adds `declared_specs`, `spec_diagnostics`, and
-  `proofCapsules` arrays to the proof envelope. `declared_specs` is the
-  effective active set: defaults when no `Spec<...>` exists, or the explicit
-  narrowed set when one does. Capsule discharge failures and ZTS606 appear in
-  `spec_diagnostics` with a `function` field.
-- `zigttp expert`: the `pi_specs_status` tool returns the active set and
-  discharge state for a handler. Drive `pi_repair_plan` from this tool's
-  output rather than from the `--goal` CLI flag.
-
-The `/specs <handler.ts>` slash command is the REPL shortcut that calls
-`pi_specs_status` directly.
+Keys are stored in `~/.zigttp/providers.json` with mode `0600`. A shell-set
+`ANTHROPIC_API_KEY` or `OPENAI_API_KEY` overrides the stored value.
 
 ## Troubleshooting
 
-### Common Errors
+**The server says no handler was provided.**
 
-**"No handler specified"**
+Run inside a project with `zigttp.json`, pass a handler path, or use `-e`:
 
 ```bash
-# Wrong:
-./zig-out/bin/zigttp serve
-
-# Right:
-./zig-out/bin/zigttp serve handler.js
-# or
-./zig-out/bin/zigttp serve -e "function handler(r) { return Response.text('OK') }"
+zigttp serve src/handler.ts
+zigttp serve -e "function handler(req) { return Response.text('ok') }"
 ```
 
-**"No 'handler' function defined"**
+**An env var check fails at startup.**
 
-```javascript
-// Wrong: missing handler function
-console.log("Hello");
+Set the required variable, remove the literal `env("NAME")` use, or pass
+`--no-env-check` for local development.
 
-// Right: must define handler
-function handler(request) {
-    return Response.text("Hello");
-}
+**A Result or optional access fails verification.**
+
+Check `.ok` before `.value`, or narrow the optional before use:
+
+```ts
+const token = parseBearer(req.headers.authorization ?? "");
+if (!token) return Response.text("Unauthorized", { status: 401 });
 ```
 
-**"SyntaxError" in handler**
+**A language feature is rejected.**
 
-Common causes: using banned syntax. Check the error message for the suggestion:
+Run `zigttp restrictions` or see [Restrictions to Proofs](restrictions-to-proofs.md)
+for the reason and supported replacement.
 
-```
-'while' is not supported; use 'for-of' with a finite collection instead
-'try' is not supported; use Result types instead
-'var' is not supported; use 'let' or 'const' instead
-'==' is not supported; use '===' instead
-```
+**A request returns 500.**
 
-**JSON validation**
+The process stays up. Check stderr, memory limits, stack depth, and any
+virtual-module runtime requirements. See [Reliability](reliability.md).
 
-```typescript
-// Use schema-backed Result helpers instead of try-catch (which is banned)
-import { schemaCompile } from "zigttp:validate";
-import { decodeJson } from "zigttp:decode";
+**A port is already in use.**
 
-schemaCompile("input", JSON.stringify({ type: "object" }));
+Choose another port:
 
-function handler(req: Request): Response {
-    const result = decodeJson("input", req.body ?? "{}");
-    if (!result.ok) return Response.json({ errors: result.errors }, { status: 400 });
-    return Response.json(result.value);
-}
-```
-
-### Debugging
-
-```javascript
-// Console methods for debugging
-// console.log(value)   - stdout
-// console.error(value) - stderr
-// console.warn(value)  - stderr
-// console.info(value)  - stdout
-// console.debug(value) - stdout
-
-function handler(request) {
-    console.log("Method:", request.method);
-    console.log("Path:", request.url);
-    console.log("Headers:", JSON.stringify(request.headers));
-    console.debug("Body:", request.body);
-
-    return Response.text("OK");
-}
-```
-
-### Memory Issues
-
-If you see out-of-memory errors:
-
-1. Increase memory limit: `-m 512k` or `-m 1m`
-2. Reduce object creation in hot paths
-3. Avoid storing large amounts of data in letiables
-
----
-
-## Quick Reference Card
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      zigttp Quick Reference                      │
-├─────────────────────────────────────────────────────────────────┤
-│ START SERVER                                                    │
-│   zigttp serve handler.ts                                        │
-│   zigttp serve -p 3000 -e "function handler(r) {...}"            │
-├─────────────────────────────────────────────────────────────────┤
-│ REQUEST OBJECT                                                  │
-│   req.method   → "GET", "POST", "PUT", "DELETE"                │
-│   req.url      → "/api/users?page=1"                           │
-│   req.path     → "/api/users"                                  │
-│   req.headers  → { "content-type": "..." }                     │
-│   req.body     → "..." or undefined                            │
-├─────────────────────────────────────────────────────────────────┤
-│ RESPONSE HELPERS                                                │
-│   Response.json({ data })          → application/json          │
-│   Response.text("string")          → text/plain                │
-│   Response.html("<html>")          → text/html                 │
-│   Response.redirect("/path", 301)  → redirect                  │
-├─────────────────────────────────────────────────────────────────┤
-│ VIRTUAL MODULES                                                 │
-│   import { env } from "zigttp:env"                             │
-│   import { jwtVerify } from "zigttp:auth"                      │
-│   import { validateJson } from "zigttp:validate"               │
-│   import { decodeJson } from "zigttp:decode"                   │
-│   import { routerMatch } from "zigttp:router"                  │
-│   import { parallel } from "zigttp:io"                         │
-│   import { guard } from "zigttp:compose"                       │
-├─────────────────────────────────────────────────────────────────┤
-│ REMEMBER                                                        │
-│   - Use let/const, never var                                   │
-│   - Arrow functions are supported: (x) => x + 1               │
-│   - No try/catch: use Result types (.ok check)                 │
-│   - No null: use undefined                                     │
-│   - No while: use for (const i of range(n))                    │
-│   - Handler must return a Response on every path               │
-└─────────────────────────────────────────────────────────────────┘
+```bash
+zigttp dev -p 3001
+zigttp serve -p 8081 src/handler.ts
 ```

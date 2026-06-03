@@ -2,9 +2,9 @@
 
 `zigttp edge` runs an in-process edge that loads multiple handler pools
 behind a single listener and routes incoming requests to a named target
-based on host, method, and path prefix. Useful when several handlers
-share one bind address - multitenant routing, internal request fan-out,
-or A/B routing during a migration.
+based on host, method, and path prefix. Useful when several handlers share one
+bind address: multitenant routing, internal request fan-out, or route-level
+experiments.
 
 ```bash
 zigttp edge --config zigttp.edge.json    # explicit path

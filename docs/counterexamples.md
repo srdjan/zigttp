@@ -35,10 +35,10 @@ short-cuts are wired in the same release as the frame itself.
 
 The Counterexample block stays empty in three cases that read like a no
 news / good news boundary: a save that broke nothing leaves `delta`
-without demoted properties; a save that demoted a property the verifier
-does not yet capture a cause for renders a Why row but no block; a fresh
-`seedInitialProof` pass has no baseline to diff against, so demotions
-are not yet a concept. The block is opt-in by silence; nothing is forced
+without demoted properties; a save that demoted a property without a captured
+cause renders a Why row but no block; a fresh `seedInitialProof` pass has no
+baseline to diff against, so demotions require another frame. The block is
+opt-in by silence; nothing is forced
 on a clean session.
 
 ## Cause-only versus flow-driven properties

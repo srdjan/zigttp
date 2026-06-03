@@ -1,8 +1,8 @@
 # Threat Model
 
-This document records the public security boundaries for the v0.1.0-beta
-runtime and tooling. It is intentionally narrow: only behavior implemented in
-this repository is in scope.
+This document records the public security boundaries for the current runtime
+and tooling. It is intentionally narrow: only behavior implemented in this
+repository is in scope.
 
 ## Assets
 
@@ -40,9 +40,9 @@ this repository is in scope.
 - The hosted control plane is out of scope for this repository.
 - Third-party extensions are out of scope unless the vulnerability is in the
   SDK or module-loading boundary.
-- The deferred Wasm policy runtime is design-only for v0.1.0-beta; current
-  policy enforcement is in-process and fail-closed when a Wasm checker is
-  requested.
+- Wasm policy runtime experiments are outside the current enforcement path.
+  Current policy enforcement is in-process and fail-closed when a Wasm checker
+  is requested.
 
 ## Security Invariants
 

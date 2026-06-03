@@ -1,6 +1,6 @@
 #!/bin/bash
-# Smoke test for docs/getting-started.md.
-# Runs the guide path in a temp dir:
+# Smoke test for the first-project path in docs/user-guide.md.
+# Runs the guide commands in a temp dir:
 #   build CLI -> init api -> dev -> test -> deploy.
 #
 # Usage: bash scripts/smoke-getting-started.sh

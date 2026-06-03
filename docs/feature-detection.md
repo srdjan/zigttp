@@ -69,7 +69,8 @@ These are JavaScript and TypeScript language features that are syntactically val
 
 ### TypeScript Features (detected by parser)
 
-These were previously detected by the stripper but moved to the parser for consistent error messages across .ts and .js files.
+The parser owns these diagnostics so `.ts` and `.js` files get the same error
+messages.
 
 | Feature | Suggested Alternative |
 |---------|----------------------|

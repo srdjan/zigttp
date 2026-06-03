@@ -3,218 +3,115 @@
   <p align="center"><a href="https://zigttp.timok.deno.net/">Website</a> - <a href="docs/README.md">Documentation</a></p>
 </p>
 
-# Compile-time proof you can see
+# zigttp
 
-zigttp is a pure-Zig JavaScript engine plus a serverless runtime. One
-binary, no dependencies, instant cold starts. The compiler is the
-whole product: every JavaScript restriction (no `var`, no `while`, no
-`class`, no `try/catch`) buys a specific compile-time proof. Your
-handler code is the spec.
+zigttp is a pure-Zig JavaScript and TypeScript runtime for HTTP handlers.
+It ships as one binary, runs without npm or Node, and uses a restricted
+language profile so the compiler can prove useful handler properties before
+the server starts.
 
-**Edit your handler. Watch the proof flip live.** Every save is
-recompiled and proven. The terminal proof card shows your handler's
-declared `Spec<...>` obligations - `deterministic`,
-`no_secret_leakage`, `injection_safe`, `idempotent` - discharged in
-real time. Drop a `Date.now()` into the body and `-deterministic`
-lights up red with a `Why:` row pointing at the source line. Wrap it
-in `step("ts", () => Date.now())` from `zigttp:durable` and the chip
-flips back green.
+The daily workflow is small:
 
 ```bash
-zigttp init my-app && cd my-app && zigttp dev
+zigttp init my-app && cd my-app
+zigttp dev
+zigttp test
+zigttp deploy
 ```
 
-See [`zigttp restrictions`](docs/restrictions-to-proofs.md) for the
-cut-to-proof map and [`examples/README.md`](examples/README.md) for
-the curated reading order.
+`zigttp dev` watches the handler, recompiles it, and prints a proof card on
+every save. `zigttp deploy` builds a self-contained local binary, writes a
+proof ledger entry, and signs a proof receipt by default.
 
 ## Install
 
-Pre-built binaries for macOS and Linux (x86_64, aarch64):
+Pre-built binaries are published for macOS and Linux on x86_64 and aarch64:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
 ```
 
-Or download a tarball from [GitHub Releases](https://github.com/srdjan/zigttp/releases).
-
-To build from source (requires Zig `0.16.0`):
+Or build from source with Zig `0.16.0`:
 
 ```bash
-git clone https://github.com/srdjan/zigttp.git && cd zigttp
+git clone https://github.com/srdjan/zigttp.git
+cd zigttp
 zig build -Doptimize=ReleaseFast
 ```
 
-## Quick Start
+## First Handler
 
-Day-to-day use is five commands: `init`, `dev`, `test`, `expert`,
-`deploy`. Each auto-detects the project from `zigttp.json`, so most
-steps take no arguments. Everything else stays in the background until
-you need it; run `zigttp help --all` for the full list.
-
-```bash
-zigttp init my-app && cd my-app   # scaffold a new project
-zigttp dev                        # proof-aware live reload
-# ... edit src/handler.ts (HTMX projects use src/handler.tsx)
-zigttp test                       # run the starter fixture
-zigttp deploy                     # self-contained signed binary
-./.zigttp/deploy/my-app
-```
-
-To see the full proof story without editing a file, run the local demo:
-
-```bash
-zigttp demo --scripted --out proof-demo --export proof-demo/passport
-open proof-demo/passport/index.html
-```
-
-That produces an offline Proof Passport showing the green baseline, unsafe
-secret-flow witness, verified repair, and local deploy receipt.
-
-For the full first project path, see the
-[User Guide](docs/user-guide.md#quick-start). For the verdict that `dev`
-and `test` print on every save, see
-[Reading the Proof Card](docs/proof-card.md).
-
-## Quick Start with AI
-
-`zigttp expert` is an interactive agent that uses Claude (or OpenAI) to
-read, edit, and prove your handler. One command stores the key; another
-launches the agent. The stream you see in the terminal is real SSE from
-the Anthropic API.
-
-```bash
-zigttp auth claude     # paste a key from https://console.anthropic.com/
-zigttp expert          # streams Claude into your terminal
-```
-
-The key is stored at `~/.zigttp/providers.json` with mode 0600 and is
-picked up automatically by `dev`, `serve`, and `expert`. A shell-set
-`ANTHROPIC_API_KEY` always wins; the stored value only fills the gap.
-Use `zigttp auth status` to see what's configured and `zigttp auth
-revoke claude` to remove it.
-
-## Handler Example
-
-```jsx
+```tsx
 function HomePage() {
     return (
         <html>
-            <head><title>Hello World</title></head>
-            <body><h1>Hello World</h1></body>
+            <head><title>Hello</title></head>
+            <body><h1>Hello from zigttp</h1></body>
         </html>
     );
 }
 
-function handler(request) {
-    if (request.url === "/") {
+function handler(req) {
+    if (req.path === "/") {
         return Response.html(renderToString(<HomePage />));
     }
-    if (request.url === "/api/echo") {
-        return Response.json({ method: request.method, url: request.url });
+    if (req.path === "/api/echo") {
+        return Response.json({ method: req.method, path: req.path });
     }
     return Response.text("Not Found", { status: 404 });
 }
 ```
 
-See [examples/](examples/) for JSX/SSR, SQL, durable workflows,
-WebSocket, and more.
+See [examples/](examples/) for routing, JSX/TSX, SQL, fetch, durable
+workflows, WebSocket, and proof examples.
 
-## What makes it different
+## Current Surface
 
-- **Opinionated language subset.** TypeScript with the footguns
-  removed. Each restriction buys a specific compiler guarantee.
-  [Language subset](docs/user-guide.md#javascript-subset-reference) -
-  [Restrictions to proofs](docs/restrictions-to-proofs.md).
-- **Compile-time verification.** Every code path returns a Response,
-  Result values are checked before access, no unreachable code, no
-  cross-request state leakage. [Verification](docs/verification.md).
-- **Sound mode.** Type-directed analysis catches non-numeric
-  arithmetic, mixed-type `+`, and tautological comparisons at compile
-  time. [Sound mode](docs/sound-mode.md).
-- **Automatic runtime sandboxing.** The compiler extracts a contract
-  and derives a least-privilege runtime policy from it. No config
-  required. [Contracts and sandboxing](docs/contracts-and-sandboxing.md).
-- **Author-declared specs.** Declare which proven properties your
-  handler must satisfy directly in the return type:
-  `Response & Spec<"idempotent" | "deterministic">`. [Spec
-  reference](docs/contracts-and-sandboxing.md#author-declared-specs-spec).
-- **Proof receipts (default-on).** Every `zigttp deploy` signs a JWS
-  over `(bytecode, contract, policy)` with a persistent Ed25519
-  identity. `zigttp verify <url>` validates from any machine.
-  [Deploy](docs/user-guide.md#proof-ledger-and-badge).
-- **Deterministic replay and proven evolution.** Record I/O with
-  `--trace`, replay with `--replay`, compare contracts across
-  versions with `-Dprove`. [Replay and
-  evolution](docs/contracts-and-sandboxing.md#deterministic-replay---trace---replay--dreplay).
-- **Proof-carrying changes.** `zigttp prove-behavior <before.ts>
-  <after.ts>` reports whether an edit is behaviorally equivalent or
-  breaking; the expert loop signs the same verdict as a
-  `kind=equivalence` receipt after each edit. `zigttp proofs gate`
-  aggregates that verdict across every handler changed in a git range and
-  posts it on the pull request. [CLI](docs/cli.md), [Proof
-  Gate](docs/proof-gate.md).
-- **Durable execution.** `run(key, fn)`, `step(name, fn)`,
-  `sleep(ms)`, `waitSignal(name)` from `zigttp:durable` with
-  write-ahead oplog and crash recovery.
-  [zigttp:durable](docs/virtual-modules/workflow/durable.md).
-- **Structured concurrent I/O.** `parallel()` and `race()` from
-  `zigttp:io` overlap outbound HTTP without async/await or Promises.
-  [zigttp:io](docs/virtual-modules/workflow/io.md).
-- **Native virtual modules.** JWT, JSON Schema, cache, SQL, fetch,
-  WebSocket, durable, scope - implemented in Zig with capability
-  declarations enforced at call time.
-  [Virtual modules index](docs/virtual-modules/README.md).
-- **`zigttp expert` interactive agent.** Compiler-in-the-loop coding
-  agent with a property-goal autoloop where the compiler (not the
-  LLM) drives convergence. [CLI reference](docs/cli.md#zigttp-expert-interactive-agent).
+- Five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Advanced
+  commands are listed by `zigttp help --all`.
+- Handler API: `function handler(req): Response`, plus `Response.text`,
+  `Response.json`, and `Response.html`.
+- Language profile: a restricted JS/TS/TSX subset with no `var`, `while`,
+  `class`, or `try/catch`; unsupported constructs fail at compile time.
+- Proofs: response-path verification, Result/optional checks, state-isolation
+  checks, active `Spec<...>` obligations, flow checks, proof traces, witnesses,
+  and proof receipts.
+- Virtual modules: 22 native modules under `zigttp:*` for env, crypto, auth,
+  validation, cache, SQL, fetch, service calls, WebSocket, routing, durable
+  workflows, structured I/O, logging, IDs, time, text, and more.
+- Local deploy: self-contained binary output under
+  `.zigttp/deploy/<project-name>` with default-on attestation.
 
 ## Numbers
 
-~3.5ms cold-start floor, ~7-15ms typical cold start. 4.8MB deployed
-binary. ~13MB memory baseline. Pre-warmed handler pool with
-per-request isolation. See [performance docs](docs/performance.md)
-for the measured cold-start distribution and the Node/Deno throughput
-comparison.
+Benchmark claims are kept in [Performance](docs/performance.md). The measured
+baseline is roughly a 3.5 ms cold-start floor, 7-15 ms typical cold start
+depending on host load, about 13 MB RSS after first response, and about 112k
+req/s on the documented HTTP benchmark.
 
 ## Documentation
 
-Start at the [Documentation Index](docs/README.md). High-traffic
-pages:
+Start at the [Documentation Index](docs/README.md).
 
-- [User Guide](docs/user-guide.md) - handler API, routing, JSON,
-  tests, troubleshooting
-- [CLI Reference](docs/cli.md) - the five-command workflow plus advanced
-  analyzer, edge, proofs, verify, and optional Studio commands
-- [Contracts and Auto-Sandboxing](docs/contracts-and-sandboxing.md) -
-  contract extraction, policy, OpenAPI/SDK emit, replay, evolution,
-  `Spec<...>`
-- [Virtual Modules](docs/virtual-modules/README.md) - canonical module
-  index and per-module API pages
-- [Verification](docs/verification.md), [Sound
-  Mode](docs/sound-mode.md), [TypeScript](docs/typescript.md), [JSX and
-  TSX](docs/user-guide.md#jsx-and-tsx-handlers)
-- [Performance](docs/performance.md), [Reliability and
-  Limits](docs/reliability.md)
-- [Architecture](docs/internals/architecture.md)
-
-## Release Scope
-
-zigttp is at v0.1.0-beta. The [Roadmap](docs/roadmap.md) lists what is in this
-tag and what is deliberately deferred.
+- [User Guide](docs/user-guide.md) - setup, handlers, routing, testing,
+  deployment, proof receipts, and troubleshooting.
+- [CLI Reference](docs/cli.md) - core commands and advanced machine tools.
+- [Virtual Modules](docs/virtual-modules/README.md) - complete current module
+  list and runtime requirements.
+- [Contracts and Sandboxing](docs/contracts-and-sandboxing.md) - contract
+  extraction, runtime policy, replay, OpenAPI, SDK emit, and `Spec<...>`.
+- [Verification](docs/verification.md), [TypeScript](docs/typescript.md),
+  [Sound Mode](docs/sound-mode.md), and
+  [Restrictions to Proofs](docs/restrictions-to-proofs.md).
+- [Performance](docs/performance.md), [Reliability](docs/reliability.md),
+  [Roadmap](docs/roadmap.md), and
+  [Architecture](docs/internals/architecture.md).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for build, test, and the
-conventions a PR must respect. Security disclosure policy:
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports go through
 [SECURITY.md](SECURITY.md).
 
 ## License
 
 MIT.
-
-## Credits
-
-- **zigts** - pure Zig JavaScript engine (part of this project)
-- [Zig](https://ziglang.org/) programming language
-- Codex and Claude

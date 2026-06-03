@@ -219,7 +219,7 @@ pub fn collectReleasePassport(allocator: std.mem.Allocator) !ReleasePassport {
     try addReleaseEvidenceCheck(allocator, &passport);
     try addReleaseGateCheck(allocator, &passport);
     try addPublicClaimsCheck(allocator, &passport);
-    try addLaunchBlockersCheck(allocator, &passport);
+    try addCurrentDocsScopeCheck(allocator, &passport);
     try addReliabilityKnownIssuesCheck(allocator, &passport);
     try addProofSurfaceCheck(allocator, &passport);
 
@@ -248,12 +248,16 @@ fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon
 }
 
 fn addReleaseEvidenceCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
-    const checklist_ok = zigts.file_io.fileExists(allocator, "docs/releases/v0.1.0-beta-checklist.md");
-    const benchmarks_ok = zigts.file_io.fileExists(allocator, "docs/releases/v0.1.0-beta-benchmarks.md");
-    if (checklist_ok and benchmarks_ok) {
-        try passport.add(allocator, "release_evidence", "Release evidence", .ok, "beta checklist and benchmark evidence documents exist", null);
+    const docs_ok =
+        zigts.file_io.fileExists(allocator, "README.md") and
+        zigts.file_io.fileExists(allocator, "docs/README.md") and
+        zigts.file_io.fileExists(allocator, "docs/user-guide.md") and
+        zigts.file_io.fileExists(allocator, "docs/roadmap.md") and
+        zigts.file_io.fileExists(allocator, "docs/virtual-modules/README.md");
+    if (docs_ok) {
+        try passport.add(allocator, "release_evidence", "Documentation evidence", .ok, "front door, user guide, roadmap, and virtual-module index exist", "bash scripts/audit-docs.sh .");
     } else {
-        try passport.add(allocator, "release_evidence", "Release evidence", .fail, "missing beta checklist or benchmark evidence document", null);
+        try passport.add(allocator, "release_evidence", "Documentation evidence", .fail, "missing maintained README, user guide, roadmap, or module index", "bash scripts/audit-docs.sh .");
     }
 }
 
@@ -284,46 +288,60 @@ fn addPublicClaimsCheck(allocator: std.mem.Allocator, passport: *ReleasePassport
     defer if (readme) |bytes| allocator.free(bytes);
     const perf = readOptionalFile(allocator, "docs/performance.md", 2 * 1024 * 1024);
     defer if (perf) |bytes| allocator.free(bytes);
-    const bench = readOptionalFile(allocator, "docs/releases/v0.1.0-beta-benchmarks.md", 1024 * 1024);
-    defer if (bench) |bytes| allocator.free(bytes);
 
-    if (readme == null or perf == null or bench == null) {
-        try passport.add(allocator, "public_claims", "Public performance claims", .fail, "README, performance doc, or benchmark evidence is missing", null);
+    if (readme == null or perf == null) {
+        try passport.add(allocator, "public_claims", "Public performance claims", .fail, "README or performance doc is missing", null);
         return;
     }
 
     const stale_readme =
-        containsAny(readme.?, &.{ "1.2MB binary", "4MB memory baseline", "3ms runtime init" });
+        containsAny(readme.?, &.{ "1.2MB binary", "4MB memory baseline", "3ms runtime init", "71ms", "79,743" });
     const stale_perf =
         containsAny(perf.?, &.{ "71ms", "71 ms", "79,743", "0.76x Deno" });
     const has_measured_baseline =
-        std.mem.indexOf(u8, bench.?, "112,393") != null and
-        std.mem.indexOf(u8, bench.?, "13.4") != null and
-        std.mem.indexOf(u8, bench.?, "7.3") != null;
+        std.mem.indexOf(u8, readme.?, "3.5") != null and
+        std.mem.indexOf(u8, readme.?, "7-15") != null and
+        std.mem.indexOf(u8, readme.?, "13 MB") != null and
+        std.mem.indexOf(u8, readme.?, "112k") != null and
+        std.mem.indexOf(u8, perf.?, "3.5") != null and
+        std.mem.indexOf(u8, perf.?, "7-15") != null and
+        std.mem.indexOf(u8, perf.?, "13 MB") != null and
+        std.mem.indexOf(u8, perf.?, "112k") != null;
 
     if (stale_readme or stale_perf or !has_measured_baseline) {
-        try passport.add(allocator, "public_claims", "Public performance claims", .fail, "public numbers are stale or not tied to the beta benchmark evidence", "zig build bench -Doptimize=ReleaseFast -- --json");
+        try passport.add(allocator, "public_claims", "Public performance claims", .fail, "public numbers are stale or missing from README/performance docs", "zig build bench -- --json");
     } else {
-        try passport.add(allocator, "public_claims", "Public performance claims", .ok, "public numbers match the beta benchmark evidence", "zig build bench -Doptimize=ReleaseFast -- --json");
+        try passport.add(allocator, "public_claims", "Public performance claims", .ok, "README and performance docs carry the current public numbers", "zig build bench -- --json");
     }
 }
 
-fn addLaunchBlockersCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
-    const checklist = readOptionalFile(allocator, "docs/releases/v0.1.0-beta-checklist.md", 1024 * 1024);
-    defer if (checklist) |bytes| allocator.free(bytes);
-    if (checklist == null) {
-        try passport.add(allocator, "launch_blockers", "Launch blockers", .fail, "beta checklist is missing", null);
+fn addCurrentDocsScopeCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
+    const readme = readOptionalFile(allocator, "README.md", 2 * 1024 * 1024);
+    defer if (readme) |bytes| allocator.free(bytes);
+    const docs_index = readOptionalFile(allocator, "docs/README.md", 512 * 1024);
+    defer if (docs_index) |bytes| allocator.free(bytes);
+    const roadmap = readOptionalFile(allocator, "docs/roadmap.md", 512 * 1024);
+    defer if (roadmap) |bytes| allocator.free(bytes);
+
+    if (readme == null or docs_index == null or roadmap == null) {
+        try passport.add(allocator, "docs_scope", "Current docs scope", .fail, "README, docs index, or roadmap is missing", null);
         return;
     }
 
-    const unresolved_owner = std.mem.indexOf(u8, checklist.?, "______") != null;
-    const unresolved_disposition =
-        std.mem.indexOf(u8, checklist.?, "Fix before launch") != null or
-        std.mem.indexOf(u8, checklist.?, "Fix or document exception") != null;
-    if (unresolved_owner or unresolved_disposition) {
-        try passport.add(allocator, "launch_blockers", "Launch blockers", .fail, "beta checklist still contains unresolved owners or fix-before-launch dispositions", null);
+    const stale_markers = [_][]const u8{
+        "Release Scope",
+        "beta checklist",
+        "docs/releases",
+        "migration instructions",
+        "old plans",
+    };
+    if (containsAny(readme.?, &stale_markers) or
+        containsAny(docs_index.?, &stale_markers) or
+        containsAny(roadmap.?, &stale_markers))
+    {
+        try passport.add(allocator, "docs_scope", "Current docs scope", .fail, "front-door docs still point at historical release material", null);
     } else {
-        try passport.add(allocator, "launch_blockers", "Launch blockers", .ok, "launch blockers have named dispositions", null);
+        try passport.add(allocator, "docs_scope", "Current docs scope", .ok, "front-door docs describe the current codebase and use one roadmap/user guide", null);
     }
 }
 

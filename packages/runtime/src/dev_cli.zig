@@ -549,9 +549,9 @@ test "doctorPathExists accepts relative paths" {
 }
 
 test "release doctor options parse json and out path" {
-    const opts = try cli_release_check.parseReleaseDoctorOptions(&.{ "--json", "--out", "docs/releases/passport.json" });
+    const opts = try cli_release_check.parseReleaseDoctorOptions(&.{ "--json", "--out", ".zigttp/release-passport.json" });
     try std.testing.expect(opts.json);
-    try std.testing.expectEqualStrings("docs/releases/passport.json", opts.out_path.?);
+    try std.testing.expectEqualStrings(".zigttp/release-passport.json", opts.out_path.?);
     try std.testing.expectError(error.InvalidArgument, cli_release_check.parseReleaseDoctorOptions(&.{"--out"}));
     try std.testing.expectError(error.InvalidArgument, cli_release_check.parseReleaseDoctorOptions(&.{"--bad"}));
 }
@@ -691,7 +691,7 @@ const ReleaseDoctorFixtureOptions = struct {
 fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: ReleaseDoctorFixtureOptions) !void {
     try tmp.dir.createDirPath(io, "packages/zigts/src");
     try tmp.dir.createDirPath(io, "packages/runtime/src");
-    try tmp.dir.createDirPath(io, "docs/releases");
+    try tmp.dir.createDirPath(io, "docs/virtual-modules");
     try tmp.dir.createDirPath(io, "docs");
     try tmp.dir.createDirPath(io, "scripts");
     try tmp.dir.createDirPath(io, ".github/workflows");
@@ -726,22 +726,33 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
     try tmp.dir.writeFile(io, .{ .sub_path = ".github/workflows/ci.yml", .data = "name: ci\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = ".github/workflows/release.yml", .data = "name: release\n" });
     try tmp.dir.writeFile(io, .{
-        .sub_path = "docs/releases/v0.1.0-beta-checklist.md",
+        .sub_path = "docs/README.md",
         .data =
-        \\# Checklist
-        \\
-        \\| Item | Domain | Owner | Disposition |
-        \\|------|--------|-------|-------------|
-        \\| No blockers | Release | srdjan | ship |
+        \\# Documentation
+        \\Current docs use one user guide and one roadmap.
         ,
     });
     try tmp.dir.writeFile(io, .{
-        .sub_path = "docs/releases/v0.1.0-beta-benchmarks.md",
+        .sub_path = "docs/user-guide.md",
         .data =
-        \\# Benchmarks
-        \\zigttp 112,393 req/s.
-        \\RSS 13.4 MB.
-        \\Cold start 7.3 ms.
+        \\# User Guide
+        \\Current user flow.
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "docs/roadmap.md",
+        .data =
+        \\# Roadmap
+        \\Current support boundary.
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "docs/virtual-modules/README.md",
+        .data =
+        \\# Virtual Modules
+        \\| Module | Exports | Capabilities |
+        \\|---|---|---|
+        \\| `zigttp:env` | `env` | `env`, `policy_check` |
         ,
     });
     try tmp.dir.writeFile(io, .{
@@ -749,11 +760,11 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .data = if (opts.stale_readme)
             "Numbers: 3ms runtime init. 1.2MB binary. 4MB memory baseline.\n"
         else
-            "Numbers: cold start 7.3 ms, RSS 13.4 MB, throughput 112,393 req/s.\n",
+            "Numbers: cold-start floor 3.5 ms, typical 7-15 ms, RSS 13 MB, throughput 112k req/s.\n",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "docs/performance.md",
-        .data = "Performance numbers match v0.1.0-beta benchmark evidence.\n",
+        .data = "Performance: 3.5 ms floor, 7-15 ms typical, 13 MB RSS, 112k req/s.\n",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "docs/reliability.md",

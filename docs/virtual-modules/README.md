@@ -1,140 +1,95 @@
 # Virtual Modules
 
-Virtual modules are native Zig APIs exposed to handlers as
-`import { ... } from "zigttp:*"`. Calls have zero interpretation
-overhead, carry effect annotations the compiler reads for handler
-property classification, and feed contract extraction for runtime
-sandboxing.
+Virtual modules are native Zig APIs imported from `zigttp:*` specifiers. The
+current built-in set is registered in `packages/zigts/src/builtin_modules.zig`;
+public module specs live in `packages/modules/module-specs/`.
 
-The modules are grouped by role. Each page documents exports,
-compile-time proof interactions, runtime failures, and related
-modules. The implementation registry is
-`packages/zigts/src/builtin_modules.zig`; public module specs live under
-`packages/modules/module-specs/`.
+Use `zigttp modules --json` for the live export list from the built binary.
 
-## Security
+## Module Catalog
 
-Trust boundary: input validation, credential handling, cryptographic
-primitives.
+| Module | Exports | Capabilities |
+|---|---|---|
+| `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | `crypto`, `clock` |
+| `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | `clock`, `policy_check` |
+| `zigttp:compose` | `guard`, `pipe` | none |
+| `zigttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | `crypto` |
+| `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery` | none |
+| `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | `runtime_callback` |
+| `zigttp:env` | `env` | `env`, `policy_check` |
+| `zigttp:fetch` | `fetch` | `network`, `runtime_callback` |
+| `zigttp:http` | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` | none |
+| `zigttp:id` | `uuid`, `ulid`, `nanoid` | `clock`, `random` |
+| `zigttp:io` | `parallel`, `race` | `runtime_callback` |
+| `zigttp:log` | `logDebug`, `logInfo`, `logWarn`, `logError` | `clock`, `stderr` |
+| `zigttp:ratelimit` | `rateCheck`, `rateReset` | `clock` |
+| `zigttp:router` | `routerMatch` | none |
+| `zigttp:scope` | `scope`, `using`, `ensure` | `runtime_callback` |
+| `zigttp:service` | `serviceCall` | `network`, `filesystem`, `runtime_callback` |
+| `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | `sqlite`, `policy_check` |
+| `zigttp:text` | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` | none |
+| `zigttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | none |
+| `zigttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | none |
+| `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | none |
+| `zigttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `roomFromPath`, `setAutoResponse` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` |
 
-- [`zigttp:auth`](./security/auth.md) - JWT signing/verification,
-  Bearer parsing, webhook signatures, constant-time comparison.
-- [`zigttp:crypto`](./security/crypto.md) - SHA-256, HMAC-SHA256,
-  base64 encode/decode.
-- [`zigttp:validate`](./security/validate.md) - JSON Schema registry
-  with `validateJson` / `validateObject` / `coerceJson`.
-- [`zigttp:decode`](./security/decode.md) - schema-backed ingress
-  (`decodeJson` / `decodeForm` / `decodeQuery`).
+## Common Usage
 
-## Data
+```ts
+import { env } from "zigttp:env";
+import { routerMatch } from "zigttp:router";
+import { sha256 } from "zigttp:crypto";
 
-Persistent or quasi-persistent state.
+function handler(req: Request): Response {
+    const match = routerMatch("GET /users/:id", req.method, req.path);
+    if (match) {
+        return Response.json({
+            id: match.params.id,
+            tokenHash: sha256(env("API_TOKEN") ?? ""),
+        });
+    }
+    return Response.text("Not Found", { status: 404 });
+}
+```
 
-- [`zigttp:cache`](./data/cache.md) - in-process key-value cache
-  with TTL and LRU.
-- [`zigttp:sql`](./data/sql.md) - registered SQLite queries with
-  build-time schema validation.
-- [`zigttp:ratelimit`](./data/ratelimit.md) - sliding-window rate
-  limiting backed by the cache layer.
+## Runtime Requirements
 
-## Net
+Most modules work without extra flags. Modules that cross a process, disk, or
+durability boundary need configuration:
 
-Inbound and outbound traffic across process boundaries.
+| Module | Requirement |
+|---|---|
+| `zigttp:env` | Proven literal env vars are checked at startup unless `--no-env-check` is passed. |
+| `zigttp:sql` | Run with `--sqlite <file>` for execution. Use `--sql-schema <schema.sql>` or `-Dsql-schema=<schema.sql>` for schema validation. |
+| `zigttp:fetch` | Enable outbound HTTP with `--outbound-http` or one or more `--outbound-host <host>` flags. Durable fetch also needs `--durable <dir>`. |
+| `zigttp:service` | Run with `--system <file>` or set `"system"` in `zigttp.json`. |
+| `zigttp:durable` | Run with `--durable <dir>`. |
+| `zigttp:websocket` | Run through the server WebSocket gateway. |
+| `zigttp:log` | Writes structured lines to stderr. Do not log raw secrets, tokens, or PII. |
 
-- [`zigttp:fetch`](./net/fetch.md) - web-standard outbound HTTP with
-  optional durable replay.
-- [`zigttp:service`](./net/service.md) - named internal
-  service-to-service calls resolved via `system.json`.
-- [`zigttp:websocket`](./net/websocket.md) - WebSocket protocol
-  termination with rooms, attachments, and codec auto-replies.
+## Effects
 
-## HTTP
+The compiler reads each export's effect annotation when deriving handler
+properties and runtime policy.
 
-HTTP-shaped utilities with no transport of their own.
+| Effect | Meaning | Examples |
+|---|---|---|
+| `none` | Pure or analysis-only operation. | `sha256`, `routerMatch`, `parseCookies`, `sql` |
+| `read` | Reads runtime state without mutating it. | `env`, `cacheGet`, `cacheStats`, `deserializeAttachment` |
+| `write` | Mutates state, performs I/O, or schedules runtime callbacks. | `fetch`, `serviceCall`, `sqlExec`, `cacheSet`, `parallel`, `run`, `send`, `logInfo` |
 
-- [`zigttp:router`](./http/router.md) - pattern-matching router with
-  captured params.
-- [`zigttp:http`](./http/http.md) - cookies, content negotiation,
-  content-type parsing, CORS headers.
-- [`zigttp:url`](./http/url.md) - URL parsing, query string handling,
-  percent-encoding.
+For capability governance internals, see
+[Module Capabilities](../internals/capabilities.md).
 
-## Workflow
+## Type-Only Imports
 
-Control-flow primitives: durable runs, pipe guards, scoped cleanup,
-structured concurrency.
-
-- [`zigttp:durable`](./workflow/durable.md) - crash-safe execution
-  with write-ahead oplog, timers, and signals.
-- [`zigttp:compose`](./workflow/compose.md) - compile-time handler
-  composition with `guard()` and the pipe operator.
-- [`zigttp:scope`](./workflow/scope.md) - structured lifecycle
-  management with deterministic LIFO cleanup.
-- [`zigttp:io`](./workflow/io.md) - `parallel()` and `race()` for
-  overlapping outbound I/O without async.
-
-## Platform
-
-Runtime primitives with no domain coupling.
-
-- [`zigttp:env`](./platform/env.md) - environment variable access
-  (literal keys feed runtime sandboxing).
-- [`zigttp:id`](./platform/id.md) - UUID v4, ULID, nanoid.
-- [`zigttp:log`](./platform/log.md) - structured line-delimited JSON
-  logging to stderr.
-- [`zigttp:text`](./platform/text.md) - HTML escape, slugify,
-  truncate, mask.
-- [`zigttp:time`](./platform/time.md) - ISO 8601 / HTTP date
-  formatting, Unix-ms arithmetic.
-
-## Type-only Module
-
-`zigttp:types` is a type-only import surface for proof annotations. It is
-stripped before runtime and does not appear in the native module registry.
-Use it for `Spec<...>` handler obligations and the helper-level
-`Proof<...>` / `Effects<...>` capsules:
+`zigttp:types` is stripped before runtime and is not in the native module
+registry. It provides proof annotation aliases:
 
 ```ts
 import type { Spec, Proof, Effects } from "zigttp:types";
 ```
 
-See [`../typescript.md`](../typescript.md) for the supported property and
-capability vocabularies.
-
-## Effect classification
-
-Every export carries an effect annotation used for handler property
-classification:
-
-- **Read**: `env`, `cacheGet`, `cacheStats`, `id/*`,
-  `websocket.deserializeAttachment`, `websocket.getWebSockets`, and
-  `websocket.roomFromPath`.
-- **Write**: `cacheSet`, `cacheDelete`, `cacheIncr`, `sqlExec`, `fetch`,
-  `serviceCall`, `parallel`, `race`, `scope`, `using`, `ensure`, every
-  durable export, `websocket.send`, `websocket.close`,
-  `websocket.serializeAttachment`, `websocket.setAutoResponse`, `log/*`, and
-  `ratelimit/*`.
-- **None**: `auth/*`, `crypto/*`, `decode/*`, `validate/*`, `compose/*`,
-  `platform/text`, `platform/time`, `http/*`, `url/*`, `router/*`, `sql`,
-  `sqlOne`, and `sqlMany`.
-
-For internal capability governance, see
-[`../internals/capabilities.md`](../internals/capabilities.md).
-
-## Runtime Requirements
-
-Most modules work without extra flags. Modules that cross a process, disk, or
-durability boundary need runtime configuration:
-
-| Module | Runtime Requirement |
-|---|---|
-| `zigttp:env` | Proven literal env vars are checked at startup unless `--no-env-check` is passed. |
-| `zigttp:sql` | Start with `--sqlite <FILE>` for query execution. Use `-Dsql-schema=<schema.sql>` or `--sql-schema` during checks for schema validation. |
-| `zigttp:fetch` | Start with `--outbound-http` or `--outbound-host <host>`. Durable fetch also needs `--durable <DIR>`. |
-| `zigttp:service` | Start with `--system <FILE>` or set `"system"` in `zigttp.json`. |
-| `zigttp:durable` | Start with `--durable <DIR>`. |
-| `zigttp:websocket` | Run through the server/WebSocket gateway; no standalone compile flag is enough. |
-| `zigttp:log` | Writes structured lines to stderr. Do not log raw secrets or credentials. |
-
-`zigttp doctor` checks the project manifest, entry file, runtime template, test
-fixture, and configured static/system paths before you start the dev loop.
+See [TypeScript](../typescript.md) and
+[Contracts and Auto-Sandboxing](../contracts-and-sandboxing.md) for active
+specs and helper capsules.
