@@ -723,13 +723,20 @@ pub fn build(b: *std.Build) void {
     bench_check_step.dependOn(&bench_check_cmd.step);
 
     // End-to-end smoke for the v1 user flow:
-    // init -> doctor -> check -> studio -> build -> deploy.
+    // init -> doctor -> check -> build -> deploy.
     // The script builds the CLI itself; the step does not reference cli_exe so
     // CI can invoke it as a single command without depending on install steps.
+    // studio is compiled out by default, so it is smoke-tested separately by
+    // `zig build smoke-studio` (which builds with -Dstudio).
     const smoke_v1_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/smoke-v1.sh" });
     smoke_v1_cmd.has_side_effects = true;
     const smoke_v1_step = b.step("smoke-v1", "Run the v1 user-flow smoke test in a temp dir");
     smoke_v1_step.dependOn(&smoke_v1_cmd.step);
+
+    const smoke_studio_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/smoke-studio.sh" });
+    smoke_studio_cmd.has_side_effects = true;
+    const smoke_studio_step = b.step("smoke-studio", "Run the opt-in studio smoke test (-Dstudio) in a temp dir");
+    smoke_studio_step.dependOn(&smoke_studio_cmd.step);
 
     const smoke_getting_started_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/smoke-getting-started.sh" });
     smoke_getting_started_cmd.has_side_effects = true;

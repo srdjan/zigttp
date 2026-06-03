@@ -1,7 +1,11 @@
 #!/bin/bash
 # End-to-end smoke test for the v1 user flow:
-#   init -> doctor -> check -> studio -> build -> run -> deploy -> run.
+#   init -> doctor -> check -> build -> run -> deploy -> run.
 # Exits non-zero on first failure, with a one-line diagnostic.
+#
+# studio is compiled out of the default build, so it is exercised separately
+# by scripts/smoke-studio.sh (which builds with -Dstudio); keep this fast path
+# free of any opt-in feature so it passes on a clean checkout.
 #
 # Usage: bash scripts/smoke-v1.sh
 
@@ -12,9 +16,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ZIGTTP="${ZIGTTP:-$REPO_ROOT/zig-out/bin/zigttp}"
 
 # Random ports in the ephemeral range; reduces flake when smoke runs concurrently.
-STUDIO_PORT=$((RANDOM % 1000 + 5000))
-BUILD_PORT=$((STUDIO_PORT + 1))
-DEPLOY_PORT=$((STUDIO_PORT + 2))
+BASE_PORT=$((RANDOM % 1000 + 5000))
+BUILD_PORT=$((BASE_PORT + 1))
+DEPLOY_PORT=$((BASE_PORT + 2))
 
 TMP_DIR=$(mktemp -d -t zigttp-smoke-XXXXXX)
 APP_NAME="smoke-app"
@@ -26,7 +30,6 @@ RUNTIME_BAK="$RUNTIME_BIN.smoke-bak"
 cleanup() {
     pkill -f "$APP_DIR/.zigttp/build/$APP_NAME" 2>/dev/null || true
     pkill -f "$APP_DIR/.zigttp/deploy/$APP_NAME" 2>/dev/null || true
-    pkill -f "zigttp.*--port $STUDIO_PORT" 2>/dev/null || true
     # Restore runtime if the missing-runtime negative test was interrupted.
     [ -e "$RUNTIME_BAK" ] && mv "$RUNTIME_BAK" "$RUNTIME_BIN" 2>/dev/null
     rm -rf "$TMP_DIR"
@@ -50,26 +53,6 @@ wait_for_http() {
         fi
         sleep 0.2
     done
-    return 1
-}
-
-# Poll Studio state until proof analysis reaches a ready payload with verdict.
-# Studio serves state.json before analysis completes; that early
-# {"status":"checking",...} response is not enough for the v1 smoke.
-# Usage: body=$(wait_for_studio_ready URL ATTEMPTS) || fail "..."
-wait_for_studio_ready() {
-    local url="$1" attempts="$2" body
-    for _ in $(seq 1 "$attempts"); do
-        if body=$(/usr/bin/curl -sf "$url" 2>/dev/null); then
-            if printf '%s' "$body" | grep -q '"status":"ready"' &&
-               printf '%s' "$body" | grep -q '"verdict"'; then
-                printf '%s' "$body"
-                return 0
-            fi
-        fi
-        sleep 0.2
-    done
-    [ -n "${body:-}" ] && printf '%s' "$body"
     return 1
 }
 
@@ -123,15 +106,6 @@ step "doctor"
 step "check"
 "$ZIGTTP" check >/dev/null || fail "check exited non-zero"
 
-step "studio launches on :$STUDIO_PORT and serves /_zigttp/studio/state.json"
-"$ZIGTTP" studio --port "$STUDIO_PORT" >/dev/null 2>&1 &
-STUDIO_PID=$!
-# Studio re-enters the developer CLI with `serve --studio --watch --prove`;
-# wait for proof analysis to finish, not just for the HTTP endpoint to exist.
-state_url="http://127.0.0.1:$STUDIO_PORT/_zigttp/studio/state.json"
-state_body=$(wait_for_studio_ready "$state_url" 75) || fail "studio state.json never reached ready verdict state: $state_body"
-stop_bg "$STUDIO_PID" "zigttp.*--port $STUDIO_PORT"
-
 step "build emits .zigttp/build/$APP_NAME"
 "$ZIGTTP" build >/dev/null 2>&1 || fail "build exited non-zero"
 [ -x "$APP_DIR/.zigttp/build/$APP_NAME" ] || fail "build artifact missing or not executable"
@@ -165,5 +139,5 @@ deploy_body=$(wait_for_http "http://127.0.0.1:$DEPLOY_PORT/" 25) || fail "deploy
 [ -n "$deploy_body" ] || fail "deploy artifact returned empty body on /"
 stop_bg "$DEPLOY_PID" "$APP_DIR/.zigttp/deploy/$APP_NAME"
 
-step "PASS: init -> doctor -> check -> studio -> build -> deploy"
+step "PASS: init -> doctor -> check -> build -> deploy"
 exit 0

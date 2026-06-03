@@ -35,6 +35,9 @@ main() {
     tar xzf "${TMPDIR}/${TARBALL}" -C "$BIN_DIR" --strip-components=1
 
     chmod +x "${BIN_DIR}/zigttp" "${BIN_DIR}/zigts"
+    if [ -f "${BIN_DIR}/zigttp-runtime" ]; then
+        chmod +x "${BIN_DIR}/zigttp-runtime"
+    fi
 
     printf "\nInstalled zigttp %s to %s\n" "$VERSION" "$BIN_DIR"
     printf "  zigttp: %s/zigttp\n" "$BIN_DIR"
@@ -84,7 +87,7 @@ resolve_version() {
 
 check_existing() {
     if [ -x "${BIN_DIR}/zigttp" ]; then
-        CURRENT=$("${BIN_DIR}/zigttp" version 2>/dev/null || echo "unknown")
+        CURRENT=$("${BIN_DIR}/zigttp" version 2>/dev/null | sed 's/^zigttp //' || echo "unknown")
         if [ "$CURRENT" = "$VERSION" ] || [ "$CURRENT" = "${VERSION#v}" ]; then
             printf "zigttp %s is already installed at %s\n" "$VERSION" "$BIN_DIR"
             exit 0

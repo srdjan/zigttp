@@ -84,13 +84,31 @@ pub fn runVeto(
     allocator: std.mem.Allocator,
     edit: turn.Edit,
 ) !VetoResult {
+    // zigttp:sql handlers need a --sql-schema the expert does not thread through
+    // yet, so the whole module is unsupported in the expert for this beta.
+    // Detecting the import up front (rather than relying on the analyzer's
+    // schema-less failure, which varies by build configuration) gives the model
+    // deterministic, actionable guidance instead of an opaque MissingSqlSchema
+    // that crashes the turn or loops on an unsatisfiable diagnostic.
+    // TODO: drop this up-front short-circuit once sql_schema_path threads through
+    // the expert apply path; the `catch error.MissingSqlSchema` backstop below is
+    // the correct-altitude guard and should outlive it.
+    if (importsSqlModule(edit.content)) {
+        return try sqlUnsupportedResult(allocator);
+    }
+
     const input: edit_simulate.EditSimulateInput = .{
         .file = edit.file,
         .content = edit.content,
         .before = edit.before,
     };
 
-    var result = try edit_simulate.simulate(allocator, input);
+    var result = edit_simulate.simulate(allocator, input) catch |err| switch (err) {
+        // Backstop for any analyzer path that still surfaces the schema-less
+        // failure as an error rather than a clean diagnostic.
+        error.MissingSqlSchema => return try sqlUnsupportedResult(allocator),
+        else => return err,
+    };
     defer result.deinit(allocator);
 
     // Salvage-on-reject. When an edit would be rejected, try normalizing the
@@ -180,6 +198,116 @@ pub fn runVeto(
             .normalized_content = salvaged_content,
             .rewrite_trace = rewrite_trace,
             .is_canonical = is_canonical,
+        },
+    };
+}
+
+/// True when the edit statically imports the zigttp:sql virtual module.
+fn importsSqlModule(content: []const u8) bool {
+    var tokenizer = zigts.parser.Tokenizer.init(content);
+    var at_statement_start = true;
+
+    while (true) {
+        const tok = tokenizer.next();
+        switch (tok.type) {
+            .eof => return false,
+            .semicolon, .rbrace => at_statement_start = true,
+            .kw_import => {
+                if (at_statement_start) {
+                    switch (scanImportForSqlModule(&tokenizer, content)) {
+                        .matched => return true,
+                        .finished_statement => at_statement_start = true,
+                        .not_import_decl => at_statement_start = false,
+                    }
+                } else {
+                    at_statement_start = false;
+                }
+            },
+            else => at_statement_start = false,
+        }
+    }
+}
+
+const ImportScanResult = enum {
+    matched,
+    finished_statement,
+    not_import_decl,
+};
+
+fn scanImportForSqlModule(tokenizer: *zigts.parser.Tokenizer, content: []const u8) ImportScanResult {
+    const first = tokenizer.next();
+    return switch (first.type) {
+        .string_literal => if (stringLiteralEquals(first, content, "zigttp:sql")) .matched else .not_import_decl,
+        .identifier => if (tokenTextEquals(first, content, "type"))
+            skipImportStatement(tokenizer)
+        else
+            scanImportFromClauseForSqlModule(tokenizer, content),
+        .lparen, .dot => .not_import_decl,
+        else => scanImportFromClauseForSqlModule(tokenizer, content),
+    };
+}
+
+fn scanImportFromClauseForSqlModule(tokenizer: *zigts.parser.Tokenizer, content: []const u8) ImportScanResult {
+    var saw_from = false;
+    while (true) {
+        const tok = tokenizer.next();
+        switch (tok.type) {
+            .eof, .semicolon => return .finished_statement,
+            .kw_from => saw_from = true,
+            .string_literal => if (saw_from and stringLiteralEquals(tok, content, "zigttp:sql")) return .matched,
+            else => {},
+        }
+    }
+}
+
+fn skipImportStatement(tokenizer: *zigts.parser.Tokenizer) ImportScanResult {
+    while (true) {
+        switch (tokenizer.next().type) {
+            .eof, .semicolon => return .finished_statement,
+            else => {},
+        }
+    }
+}
+
+fn tokenTextEquals(tok: zigts.parser.Token, content: []const u8, expected: []const u8) bool {
+    return std.mem.eql(u8, tok.text(content), expected);
+}
+
+fn stringLiteralEquals(tok: zigts.parser.Token, content: []const u8, expected: []const u8) bool {
+    const text = tok.text(content);
+    if (text.len < 2) return false;
+    const quote = text[0];
+    if (quote != '"' and quote != '\'') return false;
+    if (text[text.len - 1] != quote) return false;
+    return std.mem.eql(u8, text[1 .. text.len - 1], expected);
+}
+
+/// A failed veto whose llm_text tells the model (and, through it, the user) that
+/// zigttp:sql handlers are not verifiable by the expert in this beta, and what
+/// to do instead. Used in place of the opaque MissingSqlSchema error so the turn
+/// ends with guidance rather than crashing or looping.
+fn sqlUnsupportedResult(allocator: std.mem.Allocator) !VetoResult {
+    const guidance =
+        "This edit imports zigttp:sql, which the expert cannot verify yet: the analyzer " ++
+        "needs a --sql-schema and that is not threaded through the expert in this beta. " ++
+        "Do not retry this edit. Either avoid zigttp:sql (for example use zigttp:cache " ++
+        "instead), or tell the user to verify the handler directly with " ++
+        "`zigttp check --sql-schema <schema.sql> <handler.ts>`.";
+    const llm_text = try allocator.dupe(u8, guidance);
+    errdefer allocator.free(llm_text);
+
+    const hash_bytes = zigts.rule_registry.policyHash();
+    const hash_copy = try allocator.dupe(u8, &hash_bytes);
+    errdefer allocator.free(hash_copy);
+
+    return .{
+        .outcome = .{ .ok = false, .llm_text = llm_text, .ui_payload = null },
+        .report = .{
+            .policy_hash = hash_copy,
+            .total = 0,
+            .new = 0,
+            .preexisting = 0,
+            .after_properties = null,
         },
     };
 }
@@ -401,6 +529,59 @@ test "broken handler (var) fails the veto and body surfaces ZTS001" {
     try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "\"introduced_by_patch\":true") != null);
     try testing.expect(result.outcome.ui_payload != null);
     try testing.expect(result.report.new >= 1);
+}
+
+test "sqlUnsupportedResult yields a failed veto with actionable guidance" {
+    var result = try sqlUnsupportedResult(testing.allocator);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.outcome.ok);
+    try testing.expect(result.outcome.ui_payload == null);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "zigttp:sql") != null);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "sql-schema") != null);
+    try testing.expectEqual(@as(u32, 0), result.report.new);
+}
+
+test "importsSqlModule matches only static zigttp sql imports" {
+    try testing.expect(importsSqlModule("import { sql } from \"zigttp:sql\";"));
+    try testing.expect(importsSqlModule("import { sqlOne } from 'zigttp:sql';"));
+    try testing.expect(importsSqlModule("import \"zigttp:sql\";"));
+
+    try testing.expect(!importsSqlModule("const marker = \"zigttp:sql\";"));
+    try testing.expect(!importsSqlModule("// import { sql } from \"zigttp:sql\";\nconst ok = true;"));
+    try testing.expect(!importsSqlModule("import type { SqlRow } from \"zigttp:sql\";"));
+    try testing.expect(!importsSqlModule("const mod = import(\"zigttp:sql\");"));
+    try testing.expect(!importsSqlModule("const shape = { import: true, from: \"zigttp:sql\" };"));
+}
+
+test "a zigttp:sql handler fails the veto with guidance instead of crashing" {
+    var result = try runVeto(testing.allocator, .{
+        .file = "handler.ts",
+        .content = "import { sqlOne } from \"zigttp:sql\";\n" ++
+            "function handler(req: Request): Response { const row = sqlOne(\"SELECT * FROM users\"); return Response.json({row}); }",
+        .before = null,
+    });
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.outcome.ok);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "zigttp:sql") != null);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "sql-schema") != null);
+}
+
+test "a non-sql handler mentioning zigttp sql as text still runs normal veto" {
+    var result = try runVeto(testing.allocator, .{
+        .file = "handler.ts",
+        .content = "// import { sqlOne } from \"zigttp:sql\";\n" ++
+            "function handler(req: Request): Response & Spec<\"deterministic\"> {\n" ++
+            "  const marker = \"zigttp:sql\";\n" ++
+            "  return Response.json({ marker });\n" ++
+            "}\n",
+        .before = null,
+    });
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.outcome.ok);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "sql-schema") == null);
 }
 
 test "pre-existing violation with matching before passes the veto" {
