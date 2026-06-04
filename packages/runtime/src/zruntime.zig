@@ -6860,6 +6860,45 @@ test "object property access works" {
     try std.testing.expectEqualStrings("Alice-30", response.body);
 }
 
+test "ENG-2: zero-arg user-named method on object literal is callable" {
+    // Regression: a zero-arg method call on an object literal with a
+    // user-defined property name (`({greet:()=>7}).greet()`) used to fall
+    // through to NotCallable -> HTTP 500 because the get_field+call_method ->
+    // get_field_call peephole fusion mis-resolved the dynamically-interned
+    // atom. The fusion is now disabled (bytecode_opt.zig). Covers the literal
+    // receiver, a multi-property literal, and a variable receiver.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req){
+        \\  const a = ({greet:()=>7}).greet();
+        \\  const b = ({x:1,wave:()=>9}).wave();
+        \\  const o = { hi: () => 4 };
+        \\  const c = o.hi();
+        \\  return Response.text(a + '-' + b + '-' + c);
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<test>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqualStrings("7-9-4", response.body);
+}
+
 test "array indexing works" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

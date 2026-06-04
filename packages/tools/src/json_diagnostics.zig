@@ -35,6 +35,15 @@ pub const JsonDiagnostic = struct {
     line: u32,
     column: u16,
     suggestion: ?[]const u8,
+    /// True when `message` is a heap copy owned by this diagnostic (duped at
+    /// capture time so it outlives the checker allocator that produced it).
+    /// `deinit` frees it; static-string messages keep this false and are
+    /// left untouched. See `fromCheckerDiagnostic`.
+    message_owned: bool = false,
+
+    pub fn deinit(self: *JsonDiagnostic, allocator: std.mem.Allocator) void {
+        if (self.message_owned) allocator.free(self.message);
+    }
 };
 
 // -------------------------------------------------------------------------
@@ -243,42 +252,56 @@ pub fn fromStripError(diag: zigts.StripDiagnostic, file: []const u8) JsonDiagnos
     };
 }
 
+/// Convert a checker `Diagnostic` into a `JsonDiagnostic`, duping the message
+/// into `allocator` at capture time.
+///
+/// Checker diagnostics build their `.message` with `allocPrint` on the
+/// checker's own allocator (e.g. ZTS202/ZTS203 arg-count/arg-type detail),
+/// which is torn down with the pipeline before the JSON is serialized. Without
+/// this dupe the slice dangles and the `--json` / edit-simulate surface reads
+/// freed bytes (0xaa in debug). `allocator.dupe` is safe for both heap and
+/// static-string messages; the resulting copy is owned (`message_owned`) and
+/// freed by `JsonDiagnostic.deinit`. On OOM the borrowed slice is returned
+/// unowned, preserving prior behavior.
 fn fromCheckerDiagnostic(
+    allocator: std.mem.Allocator,
     comptime codeFn: anytype,
     diag: anytype,
     ir_view: IrView,
     file: []const u8,
 ) ?JsonDiagnostic {
     const loc = ir_view.getLoc(diag.node) orelse return null;
+    const owned_msg = allocator.dupe(u8, diag.message) catch null;
     return .{
         .code = codeFn(diag.kind),
         .severity = diag.severity.label(),
-        .message = diag.message,
+        .message = owned_msg orelse diag.message,
         .file = file,
         .line = loc.line,
         .column = loc.column,
         .suggestion = diag.help,
+        .message_owned = owned_msg != null,
     };
 }
 
-pub fn fromBoolDiagnostic(diag: bool_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    return fromCheckerDiagnostic(boolCheckerCode, diag, ir_view, file);
+pub fn fromBoolDiagnostic(allocator: std.mem.Allocator, diag: bool_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
+    return fromCheckerDiagnostic(allocator, boolCheckerCode, diag, ir_view, file);
 }
 
-pub fn fromTypeDiagnostic(diag: type_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    return fromCheckerDiagnostic(typeCheckerCode, diag, ir_view, file);
+pub fn fromTypeDiagnostic(allocator: std.mem.Allocator, diag: type_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
+    return fromCheckerDiagnostic(allocator, typeCheckerCode, diag, ir_view, file);
 }
 
-pub fn fromStrictDiagnostic(diag: strict_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    return fromCheckerDiagnostic(strictCheckerCode, diag, ir_view, file);
+pub fn fromStrictDiagnostic(allocator: std.mem.Allocator, diag: strict_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
+    return fromCheckerDiagnostic(allocator, strictCheckerCode, diag, ir_view, file);
 }
 
-pub fn fromVerifierDiagnostic(diag: handler_verifier.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    return fromCheckerDiagnostic(verifierCode, diag, ir_view, file);
+pub fn fromVerifierDiagnostic(allocator: std.mem.Allocator, diag: handler_verifier.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
+    return fromCheckerDiagnostic(allocator, verifierCode, diag, ir_view, file);
 }
 
-pub fn fromFlowDiagnostic(diag: flow_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    return fromCheckerDiagnostic(flowCheckerCode, diag, ir_view, file);
+pub fn fromFlowDiagnostic(allocator: std.mem.Allocator, diag: flow_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
+    return fromCheckerDiagnostic(allocator, flowCheckerCode, diag, ir_view, file);
 }
 
 // -------------------------------------------------------------------------

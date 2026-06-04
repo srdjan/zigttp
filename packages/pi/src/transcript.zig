@@ -253,7 +253,18 @@ fn renderAll(writer: anytype, transcript: *const Transcript) !void {
     }
 }
 
-fn renderRich(writer: anytype, entry: *const OwnedEntry) !void {
+fn renderRich(writer: *std.Io.Writer, entry: *const OwnedEntry) !void {
+    // Proof-bearing entries carry a structured ui_payload whose llm_text is raw
+    // analyzer JSON; render those legibly for humans. Everything else (and any
+    // entry without a payload) falls through to the plain-text label form.
+    const payload: ?ui_payload.UiPayload = switch (entry.*) {
+        .proof_card, .diagnostic_box, .verified_patch => |message| message.ui_payload,
+        .tool_result => |result| result.ui_payload,
+        else => null,
+    };
+    if (payload) |p| {
+        if (try ui_payload.writeLegible(writer, p)) return;
+    }
     try renderPlain(writer, entry);
 }
 
@@ -416,4 +427,35 @@ test "veto -> turn -> transcript pipeline still lands a proof entry" {
         .proof_card => |message| try testing.expect(std.mem.indexOf(u8, message.llm_text, "\"total\":0") != null),
         else => return error.TestFailed,
     }
+}
+
+test "renderRich renders a proof_card payload legibly, not as raw edit-simulate JSON" {
+    var result = try veto.runVeto(testing.allocator, .{
+        .file = "handler.ts",
+        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }",
+        .before = null,
+    });
+    defer result.deinit(testing.allocator);
+
+    var machine: turn.TurnMachine = .{ .state = .verifying_edit };
+    const action = machine.transition(.{ .edit_verified = result.outcome });
+
+    var tr: Transcript = .{};
+    defer tr.deinit(testing.allocator);
+
+    switch (action) {
+        .render => |msg| try tr.append(testing.allocator, msg),
+        else => return error.TestFailed,
+    }
+
+    // The entry's llm_text is the raw edit-simulate JSON envelope; the rich
+    // (human) renderer must instead surface the legible proof card.
+    const rendered = try renderRichEntryToOwned(testing.allocator, tr.at(0));
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.indexOf(u8, rendered, "PROVEN") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "Compiler verification") != null);
+    // No raw analyzer JSON should leak into the human rendering.
+    try testing.expect(std.mem.indexOf(u8, rendered, "\"total\"") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "\"violations\":[") == null);
 }

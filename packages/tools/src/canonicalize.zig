@@ -85,7 +85,7 @@ fn buildRefactors(
                     "canonicalize_export_function",
                 .line = diag.line,
                 .column = diag.column,
-                .message = diag.message,
+                .message = try allocator.dupe(u8, diag.message),
                 .replacement = replacement,
                 .original_line = try allocator.dupe(u8, line),
             });
@@ -101,7 +101,7 @@ fn buildRefactors(
                     "canonicalize_let_const",
                 .line = diag.line,
                 .column = diag.column,
-                .message = diag.message,
+                .message = try allocator.dupe(u8, diag.message),
                 .replacement = replacement,
                 .original_line = try allocator.dupe(u8, line),
             });
@@ -114,7 +114,7 @@ fn buildRefactors(
                 .kind = "canonicalize_compound_assign",
                 .line = diag.line,
                 .column = diag.column,
-                .message = diag.message,
+                .message = try allocator.dupe(u8, diag.message),
                 .replacement = replacement,
                 .original_line = try allocator.dupe(u8, line),
             });
@@ -128,7 +128,7 @@ fn buildRefactors(
                 .kind = "canonicalize_redundant_bool_compare",
                 .line = diag.line,
                 .column = diag.column,
-                .message = diag.message,
+                .message = try allocator.dupe(u8, diag.message),
                 .replacement = replacement,
                 .original_line = try allocator.dupe(u8, line),
             });
@@ -149,7 +149,11 @@ fn appendRefactorUnique(allocator: std.mem.Allocator, result: *Result, refactor:
             if (std.mem.eql(u8, owned.kind, "canonicalize_capability_key_alias")) {
                 existing.kind = owned.kind;
                 existing.column = owned.column;
+                // Move ownership of the duped message: free the old one, take
+                // owned's, and clear owned's so freeRefactorOwned skips it.
+                if (existing.message.len > 0) allocator.free(existing.message);
                 existing.message = owned.message;
+                owned.message = "";
             }
             freeRefactorOwned(allocator, &owned);
             return;
@@ -162,6 +166,10 @@ fn appendRefactorUnique(allocator: std.mem.Allocator, result: *Result, refactor:
 }
 
 fn freeRefactorOwned(allocator: std.mem.Allocator, refactor: *Refactor) void {
+    // `message` is duped into `allocator` at every build site (ENG-3: it must
+    // outlive the CheckResult whose diagnostics it was copied from). The empty
+    // string is the freed/moved-out sentinel and is never heap-owned.
+    if (refactor.message.len > 0) allocator.free(refactor.message);
     allocator.free(refactor.replacement);
     if (refactor.original_line) |line| allocator.free(line);
     refactor.* = .{
@@ -473,7 +481,7 @@ fn capabilityAliasReplacement(
         .kind = "canonicalize_capability_key_alias",
         .line = alias.line,
         .column = 1,
-        .message = "make capability key alias compiler-visible",
+        .message = try allocator.dupe(u8, "make capability key alias compiler-visible"),
         .replacement = alias.replacement,
         .original_line = alias.original_line,
     };

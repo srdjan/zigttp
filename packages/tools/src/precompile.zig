@@ -1047,7 +1047,7 @@ pub fn runCheckOnlyFromSourceWithOptions(
         if (bool_diags.len > 0) {
             if (json_mode) {
                 for (bool_diags) |diag| {
-                    if (json_diag.fromBoolDiagnostic(diag, ir_view, handler_path)) |jd| {
+                    if (json_diag.fromBoolDiagnostic(allocator, diag, ir_view, handler_path)) |jd| {
                         result.json_diagnostics.append(allocator, jd) catch {};
                     }
                 }
@@ -1072,7 +1072,7 @@ pub fn runCheckOnlyFromSourceWithOptions(
         if (tc_diags.len > 0) {
             if (json_mode) {
                 for (tc_diags) |diag| {
-                    if (json_diag.fromTypeDiagnostic(diag, ir_view, handler_path)) |jd| {
+                    if (json_diag.fromTypeDiagnostic(allocator, diag, ir_view, handler_path)) |jd| {
                         result.json_diagnostics.append(allocator, jd) catch {};
                     }
                 }
@@ -1096,7 +1096,7 @@ pub fn runCheckOnlyFromSourceWithOptions(
         result.strict_warnings = @intCast(strict_diags.len -| result.strict_errors);
         if (strict_diags.len > 0) {
             for (strict_diags) |diag| {
-                if (json_diag.fromStrictDiagnostic(diag, ir_view, handler_path)) |jd| {
+                if (json_diag.fromStrictDiagnostic(allocator, diag, ir_view, handler_path)) |jd| {
                     result.json_diagnostics.append(allocator, jd) catch {};
                 }
             }
@@ -1129,7 +1129,7 @@ pub fn runCheckOnlyFromSourceWithOptions(
         if (verifier_diags.len > 0) {
             if (json_mode) {
                 for (verifier_diags) |diag| {
-                    if (json_diag.fromVerifierDiagnostic(diag, ir_view, handler_path)) |jd| {
+                    if (json_diag.fromVerifierDiagnostic(allocator, diag, ir_view, handler_path)) |jd| {
                         result.json_diagnostics.append(allocator, jd) catch {};
                     }
                 }
@@ -1167,7 +1167,7 @@ pub fn runCheckOnlyFromSourceWithOptions(
         result.flow_warnings = @intCast(flow_diags.len -| result.flow_errors);
         if (json_mode) {
             for (flow_diags) |diag| {
-                if (json_diag.fromFlowDiagnostic(diag, ir_view, handler_path)) |jd| {
+                if (json_diag.fromFlowDiagnostic(allocator, diag, ir_view, handler_path)) |jd| {
                     result.json_diagnostics.append(allocator, jd) catch {};
                 }
             }
@@ -4085,6 +4085,39 @@ test "runCheckOnlyFromSource keeps diagnostics off stderr in test mode" {
     // Strict mode (default) rejects the implicit-unknown fetchSync result.
     try std.testing.expect(result.strict_errors > 0);
     try std.testing.expect(result.totalErrors() > 0);
+}
+
+test "runCheckOnlyFromSource: ZTS202 arg-count message survives json capture without use-after-free" {
+    // Regression (ENG-3): the ZTS202/ZTS203 dynamic message is allocPrint'd on
+    // the checker allocator, which the pipeline tears down before the JSON is
+    // serialized. fromCheckerDiagnostic must dupe the message into the
+    // long-lived CheckResult allocator at capture time, or the --json /
+    // edit-simulate surface reads freed bytes (0xaa in debug). Using the
+    // leak-checked testing.allocator also proves the new owned-message path has
+    // no leak or double-free.
+    const allocator = std.testing.allocator;
+    const source =
+        \\function digest(s: string): string {
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.text(digest());
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "argcount.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    var saw_202 = false;
+    for (result.json_diagnostics.items) |d| {
+        if (!std.mem.eql(u8, d.code, "ZTS202")) continue;
+        saw_202 = true;
+        // The message must be intact, not freed-memory garbage.
+        try std.testing.expect(std.unicode.utf8ValidateSlice(d.message));
+        try std.testing.expect(std.mem.indexOfScalar(u8, d.message, 0xaa) == null);
+        try std.testing.expect(std.mem.indexOf(u8, d.message, "wrong number of arguments") != null);
+    }
+    try std.testing.expect(saw_202);
 }
 
 test "runCheckOnlyFromSource accepts annotated TSX handler after JSX block" {

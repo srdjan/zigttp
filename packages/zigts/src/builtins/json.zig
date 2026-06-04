@@ -572,18 +572,57 @@ fn parseJsonNumber(text: []const u8, pos: *usize) JsonError!value.JSValue {
 
     if (is_float) {
         const f = std.fmt.parseFloat(f64, num_str) catch return error.InvalidJson;
-        // For now, truncate to int if it fits
+        // JS numbers are all f64; fromFloat is NaN-boxed inline (no allocation)
+        // and preserves full precision for fractions and large/exponent values.
         if (f == @trunc(f) and f >= -2147483648 and f <= 2147483647) {
             return value.JSValue.fromInt(@intFromFloat(f));
         }
-        // Would need heap allocation for float - return as int truncated
-        return value.JSValue.fromInt(@intFromFloat(@trunc(f)));
+        return value.JSValue.fromFloat(f);
     } else {
         const i = std.fmt.parseInt(i32, num_str, 10) catch {
-            // Try as float if integer overflow
+            // Integer overflowed i32; represent as full-precision f64.
             const f = std.fmt.parseFloat(f64, num_str) catch return error.InvalidJson;
-            return value.JSValue.fromInt(@intFromFloat(@trunc(f)));
+            return value.JSValue.fromFloat(f);
         };
         return value.JSValue.fromInt(i);
+    }
+}
+
+test "JSON.parse number full precision: decimals, large ints, and exponents" {
+    const expectEqual = std.testing.expectEqual;
+
+    // Decimal must keep its fractional part (was truncated to 9).
+    {
+        var pos: usize = 0;
+        const v = try parseJsonNumber("9.99", &pos);
+        try expectEqual(@as(?f64, 9.99), v.toNumber());
+    }
+
+    // Integer larger than 2^31 must not overflow i32 / panic.
+    {
+        var pos: usize = 0;
+        const v = try parseJsonNumber("3000000000", &pos);
+        try expectEqual(@as(?f64, 3000000000.0), v.toNumber());
+    }
+
+    // Millisecond-scale timestamp (~1.7e12) must round-trip exactly.
+    {
+        var pos: usize = 0;
+        const v = try parseJsonNumber("1700000000000", &pos);
+        try expectEqual(@as(?f64, 1700000000000.0), v.toNumber());
+    }
+
+    // Exponent literal that is an integer value still parses correctly.
+    {
+        var pos: usize = 0;
+        const v = try parseJsonNumber("1.5e3", &pos);
+        try expectEqual(@as(?f64, 1500.0), v.toNumber());
+    }
+
+    // Large exponent literal beyond i32 range must use full-precision f64.
+    {
+        var pos: usize = 0;
+        const v = try parseJsonNumber("1.7e12", &pos);
+        try expectEqual(@as(?f64, 1.7e12), v.toNumber());
     }
 }

@@ -7,13 +7,24 @@
 //!   get_loc N + add              -> get_loc_add N           (saves 1 dispatch)
 //!   get_loc N + get_loc M + add  -> get_loc_get_loc_add N M (saves 2 dispatches)
 //!   push_const X + call N        -> push_const_call X N     (saves 1 dispatch)
-//!   get_field X + call_method N  -> get_field_call X N      (saves 1 dispatch)
+//!   get_field X + call_method N  -> get_field_call X N      (DISABLED, see below)
 //!
 //! Safety: Never fuses across basic block boundaries (jump targets).
 
 const std = @import("std");
 const bytecode = @import("bytecode.zig");
 const Opcode = bytecode.Opcode;
+
+/// ENG-2: the get_field(_ic) + call_method -> get_field_call fusion is disabled.
+/// The fused get_field_call handler mis-resolves a zero-arg method call on an
+/// object literal with a user-defined property name (`({greet:()=>7}).greet()`),
+/// falling through to a NotCallable (HTTP 500). Leaving these calls as
+/// get_field_ic + call_method is both correct and keeps the inline cache the
+/// fused opcode discards (it used raw getProperty). Re-enable only with a fixed
+/// handler + regression coverage; the saved single dispatch is a perf
+/// follow-up, not a correctness concern for the beta. Runtime-level coverage:
+/// zruntime.zig "ENG-2: zero-arg user-named method on object literal is callable".
+const enable_get_field_call_fusion = false;
 
 /// Statistics from optimization pass
 pub const OptStats = struct {
@@ -290,7 +301,8 @@ pub const BytecodeOptimizer = struct {
         // Pattern: get_field X + call_method N -> get_field_call X N
         // Original: get_field(3) + call_method(2) = 5 bytes
         // Fused: get_field_call(4) = 4 bytes, NOP 1 byte
-        if (op1 == .get_field and op2 == .call_method) {
+        // Disabled via enable_get_field_call_fusion (ENG-2); see file header.
+        if (enable_get_field_call_fusion and op1 == .get_field and op2 == .call_method) {
             const atom_idx = self.readU16(code, pos + 1);
             const argc = code[next_pos + 1];
             code[pos] = @intFromEnum(Opcode.get_field_call);
@@ -308,7 +320,7 @@ pub const BytecodeOptimizer = struct {
         // Original: get_field_ic(5) + call_method(2) = 7 bytes
         // Fused: get_field_call(4) = 4 bytes, NOP 3 bytes
         // Note: Drops the IC index, but method dispatch typically doesn't benefit from IC anyway
-        if (op1 == .get_field_ic and op2 == .call_method) {
+        if (enable_get_field_call_fusion and op1 == .get_field_ic and op2 == .call_method) {
             const atom_idx = self.readU16(code, pos + 1);
             const argc = code[next_pos + 1];
             code[pos] = @intFromEnum(Opcode.get_field_call);

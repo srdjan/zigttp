@@ -59,6 +59,10 @@ pub const CheckResult = struct {
 
     pub fn deinit(self: *CheckResult, allocator: std.mem.Allocator) void {
         if (self.contract) |*c| c.deinit(allocator);
+        // Checker diagnostics own a heap copy of their message (duped at
+        // capture so it outlives the checker allocator); free those here.
+        // Static-string messages keep `message_owned` false and are skipped.
+        for (self.json_diagnostics.items) |*d| d.deinit(allocator);
         self.json_diagnostics.deinit(allocator);
         if (self.proof_trace_json) |ptj| allocator.free(ptj);
     }

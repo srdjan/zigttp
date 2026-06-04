@@ -100,6 +100,7 @@ fn runWithSession(
     }
     defer session.transcript.observer = null;
 
+    const turn_start_len = session.transcript.len();
     const turn_result = if (client_override) |client|
         runOneTurnWithClient(allocator, session, registry, client, prompt, approval_fn)
     else
@@ -115,10 +116,12 @@ fn runWithSession(
     defer allocator.free(rendered);
 
     if (!flags.json_mode) {
-        try writeOut(out_writer, rendered);
-        if (rendered.len == 0 or rendered[rendered.len - 1] != '\n') {
-            try writeOut(out_writer, "\n");
-        }
+        // The last transcript entry after a verified edit is the proof card;
+        // the legible "verified:" summary lives in the verified_patch entry
+        // just before it. Surface that summary first so `--print` shows the
+        // applied file and verdict, not just the proof card.
+        try writeVerifiedSummary(allocator, out_writer, &session.transcript, turn_start_len);
+        try writeOutLine(out_writer, rendered);
         return;
     }
 
@@ -154,11 +157,44 @@ fn runOneTurnWithClient(
     return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
 }
 
+/// In non-JSON `--print`, emit the legible verified-patch summary (the "verified:"
+/// line plus stats) if the current turn applied an edit. Renders the most recent
+/// current-turn verified_patch entry's `llm_text` summary; no-op when no edit was
+/// applied this turn.
+fn writeVerifiedSummary(
+    allocator: std.mem.Allocator,
+    out: ?*std.Io.Writer,
+    transcript: *const transcript_mod.Transcript,
+    turn_start_len: usize,
+) !void {
+    const end = transcript.len();
+    const start = if (turn_start_len > end) end else turn_start_len;
+    var i = end;
+    while (i > start) {
+        i -= 1;
+        const entry = transcript.at(i);
+        if (entry.* == .verified_patch) {
+            const rendered = try transcript_mod.renderRichEntryToOwned(allocator, entry);
+            defer allocator.free(rendered);
+            try writeOutLine(out, rendered);
+            return;
+        }
+    }
+}
+
 fn writeOut(out: ?*std.Io.Writer, bytes: []const u8) !void {
     if (out) |w| {
         try w.writeAll(bytes);
     } else {
         _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
+    }
+}
+
+/// Write `bytes`, then a trailing newline unless one is already present.
+fn writeOutLine(out: ?*std.Io.Writer, bytes: []const u8) !void {
+    try writeOut(out, bytes);
+    if (bytes.len == 0 or bytes[bytes.len - 1] != '\n') {
+        try writeOut(out, "\n");
     }
 }
 
@@ -335,4 +371,56 @@ test "runWithClient: non-json mode writes rendered text" {
     buf = aw.toArrayList();
     try testing.expect(std.mem.indexOf(u8, buf.items, "hi there") != null);
     try testing.expect(buf.items[buf.items.len - 1] == '\n');
+}
+
+test "writeVerifiedSummary ignores verified patches before current turn" {
+    const allocator = testing.allocator;
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(allocator);
+
+    try tr.entries.append(allocator, .{ .verified_patch = .{
+        .llm_text = try allocator.dupe(u8, "verified: old.ts"),
+        .ui_payload = null,
+    } });
+
+    const turn_start_len = tr.len();
+    try tr.append(allocator, .{ .user_text = "resume diagnostics" });
+    try tr.append(allocator, .{ .model_text = "no edit this turn" });
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    try writeVerifiedSummary(allocator, &aw.writer, &tr, turn_start_len);
+    buf = aw.toArrayList();
+
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+test "writeVerifiedSummary emits verified patch from current turn" {
+    const allocator = testing.allocator;
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(allocator);
+
+    try tr.entries.append(allocator, .{ .verified_patch = .{
+        .llm_text = try allocator.dupe(u8, "verified: old.ts"),
+        .ui_payload = null,
+    } });
+
+    const turn_start_len = tr.len();
+    try tr.append(allocator, .{ .user_text = "apply edit" });
+    try tr.entries.append(allocator, .{ .verified_patch = .{
+        .llm_text = try allocator.dupe(u8, "verified: current.ts"),
+        .ui_payload = null,
+    } });
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    try writeVerifiedSummary(allocator, &aw.writer, &tr, turn_start_len);
+    buf = aw.toArrayList();
+
+    try testing.expect(std.mem.indexOf(u8, buf.items, "current.ts") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "old.ts") == null);
 }

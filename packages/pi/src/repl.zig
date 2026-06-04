@@ -5,6 +5,7 @@
 //! routed locally.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zigts = @import("zigts");
 const registry_mod = @import("registry/registry.zig");
 const transcript_mod = @import("transcript.zig");
@@ -820,7 +821,9 @@ const InteractiveStreamCtx = struct {
         }
         const rendered = transcript_mod.renderRichEntryToOwned(self.allocator, entry) catch return;
         defer self.allocator.free(rendered);
-        _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+        if (!builtin.is_test) {
+            _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+        }
         self.streamed = true;
     }
 };

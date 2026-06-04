@@ -1564,6 +1564,72 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
     try writer.writeByte('}');
 }
 
+/// Render a payload as legible human lines for the REPL and `expert --print`.
+/// Returns `true` when it emitted a structured rendering, `false` when the
+/// variant has no human form here and the caller should fall back to the
+/// entry's plain `llm_text`. Only the proof-bearing variants are handled,
+/// because those are the ones whose `llm_text` is otherwise raw analyzer JSON.
+pub fn writeLegible(writer: *std.Io.Writer, payload: UiPayload) !bool {
+    switch (payload) {
+        .proof_card => |proof| {
+            try writer.writeAll("PROVEN  ");
+            try writer.writeAll(proof.title);
+            try writer.writeByte('\n');
+            try writer.print(
+                "  {s} ({d} total, {d} new",
+                .{ proof.summary, proof.stats.total, proof.stats.new },
+            );
+            if (proof.stats.preexisting) |preexisting| {
+                try writer.print(", {d} preexisting", .{preexisting});
+            }
+            try writer.writeByte(')');
+            try writer.writeByte('\n');
+            if (proof.highlights.len > 0) {
+                try writer.writeAll("  properties:");
+                for (proof.highlights) |highlight| {
+                    try writer.writeByte(' ');
+                    try writer.writeAll(highlight);
+                }
+                try writer.writeByte('\n');
+            }
+            return true;
+        },
+        .verified_patch => |patch| {
+            try writer.writeAll("verified: ");
+            try writer.writeAll(patch.file);
+            if (patch.prove) |prove| {
+                try writer.writeAll(" (");
+                try writer.writeAll(prove.classification);
+                try writer.writeByte(')');
+            }
+            try writer.writeByte('\n');
+            try writer.print(
+                "  {d} total, {d} new",
+                .{ patch.stats.total, patch.stats.new },
+            );
+            if (patch.stats.preexisting) |preexisting| {
+                try writer.print(", {d} preexisting", .{preexisting});
+            }
+            try writer.writeByte('\n');
+            if (patch.is_canonical) try writer.writeAll("  canonical\n");
+            return true;
+        },
+        .diagnostics => |diagnostics| {
+            try writer.writeAll("diagnostics: ");
+            try writer.writeAll(diagnostics.summary);
+            try writer.writeByte('\n');
+            for (diagnostics.items) |item| {
+                try writer.print(
+                    "  {s} {s}:{d}:{d} {s}\n",
+                    .{ item.code, item.path, item.line, item.column, item.message },
+                );
+            }
+            return true;
+        },
+        else => return false,
+    }
+}
+
 pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
     if (value != .object) return error.InvalidUiPayload;
     const obj = value.object;

@@ -2907,6 +2907,10 @@ test "Interpreter property access" {
     try std.testing.expectEqual(@as(i32, 42), result.getInt());
 }
 
+// ENG-2 fix lives in bytecode_opt.zig (fusion disabled); a faithful repro needs
+// the full engine, so its regression test lives at the runtime layer
+// (zruntime.zig "ENG-2: zero-arg user-named method on object literal is callable").
+
 test "Interpreter global access" {
     const allocator = std.testing.allocator;
     const gc_mod = @import("gc.zig");

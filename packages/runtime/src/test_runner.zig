@@ -24,6 +24,7 @@ const HttpHeader = @import("http_types.zig").HttpHeader;
 const HttpResponse = @import("http_types.zig").HttpResponse;
 const ServerConfig = @import("server.zig").ServerConfig;
 const handler_loader = @import("handler_loader.zig");
+const runtime_natives = @import("runtime_natives.zig");
 
 const trace = zq.trace;
 const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
@@ -173,9 +174,16 @@ fn runOneTest(
     defer headers_list.deinit(allocator);
     parseHeadersFromJson(allocator, request.headers_json, &headers_list) catch {};
 
+    // zruntime falls back to the full url for req.path when path is empty, so
+    // without this split a url like "/?probe=1" would make req.path "/?probe=1"
+    // and break handlers that check req.path === "/". Keep .url as the full
+    // target and set .path via the same helper the real server path uses.
+    const request_path = runtime_natives.splitPathAndQuery(request.url).path;
+
     var response = rt.executeHandler(.{
         .method = request.method,
         .url = request.url,
+        .path = request_path,
         .headers = headers_list,
         .body = request.body,
     }) catch |err| {
@@ -478,4 +486,45 @@ test "checkAssertions: bodyContains mismatch fails" {
     }
     try std.testing.expectEqual(@as(usize, 1), failures.items.len);
     try std.testing.expect(std.mem.indexOf(u8, failures.items[0], "body does not contain") != null);
+}
+
+test "runOneTest: request url with query string yields path without query (CLI-1 scaffold)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Handler matches req.path === "/" (mirrors the default `zigttp init` basic scaffold).
+    const handler_code =
+        \\function handler(req) {
+        \\  if (req.method === "GET" && req.path === "/") {
+        \\    return Response.text("Hello,");
+        \\  }
+        \\  return Response.text("Not Found", { status: 404 });
+        \\}
+    ;
+
+    // Mirror run(): replay sentinel installs stub modules, arena escape off.
+    const config = RuntimeConfig{
+        .replay_file_path = "test",
+        .enforce_arena_escape = false,
+    };
+
+    // The scaffold fixture sends GET /?probe=1; before the fix req.path became
+    // "/?probe=1" and the handler returned 404.
+    const test_case = TestCase{
+        .name = "scaffold probe",
+        .request = .{
+            .method = "GET",
+            .url = "/?probe=1",
+            .headers_json = "{}",
+            .body = null,
+        },
+        .assertions = .{ .status = 200 },
+    };
+
+    const result = runOneTest(allocator, config, handler_code, "<scaffold>", &test_case);
+    defer result.deinitFailures(allocator);
+
+    try std.testing.expect(result.err == null);
+    try std.testing.expect(result.pass);
 }
