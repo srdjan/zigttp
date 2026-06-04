@@ -273,16 +273,20 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]u8 {
 
     if (status != .ok) {
         // The error body is a small JSON payload carrying the real reason (bad
-        // key, exceeded quota, rate limit). Surface it instead of collapsing
-        // every failure into a bare HttpNotOk.
-        if (!builtin.is_test) {
+        // key, exceeded quota, rate limit). Classify first: when the typed error
+        // carries one-line remediation the catch site prints that actionable
+        // message, so dumping the raw body here (ahead of the catch site) would
+        // only bury it. Keep the raw `err` line solely for the unclassified
+        // `HttpNotOk` fallthrough, where the body is the user's only signal.
+        const err = http_errors.classify(@intFromEnum(status), response_body);
+        if (!builtin.is_test and loop.providerErrorRemediation(err) == null) {
             std.log.err("openai API: HTTP {d} {s}: {s}", .{
                 @intFromEnum(status),
                 status.phrase() orelse "",
                 response_body,
             });
         }
-        return http_errors.classify(@intFromEnum(status), response_body);
+        return err;
     }
 
     return response_body;

@@ -103,6 +103,13 @@ pub fn autoReject(preview: ApprovalPreview) anyerror!bool {
     return false;
 }
 
+/// Appended to the bare "agent budget exhausted before a final answer" line so a
+/// turn that runs out of model round-trips ends with a concrete next step rather
+/// than a dead end.
+pub const budget_exhausted_next_step =
+    "Next: re-run the request, narrow it to one change at a time, or run " ++
+    "`zigttp check <handler>` to see the remaining diagnostics directly.";
+
 /// One-line, actionable remediation for a model-backend error, or null for
 /// errors that are not provider failures (local I/O, parse, etc.). The wire
 /// layer maps HTTP status and in-stream errors to these typed errors; the
@@ -119,6 +126,14 @@ pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
         error.ApiError => "The provider returned an error mid-response (details logged above).",
         error.PromptTooLong => "The conversation is too large for the model's context window. Run `/compact` to shrink it, then retry.",
         error.RequestTimedOut => "The request timed out with no response. Check your network and try again.",
+        // SSE/stream decode failures from `providers/openai/sse_parser.zig`. A
+        // mangled or partial stream (often a proxy) otherwise prints a bare
+        // CamelCase name; collapse them all into one actionable line.
+        error.MalformedSse,
+        error.MissingType,
+        error.UnknownEventType,
+        error.UnexpectedJsonShape,
+        => "The provider response could not be parsed (possibly a proxy or partial stream). Try again.",
         else => null,
     };
 }
@@ -205,6 +220,10 @@ pub fn runTurnWith(
     var model_roundtrips: u8 = 0;
     var tool_calls_used: usize = 0;
     var turn_usage: turn.Usage = .{};
+    // Set when we stop the turn for running out of model round-trips. The
+    // `.prompt_user` arm reads it to append a concrete next step to the bare
+    // "budget exhausted" line so the user is not left at a dead end.
+    var hit_roundtrip_budget = false;
     // Accumulated diagnostics across failed verification attempts. The retry
     // prompt feeds the whole history (not just the latest envelope) so the model
     // does not re-introduce a violation it already fixed on an earlier attempt.
@@ -215,6 +234,7 @@ pub fn runTurnWith(
         switch (action) {
             .request_model => {
                 if (model_roundtrips >= options.max_model_roundtrips_per_turn) {
+                    hit_roundtrip_budget = true;
                     next_event = .budget_exhausted;
                     continue;
                 }
@@ -225,6 +245,7 @@ pub fn runTurnWith(
             },
             .retry_draft => |payload| {
                 if (model_roundtrips >= options.max_model_roundtrips_per_turn) {
+                    hit_roundtrip_budget = true;
                     next_event = .budget_exhausted;
                     continue;
                 }
@@ -362,7 +383,11 @@ pub fn runTurnWith(
                 return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage };
             },
             .prompt_user => |question| {
-                try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = question } });
+                const text = if (hit_roundtrip_budget)
+                    try std.fmt.allocPrint(ta, "{s}\n{s}", .{ question, budget_exhausted_next_step })
+                else
+                    question;
+                try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = text } });
                 return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage };
             },
             .end_turn => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage },
@@ -1419,4 +1444,25 @@ test "failed veto does not append a verified_patch entry" {
             else => {},
         }
     }
+}
+
+test "providerErrorRemediation: SSE parse errors map to a non-empty actionable hint" {
+    // EXP-12: a proxy-mangled stream previously printed a bare CamelCase name.
+    const sse_errors = [_]anyerror{
+        error.MalformedSse,
+        error.MissingType,
+        error.UnknownEventType,
+        error.UnexpectedJsonShape,
+    };
+    for (sse_errors) |err| {
+        const hint = providerErrorRemediation(err) orelse return error.TestFailed;
+        try testing.expect(hint.len > 0);
+        try testing.expect(std.mem.indexOf(u8, hint, "could not be parsed") != null);
+    }
+}
+
+test "budget-exhausted prompt carries a concrete next step" {
+    // EXP-9: the bare "budget exhausted" line must end with an actionable step.
+    try testing.expect(budget_exhausted_next_step.len > 0);
+    try testing.expect(std.mem.indexOf(u8, budget_exhausted_next_step, "zigttp check") != null);
 }

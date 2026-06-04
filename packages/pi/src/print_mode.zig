@@ -48,6 +48,7 @@ pub fn run(
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
         .fork_session_id = flags.fork_session_id,
+        .model = flags.model,
     });
     defer session.deinit(allocator);
 
@@ -110,7 +111,13 @@ fn runWithSession(
         // error (and close the JSON stream) and exit non-zero, rather than
         // aborting the process with a Zig error-return trace.
         loop.writeTurnErrorToStderr(err);
-        if (flags.json_mode) emitEndEvent(allocator, out_writer) catch {};
+        if (flags.json_mode) {
+            // Surface the failure in-band so a JSON consumer sees it without
+            // scraping stderr: an `error` event carrying the error name and the
+            // same one-line remediation, then the `end` sentinel.
+            emitErrorEvent(allocator, out_writer, err) catch {};
+            emitEndEvent(allocator, out_writer) catch {};
+        }
         std.process.exit(1);
     };
     defer allocator.free(rendered);
@@ -243,6 +250,36 @@ fn emitEntry(allocator: std.mem.Allocator, out: ?*std.Io.Writer, entry: *const t
     }
 }
 
+/// Emit a structured `error` event in the `{"v","k","d"}` envelope so a JSON
+/// consumer sees a failed turn in-band. `d` is an object with the error name
+/// and, for known provider failures, the one-line remediation text (else null).
+fn emitErrorEvent(allocator: std.mem.Allocator, out: ?*std.Io.Writer, err: anyerror) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var s: std.json.Stringify = .{ .writer = &aw.writer };
+    try s.beginObject();
+    try s.objectField("v");
+    try s.write(session_events.schema_version);
+    try s.objectField("k");
+    try s.write("error");
+    try s.objectField("d");
+    try s.beginObject();
+    try s.objectField("error");
+    try s.write(@errorName(err));
+    try s.objectField("remediation");
+    if (loop.providerErrorRemediation(err)) |hint| {
+        try s.write(hint);
+    } else {
+        try s.write(null);
+    }
+    try s.endObject();
+    try s.endObject();
+    try aw.writer.writeByte('\n');
+    buf = aw.toArrayList();
+    try writeOut(out, buf.items);
+}
+
 fn emitEndEvent(allocator: std.mem.Allocator, out: ?*std.Io.Writer) !void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -371,6 +408,44 @@ test "runWithClient: non-json mode writes rendered text" {
     buf = aw.toArrayList();
     try testing.expect(std.mem.indexOf(u8, buf.items, "hi there") != null);
     try testing.expect(buf.items[buf.items.len - 1] == '\n');
+}
+
+test "emitErrorEvent: known provider error carries name and remediation in-band" {
+    const allocator = testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    try emitErrorEvent(allocator, &aw.writer, error.AuthFailed);
+    buf = aw.toArrayList();
+
+    const line = std.mem.trim(u8, buf.items, "\n");
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqual(@as(i64, 2), obj.get("v").?.integer);
+    try testing.expectEqualStrings("error", obj.get("k").?.string);
+    const d = obj.get("d").?.object;
+    try testing.expectEqualStrings("AuthFailed", d.get("error").?.string);
+    try testing.expect(d.get("remediation").? == .string);
+    try testing.expect(std.mem.indexOf(u8, d.get("remediation").?.string, "zigttp auth") != null);
+}
+
+test "emitErrorEvent: non-provider error emits null remediation" {
+    const allocator = testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    try emitErrorEvent(allocator, &aw.writer, error.MissingPrintPrompt);
+    buf = aw.toArrayList();
+
+    const line = std.mem.trim(u8, buf.items, "\n");
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+    defer parsed.deinit();
+    const d = parsed.value.object.get("d").?.object;
+    try testing.expectEqualStrings("MissingPrintPrompt", d.get("error").?.string);
+    try testing.expect(d.get("remediation").? == .null);
 }
 
 test "writeVerifiedSummary ignores verified patches before current turn" {

@@ -239,26 +239,11 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const process_req_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalProcessRequest), process_req_atom, 3);
     try ctx.setGlobal(process_req_atom, process_req_func.toValue());
 
-    // Map
-    const map_proto = try createBuiltinObject(ctx, pool, root_class_idx);
-    try addMethodDynamic(ctx, map_proto, "set", wrap(map.mapSet), 2);
-    try addMethodDynamic(ctx, map_proto, "get", wrap(map.mapGet), 1);
-    try addMethodDynamic(ctx, map_proto, "has", wrap(map.mapHas), 1);
-    try addMethodDynamic(ctx, map_proto, "delete", wrap(map.mapDelete), 1);
-    try addMethodDynamic(ctx, map_proto, "clear", wrap(map.mapClear), 0);
-    const map_ctor = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(map.mapConstructor), .Map, 0);
-    try ctx.setPropertyChecked(map_ctor, .prototype, map_proto.toValue());
-    try ctx.setGlobal(.Map, map_ctor.toValue());
-
-    // Set
-    const set_proto = try createBuiltinObject(ctx, pool, root_class_idx);
-    try addMethodDynamic(ctx, set_proto, "add", wrap(set.setAdd), 1);
-    try addMethodDynamic(ctx, set_proto, "has", wrap(set.setHas), 1);
-    try addMethodDynamic(ctx, set_proto, "delete", wrap(set.setDelete), 1);
-    try addMethodDynamic(ctx, set_proto, "clear", wrap(set.setClear), 0);
-    const set_ctor = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(set.setConstructor), .Set, 0);
-    try ctx.setPropertyChecked(set_ctor, .prototype, set_proto.toValue());
-    try ctx.setGlobal(.Set, set_ctor.toValue());
+    // Map/Set are intentionally NOT registered as globals: their constructors
+    // produce prototype-less instances, so any method call (e.g. m.set(...))
+    // throws NotCallable -> HTTP 500. Leaving them unregistered makes `Map` a
+    // clear "not defined" instead. They are also outside the supported JS
+    // subset. The map/set implementations stay imported for their unit tests.
 
     // Response constructor with static methods
     const response_ctor = try createBuiltinNativeFunction(ctx, pool, root_class_idx, http.responseConstructor, .Response, 2);
@@ -345,7 +330,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, string_proto, "concat", wrap(string_builtins.stringConcat), 1);
     try addMethodDynamic(ctx, string_proto, "replace", wrap(string_builtins.stringReplace), 2);
     try addMethodDynamic(ctx, string_proto, "replaceAll", wrap(string_builtins.stringReplaceAll), 2);
-    const string_ctor = try createBuiltinObject(ctx, pool, root_class_idx);
+    const string_ctor = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(string_builtins.stringConstructor), .String, 1);
     try addMethodDynamic(ctx, string_ctor, "fromCharCode", wrap(string_builtins.stringFromCharCode), 1);
     try ctx.setGlobal(.String, string_ctor.toValue());
 

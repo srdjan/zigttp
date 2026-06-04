@@ -57,6 +57,15 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
                 }
                 return;
             }
+            if (json_mode) {
+                // Machine consumers asked for JSON: keep the error in-band as a
+                // JSON object on stdout instead of a plain-text stderr line.
+                try writeUnknownRuleJson(&aw.writer, name);
+                try aw.writer.writeAll("\n");
+                buf = aw.toArrayList();
+                _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+                std.process.exit(1);
+            }
             try aw.writer.print("Unknown rule: {s}\n", .{name});
             buf = aw.toArrayList();
             _ = std.c.write(std.c.STDERR_FILENO, buf.items.ptr, buf.items.len);
@@ -181,6 +190,16 @@ fn writeTypeCheckerText(writer: anytype, rule: TypeCheckerRule) !void {
     try writer.print("Description: {s}\n", .{rule.description});
 }
 
+/// Build the `--json` unknown-rule error object, matching the branch in
+/// `runWithArgs` that runs when no rule matches and `json_mode` is set. Kept as
+/// a tiny helper purely so the JSON shape is unit-testable without driving
+/// `runWithArgs` (which `std.process.exit`s).
+fn writeUnknownRuleJson(writer: anytype, query: []const u8) !void {
+    try writer.writeAll("{\"error\":\"unknown_rule\",\"query\":");
+    try writeJsonString(writer, query);
+    try writer.writeAll("}");
+}
+
 fn printHelp() void {
     const help =
         \\zigts describe-rule - describe diagnostic rules
@@ -209,6 +228,21 @@ test "findTypeCheckerRule resolves ZTS203 by code and name" {
     try testing.expectEqualStrings("ZTS203", by_name.code);
 
     try testing.expect(findTypeCheckerRule("ZTS999") == null);
+}
+
+test "writeUnknownRuleJson emits a JSON error object for an unknown rule" {
+    var buf: [256]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try writeUnknownRuleJson(fbs.writer(), "BOGUS");
+    const out = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, out, "\"error\":\"unknown_rule\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"query\":\"BOGUS\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Unknown rule") == null);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("unknown_rule", parsed.value.object.get("error").?.string);
+    try testing.expectEqualStrings("BOGUS", parsed.value.object.get("query").?.string);
 }
 
 test "writeTypeCheckerJson emits the rule-json shape with a real description" {

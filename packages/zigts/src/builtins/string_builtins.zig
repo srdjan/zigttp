@@ -553,6 +553,46 @@ pub fn stringReplaceAll(ctx: *context.Context, this: value.JSValue, args: []cons
     return this;
 }
 
+/// String(value) - Global String conversion function.
+/// Converts the first argument to its string form: strings pass through,
+/// numbers/booleans/undefined/null produce their canonical text, and objects
+/// stringify to "[object Object]". String() with no arguments returns "".
+pub fn stringConstructor(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    _ = this;
+    if (args.len == 0) {
+        return value.JSValue.fromPtr(string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val);
+    }
+    const val = args[0];
+
+    // String(s) on a value that is already a string (flat, slice, or rope)
+    // returns it unchanged - no allocation or copy, matching JS semantics.
+    if (val.isAnyString()) return val;
+
+    if (val.isInt()) {
+        var buf: [32]u8 = undefined;
+        const slice = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val);
+    }
+    if (val.isFloat()) {
+        var buf: [64]u8 = undefined;
+        const slice = string.formatFloatToBuf(&buf, val.getFloat64());
+        return value.JSValue.fromPtr(string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val);
+    }
+
+    const literal: []const u8 = if (val.isUndefined())
+        "undefined"
+    else if (val.isNull())
+        "null"
+    else if (val.isTrue())
+        "true"
+    else if (val.isFalse())
+        "false"
+    else
+        "[object Object]";
+
+    return value.JSValue.fromPtr(string.createString(ctx.allocator, literal) catch return value.JSValue.undefined_val);
+}
+
 /// String.fromCharCode(...charCodes) - Create string from char codes
 pub fn stringFromCharCode(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
@@ -573,4 +613,39 @@ pub fn stringFromCharCode(ctx: *context.Context, this: value.JSValue, args: []co
     }
     const result = string.createString(ctx.allocator, buf[0..len]) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
+}
+
+test "stringConstructor converts scalars to strings ENG-String" {
+    // The global String(x) must convert numbers and booleans to their text
+    // forms (previously String() was unregistered and threw NotCallable -> 500).
+    // A self-managed DebugAllocator that is intentionally not deinit'd: the
+    // ctx-created JSStrings are GC-managed and not freed individually in tests.
+    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = dbg.allocator();
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const num = stringConstructor(ctx, value.JSValue.undefined_val, &.{value.JSValue.fromInt(5)});
+    try std.testing.expectEqualStrings("5", getStringData(num) orelse return error.TestUnexpectedResult);
+
+    const yes = stringConstructor(ctx, value.JSValue.undefined_val, &.{value.JSValue.fromBool(true)});
+    try std.testing.expectEqualStrings("true", getStringData(yes) orelse return error.TestUnexpectedResult);
+
+    const undef = stringConstructor(ctx, value.JSValue.undefined_val, &.{value.JSValue.undefined_val});
+    try std.testing.expectEqualStrings("undefined", getStringData(undef) orelse return error.TestUnexpectedResult);
+
+    const empty = stringConstructor(ctx, value.JSValue.undefined_val, &.{});
+    try std.testing.expectEqualStrings("", getStringData(empty) orelse return error.TestUnexpectedResult);
+
+    const flt = stringConstructor(ctx, value.JSValue.undefined_val, &.{value.JSValue.fromFloat(3.5)});
+    try std.testing.expectEqualStrings("3.5", getStringData(flt) orelse return error.TestUnexpectedResult);
 }

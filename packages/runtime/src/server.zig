@@ -1274,6 +1274,33 @@ pub const Server = struct {
         self.syncStudioCallerReceipt();
     }
 
+    /// Cross-check the signed attestation claims against the hashes the server
+    /// actually loaded. `attest_envelope.verify` proves only that the JWS was
+    /// signed; it never compares claim hashes to the running artifact. Returns
+    /// false when the policy or bytecode hash in the claims disagrees with the
+    /// live contract. A live hash of all-zero means the contract carried no
+    /// sandbox block (e.g. live reload), so we skip that field rather than
+    /// reject it - mirroring the skip-on-zero semantics in
+    /// `contract_runtime.verifyPolicyHash` / `verifyArtifactHash`.
+    fn attestationClaimsMatchContract(
+        claims: attest_envelope.Claims,
+        contract: *const RuntimeContract,
+    ) bool {
+        if (!hexHashMatchesOrUnpinned(claims.policy_sha256, contract.policy_hash)) return false;
+        if (!hexHashMatchesOrUnpinned(claims.bytecode_sha256, contract.artifact_sha256)) return false;
+        return true;
+    }
+
+    /// True when `live` is unpinned (all-zero) or its lowercase-hex form equals
+    /// `claim_hex`. A claim field that is not 64 hex chars cannot match a
+    /// pinned 32-byte hash and is rejected.
+    fn hexHashMatchesOrUnpinned(claim_hex: []const u8, live: [32]u8) bool {
+        if (std.mem.allEqual(u8, &live, 0)) return true;
+        if (claim_hex.len != 64) return false;
+        const live_hex = std.fmt.bytesToHex(live, .lower);
+        return std.mem.eql(u8, &live_hex, claim_hex);
+    }
+
     pub fn installDevAttestation(
         self: *Self,
         contract_json: []const u8,
@@ -1521,9 +1548,15 @@ pub const Server = struct {
                 }
 
                 // Slice 2 item B: precompute the /.well-known/zigttp-attest body.
-                // Recovers the public key by verifying the embedded JWS against
-                // itself; the verify acts as a self-check that the binary's
-                // attestation is internally consistent.
+                // `attest_envelope.verify` only checks the Ed25519 signature over
+                // the JWS; it does NOT compare the signed claim hashes to what the
+                // server actually loaded. Artifact/policy binding to the running
+                // bytecode is enforced separately and fail-closed by
+                // `contract_runtime.validate` above (the server will not start on
+                // drift). Here we additionally cross-check the verified claim
+                // hashes against the live loaded contract so a validly-signed JWS
+                // that *describes* different bytecode is not served as if it
+                // matched; on mismatch we disable attestation entirely.
                 build_well_known: {
                     const cj = self.config.contract_json orelse break :build_well_known;
                     var verify_result = attest_envelope.verify(self.allocator, jws) catch |err| {
@@ -1531,6 +1564,16 @@ pub const Server = struct {
                         break :build_well_known;
                     };
                     defer verify_result.deinit();
+
+                    if (!attestationClaimsMatchContract(verify_result.claims, contract.view())) {
+                        std.log.err(
+                            "attestation: signed JWS claims do not match loaded contract hashes - disabling attestation",
+                            .{},
+                        );
+                        self.clearAttestation();
+                        break :build_well_known;
+                    }
+
                     self.well_known_doc = attest_well_known.build(
                         self.allocator,
                         cj,
@@ -2338,4 +2381,52 @@ test "dupeHostList unwinds partial allocation on failure" {
     try std.testing.expectError(error.OutOfMemory, result);
     // No leak report from testing.allocator confirms the errdefer ladder freed
     // the outer slice and the host duped before the failure.
+}
+
+test "attestationClaimsMatchContract rejects JWS describing different bytecode" {
+    const policy_bytes = [_]u8{0x11} ** 32;
+    const artifact_bytes = [_]u8{0x22} ** 32;
+    const policy_hex = std.fmt.bytesToHex(policy_bytes, .lower);
+    const artifact_hex = std.fmt.bytesToHex(artifact_bytes, .lower);
+
+    var live = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .policy_hash = policy_bytes,
+        .artifact_sha256 = artifact_bytes,
+        .allocator = std.testing.allocator,
+    };
+
+    var claims = attest_envelope.Claims{
+        .contract_sha256 = &([_]u8{'0'} ** 64),
+        .bytecode_sha256 = &artifact_hex,
+        .policy_sha256 = &policy_hex,
+        .capability_hash = &([_]u8{'0'} ** 64),
+        .compiler_version = "test",
+        .signed_at_unix = 0,
+        .property_summary = "",
+        .routes_count = 0,
+    };
+
+    // Matching claims pass.
+    try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
+
+    // A validly-signed JWS that describes different bytecode is rejected.
+    const wrong_artifact = std.fmt.bytesToHex([_]u8{0x33} ** 32, .lower);
+    claims.bytecode_sha256 = &wrong_artifact;
+    try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
+
+    // A different policy hash is rejected.
+    claims.bytecode_sha256 = &artifact_hex;
+    const wrong_policy = std.fmt.bytesToHex([_]u8{0x44} ** 32, .lower);
+    claims.policy_sha256 = &wrong_policy;
+    try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
+
+    // An unpinned (all-zero) live hash skips the field instead of rejecting,
+    // mirroring contract_runtime's skip-on-zero semantics for live reload.
+    live.policy_hash = [_]u8{0} ** 32;
+    try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
 }

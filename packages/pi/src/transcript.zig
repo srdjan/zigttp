@@ -280,6 +280,45 @@ pub fn renderRichEntryToOwned(
     return try buf.toOwnedSlice(allocator);
 }
 
+/// Byte cap applied to a `tool_result` body when it is rendered live to the
+/// interactive terminal. A single tool result (a full file dump, a long
+/// diagnostic blob) can be hundreds of KB; printing it verbatim floods the
+/// scrollback and buries the model's prose. The persisted/JSON paths keep the
+/// full body (the persister has its own, much larger disk cap); only the live
+/// TTY view is trimmed, with a `...[truncated N bytes]` marker.
+pub const tty_tool_result_cap: usize = 4 * 1024;
+
+/// Like `renderRichEntryToOwned`, but caps an oversized `.tool_result` body to
+/// `tty_tool_result_cap` before rendering so the live terminal stream is not
+/// flooded. All other entry kinds render identically. Used only by the
+/// interactive REPL's live render path; persistence and `--print --mode json`
+/// keep the uncapped renderer.
+pub fn renderRichEntryToOwnedTty(
+    allocator: std.mem.Allocator,
+    entry: *const OwnedEntry,
+) ![]u8 {
+    switch (entry.*) {
+        .tool_result => |result| {
+            if (result.llm_text.len > tty_tool_result_cap) {
+                const capped = try capToolResultBody(allocator, result.llm_text, tty_tool_result_cap);
+                defer allocator.free(capped);
+                // Shallow copy with the capped body; the ui_payload is borrowed
+                // (not freed here) and never longer than the cap anyway.
+                const trimmed: OwnedEntry = .{ .tool_result = .{
+                    .tool_use_id = result.tool_use_id,
+                    .tool_name = result.tool_name,
+                    .ok = result.ok,
+                    .llm_text = capped,
+                    .ui_payload = result.ui_payload,
+                } };
+                return try renderRichEntryToOwned(allocator, &trimmed);
+            }
+        },
+        else => {},
+    }
+    return try renderRichEntryToOwned(allocator, entry);
+}
+
 const testing = std.testing;
 const veto = @import("veto.zig");
 
@@ -402,6 +441,52 @@ test "capToolResultBody truncates with a byte-count suffix when over the cap" {
     const digits_end = std.mem.indexOfScalarPos(u8, out, digits_start, ' ') orelse return error.TestFailed;
     const dropped = try std.fmt.parseInt(usize, out[digits_start..digits_end], 10);
     try testing.expectEqual(big.len - idx, dropped);
+}
+
+test "renderRichEntryToOwnedTty caps an oversized tool_result body for the live terminal" {
+    const big_len = tty_tool_result_cap * 2;
+    const big = try testing.allocator.alloc(u8, big_len);
+    defer testing.allocator.free(big);
+    @memset(big, 'a');
+
+    var tr: Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    try tr.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = "toolu_big",
+        .tool_name = "read_file",
+        .ok = true,
+        .llm_text = big,
+        .ui_payload = null,
+    } });
+
+    // The live TTY render is capped and carries the truncation marker.
+    const tty = try renderRichEntryToOwnedTty(testing.allocator, tr.at(0));
+    defer testing.allocator.free(tty);
+    try testing.expect(tty.len < big_len);
+    try testing.expect(std.mem.indexOf(u8, tty, "[truncated") != null);
+
+    // The uncapped renderer (persistence/json paths) keeps the full body.
+    const full = try renderRichEntryToOwned(testing.allocator, tr.at(0));
+    defer testing.allocator.free(full);
+    try testing.expect(std.mem.indexOf(u8, full, "[truncated") == null);
+    try testing.expect(full.len > tty.len);
+}
+
+test "renderRichEntryToOwnedTty leaves a small tool_result body untouched" {
+    var tr: Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    try tr.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = "toolu_small",
+        .tool_name = "read_file",
+        .ok = true,
+        .llm_text = "ok",
+        .ui_payload = null,
+    } });
+
+    const tty = try renderRichEntryToOwnedTty(testing.allocator, tr.at(0));
+    defer testing.allocator.free(tty);
+    try testing.expect(std.mem.indexOf(u8, tty, "[truncated") == null);
+    try testing.expect(std.mem.indexOf(u8, tty, "ok") != null);
 }
 
 test "veto -> turn -> transcript pipeline still lands a proof entry" {

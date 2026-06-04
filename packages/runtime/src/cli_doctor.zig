@@ -14,6 +14,7 @@ const precompile = zigts_cli.precompile;
 const self_extract = @import("self_extract.zig");
 const cli_release_check = @import("cli_release_check.zig");
 const cli_paths = @import("cli_paths.zig");
+const cli_auth = @import("cli_auth.zig");
 
 pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (argv.len > 0 and std.mem.eql(u8, argv[0], "--release")) {
@@ -120,6 +121,8 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
         defer allocator.free(tests_path);
         printDoctorOptionalPath("tests", tests_path, doctorPathExists(io, tests_path));
 
+        printDoctorExpertKey(allocator);
+
         std.debug.print("\n", .{});
         if (failures > 0) {
             std.debug.print("Doctor: {d} required check{s} failed\n", .{ failures, if (failures == 1) @as([]const u8, "") else "s" });
@@ -223,6 +226,27 @@ fn printDoctorRuntimeTemplate(allocator: std.mem.Allocator) void {
     } else {
         std.debug.print("[warn] runtime  using fallback template: {s}\n", .{runtime_path});
     }
+}
+
+/// Non-failing readiness row: does `zigttp expert` have a provider key? Mirrors
+/// the auth/expert resolution exactly: stored `~/.zigttp/providers.json` values
+/// are injected into the env first, then the same env vars are read with the
+/// same "blank counts as missing" trimming the expert fail-fast path applies.
+fn printDoctorExpertKey(allocator: std.mem.Allocator) void {
+    cli_auth.injectStoredProvidersIntoEnv(allocator);
+    if (doctorExpertKeyEnv("ANTHROPIC_API_KEY")) {
+        printDoctorOk("expert", "ANTHROPIC_API_KEY configured");
+    } else if (doctorExpertKeyEnv("OPENAI_API_KEY")) {
+        printDoctorOk("expert", "OPENAI_API_KEY configured");
+    } else {
+        std.debug.print("[info] expert   no provider key; run `zigttp auth claude` to enable `zigttp expert`\n", .{});
+    }
+}
+
+fn doctorExpertKeyEnv(name: [*:0]const u8) bool {
+    const raw = std.c.getenv(name) orelse return false;
+    const value = std.mem.sliceTo(raw, 0);
+    return std.mem.trim(u8, value, " \t\r\n").len != 0;
 }
 
 fn printDoctorPlatform() void {

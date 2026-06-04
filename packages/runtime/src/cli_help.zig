@@ -61,6 +61,7 @@ const help_all_mid =
     \\Run and inspect:
     \\  zigttp serve [handler.ts]              Run a handler without watch or proof
     \\  zigttp doctor [path]                   Check project readiness
+    \\  zigttp doctor --release                Print the release proof passport
     \\  zigttp studio [handler.ts]             Optional browser proof workbench
     \\  zigttp demo                            Guided local proof theater
     \\  zigttp edge [--config FILE]            Run the in-process edge runtime
@@ -142,6 +143,9 @@ const expert_help =
     \\  --handler <path>           handler path for autoloop repair
     \\  --goal <csv>               property goals for autoloop repair
     \\  --max-iters <N>            autoloop iteration budget
+    \\
+    \\Inside the session, type /help for slash commands
+    \\  (/model, /status, /compact, /resume, /tree, ...).
     \\
     \\Examples:
     \\  zigttp expert --resume

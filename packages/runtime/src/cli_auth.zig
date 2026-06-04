@@ -155,7 +155,7 @@ fn authProviderSet(
 
     std.debug.print(
         "Saved {s} key for {s}.\n" ++
-            "Verifying: run `zigttp expert` to confirm the backend authenticates.\n",
+            "Run `zigttp expert` to start (the key is checked on the first request).\n",
         .{ provider.label, provider.name },
     );
 }
@@ -404,6 +404,11 @@ fn writeProvidersFile(allocator: std.mem.Allocator, bytes: []const u8) !void {
     var writer = file.writer(io, &buf);
     try writer.interface.writeAll(bytes);
     try writer.interface.flush();
+
+    // O_CREAT honours the requested mode only when it actually creates the
+    // file; a pre-existing providers.json with looser bits (e.g. 0644) keeps
+    // them. Re-tighten the open handle so a rewrite always lands at 0600.
+    try file.setPermissions(io, std.Io.File.Permissions.fromMode(0o600));
 }
 
 // ---------------------------------------------------------------------------
@@ -569,4 +574,47 @@ test "Store: save then load roundtrip via tmp HOME" {
     var loaded = try Store.load(allocator);
     defer loaded.deinit();
     try std.testing.expectEqualStrings("sk-ant-roundtrip-test-value", loaded.get("anthropic").?);
+}
+
+test "writeProvidersFile re-tightens a pre-existing loose 0644 file to 0600" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_z = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(home_z);
+
+    const previous_home = std.c.getenv("HOME");
+    _ = setenv("HOME", home_z.ptr, 1);
+    defer if (previous_home) |p| {
+        _ = setenv("HOME", p, 1);
+    } else {
+        _ = unsetenv("HOME");
+    };
+
+    // First write creates the file at 0600.
+    try writeProvidersFile(allocator, "{}");
+
+    // Simulate a pre-existing world/group-readable file: loosen it to 0644.
+    // O_CREAT will not re-tighten this on the next rewrite, so the explicit
+    // setPermissions in writeProvidersFile is the only thing that can.
+    const path = try providersFilePath(allocator);
+    defer allocator.free(path);
+    {
+        var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+        @memcpy(pbuf[0..path.len], path);
+        pbuf[path.len] = 0;
+        const path_z: [*:0]const u8 = @ptrCast(&pbuf);
+        try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(path_z, 0o644));
+    }
+
+    // Rewrite the existing loose file.
+    try writeProvidersFile(allocator, "{}");
+
+    // The rewrite must land back at 0600 despite the pre-existing 0644.
+    const stat = try tmp.dir.statFile(std.testing.io, ".zigttp/providers.json", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
 }

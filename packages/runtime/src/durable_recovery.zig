@@ -58,8 +58,9 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
     var recovered: u32 = 0;
 
     for (oplog_files.items) |filename| {
-        // Build full path
-        var path_buf: [512]u8 = undefined;
+        // Build full path. Sized for PATH_MAX-class paths so a long oplog
+        // directory does not silently drop a recoverable run.
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ oplog_dir, filename }) catch continue;
 
         // Read oplog file
@@ -272,4 +273,18 @@ test "durable recovery: OplogClaim.acquire returns null for a missing oplog file
     const missing = try std.fmt.allocPrint(allocator, "{s}/does-not-exist.jsonl", .{dir_buf[0..dir_len]});
     defer allocator.free(missing);
     try testing.expect(OplogClaim.acquire(allocator, missing) == null);
+}
+
+test "durable recovery: full path buffer fits oplog dir + filename beyond 512 bytes" {
+    // Regression for the silently-dropped recovery: the path buffer used to be
+    // a fixed [512]u8, so a long oplog directory plus a durable-*.jsonl
+    // filename overflowed and bufPrint skipped the run with no log line.
+    const oplog_dir = "a" ** 800;
+    const filename = "durable-" ++ ("b" ** 64) ++ ".jsonl";
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ oplog_dir, filename });
+
+    try testing.expect(full_path.len > 512);
+    try testing.expect(std.mem.endsWith(u8, full_path, filename));
 }

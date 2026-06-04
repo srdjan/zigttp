@@ -12,6 +12,7 @@ const transcript_mod = @import("transcript.zig");
 const agent = @import("agent.zig");
 const session_state = @import("session_state.zig");
 const property_goals = @import("property_goals.zig");
+const models_registry = @import("providers/models.zig");
 const tools_common = @import("tools/common.zig");
 
 const meta_tool = @import("tools/zigts_expert_meta.zig");
@@ -132,7 +133,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
 
 /// Long flags whose next token is a value. `zigts_main.zig` consults this
 /// list so it can skip the value while scanning for stray positional args.
-pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode", "--tools", "--fork", "--goal", "--max-iters", "--handler" };
+pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode", "--tools", "--fork", "--goal", "--max-iters", "--handler", "--model" };
 
 var captured_argv: ?[]const []const u8 = null;
 
@@ -216,6 +217,7 @@ fn runAutoloop(
         .no_context_files = true, // autoloop doesn't need project context
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
+        .model = flags.model,
     });
     defer session.deinit(allocator);
 
@@ -331,8 +333,18 @@ pub fn flagErrorMessage(err: anyerror) []const u8 {
         error.MissingHandlerValue => "error: --handler requires a path value\n",
         error.GoalRequiresHandler => "error: --goal requires --handler <path>\n",
         error.GoalConflictsWithPrintOrRpc => "error: --goal cannot be combined with --print or --mode rpc\n",
+        error.MissingModelValue => "error: --model requires a model id value\n",
+        error.UnknownModel => "error: --model has an unknown id; run /model in the expert REPL to list available models\n",
         else => "error: unexpected flag parse failure\n",
     };
+}
+
+/// Validate a `--model <id>` launch value against the same registry the
+/// `/model` slash command uses, returning the canonical static id so it
+/// outlives the session. An unknown id fails closed with `error.UnknownModel`.
+fn resolveModelId(val: []const u8) ![]const u8 {
+    const m = models_registry.findById(val) orelse return error.UnknownModel;
+    return m.id;
 }
 
 fn parseMaxIters(val: []const u8) !u32 {
@@ -392,6 +404,12 @@ pub const ExpertFlags = struct {
     /// behavioral verdict between the pre- and post-edit handler. Default on,
     /// matching the attestation default; `--no-equivalence-receipt` opts out.
     equivalence_receipt: bool = true,
+    /// Launch-time model override (`--model <id>`). When non-null it is the
+    /// canonical id from the model registry (validated at parse time), applied
+    /// to the session's initial active model so a run can start on a cheaper
+    /// model without typing `/model` first. Null leaves the compile-time
+    /// default in place.
+    model: ?[]const u8 = null,
 };
 
 fn takeArg(i: *usize, argv: []const []const u8, missing: anyerror) ![]const u8 {
@@ -473,6 +491,13 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
         }
         if (std.mem.startsWith(u8, arg, "--handler=")) {
             out.handler = arg["--handler=".len..];
+        }
+        if (std.mem.eql(u8, arg, "--model")) {
+            out.model = try resolveModelId(try takeArg(&i, argv, error.MissingModelValue));
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--model=")) {
+            out.model = try resolveModelId(arg["--model=".len..]);
         }
         if (std.mem.eql(u8, arg, "--no-perf-receipt")) out.perf_receipt = false;
         if (std.mem.eql(u8, arg, "--perf-receipt")) out.perf_receipt = true;
@@ -865,6 +890,36 @@ test "parseExpertFlags: --max-iters rejects zero" {
 test "parseExpertFlags: --max-iters rejects non-numeric" {
     const argv = [_][]const u8{ "zigts", "expert", "--max-iters", "abc" };
     try testing.expectError(error.InvalidMaxIters, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --model <id> two-argv form captures the canonical id" {
+    const argv = [_][]const u8{ "zigts", "expert", "--model", "claude-haiku-4-5-20251001" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expect(flags.model != null);
+    try testing.expectEqualStrings("claude-haiku-4-5-20251001", flags.model.?);
+}
+
+test "parseExpertFlags: --model=<id> inline form captures the canonical id" {
+    const argv = [_][]const u8{ "zigts", "expert", "--model=claude-sonnet-4-6" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expect(flags.model != null);
+    try testing.expectEqualStrings("claude-sonnet-4-6", flags.model.?);
+}
+
+test "parseExpertFlags: --model defaults to null when absent" {
+    const argv = [_][]const u8{ "zigts", "expert" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expect(flags.model == null);
+}
+
+test "parseExpertFlags: --model without a value errors MissingModelValue" {
+    const argv = [_][]const u8{ "zigts", "expert", "--model" };
+    try testing.expectError(error.MissingModelValue, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --model with an unknown id errors UnknownModel" {
+    const argv = [_][]const u8{ "zigts", "expert", "--model", "gpt-9-turbo" };
+    try testing.expectError(error.UnknownModel, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --goal without --handler is rejected" {

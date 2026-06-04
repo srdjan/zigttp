@@ -62,6 +62,10 @@ pub const SessionConfig = struct {
     /// with `parent_id` pointing to the source. Mutually exclusive with
     /// `resume_latest` and `session_id`.
     fork_session_id: ?[]const u8 = null,
+    /// `--model <id>` launch override (a canonical static registry id, so it
+    /// outlives the session). Applied once here so every entry point inherits
+    /// it; null leaves the compile-time default in place.
+    model: ?[]const u8 = null,
 };
 
 const stub_reply_text =
@@ -297,6 +301,11 @@ pub fn initFromEnvWithSessionConfig(
         break :blk AgentSession.initStub();
     };
     errdefer session.deinit(allocator);
+
+    // Apply a --model launch override once, here, so every caller
+    // (interactive REPL, autoloop, --print, --rpc) inherits it without each
+    // having to remember a separate apply step. Also covers no_session sessions.
+    if (config.model) |model_id| session.setModel(model_id);
 
     if (config.no_session) return session;
 

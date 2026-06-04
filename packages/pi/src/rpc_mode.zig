@@ -62,6 +62,7 @@ pub fn run(
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
         .fork_session_id = flags.fork_session_id,
+        .model = flags.model,
     });
     defer session.deinit(allocator);
 

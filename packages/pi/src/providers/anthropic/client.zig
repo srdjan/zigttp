@@ -159,18 +159,21 @@ fn postAnthropic(
 
     if (status != .ok) {
         // The success path is an SSE stream; an error is a small JSON body
-        // carrying the real reason (bad key, unknown model, rate limit). Surface
-        // the status and body (at `err` level so it survives ReleaseFast), then
-        // map the status to a typed error so the catch sites can print one-line
-        // remediation instead of collapsing every failure into bare `HttpNotOk`.
-        if (!builtin.is_test) {
+        // carrying the real reason (bad key, unknown model, rate limit). Map the
+        // status to a typed error first: when it carries one-line remediation the
+        // catch site prints that actionable message, so emitting the raw body here
+        // (during the request, ahead of the catch site) would only bury it. Keep
+        // the raw `err` line solely for the unclassified `HttpNotOk` fallthrough,
+        // where the body is the only signal the user gets.
+        const err = http_errors.classify(@intFromEnum(status), response_body);
+        if (!builtin.is_test and loop.providerErrorRemediation(err) == null) {
             std.log.err("anthropic API: HTTP {d} {s}: {s}", .{
                 @intFromEnum(status),
                 status.phrase() orelse "",
                 response_body,
             });
         }
-        return http_errors.classify(@intFromEnum(status), response_body);
+        return err;
     }
 
     return response_body;

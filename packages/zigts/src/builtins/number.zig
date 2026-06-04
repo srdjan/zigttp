@@ -305,39 +305,40 @@ pub fn numberToString(ctx: *context.Context, this: value.JSValue, args: []const 
     return value.JSValue.fromPtr(str);
 }
 
+/// Coerce a JS value to a number following ToNumber, returning the f64 or NaN.
+/// Strings are trimmed then parsed in full (a trailing non-numeric tail yields
+/// NaN, unlike parseFloat); an all-whitespace/empty string coerces to 0.
+fn coerceToNumber(val: value.JSValue) f64 {
+    if (val.isInt()) return @floatFromInt(val.getInt());
+    if (val.isFloat()) return val.getFloat64();
+    if (val.isNull()) return 0; // null -> 0
+    if (val.isUndefined()) return std.math.nan(f64); // undefined -> NaN
+    if (val.isTrue()) return 1;
+    if (val.isFalse()) return 0;
+    if (getStringData(val)) |text| {
+        const trimmed = std.mem.trim(u8, text, " \t\n\r");
+        if (trimmed.len == 0) return 0; // "" / whitespace -> 0
+        return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
+    }
+    // Objects (and anything else) coerce to NaN in this subset.
+    return std.math.nan(f64);
+}
+
 /// Global isNaN - coerces argument to number first (unlike Number.isNaN)
 pub fn globalIsNaN(_: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.fromBool(true); // isNaN(undefined) = true
 
-    const val = args[0];
-
-    // Try to get as number
-    if (val.isInt()) return value.JSValue.fromBool(false);
-    if (val.isFloat()) return value.JSValue.fromBool(std.math.isNan(val.getFloat64()));
-    if (val.isNull()) return value.JSValue.fromBool(false); // null coerces to 0
-    if (val.isUndefined()) return value.JSValue.fromBool(true);
-    if (val.isBool()) return value.JSValue.fromBool(false); // true->1, false->0
-
-    // Strings and objects would need toNumber coercion - for now return true
-    return value.JSValue.fromBool(true);
+    return value.JSValue.fromBool(std.math.isNan(coerceToNumber(args[0])));
 }
 
 /// Global isFinite - coerces argument to number first (unlike Number.isFinite)
 pub fn globalIsFinite(_: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.fromBool(false); // isFinite(undefined) = false
 
-    const val = args[0];
-
-    if (val.isInt()) return value.JSValue.fromBool(true);
-    if (val.isFloat()) {
-        const n = val.getFloat64();
-        return value.JSValue.fromBool(!std.math.isNan(n) and !std.math.isInf(n));
-    }
-    if (val.isNull()) return value.JSValue.fromBool(true); // null coerces to 0
-    if (val.isUndefined()) return value.JSValue.fromBool(false);
-    if (val.isBool()) return value.JSValue.fromBool(true); // true->1, false->0
-
-    return value.JSValue.fromBool(false);
+    // Same ToNumber coercion as globalIsNaN, so isFinite("42") is true and
+    // isFinite("x")/isFinite({}) are false (the prior code returned false for
+    // every string and object, including numeric strings).
+    return value.JSValue.fromBool(std.math.isFinite(coerceToNumber(args[0])));
 }
 
 /// Global range(end) or range(start, end) or range(start, end, step)
@@ -413,4 +414,31 @@ pub fn globalProcessRequest(ctx: *context.Context, _: value.JSValue, args: []con
 
     // Create JS string from buffer
     return ctx.createString(json) catch return value.JSValue.undefined_val;
+}
+
+test "globalIsNaN coerces ToNumber; Number.isNaN does not ENG12" {
+    // ENG-12: global isNaN(x) coerces its argument to a number, so a numeric
+    // string is not NaN while a non-numeric string is. Number.isNaN performs no
+    // coercion: only an actual NaN number is true. ctx is unused by both fns.
+    const ctx: *context.Context = undefined;
+    const undef = value.JSValue.undefined_val;
+    const allocator = std.testing.allocator;
+
+    // Numeric scalars: no coercion needed.
+    try std.testing.expect(!globalIsNaN(ctx, undef, &.{value.JSValue.fromInt(42)}).toBoolean());
+    try std.testing.expect(!globalIsNaN(ctx, undef, &.{value.JSValue.fromFloat(3.14)}).toBoolean());
+    try std.testing.expect(globalIsNaN(ctx, undef, &.{value.JSValue.nan_val}).toBoolean());
+
+    // Strings are coerced (ToNumber): "42" -> 42 (not NaN), "x" -> NaN.
+    const numeric_str = try string.createString(allocator, "42");
+    defer string.freeString(allocator, numeric_str);
+    const alpha_str = try string.createString(allocator, "x");
+    defer string.freeString(allocator, alpha_str);
+    try std.testing.expect(!globalIsNaN(ctx, undef, &.{value.JSValue.fromPtr(numeric_str)}).toBoolean());
+    try std.testing.expect(globalIsNaN(ctx, undef, &.{value.JSValue.fromPtr(alpha_str)}).toBoolean());
+
+    // Number.isNaN performs no coercion: a non-numeric string is NOT NaN.
+    try std.testing.expect(!numberIsNaN(ctx, undef, &.{value.JSValue.fromPtr(alpha_str)}).toBoolean());
+    try std.testing.expect(!numberIsNaN(ctx, undef, &.{value.JSValue.fromInt(42)}).toBoolean());
+    try std.testing.expect(numberIsNaN(ctx, undef, &.{value.JSValue.nan_val}).toBoolean());
 }

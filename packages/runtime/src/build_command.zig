@@ -568,7 +568,8 @@ fn printBuildHelp() void {
 
 fn printLocalDeployHelp() void {
     const help =
-        \\zigttp deploy --local [--no-attest]
+        \\zigttp deploy [--no-attest]
+        \\  (--local is an accepted alias; deploy takes no arguments)
         \\
         \\Build a self-contained binary for the handler in this project and
         \\record the deploy in the local proof ledger. No cloud credentials,

@@ -379,6 +379,7 @@ pub fn printDevHelp() void {
         \\  --outbound-http       Enable native outbound HTTP bridge
         \\  --sqlite <FILE>       SQLite database for zigttp:sql
         \\  --system <FILE>       System registry for zigttp:service
+        \\  --no-env-check        Skip startup env validation
         \\  --help                Show this help
         \\
         \\If no handler path is passed, the entry in zigttp.json is used.

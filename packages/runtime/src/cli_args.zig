@@ -64,14 +64,32 @@ pub fn deployArgsRequestCloud(argv: []const []const u8) ?[]const u8 {
     return null;
 }
 
+/// Commands that accept an explicit handler path positional (they call
+/// `findPositionalPath`). Only these get the "Or pass an explicit handler path"
+/// remediation; `deploy`/`test`/`build` etc. take no handler argument, so that
+/// sentence would be misleading for them.
+fn commandAcceptsHandlerPath(command: []const u8) bool {
+    return std.mem.eql(u8, command, "dev") or std.mem.eql(u8, command, "studio");
+}
+
 pub fn printNoProjectConfigDiagnostic(command: []const u8) void {
-    std.debug.print(
-        \\No zigttp.json found in the current directory or any parent.
-        \\
-        \\Run `zigttp init <name>` to scaffold a new project, then `cd <name>`
-        \\and re-run `zigttp {s}`. Or pass an explicit handler path as an argument.
-        \\
-    , .{command});
+    if (commandAcceptsHandlerPath(command)) {
+        std.debug.print(
+            \\No zigttp.json found in the current directory or any parent.
+            \\
+            \\Run `zigttp init <name>` to scaffold a new project, then `cd <name>`
+            \\and re-run `zigttp {s}`. Or pass an explicit handler path as an argument.
+            \\
+        , .{command});
+    } else {
+        std.debug.print(
+            \\No zigttp.json found in the current directory or any parent.
+            \\
+            \\Run `zigttp init <name>` to scaffold a new project, then `cd <name>`
+            \\and re-run `zigttp {s}`.
+            \\
+        , .{command});
+    }
 }
 
 /// Convert preflight errors from `dev`/`studio` (which run `zigts check`
@@ -175,6 +193,16 @@ fn isExpertValueTakingFlagEq(arg: []const u8) bool {
         }
     }
     return false;
+}
+
+test "commandAcceptsHandlerPath only includes the positional-path commands" {
+    try std.testing.expect(commandAcceptsHandlerPath("dev"));
+    try std.testing.expect(commandAcceptsHandlerPath("studio"));
+    try std.testing.expect(!commandAcceptsHandlerPath("deploy"));
+    try std.testing.expect(!commandAcceptsHandlerPath("test"));
+    try std.testing.expect(!commandAcceptsHandlerPath("build"));
+    try std.testing.expect(!commandAcceptsHandlerPath("doctor"));
+    try std.testing.expect(!commandAcceptsHandlerPath("compile"));
 }
 
 test "validateExpertArgs accepts documented expert launch forms" {

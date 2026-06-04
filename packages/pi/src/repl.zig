@@ -264,7 +264,7 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tool
     // goal in plain English, and approve the verified edit.
     try w.writeAll(
         \\How to use zigttp expert:
-        \\  1. Type what you want in plain English, e.g. "add a GET /health route to handler.ts".
+        \\  1. Type what you want in plain English, e.g. "add a GET /health route to src/handler.ts".
         \\  2. The expert drafts an edit; the analyzer verifies it and rejects any draft that fails.
         \\  3. You review the change and approve with y/N before anything is written to disk.
         \\
@@ -687,6 +687,7 @@ pub fn run(
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
         .fork_session_id = flags.fork_session_id,
+        .model = flags.model,
     });
     defer session.deinit(allocator);
 
@@ -785,7 +786,7 @@ const expert_banner =
     "\n" ++
     "Each turn calls your model provider and consumes API credits.\n" ++
     "\n" ++
-    "Try: add a GET /health route to handler.ts\n" ++
+    "Try: add a GET /health route to src/handler.ts\n" ++
     "Type a goal in plain English, 'help' for commands, or 'quit' to exit.\n";
 
 const expert_no_workspace_hint =
@@ -827,7 +828,7 @@ const InteractiveStreamCtx = struct {
             .user_text => return,
             else => {},
         }
-        const rendered = transcript_mod.renderRichEntryToOwned(self.allocator, entry) catch return;
+        const rendered = transcript_mod.renderRichEntryToOwnedTty(self.allocator, entry) catch return;
         defer self.allocator.free(rendered);
         if (!builtin.is_test) {
             // Clear the elapsed-time tick before the first entry prints so they
