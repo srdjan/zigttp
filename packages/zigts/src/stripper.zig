@@ -386,6 +386,20 @@ const Stripper = struct {
             return;
         }
 
+        // Arrow function in expression position (call argument, array element,
+        // default value, etc.). The `=`-anchored path above only catches
+        // `= (params) =>`; a typed arrow passed as an argument, e.g.
+        // `nums.toSorted((a: number, b: number) => a - b)`, reaches here as a
+        // bare `(` and its param-type colons must be stripped or the parser
+        // rejects them (ENG-15). The strict detector requires a confirming
+        // `=>` so a ternary branch like `cond ? (a) : (b)` is not mistaken for
+        // an arrow.
+        if (c == '(' and self.looksLikeArrowFunctionStrict()) {
+            try self.handleArrowFunction();
+            self.in_expression = true;
+            return;
+        }
+
         // Track expression context based on punctuators
         switch (c) {
             ';' => {
@@ -708,6 +722,79 @@ const Stripper = struct {
         {
             // Direct arrow - is arrow function
             return true;
+        }
+
+        return false;
+    }
+
+    /// Like `looksLikeArrowFunction`, but when the params are followed by a
+    /// `:` return-type it REQUIRES a confirming `=>` after the type. Used in
+    /// expression position (any bare `(`), where the looser bare-`:` heuristic
+    /// would misread a ternary branch `cond ? (a) : (b)` as an arrow. Errs
+    /// toward false (no strip) on anything ambiguous, so it never corrupts a
+    /// non-arrow.
+    fn looksLikeArrowFunctionStrict(self: *Self) bool {
+        const saved_pos = self.pos;
+        const saved_line = self.line;
+        const saved_col = self.col;
+        defer {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            self.col = saved_col;
+        }
+
+        // Scan the parenthesized group to its matching `)`.
+        self.pos += 1;
+        var paren_depth: u16 = 1;
+        while (self.pos < self.source.len and paren_depth > 0) {
+            const c = self.source[self.pos];
+            if (c == '"' or c == '\'' or c == '`') {
+                self.skipString(c) catch return false;
+                continue;
+            }
+            if (c == '(') paren_depth += 1;
+            if (c == ')') paren_depth -= 1;
+            self.pos += 1;
+        }
+        if (paren_depth != 0) return false;
+
+        // Whitespace after `)`.
+        while (self.pos < self.source.len and (self.source[self.pos] == ' ' or
+            self.source[self.pos] == '\t' or self.source[self.pos] == '\n' or
+            self.source[self.pos] == '\r')) self.pos += 1;
+        if (self.pos >= self.source.len) return false;
+
+        // Direct arrow.
+        if (self.pos + 1 < self.source.len and self.source[self.pos] == '=' and self.source[self.pos + 1] == '>') {
+            return true;
+        }
+
+        // Return-type annotation: scan the type at bracket-depth 0 and only
+        // accept if a `=>` follows. A depth-0 close bracket or `,`/`;` means we
+        // left the construct without reaching an arrow (e.g. the ternary case).
+        if (self.source[self.pos] == ':') {
+            self.pos += 1;
+            var depth: i32 = 0;
+            while (self.pos < self.source.len) {
+                const c = self.source[self.pos];
+                if (c == '"' or c == '\'' or c == '`') {
+                    self.skipString(c) catch return false;
+                    continue;
+                }
+                if (c == '(' or c == '[' or c == '{' or c == '<') {
+                    depth += 1;
+                } else if (c == ')' or c == ']' or c == '}') {
+                    if (depth == 0) return false;
+                    depth -= 1;
+                } else if (c == '>') {
+                    if (depth > 0) depth -= 1;
+                } else if (depth == 0) {
+                    if (c == '=' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>') return true;
+                    if (c == ',' or c == ';') return false;
+                }
+                self.pos += 1;
+            }
+            return false;
         }
 
         return false;
@@ -1945,6 +2032,26 @@ test "passthrough plain js" {
 
 test "passthrough with strings" {
     const source = "let s = \"hello world\";\nlet t = 'single';";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "ENG-15: typed arrow params are stripped in call-argument position" {
+    // The `=`-anchored path strips `const f = (a: number) => ...`; this guards
+    // the bare-`(` expression position (arrow passed as a call argument), which
+    // previously left the `: number` in place and broke the parser.
+    const source = "const r = ns.toSorted((a: number, b: number) => a - b);";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "=> a - b") != null);
+}
+
+test "ENG-15: a ternary with parenthesized branches is not mistaken for an arrow" {
+    // `cond ? (a) : (b)` has a `:` after `)` but no `=>`; the strict detector
+    // must leave it untouched (no false-positive type stripping).
+    const source = "const x = c ? (1) : (2);";
     const result = try strip(std.testing.allocator, source, .{});
     defer @constCast(&result).deinit();
     try std.testing.expectEqualStrings(source, result.code);
