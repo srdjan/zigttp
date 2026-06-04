@@ -27,5 +27,26 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
-    try zigts_cli.run(allocator, user_args);
+    // Map usage errors (bad/unknown/missing flags or args) to a clean one-line
+    // message + exit 1 instead of a raw Zig stack trace, mirroring the `zigttp`
+    // developer binary's analyzer dispatch so the two surfaces stay identical
+    // for IDE/CI integrations that call `zigts` directly.
+    zigts_cli.run(allocator, user_args) catch |err| switch (err) {
+        error.InvalidArgument,
+        error.InvalidArguments,
+        error.MissingArgument,
+        error.UnknownArgument,
+        error.UnknownOption,
+        error.UnknownFlag,
+        error.TooManyArguments,
+        => {
+            const cmd = if (user_args.len > 0) user_args[0] else "";
+            std.debug.print(
+                "zigts {s}: invalid arguments ({s}). Run `zigts {s} --help` for usage.\n",
+                .{ cmd, @errorName(err), cmd },
+            );
+            std.process.exit(1);
+        },
+        else => return err,
+    };
 }
