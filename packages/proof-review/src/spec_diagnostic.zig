@@ -12,7 +12,15 @@ const review = @import("review.zig");
 /// dupes them when persisting.
 pub fn specStateFor(contract: *const zigts.HandlerContract, name: []const u8) review.SpecState {
     for (contract.spec_diagnostics.items) |d| {
-        if (!std.mem.eql(u8, d.spec_name, name)) continue;
+        // Author-declared Specs carry one diagnostic per spec_name. The
+        // implicit-default profile collapses its undischarged properties into a
+        // single not_discharged whose spec_name is the joined "a, b, c" set, so
+        // match `name` against any token in that set too - otherwise the HUD,
+        // studio, deploy card, and ledger would all report the collapsed
+        // properties as discharged.
+        const matches = std.mem.eql(u8, d.spec_name, name) or
+            (d.implicit_default and d.kind == .not_discharged and joinedSetContains(d.spec_name, name));
+        if (!matches) continue;
         return .{
             .name = name,
             .discharged = false,
@@ -24,6 +32,25 @@ pub fn specStateFor(contract: *const zigts.HandlerContract, name: []const u8) re
         };
     }
     return .{ .name = name, .discharged = true };
+}
+
+/// True if `name` is one of the `", "`-joined tokens in `joined` (the
+/// collapsed implicit-default spec_name, e.g. "fault_covered, pure").
+fn joinedSetContains(joined: []const u8, name: []const u8) bool {
+    var it = std.mem.tokenizeSequence(u8, joined, ", ");
+    while (it.next()) |token| {
+        if (std.mem.eql(u8, token, name)) return true;
+    }
+    return false;
+}
+
+test "joinedSetContains matches a token in the collapsed spec_name set" {
+    try std.testing.expect(joinedSetContains("fault_covered, idempotent, pure", "idempotent"));
+    try std.testing.expect(joinedSetContains("fault_covered, idempotent, pure", "fault_covered"));
+    try std.testing.expect(joinedSetContains("fault_covered, idempotent, pure", "pure"));
+    try std.testing.expect(!joinedSetContains("fault_covered, idempotent, pure", "purely"));
+    try std.testing.expect(!joinedSetContains("fault_covered, idempotent, pure", "retry_safe"));
+    try std.testing.expect(joinedSetContains("pure", "pure"));
 }
 
 fn specDiagnosticMessage(d: zigts.SpecDiagnostic) []const u8 {

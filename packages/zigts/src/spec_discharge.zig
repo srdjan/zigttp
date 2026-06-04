@@ -245,12 +245,17 @@ pub fn dischargeSpecs(
         out.deinit(allocator);
     }
 
-    // Computed once; duped per diagnostic so each entry owns its suggestion.
-    const implicit_remedy: ?[]u8 = if (implicit_default)
-        try implicitDefaultSuggestion(allocator, properties)
-    else
-        null;
-    defer if (implicit_remedy) |s| allocator.free(s);
+    // For the implicit default profile, every unsatisfiable property would
+    // otherwise emit its own ZTS500 - a fan-out of byte-identical diagnostics
+    // (same code/line/column/message) differing only in spec_name. The agent
+    // re-feeds each one to the model every retry, inflating the veto signal.
+    // Instead, collect the undischarged property names here and emit a SINGLE
+    // collapsed ZTS500 after the loop whose suggestion names the specific
+    // undischarged set plus the minimal Spec to declare. (ZTS502 cannot fire
+    // in this mode - `declared` is the full v1 name set - so unknown-name and
+    // collapsed-ZTS500 do not interleave.)
+    var undischarged: std.ArrayList([]const u8) = .empty;
+    defer undischarged.deinit(allocator);
 
     for (declared) |name| {
         const spec = lookupV1(name);
@@ -282,9 +287,10 @@ pub fn dischargeSpecs(
                     errdefer allocator.free(spec_name);
                     const owned_module = try allocator.dupe(u8, module_name);
                     errdefer allocator.free(owned_module);
-                    const suggestion = if (implicit_remedy) |r|
-                        try allocator.dupe(u8, r)
-                    else if (suggestionForIncompatible(name, module_name)) |s|
+                    // The cache/sql contradiction is the real cause here, so
+                    // the per-import remedy is accurate even under the implicit
+                    // default profile.
+                    const suggestion = if (suggestionForIncompatible(name, module_name)) |s|
                         try allocator.dupe(u8, s)
                     else
                         null;
@@ -308,34 +314,50 @@ pub fn dischargeSpecs(
         // properties is null we record a "not_discharged" with no cause -
         // that is still actionable: it tells the user the classifier did
         // not run for this build.
-        const props = properties orelse {
-            try appendNotDischarged(allocator, &out, name, implicit_default, implicit_remedy);
-            continue;
+        const undischarged_here = blk: {
+            const props = properties orelse break :blk true;
+            break :blk !spec.?.field.lookup(props);
         };
+        if (!undischarged_here) continue;
 
-        if (!spec.?.field.lookup(props)) {
-            try appendNotDischarged(allocator, &out, name, implicit_default, implicit_remedy);
+        if (implicit_default) {
+            // Defer to the single collapsed diagnostic below.
+            try undischarged.append(allocator, spec.?.name);
+        } else {
+            try appendNotDischarged(allocator, &out, name);
         }
+    }
+
+    // Emit the one collapsed ZTS500 for the implicit default profile. Its
+    // spec_name carries the joined undischarged set so the JSON surface lists
+    // the real properties, and its suggestion names them plus the minimal Spec.
+    if (implicit_default and undischarged.items.len > 0) {
+        const spec_name = try std.mem.join(allocator, ", ", undischarged.items);
+        errdefer allocator.free(spec_name);
+        const suggestion = try implicitDefaultSuggestion(allocator, properties, undischarged.items);
+        errdefer allocator.free(suggestion);
+        try out.append(allocator, .{
+            .kind = .not_discharged,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+            .implicit_default = true,
+        });
     }
 
     return out;
 }
 
+/// Append a per-spec ZTS500 for an explicitly declared Spec that the handler
+/// proof did not discharge. The implicit-default profile does not use this -
+/// it accumulates undischarged names and emits one collapsed diagnostic.
 fn appendNotDischarged(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(SpecDiagnostic),
     name: []const u8,
-    implicit_default: bool,
-    /// When set (implicit default profile), used verbatim in place of the
-    /// per-property `suggestionFor` hint so the agent is told to declare a
-    /// narrow Spec rather than to chase an individual property.
-    override_suggestion: ?[]const u8,
 ) !void {
     const spec_name = try allocator.dupe(u8, name);
     errdefer allocator.free(spec_name);
-    const suggestion = if (override_suggestion) |o|
-        try allocator.dupe(u8, o)
-    else if (suggestionFor(name)) |s|
+    const suggestion = if (suggestionFor(name)) |s|
         try allocator.dupe(u8, s)
     else
         null;
@@ -344,53 +366,56 @@ fn appendNotDischarged(
         .kind = .not_discharged,
         .spec_name = spec_name,
         .suggestion = suggestion,
-        .implicit_default = implicit_default,
+        .implicit_default = false,
     });
 }
 
-/// Build the actionable remedy shown when the undischarged spec set is the
-/// IMPLICIT default profile (the handler declared no `Spec<...>`). Lists the
-/// commonly-declared properties the handler currently holds so the author can
-/// copy a clean, already-satisfiable narrow Spec onto the return type. Caller
-/// owns the result.
+/// Build the actionable remedy shown for the single collapsed ZTS500 emitted
+/// when the handler declares no `Spec<...>` (the IMPLICIT default profile).
+/// Data-driven from `undischarged`, the exact set of default-profile properties
+/// this handler does NOT hold: it names those properties, then offers the
+/// minimal Spec to declare - the default-profile properties the handler DOES
+/// hold. Caller owns the result.
 fn implicitDefaultSuggestion(
     allocator: std.mem.Allocator,
     properties: ?HandlerProperties,
+    undischarged: []const []const u8,
 ) ![]u8 {
-    // Curated shortlist of the properties a typical stateful handler keeps;
-    // filtered to those that actually hold so we never recommend one the
-    // handler cannot satisfy. Mirrors the scaffold's narrow Spec.
-    const curated = [_][]const u8{
-        "deterministic",
-        "injection_safe",
-        "no_secret_leakage",
-        "state_isolated",
-        "input_validated",
-    };
-    var joined: std.ArrayList(u8) = .empty;
-    defer joined.deinit(allocator);
-    var count: usize = 0;
-    for (curated) |cn| {
-        if (properties) |props| {
-            const spec = lookupV1(cn) orelse continue;
-            if (!spec.field.lookup(props)) continue;
-        }
-        if (count > 0) try joined.appendSlice(allocator, " | ");
-        try joined.appendSlice(allocator, "\"");
-        try joined.appendSlice(allocator, cn);
-        try joined.appendSlice(allocator, "\"");
-        count += 1;
+    // The properties the handler still holds form the minimal Spec the author
+    // can declare and have pass immediately. Read them straight off the
+    // classified `properties` so we never recommend one the handler fails -
+    // including read_only, which the import-contradiction path (ZTS501) emits
+    // separately and so is absent from `undischarged`. Without classified
+    // properties, fall back to the v1 profile minus the undischarged set.
+    var holds: std.ArrayList(u8) = .empty;
+    defer holds.deinit(allocator);
+    var holds_count: usize = 0;
+    for (v1_spec_names) |cn| {
+        const cn_holds = if (properties) |props| blk: {
+            const spec = lookupV1(cn) orelse break :blk false;
+            break :blk spec.field.lookup(props);
+        } else !containsString(undischarged, cn);
+        if (!cn_holds) continue;
+        if (holds_count > 0) try holds.appendSlice(allocator, " | ");
+        try holds.appendSlice(allocator, "\"");
+        try holds.appendSlice(allocator, cn);
+        try holds.appendSlice(allocator, "\"");
+        holds_count += 1;
     }
-    if (count == 0) try joined.appendSlice(allocator, "\"injection_safe\"");
+    if (holds_count == 0) try holds.appendSlice(allocator, "\"injection_safe\"");
+
+    // The undischarged properties, named so the author sees exactly what the
+    // default profile demanded that this handler cannot prove.
+    const missing = try std.mem.join(allocator, ", ", undischarged);
+    defer allocator.free(missing);
 
     return std.fmt.allocPrint(
         allocator,
         "this handler declares no Spec<...>, so the compiler must prove the full " ++
-            "default profile (read_only, retry_safe, idempotent, pure) - which a " ++
-            "handler that writes zigttp:cache/zigttp:sql cannot hold. Declare a narrow " ++
-            "Spec on the return type with only the properties it holds, e.g. " ++
+            "default profile, but it does not hold: {s}. Declare a narrow Spec on the " ++
+            "return type with only the properties it holds, e.g. " ++
             "`function handler(req: Request): Response & Spec<{s}>`.",
-        .{joined.items},
+        .{ missing, holds.items },
     );
 }
 
@@ -792,6 +817,54 @@ test "dischargeSpecs implicit default profile gives the narrow-Spec remedy" {
         }
     }
     try std.testing.expect(saw_remedy);
+}
+
+test "dischargeSpecs Spec-less pure handler collapses to one ZTS500 naming real props" {
+    // EXP-3/EXP-4 regression. A trivial pure/read-only Spec-less handler holds
+    // pure/read_only/deterministic and every flow default, but the derived
+    // properties (idempotent, fault_covered, result_safe, optional_safe,
+    // canonical) default false. Previously the implicit default profile emitted
+    // one byte-identical ZTS500 per undischarged property (the fan-out the agent
+    // re-fed to the model) and every one carried the misleading
+    // "...cache/sql cannot hold" suggestion. Now: exactly one collapsed ZTS500,
+    // whose suggestion names the actual undischarged set, not cache/sql.
+    const allocator = std.testing.allocator;
+    const props = HandlerProperties{
+        .pure = true,
+        .read_only = true,
+        .stateless = true,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = false,
+        // idempotent/fault_covered/result_safe/optional_safe/canonical default
+        // false; the flow + injection + state-isolation defaults are true.
+    };
+    const modules: [0][]const u8 = .{};
+
+    var diags = try dischargeSpecs(allocator, &v1_spec_names, props, &modules, true);
+    defer {
+        for (diags.items) |*d| @constCast(d).deinit(allocator);
+        diags.deinit(allocator);
+    }
+
+    // Exactly one ZTS500 (no per-property fan-out), no ZTS501/ZTS502.
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    const d = diags.items[0];
+    try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, d.kind);
+    try std.testing.expect(d.implicit_default);
+    try std.testing.expectEqualStrings("ZTS500", d.kind.code());
+
+    const s = d.suggestion orelse return error.MissingSuggestion;
+    // Names the real undischarged properties for THIS handler.
+    try std.testing.expect(std.mem.indexOf(u8, s, "fault_covered") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "result_safe") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "optional_safe") != null);
+    // Never the misdirecting cache/sql sentence on a handler that writes neither.
+    try std.testing.expect(std.mem.indexOf(u8, s, "cache/zigttp:sql cannot hold") == null);
+    // The minimal Spec it offers lists held properties, not the unheld ones.
+    try std.testing.expect(std.mem.indexOf(u8, s, "Response & Spec<") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"pure\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"fault_covered\"") == null);
 }
 
 test "dischargeEffects ceiling matching the inferred row returns empty" {

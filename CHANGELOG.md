@@ -38,17 +38,14 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 - Root-level `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, and `CODEOWNERS`.
 - This `CHANGELOG.md`.
 - `docs/internals/capabilities.md` - complete capability enforcement map: every `ModuleCapability` variant, which virtual modules declare it, and the enforcement helpers (`pushActiveModuleContext`, `requireCapability`, `wrapNativeFnWithCapabilities`) that gate it. Explains the thread-local context model that makes capability enforcement compose with `HandlerPool`.
-- `docs/control-plane-contract.md` - HTTP wire contract for `zigttp deploy` and `zigttp login`: endpoints (`/v1/auth/device/{start,poll}`, `/v1/auth/token/verify`, `/v1/deploy/session`), request/response schemas, status code semantics, credentials file format, cross-compile pipeline, OCI proven-fact labels, Northflank provider endpoints, drift detection, and the minimum contract a self-hosted control plane must implement under `ZIGTTP_CONTROL_PLANE_URL`.
 - `packages/runtime/src/handler_loader.zig` - shared loader that collapses the duplicated `HandlerSource` switch in `replay_runner.zig`, `test_runner.zig`, and `durable_recovery.zig` into a single `load(allocator, handler, label)` helper, plus inline tests covering `inline_code`, `embedded_bytecode`, and `appended_payload` branches.
 - Linux (`ubuntu-latest`) entry in the CI test matrix. `.github/workflows/release.yml` now runs `zig build test test-zigts test-zruntime`, the release build, `scripts/test-examples.sh`, the policy-hash check, and the expert subsystem verification on both macOS and Linux.
-- `examples/url-shortener/` wired into `scripts/test-examples.sh` (currently disabled behind a comment — the fixture has drifted from the handler and is tracked for repair).
 
 ### Changed
 
 - `zigttp expert` and `zigts expert` now fail fast when no model backend is configured. With neither `ANTHROPIC_API_KEY` nor `OPENAI_API_KEY` set to a non-empty value, the CLI prints setup guidance and exits non-zero instead of launching the agent UI on the offline stub. This is a v1 semantic change to the contract published in `docs/internals/zigts-expert-contract.md`; the prior stub fallback for an unset environment is no longer reachable from either CLI, including the `--print --mode json` event stream.
 - Hosted cloud deploy is deferred from v0.1.0-beta. `zigttp deploy --cloud`, `login`, `logout`, `review`, `grants`, and `revoke-grant` are gated at the CLI boundary and reject with a "not in this beta" message; they are dropped from `zigttp help --all`. The control-plane code stays in `packages/runtime/src/deploy/`, ready to re-enable once the path has CI smoke coverage.
 - The experimental `assert-intent` command is hidden from `zigttp help --all`; it still dispatches for callers that invoke it directly.
-- `docs/rollout.md` reframed as a historical appendix for the v0.14-v0.15 rule review rollout; active changes now land here.
 - `AGENTS.md` documentation index now covers the full `docs/` directory.
 - `scripts/test-examples.sh` runs `zig build` up-front so CI fails fast on a broken runtime rather than emitting N cryptic per-suite errors.
 - `replay_runner.zig`, `test_runner.zig`, and `durable_recovery.zig` delegate handler-source loading to `handler_loader.zig` instead of each carrying its own switch.

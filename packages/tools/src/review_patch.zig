@@ -55,7 +55,11 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     const input: edit_simulate.EditSimulateInput = if (stdin_json)
         try edit_simulate.readStdinJson(allocator)
     else blk: {
-        const path = handler_path orelse return error.MissingArgument;
+        const path = handler_path orelse {
+            const usage = "Usage: zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]\n";
+            _ = std.c.write(std.c.STDERR_FILENO, usage.ptr, usage.len);
+            std.process.exit(1);
+        };
         owned_content = try file_io.readFile(allocator, path, 10 * 1024 * 1024);
         if (before_path) |bp| {
             owned_before = try file_io.readFile(allocator, bp, 10 * 1024 * 1024);

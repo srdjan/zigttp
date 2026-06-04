@@ -498,6 +498,15 @@ fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
 
     const pid = std.c.fork();
     if (pid == 0) {
+        // The appended bytecode makes the signed binary fail codesign's strict
+        // validation, so codesign prints scary-but-expected diagnostics to
+        // stdout/stderr. Silence them: the signature is still applied and the
+        // binary still runs. Redirect both streams to /dev/null before exec.
+        const devnull_fd = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+        if (devnull_fd >= 0) {
+            _ = std.c.dup2(devnull_fd, std.c.STDOUT_FILENO);
+            _ = std.c.dup2(devnull_fd, std.c.STDERR_FILENO);
+        }
         const codesign: [*:0]const u8 = "/usr/bin/codesign";
         const argv = [_:null]?[*:0]const u8{
             codesign,
@@ -512,9 +521,8 @@ fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
     } else if (pid > 0) {
         var status: i32 = 0;
         _ = std.c.waitpid(pid, &status, 0);
-        if (status != 0) {
-            std.log.warn("Ad-hoc code signing returned non-zero status", .{});
-        }
+        // A non-zero status is expected (strict validation fails on the appended
+        // bytecode) and unactionable, so it is deliberately not surfaced.
     }
 }
 

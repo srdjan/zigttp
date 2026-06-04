@@ -2450,7 +2450,11 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
             return error.InvalidArgument;
         }
     }
-    const path = file orelse return error.MissingArgument;
+    const path = file orelse {
+        const usage = "Usage: zigts normalize <file> [--write] [--check] [--json]\n";
+        _ = std.c.write(std.c.STDERR_FILENO, usage.ptr, usage.len);
+        std.process.exit(1);
+    };
     if (write_mode and check_mode) return error.InvalidArgument;
 
     var nr = try normalize(allocator, path);
@@ -2568,7 +2572,11 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
             return error.InvalidArgument;
         }
     }
-    const path = file orelse return error.MissingArgument;
+    const path = file orelse {
+        const usage = "Usage: zigts canonicalize <file> --json [--simulate]\n";
+        _ = std.c.write(std.c.STDERR_FILENO, usage.ptr, usage.len);
+        std.process.exit(1);
+    };
     if (!json_mode) return error.InvalidArgument;
 
     var result = try collect(allocator, path);

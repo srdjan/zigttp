@@ -413,7 +413,7 @@ fn printHelp() void {
         \\      hash no longer matches this binary; --allow-version-mismatch
         \\      overrides that gate.
         \\
-        \\A capsule is recorded by `zigttp dev --record-proof` (deferred) or
+        \\A capsule is recorded by `zigttp dev --record-proof` or
         \\authored from recorded `--trace` output. The capsule format lives in
         \\packages/runtime/src/capsule.zig.
         \\

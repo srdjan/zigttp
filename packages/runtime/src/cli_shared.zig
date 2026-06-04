@@ -90,6 +90,24 @@ pub fn takeArg(i: *usize, argv: []const []const u8, missing: anyerror) ![]const 
     return argv[i.*];
 }
 
+/// Strip TypeScript annotations from an inline `-e`/`--eval` snippet so it
+/// matches the file path, where `.ts`/`.tsx` handlers are stripped before
+/// parsing. Without this, `-e "const x: number = 5"` reaches the parser raw
+/// and fails, while the identical code in a file loads fine.
+///
+/// Returns an owned buffer; the caller owns it (the serve path leaks the
+/// handler source for the process lifetime). If the stripper rejects the
+/// source (an unsupported construct, OOM), the original is duped through
+/// unchanged so plain-JS `-e` keeps its existing behavior and the parser
+/// produces the same diagnostic it always did.
+pub fn stripInlineSource(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
+    var strip_result = zigts.strip(allocator, source, .{ .report_errors = false }) catch {
+        return allocator.dupe(u8, source);
+    };
+    defer strip_result.deinit();
+    return allocator.dupe(u8, strip_result.code);
+}
+
 pub fn printVersion() void {
     const version = "zigttp " ++ zigts.version.string ++ "\n";
     _ = std.c.write(std.c.STDOUT_FILENO, version.ptr, version.len);
@@ -282,4 +300,22 @@ test "parse size" {
     try std.testing.expectEqual(@as(usize, 1024 * 1024), try parseSize("1m"));
     try std.testing.expectEqual(@as(usize, 1024 * 1024), try parseSize("1mb"));
     try std.testing.expectEqual(@as(usize, 100), try parseSize("100"));
+}
+
+test "stripInlineSource strips TS annotations ENG7" {
+    const allocator = std.testing.allocator;
+
+    // A type annotation that would be a parse error if fed raw to the parser
+    // must be stripped, matching the file path.
+    const ts_src = "function handler(req) { const x: number = 5; return Response.text(String(x)); }";
+    const stripped = try stripInlineSource(allocator, ts_src);
+    defer allocator.free(stripped);
+    try std.testing.expect(std.mem.indexOf(u8, stripped, ": number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, stripped, "const x") != null);
+
+    // Plain JS round-trips unchanged so `-e` of pure JS keeps its behavior.
+    const js_src = "function handler(req) { return Response.json({ok:true}); }";
+    const passthrough = try stripInlineSource(allocator, js_src);
+    defer allocator.free(passthrough);
+    try std.testing.expectEqualStrings(js_src, passthrough);
 }

@@ -106,6 +106,33 @@ const prologue =
     \\                                (auto-fix the ZTS6xx canonical band);
     \\                                prefer this over hand-fixing ternary,
     \\                                compound-assign, redundant-bool slips
+    \\  zigts_expert_ast_rewrite    - dispatch a typed RepairIntent into a
+    \\                                verified in-memory canonical rewrite
+    \\                                (replace_let_with_const,
+    \\                                replace_arrow_with_function,
+    \\                                replace_compound_assign_with_explicit,
+    \\                                and the rest); returns proposed content
+    \\                                plus the edit-simulate veto verdict and
+    \\                                never writes the file
+    \\  zigts_expert_narrow         - per-path label flow report for a handler;
+    \\                                each diagnostic carries the path
+    \\                                constraints (method comparisons, stub
+    \\                                truthiness, result-ok narrowing) that
+    \\                                witness it, so you can propose the
+    \\                                discriminating guard that proves a sink
+    \\                                safe on the offending branch
+    \\  zigts_expert_effects        - inferred effect row for every named
+    \\                                function in a file: the union of required
+    \\                                capabilities plus determinism, purity,
+    \\                                recursion, and egress flags; call before
+    \\                                editing to surface a refactor's effect
+    \\                                delta
+    \\  zigts_expert_ratchet        - the property set the compiler currently
+    \\                                proves for a handler, straight from
+    \\                                contract.json provenSpecs (also signed in
+    \\                                the Zigttp-Attest JWS); ground a /ratchet
+    \\                                or /tighten suggestion in this set, not
+    \\                                speculation
     \\  zigts_expert_edit_simulate  - dry-run a proposed edit
     \\  zigts_expert_review_patch   - diff-aware violation review
     \\  zigts_expert_prove_patch    - classify a before/after contract pair
@@ -183,6 +210,10 @@ const prologue =
     \\  Violation baseline before editing      -> zigts_expert_verify_paths
     \\  Canonical refactor preview             -> zigts_expert_canonicalize
     \\  Auto-fix canonical (ZTS6xx) slips      -> zigts_expert_normalize
+    \\  Apply a typed canonical RepairIntent   -> zigts_expert_ast_rewrite
+    \\  Per-path label flow / guard discovery  -> zigts_expert_narrow
+    \\  Inferred effect row for a file         -> zigts_expert_effects
+    \\  Proven property set (ratchet/tighten)  -> zigts_expert_ratchet
     \\  Contract-pair compatibility proof      -> zigts_expert_prove_patch
     \\  Cross-handler system proof             -> zigts_expert_system_proof
     \\  Proof-guided repair plan               -> pi_repair_plan
@@ -336,7 +367,12 @@ const prologue =
     \\     sink no longer receives the labelled value, or the branch that
     \\     carries it is closed earlier. Do not mute the rule or rename
     \\     the env var - the witness is an executable proof, so the fix
-    \\     must close the concrete path.
+    \\     must close the concrete path. When the leak holds on only one
+    \\     branch, call zigts_expert_narrow first: it reports the path
+    \\     constraints (method comparison, stub truthiness, result-ok
+    \\     narrowing) that witness each diagnostic, which is exactly the
+    \\     discriminating guard to add so the sink proves safe on the
+    \\     offending branch without restructuring the handler.
     \\  6. Re-run pi_goal_check. Repeat until "ok":true.
     \\Every iteration is captured as a proof-carrying patch in the session
     \\ledger, so the final artifact carries a record of which goals were

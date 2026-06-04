@@ -63,7 +63,9 @@ pub fn processSubmit(
     if (std.mem.startsWith(u8, trimmed, "/skill:")) {
         const skill_name = trimmed["/skill:".len..];
         if (skills_catalog.findByName(skill_name)) |skill| {
-            writeWorking();
+            var ticker: WorkingTicker = .{};
+            ticker.start();
+            defer ticker.finish();
             const rendered = try agent.runOneTurn(allocator, session, registry, skill.body, approval_fn);
             return .{ .rendered = rendered };
         }
@@ -101,7 +103,9 @@ pub fn processSubmit(
         if (prompts_catalog.findByName(tmpl_name)) |tmpl| {
             const expanded = try prompts_catalog.expand(allocator, tmpl.body, tmpl_args.items);
             defer allocator.free(expanded);
-            writeWorking();
+            var ticker: WorkingTicker = .{};
+            ticker.start();
+            defer ticker.finish();
             const rendered = try agent.runOneTurn(allocator, session, registry, expanded, approval_fn);
             return .{ .rendered = rendered };
         }
@@ -135,7 +139,9 @@ pub fn processSubmit(
     }
 
     if (!shouldDispatchTool(registry, trimmed)) {
-        writeWorking();
+        var ticker: WorkingTicker = .{};
+        ticker.start();
+        defer ticker.finish();
         const rendered = try agent.runOneTurn(allocator, session, registry, trimmed, approval_fn);
         return .{ .rendered = rendered };
     }
@@ -428,7 +434,7 @@ fn renderHotkeys(allocator: std.mem.Allocator) !ToolResult {
         u8,
         "Keyboard shortcuts (CLI REPL):\n" ++
             "  Enter          submit current line\n" ++
-            "  Ctrl-C         interrupt / cancel\n" ++
+            "  Ctrl-C         stop the session\n" ++
             "  Ctrl-D         quit (EOF)\n",
     );
     defer allocator.free(msg);
@@ -730,10 +736,10 @@ pub fn run(
                 }
                 if (is_tty) {
                     const tok = session.token_totals;
-                    var token_buf: [128]u8 = undefined;
+                    var token_buf: [160]u8 = undefined;
                     const token_line = std.fmt.bufPrint(
                         &token_buf,
-                        "[tokens: in={d} cache_r={d} cache_w={d} out={d}]\n",
+                        "[session tokens (cumulative): in={d} cache_r={d} cache_w={d} out={d}]\n",
                         .{
                             tok.input_tokens,
                             tok.cache_read_input_tokens,
@@ -776,6 +782,8 @@ pub fn run(
 const expert_banner =
     "zigttp expert: I propose compiler-verified edits to your handler. Every draft is\n" ++
     "checked by the analyzer and rejected if it fails, so you only approve edits that pass.\n" ++
+    "\n" ++
+    "Each turn calls your model provider and consumes API credits.\n" ++
     "\n" ++
     "Try: add a GET /health route to handler.ts\n" ++
     "Type a goal in plain English, 'help' for commands, or 'quit' to exit.\n";
@@ -822,6 +830,9 @@ const InteractiveStreamCtx = struct {
         const rendered = transcript_mod.renderRichEntryToOwned(self.allocator, entry) catch return;
         defer self.allocator.free(rendered);
         if (!builtin.is_test) {
+            // Clear the elapsed-time tick before the first entry prints so they
+            // never collide on the same line.
+            stopWorkingTicker();
             _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
         }
         self.streamed = true;
@@ -829,11 +840,70 @@ const InteractiveStreamCtx = struct {
 };
 
 /// Immediate feedback for the gap between submitting a prompt and the first
-/// streamed entry arriving, so the terminal is never silently frozen. TTY only.
-fn writeWorking() void {
-    if (std.c.isatty(std.c.STDOUT_FILENO) == 0) return;
-    const msg = "working...\n";
-    _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
+/// streamed entry arriving, so the terminal is never silently frozen. The
+/// provider client reads the whole response body before returning, so without
+/// this the terminal would look frozen for the entire first turn. A background
+/// thread rewrites a single `working... Ns` line each second until the first
+/// entry streams (or the turn returns). TTY-only, never in --print/json/test.
+const WorkingTicker = struct {
+    thread: ?std.Thread = null,
+    stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    /// File-scope handle so the live-stream observer can stop the ticker the
+    /// instant the first entry arrives, before it prints over the elapsed line.
+    var active: ?*WorkingTicker = null;
+
+    fn start(self: *WorkingTicker) void {
+        if (builtin.is_test) return;
+        if (std.c.isatty(std.c.STDOUT_FILENO) == 0) return;
+        self.stop.store(false, .seq_cst);
+        active = self;
+        self.thread = std.Thread.spawn(.{}, tick, .{self}) catch {
+            // Without the thread, fall back to a static one-shot notice so the
+            // user still sees that work started.
+            active = null;
+            const msg = "working...\n";
+            _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
+            return;
+        };
+    }
+
+    /// Idempotent: safe to call from both the observer and the post-turn path.
+    fn finish(self: *WorkingTicker) void {
+        active = null;
+        if (self.thread) |t| {
+            self.stop.store(true, .seq_cst);
+            t.join();
+            self.thread = null;
+            // Clear the elapsed-time line so the entry text starts clean.
+            const clear = "\r\x1b[K";
+            _ = std.c.write(std.c.STDOUT_FILENO, clear.ptr, clear.len);
+        }
+    }
+
+    fn tick(self: *WorkingTicker) void {
+        var seconds: u64 = 0;
+        while (!self.stop.load(.seq_cst)) {
+            var buf: [64]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "\rworking... {d}s", .{seconds}) catch "\rworking...";
+            _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+            // Sleep in short slices so stop is observed within ~50ms of finish().
+            var slept: u64 = 0;
+            while (slept < std.time.ns_per_s) : (slept += 50 * std.time.ns_per_ms) {
+                if (self.stop.load(.seq_cst)) return;
+                var req = std.c.timespec{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&req, null);
+            }
+            seconds += 1;
+        }
+    }
+};
+
+/// Stops the active ticker (if any) so the first streamed entry prints over a
+/// cleared line instead of colliding with the elapsed-time tick. No-op when no
+/// ticker is running (e.g. dispatched tool commands).
+fn stopWorkingTicker() void {
+    if (WorkingTicker.active) |t| t.finish();
 }
 
 /// Surface a one-line notice when the shared auto-compaction guard fired, so the
@@ -1101,6 +1171,31 @@ test "selectApprovalFn: ask resolves to the interactive approveEdit" {
         .bare => |func| try testing.expect(func == approveEdit),
         else => return error.TestFailed,
     }
+}
+
+test "EXP-5: hotkeys help no longer claims Ctrl-C interrupts a blocked turn" {
+    var result = try renderHotkeys(testing.allocator);
+    defer result.deinit(testing.allocator);
+    // No SIGINT handler exists, so the old "interrupt / cancel" text was a lie.
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "interrupt") == null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "Ctrl-C         stop the session") != null);
+}
+
+test "EXP-8: interactive banner warns that each turn spends API credits" {
+    try testing.expect(std.mem.indexOf(u8, expert_banner, "consumes API credits") != null);
+}
+
+test "EXP-8: post-turn token line is labelled cumulative for the whole session" {
+    // The line accumulates across turns; the label must say so. Asserted against
+    // the same literal the interactive loop formats so a relabel can't silently
+    // drift back to the unlabelled per-turn-looking form.
+    var buf: [160]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &buf,
+        "[session tokens (cumulative): in={d} cache_r={d} cache_w={d} out={d}]\n",
+        .{ @as(u64, 1), @as(u64, 2), @as(u64, 3), @as(u64, 4) },
+    ) catch unreachable;
+    try testing.expect(std.mem.indexOf(u8, line, "cumulative") != null);
 }
 
 test "InteractiveStreamCtx skips user_text and marks streamed for model entries" {

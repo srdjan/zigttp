@@ -110,12 +110,49 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
     return recovered;
 }
 
+/// Exclusive non-blocking claim on a single oplog file, held for the duration
+/// of a recovery re-execution. The scheduler re-runs `recoverIncompleteOplogs`
+/// every second, so without a claim two passes (or a pass overlapping a live
+/// request that still owns the oplog) could re-execute the same handler
+/// concurrently and double-apply its effects. `flock(LOCK_EX | LOCK_NB)` fails
+/// closed: if the lock is already held the second claimant skips the file. The
+/// lock is advisory and released when the fd closes.
+const OplogClaim = struct {
+    fd: c_int,
+
+    /// Try to claim `path`. Returns null when the lock is already held by
+    /// another recovery pass (skip this oplog) or the file cannot be opened.
+    fn acquire(allocator: std.mem.Allocator, path: []const u8) ?OplogClaim {
+        const path_z = allocator.dupeZ(u8, path) catch return null;
+        defer allocator.free(path_z);
+        const fd = std.c.open(path_z, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        if (fd < 0) return null;
+        if (std.c.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB) != 0) {
+            _ = std.c.close(fd);
+            return null;
+        }
+        return .{ .fd = fd };
+    }
+
+    fn release(self: OplogClaim) void {
+        // Closing the fd drops the advisory lock; an explicit LOCK.UN first
+        // makes the release intent obvious and independent of close timing.
+        _ = std.c.flock(self.fd, std.posix.LOCK.UN);
+        _ = std.c.close(self.fd);
+    }
+};
+
 fn recoverOne(
     allocator: std.mem.Allocator,
     config: ServerConfig,
     parsed: *const trace.IncompleteOplog,
     oplog_path: []const u8,
 ) !bool {
+    // Claim the oplog before re-executing. If another pass already holds it,
+    // skip rather than double-execute the handler.
+    const claim = OplogClaim.acquire(allocator, oplog_path) orelse return false;
+    defer claim.release();
+
     const recovery_config = config.runtime_config;
 
     const rt = try Runtime.init(allocator, recovery_config);
@@ -176,3 +213,63 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 }
 
 const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "durable recovery: OplogClaim refuses a second concurrent claim on the same oplog" {
+    // The scheduler re-runs recoverIncompleteOplogs every second. Two passes (or
+    // a pass overlapping a live request) must not both re-execute the same oplog.
+    // The exclusive non-blocking flock claim guarantees the second claimant is
+    // turned away (skip), so the handler runs at most once per oplog at a time.
+    const allocator = testing.allocator;
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // A real file the claim can open and lock.
+    {
+        var f = try tmp.dir.createFile(io, "durable-key.jsonl", .{});
+        f.close(io);
+    }
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(io, &dir_buf);
+    const oplog_path = try std.fmt.allocPrint(allocator, "{s}/durable-key.jsonl", .{dir_buf[0..dir_len]});
+    defer allocator.free(oplog_path);
+
+    // First pass claims the oplog.
+    const first = OplogClaim.acquire(allocator, oplog_path) orelse
+        return error.FirstClaimShouldSucceed;
+
+    // A concurrent second pass must be refused while the first holds the lock.
+    try testing.expect(OplogClaim.acquire(allocator, oplog_path) == null);
+
+    // After the first pass releases, the oplog is claimable again.
+    first.release();
+    const second = OplogClaim.acquire(allocator, oplog_path) orelse
+        return error.ReclaimAfterReleaseShouldSucceed;
+    second.release();
+}
+
+test "durable recovery: OplogClaim.acquire returns null for a missing oplog file" {
+    const allocator = testing.allocator;
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(io, &dir_buf);
+    const missing = try std.fmt.allocPrint(allocator, "{s}/does-not-exist.jsonl", .{dir_buf[0..dir_len]});
+    defer allocator.free(missing);
+    try testing.expect(OplogClaim.acquire(allocator, missing) == null);
+}

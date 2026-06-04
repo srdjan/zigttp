@@ -70,7 +70,7 @@ const help_all_mid =
     \\  zigttp compile <handler.ts> -o <bin>   Build a binary from an explicit path
     \\
     \\Proof ledger:
-    \\  zigttp proofs [list|show|diff|watch|export|badge|bundle|verify]
+    \\  zigttp proofs [list|show|diff|watch|export|badge|bundle|verify|gate]
     \\  zigttp proof replay <capsule>          Replay a recorded capsule against the current handler
     \\  zigttp ledger [export|replay]          Export or replay an expert-session verified-patch ledger
     \\  zigttp verify <url>                    Verify a deployed proof receipt

@@ -433,7 +433,8 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             printServeHelp();
             return error.HelpRequested;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--eval")) {
-            config.handler = .{ .inline_code = try shared.takeArg(&i, argv, error.MissingEvalCode) };
+            const raw_eval = try shared.takeArg(&i, argv, error.MissingEvalCode);
+            config.handler = .{ .inline_code = try shared.stripInlineSource(allocator, raw_eval) };
             handler_set = true;
         } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--memory")) {
             const value = try shared.takeArg(&i, argv, error.MissingMemoryValue);
