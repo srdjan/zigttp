@@ -276,6 +276,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 printNoProjectConfigDiagnostic(command);
                 std.process.exit(1);
             }
+            // Usage errors (bad/unknown/missing flags or args) must not escape
+            // as a raw Zig stack trace: IDE/CI cannot read those. Map them to a
+            // clean one-line message and exit 1. Generic across every analyzer
+            // command routed through this dispatch.
+            if (err == error.InvalidArgument or
+                err == error.InvalidArguments or
+                err == error.MissingArgument or
+                err == error.UnknownArgument or
+                err == error.UnknownOption or
+                err == error.UnknownFlag or
+                err == error.TooManyArguments)
+            {
+                std.debug.print(
+                    "zigttp {s}: invalid arguments ({s}). Run `zigttp {s} --help` for usage.\n",
+                    .{ command, @errorName(err), command },
+                );
+                std.process.exit(1);
+            }
             return err;
         };
         return;

@@ -1355,7 +1355,12 @@ pub const IRStore = struct {
             },
             .optional_call => blk: {
                 const c = node.data.call;
-                const b_val = @as(u32, c.args_count) | (@as(u32, @as(u16, @truncate(c.args_start))) << 8);
+                // Pack the is_optional bit (<<24) like .call/.method_call so
+                // getCallData reports the optional flag and emitCall emits the
+                // nil-check short-circuit instead of a plain throwing call.
+                const b_val = @as(u32, c.args_count) |
+                    (@as(u32, @as(u16, @truncate(c.args_start))) << 8) |
+                    (@as(u32, if (c.is_optional) 1 else 0) << 24);
                 break :blk self.addNode(.optional_call, loc, .{ .a = c.callee, .b = b_val });
             },
 

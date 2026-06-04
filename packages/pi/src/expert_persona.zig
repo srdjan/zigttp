@@ -302,6 +302,14 @@ const prologue =
     \\sql state. When you rewrite a scaffolded handler, keep its existing
     \\`Spec<...>` annotation rather than dropping it.
     \\
+    \\zigttp:sql caveat (this beta): you cannot verify or land a handler that
+    \\imports zigttp:sql - the veto short-circuits every zigttp:sql edit to
+    \\"unsupported" because SQL-schema verification is deferred. Do not draft a
+    \\zigttp:sql handler and try to apply it; you will burn the turn at veto. For
+    \\persistence reachable in this loop, use zigttp:cache instead. If the user
+    \\truly needs zigttp:sql, steer them to run `zigttp check --sql-schema <path>`
+    \\directly rather than going through the expert apply path.
+    \\
     \\Building HTML lists: when the handler return type is annotated, prefer a
     \\`for...of` loop with a `let` string accumulator over `.map`/`.filter`.
     \\Array HOF callbacks with inline-typed params (`(todo: Todo) => ...`) or

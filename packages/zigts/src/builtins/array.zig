@@ -730,16 +730,14 @@ pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const 
 }
 
 /// Array.prototype.toSorted(compareFunc?) - Return new sorted array (non-mutating)
-/// Implements default string comparison per JS spec. Custom compare functions not yet supported.
+/// With a compare function, orders by the sign of its numeric return value (per JS
+/// spec: <0 keeps a before b, >0 puts b before a, 0/NaN treats them as equal).
+/// Without one, falls back to default lexicographic string comparison.
 pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     if (obj.class_id != .array) return value.JSValue.undefined_val;
 
-    // Custom compare functions not yet supported
-    if (args.len > 0 and args[0].isObject()) {
-        // TODO: Implement callback invocation for custom comparators
-        // For now, ignore the compare function and use default sort
-    }
+    const compare_fn: ?*object.JSObject = getCallbackArg(args);
 
     const len = obj.getArrayLength();
     if (len == 0) {
@@ -757,32 +755,51 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
         temp[i] = obj.getIndex(i) orelse value.JSValue.undefined_val;
     }
 
-    // Sort using default string comparison (per JS spec)
-    std.mem.sort(value.JSValue, temp, ctx.allocator, struct {
-        pub fn lessThan(allocator: std.mem.Allocator, a: value.JSValue, b: value.JSValue) bool {
-            // undefined values go to the end
-            if (a.isUndefined() and b.isUndefined()) return false;
-            if (a.isUndefined()) return false;
-            if (b.isUndefined()) return true;
-
-            // Convert to strings and compare lexicographically (JS default)
-            const str_a = valueToStringSimple(allocator, a) catch return false;
-            defer if (!a.isString()) string.freeString(allocator, str_a);
-            const str_b = valueToStringSimple(allocator, b) catch return false;
-            defer if (!b.isString()) string.freeString(allocator, str_b);
-
-            const slice_a = str_a.data();
-            const slice_b = str_b.data();
-
-            // Lexicographic comparison
-            const min_len = @min(slice_a.len, slice_b.len);
-            for (slice_a[0..min_len], slice_b[0..min_len]) |ca, cb| {
-                if (ca < cb) return true;
-                if (ca > cb) return false;
+    if (compare_fn) |callback| {
+        // Custom comparator: order by the sign of the callback's numeric result.
+        const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+        const CompareCtx = struct {
+            call_fn: http.CallFunctionFn,
+            callback: *object.JSObject,
+            pub fn lessThan(self: @This(), a: value.JSValue, b: value.JSValue) bool {
+                // undefined values sort to the end without invoking the comparator (per spec).
+                if (a.isUndefined()) return false;
+                if (b.isUndefined()) return true;
+                const call_args = [_]value.JSValue{ a, b };
+                const result = invokeCallback(self.call_fn, self.callback, &call_args) orelse return false;
+                const n = result.toNumber() orelse return false;
+                return n < 0;
             }
-            return slice_a.len < slice_b.len;
-        }
-    }.lessThan);
+        };
+        std.mem.sort(value.JSValue, temp, CompareCtx{ .call_fn = call_fn, .callback = callback }, CompareCtx.lessThan);
+    } else {
+        // Default: lexicographic string comparison (per JS spec).
+        std.mem.sort(value.JSValue, temp, ctx.allocator, struct {
+            pub fn lessThan(allocator: std.mem.Allocator, a: value.JSValue, b: value.JSValue) bool {
+                // undefined values go to the end
+                if (a.isUndefined() and b.isUndefined()) return false;
+                if (a.isUndefined()) return false;
+                if (b.isUndefined()) return true;
+
+                // Convert to strings and compare lexicographically (JS default)
+                const str_a = valueToStringSimple(allocator, a) catch return false;
+                defer if (!a.isString()) string.freeString(allocator, str_a);
+                const str_b = valueToStringSimple(allocator, b) catch return false;
+                defer if (!b.isString()) string.freeString(allocator, str_b);
+
+                const slice_a = str_a.data();
+                const slice_b = str_b.data();
+
+                // Lexicographic comparison
+                const min_len = @min(slice_a.len, slice_b.len);
+                for (slice_a[0..min_len], slice_b[0..min_len]) |ca, cb| {
+                    if (ca < cb) return true;
+                    if (ca > cb) return false;
+                }
+                return slice_a.len < slice_b.len;
+            }
+        }.lessThan);
+    }
 
     // Create result array with sorted elements
     const result = ctx.createArray() catch return value.JSValue.undefined_val;
@@ -831,4 +848,57 @@ test "arrayToSorted sorts non-string elements without an allocator mismatch" {
     try std.testing.expectEqual(@as(i32, 1), (sorted_obj.getIndex(0) orelse value.JSValue.undefined_val).getInt());
     try std.testing.expectEqual(@as(i32, 2), (sorted_obj.getIndex(1) orelse value.JSValue.undefined_val).getInt());
     try std.testing.expectEqual(@as(i32, 3), (sorted_obj.getIndex(2) orelse value.JSValue.undefined_val).getInt());
+}
+
+test "arrayToSorted ascending numeric comparator ENG5" {
+    // Regression for ENG-5: a custom comparator `(a,b) => a-b` must drive the
+    // ordering. The default string sort puts [10,2,1,33,4] in [1,10,2,33,4]
+    // order; the comparator must instead yield ascending [1,2,4,10,33].
+    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = dbg.allocator();
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Stub comparator behaving like `(a,b) => a-b`.
+    const stub = struct {
+        fn call(_: *object.JSObject, call_args: []const value.JSValue) anyerror!value.JSValue {
+            const a = call_args[0].getInt();
+            const b = call_args[1].getInt();
+            return value.JSValue.fromInt(a - b);
+        }
+    };
+    http.setCallFunctionCallback(stub.call);
+    defer http.clearCallFunctionCallback();
+
+    // A callable function object to pass as the comparator argument.
+    const cmp = try ctx.createObject(null);
+    cmp.flags.is_callable = true;
+
+    const arr = try ctx.createArray();
+    arr.prototype = ctx.array_prototype;
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(2));
+    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(1));
+    try ctx.setIndexChecked(arr, 3, value.JSValue.fromInt(33));
+    try ctx.setIndexChecked(arr, 4, value.JSValue.fromInt(4));
+    arr.setArrayLength(5);
+
+    const sorted = arrayToSorted(ctx, arr.toValue(), &.{cmp.toValue()});
+    const sorted_obj = getObject(sorted) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 5), sorted_obj.getArrayLength());
+    const expected = [_]i32{ 1, 2, 4, 10, 33 };
+    for (expected, 0..) |want, idx| {
+        const got = (sorted_obj.getIndex(@intCast(idx)) orelse value.JSValue.undefined_val).getInt();
+        try std.testing.expectEqual(want, got);
+    }
 }

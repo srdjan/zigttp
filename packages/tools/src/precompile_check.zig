@@ -177,28 +177,9 @@ pub fn appendSpecDiagnosticsJson(
     const contract = if (result.contract) |*c| c else return;
     for (contract.spec_diagnostics.items) |diag| {
         const code: []const u8 = diag.kind.code();
-        var message: []const u8 = switch (diag.kind) {
-            .not_discharged => "declared Spec was not discharged by handler proof",
-            .incompatible_with_import => "declared Spec is incompatible with imported module",
-            .unknown_name => "declared Spec name is not recognized",
-            .missing_capsule => "helper breaks a handler-demanded property and carries no Proof<...> capsule",
-            .effect_undeclared => "function reaches a capability outside its declared Effects<...> ceiling",
-            .effect_unknown_capability => "Effects<...> names an unknown capability",
-            .effect_over_declared => "declared capability is never reached by the function",
-            .budget_exceeded => "handler reaches a capability outside its declared Effects<...> budget",
-            .helper_budget_exceeded => "helper reaches a capability outside the handler's Effects<...> budget",
-            .missing_effects_capsule => "exported helper carries no Effects<...> capsule",
-            .missing_proof_capsule_export => "exported helper carries no Proof<...> capsule",
-        };
-        // The implicit default profile never "declared" anything; say so, so
-        // the agent (and authors) stop hunting for a Spec<...> they never wrote.
-        if (diag.implicit_default) {
-            message = switch (diag.kind) {
-                .not_discharged => "handler declares no Spec<...>; the default proof profile demands a property this handler does not hold",
-                .incompatible_with_import => "handler declares no Spec<...>; the default profile's read_only conflicts with a stateful module import",
-                else => message,
-            };
-        }
+        // Single source of truth shared with the human card (formatProofCard)
+        // so the two surfaces cannot drift.
+        const message: []const u8 = specDiagnosticMessage(diag);
         result.json_diagnostics.append(allocator, .{
             .code = code,
             .severity = if (diag.kind.severity() == .warn) "warning" else "error",
@@ -439,7 +420,52 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         }
     }
 
+    // Spec/Effects diagnostics live in contract.spec_diagnostics, not in
+    // json_diagnostics, so the human card must render them here or the printed
+    // error lines fall short of the footer count (e.g. a Spec-less handler
+    // trips ZTS500 in `specErrors()` but otherwise prints nothing).
+    if (r.contract) |*contract| {
+        if (r.specErrors() > 0) {
+            writer.print("\n  Spec diagnostics:\n", .{}) catch return;
+            for (contract.spec_diagnostics.items) |d| {
+                if (d.kind.severity() != .err) continue;
+                writer.print(
+                    "    {s} (error) {s}:{d}:{d}  {s}\n",
+                    .{ d.kind.code(), filename, contract.handler.line, contract.handler.column, specDiagnosticMessage(d) },
+                ) catch return;
+                if (d.suggestion) |suggestion| {
+                    writer.print("      help: {s}\n", .{suggestion}) catch return;
+                }
+            }
+        }
+    }
+
     writer.print("\n  {d} errors, {d} warnings\n", .{ r.totalErrors(), r.totalWarnings() }) catch return;
+}
+
+/// Human-readable message for a spec/Effects diagnostic, mirroring the JSON
+/// text in `appendSpecDiagnosticsJson` so the card and `--json` agree.
+fn specDiagnosticMessage(diag: handler_contract.SpecDiagnostic) []const u8 {
+    if (diag.implicit_default) {
+        switch (diag.kind) {
+            .not_discharged => return "handler declares no Spec<...>; the default proof profile demands a property this handler does not hold",
+            .incompatible_with_import => return "handler declares no Spec<...>; the default profile's read_only conflicts with a stateful module import",
+            else => {},
+        }
+    }
+    return switch (diag.kind) {
+        .not_discharged => "declared Spec was not discharged by handler proof",
+        .incompatible_with_import => "declared Spec is incompatible with imported module",
+        .unknown_name => "declared Spec name is not recognized",
+        .missing_capsule => "helper breaks a handler-demanded property and carries no Proof<...> capsule",
+        .effect_undeclared => "function reaches a capability outside its declared Effects<...> ceiling",
+        .effect_unknown_capability => "Effects<...> names an unknown capability",
+        .effect_over_declared => "declared capability is never reached by the function",
+        .budget_exceeded => "handler reaches a capability outside its declared Effects<...> budget",
+        .helper_budget_exceeded => "helper reaches a capability outside the handler's Effects<...> budget",
+        .missing_effects_capsule => "exported helper carries no Effects<...> capsule",
+        .missing_proof_capsule_export => "exported helper carries no Proof<...> capsule",
+    };
 }
 
 fn isCanonicalDiagnostic(code: []const u8) bool {

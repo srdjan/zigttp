@@ -8,7 +8,7 @@ These three handlers, in order, are the shortest path to seeing what makes zigtt
 
 1. **[handler/spec-guardrails.ts](handler/spec-guardrails.ts)** - the magnet, in 24 lines. The handler declares `Spec<"deterministic" | "idempotent" | "no_secret_leakage" | "injection_safe">` on its return type and the compiler discharges all four. Try editing it: drop a `Date.now()` into the body and watch `-deterministic` light up in the proof card with a `Why:` row. Wrap it in `step("ts", () => Date.now())` from `zigttp:durable` and the chip flips back green.
 
-2. **[handler/handler-full.tsx](handler/handler-full.tsx)** - the same magnet, with branches. JSX rendering, multiple routes, Result handling, and a non-trivial `Spec<...>` declaration. Read it after the guardrails example to see how the proof obligations scale across a real handler.
+2. **[handler/handler-full.tsx](handler/handler-full.tsx)** - the same shape, with branches. JSX rendering, multiple routes, and Result handling across a fuller handler. It returns a plain `Response` (no `Spec<...>`), so it does not declare proof obligations; read it after the guardrails example to see the routing surface scale up, then compare with [handler/handler.ts](handler/handler.ts), which carries the `Spec<...>` declaration.
 
 3. **[handler/secret-leak.ts](handler/secret-leak.ts)** - see a proof reject your code. Reads `env("SECRET_KEY")` and tries to ship it back in the response body. The flow analyzer catches it before runtime and emits ZTS400. This is the most concrete demo of "the compiler proves what your code is."
 
@@ -73,6 +73,27 @@ zig build run -- examples/handler/spec-guardrails.ts -p 3000        # serve
 zig build run -- examples/handler/spec-guardrails.ts --watch --prove # proven live reload
 zigts check examples/handler/spec-guardrails.ts                     # verify once
 ```
+
+### A note on `zigttp check` and these examples
+
+`zigttp check` (equivalently `zigts check`) runs the strict analyzer. Its
+default is to demand a *fully discharged* handler: when a handler declares no
+`Spec<...>` on its return type, the verifier must prove the entire default
+profile (`read_only`, `retry_safe`, `idempotent`, `pure`) and emits **ZTS500**
+if any member does not hold. Most examples here are intentionally minimal -
+they exist to show one feature (a route, a module import, a JSX component) and
+deliberately do *not* carry a `Spec<...>`, so they exit non-zero under `check`.
+That is expected, not a bug: the example test harness
+(`scripts/test-examples.sh`) replays each `.test.jsonl` for observable
+behavior, which is a separate gate from the strict `check` discharge.
+
+The canonical example that declares and fully discharges a `Spec<...>` - and so
+passes strict `check` cleanly - is [handler/handler.ts](handler/handler.ts).
+[handler/spec-guardrails.ts](handler/spec-guardrails.ts) also declares a
+`Spec<...>` and is the magnet to edit interactively under `zigttp dev`.
+[handler/spec-fails-idempotent.ts](handler/spec-fails-idempotent.ts) declares a
+`Spec<...>` it cannot hold *on purpose*, to exercise the ZTS500 discharge
+diagnostic.
 
 ## Diagnosing failures
 

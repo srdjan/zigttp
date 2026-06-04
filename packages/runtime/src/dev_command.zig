@@ -104,7 +104,27 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
         .stdout = .inherit,
         .stderr = .inherit,
     });
-    _ = child.wait(io) catch {};
+    propagateChildExit(child.wait(io) catch return);
+}
+
+/// Mirror the serve child's exit code into the `dev`/`studio` parent. Without
+/// this, a child that `std.process.exit(1)`s (port in use, missing handler,
+/// failed server init) leaves the parent returning 0, so callers and CI read
+/// a hard failure as success.
+fn propagateChildExit(term: std.process.Child.Term) void {
+    if (childExitCode(term)) |code| std.process.exit(code);
+}
+
+/// Decide the parent exit code for a finished serve child, split out from
+/// `propagateChildExit` so it is unit-testable without `std.process.exit`.
+/// Only a non-zero `.exited` status propagates: a signal termination (the
+/// usual Ctrl+C, delivered to the whole process group) returns null so
+/// stopping a healthy session stays exit 0.
+fn childExitCode(term: std.process.Child.Term) ?u8 {
+    return switch (term) {
+        .exited => |code| if (code != 0) code else null,
+        .signal, .stopped, .unknown => null,
+    };
 }
 
 /// Adapter registered into the `pi_app.capsule_probe` seam: replays the
@@ -181,7 +201,7 @@ pub fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, arg
         .stdout = .inherit,
         .stderr = .inherit,
     });
-    _ = child.wait(io) catch {};
+    propagateChildExit(child.wait(io) catch return);
 }
 
 /// Lets `mkdir myapp && cd myapp && zigttp studio` work as a single demo
@@ -492,6 +512,16 @@ test "studioPreflight tolerates dotfile-only cwd (e.g. .git)" {
     try studioPreflight(testing.allocator, .basic);
 
     try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zigttp.json", .{});
+}
+
+test "childExitCode propagates a failed serve child but not a clean stop" {
+    // A serve child that std.process.exit(N)s (port in use, missing handler)
+    // must surface code N to the dev/studio parent.
+    try std.testing.expectEqual(@as(?u8, 1), childExitCode(.{ .exited = 1 }));
+    try std.testing.expectEqual(@as(?u8, 2), childExitCode(.{ .exited = 2 }));
+    // A clean exit and a signal stop (Ctrl+C of a healthy session) stay 0.
+    try std.testing.expectEqual(@as(?u8, null), childExitCode(.{ .exited = 0 }));
+    try std.testing.expectEqual(@as(?u8, null), childExitCode(.{ .signal = .INT }));
 }
 
 test "runDevPreflight reports analyzer failure before starting dev loop" {

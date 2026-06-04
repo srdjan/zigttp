@@ -42,7 +42,15 @@ zig build -Doptimize=ReleaseFast
 ## First Handler
 
 ```tsx
-function HomePage() {
+import type { Spec } from "zigttp:types";
+
+type Guardrails = Spec<
+    | "deterministic"
+    | "no_secret_leakage"
+    | "injection_safe"
+>;
+
+function HomePage(): JSX.Element {
     return (
         <html>
             <head><title>Hello</title></head>
@@ -51,7 +59,7 @@ function HomePage() {
     );
 }
 
-function handler(req) {
+function handler(req: Request): Response & Guardrails {
     if (req.path === "/") {
         return Response.html(renderToString(<HomePage />));
     }

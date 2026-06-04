@@ -257,15 +257,42 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         defer live_reload.deinit();
 
         server.runWithBackgroundWork(&live_reload, watcherThread) catch |err| {
-            std.log.err("Server error: {}", .{err});
+            reportServerError(err, config.port);
             std.process.exit(1);
         };
     } else {
         server.run() catch |err| {
-            std.log.err("Server error: {}", .{err});
+            reportServerError(err, config.port);
             std.process.exit(1);
         };
     }
+}
+
+/// Print a server-run failure. A port already in use is the most common
+/// first-run failure, so it gets an actionable line naming the port and the
+/// remedy instead of the bare `error.AddressInUse`, which prints after the
+/// green proof card and reads like success followed by a cryptic crash.
+fn reportServerError(err: anyerror, port: u16) void {
+    if (err == error.AddressInUse) {
+        if (!builtin.is_test) {
+            var buf: [160]u8 = undefined;
+            const line = formatAddressInUse(&buf, port) catch return;
+            _ = std.c.write(std.c.STDERR_FILENO, line.ptr, line.len);
+        }
+        return;
+    }
+    std.log.err("Server error: {}", .{err});
+}
+
+/// Render the actionable port-in-use line into `buf`. Split out from
+/// `reportServerError` so the message (port number + remedy) is unit-testable
+/// without binding a socket.
+fn formatAddressInUse(buf: []u8, port: u16) ![]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "Port {d} is already in use. Pass a different port: zigttp dev -p <PORT>\n",
+        .{port},
+    );
 }
 
 const ServeFeatureFlags = struct {
@@ -514,8 +541,12 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
     defer server.deinit();
 
     server.run() catch |err| {
-        std.log.err("Server error: {}", .{err});
-        return;
+        // Same chokepoint as serveCommand: a deployed binary is the path most
+        // likely to hit AddressInUse on a fresh host, so surface the actionable
+        // port message and exit non-zero rather than logging a bare error and
+        // returning 0 (which supervisors read as a clean start).
+        reportServerError(err, config.port);
+        std.process.exit(1);
     };
 }
 
@@ -652,4 +683,14 @@ test "parseCommonServeFlag: --lifecycle rejects unknown value" {
     const argv = [_][]const u8{ "--lifecycle", "nonsense" };
     var i: usize = 0;
     try std.testing.expectError(error.InvalidLifecycleValue, parseCommonServeFlag(argv[0], &i, &argv, &config));
+}
+
+test "formatAddressInUse names the port and the remedy" {
+    var buf: [160]u8 = undefined;
+    const line = try formatAddressInUse(&buf, 3000);
+    // Must name the actual port and tell the user how to recover, instead of
+    // the bare error.AddressInUse that read like a crash after the proof card.
+    try std.testing.expect(std.mem.indexOf(u8, line, "3000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "already in use") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "zigttp dev -p") != null);
 }

@@ -220,6 +220,11 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
             stdin_json = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--json")) {
+            // edit-simulate is JSON-by-default; accept a redundant --json so
+            // IDE/CI callers that always pass it do not hit InvalidArgument.
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--before")) {
             i += 1;
             if (i >= argv.len) return error.MissingArgument;
@@ -429,6 +434,25 @@ test "violationKey excludes line numbers" {
 
     try std.testing.expectEqual(key1.code_hash, key2.code_hash);
     try std.testing.expectEqual(key1.msg_hash, key2.msg_hash);
+}
+
+test "runWithArgs accepts redundant --json flag" {
+    const allocator = std.testing.allocator;
+
+    const handler =
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var uniquifier: u8 = undefined;
+    const addr = @intFromPtr(&uniquifier);
+    const path = try std.fmt.allocPrint(allocator, "/tmp/zigts-edit-sim-json-{x}.ts", .{addr});
+    defer allocator.free(path);
+    try file_io.writeFile(allocator, path, handler);
+    defer deleteTempFile(allocator, path);
+
+    // The redundant --json must be accepted (not error.InvalidArgument).
+    try runWithArgs(allocator, &.{ path, "--json" });
 }
 
 test "simulate flags newly introduced canonical diagnostics" {

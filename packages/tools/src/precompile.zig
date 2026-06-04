@@ -887,8 +887,43 @@ pub fn runCheckOnlyWithOptions(
     const source = readFilePosix(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
         if (!opts.json_mode) {
             debugPrint("Error reading handler file '{s}': {}\n", .{ handler_path, err });
+            return err;
         }
-        return err;
+        // In JSON mode an unreadable handler must surface as a structured
+        // ZTS000 diagnostic, not a raw Zig stack trace: IDE/CI callers parse
+        // stdout and cannot read a propagated error. The CLI's existing
+        // json_mode branch then renders writeErrorJson and exits 1.
+        var result = CheckResult{};
+        // errdefer frees `result` (and any owned diagnostic message) on every
+        // error return below, so the catch arms only need to free state not yet
+        // handed to `result`.
+        errdefer result.deinit(allocator);
+        const message = std.fmt.allocPrint(
+            allocator,
+            "cannot read handler file '{s}': {s}",
+            .{ handler_path, @errorName(err) },
+        ) catch {
+            // Allocation failed: fall back to propagating the original error
+            // rather than emitting an empty (and therefore misleading) JSON.
+            return err;
+        };
+        result.json_diagnostics.append(allocator, .{
+            .code = "ZTS000",
+            .severity = "error",
+            .message = message,
+            .file = handler_path,
+            .line = 0,
+            .column = 0,
+            .suggestion = null,
+            .message_owned = true,
+        }) catch {
+            // `message` is not yet owned by `result`; free it here. `result`
+            // itself is cleaned by the errdefer above.
+            allocator.free(message);
+            return err;
+        };
+        result.parse_errors = 1;
+        return result;
     };
     defer allocator.free(source);
     return runCheckOnlyFromSourceWithOptions(allocator, source, handler_path, opts);
@@ -3831,6 +3866,84 @@ test "formatProofCard: canonical public helper diagnostics are visible in text m
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS610") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "one-way-effects-text.ts") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Effects<...>") != null);
+}
+
+test "runCheckOnlyWithOptions: json mode emits ZTS000 for an unreadable handler" {
+    const allocator = std.testing.allocator;
+    // A missing handler in JSON mode must produce a structured ZTS000 result,
+    // not a propagated Zig error that would dump a raw stack trace to IDE/CI.
+    var result = try runCheckOnlyWithOptions(
+        allocator,
+        "/nonexistent/zigttp-cli2-missing.ts",
+        .{ .json_mode = true },
+    );
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.totalErrors() > 0);
+    var saw_zts000 = false;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS000")) {
+            saw_zts000 = true;
+            try std.testing.expectEqualStrings("error", d.severity);
+            try std.testing.expect(std.mem.indexOf(u8, d.message, "cannot read handler file") != null);
+            try std.testing.expect(std.mem.indexOf(u8, d.file, "zigttp-cli2-missing.ts") != null);
+        }
+    }
+    try std.testing.expect(saw_zts000);
+}
+
+test "runCheckOnlyWithOptions: non-json mode still propagates a missing-handler error" {
+    const allocator = std.testing.allocator;
+    // Without --json, the readable line is printed and the error propagates so
+    // the CLI maps it to a clean exit; assert the error path is preserved.
+    try std.testing.expectError(
+        error.FileNotFound,
+        runCheckOnlyWithOptions(allocator, "/nonexistent/zigttp-cli2-missing.ts", .{ .json_mode = false }),
+    );
+}
+
+test "formatProofCard: spec-less handler renders ZTS500 lines matching the footer count" {
+    const allocator = std.testing.allocator;
+    // A handler with no Spec<...> activates the default proof profile, whose
+    // unsatisfiable properties trip error-severity ZTS500 spec diagnostics.
+    // Those used to be counted in the footer but never printed; assert they
+    // now render and that the printed error lines equal the footer count.
+    const source =
+        \\function handler(req: Request): Response {
+        \\  _ = req;
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "spec-less-text.ts", .{});
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    var spec_err_count: usize = 0;
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind.severity() == .err) spec_err_count += 1;
+    }
+    try std.testing.expect(spec_err_count > 0);
+    // The footer count is exactly the error-severity spec diagnostics for this
+    // handler (no other error category fires), so the printed lines must match.
+    try std.testing.expectEqual(@as(u32, @intCast(spec_err_count)), result.totalErrors());
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    formatProofCard(&aw.writer, &result, "spec-less-text.ts");
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Spec diagnostics") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS500") != null);
+
+    // Count printed error-severity spec lines: each renders as "    ZTSxxx (error) ".
+    var printed: usize = 0;
+    var search_from: usize = 0;
+    while (std.mem.indexOfPos(u8, buf.items, search_from, " (error) ")) |pos| {
+        printed += 1;
+        search_from = pos + " (error) ".len;
+    }
+    try std.testing.expectEqual(spec_err_count, printed);
 }
 
 test "formatProofCard: strict canonical diagnostics are visible in text mode" {

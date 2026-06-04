@@ -5100,6 +5100,38 @@ test "virtual module import alias resolves to callable binding" {
     try std.testing.expectEqualStrings("function", response.body);
 }
 
+test "optional call short circuits on undefined callee" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    // `(undefined)?.()` must short-circuit to undefined instead of throwing
+    // NotCallable; `(()=>9)?.()` must still invoke and yield 9.
+    const handler_code =
+        \\function handler(req) {
+        \\  const f = undefined;
+        \\  const g = () => 9;
+        \\  return Response.text(typeof f?.() + ":" + g?.());
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<optional-call>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("undefined:9", response.body);
+}
+
 test "built-in module import runs under capability wrapper context" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

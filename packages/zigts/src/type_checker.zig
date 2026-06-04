@@ -1450,6 +1450,63 @@ pub const TypeChecker = struct {
             return self.env.pool.addUnion(self.allocator, field_types[0..count]);
         }
 
+        // Array (and tuple-typed array literal) receivers. A heterogeneous literal
+        // like `[10, 2, 1]` infers as a tuple, so widen it back to a `T[]` result.
+        if (tag == .t_array) {
+            return self.inferArrayMethodType(obj_type, prop_name);
+        }
+        if (tag == .t_tuple) {
+            return self.inferArrayMethodType(self.tupleToArrayType(obj_type), prop_name);
+        }
+
+        return null_type_idx;
+    }
+
+    /// Widen a tuple type into a `T[]` whose element is the union of its (widened)
+    /// element types. Used so array-method modelling works on array-literal receivers.
+    fn tupleToArrayType(self: *const TypeChecker, tuple_type: TypeIndex) TypeIndex {
+        const elements = self.env.pool.getTupleElements(tuple_type);
+        if (elements.len == 0) return self.env.pool.addArray(self.allocator, self.env.pool.idx_unknown);
+        var widened: [32]TypeIndex = undefined;
+        var count: usize = 0;
+        for (elements) |elem| {
+            if (count >= widened.len) break;
+            const w = self.env.pool.widenLiteral(elem);
+            var seen = false;
+            for (widened[0..count]) |existing| {
+                if (existing == w) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                widened[count] = w;
+                count += 1;
+            }
+        }
+        const element_type = if (count == 1) widened[0] else self.env.pool.addUnion(self.allocator, widened[0..count]);
+        return self.env.pool.addArray(self.allocator, element_type);
+    }
+
+    /// Model the subset of Array.prototype methods that preserve the element type.
+    /// `toSorted(compareFn?)` and `toReversed()` both return a fresh `T[]`. Without
+    /// this, member access on an array receiver infers `null_type_idx`, leaving the
+    /// call's return type unknown and (for `toSorted`) risking a spurious argument
+    /// diagnostic against an unmodelled signature. The comparator parameter is typed
+    /// `unknown` and optional so any callback is accepted.
+    fn inferArrayMethodType(self: *const TypeChecker, array_type: TypeIndex, prop_name: []const u8) TypeIndex {
+        if (std.mem.eql(u8, prop_name, "toSorted")) {
+            const params = [_]type_pool_mod.FuncParam{.{
+                .name_start = 0,
+                .name_len = 0,
+                .type_idx = self.env.pool.idx_unknown,
+                .optional = true,
+            }};
+            return self.env.pool.addFunction(self.allocator, &params, array_type);
+        }
+        if (std.mem.eql(u8, prop_name, "toReversed")) {
+            return self.env.pool.addFunction(self.allocator, &.{}, array_type);
+        }
         return null_type_idx;
     }
 
@@ -1595,11 +1652,18 @@ pub const TypeChecker = struct {
             const tag = self.env.pool.getTag(callee_type) orelse return;
             if (tag == .t_function) {
                 const info = self.env.pool.getFunctionInfo(callee_type);
-                if (call.args_count != info.params.len) {
+                // Optional (trailing) params may be omitted: the arg count must fall
+                // between the required-param count and the total param count.
+                var required: usize = 0;
+                for (info.params) |param| {
+                    if (!param.optional) required += 1;
+                }
+                if (call.args_count < required or call.args_count > info.params.len) {
                     self.addArgCountMismatch(node, info.params.len, @intCast(call.args_count));
                     return;
                 }
                 for (info.params, 0..) |param, i| {
+                    if (i >= call.args_count) break;
                     const arg_idx = self.ir_view.getListIndex(call.args_start, @intCast(i));
                     const arg_type = self.inferType(arg_idx);
                     if (arg_type != null_type_idx and param.type_idx != null_type_idx and !self.env.pool.isAssignableTo(arg_type, param.type_idx)) {
@@ -2066,4 +2130,28 @@ test "TypeChecker: template literal type rejects non-matching string" {
         \\type ApiRoute = `/api/${string}`;
         \\const bad: ApiRoute = "/other";
     , 1, 0);
+}
+
+test "TypeChecker: toSorted with a comparator type-checks clean" {
+    // Regression for ENG-9: a comparator argument must not raise ZTS204/ZTS003.
+    // toSorted(compareFn?) is modelled as an optional callback returning T[].
+    try checkTypedSource(
+        \\const nums = [10, 2, 1, 33, 4];
+        \\const sorted = nums.toSorted((a, b) => a - b);
+    , 0, 0);
+}
+
+test "TypeChecker: toSorted with no comparator type-checks clean" {
+    // The single comparator parameter is optional, so a zero-arg call is valid.
+    try checkTypedSource(
+        \\const nums = [3, 1, 2];
+        \\const sorted = nums.toSorted();
+    , 0, 0);
+}
+
+test "TypeChecker: toReversed type-checks clean" {
+    try checkTypedSource(
+        \\const nums = [3, 1, 2];
+        \\const rev = nums.toReversed();
+    , 0, 0);
 }
