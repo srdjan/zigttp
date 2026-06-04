@@ -281,9 +281,13 @@ compiler checks before they land.
 ```bash
 zigttp auth claude
 zigttp expert
+zigttp expert --model claude-sonnet-4-6
 zigttp expert --print "add a GET /health route"
 zigttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
+
+Pass `--model <id>` to start on a specific provider model, or switch mid-session
+with the `/model` command.
 
 Keys are stored in `~/.zigttp/providers.json` with mode `0600`. A shell-set
 `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` overrides the stored value.

@@ -140,11 +140,15 @@ Useful modes:
 
 ```bash
 zigttp expert --resume
+zigttp expert --model claude-sonnet-4-6
 zigttp expert --print "add a GET /health route"
 zigttp expert --print "..." --mode json
 zigttp expert --mode rpc
 zigttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
+
+`--model <id>` starts the session on a specific provider model; run `/model`
+in-session to list the available ids.
 
 The stored provider file is `~/.zigttp/providers.json` with mode `0600`.
 Environment variables `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` override stored
