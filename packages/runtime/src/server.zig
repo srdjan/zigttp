@@ -7,7 +7,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zigts = @import("zigts");
 const engine = @import("engine_adapter.zig");
 const Io = std.Io;
 const net = std.Io.net;
@@ -1305,21 +1304,14 @@ pub const Server = struct {
         self: *Self,
         contract_json: []const u8,
         bytecode: []const u8,
-        contract: *const zigts.HandlerContract,
+        contract: *const engine.HandlerContract,
     ) !void {
         self.clearAttestation();
 
         const jws = try attest_build_receipt.buildDevJws(self.allocator, contract_json, bytecode, contract);
         defer self.allocator.free(jws);
 
-        const props_or_default = contract.properties orelse zigts.handler_contract.HandlerProperties{
-            .pure = false,
-            .read_only = false,
-            .stateless = false,
-            .retry_safe = false,
-            .deterministic = false,
-            .has_egress = false,
-        };
+        const props_or_default = contract.properties orelse engine.defaultHandlerProperties();
 
         self.attestation_headers = try attest_header_strings.build(
             self.allocator,
@@ -1360,7 +1352,7 @@ pub const Server = struct {
     /// No-op without a pool. The duped host strings are server-owned and
     /// retained for one extra generation so in-flight runtimes never read freed
     /// memory after a reload swaps the list.
-    pub fn setDevEgressPolicy(self: *Self, contract: *const zigts.HandlerContract) void {
+    pub fn setDevEgressPolicy(self: *Self, contract: *const engine.HandlerContract) void {
         const pool = if (self.pool) |*p| p else return;
 
         // Rotate generations: free gen N-2, keep gen N-1 alive for in-flight
@@ -1372,7 +1364,7 @@ pub const Server = struct {
         // Reuse the same contract->policy mapping the AOT paths use; dev only
         // enforces the egress section. Fail-closed when the host set was proven
         // (!dynamic), permissive when dynamic - identical to deployed builds.
-        var egress = zigts.handler_policy.contractToRuntimePolicy(contract).egress;
+        var egress = engine.contractEgressPolicy(contract);
 
         // contractToRuntimePolicy borrows the host slices from the contract,
         // which a later reload frees; own a copy so in-flight runtimes stay safe.

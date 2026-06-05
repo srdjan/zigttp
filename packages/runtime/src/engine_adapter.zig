@@ -12,6 +12,9 @@ pub const Runtime = zruntime.Runtime;
 pub const HandlerPool = zruntime.HandlerPool;
 pub const RuntimeConfig = zruntime.RuntimeConfig;
 pub const ResponseHandle = HandlerPool.ResponseHandle;
+pub const HandlerContract = zq.HandlerContract;
+pub const HandlerProperties = zq.handler_contract.HandlerProperties;
+pub const RuntimeAllowList = zq.handler_policy.RuntimeAllowList;
 pub const JSValue = zq.JSValue;
 pub const Instant = zq.compat.Instant;
 pub const Timer = zq.compat.Timer;
@@ -35,6 +38,21 @@ pub fn unixMillis() i64 {
 
 pub fn jsInt(value: i32) JSValue {
     return JSValue.fromInt(value);
+}
+
+pub fn defaultHandlerProperties() HandlerProperties {
+    return .{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = false,
+        .has_egress = false,
+    };
+}
+
+pub fn contractEgressPolicy(contract: *const HandlerContract) RuntimeAllowList {
+    return zq.handler_policy.contractToRuntimePolicy(contract).egress;
 }
 
 pub fn activeWebSocketConnection() ?u64 {

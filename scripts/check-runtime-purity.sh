@@ -52,6 +52,20 @@ if [ "$present" -eq 0 ]; then
   fail=1
 fi
 
+# 3. The HTTP server must go through engine_adapter for zts engine types and
+#    policy helpers. Other runtime files still have direct engine imports while
+#    the larger decoupling work proceeds, but server.zig is now an enforced
+#    boundary.
+server_src="packages/runtime/src/server.zig"
+if [ -f "$server_src" ]; then
+  server_boundary_hits="$(grep -nE '@import\("zigts"\)|(^|[^[:alnum:]_])zigts\.' "$server_src" || true)"
+  if [ -n "$server_boundary_hits" ]; then
+    echo "error: server.zig imports zigts directly; use packages/runtime/src/engine_adapter.zig" >&2
+    echo "$server_boundary_hits" >&2
+    fail=1
+  fi
+fi
+
 if [ "$fail" -eq 0 ]; then
   echo "runtime purity OK: no agent/provider surface in $(basename "$runtime_bin") or $(basename "$zigts_bin")"
 fi
