@@ -42,7 +42,7 @@ behavior lives in [User Guide](user-guide.md).
 - Add server-level rate limiting only if the standalone server becomes a
   first-class unproxied deployment target; application limits are currently
   handled with `zigttp:ratelimit`.
-- Add cache-eviction policy and long-running-process tuning once production
-  usage needs it.
+- Add size-bounded native JIT code eviction and long-running-process tuning
+  once production usage needs it.
 - Promote hosted deploy only after the control-plane path has CI smoke coverage
   and user-facing commands are present in default docs.

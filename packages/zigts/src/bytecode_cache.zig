@@ -451,6 +451,11 @@ pub const CACHE_VERSION: u32 = 2;
 /// Cache file magic bytes "ZTSC" (zts cache)
 pub const CACHE_MAGIC: u32 = 0x5A545343;
 
+/// Conservative default for the in-memory bytecode cache. One runtime pool
+/// normally compiles a single handler, but dev/live-reload and tool paths can
+/// see many sources in one process.
+pub const DEFAULT_MAX_ENTRIES: usize = 256;
+
 /// Cache entry header
 pub const CacheHeader = extern struct {
     magic: u32 = CACHE_MAGIC,
@@ -467,6 +472,12 @@ pub const BytecodeCache = struct {
     /// In-memory cache: source hash -> serialized bytecode
     cache: std.AutoHashMapUnmanaged(CacheKey, []const u8),
 
+    /// Insertion order for deterministic oldest-entry eviction.
+    order: std.ArrayListUnmanaged(CacheKey),
+
+    /// Maximum retained entries. Zero disables storage while keeping lookups safe.
+    max_entries: usize,
+
     /// Synchronizes cache access across threads
     lock: compat.RwLock = .{},
 
@@ -475,9 +486,15 @@ pub const BytecodeCache = struct {
     misses: std.atomic.Value(u64),
 
     pub fn init(allocator: std.mem.Allocator) BytecodeCache {
+        return initWithMaxEntries(allocator, DEFAULT_MAX_ENTRIES);
+    }
+
+    pub fn initWithMaxEntries(allocator: std.mem.Allocator, max_entries: usize) BytecodeCache {
         return .{
             .allocator = allocator,
             .cache = .{},
+            .order = .empty,
+            .max_entries = max_entries,
             .hits = std.atomic.Value(u64).init(0),
             .misses = std.atomic.Value(u64).init(0),
         };
@@ -492,6 +509,7 @@ pub const BytecodeCache = struct {
             self.allocator.free(bytes.*);
         }
         self.cache.deinit(self.allocator);
+        self.order.deinit(self.allocator);
     }
 
     /// Generate cache key from source code
@@ -503,6 +521,7 @@ pub const BytecodeCache = struct {
 
     /// Store bytecode in cache
     pub fn put(self: *BytecodeCache, key: CacheKey, func: *const bytecode.FunctionBytecodeCompact) !void {
+        if (self.max_entries == 0) return;
         const bytes = func.asBytes();
 
         // Copy bytes to owned memory
@@ -515,9 +534,13 @@ pub const BytecodeCache = struct {
         // Remove old entry if exists
         if (self.cache.fetchRemove(key)) |old| {
             self.allocator.free(old.value);
+            self.removeOrderEntryLocked(key);
         }
 
+        try self.order.append(self.allocator, key);
+        errdefer self.removeOrderEntryLocked(key);
         try self.cache.put(self.allocator, key, owned);
+        self.evictOverflowLocked();
     }
 
     /// Retrieve bytecode from cache
@@ -534,6 +557,7 @@ pub const BytecodeCache = struct {
 
     /// Store raw serialized bytes in cache (Phase 1b: for JSValue constant serialization)
     pub fn putRaw(self: *BytecodeCache, key: CacheKey, data: []const u8) !void {
+        if (self.max_entries == 0) return;
         // Copy bytes to owned memory
         const owned = try self.allocator.dupe(u8, data);
         errdefer self.allocator.free(owned);
@@ -544,9 +568,13 @@ pub const BytecodeCache = struct {
         // Remove old entry if exists
         if (self.cache.fetchRemove(key)) |old| {
             self.allocator.free(old.value);
+            self.removeOrderEntryLocked(key);
         }
 
+        try self.order.append(self.allocator, key);
+        errdefer self.removeOrderEntryLocked(key);
         try self.cache.put(self.allocator, key, owned);
+        self.evictOverflowLocked();
     }
 
     /// Get raw serialized bytes from cache (Phase 1b: for JSValue constant deserialization)
@@ -586,6 +614,7 @@ pub const BytecodeCache = struct {
         defer self.lock.unlock();
         if (self.cache.fetchRemove(key)) |old| {
             self.allocator.free(old.value);
+            self.removeOrderEntryLocked(key);
         }
     }
 
@@ -598,6 +627,7 @@ pub const BytecodeCache = struct {
             self.allocator.free(bytes.*);
         }
         self.cache.clearRetainingCapacity();
+        self.order.clearRetainingCapacity();
         self.hits.store(0, .monotonic);
         self.misses.store(0, .monotonic);
     }
@@ -608,6 +638,24 @@ pub const BytecodeCache = struct {
         lock.lockShared();
         defer lock.unlockShared();
         return self.cache.count();
+    }
+
+    fn evictOverflowLocked(self: *BytecodeCache) void {
+        while (self.cache.count() > self.max_entries and self.order.items.len > 0) {
+            const oldest = self.order.orderedRemove(0);
+            if (self.cache.fetchRemove(oldest)) |entry| {
+                self.allocator.free(entry.value);
+            }
+        }
+    }
+
+    fn removeOrderEntryLocked(self: *BytecodeCache, key: CacheKey) void {
+        for (self.order.items, 0..) |entry, idx| {
+            if (std.mem.eql(u8, &entry, &key)) {
+                _ = self.order.orderedRemove(idx);
+                return;
+            }
+        }
     }
 };
 
@@ -771,6 +819,56 @@ test "BytecodeCache basic operations" {
     // Check stats
     try std.testing.expectEqual(@as(u64, 1), cache.hits.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), cache.misses.load(.monotonic));
+}
+
+test "BytecodeCache evicts oldest raw entry when bounded" {
+    const allocator = std.testing.allocator;
+
+    var cache = BytecodeCache.initWithMaxEntries(allocator, 2);
+    defer cache.deinit();
+
+    const key1 = BytecodeCache.cacheKey("handler one");
+    const key2 = BytecodeCache.cacheKey("handler two");
+    const key3 = BytecodeCache.cacheKey("handler three");
+    const key4 = BytecodeCache.cacheKey("handler four");
+
+    const one = [_]u8{1};
+    const two = [_]u8{2};
+    const three = [_]u8{3};
+    const four = [_]u8{4};
+    const nine = [_]u8{9};
+
+    try cache.putRaw(key1, &one);
+    try cache.putRaw(key2, &two);
+    try cache.putRaw(key3, &three);
+
+    try std.testing.expectEqual(@as(usize, 2), cache.count());
+    try std.testing.expect(cache.getRaw(key1) == null);
+    try std.testing.expectEqualSlices(u8, &two, cache.getRaw(key2).?);
+    try std.testing.expectEqualSlices(u8, &three, cache.getRaw(key3).?);
+
+    try cache.putRaw(key2, &nine);
+    try cache.putRaw(key4, &four);
+
+    try std.testing.expectEqual(@as(usize, 2), cache.count());
+    try std.testing.expect(cache.getRaw(key3) == null);
+    try std.testing.expectEqualSlices(u8, &nine, cache.getRaw(key2).?);
+    try std.testing.expectEqualSlices(u8, &four, cache.getRaw(key4).?);
+}
+
+test "BytecodeCache zero max entries disables storage" {
+    const allocator = std.testing.allocator;
+
+    var cache = BytecodeCache.initWithMaxEntries(allocator, 0);
+    defer cache.deinit();
+
+    const key = BytecodeCache.cacheKey("handler");
+    const data = [_]u8{ 1, 2, 3 };
+
+    try cache.putRaw(key, &data);
+
+    try std.testing.expectEqual(@as(usize, 0), cache.count());
+    try std.testing.expect(cache.getRaw(key) == null);
 }
 
 /// Simple slice writer for serialization

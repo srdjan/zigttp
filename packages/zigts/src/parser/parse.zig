@@ -1,7 +1,8 @@
 //! JavaScript/JSX Parser
 //!
 //! Pratt parser producing IR nodes with integrated scope analysis.
-//! Supports ES5 + limited ES6 (arrow functions, template literals, classes).
+//! Supports the ZigTS profile: ES5 plus selected ES6 syntax such as arrow
+//! functions and template literals. Classes are rejected with diagnostics.
 
 const std = @import("std");
 const builtin = @import("builtin");
