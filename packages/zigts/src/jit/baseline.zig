@@ -617,21 +617,12 @@ pub const BaselineCompiler = struct {
             self.emitter.movsxdRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
             self.emitter.movsxdRegReg(.rcx, .rcx) catch return CompileError.OutOfMemory;
 
-            // Perform operation with overflow check
             switch (op) {
-                .add => {
-                    self.emitter.addRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
-                    try self.emitJccToLabel(.o, overflow_slow);
-                },
-                .sub => {
-                    self.emitter.subRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
-                    try self.emitJccToLabel(.o, overflow_slow);
-                },
-                .mul => {
-                    self.emitter.imulRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
-                    try self.emitJccToLabel(.o, overflow_slow);
-                },
+                .add => self.emitter.addRegReg(.rax, .rcx) catch return CompileError.OutOfMemory,
+                .sub => self.emitter.subRegReg(.rax, .rcx) catch return CompileError.OutOfMemory,
+                .mul => self.emitter.imulRegReg(.rax, .rcx) catch return CompileError.OutOfMemory,
             }
+            try self.emitI32OverflowCheck(overflow_slow);
 
             // Rebox: OR with INT_TAG (result in lower 32 bits, just add the tag)
             self.emitter.movRegImm64(.r10, INT_TAG) catch return CompileError.OutOfMemory;
@@ -732,24 +723,12 @@ pub const BaselineCompiler = struct {
             self.emitter.sxtwRegReg(.x9, .x9) catch return CompileError.OutOfMemory;
             self.emitter.sxtwRegReg(.x10, .x10) catch return CompileError.OutOfMemory;
 
-            // Perform operation with overflow check
             switch (op) {
-                .add => {
-                    self.emitter.addsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
-                    try self.emitBcondToLabel(.vs, overflow_slow);
-                },
-                .sub => {
-                    self.emitter.subsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
-                    try self.emitBcondToLabel(.vs, overflow_slow);
-                },
-                .mul => {
-                    self.emitter.mulRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
-                    // Check i32 range: sign-extend and compare
-                    self.emitter.sxtwRegReg(.x11, .x9) catch return CompileError.OutOfMemory;
-                    self.emitter.cmpRegReg(.x9, .x11) catch return CompileError.OutOfMemory;
-                    try self.emitBcondToLabel(.ne, overflow_slow);
-                },
+                .add => self.emitter.addsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
+                .sub => self.emitter.subsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
+                .mul => self.emitter.mulRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
             }
+            try self.emitI32OverflowCheck(overflow_slow);
 
             // Rebox: OR with INT_TAG
             self.emitter.movRegImm64(.x11, INT_TAG) catch return CompileError.OutOfMemory;
@@ -2038,6 +2017,26 @@ pub const BaselineCompiler = struct {
         }
     }
 
+    /// Emit the i32-overflow check for an integer add/sub/mul result, branching to
+    /// `slow_label` on overflow. The operands were sign-extended i32->i64, so the op
+    /// ran at 64-bit width and the 64-bit overflow flag never catches an i32-range
+    /// overflow (e.g. 2e9 + 2e9 = 4e9 fits in i64). Detect it by re-sign-extending
+    /// the low 32 bits of the result and comparing: a mismatch means the result left
+    /// i32 range and must take the slow path (promote to float). The result lives in
+    /// .rax (x86) / .x9 (aarch64); .r10 / .x11 are scratch. Single source of truth so
+    /// a new arithmetic op cannot reintroduce the wrap-instead-of-promote bug.
+    fn emitI32OverflowCheck(self: *BaselineCompiler, slow_label: u32) CompileError!void {
+        if (is_x86_64) {
+            self.emitter.movsxdRegReg(.r10, .rax) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rax, .r10) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow_label);
+        } else if (is_aarch64) {
+            self.emitter.sxtwRegReg(.x11, .x9) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x9, .x11) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow_label);
+        }
+    }
+
     fn getStackOverflowLabel(self: *BaselineCompiler) u32 {
         if (self.stack_overflow_label == null) {
             self.stack_overflow_label = self.newLocalLabel();
@@ -2413,19 +2412,11 @@ pub const BaselineCompiler = struct {
             self.emitter.movsxdRegReg(.rcx, .rcx) catch return CompileError.OutOfMemory;
 
             switch (op) {
-                .add => {
-                    self.emitter.addRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
-                    try self.emitJccToLabel(.o, slow);
-                },
-                .sub => {
-                    self.emitter.subRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
-                    try self.emitJccToLabel(.o, slow);
-                },
-                .mul => {
-                    self.emitter.imulRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
-                    try self.emitJccToLabel(.o, slow);
-                },
+                .add => self.emitter.addRegReg(.rax, .rcx) catch return CompileError.OutOfMemory,
+                .sub => self.emitter.subRegReg(.rax, .rcx) catch return CompileError.OutOfMemory,
+                .mul => self.emitter.imulRegReg(.rax, .rcx) catch return CompileError.OutOfMemory,
             }
+            try self.emitI32OverflowCheck(slow);
 
             // Rebox: OR with INT_TAG
             self.emitter.movRegImm64(.r10, INT_TAG) catch return CompileError.OutOfMemory;
@@ -2474,22 +2465,11 @@ pub const BaselineCompiler = struct {
             self.emitter.sxtwRegReg(.x10, .x10) catch return CompileError.OutOfMemory;
 
             switch (op) {
-                .add => {
-                    self.emitter.addsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
-                    try self.emitBcondToLabel(.vs, slow);
-                },
-                .sub => {
-                    self.emitter.subsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
-                    try self.emitBcondToLabel(.vs, slow);
-                },
-                .mul => {
-                    self.emitter.mulRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
-                    // Check i32 range
-                    self.emitter.sxtwRegReg(.x11, .x9) catch return CompileError.OutOfMemory;
-                    self.emitter.cmpRegReg(.x9, .x11) catch return CompileError.OutOfMemory;
-                    try self.emitBcondToLabel(.ne, slow);
-                },
+                .add => self.emitter.addsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
+                .sub => self.emitter.subsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
+                .mul => self.emitter.mulRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
             }
+            try self.emitI32OverflowCheck(slow);
 
             // Rebox: OR with INT_TAG
             self.emitter.movRegImm64(.x11, INT_TAG) catch return CompileError.OutOfMemory;

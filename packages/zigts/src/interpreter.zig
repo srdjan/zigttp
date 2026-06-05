@@ -998,7 +998,10 @@ pub const Interpreter = struct {
 
                 if (obj_val.isObject()) {
                     const obj = object.JSObject.fromValue(obj_val);
-                    obj.setSlot(slot_idx, val);
+                    // Barriered: a literal being initialized can be evacuated to
+                    // tenured by an allocation between create and this store, so a
+                    // nursery value needs the cross-gen edge recorded.
+                    try self.ctx.setSlotBarriered(obj, slot_idx, val);
                 }
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -1142,7 +1145,8 @@ pub const Interpreter = struct {
 
                     if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
                         self.pic_hits +%= 1;
-                        obj.setSlot(slot_offset, val);
+                        // Arena-escape already checked above; barrier the fast-path store.
+                        try self.ctx.setSlotBarriered(obj, slot_offset, val);
                         continue :sw @enumFromInt(self.pc[0]);
                     }
 
@@ -1153,7 +1157,8 @@ pub const Interpreter = struct {
                     };
                     if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
                         self.updatePic(pic, obj.hidden_class_idx, slot_offset);
-                        obj.setSlot(slot_offset, val);
+                        // Arena-escape already checked above; barrier the fast-path store.
+                        try self.ctx.setSlotBarriered(obj, slot_offset, val);
                     } else {
                         try self.ctx.setPropertyChecked(obj, atom, val);
                     }

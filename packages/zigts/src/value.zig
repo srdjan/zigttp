@@ -103,6 +103,10 @@ pub const JSValue = packed struct(u64) {
     pub inline fn fromPtr(ptr: *anyopaque) JSValue {
         const addr = @intFromPtr(ptr);
         std.debug.assert(addr & 0x7 == 0);
+        // NaN-box round-trip invariant: the upper 16 bits carry the type prefix.
+        // Any address bit >= 48 would alias the PTR tag and be silently truncated
+        // by toPtr/getPtrAddress (which mask with the low-48 PAYLOAD_MASK).
+        std.debug.assert(addr & PREFIX_MASK == 0);
         return .{ .raw = PTR_PREFIX | addr };
     }
 
@@ -126,6 +130,9 @@ pub const JSValue = packed struct(u64) {
     pub inline fn fromExternPtr(ptr: *anyopaque) JSValue {
         const addr = @intFromPtr(ptr);
         std.debug.assert(addr & 0x7 == 0);
+        // Same low-48 round-trip invariant as fromPtr: toExternPtr recovers the
+        // address via PAYLOAD_MASK, so a high-bit address would be truncated.
+        std.debug.assert(addr & PREFIX_MASK == 0);
         return .{ .raw = EXTERN_PREFIX | addr };
     }
 
@@ -841,6 +848,17 @@ test "JSValue extern pointer encoding" {
 
     const recovered = ptr_val.toExternPtr(u64);
     try std.testing.expectEqual(&dummy, recovered);
+}
+
+test "JSValue fromPtr round-trips low-48-bit addresses" {
+    // A real 8-byte-aligned pointer (canonical address, high 16 bits clear)
+    // survives the boxing round-trip, confirming the new high-bit assert does
+    // not reject any pointer the runtime can actually produce.
+    var dummy: u64 align(8) = 0xDEADBEEF;
+    const boxed = JSValue.fromPtr(&dummy);
+    try std.testing.expect(boxed.isPtr());
+    try std.testing.expectEqual(&dummy, boxed.toPtr(u64));
+    try std.testing.expectEqual(@as(u64, @intFromPtr(&dummy)), boxed.getPtrAddress());
 }
 
 test "JSValue format" {

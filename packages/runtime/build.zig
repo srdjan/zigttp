@@ -105,6 +105,20 @@ pub fn build(b: *std.Build) void {
     zruntime.addImport("zigts", zigts_mod);
     zruntime.addOptions("runtime_feature_options", runtime_features);
 
+    // test-server: integration suite rooted at server_test.zig. It pulls in
+    // server.zig (and transitively engine_adapter -> zruntime / runtime_pool),
+    // so it needs the same imports the runtime template uses: zigts, the
+    // feature options, and (attached by the top-level build) the
+    // embedded_handler anon import.
+    const server_tests = b.addModule("server_tests", .{
+        .root_source_file = b.path("src/server_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    server_tests.addImport("zigts", zigts_mod);
+    server_tests.addOptions("runtime_feature_options", runtime_features);
+
     const benchmark = b.addModule("benchmark", .{
         .root_source_file = b.path("src/benchmark.zig"),
         .target = target,

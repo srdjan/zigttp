@@ -151,7 +151,7 @@ pub fn arrayShift(ctx: *context.Context, this: value.JSValue, args: []const valu
     var i: u32 = 1;
     while (i < len) : (i += 1) {
         const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        obj.setIndex(ctx.allocator, i - 1, val) catch return first;
+        ctx.setIndexChecked(obj, i - 1, val) catch return first;
     }
     obj.setArrayLength(len - 1);
     return first;
@@ -171,12 +171,12 @@ pub fn arrayUnshift(ctx: *context.Context, this: value.JSValue, args: []const va
     while (i > 0) {
         i -= 1;
         const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        obj.setIndex(ctx.allocator, i + shift, val) catch return value.JSValue.undefined_val;
+        ctx.setIndexChecked(obj, i + shift, val) catch return value.JSValue.undefined_val;
     }
 
     // Insert new elements at the front
     for (args, 0..) |arg, idx| {
-        obj.setIndex(ctx.allocator, @intCast(idx), arg) catch return value.JSValue.undefined_val;
+        ctx.setIndexChecked(obj, @intCast(idx), arg) catch return value.JSValue.undefined_val;
     }
 
     return value.JSValue.fromInt(@intCast(obj.getArrayLength()));
@@ -217,20 +217,20 @@ pub fn arraySplice(ctx: *context.Context, this: value.JSValue, args: []const val
         var j: i32 = len - 1;
         while (j >= start + delete_count) : (j -= 1) {
             const val = obj.getIndex(@intCast(j)) orelse value.JSValue.undefined_val;
-            obj.setIndex(ctx.allocator, @intCast(j + shift_amount), val) catch return deleted.toValue();
+            ctx.setIndexChecked(obj, @intCast(j + shift_amount), val) catch return deleted.toValue();
         }
     } else if (shift_amount < 0) {
         // Deleting more than inserting: shift tail elements left
         var j: i32 = start + delete_count;
         while (j < len) : (j += 1) {
             const val = obj.getIndex(@intCast(j)) orelse value.JSValue.undefined_val;
-            obj.setIndex(ctx.allocator, @intCast(j + shift_amount), val) catch return deleted.toValue();
+            ctx.setIndexChecked(obj, @intCast(j + shift_amount), val) catch return deleted.toValue();
         }
     }
 
     // Insert new items at start position
     for (insert_items, 0..) |item, idx| {
-        obj.setIndex(ctx.allocator, @intCast(start + @as(i32, @intCast(idx))), item) catch return deleted.toValue();
+        ctx.setIndexChecked(obj, @intCast(start + @as(i32, @intCast(idx))), item) catch return deleted.toValue();
     }
 
     // Update length

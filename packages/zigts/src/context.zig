@@ -929,6 +929,24 @@ pub const Context = struct {
         };
     }
 
+    /// Store a value into a precomputed object slot with the cross-generation
+    /// write barrier applied. Fail-closed on barrier OOM and installs an
+    /// exception exactly like setPropertyChecked/setIndexChecked, so fast and
+    /// slow store paths behave identically on failure (single barrier, no
+    /// double-barrier).
+    ///
+    /// PRECONDITION: the caller has already run the arena-escape check for this
+    /// store (the interpreter IC fast path does so before dispatching here, as
+    /// does jitPutFieldIC). This helper deliberately does NOT re-run that check,
+    /// so it must never be used on an unchecked store path.
+    pub fn setSlotBarriered(self: *Context, obj: *object.JSObject, slot: u16, val: value.JSValue) !void {
+        self.gc_state.writeBarrier(@ptrCast(obj), val) catch |err| {
+            self.throwException(value.JSValue.exception_val);
+            return err;
+        };
+        obj.setSlot(slot, val);
+    }
+
     pub fn deinit(self: *Context) void {
         // Clean up per-module state (caches, registries) before destroying objects
         for (&self.module_state) |*slot| {
@@ -1129,10 +1147,9 @@ pub const Context = struct {
     /// JIT helper: write a precomputed slot index for object literal initialization.
     /// Used as the overflow fallback for `set_slot` when the slot is not inline.
     pub fn jitSetSlot(self: *Context, obj_val: value.JSValue, slot_idx: u16, val: value.JSValue) callconv(.c) value.JSValue {
-        _ = self;
         if (obj_val.isObject()) {
             const obj = object.JSObject.fromValue(obj_val);
-            obj.setSlot(slot_idx, val);
+            self.setSlotBarriered(obj, slot_idx, val) catch return self.jitThrow();
         }
         return val;
     }
@@ -2176,6 +2193,67 @@ test "setIndexChecked fails before mutating when write barrier cannot allocate" 
     try std.testing.expectEqual(@as(u32, 0), arr.getArrayLength());
     try std.testing.expect(arr.getIndex(0) == null);
     try std.testing.expectEqual(@as(usize, 0), gc_state.remembered_set.entries.items.len);
+}
+
+test "setSlotBarriered fails before mutating when write barrier cannot allocate" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const pool = ctx.hidden_class_pool.?;
+    var obj = try object.JSObject.create(allocator, ctx.root_class_idx, null, pool);
+    defer obj.destroy(allocator);
+
+    // obj is heap-allocated (tenured-classified); nursery_val is a young pointer,
+    // so the barrier must record a cross-gen edge - which the failing allocator denies.
+    const nursery_ptr = gc_state.allocNursery(64) orelse return error.NurseryAllocFailed;
+    const nursery_val = value.JSValue.fromPtr(nursery_ptr);
+
+    const slot: u16 = 0;
+    const before = obj.inline_slots[slot];
+
+    gc_state.remembered_set.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    gc_state.remembered_set = gc.RememberedSet.init(failing.allocator());
+
+    try std.testing.expectError(error.OutOfMemory, ctx.setSlotBarriered(obj, slot, nursery_val));
+    try std.testing.expect(ctx.hasException());
+    try std.testing.expectEqual(before.raw, obj.inline_slots[slot].raw);
+    try std.testing.expectEqual(@as(usize, 0), gc_state.remembered_set.entries.items.len);
+}
+
+test "setSlotBarriered records the cross-gen edge the interpreter fast path relies on" {
+    // Regression for the put_field_ic / set_slot UAF: the bare obj.setSlot fast
+    // path wrote the slot but never recorded the tenured->nursery edge, so minor
+    // GC could not find the young survivor. The interpreter and JIT fast paths now
+    // route through this helper; this exercises it directly.
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const pool = ctx.hidden_class_pool.?;
+    var holder = try object.JSObject.create(allocator, ctx.root_class_idx, null, pool);
+    defer holder.destroy(allocator);
+
+    // holder is heap-allocated (tenured-classified); child is a young nursery value.
+    const child = gc_state.allocNursery(64) orelse return error.NurseryAllocFailed;
+    try std.testing.expect(!gc_state.isInNursery(@ptrCast(holder)));
+    try std.testing.expect(gc_state.isInNursery(child));
+
+    try std.testing.expectEqual(@as(usize, 0), gc_state.remembered_set.entries.items.len);
+    try ctx.setSlotBarriered(holder, 1, value.JSValue.fromPtr(child));
+
+    // The store both wrote the slot and recorded the cross-gen edge.
+    try std.testing.expectEqual(value.JSValue.fromPtr(child).raw, holder.inline_slots[1].raw);
+    try std.testing.expect(gc_state.remembered_set.contains(@ptrCast(holder)));
 }
 
 test "Context catch handler" {

@@ -238,7 +238,11 @@ pub export fn jitPutFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_
 
         if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
             interp.pic_hits +%= 1;
-            obj.setSlot(slot_offset, val);
+            // Arena-escape already checked above; barrier the fast-path store.
+            ctx.setSlotBarriered(obj, slot_offset, val) catch {
+                ctx.throwException(value.JSValue.exception_val);
+                return value.JSValue.exception_val;
+            };
             return val;
         }
 
@@ -253,7 +257,11 @@ pub export fn jitPutFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_
 
         if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
             interp.updatePic(pic, obj.hidden_class_idx, slot_offset);
-            obj.setSlot(slot_offset, val);
+            // Arena-escape already checked above; barrier the fast-path store.
+            ctx.setSlotBarriered(obj, slot_offset, val) catch {
+                ctx.throwException(value.JSValue.exception_val);
+                return value.JSValue.exception_val;
+            };
             return val;
         }
 

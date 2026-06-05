@@ -229,6 +229,11 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+// refAllDecls only recurses pub decls, so anchor the (non-pub) parity gate explicitly.
+test {
+    _ = @import("tests/opcode_parity.zig");
+}
+
 test "version" {
     try std.testing.expectEqualStrings("0.1.0-beta", version.string);
 }

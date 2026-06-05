@@ -685,6 +685,23 @@ pub fn build(b: *std.Build) void {
     zruntime_test_step.dependOn(&run_zruntime_tests.step);
     test_step.dependOn(&run_zruntime_tests.step);
 
+    // test-server: server/runtime facade integration suite (Phase 0b gate).
+    // Tests through public entry points (Server.init/deinit, HandlerPool
+    // execute*, RuntimeConfig) — never interpreter/JIT internals.
+    const server_tests = b.addTest(.{
+        .root_module = runtime_dep.module("server_tests"),
+    });
+    server_tests.root_module.addAnonymousImport("embedded_handler", .{
+        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
+        .imports = &.{
+            .{ .name = "zigts", .module = zigts_mod },
+        },
+    });
+    const run_server_tests = b.addRunArtifact(server_tests);
+    const server_test_step = b.step("test-server", "Run server/runtime facade integration tests");
+    server_test_step.dependOn(&run_server_tests.step);
+    test_step.dependOn(&run_server_tests.step);
+
     // Benchmark executable
     const bench_exe = b.addExecutable(.{
         .name = "zigttp-bench",

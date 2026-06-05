@@ -4,6 +4,7 @@
 //! Incorporates FUGC-inspired SIMD turbosweep for efficient collection.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const heap = @import("heap.zig");
 const value = @import("value.zig");
 const object = @import("object.zig");
@@ -26,6 +27,11 @@ pub const GCConfig = struct {
     sweep_chunk_size: usize = 4096,
     /// Gray stack initial capacity
     gray_stack_capacity: usize = 1024,
+    /// Cap on automatic major-GC threshold growth (number of tenured objects).
+    /// Bounds the live_count*2 growth in continueIncrementalMajorGCSweep so a
+    /// transient live-set spike cannot push the threshold arbitrarily high and
+    /// starve future collections. 0 = no cap.
+    max_major_gc_threshold: usize = 1 << 22,
 };
 
 /// Nursery heap with bump allocation
@@ -131,6 +137,11 @@ pub const TenuredHeap = struct {
 
     /// Register an object in tenured space
     pub fn registerObject(self: *TenuredHeap, ptr: *anyopaque) !usize {
+        // Idempotent: a pointer already tracked returns its existing index.
+        // Registering twice would double-count accounted bytes and append a
+        // second slot, leaving the first slot dangling for a later double
+        // freeRaw / premature free.
+        if (self.object_index.get(ptr)) |existing| return existing;
         const header: *heap.MemBlockHeader = @ptrCast(@alignCast(ptr));
         self.allocated += accountedBytesForHeader(header);
         if (self.free_indices.items.len != 0) {
@@ -332,6 +343,11 @@ pub const RememberedSet = struct {
         self.entries.clearRetainingCapacity();
         self.seen.clearRetainingCapacity();
     }
+
+    /// True if a cross-generation edge from this holder has been recorded.
+    pub fn contains(self: *const RememberedSet, ptr: *anyopaque) bool {
+        return self.seen.contains(ptr);
+    }
 };
 
 /// Root set for GC traversal
@@ -462,6 +478,15 @@ pub const FloatConstantPool = struct {
         if (std.math.isPositiveInf(v)) return &self.pos_inf;
         if (std.math.isNegativeInf(v)) return &self.neg_inf;
         return null;
+    }
+
+    /// True if ptr points at one of the pre-allocated boxes inside this pool.
+    /// The six boxes are inline fields, so any cached float box pointer falls
+    /// within [base, base + @sizeOf(FloatConstantPool)).
+    pub fn contains(self: *FloatConstantPool, ptr: *anyopaque) bool {
+        const p = @intFromPtr(ptr);
+        const base = @intFromPtr(self);
+        return p >= base and p < base + @sizeOf(FloatConstantPool);
     }
 };
 
@@ -730,6 +755,9 @@ pub const GC = struct {
 
         // 1. Mark phase: mark all reachable nursery objects
         self.markRoots();
+        // Debug tripwire: verify the remembered set captured every tenured->nursery
+        // edge before we rely on it to find young survivors (no-op in release/test).
+        self.debugAssertNoUnrecordedYoungEdges();
         self.markRememberedSet();
         self.drainGrayStack();
         if (self.gc_oom) {
@@ -881,6 +909,9 @@ pub const GC = struct {
 
     /// Evacuate a single object from nursery to tenured
     fn evacuateObject(self: *GC, ptr: *anyopaque) !*anyopaque {
+        // Pre-allocated float-pool boxes live outside the nursery and are never
+        // GC-managed; leave them in place rather than copying into tenured.
+        if (self.isFloatPoolBox(ptr)) return ptr;
         // Check if already evacuated (has forwarding pointer)
         if (self.getForwardingPointer(ptr)) |fwd| {
             return fwd;
@@ -1073,6 +1104,11 @@ pub const GC = struct {
         self.gc_oom = false;
         self.major_gc_count += 1;
         self.phase = .marking;
+        // Non-hybrid major GC frees swept objects through heap_ptr; processUnmarkedWord
+        // does `heap_ptr orelse unreachable`. Require it whenever there is tenured
+        // content to sweep. (Major GC over an empty tenured heap is a valid no-op,
+        // which is what the empty-heap GC unit tests exercise.)
+        std.debug.assert(self.heap_ptr != null or self.tenured.objects.items.len == 0);
 
         // 1. Mark from roots
         self.markRoots();
@@ -1117,9 +1153,14 @@ pub const GC = struct {
         self.incremental_sweep_word = 0;
         self.incremental_sweep_limit_word = 0;
 
-        // Grow threshold to avoid thrashing when the live set legitimately grows.
+        // Grow threshold to avoid thrashing when the live set legitimately grows,
+        // but cap the growth so a transient spike cannot starve future collections.
         const live_count = self.tenured.objects.items.len - self.tenured.free_indices.items.len;
-        self.major_gc_threshold = @max(self.major_gc_threshold, live_count * 2);
+        const grown = @max(self.major_gc_threshold, live_count * 2);
+        self.major_gc_threshold = if (self.config.max_major_gc_threshold == 0)
+            grown
+        else
+            @min(grown, self.config.max_major_gc_threshold);
     }
 
     /// Major GC with explicit heap reference for memory deallocation
@@ -1200,6 +1241,11 @@ pub const GC = struct {
 
     fn markPtr(self: *GC, ptr: *anyopaque) void {
         if (self.gc_oom) return;
+        // isInTenured(ptr) == !isInNursery(ptr), so any non-nursery pointer
+        // (including an unregistered float-pool box) is tenured-classified and
+        // would be pushed onto the gray stack. Drop float boxes early: they are
+        // not registered in tenured, hold no child pointers, and need no mark.
+        if (self.isFloatPoolBox(ptr)) return;
         if (self.isInTenured(ptr)) {
             if (self.markTenured(ptr)) {
                 self.gray_stack.push(ptr) catch {
@@ -1268,6 +1314,43 @@ pub const GC = struct {
         }
     }
 
+    /// Debug-only regression tripwire for the write barrier. Every tenured
+    /// JSObject slot that points into the nursery must have its holder recorded
+    /// in the remembered set; otherwise a barriered store was missed and minor
+    /// GC cannot find the young survivor (cross-generation use-after-free).
+    ///
+    /// Walks the SAME slot set as scanJSObject (inline_slots + overflow_slots
+    /// [0..overflow_capacity]) so it cannot drift from the real marker. The
+    /// prototype is intentionally excluded: it is not assigned through the
+    /// barriered store helpers. Object/element stores both land in these slots
+    /// (array element i lives at slot i+1), so this covers the full barrier scope.
+    ///
+    /// No-op outside Debug and in test builds, per the project assert-gating rule.
+    fn debugAssertNoUnrecordedYoungEdges(self: *GC) void {
+        if (builtin.mode != .Debug or builtin.is_test) return;
+        for (self.tenured.objects.items) |maybe_ptr| {
+            const ptr = maybe_ptr orelse continue; // freed slots are nulled by sweep
+            const header: *heap.MemBlockHeader = @ptrCast(@alignCast(ptr));
+            if (header.tag != .object) continue;
+            const obj: *object.JSObject = @ptrCast(@alignCast(ptr));
+            for (&obj.inline_slots) |slot| {
+                self.assertHolderRemembered(ptr, slot);
+            }
+            if (obj.overflow_slots) |slots| {
+                for (slots[0..obj.overflow_capacity]) |slot| {
+                    self.assertHolderRemembered(ptr, slot);
+                }
+            }
+        }
+    }
+
+    fn assertHolderRemembered(self: *GC, holder: *anyopaque, slot: value.JSValue) void {
+        if (!slot.isPtr()) return;
+        const child: *anyopaque = @ptrCast(slot.toPtr(u8));
+        if (!self.isInNursery(child)) return;
+        std.debug.assert(self.remembered_set.contains(holder));
+    }
+
     /// Scan a value array (array of JSValues)
     fn scanValueArray(self: *GC, ptr: *anyopaque, size_bytes: usize) void {
         // Value array: header followed by JSValue elements
@@ -1316,9 +1399,13 @@ pub const GC = struct {
             }
 
             // For advancing wavefront: if we're marking and writing to black object,
-            // mark the new value gray (SATB barrier)
+            // mark the new value gray (SATB barrier). markValue -> markPtr sets
+            // gc_oom on a gray-stack push failure; surface it so the caller
+            // (setPropertyChecked / setIndexChecked / setSlotBarriered) rejects
+            // the store fail-closed instead of silently dropping the SATB mark.
             if (self.config.advancing_wavefront and self.phase == .marking) {
                 self.markValue(new_val);
+                if (self.gc_oom) return error.OutOfMemory;
             }
         }
     }
@@ -1333,6 +1420,13 @@ pub const GC = struct {
     /// Check if pointer is in tenured space
     pub fn isInTenured(self: *GC, ptr: *anyopaque) bool {
         return !self.isInNursery(ptr);
+    }
+
+    /// True if ptr is one of the pre-allocated float-pool boxes. Because
+    /// isInTenured(ptr) == !isInNursery(ptr), a float box (outside the nursery)
+    /// would otherwise be tenured-classified; this lets mark/evacuate skip it.
+    inline fn isFloatPoolBox(self: *GC, ptr: *anyopaque) bool {
+        return self.float_pool.contains(ptr);
     }
 
     /// Get GC statistics
@@ -1656,6 +1750,105 @@ test "FloatConstantPool caching" {
     const pi = try gc_state.allocFloat(3.14159);
     try std.testing.expectEqual(@as(f64, 3.14159), pi.value);
     try std.testing.expectEqual(@as(u64, 8), gc_state.float_pool_hits); // No new hit
+}
+
+test "TenuredHeap registerObject is idempotent" {
+    const allocator = std.testing.allocator;
+    var tenured = try TenuredHeap.init(allocator, 4096);
+    defer tenured.deinit();
+
+    var heap_state = heap.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+
+    const TestObj = struct {
+        header: heap.MemBlockHeader,
+        payload: u64,
+    };
+    const size = @sizeOf(TestObj);
+    const ptr = heap_state.allocRaw(size) orelse return error.OutOfMemory;
+    const obj: *TestObj = @ptrCast(@alignCast(ptr));
+    obj.* = .{ .header = heap.MemBlockHeader.init(.object, size), .payload = 0 };
+
+    const idx1 = try tenured.registerObject(obj);
+    const count_after_first = tenured.objects.items.len;
+    const allocated_after_first = tenured.allocated;
+
+    // Re-registering the same pointer must return the same index without adding a
+    // second slot or double-counting accounted bytes.
+    const idx2 = try tenured.registerObject(obj);
+    try std.testing.expectEqual(idx1, idx2);
+    try std.testing.expectEqual(count_after_first, tenured.objects.items.len);
+    try std.testing.expectEqual(allocated_after_first, tenured.allocated);
+}
+
+test "major-GC threshold growth is capped" {
+    const allocator = std.testing.allocator;
+    // heap_state must outlive gc_state: gc_state.deinit frees the rooted tenured
+    // objects through heap_ptr, so it has to run before heap_state.deinit (LIFO).
+    var heap_state = heap.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 4096, .max_major_gc_threshold = 4 });
+    defer gc_state.deinit();
+    gc_state.setHeap(&heap_state);
+    gc_state.setMajorGCThreshold(0); // force a collection whenever a tenured object exists
+
+    const TestObj = struct {
+        header: heap.MemBlockHeader,
+        payload: u64,
+    };
+    const size = @sizeOf(TestObj);
+
+    // 10 rooted leaf objects survive the sweep, so without the cap the threshold
+    // would grow to live_count*2 == 20.
+    for (0..10) |i| {
+        const ptr = heap_state.allocRaw(size) orelse return error.OutOfMemory;
+        const obj: *TestObj = @ptrCast(@alignCast(ptr));
+        obj.* = .{ .header = heap.MemBlockHeader.init(.byte_array, size), .payload = @intCast(i) };
+        _ = try gc_state.tenured.registerObject(obj);
+        try gc_state.addRoot(value.JSValue.fromPtr(obj));
+    }
+
+    // Drive two full incremental cycles to completion; the cap must hold across both.
+    var cycles: usize = 0;
+    while (cycles < 2) : (cycles += 1) {
+        gc_state.runIncrementalGCStep(64);
+        var guard: usize = 0;
+        while (gc_state.phase != .idle and guard < 64) : (guard += 1) {
+            gc_state.runIncrementalGCStep(64);
+        }
+        try std.testing.expectEqual(GC.GCPhase.idle, gc_state.phase);
+    }
+
+    try std.testing.expect(gc_state.major_gc_threshold <= gc_state.config.max_major_gc_threshold);
+    try std.testing.expectEqual(@as(usize, 4), gc_state.major_gc_threshold);
+}
+
+test "writeBarrier fails closed when SATB marking cannot push gray stack" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    // Both pointers nursery-resident: the remembered-set branch is skipped (old is
+    // not tenured) so only the SATB marking branch runs.
+    const old_ptr = gc_state.allocNursery(64) orelse return error.NurseryAllocFailed;
+    const new_ptr = gc_state.allocNursery(64) orelse return error.NurseryAllocFailed;
+    try std.testing.expect(gc_state.isInNursery(old_ptr));
+    try std.testing.expect(gc_state.isInNursery(new_ptr));
+
+    // Back the gray stack with a failing allocator so the SATB push OOMs.
+    gc_state.gray_stack.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    gc_state.gray_stack = GrayStack.init(failing.allocator());
+
+    gc_state.phase = .marking;
+    std.debug.assert(gc_state.config.advancing_wavefront);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        gc_state.writeBarrier(old_ptr, value.JSValue.fromPtr(new_ptr)),
+    );
+    try std.testing.expect(gc_state.gc_oom);
 }
 
 test "UpvaluePool acquire and release" {
