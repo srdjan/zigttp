@@ -413,6 +413,105 @@ pub fn hasTransferEncodingChunked(header_section: []const u8) bool {
     return false;
 }
 
+const MAX_CHUNK_SIZE_LINE_BYTES: usize = 8 * 1024;
+const MAX_CHUNK_TRAILER_LINE_BYTES: usize = 8 * 1024;
+const MAX_CHUNK_TRAILER_BYTES: usize = 16 * 1024;
+
+/// Return the number of encoded body bytes consumed by a complete chunked
+/// transfer, including the terminating chunk and ignored trailers. Returns
+/// null when the caller needs to read more bytes.
+pub fn chunkedBodyConsumed(body: []const u8, max_body_size: usize) !?usize {
+    var pos: usize = 0;
+    var decoded_len: usize = 0;
+
+    while (true) {
+        const line_rel = (try findCrlfWithin(body[pos..], MAX_CHUNK_SIZE_LINE_BYTES)) orelse return null;
+        const line_end = pos + line_rel;
+        const size = try parseChunkSizeLine(body[pos..line_end]);
+        pos = line_end + 2;
+
+        if (size == 0) {
+            const trailer_start = pos;
+            while (true) {
+                if (pos + 2 <= body.len and std.mem.eql(u8, body[pos..][0..2], "\r\n")) {
+                    return pos + 2;
+                }
+                if (pos - trailer_start > MAX_CHUNK_TRAILER_BYTES) return error.InvalidChunkedEncoding;
+                const trailer_rel = (try findCrlfWithin(body[pos..], MAX_CHUNK_TRAILER_LINE_BYTES)) orelse {
+                    if (body.len - trailer_start > MAX_CHUNK_TRAILER_BYTES) return error.InvalidChunkedEncoding;
+                    return null;
+                };
+                pos += trailer_rel + 2;
+            }
+        }
+
+        if (decoded_len > max_body_size or size > max_body_size - decoded_len) {
+            return error.FileTooBig;
+        }
+        decoded_len += size;
+
+        if (body.len < pos + size + 2) return null;
+        pos += size;
+        if (!std.mem.eql(u8, body[pos..][0..2], "\r\n")) return error.InvalidChunkedEncoding;
+        pos += 2;
+    }
+}
+
+/// Decode a complete chunked transfer into an owned byte slice. The caller owns
+/// the returned slice. Trailers are validated for framing and otherwise ignored.
+pub fn decodeChunkedBody(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    max_body_size: usize,
+) ![]u8 {
+    _ = try chunkedBodyConsumed(body, max_body_size) orelse return error.IncompleteBody;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var pos: usize = 0;
+    while (true) {
+        const line_rel = std.mem.indexOf(u8, body[pos..], "\r\n") orelse return error.IncompleteBody;
+        const line_end = pos + line_rel;
+        const size = try parseChunkSizeLine(body[pos..line_end]);
+        pos = line_end + 2;
+
+        if (size == 0) break;
+        try out.appendSlice(allocator, body[pos..][0..size]);
+        pos += size + 2;
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn parseChunkSizeLine(line: []const u8) !usize {
+    const size_part_raw = if (std.mem.indexOfScalar(u8, line, ';')) |idx| line[0..idx] else line;
+    const size_part = std.mem.trim(u8, size_part_raw, " \t");
+    if (size_part.len == 0) return error.InvalidChunkedEncoding;
+
+    var value: usize = 0;
+    for (size_part) |c| {
+        const digit = hexVal(c) orelse return error.InvalidChunkedEncoding;
+        const shifted, const overflow_mul = @mulWithOverflow(value, 16);
+        if (overflow_mul != 0) return error.FileTooBig;
+        const added, const overflow_add = @addWithOverflow(shifted, @as(usize, digit));
+        if (overflow_add != 0) return error.FileTooBig;
+        value = added;
+    }
+    return value;
+}
+
+fn findCrlfWithin(input: []const u8, max_line_bytes: usize) !?usize {
+    if (std.mem.indexOf(u8, input, "\r\n")) |idx| {
+        if (idx > max_line_bytes) return error.InvalidChunkedEncoding;
+        return idx;
+    }
+
+    if (input.len <= max_line_bytes) return null;
+    if (input.len == max_line_bytes + 1 and input[max_line_bytes] == '\r') return null;
+    return error.InvalidChunkedEncoding;
+}
+
 const testing = std.testing;
 
 test "findHeaderEnd: terminator at start of small buffer" {
@@ -636,6 +735,66 @@ test "hasTransferEncodingChunked: comma-list containing chunked" {
 test "hasTransferEncodingChunked: absent or other encoding returns false" {
     try testing.expect(!hasTransferEncodingChunked("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
     try testing.expect(!hasTransferEncodingChunked("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"));
+}
+
+test "chunkedBodyConsumed detects complete body with trailers" {
+    const body = "5;ext=1\r\nhello\r\n6\r\n world\r\n0\r\nX-Trailer: ignored\r\n\r\nnext";
+    try testing.expectEqual(@as(?usize, 52), try chunkedBodyConsumed(body, 1024));
+}
+
+test "decodeChunkedBody assembles chunks" {
+    const decoded = try decodeChunkedBody(testing.allocator, "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", 1024);
+    defer testing.allocator.free(decoded);
+    try testing.expectEqualStrings("hello world", decoded);
+}
+
+test "chunkedBodyConsumed returns null for incomplete body" {
+    try testing.expectEqual(@as(?usize, null), try chunkedBodyConsumed("5\r\nhel", 1024));
+}
+
+test "chunkedBodyConsumed rejects malformed size" {
+    try testing.expectError(error.InvalidChunkedEncoding, chunkedBodyConsumed("z\r\nhello\r\n0\r\n\r\n", 1024));
+}
+
+test "chunkedBodyConsumed enforces decoded body limit" {
+    try testing.expectError(error.FileTooBig, chunkedBodyConsumed("5\r\nhello\r\n0\r\n\r\n", 4));
+}
+
+test "chunkedBodyConsumed rejects overlong chunk size line before CRLF" {
+    const line = try testing.allocator.alloc(u8, MAX_CHUNK_SIZE_LINE_BYTES + 1);
+    defer testing.allocator.free(line);
+    @memset(line, 'a');
+
+    try testing.expectError(error.InvalidChunkedEncoding, chunkedBodyConsumed(line, 1024));
+}
+
+test "chunkedBodyConsumed allows max length chunk size line to wait for CRLF" {
+    const line = try testing.allocator.alloc(u8, MAX_CHUNK_SIZE_LINE_BYTES + 1);
+    defer testing.allocator.free(line);
+    @memset(line[0..MAX_CHUNK_SIZE_LINE_BYTES], 'a');
+    line[MAX_CHUNK_SIZE_LINE_BYTES] = '\r';
+
+    try testing.expectEqual(@as(?usize, null), try chunkedBodyConsumed(line, 1024));
+}
+
+test "chunkedBodyConsumed rejects overlong trailer line before CRLF" {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    try body.appendSlice(testing.allocator, "0\r\n");
+    try body.appendNTimes(testing.allocator, 'a', MAX_CHUNK_TRAILER_LINE_BYTES + 1);
+
+    try testing.expectError(error.InvalidChunkedEncoding, chunkedBodyConsumed(body.items, 1024));
+}
+
+test "chunkedBodyConsumed rejects oversized trailer block" {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    try body.appendSlice(testing.allocator, "0\r\n");
+    while (body.items.len <= MAX_CHUNK_TRAILER_BYTES + 8) {
+        try body.appendSlice(testing.allocator, "X: y\r\n");
+    }
+
+    try testing.expectError(error.InvalidChunkedEncoding, chunkedBodyConsumed(body.items, 1024));
 }
 
 // -------------------------------------------------------------------------

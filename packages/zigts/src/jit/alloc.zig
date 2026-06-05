@@ -109,6 +109,28 @@ pub const CodeAllocator = struct {
         self.pages.deinit(self.allocator);
     }
 
+    /// Free all executable pages and reset allocation state. Callers must first
+    /// clear every CompiledCode pointer that could reference these pages.
+    pub fn reset(self: *CodeAllocator) void {
+        for (self.pages.items) |*page| {
+            page.deinit();
+        }
+        self.pages.clearRetainingCapacity();
+        self.free_hint = 0;
+    }
+
+    pub fn usedBytes(self: *const CodeAllocator) usize {
+        var total: usize = 0;
+        for (self.pages.items) |*page| total += page.offset;
+        return total;
+    }
+
+    pub fn committedBytes(self: *const CodeAllocator) usize {
+        var total: usize = 0;
+        for (self.pages.items) |*page| total += page.memory.len;
+        return total;
+    }
+
     /// Allocate space for code, returns writable slice
     /// Use allocWithPage() if you need to toggle the page executable.
     pub fn alloc(self: *CodeAllocator, size: usize) AllocError![]u8 {
@@ -383,4 +405,19 @@ test "CodeAllocator: multiple allocations" {
 
     // Should all be from the same page
     try std.testing.expectEqual(@as(usize, 1), alloc_inst.pages.items.len);
+}
+
+test "CodeAllocator: accounting and reset" {
+    var alloc_inst = CodeAllocator.init(std.testing.allocator);
+    defer alloc_inst.deinit();
+
+    _ = try alloc_inst.alloc(64);
+    _ = try alloc_inst.alloc(32);
+    try std.testing.expectEqual(@as(usize, 96), alloc_inst.usedBytes());
+    try std.testing.expect(alloc_inst.committedBytes() >= PAGE_SIZE);
+
+    alloc_inst.reset();
+    try std.testing.expectEqual(@as(usize, 0), alloc_inst.usedBytes());
+    try std.testing.expectEqual(@as(usize, 0), alloc_inst.committedBytes());
+    try std.testing.expectEqual(@as(usize, 0), alloc_inst.pages.items.len);
 }

@@ -64,7 +64,7 @@ durability boundary need configuration:
 | `zigttp:fetch` | Enable outbound HTTP with `--outbound-http` or one or more `--outbound-host <host>` flags. Durable fetch also needs `--durable <dir>`. |
 | `zigttp:service` | Run with `--system <file>` or set `"system"` in `zigttp.json`. |
 | `zigttp:durable` | Run with `--durable <dir>`. |
-| `zigttp:websocket` | Run through the server WebSocket gateway. |
+| `zigttp:websocket` | Run through the server WebSocket gateway. Peer closes dispatch `onClose(ws, code, reason)` with parsed close metadata. |
 | `zigttp:log` | Writes structured lines to stderr. Do not log raw secrets, tokens, or PII. |
 
 ## Effects

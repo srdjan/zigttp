@@ -15,6 +15,7 @@ const std = @import("std");
 const Server = @import("server.zig").Server;
 const shared = @import("cli_shared.zig");
 const contract_runtime = @import("contract_runtime.zig");
+const RuntimePolicy = @import("engine_adapter.zig").RuntimePolicy;
 const zigts = @import("zigts");
 const compat = zigts.compat;
 const zigts_cli = @import("zigts_cli");
@@ -291,7 +292,7 @@ pub const LiveReloadState = struct {
         if (self.config.prove) {
             var new_contract = analysis.contract orelse {
                 printReload("No contract extracted. Reloading without proof.\n", .{});
-                self.doSwap(&new_code, false);
+                _ = self.doSwap(&new_code, null);
                 return;
             };
             analysis.contract = null;
@@ -326,8 +327,11 @@ pub const LiveReloadState = struct {
                     &new_contract,
                 ) catch |err| {
                     printProve("Contract diff failed: {}. Reloading without proof.\n", .{err});
-                    self.updateCurrentContract(new_contract);
-                    self.doSwap(&new_code, false);
+                    if (self.doSwap(&new_code, null)) {
+                        self.updateCurrentContract(new_contract);
+                    } else {
+                        new_contract.deinit(self.allocator);
+                    }
                     return;
                 };
                 defer diff.deinit(self.allocator);
@@ -342,8 +346,11 @@ pub const LiveReloadState = struct {
                     &new_contract,
                 ) catch |err| {
                     printProve("Upgrade analysis failed: {}. Reloading without proof.\n", .{err});
-                    self.updateCurrentContract(new_contract);
-                    self.doSwap(&new_code, false);
+                    if (self.doSwap(&new_code, null)) {
+                        self.updateCurrentContract(new_contract);
+                    } else {
+                        new_contract.deinit(self.allocator);
+                    }
                     return;
                 };
                 defer manifest.deinit(self.allocator);
@@ -354,11 +361,14 @@ pub const LiveReloadState = struct {
                     if (verdict != .safe and verdict != .safe_with_additions) {
                         printProve("Verdict: {s}. Applying anyway (--force-swap).\n", .{verdict.toString()});
                     }
-                    self.tryLogSwap(&new_contract, &sha_hex);
-                    self.updateCurrentContract(new_contract);
-                    self.doSwap(&new_code, true);
-                    self.refreshDevAttestation(self.previous_code orelse "");
-                    if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
+                    if (self.doSwap(&new_code, &new_contract)) {
+                        self.tryLogSwap(&new_contract, &sha_hex);
+                        self.updateCurrentContract(new_contract);
+                        self.refreshDevAttestation(self.previous_code orelse "");
+                        if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
+                    } else {
+                        new_contract.deinit(self.allocator);
+                    }
                 } else {
                     self.renderHud(&new_contract, old_contract, elapsed_ms, &sha_hex);
                     printBlockedDetails(&diff, &manifest);
@@ -366,14 +376,17 @@ pub const LiveReloadState = struct {
                     new_contract.deinit(self.allocator);
                 }
             } else {
-                self.tryLogSwap(&new_contract, &sha_hex);
-                self.updateCurrentContract(new_contract);
-                self.doSwap(&new_code, true);
-                self.refreshDevAttestation(self.previous_code orelse "");
-                if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
+                if (self.doSwap(&new_code, &new_contract)) {
+                    self.tryLogSwap(&new_contract, &sha_hex);
+                    self.updateCurrentContract(new_contract);
+                    self.refreshDevAttestation(self.previous_code orelse "");
+                    if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
+                } else {
+                    new_contract.deinit(self.allocator);
+                }
             }
         } else {
-            self.doSwap(&new_code, false);
+            _ = self.doSwap(&new_code, null);
         }
     }
 
@@ -449,9 +462,7 @@ pub const LiveReloadState = struct {
                 return;
             };
             self.server.updateContract(validated);
-            // The validated runtime contract drops egress; enforce it from the
-            // full HandlerContract so dev/serve matches deployed egress policy.
-            self.server.setDevEgressPolicy(hc);
+            self.server.setDevCapabilityPolicy(hc);
         }
     }
 
@@ -723,52 +734,60 @@ pub const LiveReloadState = struct {
         self.previous_code = new_code;
     }
 
-    /// Take ownership of new_code and swap the handler pool.
-    /// Nulls the caller's pointer so the defer cleanup is a no-op.
-    fn doSwap(self: *LiveReloadState, new_code_ptr: *?[]const u8, update_contract: bool) void {
-        const new_code = new_code_ptr.* orelse return;
-        new_code_ptr.* = null;
+    /// Take ownership of new_code and swap the handler pool. Returns true only
+    /// after the serving generation is updated. Nulls the caller's pointer
+    /// whenever ownership transfers so the defer cleanup is a no-op.
+    fn doSwap(
+        self: *LiveReloadState,
+        new_code_ptr: *?[]const u8,
+        runtime_contract: ?*const HandlerContract,
+    ) bool {
+        const new_code = new_code_ptr.* orelse return false;
 
-        if (self.server.pool) |*pool| {
-            // Switch the pool to the new generation FIRST, under the pool's
-            // runtime_init_mutex. Only once the pool no longer points at the
-            // prior generation is it safe to retire older code. Freeing before
-            // the swap (the previous bug) raced a concurrent worker reading the
-            // freed handler_code in ensureRuntime on a rapid second save.
-            const invalidated = pool.reloadHandler(new_code, self.handler_path);
-            self.rotateGenerations(new_code);
-
-            if (update_contract) {
-                if (self.current_contract) |*hc| {
-                    const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
-                        printReload("Failed to build runtime contract: {}.\n", .{err});
-                        printReload("Handler swapped. {d} runtime(s) invalidated.\n", .{invalidated});
-                        return;
-                    };
-                    // Live reload validates without an embedded artifact: the
-                    // HandlerContract carries hashes only when the original build
-                    // emitted them, and verifyArtifactHash skips when absent.
-                    const validated = contract_runtime.validate(raw, .{}) catch |err| {
-                        printReload("Contract failed validation: {}.\n", .{err});
-                        printReload("Handler swapped. {d} runtime(s) invalidated.\n", .{invalidated});
-                        return;
-                    };
-                    self.server.updateContract(validated);
-                    self.server.setDevEgressPolicy(hc);
-
-                    if (self.server.proof_cache != null) {
-                        printProve("Proof cache: enabled (deterministic + read_only)\n", .{});
-                    }
-                }
-            }
-
-            printReload("Handler swapped. {d} runtime(s) invalidated.\n", .{invalidated});
-        } else {
+        const pool = if (self.server.pool) |*p| p else {
             // No pool references the generations, but keep the same rotation so
             // the retain/free discipline (and deinit cleanup) stays uniform.
+            new_code_ptr.* = null;
             self.rotateGenerations(new_code);
             printReload("No handler pool available. Swap skipped.\n", .{});
+            return false;
+        };
+
+        var validated_contract: ?contract_runtime.ValidatedRuntimeContract = null;
+        var dev_policy: ?RuntimePolicy = null;
+        if (runtime_contract) |hc| {
+            const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
+                printReload("Failed to build runtime contract: {}. Keeping previous handler active.\n", .{err});
+                return false;
+            };
+            // Live reload validates without an embedded artifact: the
+            // HandlerContract carries hashes only when the original build
+            // emitted them, and verifyArtifactHash skips when absent.
+            validated_contract = contract_runtime.validate(raw, .{}) catch |err| {
+                printReload("Contract failed validation: {}. Keeping previous handler active.\n", .{err});
+                return false;
+            };
+            dev_policy = self.server.stageDevCapabilityPolicy(hc);
         }
+
+        // Switch the pool to the new generation FIRST, under the pool's
+        // runtime_init_mutex. Only once the pool no longer points at the
+        // prior generation is it safe to retire older code. Freeing before
+        // the swap (the previous bug) raced a concurrent worker reading the
+        // freed handler_code in ensureRuntime on a rapid second save.
+        const invalidated = pool.reloadHandlerWithPolicy(new_code, self.handler_path, dev_policy);
+        new_code_ptr.* = null;
+        self.rotateGenerations(new_code);
+
+        if (validated_contract) |validated| {
+            self.server.updateContract(validated);
+            if (self.server.proof_cache != null) {
+                printProve("Proof cache: enabled (deterministic + read_only)\n", .{});
+            }
+        }
+
+        printReload("Handler swapped. {d} runtime(s) invalidated.\n", .{invalidated});
+        return true;
     }
 };
 

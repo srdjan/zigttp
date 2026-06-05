@@ -90,7 +90,9 @@ The same contract feeds:
 `zigttp dev` watches handler and config files. On a valid save it recompiles
 the handler. With `--prove`, the new contract is diffed against the previous
 contract before the handler pool is swapped. Compilation failures keep the
-currently serving handler active.
+currently serving handler active. Accepted swaps rederive the runtime
+capability policy and handler-pool lifecycle policy from the new contract
+before new runtime generations are acquired.
 
 ## Deploy Artifact
 

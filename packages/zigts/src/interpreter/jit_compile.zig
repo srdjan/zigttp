@@ -54,6 +54,7 @@ pub fn tryCompileBaseline(interp: *Interpreter, func: *bytecode.FunctionBytecode
     compiled_ptr.* = compiled;
     func.compiled_code = compiled_ptr;
     setTier(interp, func, .baseline);
+    interp.ctx.enforceJitCodeBudget();
 }
 
 /// Try to compile a function using the optimized JIT tier.
@@ -90,6 +91,7 @@ pub fn tryCompileOptimized(interp: *Interpreter, func: *bytecode.FunctionBytecod
     compiled_ptr.* = compiled;
     func.compiled_code = compiled_ptr;
     setTier(interp, func, .optimized);
+    interp.ctx.enforceJitCodeBudget();
 }
 
 /// Allocate type feedback vector for a function.

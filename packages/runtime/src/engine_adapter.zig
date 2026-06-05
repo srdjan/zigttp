@@ -14,7 +14,7 @@ pub const RuntimeConfig = zruntime.RuntimeConfig;
 pub const ResponseHandle = HandlerPool.ResponseHandle;
 pub const HandlerContract = zq.HandlerContract;
 pub const HandlerProperties = zq.handler_contract.HandlerProperties;
-pub const RuntimeAllowList = zq.handler_policy.RuntimeAllowList;
+pub const RuntimePolicy = zq.handler_policy.RuntimePolicy;
 pub const JSValue = zq.JSValue;
 pub const Instant = zq.compat.Instant;
 pub const Timer = zq.compat.Timer;
@@ -51,8 +51,8 @@ pub fn defaultHandlerProperties() HandlerProperties {
     };
 }
 
-pub fn contractEgressPolicy(contract: *const HandlerContract) RuntimeAllowList {
-    return zq.handler_policy.contractToRuntimePolicy(contract).egress;
+pub fn contractRuntimePolicy(contract: *const HandlerContract) RuntimePolicy {
+    return zq.handler_policy.contractToRuntimePolicy(contract);
 }
 
 pub fn activeWebSocketConnection() ?u64 {

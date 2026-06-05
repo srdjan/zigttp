@@ -9,8 +9,10 @@ behavior lives in [User Guide](user-guide.md).
 
 - macOS and Linux on x86_64 and aarch64.
 - Zig `0.16.0` as declared by `build.zig.zon`.
-- Threaded HTTP/1.1 server with per-request runtime isolation.
+- Threaded HTTP/1.1 server with per-request runtime isolation and decoded
+  `Content-Length` or `Transfer-Encoding: chunked` request bodies.
 - Restricted JS/TS/TSX handler execution through `zigts`.
+- WebSocket gateway support with parsed peer close-code metadata.
 - The five core `zigttp` commands: `init`, `dev`, `test`, `expert`, `deploy`.
 - Local self-contained deploy artifacts with default-on attestation.
 - Compile-time checks for response paths, Result and optional handling,
@@ -28,10 +30,9 @@ behavior lives in [User Guide](user-guide.md).
   networking path is not a supported request backend.
 - Handlers receive raw `multipart/form-data` bodies. Parse multipart bodies in
   handler code or behind a virtual module once one exists.
-- Compiled native code is freed on handler swap, but there is no size-bounded
-  JIT cache eviction policy for long-running processes.
-- WebSocket frame handling is implemented, but peer-sent close bodies are not
-  exposed as parsed close-code metadata.
+- Native JIT code has a per-runtime-context soft cap; when the cap is exceeded
+  at a JIT compile safe point, compiled function pointers are cleared and the
+  context's native code pages are released.
 - Windows is not supported.
 
 ## Planned Work
@@ -42,7 +43,5 @@ behavior lives in [User Guide](user-guide.md).
 - Add server-level rate limiting only if the standalone server becomes a
   first-class unproxied deployment target; application limits are currently
   handled with `zigttp:ratelimit`.
-- Add size-bounded native JIT code eviction and long-running-process tuning
-  once production usage needs it.
 - Promote hosted deploy only after the control-plane path has CI smoke coverage
   and user-facing commands are present in default docs.

@@ -35,6 +35,36 @@ pub const Opcode = std.http.Server.WebSocket.Opcode;
 pub const Header0 = std.http.Server.WebSocket.Header0;
 pub const Header1 = std.http.Server.WebSocket.Header1;
 
+pub const CloseMetadata = struct {
+    /// RFC 6455 "No Status Received" sentinel. This value is never valid on
+    /// the wire, but is the right local representation for an empty close body.
+    code: u16 = 1005,
+    reason: []const u8 = "",
+    had_code: bool = false,
+};
+
+pub const SmallMessage = struct {
+    opcode: Opcode,
+    data: []u8,
+};
+
+pub const ReadResult = union(enum) {
+    message: SmallMessage,
+    close: CloseMetadata,
+};
+
+pub const ReadSmallMessageError = error{
+    ConnectionClose,
+    UnexpectedOpCode,
+    MessageOversize,
+    MissingMaskBit,
+    ReadFailed,
+    EndOfStream,
+    InvalidCloseFrame,
+    InvalidCloseCode,
+    InvalidCloseReason,
+};
+
 /// Magic GUID appended to the client key during accept-key computation.
 /// Defined in RFC 6455 §4.2.2.
 const accept_key_guid: []const u8 = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -118,6 +148,83 @@ pub fn writeHandshakeResponse(writer: anytype, accept_key: *const [accept_key_le
     try writer.writeAll("Sec-WebSocket-Accept: ");
     try writer.writeAll(accept_key);
     try writer.writeAll("\r\n\r\n");
+}
+
+/// Read a single non-fragmented client frame. This mirrors
+/// std.http.Server.WebSocket.readSmallMessage but returns parsed close-frame
+/// metadata instead of collapsing every close into error.ConnectionClose.
+pub fn readSmallMessage(ws: *std.http.Server.WebSocket) ReadSmallMessageError!ReadResult {
+    const in = ws.input;
+    while (true) {
+        const header = try in.takeArray(2);
+        const h0: Header0 = @bitCast(header[0]);
+        const h1: Header1 = @bitCast(header[1]);
+
+        switch (h0.opcode) {
+            .text, .binary, .pong, .ping, .connection_close => {},
+            .continuation => return error.UnexpectedOpCode,
+            _ => return error.UnexpectedOpCode,
+        }
+
+        if (!h0.fin) return error.MessageOversize;
+        if (!h1.mask) return error.MissingMaskBit;
+
+        const len: usize = switch (h1.payload_len) {
+            .len16 => try in.takeInt(u16, .big),
+            .len64 => std.math.cast(usize, try in.takeInt(u64, .big)) orelse return error.MessageOversize,
+            else => @intFromEnum(h1.payload_len),
+        };
+        if (len > in.buffer.len) return error.MessageOversize;
+        if (isControlOpcode(h0.opcode) and len > 125) return error.MessageOversize;
+
+        const mask: u32 = @bitCast((try in.takeArray(4)).*);
+        const payload = try in.take(len);
+        unmaskPayload(payload, mask);
+
+        switch (h0.opcode) {
+            .pong => continue,
+            .connection_close => return .{ .close = try parseClosePayload(payload) },
+            .text, .binary, .ping => return .{ .message = .{ .opcode = h0.opcode, .data = payload } },
+            else => return error.UnexpectedOpCode,
+        }
+    }
+}
+
+pub fn parseClosePayload(payload: []const u8) ReadSmallMessageError!CloseMetadata {
+    if (payload.len == 0) return .{};
+    if (payload.len == 1) return error.InvalidCloseFrame;
+
+    const code = std.mem.readInt(u16, payload[0..2], .big);
+    if (!validCloseCode(code)) return error.InvalidCloseCode;
+
+    const reason = payload[2..];
+    if (!std.unicode.utf8ValidateSlice(reason)) return error.InvalidCloseReason;
+    return .{ .code = code, .reason = reason, .had_code = true };
+}
+
+fn validCloseCode(code: u16) bool {
+    return switch (code) {
+        1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014 => true,
+        3000...4999 => true,
+        else => false,
+    };
+}
+
+fn isControlOpcode(opcode: Opcode) bool {
+    return switch (opcode) {
+        .connection_close, .ping, .pong => true,
+        else => false,
+    };
+}
+
+fn unmaskPayload(payload: []u8, mask: u32) void {
+    const floored_len = (payload.len / 4) * 4;
+    const u32_payload: []align(1) u32 = @ptrCast(payload[0..floored_len]);
+    for (u32_payload) |*elem| elem.* ^= mask;
+    const mask_bytes: []const u8 = @ptrCast(&mask);
+    for (payload[floored_len..], mask_bytes[0 .. payload.len - floored_len]) |*leftover, m| {
+        leftover.* ^= m;
+    }
 }
 
 /// Check whether a comma-separated HTTP header field-value contains a
@@ -253,4 +360,30 @@ test "Opcode re-export matches stdlib shape" {
     try testing.expectEqual(@as(u4, 8), @intFromEnum(Opcode.connection_close));
     try testing.expectEqual(@as(u4, 9), @intFromEnum(Opcode.ping));
     try testing.expectEqual(@as(u4, 10), @intFromEnum(Opcode.pong));
+}
+
+test "parseClosePayload accepts code and reason" {
+    const close = try parseClosePayload("\x03\xe8normal");
+    try testing.expect(close.had_code);
+    try testing.expectEqual(@as(u16, 1000), close.code);
+    try testing.expectEqualStrings("normal", close.reason);
+}
+
+test "parseClosePayload uses 1005 sentinel for empty payload" {
+    const close = try parseClosePayload("");
+    try testing.expect(!close.had_code);
+    try testing.expectEqual(@as(u16, 1005), close.code);
+    try testing.expectEqualStrings("", close.reason);
+}
+
+test "parseClosePayload rejects one byte payload" {
+    try testing.expectError(error.InvalidCloseFrame, parseClosePayload(&[_]u8{0x03}));
+}
+
+test "parseClosePayload rejects reserved wire code" {
+    try testing.expectError(error.InvalidCloseCode, parseClosePayload(&[_]u8{ 0x03, 0xee }));
+}
+
+test "parseClosePayload rejects invalid utf8 reason" {
+    try testing.expectError(error.InvalidCloseReason, parseClosePayload(&[_]u8{ 0x03, 0xe8, 0xff }));
 }

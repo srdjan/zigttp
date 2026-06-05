@@ -249,7 +249,7 @@ pub const EdgeServer = struct {
             if (err == error.FileTooBig) sendError(fd, 413, "Payload Too Large") catch {};
             return;
         };
-        var parsed = parseRequest(allocator, request_data, self.config.max_headers) catch {
+        var parsed = parseRequest(allocator, request_data, self.config.max_headers, self.config.max_body_size) catch {
             sendError(fd, 400, "Bad Request") catch {};
             return;
         };
@@ -664,15 +664,19 @@ const ParsedRequest = struct {
     request: HttpRequestView,
     query_storage: ?[]QueryParam = null,
     query_decoded_storage: ?[]u8 = null,
+    body_owned: bool = false,
 
     fn deinit(self: *ParsedRequest, allocator: std.mem.Allocator) void {
+        if (self.body_owned) {
+            if (self.request.body) |body| allocator.free(body);
+        }
         if (self.query_storage) |storage| allocator.free(storage);
         if (self.query_decoded_storage) |storage| allocator.free(storage);
         self.request.headers.deinit(allocator);
     }
 };
 
-fn parseRequest(allocator: std.mem.Allocator, data: []const u8, max_headers: usize) !ParsedRequest {
+fn parseRequest(allocator: std.mem.Allocator, data: []const u8, max_headers: usize, max_body_size: usize) !ParsedRequest {
     const header_end = http_parser.findHeaderEnd(data) orelse return error.InvalidRequest;
     const header_section = data[0..header_end];
     var lines = std.mem.splitSequence(u8, header_section, "\r\n");
@@ -700,10 +704,18 @@ fn parseRequest(allocator: std.mem.Allocator, data: []const u8, max_headers: usi
         }
         header_count += 1;
     }
-    if (slots.has_chunked_encoding) return error.UnsupportedTransferEncoding;
-
     const body_start = header_end + 4;
-    const body = if (body_start < data.len) data[body_start..] else null;
+    var body_owned = false;
+    const body = if (slots.has_chunked_encoding) blk: {
+        if (slots.content_length != null) return error.InvalidRequest;
+        const decoded = try http_parser.decodeChunkedBody(allocator, data[body_start..], max_body_size);
+        if (decoded.len == 0) {
+            allocator.free(decoded);
+            break :blk null;
+        }
+        body_owned = true;
+        break :blk decoded;
+    } else if (body_start < data.len) data[body_start..] else null;
     const query = try http_parser.parseQueryString(allocator, parsed_line.query_string, http_parser.DEFAULT_MAX_QUERY_LENGTH);
 
     return .{
@@ -717,6 +729,7 @@ fn parseRequest(allocator: std.mem.Allocator, data: []const u8, max_headers: usi
         },
         .query_storage = query.storage,
         .query_decoded_storage = query.decoded_storage,
+        .body_owned = body_owned,
     };
 }
 
@@ -725,6 +738,7 @@ fn readRequestData(fd: std.posix.fd_t, allocator: std.mem.Allocator, max_body_si
     errdefer buf.deinit(allocator);
     var header_end: ?usize = null;
     var total_needed: ?usize = null;
+    var is_chunked = false;
     var tmp: [8192]u8 = undefined;
 
     while (true) {
@@ -734,12 +748,25 @@ fn readRequestData(fd: std.posix.fd_t, allocator: std.mem.Allocator, max_body_si
         if (header_end == null) {
             if (http_parser.findHeaderEnd(buf.items)) |end| {
                 header_end = end;
-                if (http_parser.hasTransferEncodingChunked(buf.items[0..end])) return error.UnsupportedTransferEncoding;
-                const content_len = (try http_parser.parseContentLength(buf.items[0..end])) orelse 0;
+                const content_len_opt = try http_parser.parseContentLength(buf.items[0..end]);
+                is_chunked = http_parser.hasTransferEncodingChunked(buf.items[0..end]);
+                if (is_chunked and content_len_opt != null) return error.InvalidRequest;
+                const content_len = content_len_opt orelse 0;
                 if (content_len > max_body_size) return error.FileTooBig;
-                total_needed = end + 4 + content_len;
+                if (is_chunked) {
+                    if (try http_parser.chunkedBodyConsumed(buf.items[end + 4 ..], max_body_size)) |encoded_len| {
+                        total_needed = end + 4 + encoded_len;
+                    }
+                } else {
+                    total_needed = end + 4 + content_len;
+                }
             } else if (buf.items.len > 32 * 1024) {
                 return error.InvalidRequest;
+            }
+        } else if (is_chunked and total_needed == null) {
+            const body_start = header_end.? + 4;
+            if (try http_parser.chunkedBodyConsumed(buf.items[body_start..], max_body_size)) |encoded_len| {
+                total_needed = body_start + encoded_len;
             }
         }
         if (total_needed) |needed| {
@@ -922,6 +949,21 @@ test "path prefix does not match partial segment" {
     try std.testing.expect(matchesPathPrefix("/api", "/api/users"));
     try std.testing.expect(matchesPathPrefix("/api", "/api"));
     try std.testing.expect(!matchesPathPrefix("/api", "/apix"));
+}
+
+test "edge parseRequest decodes chunked request body" {
+    const allocator = std.testing.allocator;
+    const data =
+        "POST /api HTTP/1.1\r\n" ++
+        "Host: example.test\r\n" ++
+        "Transfer-Encoding: chunked\r\n" ++
+        "\r\n" ++
+        "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+
+    var parsed = try parseRequest(allocator, data, 64, 1024);
+    defer parsed.deinit(allocator);
+    try std.testing.expect(parsed.request.body != null);
+    try std.testing.expectEqualStrings("hello world", parsed.request.body.?);
 }
 
 test "edge sendResponse drops handler supplied framing headers" {

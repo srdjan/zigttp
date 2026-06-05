@@ -159,6 +159,8 @@ pub fn callBytecodeFunction(
             const prev_interp = interpreter.current_interpreter;
             interpreter.current_interpreter = self;
             defer interpreter.current_interpreter = prev_interp;
+            self.ctx.enterJitFrame();
+            defer self.ctx.leaveJitFrame();
             // Set interpreter pointer in context for IC fast path
             self.ctx.jit_interpreter = @ptrCast(self);
             defer self.ctx.jit_interpreter = null;
@@ -237,6 +239,8 @@ pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) Interpret
             const prev_interp = interpreter.current_interpreter;
             interpreter.current_interpreter = self;
             defer interpreter.current_interpreter = prev_interp;
+            self.ctx.enterJitFrame();
+            defer self.ctx.leaveJitFrame();
             // Set interpreter pointer in context for IC fast path
             self.ctx.jit_interpreter = @ptrCast(self);
             defer self.ctx.jit_interpreter = null;

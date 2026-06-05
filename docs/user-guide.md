@@ -76,7 +76,7 @@ Request fields used by examples:
 | `req.path` | Path without query string. |
 | `req.query` | Query string object when available. |
 | `req.headers` | Lowercase header map. |
-| `req.body` | Request body as a string. |
+| `req.body` | Decoded request body as a string. `Content-Length` and HTTP/1.1 chunked request bodies are accepted. |
 
 Response helpers:
 

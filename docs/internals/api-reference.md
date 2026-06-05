@@ -29,12 +29,18 @@ pub fn main() !void {
         // Network configuration
         .port = 8080,
         .host = "127.0.0.1",
+        .max_body_size = 1024 * 1024,           // Decoded request body cap
 
         // Logging
-        .quiet = false,                         // Disable request logging
+        .log_requests = true,                   // Enable request logging
 
         // Features
         .static_dir = null,                     // Static file directory
+
+        // Runtime configuration
+        .runtime_config = .{
+            .jit_code_max_bytes = 16 * 1024 * 1024, // Per-context native code cap
+        },
     };
     // For CORS, import `cors` from the `zigttp:http` virtual module in the handler.
 
@@ -55,6 +61,10 @@ pub fn main() !void {
 **`pool_wait_timeout_ms`** (default: 5) - Maximum time to wait for available handler (milliseconds). Returns 503 if timeout exceeded.
 
 **`pool_metrics_every`** (default: 0 = disabled) - Log pool metrics every N requests. Output: `Pool metrics: in_use=2/8 exhausted=0 avg_wait_us=3 max_wait_us=20 avg_exec_us=120 max_exec_us=500`
+
+#### Runtime Configuration
+
+**`runtime_config.jit_code_max_bytes`** (default: 16MB) - Soft cap for native JIT code bytes per runtime context. When the cap is exceeded at a JIT compile safe point, compiled function pointers are cleared and the context's native code pages are released. Set to `0` to disable native-code eviction.
 
 #### Static File Cache
 

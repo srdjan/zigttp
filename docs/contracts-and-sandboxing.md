@@ -160,8 +160,9 @@ won't boot" and "individual requests get rejected".
 - Pooling policy is derived from contract properties
   (`contract_runtime.zig:derivePoolingPolicy`) and applied to the
   HandlerPool exactly once via `pool.setPoolingPolicy(...)` from
-  `server.zig:start`. There is no later code path that re-derives
-  or updates `pool.pooling_policy`.
+  `server.zig:start`. In `zigttp dev --watch --prove`, each accepted
+  swap re-derives the pooling policy from the new contract before the
+  handler pool is reused.
 - Attestation envelope (`Zigttp-Attest`) is materialized for
   `GET /.well-known/zigttp-attest`.
 
@@ -207,21 +208,21 @@ won't boot" and "individual requests get rejected".
 - `server.zig:updateContract` (called by `live_reload`) replaces the
   proven-routes table and the proof cache so per-request route
   gating and the read-only cache reflect the new contract.
-- **The egress section of the policy IS re-derived on swap; env,
-  cache, and sql are not.** In the interpreted `dev`/`serve` path the
-  embedded `RuntimePolicy` is the empty stub, so `live_reload`
-  re-derives the egress allowlist from each new contract and applies it
-  via `server.zig:setDevEgressPolicy` → `runtime_pool.zig:setDevEgressPolicy`
-  (plumbed as `RuntimeConfig.dev_egress_policy`), invalidating idle
-  runtimes so they re-create enforcing the new hosts. The env, cache,
-  and sql sections are not wired into the dev path and stay permissive
-  there. In a precompiled or deployed binary the policy is the comptime
+- In the interpreted `dev`/`serve` path the embedded `RuntimePolicy`
+  is the empty stub, so `live_reload` derives the full runtime policy
+  from each accepted contract and applies it via
+  `server.zig:setDevCapabilityPolicy` →
+  `runtime_pool.zig:setDevCapabilityPolicy` (plumbed as
+  `RuntimeConfig.dev_capability_policy`). That invalidates idle
+  runtimes so env, egress, cache, and sql gates re-create from the new
+  contract. If policy allocation fails, the staged policy fails closed.
+- `server.zig:updateContract` also refreshes `pool.pooling_policy`
+  from the new contract unless an explicit lifecycle override was
+  configured. In-flight requests finish on the old runtime generation;
+  later acquisitions use the re-derived lifecycle policy.
+- In a precompiled or deployed binary the policy is the comptime
   constant baked at build time and is never swapped; tightening or
   widening it requires a rebuild.
-- **`pool.pooling_policy` is NOT updated either.** It stays at the
-  value derived from the contract present at server startup. A new
-  contract whose properties would imply a different pooling policy
-  takes effect on the next process start, not on the next swap.
 - Durable handlers refuse hot swap entirely because replay state
   depends on handler identity.
 

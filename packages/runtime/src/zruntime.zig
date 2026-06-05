@@ -6060,16 +6060,16 @@ test "parallel fetch allows allowlisted host and drops disallowed one" {
 }
 
 // Change 2: the dev/serve contract-derived allowlist arrives via
-// RuntimeConfig.dev_egress_policy and is applied by applyEmbeddedCapabilityPolicy
+// RuntimeConfig.dev_capability_policy and is applied by applyEmbeddedCapabilityPolicy
 // on top of the (empty) embedded stub. Enforced identically on the sync path.
-test "dev_egress_policy config enforces egress on sync fetch" {
+test "dev_capability_policy config enforces egress on sync fetch" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     const rt = try Runtime.init(allocator, .{
         .outbound_http_enabled = true,
-        .dev_egress_policy = .{ .enabled = true, .values = &[_][]const u8{"localhost"} },
+        .dev_capability_policy = .{ .egress = .{ .enabled = true, .values = &[_][]const u8{"localhost"} } },
     });
     defer rt.deinit();
 
@@ -6096,15 +6096,37 @@ test "dev_egress_policy config enforces egress on sync fetch" {
     try std.testing.expectEqualStrings("HostNotAllowed", parsed.value.object.get("blocked").?.string);
 }
 
+test "dev_capability_policy config applies env cache and sql sections" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .dev_capability_policy = .{
+            .env = .{ .enabled = true, .values = &[_][]const u8{"API_KEY"} },
+            .cache = .{ .enabled = true, .values = &[_][]const u8{"sessions"} },
+            .sql = .{ .enabled = true, .values = &[_][]const u8{"listTodos"}, .queries = &.{} },
+        },
+    });
+    defer rt.deinit();
+
+    try std.testing.expect(rt.ctx.capability_policy.allowsEnv("API_KEY"));
+    try std.testing.expect(!rt.ctx.capability_policy.allowsEnv("OTHER"));
+    try std.testing.expect(rt.ctx.capability_policy.allowsCacheNamespace("sessions"));
+    try std.testing.expect(!rt.ctx.capability_policy.allowsCacheNamespace("other"));
+    try std.testing.expect(rt.ctx.capability_policy.allowsSqlQuery("listTodos"));
+    try std.testing.expect(!rt.ctx.capability_policy.allowsSqlQuery("dropTodos"));
+}
+
 // ...and on the parallel path, via the same config-supplied allowlist.
-test "dev_egress_policy config enforces egress on parallel fetch" {
+test "dev_capability_policy config enforces egress on parallel fetch" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     const rt = try Runtime.init(allocator, .{
         .outbound_http_enabled = true,
-        .dev_egress_policy = .{ .enabled = true, .values = &[_][]const u8{"localhost"} },
+        .dev_capability_policy = .{ .egress = .{ .enabled = true, .values = &[_][]const u8{"localhost"} } },
     });
     defer rt.deinit();
 

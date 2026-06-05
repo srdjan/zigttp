@@ -28,6 +28,14 @@ pub const JitMetrics = struct {
     code_bytes: u64 = 0,
     /// Total bytecode bytes compiled (for expansion ratio calculation)
     bytecode_bytes: u64 = 0,
+    /// Native code bytes currently live in executable pages.
+    code_bytes_live: u64 = 0,
+    /// OS-committed executable bytes currently held by the code allocator.
+    code_bytes_committed: u64 = 0,
+    /// Number of full-context native-code evictions.
+    eviction_count: u32 = 0,
+    /// Native code bytes made unreachable by eviction.
+    evicted_code_bytes: u64 = 0,
     /// Number of compilation failures (UnsupportedOpcode, etc.)
     compilation_failures: u32 = 0,
     /// Compilation time histogram: [0-10us, 10-100us, 100us-1ms, >1ms]
@@ -255,6 +263,12 @@ pub const Context = struct {
     /// JIT code allocator for compiled functions (Phase 11)
     /// Lazily initialized when first JIT compilation is requested
     code_allocator: ?*jit.CodeAllocator,
+    /// Soft cap for native JIT code bytes in this context. 0 disables eviction.
+    jit_code_max_bytes: usize = 16 * 1024 * 1024,
+    /// Number of native JIT frames currently executing on this context.
+    jit_active_frames: u32 = 0,
+    /// Set when code pages exceed the cap while native frames are active.
+    jit_eviction_pending: bool = false,
     /// JIT compilation metrics (compiled out in ReleaseFast)
     jit_metrics: JitMetricsState,
     /// Interpreter pointer for JIT IC fast path access
@@ -338,6 +352,9 @@ pub const Context = struct {
             .json_writer = std.Io.Writer.Allocating.init(allocator),
             .render_writer = std.Io.Writer.Allocating.init(allocator),
             .code_allocator = null,
+            .jit_code_max_bytes = 16 * 1024 * 1024,
+            .jit_active_frames = 0,
+            .jit_eviction_pending = false,
             .jit_metrics = .{},
             .builtin_objects = .empty,
             .bytecode_functions = .empty,
@@ -644,6 +661,10 @@ pub const Context = struct {
         self.jit_metrics.compile_time_ns +%= time_ns;
         self.jit_metrics.code_bytes +%= @intCast(code_size);
         self.jit_metrics.bytecode_bytes +%= @intCast(bytecode_size);
+        if (self.code_allocator) |ca| {
+            self.jit_metrics.code_bytes_live = @intCast(ca.usedBytes());
+            self.jit_metrics.code_bytes_committed = @intCast(ca.committedBytes());
+        }
 
         // Update histogram: [0-10us, 10-100us, 100us-1ms, >1ms]
         const time_us = time_ns / 1000;
@@ -654,6 +675,19 @@ pub const Context = struct {
     pub fn recordJitFailure(self: *Context) void {
         if (!enable_jit_metrics) return;
         self.jit_metrics.compilation_failures +%= 1;
+    }
+
+    pub fn recordJitEviction(self: *Context, evicted_bytes: usize) void {
+        if (!enable_jit_metrics) return;
+        self.jit_metrics.eviction_count +%= 1;
+        self.jit_metrics.evicted_code_bytes +%= @intCast(evicted_bytes);
+        if (self.code_allocator) |ca| {
+            self.jit_metrics.code_bytes_live = @intCast(ca.usedBytes());
+            self.jit_metrics.code_bytes_committed = @intCast(ca.committedBytes());
+        } else {
+            self.jit_metrics.code_bytes_live = 0;
+            self.jit_metrics.code_bytes_committed = 0;
+        }
     }
 
     pub fn getJitMetrics(self: *const Context) ?JitMetrics {
@@ -669,6 +703,10 @@ pub const Context = struct {
             .{ m.compile_count, m.compilation_failures, m.code_bytes, m.bytecode_bytes, m.compile_time_ns },
         );
         try writer.print(
+            "jit: live_bytes={d} committed_bytes={d} evictions={d} evicted_bytes={d}\n",
+            .{ m.code_bytes_live, m.code_bytes_committed, m.eviction_count, m.evicted_code_bytes },
+        );
+        try writer.print(
             "jit: avg_compile_us={d:.2} expansion_ratio={d:.2}x histogram=[<10us:{d}, <100us:{d}, <1ms:{d}, >1ms:{d}]\n",
             .{
                 m.averageCompileTimeUs(),
@@ -679,6 +717,74 @@ pub const Context = struct {
                 m.compile_time_histogram[3],
             },
         );
+    }
+
+    pub fn setJitCodeMaxBytes(self: *Context, max_bytes: usize) void {
+        self.jit_code_max_bytes = max_bytes;
+    }
+
+    pub fn enterJitFrame(self: *Context) void {
+        self.jit_active_frames += 1;
+    }
+
+    pub fn leaveJitFrame(self: *Context) void {
+        std.debug.assert(self.jit_active_frames > 0);
+        self.jit_active_frames -= 1;
+        if (self.jit_active_frames == 0 and self.jit_eviction_pending) {
+            self.enforceJitCodeBudget();
+        }
+    }
+
+    pub fn enforceJitCodeBudget(self: *Context) void {
+        const max_bytes = self.jit_code_max_bytes;
+        if (max_bytes == 0) {
+            self.jit_eviction_pending = false;
+            return;
+        }
+        const ca = self.code_allocator orelse return;
+        if (ca.usedBytes() <= max_bytes) {
+            self.jit_eviction_pending = false;
+            return;
+        }
+
+        if (self.jit_active_frames != 0) {
+            self.jit_eviction_pending = true;
+            return;
+        }
+
+        self.jit_eviction_pending = false;
+        const evicted = self.clearCompiledCodePointers();
+        ca.reset();
+        self.recordJitEviction(evicted);
+    }
+
+    pub fn clearCompiledCodePointers(self: *Context) usize {
+        var evicted: usize = 0;
+        for (self.bytecode_functions.items) |obj| {
+            if (obj.getBytecodeFunctionData()) |data| {
+                evicted += self.clearCompiledCodeRecursive(@constCast(data.bytecode));
+            }
+        }
+        return evicted;
+    }
+
+    fn clearCompiledCodeRecursive(self: *Context, func: *bytecode.FunctionBytecode) usize {
+        var evicted: usize = 0;
+        if (func.compiled_code) |cc| {
+            const compiled: *jit.CompiledCode = @ptrCast(@alignCast(cc));
+            evicted += compiled.code.len;
+            self.allocator.destroy(compiled);
+            func.compiled_code = null;
+            func.tier = .baseline_candidate;
+        }
+
+        for (func.constants) |constant| {
+            if (!constant.isExternPtr()) continue;
+            const magic = constant.toExternPtr(u32);
+            if (magic.* != bytecode.MAGIC) continue;
+            evicted += self.clearCompiledCodeRecursive(constant.toExternPtr(bytecode.FunctionBytecode));
+        }
+        return evicted;
     }
 
     // ========================================================================
@@ -1861,6 +1967,106 @@ test "Context stack operations" {
 
     try std.testing.expectEqual(value.JSValue.true_val, ctx.pop());
     try std.testing.expectEqual(@as(i32, 42), ctx.pop().getInt());
+}
+
+test "Context enforces JIT code budget by clearing compiled functions" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const func = try allocator.create(bytecode.FunctionBytecode);
+    errdefer allocator.destroy(func);
+    const code_bytes = try allocator.dupe(u8, &[_]u8{@intFromEnum(bytecode.Opcode.ret_undefined)});
+    errdefer allocator.free(code_bytes);
+    func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 0,
+        .flags = .{},
+        .code = code_bytes,
+        .constants = &.{},
+        .source_map = null,
+        .tier = .baseline,
+    };
+
+    const ca = try ctx.getOrCreateCodeAllocator();
+    const code = try ca.alloc(64);
+    const compiled = try allocator.create(jit.CompiledCode);
+    compiled.* = jit.CompiledCode.fromSlice(code);
+    func.compiled_code = compiled;
+
+    const obj = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, func, .null);
+    var obj_tracked = false;
+    errdefer if (!obj_tracked) obj.destroyFull(allocator);
+    try ctx.bytecode_functions.append(allocator, obj);
+    obj_tracked = true;
+
+    ctx.setJitCodeMaxBytes(1);
+    ctx.enforceJitCodeBudget();
+
+    try std.testing.expect(func.compiled_code == null);
+    try std.testing.expectEqual(bytecode.CompilationTier.baseline_candidate, func.tier);
+    try std.testing.expectEqual(@as(usize, 0), ca.usedBytes());
+    try std.testing.expectEqual(@as(usize, 0), ca.committedBytes());
+}
+
+test "Context defers JIT code eviction while native frames are active" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const func = try allocator.create(bytecode.FunctionBytecode);
+    errdefer allocator.destroy(func);
+    const code_bytes = try allocator.dupe(u8, &[_]u8{@intFromEnum(bytecode.Opcode.ret_undefined)});
+    errdefer allocator.free(code_bytes);
+    func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 0,
+        .flags = .{},
+        .code = code_bytes,
+        .constants = &.{},
+        .source_map = null,
+        .tier = .baseline,
+    };
+
+    const ca = try ctx.getOrCreateCodeAllocator();
+    const code = try ca.alloc(64);
+    const compiled = try allocator.create(jit.CompiledCode);
+    compiled.* = jit.CompiledCode.fromSlice(code);
+    func.compiled_code = compiled;
+
+    const obj = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, func, .null);
+    var obj_tracked = false;
+    errdefer if (!obj_tracked) obj.destroyFull(allocator);
+    try ctx.bytecode_functions.append(allocator, obj);
+    obj_tracked = true;
+
+    ctx.setJitCodeMaxBytes(1);
+    ctx.enterJitFrame();
+    ctx.enforceJitCodeBudget();
+
+    try std.testing.expect(ctx.jit_eviction_pending);
+    try std.testing.expect(func.compiled_code != null);
+    try std.testing.expect(ca.usedBytes() > 0);
+
+    ctx.leaveJitFrame();
+
+    try std.testing.expect(!ctx.jit_eviction_pending);
+    try std.testing.expect(func.compiled_code == null);
+    try std.testing.expectEqual(@as(usize, 0), ca.usedBytes());
 }
 
 test "AtomTable interning" {

@@ -14,6 +14,9 @@ pub const RuntimeConfig = struct {
     enforce_arena_escape: bool = true,
     jit_policy: ?zq.interpreter.JitPolicy = null,
     jit_threshold: ?u32 = null,
+    /// Soft cap for native JIT code bytes per runtime context. 0 disables
+    /// native-code eviction.
+    jit_code_max_bytes: usize = 16 * 1024 * 1024,
     outbound_http_enabled: bool = false,
     outbound_allow_host: ?[]const u8 = null,
     outbound_max_response_bytes: usize = 1024 * 1024,
@@ -26,12 +29,12 @@ pub const RuntimeConfig = struct {
     /// replayed on startup; completed ones keep duplicate keys idempotent.
     durable_oplog_dir: ?[]const u8 = null,
     system_config_path: ?[]const u8 = null,
-    /// Dev/serve live path only: a contract-derived egress allowlist applied
-    /// on top of the embedded (stub) policy by `applyEmbeddedCapabilityPolicy`.
-    /// Null on AOT paths, which already carry their egress in
-    /// `embedded_handler.capability_policy`. The slice is borrowed; its owner
-    /// (the dev server) keeps it alive across the runtimes that read it.
-    dev_egress_policy: ?zq.handler_policy.RuntimeAllowList = null,
+    /// Dev/serve live path only: a contract-derived capability policy applied
+    /// instead of the embedded (stub) policy by `applyEmbeddedCapabilityPolicy`.
+    /// Null on AOT paths, which already carry their full policy in
+    /// `embedded_handler.capability_policy`. Borrowed backing storage is owned
+    /// by the dev server and retained across in-flight runtime generations.
+    dev_capability_policy: ?zq.handler_policy.RuntimePolicy = null,
 };
 
 pub fn openTraceFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
@@ -87,14 +90,16 @@ pub fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.he
     if (config.jit_threshold) |threshold| {
         zq.interpreter.setJitThreshold(threshold);
     }
+    ctx.setJitCodeMaxBytes(config.jit_code_max_bytes);
 }
 
 pub fn applyEmbeddedCapabilityPolicy(ctx: *zq.Context, config: RuntimeConfig) void {
     ctx.capability_policy = embedded_handler.capability_policy;
     // Dev/serve override: the embedded policy is the empty stub here, so the
-    // contract-derived egress allowlist is the only enforcement in interpreted
-    // mode. AOT builds leave dev_egress_policy null and keep the embedded list.
-    if (config.dev_egress_policy) |egress| {
-        ctx.capability_policy.egress = egress;
+    // full contract-derived policy is the enforcement source in interpreted
+    // mode. AOT builds leave dev_capability_policy null and keep the embedded
+    // list.
+    if (config.dev_capability_policy) |policy| {
+        ctx.capability_policy = policy;
     }
 }

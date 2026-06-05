@@ -623,6 +623,7 @@ const ConnectionPool = struct {
         var header_end: ?usize = null;
         var content_length: usize = 0;
         var total_needed: usize = 0;
+        var is_chunked = false;
 
         while (true) {
             // Read directly into appropriate buffer
@@ -660,15 +661,24 @@ const ConnectionPool = struct {
             if (header_end == null) {
                 if (findHeaderEnd(current_data)) |offset| {
                     header_end = offset;
-                    if (http_parser.hasTransferEncodingChunked(current_data[0..offset])) {
-                        return error.UnsupportedTransferEncoding;
-                    }
                     const body_start = offset + 4;
-                    content_length = (try parseContentLength(current_data[0..offset])) orelse 0;
+                    const content_length_opt = try parseContentLength(current_data[0..offset]);
+                    is_chunked = http_parser.hasTransferEncodingChunked(current_data[0..offset]);
+                    if (is_chunked and content_length_opt != null) return error.InvalidRequest;
+                    content_length = content_length_opt orelse 0;
                     if (content_length > self.server.config.max_body_size) {
                         return error.FileTooBig;
                     }
-                    total_needed = body_start + content_length;
+                    if (is_chunked) {
+                        if (try http_parser.chunkedBodyConsumed(
+                            current_data[body_start..],
+                            self.server.config.max_body_size,
+                        )) |encoded_len| {
+                            total_needed = body_start + encoded_len;
+                        }
+                    } else {
+                        total_needed = body_start + content_length;
+                    }
 
                     // Pre-allocate heap if we know we need it
                     if (total_needed > stack_buf.len and heap_buf == null) {
@@ -676,9 +686,18 @@ const ConnectionPool = struct {
                         @memcpy(heap_buf.?[0..stack_len], stack_buf[0..stack_len]);
                     }
 
-                    if (stack_len >= total_needed) break;
+                    if (total_needed > 0 and stack_len >= total_needed) break;
                 } else if (stack_len > max_header_bytes) {
                     return error.InvalidRequest;
+                }
+            } else if (is_chunked) {
+                const body_start = header_end.? + 4;
+                if (try http_parser.chunkedBodyConsumed(
+                    current_data[body_start..],
+                    self.server.config.max_body_size,
+                )) |encoded_len| {
+                    total_needed = body_start + encoded_len;
+                    break;
                 }
             } else if (stack_len >= total_needed) {
                 break;
@@ -1057,23 +1076,81 @@ pub const AppendedPayload = struct {
 // Server Implementation
 // ============================================================================
 
-/// Deep-copy a borrowed host list into freshly owned slices. On failure the
+/// Deep-copy a borrowed string list into freshly owned slices. On failure the
 /// partial allocation is unwound so nothing leaks.
-fn dupeHostList(allocator: std.mem.Allocator, hosts: []const []const u8) ![]const []const u8 {
-    const out = try allocator.alloc([]const u8, hosts.len);
+fn dupeStringList(allocator: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
+    const out = try allocator.alloc([]const u8, values.len);
     errdefer allocator.free(out);
     var filled: usize = 0;
-    errdefer for (out[0..filled]) |h| allocator.free(h);
-    for (hosts, 0..) |h, i| {
-        out[i] = try allocator.dupe(u8, h);
+    errdefer for (out[0..filled]) |value| allocator.free(value);
+    for (values, 0..) |value, i| {
+        out[i] = try allocator.dupe(u8, value);
         filled = i + 1;
     }
     return out;
 }
 
-fn freeHostList(allocator: std.mem.Allocator, hosts: []const []const u8) void {
-    for (hosts) |h| allocator.free(h);
-    allocator.free(hosts);
+fn freeStringList(allocator: std.mem.Allocator, values: []const []const u8) void {
+    for (values) |value| allocator.free(value);
+    allocator.free(values);
+}
+
+const OwnedDevPolicy = struct {
+    policy: engine.RuntimePolicy,
+    env_values: ?[]const []const u8 = null,
+    egress_values: ?[]const []const u8 = null,
+    cache_values: ?[]const []const u8 = null,
+    sql_values: ?[]const []const u8 = null,
+
+    fn deinit(self: *OwnedDevPolicy, allocator: std.mem.Allocator) void {
+        if (self.env_values) |values| freeStringList(allocator, values);
+        if (self.egress_values) |values| freeStringList(allocator, values);
+        if (self.cache_values) |values| freeStringList(allocator, values);
+        if (self.sql_values) |values| freeStringList(allocator, values);
+        self.* = .{ .policy = .{} };
+    }
+};
+
+fn ownDevPolicy(allocator: std.mem.Allocator, contract: *const engine.HandlerContract) !OwnedDevPolicy {
+    const borrowed = engine.contractRuntimePolicy(contract);
+    var owned = OwnedDevPolicy{ .policy = borrowed };
+    errdefer owned.deinit(allocator);
+
+    if (borrowed.env.values.len > 0) {
+        owned.env_values = try dupeStringList(allocator, borrowed.env.values);
+        owned.policy.env.values = owned.env_values.?;
+    }
+    if (borrowed.egress.values.len > 0) {
+        owned.egress_values = try dupeStringList(allocator, borrowed.egress.values);
+        owned.policy.egress.values = owned.egress_values.?;
+    }
+    if (borrowed.cache.values.len > 0) {
+        owned.cache_values = try dupeStringList(allocator, borrowed.cache.values);
+        owned.policy.cache.values = owned.cache_values.?;
+    }
+    if (borrowed.sql.queries.len > 0) {
+        const values = try allocator.alloc([]const u8, borrowed.sql.queries.len);
+        errdefer allocator.free(values);
+        var filled: usize = 0;
+        errdefer for (values[0..filled]) |value| allocator.free(value);
+        for (borrowed.sql.queries, 0..) |query, i| {
+            values[i] = try allocator.dupe(u8, query.name);
+            filled = i + 1;
+        }
+        owned.sql_values = values;
+        owned.policy.sql = .{ .enabled = borrowed.sql.enabled, .values = values, .queries = &.{} };
+    }
+
+    return owned;
+}
+
+fn denyAllDevPolicy() engine.RuntimePolicy {
+    return .{
+        .env = .{ .enabled = true, .values = &.{} },
+        .egress = .{ .enabled = true, .values = &.{} },
+        .cache = .{ .enabled = true, .values = &.{} },
+        .sql = .{ .enabled = true, .values = &.{}, .queries = &.{} },
+    };
 }
 
 /// Ignore SIGPIPE process-wide so a client that disconnects mid-response turns
@@ -1127,13 +1204,13 @@ pub const Server = struct {
     /// WebSocket connection registry. Initialised lazily on the first
     /// upgrade attempt; a handler with no WS exports pays zero cost.
     ws_pool: ?websocket_pool.Pool = null,
-    /// Dev/serve egress allowlist backing storage. The contract-derived
-    /// `RuntimeAllowList` handed to the pool borrows these slices, so two
-    /// generations are retained: a live-reload swap rotates `current` into
-    /// `previous` (still readable by in-flight runtimes) and frees the older
-    /// generation. Both are freed in `deinit`. Null on AOT/embedded paths.
-    dev_egress_hosts_current: ?[]const []const u8 = null,
-    dev_egress_hosts_previous: ?[]const []const u8 = null,
+    /// Dev/serve policy backing storage. The contract-derived RuntimePolicy
+    /// handed to the pool borrows these slices, so two generations are
+    /// retained: a live-reload swap rotates `current` into `previous` (still
+    /// readable by in-flight runtimes) and frees the older generation. Both are
+    /// freed in `deinit`. Null on AOT/embedded paths.
+    dev_policy_current: ?OwnedDevPolicy = null,
+    dev_policy_previous: ?OwnedDevPolicy = null,
 
     const Self = @This();
     const IoBackend = Io.Threaded;
@@ -1214,8 +1291,8 @@ pub const Server = struct {
         if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
         if (self.security_logger) |logger| logger.deinit();
         if (self.studio) |*studio| studio.deinit();
-        if (self.dev_egress_hosts_previous) |prev| freeHostList(self.allocator, prev);
-        if (self.dev_egress_hosts_current) |cur| freeHostList(self.allocator, cur);
+        if (self.dev_policy_previous) |*prev| prev.deinit(self.allocator);
+        if (self.dev_policy_current) |*cur| cur.deinit(self.allocator);
         engine.deinitSecurityEvents();
         self.static_cache.deinit();
         if (self.evented_ready) {
@@ -1257,6 +1334,13 @@ pub const Server = struct {
                 p,
                 .{},
             );
+        }
+
+        if (self.pool) |*pool| {
+            const contract_ptr: ?*const ValidatedRuntimeContract = if (self.contract) |*c| c else null;
+            const effective = self.config.lifecycle_override orelse
+                contract_runtime.derivePoolingPolicy(contract_ptr);
+            pool.setPoolingPolicy(effective);
         }
     }
 
@@ -1345,42 +1429,31 @@ pub const Server = struct {
         self.syncStudioCallerReceipt();
     }
 
-    /// Derive the egress allowlist from a freshly compiled HandlerContract and
-    /// push it onto the runtime pool (dev/serve live path only). Fail-closed
-    /// when the contract proved a literal host set (`!egress.dynamic`),
-    /// matching the AOT policy semantics; permissive when egress is dynamic.
-    /// No-op without a pool. The duped host strings are server-owned and
-    /// retained for one extra generation so in-flight runtimes never read freed
-    /// memory after a reload swaps the list.
-    pub fn setDevEgressPolicy(self: *Self, contract: *const engine.HandlerContract) void {
+    /// Derive the full capability policy from a freshly compiled
+    /// HandlerContract and push it onto the runtime pool (dev/serve live path
+    /// only). Fail-closed on allocation failure so a proven-restricted handler
+    /// never becomes permissive after a reload.
+    pub fn setDevCapabilityPolicy(self: *Self, contract: *const engine.HandlerContract) void {
         const pool = if (self.pool) |*p| p else return;
+        pool.setDevCapabilityPolicy(self.stageDevCapabilityPolicy(contract));
+    }
 
+    /// Prepare owned backing storage for a contract-derived dev policy and
+    /// return the borrowed runtime view. The next call keeps this generation in
+    /// `previous` so in-flight runtimes can finish safely.
+    pub fn stageDevCapabilityPolicy(self: *Self, contract: *const engine.HandlerContract) engine.RuntimePolicy {
         // Rotate generations: free gen N-2, keep gen N-1 alive for in-flight
         // runtimes still referencing it.
-        if (self.dev_egress_hosts_previous) |prev| freeHostList(self.allocator, prev);
-        self.dev_egress_hosts_previous = self.dev_egress_hosts_current;
-        self.dev_egress_hosts_current = null;
+        if (self.dev_policy_previous) |*prev| prev.deinit(self.allocator);
+        self.dev_policy_previous = self.dev_policy_current;
+        self.dev_policy_current = null;
 
-        // Reuse the same contract->policy mapping the AOT paths use; dev only
-        // enforces the egress section. Fail-closed when the host set was proven
-        // (!dynamic), permissive when dynamic - identical to deployed builds.
-        var egress = engine.contractEgressPolicy(contract);
-
-        // contractToRuntimePolicy borrows the host slices from the contract,
-        // which a later reload frees; own a copy so in-flight runtimes stay safe.
-        if (egress.values.len > 0) {
-            egress.values = dupeHostList(self.allocator, egress.values) catch {
-                // OOM: fail CLOSED, not open. The contract proved a restricted
-                // host set, so install a deny-all policy (enabled with no allowed
-                // hosts) rather than the permissive default, which would let a
-                // proven-restricted handler reach any host after an allocation
-                // failure - contradicting the stated fail-closed posture.
-                pool.setDevEgressPolicy(.{ .enabled = true, .values = &.{} });
-                return;
-            };
-            self.dev_egress_hosts_current = egress.values;
-        }
-        pool.setDevEgressPolicy(egress);
+        const owned = ownDevPolicy(self.allocator, contract) catch {
+            return denyAllDevPolicy();
+        };
+        const policy = owned.policy;
+        self.dev_policy_current = owned;
+        return policy;
     }
 
     fn syncStudioCallerReceipt(self: *Self) void {
@@ -1686,11 +1759,21 @@ pub const Server = struct {
             &line_iter,
         );
 
-        if (fast_slots.has_chunked_encoding) return error.UnsupportedTransferEncoding;
-
         // Extract body if present
         var body: ?[]u8 = null;
-        if (fast_slots.content_length) |len| {
+        if (fast_slots.has_chunked_encoding) {
+            if (fast_slots.content_length != null) return error.InvalidRequest;
+            const decoded = try http_parser.decodeChunkedBody(
+                allocator,
+                data[body_start..],
+                self.config.max_body_size,
+            );
+            if (decoded.len > 0) {
+                body = decoded;
+            } else {
+                allocator.free(decoded);
+            }
+        } else if (fast_slots.content_length) |len| {
             if (len > 0) {
                 if (len > self.config.max_body_size) return error.FileTooBig;
                 if (body_start > data.len or len > data.len - body_start) {
@@ -2147,6 +2230,36 @@ test "threaded readRequestData handles partial headers" {
     try std.testing.expectEqualStrings("hello", request.body.?);
 }
 
+test "threaded readRequestData handles chunked body across reads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &server,
+        .allocator = allocator,
+    };
+
+    const fds = try createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+
+    try writeAllFd(fds[1], "POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel");
+    try writeAllFd(fds[1], "lo\r\n6\r\n world\r\n0\r\n\r\n");
+    std.Io.Threaded.closeFd(fds[1]);
+
+    const data = try pool.readRequestData(fds[0], allocator);
+    var request = try server.parseRequestFromBuffer(allocator, data);
+    defer request.deinit(allocator);
+    try std.testing.expect(request.body != null);
+    try std.testing.expectEqualStrings("hello world", request.body.?);
+}
+
 test "threaded handleSingleRequestSync returns 413 for oversized body" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2199,7 +2312,7 @@ test "parseRequestFromBuffer rejects duplicate content length" {
     try std.testing.expectError(error.DuplicateContentLength, server.parseRequestFromBuffer(allocator, data));
 }
 
-test "parseRequestFromBuffer rejects chunked transfer encoding" {
+test "parseRequestFromBuffer decodes chunked transfer encoding" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2212,9 +2325,31 @@ test "parseRequestFromBuffer rejects chunked transfer encoding" {
         "Host: example.com\r\n" ++
         "Transfer-Encoding: chunked\r\n" ++
         "\r\n" ++
+        "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+
+    var request = try server.parseRequestFromBuffer(allocator, data);
+    defer request.deinit(allocator);
+    try std.testing.expect(request.body != null);
+    try std.testing.expectEqualStrings("hello world", request.body.?);
+}
+
+test "parseRequestFromBuffer rejects content-length with chunked transfer encoding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    const data =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Content-Length: 5\r\n" ++
+        "Transfer-Encoding: chunked\r\n" ++
+        "\r\n" ++
         "5\r\nhello\r\n0\r\n\r\n";
 
-    try std.testing.expectError(error.UnsupportedTransferEncoding, server.parseRequestFromBuffer(allocator, data));
+    try std.testing.expectError(error.InvalidRequest, server.parseRequestFromBuffer(allocator, data));
 }
 
 test "buildDynamicResponseHeader filters handler supplied framing headers" {
@@ -2352,11 +2487,11 @@ test "findHeaderEnd handles short buffers" {
     try std.testing.expectEqual(@as(?usize, 0), findHeaderEnd("\r\n\r\n"));
 }
 
-test "dupeHostList round-trips into independent allocations" {
+test "dupeStringList round-trips into independent allocations" {
     const allocator = std.testing.allocator;
     const hosts = [_][]const u8{ "api.stripe.com", "localhost" };
-    const dup = try dupeHostList(allocator, &hosts);
-    defer freeHostList(allocator, dup);
+    const dup = try dupeStringList(allocator, &hosts);
+    defer freeStringList(allocator, dup);
 
     try std.testing.expectEqual(@as(usize, 2), dup.len);
     try std.testing.expectEqualStrings("api.stripe.com", dup[0]);
@@ -2365,11 +2500,11 @@ test "dupeHostList round-trips into independent allocations" {
     try std.testing.expect(dup[0].ptr != hosts[0].ptr);
 }
 
-test "dupeHostList unwinds partial allocation on failure" {
+test "dupeStringList unwinds partial allocation on failure" {
     const hosts = [_][]const u8{ "a", "b", "c" };
     // Allocations: outer slice, dupe("a"), dupe("b") <- fails here.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
-    const result = dupeHostList(failing.allocator(), &hosts);
+    const result = dupeStringList(failing.allocator(), &hosts);
     try std.testing.expectError(error.OutOfMemory, result);
     // No leak report from testing.allocator confirms the errdefer ladder freed
     // the outer slice and the host duped before the failure.

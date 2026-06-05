@@ -77,6 +77,7 @@ pub fn run(cfg: Config) void {
         .input = &reader.interface,
         .output = &writer.interface,
     };
+    var close_metadata: websocket_codec.CloseMetadata = .{};
 
     // Dispatch onOpen once before entering the read loop. Failures are
     // logged but do not abort the connection — a handler that throws
@@ -91,7 +92,7 @@ pub fn run(cfg: Config) void {
 
     defer {
         if (cfg.handler_pool) |hp| {
-            dispatchOnClose(hp, cfg.pool, cfg.id, 1000) catch |err| {
+            dispatchOnClose(hp, cfg.pool, cfg.id, close_metadata.code, close_metadata.reason) catch |err| {
                 std.log.warn("ws onClose dispatch failed (id={d}): {}", .{ cfg.id, err });
             };
         }
@@ -100,7 +101,7 @@ pub fn run(cfg: Config) void {
     }
 
     while (true) {
-        const msg = ws.readSmallMessage() catch |err| switch (err) {
+        const read_result = websocket_codec.readSmallMessage(&ws) catch |err| switch (err) {
             error.ConnectionClose => return,
             error.EndOfStream => return,
             // Oversized / malformed frames: send a 1009 (Message Too
@@ -111,11 +112,23 @@ pub fn run(cfg: Config) void {
                 sendCloseSilently(&ws, 1009);
                 return;
             },
-            error.MissingMaskBit, error.UnexpectedOpCode => {
+            error.MissingMaskBit, error.UnexpectedOpCode, error.InvalidCloseFrame, error.InvalidCloseCode => {
                 sendCloseSilently(&ws, 1002);
                 return;
             },
+            error.InvalidCloseReason => {
+                sendCloseSilently(&ws, 1007);
+                return;
+            },
             error.ReadFailed => return,
+        };
+
+        const msg = switch (read_result) {
+            .message => |message| message,
+            .close => |metadata| {
+                close_metadata = metadata;
+                return;
+            },
         };
 
         _ = cfg.pool.touch(cfg.id, .parked, engine.unixMillis());
@@ -259,15 +272,13 @@ fn dispatchOnOpen(
 }
 
 /// Dispatch `onClose(ws, code, reason)`. Same tolerance as onOpen —
-/// handlers don't have to define it. `reason` is empty for W1 because
-/// the peer-sent close payload isn't surfaced by `readSmallMessage`
-/// (std returns `error.ConnectionClose` without the body). W2 will
-/// parse the close frame explicitly to thread the reason through.
+/// handlers don't have to define it.
 fn dispatchOnClose(
     handler_pool: *HandlerPool,
     ws_pool: *Pool,
     id: ConnectionId,
     code: u16,
+    reason: []const u8,
 ) !void {
     _ = ws_pool.beginDispatch(id);
     // Intentionally skip endDispatch on close — `unregister` is about
@@ -285,7 +296,7 @@ fn dispatchOnClose(
     const id_i32: i32 = std.math.cast(i32, id) orelse return error.ConnectionIdOverflow;
     const ws_val = engine.jsInt(id_i32);
     const code_val = engine.jsInt(@as(i32, code));
-    const reason_val = try lease.runtime.ctx.createString("");
+    const reason_val = try lease.runtime.ctx.createString(reason);
 
     _ = lease.runtime.callGlobalFunction("onClose", &.{ ws_val, code_val, reason_val }) catch |err| switch (err) {
         error.NotCallable => return,

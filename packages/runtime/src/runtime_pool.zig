@@ -60,7 +60,7 @@ pub const HandlerPool = struct {
     /// mismatch that is, by definition, only visible on cache hits.
     cache_disabled: std.atomic.Value(bool),
     runtime_init_mutex: compat.Mutex,
-    /// Bumped by reloadHandler / setDevEgressPolicy so idle runtimes rebuild
+    /// Bumped by reloadHandler / setDevCapabilityPolicy so idle runtimes rebuild
     /// lazily on their next acquire (under runtime_init_mutex) instead of being
     /// torn down from the reload thread while a worker may be executing on them.
     reload_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -212,6 +212,18 @@ pub const HandlerPool = struct {
     /// until the next reload cycle to avoid use-after-free on in-flight
     /// runtimes).
     pub fn reloadHandler(self: *Self, new_code: []const u8, new_filename: []const u8) usize {
+        return self.reloadHandlerWithPolicy(new_code, new_filename, null);
+    }
+
+    /// Hot-swap handler code and, when supplied, the dev capability policy in
+    /// one generation update. This prevents newly-created runtimes from seeing
+    /// new code with the old dev policy or the reverse.
+    pub fn reloadHandlerWithPolicy(
+        self: *Self,
+        new_code: []const u8,
+        new_filename: []const u8,
+        dev_policy: ?zq.handler_policy.RuntimePolicy,
+    ) usize {
         self.runtime_init_mutex.lock();
         self.cache_mutex.lock();
 
@@ -219,6 +231,9 @@ pub const HandlerPool = struct {
         self.handler_filename = new_filename;
         self.cache.clear();
         self.embedded_bytecode = null;
+        if (dev_policy) |policy| {
+            self.config.dev_capability_policy = policy;
+        }
 
         self.cache_mutex.unlock();
         self.runtime_init_mutex.unlock();
@@ -239,15 +254,15 @@ pub const HandlerPool = struct {
         return invalidated;
     }
 
-    /// Dev/serve live path only: pin a contract-derived egress allowlist onto
+    /// Dev/serve live path only: pin a contract-derived capability policy onto
     /// the pool config and invalidate idle runtimes so they re-create enforcing
     /// it. Recreated runtimes read `self.config` in `ensureRuntime`. In-flight
     /// (checked-out) runtimes finish under the previous policy, so the caller
-    /// must keep the previous allowlist's backing strings alive one generation
-    /// (see `Server.setDevEgressPolicy`). Mirrors `reloadHandler`'s locking.
-    pub fn setDevEgressPolicy(self: *Self, policy: zq.handler_policy.RuntimeAllowList) void {
+    /// must keep the previous policy's backing storage alive one generation.
+    /// Mirrors `reloadHandler`'s locking.
+    pub fn setDevCapabilityPolicy(self: *Self, policy: zq.handler_policy.RuntimePolicy) void {
         self.runtime_init_mutex.lock();
-        self.config.dev_egress_policy = policy;
+        self.config.dev_capability_policy = policy;
         self.runtime_init_mutex.unlock();
 
         // Same rationale as reloadHandler: bump the generation so idle runtimes
