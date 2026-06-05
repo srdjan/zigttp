@@ -3787,6 +3787,39 @@ test "partner manifest contractExtractions populate extensions section" {
     try std.testing.expect(containsString(bucket.literals.items, "card_charge"));
 }
 
+test "builtin zigttp:fetch extracts the Open-Meteo egress host from a literal url" {
+    const allocator = std.testing.allocator;
+
+    // Mirrors examples/fetch/weather-forecasts.ts: a single keyless fetch to
+    // Open-Meteo. The built-in fetch binding declares a fetch_host/extract_host
+    // contract extraction on arg 0, so the host must land in egress_hosts as the
+    // sole proven host with dynamic=false. This locks the demo's headline proof.
+    const source =
+        \\import { fetch } from "zigttp:fetch";
+        \\const r = fetch("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m&timezone=auto", { headers: { "Accept": "application/json" } });
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
+    defer builder.deinit();
+
+    try builder.scanImports();
+    try builder.scanCallSites();
+
+    try std.testing.expect(containsString(builder.egress_hosts.items, "api.open-meteo.com"));
+    // Exactly one proven host, statically known (not dynamic).
+    try std.testing.expectEqual(@as(usize, 1), builder.egress_hosts.items.len);
+    try std.testing.expect(!builder.egress_dynamic);
+}
+
 test "missing manifest registry skips partner imports" {
     const allocator = std.testing.allocator;
 

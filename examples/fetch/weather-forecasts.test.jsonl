@@ -11,3 +11,22 @@
 {"type":"test","name":"GET /unknown returns 404 without fetching"}
 {"type":"request","method":"GET","url":"/unknown","headers":{},"body":null}
 {"type":"expect","status":404,"bodyContains":"not_found"}
+
+{"type":"test","name":"POST /weather is rejected before any egress"}
+{"type":"request","method":"POST","url":"/weather","headers":{},"body":null}
+{"type":"expect","status":405,"bodyContains":"method_not_allowed"}
+
+{"type":"test","name":"GET / serves the same forecast as /weather"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":["https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m,relative_humidity_2m,wind_speed_10m,is_day&timezone=auto"],"result":{"status":200,"statusText":"OK","headers":{"content-type":"application/json","x-request-id":"meteo-123"},"body":"{\"latitude\":52.52,\"longitude\":13.41,\"timezone\":\"Europe/Berlin\",\"current_units\":{\"temperature_2m\":\"C\",\"relative_humidity_2m\":\"%\",\"wind_speed_10m\":\"km/h\",\"is_day\":\"\"},\"current\":{\"time\":\"2026-06-01T12:00\",\"temperature_2m\":21.5,\"relative_humidity_2m\":56,\"wind_speed_10m\":8.2,\"is_day\":1}}"}}
+{"type":"expect","status":200,"bodyContains":"Europe/Berlin"}
+
+{"type":"test","name":"missing upstream x-request-id falls back to none"}
+{"type":"request","method":"GET","url":"/weather","headers":{},"body":null}
+{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":["https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m,relative_humidity_2m,wind_speed_10m,is_day&timezone=auto"],"result":{"status":200,"statusText":"OK","headers":{"content-type":"application/json"},"body":"{\"latitude\":52.52,\"longitude\":13.41,\"timezone\":\"Europe/Berlin\",\"current_units\":{\"temperature_2m\":\"C\",\"relative_humidity_2m\":\"%\",\"wind_speed_10m\":\"km/h\",\"is_day\":\"\"},\"current\":{\"time\":\"2026-06-01T12:00\",\"temperature_2m\":21.5,\"relative_humidity_2m\":56,\"wind_speed_10m\":8.2,\"is_day\":1}}"}}
+{"type":"expect","status":200,"bodyContains":"\"upstreamRequestId\":\"none\""}
+
+{"type":"test","name":"malformed upstream JSON degrades safely to a 200 envelope"}
+{"type":"request","method":"GET","url":"/weather","headers":{},"body":null}
+{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":["https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m,relative_humidity_2m,wind_speed_10m,is_day&timezone=auto"],"result":{"status":200,"statusText":"OK","headers":{"content-type":"application/json"},"body":"not json{"}}
+{"type":"expect","status":200,"bodyContains":"open-meteo"}
