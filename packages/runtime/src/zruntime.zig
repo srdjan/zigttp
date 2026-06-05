@@ -2927,6 +2927,37 @@ fn parseFetchInitOptions(
     return .{ .ok = options };
 }
 
+// Shared outbound-fetch plumbing for the three call sites below (the synchronous
+// fetchSyncResult, the parallel worker doFetchWorkerInner, and the native HTTP
+// bridge). All three pre-create the connection via connectTcpOptions to apply a
+// connect timeout, so they share the same two std.http.Client quirks.
+
+/// std.http.Client loads the CA bundle and stamps client.now lazily inside
+/// request(); but because we pre-create the connection, Connection.Tls.create
+/// would assert on a null client.now. Bootstrap that TLS state up front. After
+/// this, request() sees client.now != null and skips its own rescan, and
+/// client.deinit() frees the bundle. No-op for plain HTTP.
+fn bootstrapClientTls(client: *std.http.Client, protocol: std.http.Client.Protocol) error{CertificateBundleLoadFailure}!void {
+    if (protocol != .tls) return;
+    const now = std.Io.Clock.real.now(client.io);
+    client.ca_bundle.rescan(client.allocator, client.io, now) catch return error.CertificateBundleLoadFailure;
+    client.now = now;
+}
+
+/// Read a response body, transparently decoding Content-Encoding and
+/// Transfer-Encoding. The plain response.reader() returns raw chunked/compressed
+/// bytes, and std.http.Client advertises gzip/deflate by default, so a compressed
+/// or chunked body would otherwise reach the caller verbatim (and JSON.parse then
+/// yields {}). readerDecompressing handles gzip/deflate/zstd; identity passes
+/// through. Pair with `.accept_encoding = .omit` on the request to prefer identity.
+fn readResponseBody(response: *std.http.Client.Response, allocator: std.mem.Allocator, max_bytes: usize) ![]u8 {
+    var body_transfer: [4096]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var reader = response.readerDecompressing(&body_transfer, &decompress, &decompress_buf);
+    return reader.allocRemaining(allocator, std.Io.Limit.limited(max_bytes));
+}
+
 fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     if (!rt.config.outbound_http_enabled) {
         return createFetchErrorResponse(rt, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
@@ -2966,6 +2997,9 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse {
         return createFetchErrorResponse(rt, "InvalidUrl", "unsupported URI scheme");
     };
+    bootstrapClientTls(&client, protocol) catch {
+        return createFetchErrorResponse(rt, "ConnectFailed", "CertificateBundleLoadFailure");
+    };
     const timeout: std.Io.Timeout = if (rt.config.outbound_timeout_ms == 0) .none else blk: {
         const duration = std.Io.Duration.fromMilliseconds(@intCast(rt.config.outbound_timeout_ms));
         break :blk .{ .duration = .{ .raw = duration, .clock = .awake } };
@@ -2986,6 +3020,8 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
         .redirect_behavior = .unhandled,
         .keep_alive = false,
         .connection = connection,
+        // Prefer an identity body (see readResponseBody); we decode anyway.
+        .headers = .{ .accept_encoding = .omit },
         .extra_headers = options.headers.items,
     }) catch |err| {
         client.connection_pool.release(connection, client.io);
@@ -3020,9 +3056,7 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     var owned_head = try snapshotResponseHead(rt.allocator, response.head);
     defer owned_head.deinit(rt.allocator);
 
-    var body_transfer: [64]u8 = undefined;
-    var response_reader = response.reader(&body_transfer);
-    const response_body = response_reader.allocRemaining(rt.allocator, std.Io.Limit.limited(options.max_response_bytes)) catch |err| switch (err) {
+    const response_body = readResponseBody(&response, rt.allocator, options.max_response_bytes) catch |err| switch (err) {
         error.StreamTooLong => return createFetchErrorResponse(rt, "ResponseTooLarge", "response exceeded max_response_bytes"),
         else => return createFetchErrorResponse(rt, "ResponseReadFailed", @errorName(err)),
     };
@@ -4186,6 +4220,15 @@ fn doFetchWorkerInner(
         };
     };
 
+    bootstrapClientTls(&client, protocol) catch {
+        return zq.modules.io.FetchResult{
+            .status = 599,
+            .ok = false,
+            .error_code = try allocator.dupe(u8, "ConnectFailed"),
+            .error_details = try allocator.dupe(u8, "CertificateBundleLoadFailure"),
+        };
+    };
+
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
     const host = try uri.getHost(&host_buf);
 
@@ -4215,6 +4258,8 @@ fn doFetchWorkerInner(
         .redirect_behavior = .unhandled,
         .keep_alive = false,
         .connection = connection,
+        // Prefer an identity body (see readResponseBody); we decode anyway.
+        .headers = .{ .accept_encoding = .omit },
         .extra_headers = desc.headers.items,
     }) catch |err| {
         client.connection_pool.release(connection, client.io);
@@ -4286,9 +4331,7 @@ fn doFetchWorkerInner(
     defer owned_head.deinit(allocator);
 
     const max_response_bytes = @max(@as(usize, 1), desc.max_response_bytes);
-    var body_transfer: [64]u8 = undefined;
-    var response_reader = response.reader(&body_transfer);
-    const response_body = response_reader.allocRemaining(allocator, std.Io.Limit.limited(max_response_bytes)) catch |err| switch (err) {
+    const response_body = readResponseBody(&response, allocator, max_response_bytes) catch |err| switch (err) {
         error.StreamTooLong => {
             return zq.modules.io.FetchResult{
                 .status = 599,
@@ -4476,6 +4519,9 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse {
         return try httpRequestErrorJsonAlloc(a, "InvalidUrl", "unsupported URI scheme");
     };
+    bootstrapClientTls(&client, protocol) catch {
+        return try httpRequestErrorJsonAlloc(a, "ConnectFailed", "CertificateBundleLoadFailure");
+    };
     const timeout: std.Io.Timeout = if (rt.config.outbound_timeout_ms == 0) .none else blk: {
         const duration = std.Io.Duration.fromMilliseconds(@intCast(rt.config.outbound_timeout_ms));
         break :blk .{ .duration = .{ .raw = duration, .clock = .awake } };
@@ -4496,6 +4542,8 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
         .redirect_behavior = .unhandled,
         .keep_alive = false,
         .connection = connection,
+        // Prefer an identity body (see readResponseBody); we decode anyway.
+        .headers = .{ .accept_encoding = .omit },
         .extra_headers = headers.items,
     }) catch |err| {
         client.connection_pool.release(connection, client.io);
@@ -4531,9 +4579,7 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
     var owned_head = try snapshotResponseHead(a, response.head);
     defer owned_head.deinit(a);
 
-    var body_transfer: [64]u8 = undefined;
-    var response_reader = response.reader(&body_transfer);
-    const response_body = response_reader.allocRemaining(a, std.Io.Limit.limited(max_response_bytes)) catch |err| switch (err) {
+    const response_body = readResponseBody(&response, a, max_response_bytes) catch |err| switch (err) {
         error.StreamTooLong => return try httpRequestErrorJsonAlloc(a, "ResponseTooLarge", "response exceeded max_response_bytes"),
         else => return try httpRequestErrorJsonAlloc(a, "ResponseReadFailed", @errorName(err)),
     };
@@ -6321,6 +6367,175 @@ test "zigttp fetch replay preserves missing content-type header" {
     try std.testing.expectEqual(false, obj.get("hasContentType").?.bool);
     try std.testing.expectEqualStrings("missing", obj.get("contentType").?.string);
     try std.testing.expectEqual(@as(u32, 1), replay_state.cursor);
+    try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
+}
+
+// Mirrors examples/fetch/weather-forecasts.ts (the demo handler). Embedded as
+// plain JS so the replay tests below exercise the real fetch -> json() -> shape
+// pipeline without the type-import surface; behavior is identical.
+const weather_handler_src =
+    \\import { fetch } from "zigttp:fetch";
+    \\function handler(req) {
+    \\  if (req.method !== "GET") {
+    \\    return Response.json({ error: "method_not_allowed" }, { status: 405 });
+    \\  }
+    \\  if (req.path !== "/" && req.path !== "/weather") {
+    \\    return Response.json({ error: "not_found" }, { status: 404 });
+    \\  }
+    \\  const upstream = fetch("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m,relative_humidity_2m,wind_speed_10m,is_day&timezone=auto", {
+    \\    headers: { "Accept": "application/json" },
+    \\    maxResponseBytes: 65536,
+    \\  });
+    \\  if (!upstream.ok) {
+    \\    return Response.json({ error: "weather_unavailable", upstreamStatus: upstream.status }, { status: 502 });
+    \\  }
+    \\  const forecast = upstream.json();
+    \\  return Response.json({
+    \\    app: "Weather Forecasts",
+    \\    source: "open-meteo",
+    \\    upstreamRequestId: upstream.headers.get("x-request-id") ?? "none",
+    \\    coordinates: { latitude: forecast.latitude, longitude: forecast.longitude },
+    \\    timezone: forecast.timezone,
+    \\    current: {
+    \\      temperature: forecast.current.temperature_2m,
+    \\      humidity: forecast.current.relative_humidity_2m,
+    \\      isDay: forecast.current.is_day,
+    \\    },
+    \\  });
+    \\}
+;
+
+test "weather handler parses Open-Meteo forecast and surfaces request id" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .replay_file_path = "test",
+        .enforce_arena_escape = false,
+    });
+    defer rt.deinit();
+
+    // The upstream body is a JSON string nested inside result_json, hence the
+    // doubled escaping. Named so result_json reads as wrapper ++ body ++ close.
+    const forecast_body = "{\\\"latitude\\\":52.52,\\\"longitude\\\":13.41,\\\"timezone\\\":\\\"Europe/Berlin\\\",\\\"current\\\":{\\\"temperature_2m\\\":21.5,\\\"relative_humidity_2m\\\":56,\\\"is_day\\\":1}}";
+    const io_calls = [_]zq.trace.IoEntry{
+        .{
+            .seq = 0,
+            .module = "fetch",
+            .func = "fetch",
+            .args_json = "[\"https://api.open-meteo.com/v1/forecast\"]",
+            .result_json = "{\"status\":200,\"statusText\":\"OK\",\"ok\":true,\"headers\":{\"content-type\":\"application/json\",\"x-request-id\":\"meteo-123\"},\"body\":\"" ++ forecast_body ++ "\"}",
+        },
+    };
+    var replay_state = zq.trace.ReplayState{ .io_calls = &io_calls, .cursor = 0, .divergences = 0 };
+    rt.ctx.setModuleState(zq.trace.REPLAY_STATE_SLOT, @ptrCast(&replay_state), &zq.trace.ReplayState.deinitOpaque);
+    defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
+
+    try rt.loadHandler(weather_handler_src, "<weather-replay-ok>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/weather"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("open-meteo", obj.get("source").?.string);
+    try std.testing.expectEqualStrings("Europe/Berlin", obj.get("timezone").?.string);
+    try std.testing.expectEqualStrings("meteo-123", obj.get("upstreamRequestId").?.string);
+    try std.testing.expectApproxEqAbs(@as(f64, 52.52), obj.get("coordinates").?.object.get("latitude").?.float, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 21.5), obj.get("current").?.object.get("temperature").?.float, 0.001);
+    try std.testing.expectEqual(@as(i64, 56), obj.get("current").?.object.get("humidity").?.integer);
+    try std.testing.expectEqual(@as(u32, 1), replay_state.cursor);
+    try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
+}
+
+test "weather handler returns 502 when upstream is not ok" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .replay_file_path = "test",
+        .enforce_arena_escape = false,
+    });
+    defer rt.deinit();
+
+    const io_calls = [_]zq.trace.IoEntry{
+        .{
+            .seq = 0,
+            .module = "fetch",
+            .func = "fetch",
+            .args_json = "[\"https://api.open-meteo.com/v1/forecast\"]",
+            .result_json = "{\"status\":503,\"statusText\":\"Service Unavailable\",\"ok\":false,\"headers\":{\"content-type\":\"application/json\"},\"body\":\"{}\"}",
+        },
+    };
+    var replay_state = zq.trace.ReplayState{ .io_calls = &io_calls, .cursor = 0, .divergences = 0 };
+    rt.ctx.setModuleState(zq.trace.REPLAY_STATE_SLOT, @ptrCast(&replay_state), &zq.trace.ReplayState.deinitOpaque);
+    defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
+
+    try rt.loadHandler(weather_handler_src, "<weather-replay-502>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/weather"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 502), response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "weather_unavailable") != null);
+    try std.testing.expectEqual(@as(u32, 1), replay_state.cursor);
+    try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
+}
+
+test "weather handler returns 404 for an unknown path without any egress" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .replay_file_path = "test",
+        .enforce_arena_escape = false,
+    });
+    defer rt.deinit();
+
+    // No recorded I/O: the not-found path must short-circuit before fetch.
+    const io_calls = [_]zq.trace.IoEntry{};
+    var replay_state = zq.trace.ReplayState{ .io_calls = &io_calls, .cursor = 0, .divergences = 0 };
+    rt.ctx.setModuleState(zq.trace.REPLAY_STATE_SLOT, @ptrCast(&replay_state), &zq.trace.ReplayState.deinitOpaque);
+    defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
+
+    try rt.loadHandler(weather_handler_src, "<weather-replay-404>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/unknown"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 404), response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "not_found") != null);
+    // cursor stays at 0: fetch was never reached, so no egress happened.
+    try std.testing.expectEqual(@as(u32, 0), replay_state.cursor);
     try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
 }
 
