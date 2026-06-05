@@ -209,6 +209,19 @@ pub fn writeResultJson(writer: anytype, result: *const SimulateResult) !void {
 
 /// CLI entry point for `zigts edit-simulate`.
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    try runWithArgsWriter(allocator, argv, &aw.writer);
+
+    buf = aw.toArrayList();
+    if (buf.items.len > 0) {
+        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+    }
+}
+
+fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, writer: *std.Io.Writer) !void {
     var stdin_json = false;
     var handler_path: ?[]const u8 = null;
     var before_path: ?[]const u8 = null;
@@ -271,16 +284,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var result = try simulate(allocator, input);
     defer result.deinit(allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-
-    try writeResultJson(&aw.writer, &result);
-
-    buf = aw.toArrayList();
-    if (buf.items.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
-    }
+    try writeResultJson(writer, &result);
 }
 
 // ---------------------------------------------------------------------------
@@ -451,8 +455,15 @@ test "runWithArgs accepts redundant --json flag" {
     try file_io.writeFile(allocator, path, handler);
     defer deleteTempFile(allocator, path);
 
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
     // The redundant --json must be accepted (not error.InvalidArgument).
-    try runWithArgs(allocator, &.{ path, "--json" });
+    try runWithArgsWriter(allocator, &.{ path, "--json" }, &aw.writer);
+
+    buf = aw.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"violations\"") != null);
 }
 
 test "simulate flags newly introduced canonical diagnostics" {
