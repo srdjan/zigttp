@@ -834,7 +834,11 @@ pub const HandlerAnalyzer = struct {
         const obj = self.ir.getObject(node) orelse return null;
 
         var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(self.allocator);
+        // `defer` (not `errdefer`): several `return null` paths below bail when a
+        // property value isn't statically serializable (e.g. a member access like
+        // `forecast.latitude`). errdefer would skip those, leaking the partial
+        // buffer. On success `toOwnedSlice` empties buf, so deinit is a no-op.
+        defer buf.deinit(self.allocator);
 
         try buf.append(self.allocator, '{');
 
@@ -939,7 +943,10 @@ pub const HandlerAnalyzer = struct {
         const arr = self.ir.getArray(node) orelse return null;
 
         var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(self.allocator);
+        // `defer` (not `errdefer`): the `return null` below bails when an element
+        // isn't statically serializable, which errdefer would skip and leak. On
+        // success `toOwnedSlice` empties buf, so deinit is a no-op.
+        defer buf.deinit(self.allocator);
 
         try buf.append(self.allocator, '[');
 
