@@ -1336,12 +1336,19 @@ pub const Server = struct {
             );
         }
 
-        if (self.pool) |*pool| {
-            const contract_ptr: ?*const ValidatedRuntimeContract = if (self.contract) |*c| c else null;
-            const effective = self.config.lifecycle_override orelse
-                contract_runtime.derivePoolingPolicy(contract_ptr);
-            pool.setPoolingPolicy(effective);
-        }
+        _ = self.applyPoolingPolicy();
+    }
+
+    /// Apply the effective pooling policy to the live pool: a CLI lifecycle
+    /// override wins, otherwise derive it from the current contract's
+    /// properties. Returns the applied policy, or null when there is no pool.
+    fn applyPoolingPolicy(self: *Self) ?contract_runtime.PoolingPolicy {
+        const pool = if (self.pool) |*p| p else return null;
+        const contract_ptr: ?*const ValidatedRuntimeContract = if (self.contract) |*c| c else null;
+        const effective = self.config.lifecycle_override orelse
+            contract_runtime.derivePoolingPolicy(contract_ptr);
+        pool.setPoolingPolicy(effective);
+        return effective;
     }
 
     fn clearAttestation(self: *Self) void {
@@ -1657,11 +1664,7 @@ pub const Server = struct {
 
         // Apply the lifecycle policy: CLI override wins, otherwise derive
         // from contract properties.
-        if (self.pool) |*p| {
-            const contract_ptr: ?*const ValidatedRuntimeContract = if (self.contract) |*c| c else null;
-            const effective = self.config.lifecycle_override orelse
-                contract_runtime.derivePoolingPolicy(contract_ptr);
-            p.setPoolingPolicy(effective);
+        if (self.applyPoolingPolicy()) |effective| {
             std.log.info("   Pooling policy: {s}", .{@tagName(effective)});
         }
 

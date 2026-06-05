@@ -468,6 +468,9 @@ pub fn decodeChunkedBody(
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
+    // Decoded output never exceeds the encoded body; reserve once so the
+    // per-chunk appendSlice loop does not reallocate as it grows.
+    try out.ensureTotalCapacity(allocator, body.len);
 
     var pos: usize = 0;
     while (true) {

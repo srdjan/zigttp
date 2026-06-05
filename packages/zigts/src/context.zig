@@ -661,10 +661,7 @@ pub const Context = struct {
         self.jit_metrics.compile_time_ns +%= time_ns;
         self.jit_metrics.code_bytes +%= @intCast(code_size);
         self.jit_metrics.bytecode_bytes +%= @intCast(bytecode_size);
-        if (self.code_allocator) |ca| {
-            self.jit_metrics.code_bytes_live = @intCast(ca.usedBytes());
-            self.jit_metrics.code_bytes_committed = @intCast(ca.committedBytes());
-        }
+        self.refreshCodeAllocatorGauges();
 
         // Update histogram: [0-10us, 10-100us, 100us-1ms, >1ms]
         const time_us = time_ns / 1000;
@@ -681,6 +678,12 @@ pub const Context = struct {
         if (!enable_jit_metrics) return;
         self.jit_metrics.eviction_count +%= 1;
         self.jit_metrics.evicted_code_bytes +%= @intCast(evicted_bytes);
+        self.refreshCodeAllocatorGauges();
+    }
+
+    /// Sample the JIT code allocator's live/committed byte gauges. With no code
+    /// allocator set, both gauges read zero.
+    fn refreshCodeAllocatorGauges(self: *Context) void {
         if (self.code_allocator) |ca| {
             self.jit_metrics.code_bytes_live = @intCast(ca.usedBytes());
             self.jit_metrics.code_bytes_committed = @intCast(ca.committedBytes());
