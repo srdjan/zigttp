@@ -22,7 +22,7 @@ pub inline fn modValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
 /// cast, so it is total over every finite input - the naive
 /// `@intFromFloat(@trunc(f))` is illegal behavior (panic in safe builds, UB in
 /// ReleaseFast) for `|f| >= 2^63`, e.g. `1e30 | 0`.
-pub inline fn floatToInt32(f: f64) i32 {
+inline fn floatToInt32(f: f64) i32 {
     if (!std.math.isFinite(f)) return 0;
     const t = @trunc(f);
     const m = @mod(t, 4294967296.0); // in [0, 2^32)
