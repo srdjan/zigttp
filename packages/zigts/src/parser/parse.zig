@@ -835,60 +835,6 @@ pub const Parser = struct {
         });
     }
 
-    fn parseWhileStatement(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance(); // consume 'while'
-
-        try self.expect(.lparen, "'('");
-        const condition = try self.parseExpression(.none);
-        try self.expect(.rparen, "')'");
-
-        const was_in_loop = self.in_loop;
-        self.in_loop = true;
-        const body = try self.parseStatement();
-        self.in_loop = was_in_loop;
-
-        return try self.nodes.add(.{
-            .tag = .while_stmt,
-            .loc = loc,
-            .data = .{ .loop = .{
-                .kind = .while_loop,
-                .init = null_node,
-                .condition = condition,
-                .update = null_node,
-                .body = body,
-            } },
-        });
-    }
-
-    fn parseDoWhileStatement(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance(); // consume 'do'
-
-        const was_in_loop = self.in_loop;
-        self.in_loop = true;
-        const body = try self.parseStatement();
-        self.in_loop = was_in_loop;
-
-        try self.expect(.kw_while, "'while'");
-        try self.expect(.lparen, "'('");
-        const condition = try self.parseExpression(.none);
-        try self.expect(.rparen, "')'");
-        try self.expectSemicolon();
-
-        return try self.nodes.add(.{
-            .tag = .do_while_stmt,
-            .loc = loc,
-            .data = .{ .loop = .{
-                .kind = .do_while,
-                .init = null_node,
-                .condition = condition,
-                .update = null_node,
-                .body = body,
-            } },
-        });
-    }
-
     /// Parse for/for-of statement.
     ///
     /// Supports two forms:
@@ -1066,69 +1012,6 @@ pub const Parser = struct {
             .tag = .continue_stmt,
             .loc = loc,
             .data = .{ .opt_label = null },
-        });
-    }
-
-    fn parseThrowStatement(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance(); // consume 'throw'
-
-        const value = try self.parseExpression(.none);
-        try self.expectSemicolon();
-
-        return try self.nodes.add(.{
-            .tag = .throw_stmt,
-            .loc = loc,
-            .data = .{ .opt_value = value },
-        });
-    }
-
-    fn parseTryStatement(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance(); // consume 'try'
-
-        const try_block = try self.parseBlock();
-
-        var catch_binding = BindingRef{ .scope_id = 0, .slot = 255, .kind = .local };
-        var catch_block: NodeIndex = null_node;
-        var finally_block: NodeIndex = null_node;
-
-        if (self.match(.kw_catch)) {
-            _ = try self.scopes.pushScope(.catch_block);
-
-            if (self.match(.lparen)) {
-                const catch_name = try self.expectIdentifier("catch parameter");
-                const catch_atom = try self.addAtom(catch_name.text(self.source));
-                catch_binding = self.scopes.declareBinding(
-                    catch_name.text(self.source),
-                    catch_atom,
-                    .catch_param,
-                    false,
-                ) catch return error.TooManyLocals;
-                try self.expect(.rparen, "')'");
-            }
-
-            catch_block = try self.parseBlock();
-            self.scopes.popScope();
-        }
-
-        if (self.match(.kw_finally)) {
-            finally_block = try self.parseBlock();
-        }
-
-        if (catch_block == null_node and finally_block == null_node) {
-            self.errorAt(loc, "try statement requires catch or finally");
-        }
-
-        return try self.nodes.add(.{
-            .tag = .try_stmt,
-            .loc = loc,
-            .data = .{ .try_stmt = .{
-                .try_block = try_block,
-                .catch_binding = catch_binding,
-                .catch_block = catch_block,
-                .finally_block = finally_block,
-            } },
         });
     }
 
@@ -2158,12 +2041,6 @@ pub const Parser = struct {
         return try self.nodes.add(Node.litBool(loc, value));
     }
 
-    fn parseNullLiteral(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance();
-        return try self.nodes.add(Node.litNull(loc));
-    }
-
     fn parseUndefinedLiteral(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance();
@@ -2308,27 +2185,6 @@ pub const Parser = struct {
         const name_atom = try self.addAtom("async");
         const binding = self.scopes.resolveBinding("async", name_atom);
         return try self.nodes.add(Node.identifier(loc, binding));
-    }
-
-    fn parseYieldExpression(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance(); // consume 'yield'
-
-        var value: NodeIndex = null_node;
-        if (!self.check(.semicolon) and !self.check(.rbrace) and
-            !self.check(.rparen) and !self.check(.rbracket) and
-            !self.check(.comma) and !self.check(.colon) and !self.check(.eof))
-        {
-            // Check for yield*
-            _ = self.match(.star);
-            value = try self.parseExpression(.assignment);
-        }
-
-        return try self.nodes.add(.{
-            .tag = .yield_expr,
-            .loc = loc,
-            .data = .{ .opt_value = value },
-        });
     }
 
     fn parseAwaitExpression(self: *Parser) anyerror!NodeIndex {
