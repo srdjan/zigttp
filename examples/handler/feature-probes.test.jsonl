@@ -29,3 +29,11 @@
 {"type":"test","name":"object math and array helper results"}
 {"type":"request","method":"GET","url":"/helpers","headers":{},"body":null}
 {"type":"expect","status":200,"body":"{\"values\":[1,2],\"entries\":[[\"a\",1],[\"b\",2]],\"floors\":[-2,-2,3],\"rounded\":[-2,-1,4],\"abs\":1.8,\"min\":4,\"max\":9,\"forEachTotal\":6}"}
+
+{"type":"test","name":"for-of closures capture per-iteration bindings"}
+{"type":"request","method":"GET","url":"/for-of-closure","headers":{},"body":null}
+{"type":"expect","status":200,"body":"{\"captured\":[0,1,2]}"}
+
+{"type":"test","name":"compound member assignment evaluates the receiver once"}
+{"type":"request","method":"GET","url":"/compound-member","headers":{},"body":null}
+{"type":"expect","status":200,"body":"{\"n\":15,\"calls\":1}"}
