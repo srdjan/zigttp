@@ -85,6 +85,7 @@ fn adaptFunctionBinding(
         .name = binding.name,
         .func = wrapToNativeFn(binding.module_func, specifier, &internal_required_capabilities),
         .arg_count = binding.arg_count,
+        .required_arg_count = binding.required_arg_count,
         .effect = @enumFromInt(@intFromEnum(binding.effect)),
         .returns = @enumFromInt(@intFromEnum(binding.returns)),
         .param_types = &param_types,

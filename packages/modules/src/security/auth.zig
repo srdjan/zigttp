@@ -33,8 +33,12 @@ pub const binding = sdk.ModuleBinding{
             .name = "jwtVerify",
             .module_func = jwtVerifyImpl,
             .arg_count = 3,
+            .required_arg_count = 2,
             .returns = .result,
-            .param_types = &.{ .string, .string },
+            // (token, secret, alg?) - the optional third algorithm argument is
+            // documented (`jwtVerify(token, secret, "HS256")`), but callers may
+            // omit it and use the verifier's HS256 default.
+            .param_types = &.{ .string, .string, .string },
             .failure_severity = .critical,
             .contract_flags = .{ .sets_jwt_auth = true },
             .return_labels = .{ .credential = true, .validated = true },

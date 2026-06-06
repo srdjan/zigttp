@@ -124,6 +124,9 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
             const param_len = if (is_fetch) @min(func.param_types.len, 1) else func.param_types.len;
             const param_count: u8 = @intCast(@min(param_len, 16));
             sig.param_count = param_count;
+            if (func.required_arg_count) |required_arg_count| {
+                sig.required_param_count = @intCast(@min(required_arg_count, param_count));
+            }
             for (func.param_types[0..param_count], 0..) |pt, i| {
                 sig.param_types[i] = mapReturnKind(
                     pt,
@@ -169,4 +172,22 @@ test "populateModuleTypes registers signatures" {
     // Return type should be nullable
     const ret_tag = pool.getTag(env_sig.?.return_type);
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_nullable, ret_tag.?);
+}
+
+test "populateModuleTypes keeps jwtVerify algorithm optional" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    populateModuleTypes(&env, &pool, allocator);
+
+    const sig = env.getFnSigByName("jwtVerify") orelse return error.MissingJwtVerify;
+    try std.testing.expectEqual(@as(u8, 3), sig.param_count);
+    try std.testing.expectEqual(@as(u8, 2), sig.required_param_count orelse sig.param_count);
+    try std.testing.expectEqual(pool.idx_string, sig.param_types[0]);
+    try std.testing.expectEqual(pool.idx_string, sig.param_types[1]);
+    try std.testing.expectEqual(pool.idx_string, sig.param_types[2]);
 }

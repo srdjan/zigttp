@@ -71,6 +71,7 @@ pub const GenericScope = struct {
 pub const FunctionSig = struct {
     param_types: [16]TypeIndex = undefined,
     param_count: u8 = 0,
+    required_param_count: ?u8 = null,
     return_type: TypeIndex = null_type_idx,
 };
 

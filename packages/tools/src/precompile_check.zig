@@ -542,9 +542,11 @@ pub fn generateTypeDefs(writer: anytype) void {
         writer.print("declare module \"{s}\" {{\n", .{binding.specifier}) catch return;
         for (binding.exports) |func| {
             writer.print("  export function {s}(", .{func.name}) catch return;
+            const required_arg_count = func.required_arg_count orelse @as(u8, @intCast(@min(func.param_types.len, 255)));
             for (func.param_types, 0..) |pt, i| {
                 if (i > 0) writer.print(", ", .{}) catch return;
-                writer.print("arg{d}: {s}", .{ i, returnKindToTs(pt) }) catch return;
+                const optional_marker: []const u8 = if (i >= required_arg_count) "?" else "";
+                writer.print("arg{d}{s}: {s}", .{ i, optional_marker, returnKindToTs(pt) }) catch return;
             }
             writer.print("): {s};\n", .{returnKindToTs(func.returns)}) catch return;
         }

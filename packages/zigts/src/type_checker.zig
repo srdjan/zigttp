@@ -1737,10 +1737,9 @@ pub const TypeChecker = struct {
         const sig = self.env.getFnSigByName(name) orelse return;
 
         // Check argument count
-        if (call.args_count < sig.param_count) {
-            // Count required params (non-optional)
-            // For now, treat all params as required
-            self.addArgCountMismatch(node, sig.param_count, @intCast(call.args_count));
+        const required_param_count = sig.required_param_count orelse sig.param_count;
+        if (call.args_count < required_param_count) {
+            self.addArgCountMismatch(node, required_param_count, @intCast(call.args_count));
             return;
         }
 
@@ -2139,6 +2138,20 @@ test "TypeChecker: toSorted with a comparator type-checks clean" {
         \\const nums = [10, 2, 1, 33, 4];
         \\const sorted = nums.toSorted((a, b) => a - b);
     , 0, 0);
+}
+
+test "TypeChecker: jwtVerify algorithm parameter is optional" {
+    try checkTypedSource(
+        \\import { jwtVerify } from "zigttp:auth";
+        \\const result = jwtVerify("token", "secret");
+    , 0, 0);
+}
+
+test "TypeChecker: jwtVerify algorithm parameter is type-checked when present" {
+    try checkTypedSource(
+        \\import { jwtVerify } from "zigttp:auth";
+        \\const result = jwtVerify("token", "secret", 123);
+    , 1, 0);
 }
 
 test "TypeChecker: toSorted with no comparator type-checks clean" {

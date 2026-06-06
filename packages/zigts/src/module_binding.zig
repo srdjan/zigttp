@@ -57,6 +57,7 @@ pub const ActiveModuleToken = struct {
 
 threadlocal var active_module_context: ?ActiveModuleContext = null;
 threadlocal var sdk_prng: ?std.Random.DefaultPrng = null;
+threadlocal var sdk_csprng: ?std.Random.DefaultCsprng = null;
 
 /// Generate a NativeFn wrapper around a ModuleFn.
 /// The wrapper casts *anyopaque to *ModuleHandle (a no-op pointer cast)
@@ -281,14 +282,44 @@ pub fn fillRandomForActiveModule(buf: []u8) ActiveCapabilityError!void {
     try requireActiveCapability(.random);
     if (buf.len == 0) return;
 
-    if (sdk_prng == null) {
-        const seed = std.hash.Wyhash.hash(0, currentActiveModuleSpecifier()) ^
-            @as(u64, @bitCast(nowNsForActiveModule() catch 0));
-        sdk_prng = std.Random.DefaultPrng.init(seed);
+    if (comptime build_options.analyzer_only) {
+        // The wasm/freestanding analyzer never executes handler code and has no
+        // OS CSPRNG; a deterministic PRNG keeps that build linking. IDs minted
+        // on this path are never security-bearing.
+        if (sdk_prng == null) {
+            const seed = std.hash.Wyhash.hash(0, currentActiveModuleSpecifier()) ^
+                @as(u64, @bitCast(nowNsForActiveModule() catch 0));
+            sdk_prng = std.Random.DefaultPrng.init(seed);
+        }
+        sdk_prng.?.random().bytes(buf);
+        return;
     }
 
-    var rng = sdk_prng.?.random();
-    rng.bytes(buf);
+    // Hosted runtime: a forward-ratcheting ChaCha CSPRNG seeded once per thread
+    // from the OS entropy pool. This backs zigttp:id (uuid/ulid/nanoid), which
+    // are routinely used as session tokens, reset tokens, and idempotency keys -
+    // the previous Xoshiro256, seeded once from the wall clock, was both
+    // low-entropy and state-recoverable from a single observed id.
+    if (sdk_csprng == null) {
+        var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
+        fillOsEntropy(&seed) catch @panic("zigttp:id: cannot seed CSPRNG from /dev/urandom");
+        sdk_csprng = std.Random.DefaultCsprng.init(seed);
+    }
+    sdk_csprng.?.random().bytes(buf);
+}
+
+/// Fill `buf` from the OS entropy pool (/dev/urandom). Mirrors the attestation
+/// keypair's seeding; only ever referenced from the hosted (libc-linked) path.
+fn fillOsEntropy(buf: []u8) !void {
+    const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.UrandomOpenFailed;
+    defer _ = std.c.close(fd);
+    var filled: usize = 0;
+    while (filled < buf.len) {
+        const n = std.c.read(fd, buf[filled..].ptr, buf.len - filled);
+        if (n <= 0) return error.UrandomReadFailed;
+        filled += @intCast(n);
+    }
 }
 
 pub fn fillRandomChecked(buf: []u8) void {
@@ -1337,6 +1368,10 @@ pub const FunctionBinding = struct {
 
     /// Argument count (for JS runtime).
     arg_count: u8,
+
+    /// Required argument count for static checking. When null, every typed
+    /// parameter is required.
+    required_arg_count: ?u8 = null,
 
     /// Effect classification for handler property derivation.
     effect: EffectClass = .read,

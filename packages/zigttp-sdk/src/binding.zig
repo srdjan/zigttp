@@ -158,6 +158,7 @@ pub const FunctionBinding = struct {
     name: []const u8,
     module_func: ModuleFn,
     arg_count: u8,
+    required_arg_count: ?u8 = null,
     effect: EffectClass = .read,
     returns: ReturnKind = .unknown,
     param_types: []const ReturnKind = &.{},

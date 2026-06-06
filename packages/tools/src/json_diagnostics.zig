@@ -616,7 +616,8 @@ pub fn writeModulesJson(writer: anytype) !void {
             if (j > 0) try writer.writeByte(',');
             try writer.writeAll("{\"name\":");
             try writeJsonString(writer, func.name);
-            try writer.print(",\"arg_count\":{d},\"params\":[", .{func.arg_count});
+            const required_arg_count = func.required_arg_count orelse @as(u8, @intCast(@min(func.param_types.len, 255)));
+            try writer.print(",\"arg_count\":{d},\"required_arg_count\":{d},\"params\":[", .{ func.arg_count, required_arg_count });
             for (func.param_types, 0..) |pt, k| {
                 if (k > 0) try writer.writeByte(',');
                 try writeJsonString(writer, pt.jsTypeName());
