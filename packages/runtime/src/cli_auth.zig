@@ -251,6 +251,10 @@ const Store = struct {
 
         const bytes = readProvidersFile(allocator) catch |err| switch (err) {
             error.FileNotFound, error.HomeDirMissing => return store,
+            error.ProvidersPermissionsTooOpen => {
+                std.log.warn("ignoring ~/.zigttp/providers.json: permissions are too open (must be 0600); run `zigttp auth` to rewrite it", .{});
+                return store;
+            },
             else => return err,
         };
         defer allocator.free(bytes);
@@ -373,6 +377,14 @@ fn readProvidersFile(allocator: std.mem.Allocator) ![]u8 {
 
     var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
     defer file.close(io);
+
+    // Refuse a group/world-accessible credential file: do not inject API keys
+    // from a file looser than 0600. The write path always tightens to 0600;
+    // this guards against another tool having created it with loose bits.
+    // Mirrors the attest keypair loader's permission check.
+    var st: std.c.Stat = undefined;
+    if (std.c.fstat(file.handle, &st) != 0) return error.ProvidersStatFailed;
+    if (st.mode & 0o077 != 0) return error.ProvidersPermissionsTooOpen;
 
     var buf: [4096]u8 = undefined;
     var reader = file.reader(io, &buf);

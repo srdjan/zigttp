@@ -19,6 +19,7 @@ pub const JSValue = zq.JSValue;
 pub const Instant = zq.compat.Instant;
 pub const Timer = zq.compat.Timer;
 pub const Mutex = zq.compat.Mutex;
+pub const RwLock = zq.compat.RwLock;
 
 pub fn readFile(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]const u8 {
     return zq.file_io.readFile(allocator, path, max_bytes);

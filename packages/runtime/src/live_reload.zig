@@ -95,6 +95,10 @@ pub const LiveReloadState = struct {
         watch_paths: []const []const u8,
         config: LiveReloadConfig,
     ) LiveReloadState {
+        // Engage the contract/proof_cache read-lock on the server's request
+        // path now that live reload may swap them concurrently. Set before the
+        // watcher thread or any request worker runs, so it is race-free.
+        server.reload_active = true;
         return .{
             .allocator = allocator,
             .server = server,

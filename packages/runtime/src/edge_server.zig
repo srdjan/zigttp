@@ -801,66 +801,20 @@ fn sendResponse(fd: std.posix.fd_t, response: *HttpResponse) !void {
             .{ .base = header_buf[0..pos].ptr, .len = pos },
             .{ .base = response.body.ptr, .len = response.body.len },
         };
-        try writevAllFd(fd, &iovecs);
+        try io_mod.writevAllFd(fd, &iovecs);
     } else {
-        try writeAllFd(fd, header_buf[0..pos]);
+        try io_mod.writeAllFd(fd, header_buf[0..pos]);
     }
 }
 
 fn sendStatic(fd: std.posix.fd_t, status: u16, reason: []const u8, body: []const u8) !void {
     var buf: [512]u8 = undefined;
     const response = try std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status, reason, body.len, body });
-    try writeAllFd(fd, response);
+    try io_mod.writeAllFd(fd, response);
 }
 
 fn sendError(fd: std.posix.fd_t, status: u16, message: []const u8) !void {
     try sendStatic(fd, status, statusText(status), message);
-}
-
-fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
-    var remaining = data;
-    while (remaining.len > 0) {
-        const result = std.c.write(fd, remaining.ptr, remaining.len);
-        if (result < 0) return error.WriteFailed;
-        const n: usize = @intCast(result);
-        if (n == 0) return error.WriteFailed;
-        remaining = remaining[n..];
-    }
-}
-
-fn writevAllFd(fd: std.posix.fd_t, iovecs: []std.posix.iovec_const) !void {
-    var remaining_iovecs = iovecs;
-    var first_offset: usize = 0;
-
-    while (remaining_iovecs.len > 0) {
-        var adjusted = remaining_iovecs;
-        if (first_offset > 0) {
-            adjusted[0].base = @ptrCast(@as([*]const u8, @ptrCast(adjusted[0].base)) + first_offset);
-            adjusted[0].len -= first_offset;
-        }
-
-        const result = std.c.writev(fd, adjusted.ptr, @intCast(@min(adjusted.len, std.math.maxInt(c_int))));
-        if (result < 0) return error.WriteFailed;
-        const n: usize = @intCast(result);
-        if (n == 0) return error.WriteFailed;
-
-        var bytes_remaining = n;
-        while (bytes_remaining > 0 and remaining_iovecs.len > 0) {
-            const current_len = if (first_offset > 0)
-                remaining_iovecs[0].len - first_offset
-            else
-                remaining_iovecs[0].len;
-
-            if (bytes_remaining >= current_len) {
-                bytes_remaining -= current_len;
-                remaining_iovecs = remaining_iovecs[1..];
-                first_offset = 0;
-            } else {
-                first_offset += bytes_remaining;
-                bytes_remaining = 0;
-            }
-        }
-    }
 }
 
 fn isHopByHopHeader(key: []const u8) bool {

@@ -424,6 +424,15 @@ const ConnectionPool = struct {
     fn handleSingleRequestSync(self: *ConnectionPool, fd: std.posix.fd_t, request_num: u32, req_allocator: std.mem.Allocator) !RequestOutcome {
         _ = request_num;
 
+        // Hold a shared lock across the request so the live-reload watcher's
+        // exclusive contract/proof_cache swap (updateContract) waits for
+        // in-flight readers instead of freeing structures this request still
+        // points into. Gated on reload being active: the production path takes
+        // no lock. Concurrent requests still run in parallel (shared lock).
+        const guard_contract = self.server.reload_active;
+        if (guard_contract) self.server.contract_lock.lockShared();
+        defer if (guard_contract) self.server.contract_lock.unlockShared();
+
         const request_data = self.readRequestData(fd, req_allocator) catch |err| {
             if (err == error.EndOfStream or err == error.ConnectionResetByPeer or err == error.WouldBlock) return .close;
             if (err == error.UnsupportedTransferEncoding) {
@@ -1186,6 +1195,14 @@ pub const Server = struct {
     conn_pool: ?*ConnectionPool,
     contract: ?ValidatedRuntimeContract,
     proof_cache: ?proof_adapter.ProofCache,
+    /// Guards `contract`/`proof_cache` against the live-reload watcher thread
+    /// freeing+rebuilding them (`updateContract`) while worker threads read
+    /// them mid-request. Only engaged when `reload_active` is set, so the
+    /// production path (no swaps) takes no lock.
+    contract_lock: engine.RwLock = .{},
+    /// True once live reload (`--watch`) is wired up and may call
+    /// `updateContract` concurrently with request handling.
+    reload_active: bool = false,
     security_logger: ?*SecurityLogger,
     studio: ?studio_mod.State,
     /// Precomputed `Zigttp-Proofs` and `Zigttp-Attest` header strings, built
@@ -1310,6 +1327,11 @@ pub const Server = struct {
     /// Replace the runtime contract and reconfigure the proof cache.
     /// Called by live reload after a handler swap with a new contract.
     pub fn updateContract(self: *Self, new_contract: ValidatedRuntimeContract) void {
+        // Exclusive: wait for any in-flight request readers to drain before
+        // freeing+rebuilding the contract/proof_cache they may be reading.
+        self.contract_lock.lock();
+        defer self.contract_lock.unlock();
+
         if (self.contract) |*c| c.deinit();
         self.contract = new_contract;
 
@@ -1424,6 +1446,7 @@ pub const Server = struct {
             contract_json,
             jws,
             verify_result.public_key,
+            verify_result.claims.contract_sha256,
         );
         errdefer {
             if (self.well_known_doc) |*doc| {
@@ -1651,6 +1674,7 @@ pub const Server = struct {
                         cj,
                         jws,
                         verify_result.public_key,
+                        verify_result.claims.contract_sha256,
                     ) catch |err| {
                         std.log.warn("attestation: failed to build well-known doc: {} (continuing without)", .{err});
                         break :build_well_known;
@@ -1715,9 +1739,24 @@ pub const Server = struct {
         var listener = self.listener orelse return error.NotStarted;
 
         while (self.running) {
-            const stream = listener.accept(io) catch |err| {
-                if (err == error.ConnectionAborted) continue;
-                return err;
+            const stream = listener.accept(io) catch |err| switch (err) {
+                // Per-connection hiccup: drop it and keep serving.
+                error.ConnectionAborted => continue,
+                // Resource exhaustion under load or attack (EMFILE/ENFILE/
+                // ENOBUFS) is exactly when the server must stay up. Back off
+                // briefly so we don't busy-spin while descriptors/buffers drain.
+                error.ProcessFdQuotaExceeded,
+                error.SystemFdQuotaExceeded,
+                error.SystemResources,
+                => {
+                    std.log.warn("accept: transient resource exhaustion ({}); backing off", .{err});
+                    std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+                    continue;
+                },
+                // `shutdown` surfaces as these while a concurrent accept is
+                // blocked; exit the loop cleanly rather than as an error.
+                error.SocketNotListening, error.Canceled => return,
+                else => return err,
             };
 
             const fd = stream.socket.handle;

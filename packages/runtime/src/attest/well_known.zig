@@ -40,12 +40,35 @@ pub const Doc = struct {
     }
 };
 
+/// True for an unpinned (all-zero or empty) hex hash claim, mirroring the
+/// skip-on-zero semantics used for the policy/bytecode hashes.
+fn isUnpinnedHex(hex: []const u8) bool {
+    if (hex.len == 0) return true;
+    for (hex) |c| if (c != '0') return false;
+    return true;
+}
+
 pub fn build(
     allocator: std.mem.Allocator,
     contract_json: []const u8,
     attestation_jws: []const u8,
     public_key: [Ed25519.PublicKey.encoded_length]u8,
+    /// The `contractSha256` claim from the signed JWS. The contract embedded in
+    /// the doc is served unsigned, so it MUST hash to this value; otherwise an
+    /// operator or MITM that can rewrite the well-known body (but not the key)
+    /// could advertise a contract that disagrees with the signature. Fail closed
+    /// on mismatch. Pass an all-zero/empty hex to skip (unpinned).
+    expected_contract_sha256: []const u8,
 ) !Doc {
+    if (!isUnpinnedHex(expected_contract_sha256)) {
+        var contract_digest: [32]u8 = undefined;
+        Sha256.hash(contract_json, &contract_digest, .{});
+        const actual_hex = std.fmt.bytesToHex(contract_digest, .lower);
+        if (!std.ascii.eqlIgnoreCase(&actual_hex, expected_contract_sha256)) {
+            return error.ContractHashMismatch;
+        }
+    }
+
     const fingerprint = envelope.keyFingerprint(public_key);
 
     const pubkey_b64_len = b64.Encoder.calcSize(public_key.len);
@@ -84,8 +107,14 @@ fn samplePubKey() [32]u8 {
     return .{ 0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60 } ++ [_]u8{0} ** 24;
 }
 
+fn sampleSha() [64]u8 {
+    var digest: [32]u8 = undefined;
+    Sha256.hash(sample_contract, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
 test "build embeds attest, contract, and public key" {
-    var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey());
+    var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &sampleSha());
     defer doc.deinit(testing.allocator);
 
     try testing.expect(std.mem.indexOf(u8, doc.body, "\"v\":\"zigttp-attest-v1\"") != null);
@@ -97,9 +126,9 @@ test "build embeds attest, contract, and public key" {
 }
 
 test "identical inputs produce byte-identical bodies and ETags" {
-    var first = try build(testing.allocator, sample_contract, sample_jws, samplePubKey());
+    var first = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &sampleSha());
     defer first.deinit(testing.allocator);
-    var second = try build(testing.allocator, sample_contract, sample_jws, samplePubKey());
+    var second = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &sampleSha());
     defer second.deinit(testing.allocator);
 
     try testing.expectEqualStrings(first.body, second.body);
@@ -107,9 +136,9 @@ test "identical inputs produce byte-identical bodies and ETags" {
 }
 
 test "different attest JWS yields different ETag" {
-    var first = try build(testing.allocator, sample_contract, sample_jws, samplePubKey());
+    var first = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &sampleSha());
     defer first.deinit(testing.allocator);
-    var second = try build(testing.allocator, sample_contract, "different.jws.bytes", samplePubKey());
+    var second = try build(testing.allocator, sample_contract, "different.jws.bytes", samplePubKey(), &sampleSha());
     defer second.deinit(testing.allocator);
 
     try testing.expect(!std.mem.eql(u8, &first.etag_hex, &second.etag_hex));
@@ -119,16 +148,16 @@ test "different public key yields different ETag" {
     var alt_key = samplePubKey();
     alt_key[0] ^= 0xFF;
 
-    var first = try build(testing.allocator, sample_contract, sample_jws, samplePubKey());
+    var first = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &sampleSha());
     defer first.deinit(testing.allocator);
-    var second = try build(testing.allocator, sample_contract, sample_jws, alt_key);
+    var second = try build(testing.allocator, sample_contract, sample_jws, alt_key, &sampleSha());
     defer second.deinit(testing.allocator);
 
     try testing.expect(!std.mem.eql(u8, &first.etag_hex, &second.etag_hex));
 }
 
 test "ETag is sha256 of body, lowercase hex" {
-    var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey());
+    var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &sampleSha());
     defer doc.deinit(testing.allocator);
 
     var digest: [32]u8 = undefined;
@@ -137,8 +166,23 @@ test "ETag is sha256 of body, lowercase hex" {
     try testing.expectEqualSlices(u8, &expected, &doc.etag_hex);
 }
 
+test "build fails closed when the contract does not match the signed hash" {
+    // A contract that does not hash to the JWS's contractSha256 must be
+    // rejected, not served unsigned alongside a signature that disagrees.
+    try testing.expectError(error.ContractHashMismatch, build(
+        testing.allocator,
+        sample_contract,
+        sample_jws,
+        samplePubKey(),
+        &([_]u8{'a'} ** 64), // wrong hash
+    ));
+    // An all-zero (unpinned) claim skips the binding check.
+    var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &([_]u8{'0'} ** 64));
+    doc.deinit(testing.allocator);
+}
+
 test "kid in publicKey equals envelope.keyFingerprint of the embedded x" {
-    var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey());
+    var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &sampleSha());
     defer doc.deinit(testing.allocator);
 
     const expected_fp = envelope.keyFingerprint(samplePubKey());
