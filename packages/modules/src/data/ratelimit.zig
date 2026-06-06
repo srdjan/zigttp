@@ -78,20 +78,23 @@ pub const RateStore = struct {
     }
 
     fn evictExpired(self: *RateStore, now: i64) void {
-        var expired: [64][]const u8 = undefined;
-        var expired_count: usize = 0;
+        // Drain ALL expired keys this sweep. The old fixed 64-key cap let
+        // expired entries accumulate faster than they were reclaimed under a
+        // high-cardinality key space (e.g. per-IP limiting under an IP flood),
+        // growing the map without bound. Collecting into a heap list (this runs
+        // only every EVICT_INTERVAL checks) avoids mutating the map mid-iterate.
+        var expired = std.ArrayList([]const u8).empty;
+        defer expired.deinit(self.allocator);
 
         var iter = self.entries.iterator();
         while (iter.next()) |entry| {
             if (now >= entry.value_ptr.window_start + entry.value_ptr.window_sec) {
-                if (expired_count < 64) {
-                    expired[expired_count] = entry.key_ptr.*;
-                    expired_count += 1;
-                }
+                // Best-effort on OOM: remove whatever was collected so far.
+                expired.append(self.allocator, entry.key_ptr.*) catch break;
             }
         }
 
-        for (expired[0..expired_count]) |key| {
+        for (expired.items) |key| {
             if (self.entries.fetchRemove(key)) |_| {
                 self.allocator.free(key);
             }

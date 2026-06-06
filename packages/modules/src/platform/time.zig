@@ -100,7 +100,10 @@ fn parseIsoString(s: []const u8) ?i64 {
     if (s[7] != '-') return null;
     const day = parseInt(u8, s[8..10]) orelse return null;
 
-    if (month < 1 or month > 12 or day < 1 or day > 31) return null;
+    if (month < 1 or month > 12 or day < 1) return null;
+    // Reject impossible days for the month rather than silently rolling over
+    // (e.g. "2024-02-30" must not parse as March 1).
+    if (day > daysInMonth(year, month)) return null;
 
     var hour: u8 = 0;
     var minute: u8 = 0;
@@ -166,21 +169,36 @@ fn isLeapYear(year: u16) bool {
     return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0);
 }
 
+/// Number of days in `month` (1-12) of `year`, accounting for leap February.
+fn daysInMonth(year: u16, month: u8) u8 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(year)) 29 else 28,
+        else => 0,
+    };
+}
+
 fn addSecondsImpl(_: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
     if (args.len < 2) return sdk.JSValue.undefined_val;
 
     const epoch_ms = extractEpochMs(args[0]) orelse return sdk.JSValue.undefined_val;
     const seconds_f = sdk.extractFloat(args[1]) orelse return sdk.JSValue.undefined_val;
-    const delta_ms: i64 = @intFromFloat(seconds_f * 1000.0);
+    // Saturating cast: an out-of-range or NaN seconds value must not panic the
+    // worker (`@intFromFloat` is illegal behavior outside the i64 range).
+    const delta_ms: i64 = std.math.lossyCast(i64, seconds_f * 1000.0);
+    const sum: i64 = std.math.add(i64, epoch_ms, delta_ms) catch
+        if (delta_ms < 0) std.math.minInt(i64) else std.math.maxInt(i64);
 
-    return sdk.JSValue.fromFloat(@floatFromInt(epoch_ms + delta_ms));
+    return sdk.JSValue.fromFloat(@floatFromInt(sum));
 }
 
 fn extractEpochMs(val: sdk.JSValue) ?i64 {
     if (val.toInt()) |i| return @as(i64, i);
     if (val.toFloat()) |f| {
         if (std.math.isNan(f) or std.math.isInf(f)) return null;
-        return @intFromFloat(f);
+        // Saturating cast guards finite-but-out-of-i64-range timestamps.
+        return std.math.lossyCast(i64, f);
     }
     return null;
 }

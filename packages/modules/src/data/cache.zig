@@ -157,7 +157,9 @@ pub const CacheStore = struct {
         };
 
         if (entry.expires_at) |exp| {
-            if (now_s > exp) {
+            // `>=`: a ttl of 0 expires the entry within the same second it was
+            // written, matching the documented "0 means already expired".
+            if (now_s >= exp) {
                 self.removeEntry(ns_cache, entry);
                 ns_cache.misses += 1;
                 return null;
@@ -173,9 +175,13 @@ pub const CacheStore = struct {
         const ns_cache = try self.getOrCreateNamespace(ns);
 
         if (ns_cache.entries.get(key)) |existing| {
+            // Dupe the new value BEFORE freeing the old one: if the allocation
+            // fails we return the error with the entry still intact, rather than
+            // leaving `cache_value` dangling for the next get to read freed memory.
+            const new_value = try self.allocator.dupe(u8, val);
             self.total_bytes -= existing.byte_size;
             self.allocator.free(existing.cache_value);
-            existing.cache_value = try self.allocator.dupe(u8, val);
+            existing.cache_value = new_value;
             existing.byte_size = existing.key.len + existing.ns.len + existing.cache_value.len;
             existing.expires_at = if (ttl) |t| now_s + t else null;
             self.total_bytes += existing.byte_size;

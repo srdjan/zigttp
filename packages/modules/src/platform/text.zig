@@ -118,7 +118,12 @@ fn truncateImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSV
         return sdk.createString(handle, input) catch sdk.JSValue.undefined_val;
     }
 
-    const cut = if (max_len > suffix.len) max_len - suffix.len else 0;
+    var cut = if (max_len > suffix.len) max_len - suffix.len else 0;
+    // Back the cut off to a UTF-8 codepoint boundary so we never slice a
+    // multi-byte sequence in half (createString does not validate UTF-8, so a
+    // split would emit mojibake / a lone continuation byte). Continuation bytes
+    // match 0b10xxxxxx.
+    while (cut > 0 and (input[cut] & 0xC0) == 0x80) : (cut -= 1) {}
     const allocator = sdk.getAllocator(handle);
 
     var buf = std.ArrayList(u8).empty;

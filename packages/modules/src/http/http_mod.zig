@@ -251,7 +251,11 @@ fn corsImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue
             try sdk.objectSet(handle, obj, "Access-Control-Max-Age", try sdk.createString(handle, num_str));
         }
         if (getBoolProp(handle, opts, "credentials")) |creds| {
-            if (creds) {
+            // CORS forbids `Access-Control-Allow-Origin: *` together with
+            // credentials (browsers reject it, and the wildcard+credentials
+            // combination is a credential-leak footgun). Only emit the
+            // credentials header for a specific origin; for `*` it is dropped.
+            if (creds and !std.mem.eql(u8, origin, "*")) {
                 try sdk.objectSet(handle, obj, "Access-Control-Allow-Credentials", try sdk.createString(handle, "true"));
             }
         }
