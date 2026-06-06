@@ -1657,7 +1657,11 @@ pub const BaselineCompiler = struct {
             },
 
             .put_elem => {
-                try self.emitPutElem();
+                try self.emitPutElem(false);
+            },
+
+            .put_elem_keep => {
+                try self.emitPutElem(true);
             },
 
             .get_global => {
@@ -4943,7 +4947,10 @@ pub const BaselineCompiler = struct {
     }
 
     /// Emit code to set an element by index via helper
-    fn emitPutElem(self: *BaselineCompiler) CompileError!void {
+    /// Emit a computed element store via Context.jitPutElem. When `keep` is set
+    /// (the put_elem_keep variant used by `obj[k] += v`), the stored value -
+    /// returned by jitPutElem in the result register - is left on the stack.
+    fn emitPutElem(self: *BaselineCompiler, keep: bool) CompileError!void {
         const fn_ptr = @intFromPtr(&Context.jitPutElem);
         if (is_x86_64) {
             try self.emitPopReg(.rcx); // val
@@ -4952,6 +4959,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.rax);
+            if (keep) try self.emitPushReg(.rax);
         } else if (is_aarch64) {
             try self.emitPopReg(.x3); // val
             try self.emitPopReg(.x2); // idx
@@ -4959,6 +4967,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.x9);
+            if (keep) try self.emitPushReg(.x0);
         }
     }
 
@@ -6551,6 +6560,11 @@ test "baseline: compile property access opcodes" {
         @intFromEnum(Opcode.push_0),
         @intFromEnum(Opcode.push_1),
         @intFromEnum(Opcode.put_elem),
+        @intFromEnum(Opcode.push_null),
+        @intFromEnum(Opcode.push_0),
+        @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.put_elem_keep),
+        @intFromEnum(Opcode.drop),
         @intFromEnum(Opcode.ret_undefined),
     };
 

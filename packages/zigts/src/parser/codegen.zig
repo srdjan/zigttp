@@ -1358,13 +1358,11 @@ pub const CodeGen = struct {
     fn emitAssignment(self: *CodeGen, assign: Node.AssignExpr) !void {
         const target_tag = self.ir.getTag(assign.target) orelse return;
 
-        // Compound assignment to a member target (`obj.prop += v`): evaluate the
-        // object expression exactly once. The generic path below would emit it
-        // for the read and again for the store, double-evaluating a
-        // side-effecting receiver like `getBox().n += 1`. (Computed-target
-        // compound `obj[k] += v` still goes through the generic path; folding
-        // its read+store would need a `put_elem_keep` opcode across all three
-        // execution tiers.)
+        // Compound assignment to a member target (`obj.prop += v` / `obj[k] += v`):
+        // evaluate the receiver (and, for computed targets, the key expression)
+        // exactly once. The generic path below would emit them for the read and
+        // again for the store, double-evaluating a side-effecting receiver like
+        // `getBox().n += 1` or a side-effecting key like `obj[k()] += 1`.
         if (assign.op) |op| {
             if (target_tag == .member_access) {
                 const member = self.ir.getMember(assign.target).?;
@@ -1378,6 +1376,21 @@ pub const CodeGen = struct {
                 try self.emit(.put_field_keep); // pops obj+result, sets, -> [result]
                 try self.emitU16(member.property);
                 self.popStack(1);
+                return;
+            }
+            if (target_tag == .computed_access) {
+                const member = self.ir.getMember(assign.target).?;
+                try self.emitNode(member.object); // [obj]
+                try self.emitNode(member.computed); // [obj, key] - key evaluated once
+                try self.emit(.dup2); // [obj, key, obj, key]
+                self.pushStack(2);
+                try self.emit(.get_elem); // [obj, key, current]
+                self.popStack(1);
+                try self.emitNode(assign.value); // [obj, key, current, value]
+                try self.emit(self.binaryOpToOpcode(op)); // [obj, key, result]
+                self.popStack(1);
+                try self.emit(.put_elem_keep); // pops obj,key,result, sets, -> [result]
+                self.popStack(2);
                 return;
             }
         }

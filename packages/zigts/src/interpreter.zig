@@ -1242,30 +1242,19 @@ pub const Interpreter = struct {
                 const val = self.ctx.pop();
                 const index_val = self.ctx.pop();
                 const obj_val = self.ctx.pop();
-
-                if (obj_val.isObject()) {
-                    const obj = object.JSObject.fromValue(obj_val);
-                    if (index_val.isInt()) {
-                        const idx = index_val.getInt();
-                        if (idx >= 0) {
-                            if (obj.class_id == .array) {
-                                try self.ctx.setIndexChecked(obj, @intCast(idx), val);
-                            } else {
-                                var idx_buf: [32]u8 = undefined;
-                                const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch {
-                                    continue :sw @enumFromInt(self.pc[0]);
-                                };
-                                const atom = self.ctx.atoms.intern(idx_slice) catch {
-                                    continue :sw @enumFromInt(self.pc[0]);
-                                };
-                                try self.ctx.setPropertyChecked(obj, atom, val);
-                            }
-                        }
-                    } else if (self.ctx.internComputedKey(index_val)) |atom| {
-                        // String key: `obj["x"] = v` / `obj[k] = v`.
-                        try self.ctx.setPropertyChecked(obj, atom, val);
-                    }
-                }
+                try self.storeElem(obj_val, index_val, val);
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .put_elem_keep => {
+                // Like put_elem, but leaves the assigned value on the stack so
+                // computed compound assignment (`obj[k()] += v`) can store and
+                // keep the result without re-evaluating obj/key.
+                self.advanceOp();
+                const val = self.ctx.pop();
+                const index_val = self.ctx.pop();
+                const obj_val = self.ctx.pop();
+                try self.storeElem(obj_val, index_val, val);
+                try self.ctx.push(val);
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .get_global => {
@@ -2247,6 +2236,30 @@ pub const Interpreter = struct {
             self.opcode_histogram[@intFromEnum(self.last_op)] +%= 1;
         }
         self.pc += 1;
+    }
+
+    /// Store `val` into `obj_val[index_val]`, shared by put_elem and
+    /// put_elem_keep. Array integer indices go through setIndexChecked;
+    /// every other key (non-array int, string) is interned to an atom. A
+    /// non-object receiver or unrepresentable index is a no-op.
+    inline fn storeElem(self: *Interpreter, obj_val: value.JSValue, index_val: value.JSValue, val: value.JSValue) !void {
+        if (!obj_val.isObject()) return;
+        const obj = object.JSObject.fromValue(obj_val);
+        if (index_val.isInt()) {
+            const idx = index_val.getInt();
+            if (idx < 0) return;
+            if (obj.class_id == .array) {
+                try self.ctx.setIndexChecked(obj, @intCast(idx), val);
+            } else {
+                var idx_buf: [32]u8 = undefined;
+                const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch return;
+                const atom = self.ctx.atoms.intern(idx_slice) catch return;
+                try self.ctx.setPropertyChecked(obj, atom, val);
+            }
+        } else if (self.ctx.internComputedKey(index_val)) |atom| {
+            // String key: `obj["x"] = v` / `obj[k] = v`.
+            try self.ctx.setPropertyChecked(obj, atom, val);
+        }
     }
 
     // ========================================================================
@@ -4823,6 +4836,202 @@ test "Interpreter new_array" {
     var interp = Interpreter.init(ctx);
     const result = try interp.run(&func);
     try std.testing.expect(result.isObject());
+}
+
+test "End-to-end: computed compound assignment evaluates key once (object)" {
+    // Regression: `obj[k()] += v` double-evaluated the key expression - once for
+    // the read, once for the store - running k()'s side effect twice. The
+    // put_elem_keep fast path folds read+store so k() runs exactly once.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const parser_mod = @import("parser/root.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source =
+        \\let calls = 0;
+        \\let obj = { x: 10 };
+        \\function key() { calls = calls + 1; return "x"; }
+        \\obj[key()] += 5;
+        \\let result = calls * 1000 + obj.x;
+    ;
+
+    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try p.parse();
+    try std.testing.expect(code.len > 0);
+
+    const shapes = p.getShapes();
+    if (shapes.len > 0) {
+        try ctx.materializeShapes(shapes);
+    }
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    _ = try interp.run(&func);
+
+    const result_atom = try ctx.atoms.intern("result");
+    const result_val = ctx.getGlobal(result_atom) orelse return error.MissingResult;
+    try std.testing.expect(result_val.isInt());
+    // calls == 1 (single eval), obj.x == 15 -> 1*1000 + 15. Double-eval gives 2015.
+    try std.testing.expectEqual(@as(i32, 1015), result_val.getInt());
+}
+
+test "End-to-end: computed compound assignment evaluates key once (array)" {
+    // Same regression as above, exercising the integer-index array store path.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const parser_mod = @import("parser/root.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source =
+        \\let n = 0;
+        \\let arr = [10, 20, 30];
+        \\function idx() { n = n + 1; return 1; }
+        \\arr[idx()] += 5;
+        \\let result = n * 1000 + arr[1];
+    ;
+
+    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try p.parse();
+    try std.testing.expect(code.len > 0);
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    _ = try interp.run(&func);
+
+    const result_atom = try ctx.atoms.intern("result");
+    const result_val = ctx.getGlobal(result_atom) orelse return error.MissingResult;
+    try std.testing.expect(result_val.isInt());
+    // n == 1 (single eval), arr[1] == 25 -> 1*1000 + 25. Double-eval gives 2025.
+    try std.testing.expectEqual(@as(i32, 1025), result_val.getInt());
+}
+
+test "JIT: baseline put_elem_keep stores and keeps value" {
+    // Exercises the baseline-compiled put_elem_keep emitter end to end: build
+    // [10], then arr[0] += 5 via dup2/get_elem/put_elem_keep, expect 15. Catches
+    // a wrong push register in emitPutElemKeep (would return the index, not 15).
+    // Arena-backed like the other object/array tests: GC-tracked heap objects
+    // are reclaimed by the arena rather than freed individually.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+
+    const prev_policy = getJitPolicy();
+    const prev_threshold = getJitThreshold();
+    const prev_warmup = getJitFeedbackWarmup();
+    defer {
+        setJitPolicy(prev_policy);
+        setJitThreshold(prev_threshold);
+        setJitFeedbackWarmup(prev_warmup);
+    }
+
+    setJitPolicy(.eager);
+    setJitThreshold(1);
+    setJitFeedbackWarmup(1);
+
+    if (jitDisabled()) return;
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.new_array),
+        1,
+        0, // [arr] (length 1)
+        @intFromEnum(bytecode.Opcode.dup), // [arr, arr]
+        @intFromEnum(bytecode.Opcode.push_i8),
+        0, // [arr, arr, 0]
+        @intFromEnum(bytecode.Opcode.push_i8),
+        10, // [arr, arr, 0, 10]
+        @intFromEnum(bytecode.Opcode.put_elem), // arr[0]=10 -> [arr]
+        @intFromEnum(bytecode.Opcode.push_i8),
+        0, // [arr, 0]
+        @intFromEnum(bytecode.Opcode.dup2), // [arr, 0, arr, 0]
+        @intFromEnum(bytecode.Opcode.get_elem), // [arr, 0, 10]
+        @intFromEnum(bytecode.Opcode.push_i8),
+        5, // [arr, 0, 10, 5]
+        @intFromEnum(bytecode.Opcode.add), // [arr, 0, 15]
+        @intFromEnum(bytecode.Opcode.put_elem_keep), // arr[0]=15 -> [15]
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 8,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+    defer jit_compile.cleanupTypeFeedback(allocator, &func);
+    defer jit_compile.cleanupCompiledCode(allocator, &func);
+
+    var result: value.JSValue = value.JSValue.undefined_val;
+    var i: u32 = 0;
+    while (i < 3) : (i += 1) {
+        result = try interp.run(&func);
+    }
+
+    try std.testing.expect(func.compiled_code != null);
+    try std.testing.expectEqual(bytecode.CompilationTier.baseline, func.tier);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, 15), result.getInt());
 }
 
 test "Interpreter ret_undefined" {

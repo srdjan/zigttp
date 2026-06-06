@@ -130,6 +130,7 @@ pub const Opcode = enum(u8) {
     put_field = 0x71, // +u16 atom_idx
     get_elem = 0x72,
     put_elem = 0x73,
+    put_elem_keep = 0x74, // set element and keep value on stack
     put_field_keep = 0x76, // +u16 atom_idx - set property and keep value on stack
 
     // Object operations
@@ -327,6 +328,7 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         .put_field => .{ .size = 3, .n_pop = 2, .n_push = 0, .name = "put_field" },
         .get_elem => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "get_elem" },
         .put_elem => .{ .size = 1, .n_pop = 3, .n_push = 0, .name = "put_elem" },
+        .put_elem_keep => .{ .size = 1, .n_pop = 3, .n_push = 1, .name = "put_elem_keep" },
         .put_field_keep => .{ .size = 3, .n_pop = 2, .n_push = 1, .name = "put_field_keep" },
 
         // Object operations
