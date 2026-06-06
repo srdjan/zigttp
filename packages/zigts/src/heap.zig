@@ -32,6 +32,12 @@ pub const MemBlockHeader = packed struct(u32) {
 
     pub fn init(tag: MemTag, size_bytes: usize) MemBlockHeader {
         const words = (size_bytes + 7) / 8;
+        // size_words is u26 (max ~512MB). A larger object would silently wrap
+        // in ReleaseFast (corrupting the size) or panic in safe builds; make it
+        // a deterministic, clearly-labelled panic in every build mode instead.
+        if (words > std.math.maxInt(u26)) {
+            @panic("MemBlockHeader: object exceeds the 512MB single-object size limit");
+        }
         return .{
             .tag = tag,
             .size_words = @intCast(words),

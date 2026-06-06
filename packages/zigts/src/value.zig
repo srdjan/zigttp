@@ -517,6 +517,13 @@ pub const JSValue = packed struct(u64) {
         return false;
     }
 
+    /// Public: a direct byte view of a string value (flat string, slice, or a
+    /// single-leaf rope). Returns null for a non-string or a multi-leaf rope -
+    /// the caller must flatten the latter. No allocation.
+    pub fn stringBytes(val: JSValue) ?[]const u8 {
+        return getStringData(val, val.isString(), val.isRope(), val.isStringSlice());
+    }
+
     /// Helper: get string data directly if possible (flat string or slice)
     /// Returns null for ropes which need special traversal
     fn getStringData(val: JSValue, is_str: bool, is_rope: bool, is_slice: bool) ?[]const u8 {

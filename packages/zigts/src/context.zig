@@ -11,6 +11,8 @@ const object = @import("object.zig");
 const arena_mod = @import("arena.zig");
 const string = @import("string.zig");
 const jit = @import("jit/root.zig");
+const interp_util = @import("interpreter/util.zig");
+const cmp = @import("interpreter/cmp.zig");
 const builtins = @import("builtins/root.zig");
 const bytecode = @import("bytecode.zig");
 const handler_policy = @import("handler_policy.zig");
@@ -1155,6 +1157,26 @@ pub const Context = struct {
     }
 
     /// JIT helper: get element by index
+    /// Intern a computed string property key into an Atom (flat/slice borrowed
+    /// directly, multi-leaf rope flattened to a temporary). Mirrors the
+    /// interpreter's helper so JIT and interpreter agree on `obj[stringKey]`.
+    /// Intern a computed string property key into an Atom (flat/slice borrowed
+    /// directly, multi-leaf rope flattened to a temporary). Single source of
+    /// truth shared by the interpreter dispatch loop and the JIT helpers so
+    /// `obj[stringKey]` resolves identically in both tiers.
+    pub fn internComputedKey(self: *Context, key_val: value.JSValue) ?object.Atom {
+        if (key_val.stringBytes()) |bytes| {
+            return self.atoms.intern(bytes) catch null;
+        }
+        if (key_val.isRope()) {
+            const rope = key_val.toPtr(string.RopeNode);
+            const flat = rope.flatten(self.allocator) catch return null;
+            defer string.freeString(self.allocator, flat);
+            return self.atoms.intern(flat.data()) catch null;
+        }
+        return null;
+    }
+
     pub fn jitGetElem(self: *Context, obj_val: value.JSValue, index_val: value.JSValue) callconv(.c) value.JSValue {
         const pool = self.hidden_class_pool orelse return value.JSValue.undefined_val;
         if (obj_val.isObject() and index_val.isInt()) {
@@ -1187,6 +1209,13 @@ pub const Context = struct {
                 }
             }
         }
+        // String key: `obj["x"]` / `obj[k]`.
+        if (obj_val.isObject() and !index_val.isInt()) {
+            if (self.internComputedKey(index_val)) |atom| {
+                const obj = object.JSObject.fromValue(obj_val);
+                return obj.getProperty(pool, atom) orelse value.JSValue.undefined_val;
+            }
+        }
         return value.JSValue.undefined_val;
     }
 
@@ -1205,6 +1234,12 @@ pub const Context = struct {
                     const atom = self.atoms.intern(idx_slice) catch return val;
                     self.setPropertyChecked(obj, atom, val) catch return self.jitThrow();
                 }
+            }
+        } else if (obj_val.isObject()) {
+            // String key: `obj["x"] = v` / `obj[k] = v`.
+            if (self.internComputedKey(index_val)) |atom| {
+                const obj = object.JSObject.fromValue(obj_val);
+                self.setPropertyChecked(obj, atom, val) catch return self.jitThrow();
             }
         }
         return val;
@@ -1407,14 +1442,11 @@ pub const Context = struct {
         return self.jitAllocFloat(an / bn);
     }
 
-    /// JIT helper: modulo two values (integer-only fast path)
+    /// JIT helper: modulo two values. Delegates to the single source of truth in
+    /// interpreter/util.zig (`x % 0` -> NaN, float operands supported); only a
+    /// non-numeric operand errors, which becomes a JIT throw.
     pub fn jitMod(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
-        if (a.isInt() and b.isInt()) {
-            const bv = b.getInt();
-            if (bv == 0) return self.jitThrow();
-            return value.JSValue.fromInt(@rem(a.getInt(), bv));
-        }
-        return self.jitThrow();
+        return interp_util.modValues(a, b) catch self.jitThrow();
     }
 
     /// JIT helper: exponentiation
@@ -1455,14 +1487,9 @@ pub const Context = struct {
     }
 
     fn jitToInt32(val: value.JSValue) i32 {
-        if (val.isInt()) return val.getInt();
-        if (val.isFloat64()) {
-            const f = val.getFloat64();
-            if (std.math.isNan(f) or std.math.isInf(f) or f == 0) return 0;
-            const int_val: i64 = @intFromFloat(@trunc(f));
-            return @truncate(int_val);
-        }
-        return 0;
+        // Single source of truth shared with the interpreter dispatch loop; the
+        // safe modulo-2^32 reduction lives in interpreter/util.zig.
+        return interp_util.toInt32(val);
     }
 
     /// JIT helpers: bitwise operations
@@ -1498,12 +1525,13 @@ pub const Context = struct {
     fn jitShift(_: *Context, a: value.JSValue, b: value.JSValue, op: enum { shl, shr, ushr }) value.JSValue {
         const shift: u5 = @intCast(@as(u32, @bitCast(jitToInt32(b))) & 0x1F);
         const ai = jitToInt32(a);
-        const result: i32 = switch (op) {
-            .shl => ai << shift,
-            .shr => ai >> shift,
-            .ushr => @bitCast(@as(u32, @bitCast(ai)) >> shift),
+        return switch (op) {
+            .shl => value.JSValue.fromInt(ai << shift),
+            .shr => value.JSValue.fromInt(ai >> shift),
+            // `>>>` yields an unsigned 32-bit value; box >2^31 results as float
+            // (shared with the interpreter's util.fromUint32).
+            .ushr => interp_util.fromUint32(@as(u32, @bitCast(ai)) >> shift),
         };
-        return value.JSValue.fromInt(result);
     }
 
     /// JIT helper: strict equality (===)
@@ -1543,28 +1571,15 @@ pub const Context = struct {
         return self.jitCompare(a, b, .gte);
     }
 
-    fn jitCompare(self: *Context, a: value.JSValue, b: value.JSValue, op: enum { lt, lte, gt, gte }) value.JSValue {
-        if (a.isInt() and b.isInt()) {
-            const ai = a.getInt();
-            const bi = b.getInt();
-            const result = switch (op) {
-                .lt => ai < bi,
-                .lte => ai <= bi,
-                .gt => ai > bi,
-                .gte => ai >= bi,
-            };
-            return value.JSValue.fromBool(result);
-        }
-        const an = a.toNumber() orelse return self.jitThrow();
-        const bn = b.toNumber() orelse return self.jitThrow();
-        if (std.math.isNan(an) or std.math.isNan(bn)) return self.jitThrow();
-        const result = switch (op) {
-            .lt => an < bn,
-            .lte => an <= bn,
-            .gt => an > bn,
-            .gte => an >= bn,
-        };
-        return value.JSValue.fromBool(result);
+    fn jitCompare(_: *Context, a: value.JSValue, b: value.JSValue, op: enum { lt, lte, gt, gte }) value.JSValue {
+        // Single source of truth shared with the interpreter: the cmp helpers
+        // encode the ECMAScript "unordered (NaN / non-numeric) -> false" rule.
+        return value.JSValue.fromBool(switch (op) {
+            .lt => cmp.lessThan(a, b),
+            .lte => cmp.lessEqual(a, b),
+            .gt => cmp.greaterThan(a, b),
+            .gte => cmp.greaterEqual(a, b),
+        });
     }
 
     fn jitAllocFloat(self: *Context, v: f64) value.JSValue {
@@ -2254,6 +2269,36 @@ test "setSlotBarriered records the cross-gen edge the interpreter fast path reli
     // The store both wrote the slot and recorded the cross-gen edge.
     try std.testing.expectEqual(value.JSValue.fromPtr(child).raw, holder.inline_slots[1].raw);
     try std.testing.expect(gc_state.remembered_set.contains(@ptrCast(holder)));
+}
+
+test "computed member access round-trips string and integer keys" {
+    // Regression for the put_elem/get_elem string-key gap: both opcodes only
+    // handled integer indices, so `obj["x"] = v` silently dropped the write and
+    // `obj["x"]` always read undefined. The interpreter and JIT now intern a
+    // string key into an atom; this drives the JIT helpers directly.
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const obj = try ctx.createObject(null);
+    defer obj.destroy(allocator);
+    const obj_val = obj.toValue();
+
+    // String key round-trip: obj["x"] = 42 then obj["x"] == 42.
+    const key = try ctx.createString("x");
+    defer string.freeString(allocator, key.toPtr(string.JSString));
+    _ = ctx.jitPutElem(obj_val, key, value.JSValue.fromInt(42));
+    const got = ctx.jitGetElem(obj_val, key);
+    try std.testing.expect(got.isInt());
+    try std.testing.expectEqual(@as(i32, 42), got.getInt());
+
+    // An absent string key reads undefined (not a crash, not stale data).
+    const absent = try ctx.createString("missing");
+    defer string.freeString(allocator, absent.toPtr(string.JSString));
+    try std.testing.expect(ctx.jitGetElem(obj_val, absent).isUndefined());
 }
 
 test "Context catch handler" {

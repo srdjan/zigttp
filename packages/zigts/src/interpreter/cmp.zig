@@ -6,19 +6,45 @@ const std = @import("std");
 const value = @import("../value.zig");
 const string = @import("../string.zig");
 
-pub inline fn compareValues(a: value.JSValue, b: value.JSValue) !std.math.Order {
+/// Numeric ordering of two values, or `null` when the operands are "unordered"
+/// (a NaN operand, or an operand that does not coerce to a number). Per
+/// ECMAScript every relational operator yields `false` for unordered operands -
+/// e.g. `NaN < 5`, `undefined > 0` - so callers must treat `null` as false, not
+/// as a thrown error.
+pub inline fn compareValues(a: value.JSValue, b: value.JSValue) ?std.math.Order {
     // Integer fast path
     if (a.isInt() and b.isInt()) {
         return std.math.order(a.getInt(), b.getInt());
     }
     // Float comparison
-    const an = a.toNumber() orelse return error.TypeError;
-    const bn = b.toNumber() orelse return error.TypeError;
-    // NaN comparisons are always false
-    if (std.math.isNan(an) or std.math.isNan(bn)) {
-        return error.TypeError;
-    }
+    const an = a.toNumber() orelse return null;
+    const bn = b.toNumber() orelse return null;
+    if (std.math.isNan(an) or std.math.isNan(bn)) return null;
     return std.math.order(an, bn);
+}
+
+/// `a < b` with ECMAScript unordered-is-false semantics.
+pub inline fn lessThan(a: value.JSValue, b: value.JSValue) bool {
+    const o = compareValues(a, b) orelse return false;
+    return o == .lt;
+}
+
+/// `a <= b` with ECMAScript unordered-is-false semantics.
+pub inline fn lessEqual(a: value.JSValue, b: value.JSValue) bool {
+    const o = compareValues(a, b) orelse return false;
+    return o == .lt or o == .eq;
+}
+
+/// `a > b` with ECMAScript unordered-is-false semantics.
+pub inline fn greaterThan(a: value.JSValue, b: value.JSValue) bool {
+    const o = compareValues(a, b) orelse return false;
+    return o == .gt;
+}
+
+/// `a >= b` with ECMAScript unordered-is-false semantics.
+pub inline fn greaterEqual(a: value.JSValue, b: value.JSValue) bool {
+    const o = compareValues(a, b) orelse return false;
+    return o == .gt or o == .eq;
 }
 
 /// Loose equality (==)

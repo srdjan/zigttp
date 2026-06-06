@@ -518,7 +518,12 @@ pub const Interpreter = struct {
                         continue :sw @enumFromInt(self.pc[0]);
                     }
                 }
-                return error.DivisionByZero;
+                // Float operands and `x % 0` go through the shared helper:
+                // ECMAScript yields NaN for modulo-by-zero and supports float
+                // operands, rather than aborting the handler.
+                self.ctx.stack[sp - 2] = try util.modValues(a, b);
+                self.ctx.sp = sp - 1;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .pow => {
                 self.advanceOp();
@@ -734,7 +739,7 @@ pub const Interpreter = struct {
                     continue :sw @enumFromInt(self.pc[0]);
                 } else {
                     @branchHint(.cold);
-                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(try cmp.compareValues(a, b) == .lt);
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.lessThan(a, b));
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
@@ -749,8 +754,7 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                const order = try cmp.compareValues(a, b);
-                self.ctx.stack[sp - 2] = value.JSValue.fromBool(order == .lt or order == .eq);
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.lessEqual(a, b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -764,7 +768,7 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                self.ctx.stack[sp - 2] = value.JSValue.fromBool(try cmp.compareValues(a, b) == .gt);
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.greaterThan(a, b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -778,8 +782,7 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                const order = try cmp.compareValues(a, b);
-                self.ctx.stack[sp - 2] = value.JSValue.fromBool(order == .gt or order == .eq);
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.greaterEqual(a, b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -894,7 +897,7 @@ pub const Interpreter = struct {
                 const a = self.ctx.stack[sp - 2];
                 const shift: u5 = @intCast(@as(u32, @bitCast(util.toInt32(b))) & 0x1F);
                 const ua: u32 = @bitCast(util.toInt32(a));
-                self.ctx.stack[sp - 2] = value.JSValue.fromInt(@bitCast(ua >> shift));
+                self.ctx.stack[sp - 2] = util.fromUint32(ua >> shift);
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -1219,6 +1222,17 @@ pub const Interpreter = struct {
                         }
                     }
                 }
+                // String key: `obj["x"]` / `obj[k]`.
+                if (obj_val.isObject() and !index_val.isInt()) {
+                    if (self.ctx.internComputedKey(index_val)) |atom| {
+                        if (self.ctx.hidden_class_pool) |pool| {
+                            const obj = object.JSObject.fromValue(obj_val);
+                            self.ctx.stack[sp - 2] = obj.getProperty(pool, atom) orelse value.JSValue.undefined_val;
+                            self.ctx.sp = sp - 1;
+                            continue :sw @enumFromInt(self.pc[0]);
+                        }
+                    }
+                }
                 self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
@@ -1229,22 +1243,27 @@ pub const Interpreter = struct {
                 const index_val = self.ctx.pop();
                 const obj_val = self.ctx.pop();
 
-                if (obj_val.isObject() and index_val.isInt()) {
+                if (obj_val.isObject()) {
                     const obj = object.JSObject.fromValue(obj_val);
-                    const idx = index_val.getInt();
-                    if (idx >= 0) {
-                        if (obj.class_id == .array) {
-                            try self.ctx.setIndexChecked(obj, @intCast(idx), val);
-                        } else {
-                            var idx_buf: [32]u8 = undefined;
-                            const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch {
-                                continue :sw @enumFromInt(self.pc[0]);
-                            };
-                            const atom = self.ctx.atoms.intern(idx_slice) catch {
-                                continue :sw @enumFromInt(self.pc[0]);
-                            };
-                            try self.ctx.setPropertyChecked(obj, atom, val);
+                    if (index_val.isInt()) {
+                        const idx = index_val.getInt();
+                        if (idx >= 0) {
+                            if (obj.class_id == .array) {
+                                try self.ctx.setIndexChecked(obj, @intCast(idx), val);
+                            } else {
+                                var idx_buf: [32]u8 = undefined;
+                                const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch {
+                                    continue :sw @enumFromInt(self.pc[0]);
+                                };
+                                const atom = self.ctx.atoms.intern(idx_slice) catch {
+                                    continue :sw @enumFromInt(self.pc[0]);
+                                };
+                                try self.ctx.setPropertyChecked(obj, atom, val);
+                            }
                         }
+                    } else if (self.ctx.internComputedKey(index_val)) |atom| {
+                        // String key: `obj["x"] = v` / `obj[k] = v`.
+                        try self.ctx.setPropertyChecked(obj, atom, val);
                     }
                 }
                 continue :sw @enumFromInt(self.pc[0]);
@@ -2154,7 +2173,7 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                self.ctx.stack[sp - 2] = value.JSValue.fromBool(try cmp.compareValues(a, b) == .lt);
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.lessThan(a, b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -2169,7 +2188,7 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                self.ctx.stack[sp - 2] = value.JSValue.fromBool(try cmp.compareValues(a, b) == .gt);
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.greaterThan(a, b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -2184,8 +2203,7 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                const order = try cmp.compareValues(a, b);
-                self.ctx.stack[sp - 2] = value.JSValue.fromBool(order == .lt or order == .eq);
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.lessEqual(a, b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -2200,8 +2218,7 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                const order = try cmp.compareValues(a, b);
-                self.ctx.stack[sp - 2] = value.JSValue.fromBool(order == .gt or order == .eq);
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.greaterEqual(a, b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -4067,6 +4084,49 @@ test "End-to-end: default parameters" {
 
     var interp = Interpreter.init(ctx);
     // Expression statements drop values, so result is undefined
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "End-to-end: optional method call short-circuits on nullish receiver" {
+    // Regression: `undefined?.foo()` threw NotCallable - the `?.` guarded only
+    // the property read, not the call. It must short-circuit to undefined, so
+    // `interp.run` completes without error.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const parser_mod = @import("parser/root.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var strings = string_mod.StringTable.init(allocator);
+    const code_str = "function outer() { const a = undefined; return a?.foo(); } outer()";
+    var p = parser_mod.Parser.init(allocator, code_str, &strings, null);
+    defer p.deinit();
+
+    const code = try p.parse();
+    try std.testing.expect(code.len > 0);
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    // Must NOT raise error.NotCallable; the call short-circuits to undefined.
     const result = try interp.run(&func);
     try std.testing.expect(result.isUndefined());
 }

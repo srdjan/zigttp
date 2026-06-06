@@ -736,6 +736,7 @@ pub const Parser = struct {
             while (true) {
                 // Check for rest parameter
                 if (self.match(.spread)) {
+                    self.errors.addErrorAt(.unsupported_feature, self.previous, "rest parameters ('...args') are not supported; accept an explicit array parameter instead");
                     param_flags.has_rest_param = true;
                 }
 
@@ -752,7 +753,10 @@ pub const Parser = struct {
                     return error.TooManyLocals;
                 };
 
-                // Check for default value
+                // Check for default value. Default params are accepted here and
+                // flagged downstream by the strict checker's
+                // `canonical_default_parameter` rule (which `normalize` can also
+                // auto-fix); rejecting them at parse time would bypass that.
                 var default_value: NodeIndex = null_node;
                 if (self.match(.assign)) {
                     param_flags.has_default_params = true;
@@ -2646,6 +2650,7 @@ pub const Parser = struct {
             if (!self.check(.rparen)) {
                 while (true) {
                     if (self.match(.spread)) {
+                        self.errors.addErrorAt(.unsupported_feature, self.previous, "rest parameters ('...args') are not supported; accept an explicit array parameter instead");
                         flags.has_rest_param = true;
                     }
 
@@ -2658,6 +2663,8 @@ pub const Parser = struct {
                         false,
                     ) catch return error.TooManyLocals;
 
+                    // Default params accepted here; flagged by the strict
+                    // checker's canonical_default_parameter rule downstream.
                     var default_value: NodeIndex = null_node;
                     if (self.match(.assign)) {
                         flags.has_default_params = true;
@@ -4942,6 +4949,23 @@ test "unsupported: implements keyword" {
     };
 
     try std.testing.expect(false);
+}
+
+test "unsupported: rest parameter" {
+    const allocator = std.testing.allocator;
+    const source = "const f = (...xs) => xs;";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    _ = parser.parse() catch {};
+
+    try std.testing.expect(parser.hasErrors());
+    var found = false;
+    for (parser.getErrors()) |err| {
+        if (err.kind == error_mod.ErrorKind.unsupported_feature and
+            std.mem.indexOf(u8, err.message, "rest parameters") != null) found = true;
+    }
+    try std.testing.expect(found);
 }
 
 test "unsupported: public modifier" {

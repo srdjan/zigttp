@@ -43,6 +43,7 @@ const Case = struct {
     kind: Kind,
     expected_num: f64 = 0,
     expected_bool: bool = false,
+    expect_nan: bool = false,
 };
 
 fn op(comptime o: O) u8 {
@@ -70,6 +71,23 @@ const sub_overflow_consts = [_]JSValue{ JSValue.fromInt(-2_000_000_000), JSValue
 const mul_overflow_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 0, 0, op(.mul), op(.ret) };
 const mul_overflow_consts = [_]JSValue{JSValue.fromInt(100_000)};
 
+// --- ECMAScript numeric-conformance cases (regression guards) ---
+// ToInt32 of a float >= 2^63 must NOT panic (the naive @intFromFloat(@trunc) was
+// illegal behavior); `1e30 & 1` reduces modulo 2^32 first and is even -> 0.
+const to_int32_big_code = [_]u8{ op(.push_const), 0, 0, op(.push_i8), 1, op(.bit_and), op(.ret) };
+const to_int32_big_consts = [_]JSValue{JSValue.fromFloat(1e30)};
+// Float modulo and modulo-by-zero: `1.5 % 2.5 == 1.5`; `5 % 0 == NaN` (not a
+// thrown DivisionByZero that aborts the handler).
+const mod_float_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.mod), op(.ret) };
+const mod_float_consts = [_]JSValue{ JSValue.fromFloat(1.5), JSValue.fromFloat(2.5) };
+const mod_zero_code = [_]u8{ op(.push_i8), 5, op(.push_i8), 0, op(.mod), op(.ret) };
+// A NaN relational operand yields false (unordered), not a thrown TypeError.
+const nan_lt_code = [_]u8{ op(.push_const), 0, 0, op(.push_i8), 5, op(.lt), op(.ret) };
+const nan_lt_consts = [_]JSValue{JSValue.fromFloat(std.math.nan(f64))};
+// `(-1) >>> 0` is the unsigned 32-bit value 4294967295, boxed as a float because
+// it exceeds maxInt(i32) - not a negative int. push_i8 0xFF is the signed byte -1.
+const ushr_neg_code = [_]u8{ op(.push_i8), 0xFF, op(.push_i8), 0, op(.ushr), op(.ret) };
+
 const cases = [_]Case{
     .{ .name = "add", .code = &add_code, .kind = .number, .expected_num = 8 },
     .{ .name = "sub", .code = &sub_code, .kind = .number, .expected_num = 6 },
@@ -80,6 +98,11 @@ const cases = [_]Case{
     .{ .name = "add_overflow", .code = &overflow_code, .constants = &overflow_consts, .kind = .number, .expected_num = 4_000_000_000 },
     .{ .name = "sub_overflow", .code = &sub_overflow_code, .constants = &sub_overflow_consts, .kind = .number, .expected_num = -4_000_000_000 },
     .{ .name = "mul_overflow", .code = &mul_overflow_code, .constants = &mul_overflow_consts, .kind = .number, .expected_num = 10_000_000_000 },
+    .{ .name = "to_int32_big", .code = &to_int32_big_code, .constants = &to_int32_big_consts, .kind = .number, .expected_num = 0 },
+    .{ .name = "mod_float", .code = &mod_float_code, .constants = &mod_float_consts, .kind = .number, .expected_num = 1.5 },
+    .{ .name = "mod_zero", .code = &mod_zero_code, .kind = .number, .expect_nan = true },
+    .{ .name = "nan_lt", .code = &nan_lt_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = false },
+    .{ .name = "ushr_neg", .code = &ushr_neg_code, .kind = .number, .expected_num = 4294967295 },
 };
 
 fn buildFunc(case: Case) bytecode.FunctionBytecode {
@@ -112,7 +135,11 @@ fn checkExpected(case: Case, result: JSValue) !void {
     switch (case.kind) {
         .number => {
             const n = result.toNumber() orelse return error.ExpectedNumber;
-            try std.testing.expectEqual(case.expected_num, n);
+            if (case.expect_nan) {
+                try std.testing.expect(std.math.isNan(n));
+            } else {
+                try std.testing.expectEqual(case.expected_num, n);
+            }
         },
         .boolean => {
             try std.testing.expect(result.isBool());

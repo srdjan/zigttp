@@ -91,6 +91,12 @@ pub const CodeGen = struct {
     /// When >= IC_CACHE_SIZE, falls back to non-IC opcodes
     ic_cache_idx: u16,
 
+    /// Count of nested function/arrow expressions emitted so far. A diff across
+    /// a loop body tells whether that body created any closures, so for-of can
+    /// emit a per-iteration `close_upvalue` only when a closure could capture
+    /// the loop variable (keeping closure-free loops zero-overhead).
+    closure_count: u32 = 0,
+
     /// Optimization statistics (accumulated across all functions)
     opt_stats: bytecode_opt.OptStats,
 
@@ -1096,6 +1102,16 @@ pub const CodeGen = struct {
                 return;
             }
 
+            // `obj?.method(args)`: the optional is on the property access, so the
+            // whole call must short-circuit to undefined when the receiver is
+            // nullish - otherwise call_method runs on an undefined method value
+            // and throws NotCallable.
+            if (callee_tag == .optional_chain) {
+                try self.emitNode(member.object); // [receiver]
+                try self.emitOptionalMethodCall(call, member);
+                return;
+            }
+
             // Method call: obj.method(args)
             // Stack: [obj] -> [obj, obj] -> [obj, method] -> [obj, method, args...] -> [result]
             try self.emitNode(member.object);
@@ -1152,12 +1168,11 @@ pub const CodeGen = struct {
     /// `extra_below` = 0. If the callee is null or undefined the call is
     /// skipped and `undefined` is pushed; otherwise the call proceeds normally.
     /// Mirrors the nil-check pattern in `emitNullishCoalescing`.
-    fn emitOptionalCall(self: *CodeGen, call: Node.CallExpr, extra_below: u16) !void {
-        // Stack: [..., (receiver?), callee]
-        const skip_label = try self.createLabel();
-        const end_label = try self.createLabel();
-
-        // Check callee === null
+    /// Emit a guard that jumps to `skip_label` when the top-of-stack value is
+    /// null or undefined, leaving the value on the stack otherwise. Stack-neutral.
+    /// Shared by the optional-call emitters (the value being tested is the callee
+    /// for `emitOptionalCall`, the receiver for `emitOptionalMethodCall`).
+    fn emitNullishSkip(self: *CodeGen, skip_label: u32) !void {
         try self.emit(.dup);
         self.pushStack(1);
         try self.emit(.push_null);
@@ -1167,7 +1182,6 @@ pub const CodeGen = struct {
         try self.emitJump(.if_true, skip_label);
         self.popStack(1);
 
-        // Check callee === undefined
         try self.emit(.dup);
         self.pushStack(1);
         try self.emit(.push_undefined);
@@ -1176,6 +1190,15 @@ pub const CodeGen = struct {
         self.popStack(1);
         try self.emitJump(.if_true, skip_label);
         self.popStack(1);
+    }
+
+    fn emitOptionalCall(self: *CodeGen, call: Node.CallExpr, extra_below: u16) !void {
+        // Stack: [..., (receiver?), callee]
+        const skip_label = try self.createLabel();
+        const end_label = try self.createLabel();
+
+        // Short-circuit if the callee is null or undefined.
+        try self.emitNullishSkip(skip_label);
 
         // Not nullish: perform the call. Stack here is [..., (receiver?), callee].
         try self.emitCallArgs(call);
@@ -1200,6 +1223,42 @@ pub const CodeGen = struct {
             try self.emit(.drop); // drop receiver
             self.popStack(1);
         }
+        try self.emit(.push_undefined);
+        self.pushStack(1);
+
+        try self.placeLabel(end_label);
+    }
+
+    /// Emit `receiver?.method(args)`: if the receiver is null/undefined the whole
+    /// call short-circuits to `undefined`; otherwise it proceeds as a normal
+    /// method call. The receiver value must already be on top of the stack.
+    /// Both branches leave exactly one value where the receiver was.
+    fn emitOptionalMethodCall(self: *CodeGen, call: Node.CallExpr, member: Node.MemberExpr) !void {
+        const skip_label = try self.createLabel();
+        const end_label = try self.createLabel();
+
+        // Stack: [receiver]. Short-circuit the whole call if it is nullish.
+        try self.emitNullishSkip(skip_label);
+
+        // Not nullish: [receiver] -> [receiver, receiver] -> [receiver, method].
+        try self.emit(.dup);
+        self.pushStack(1);
+        try self.emitGetField(member.property);
+        if (call.is_optional) {
+            // `obj?.method?.()`: also guard the method value being nullish.
+            try self.emitOptionalCall(call, 1);
+        } else {
+            try self.emitCallArgs(call);
+            try self.emit(.call_method);
+            try self.emitByte(call.args_count);
+            self.popStack(call.args_count + 1);
+        }
+        try self.emitJump(.goto, end_label);
+
+        // Nullish receiver: drop it, push undefined.
+        try self.placeLabel(skip_label);
+        try self.emit(.drop);
+        self.popStack(1);
         try self.emit(.push_undefined);
         self.pushStack(1);
 
@@ -1299,6 +1358,30 @@ pub const CodeGen = struct {
     fn emitAssignment(self: *CodeGen, assign: Node.AssignExpr) !void {
         const target_tag = self.ir.getTag(assign.target) orelse return;
 
+        // Compound assignment to a member target (`obj.prop += v`): evaluate the
+        // object expression exactly once. The generic path below would emit it
+        // for the read and again for the store, double-evaluating a
+        // side-effecting receiver like `getBox().n += 1`. (Computed-target
+        // compound `obj[k] += v` still goes through the generic path; folding
+        // its read+store would need a `put_elem_keep` opcode across all three
+        // execution tiers.)
+        if (assign.op) |op| {
+            if (target_tag == .member_access) {
+                const member = self.ir.getMember(assign.target).?;
+                try self.emitNode(member.object); // [obj]
+                try self.emit(.dup); // [obj, obj]
+                self.pushStack(1);
+                try self.emitGetField(member.property); // [obj, current]
+                try self.emitNode(assign.value); // [obj, current, value]
+                try self.emit(self.binaryOpToOpcode(op)); // [obj, result]
+                self.popStack(1);
+                try self.emit(.put_field_keep); // pops obj+result, sets, -> [result]
+                try self.emitU16(member.property);
+                self.popStack(1);
+                return;
+            }
+        }
+
         if (assign.op) |op| {
             // Compound assignment: get current value first
             try self.emitNode(assign.target);
@@ -1329,11 +1412,18 @@ pub const CodeGen = struct {
             },
             .computed_access => {
                 const member = self.ir.getMember(assign.target).?;
-                try self.emitNode(member.object);
-                try self.emitNode(member.computed);
-                try self.emit(.rot3);
-                try self.emit(.put_elem);
-                self.popStack(2);
+                // An assignment is an expression: it must leave the assigned
+                // value on the stack (the .identifier branch dups, the
+                // .member_access branch uses put_field_keep). `put_elem` leaves
+                // nothing, so dup the value below object/key - one copy is
+                // consumed by the store, the original survives.
+                try self.emit(.dup); // [value, value]
+                self.pushStack(1);
+                try self.emitNode(member.object); // [value, value, object]
+                try self.emitNode(member.computed); // [value, value, object, key]
+                try self.emit(.rot3); // [value, object, key, value]
+                try self.emit(.put_elem); // consumes object,key,value -> [value]
+                self.popStack(3);
             },
             else => {},
         }
@@ -1594,6 +1684,9 @@ pub const CodeGen = struct {
     }
 
     fn emitFunctionExpr(self: *CodeGen, node_idx: NodeIndex, func: Node.FunctionExpr) !void {
+        // Record that a nested function/arrow was emitted so an enclosing loop
+        // can decide whether to close per-iteration upvalues.
+        self.closure_count +%= 1;
 
         // Save current codegen state
         const saved_code = self.code;
@@ -2069,10 +2162,24 @@ pub const CodeGen = struct {
         // Stack: [iterable, index]
 
         // Execute loop body
+        const closures_before = self.closure_count;
         try self.emitNode(for_iter.body);
 
         // Continue label (for continue statements)
         try self.placeLabel(continue_label);
+
+        // Per-iteration binding semantics: if the body created any closure, the
+        // loop variable (and any body-scoped locals above it) may have been
+        // captured, so close those upvalues at the back-edge. Each iteration's
+        // closures then observe their own value - `for (const i of [0,1,2])
+        // fns.push(()=>i)` yields [0,1,2], not [2,2,2]. Skipped entirely for
+        // closure-free loops to keep the hot path at zero cost.
+        if (self.closure_count != closures_before and
+            (binding.kind == .local or binding.kind == .argument) and binding.slot <= 255)
+        {
+            try self.emit(.close_upvalue);
+            try self.emitByte(@truncate(binding.slot));
+        }
 
         // Jump back to loop start (index already incremented by for_of_next)
         try self.emitJump(.goto, loop_start);

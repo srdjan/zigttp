@@ -508,6 +508,11 @@ pub const ComptimeEvaluator = struct {
         self.advance();
         self.skipWhitespace();
         const right = try self.parseExpression(prec);
+        // parseInfix consumes both operands; each op below produces a fresh
+        // value (add allocates a new string), so free any heap-backed operand
+        // strings on every path, including the TypeMismatch error returns.
+        defer left.deinit(self.allocator);
+        defer right.deinit(self.allocator);
 
         return switch (op) {
             '+' => self.add(left, right),
@@ -1205,12 +1210,14 @@ pub const ComptimeEvaluator = struct {
     // ========================================================================
 
     fn add(self: *Self, left: ComptimeValue, right: ComptimeValue) ComptimeError!ComptimeValue {
-        _ = self;
-        // String concatenation
+        // String concatenation. Allocate from the evaluator's allocator - the
+        // same one the caller frees the result with (`result.deinit(allocator)`
+        // in the stripper); the previous page_allocator made that a
+        // cross-allocator free.
         if (left == .string or right == .string) {
             const ls = valueToString(left);
             const rs = valueToString(right);
-            const result = std.fmt.allocPrint(std.heap.page_allocator, "{s}{s}", .{ ls, rs }) catch return ComptimeError.OutOfMemory;
+            const result = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ls, rs }) catch return ComptimeError.OutOfMemory;
             return .{ .string = result };
         }
 
@@ -2118,4 +2125,16 @@ test "comptime string method chaining" {
     const r = try eval.evaluate();
     defer r.deinit(allocator);
     try std.testing.expectEqualStrings("HELLO WORLD", r.string);
+}
+
+test "comptime string concatenation frees with the evaluator allocator" {
+    // Regression: `add` allocated the concatenation from page_allocator while
+    // the caller freed it with the evaluator's allocator. Under the leak-
+    // detecting testing allocator that cross-allocator free is caught here.
+    const allocator = std.testing.allocator;
+
+    var eval = ComptimeEvaluator.init(allocator, "\"foo\" + \"bar\"", 1, 1);
+    const r = try eval.evaluate();
+    defer r.deinit(allocator);
+    try std.testing.expectEqualStrings("foobar", r.string);
 }
