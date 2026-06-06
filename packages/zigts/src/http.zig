@@ -815,13 +815,6 @@ fn renderRawChildren(ctx: *context.Context, children: value.JSValue, writer: any
 // Helpers
 // ============================================================================
 
-/// Get string data from a JSValue (handles flat strings, ropes, and slices)
-/// When ctx is provided, uses arena allocation for rope flattening to avoid
-/// leaking c_allocator memory when arena resets.
-fn getStringArg(val: value.JSValue) ![]const u8 {
-    return getStringArgWithCtx(val, null);
-}
-
 fn getStringArgWithCtx(val: value.JSValue, ctx: ?*context.Context) ![]const u8 {
     if (val.isString()) {
         return val.toPtr(string.JSString).data();

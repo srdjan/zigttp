@@ -2169,10 +2169,6 @@ pub const Runtime = struct {
         return runtime.callFunction(func_obj, args);
     }
 
-    fn extractResponse(self: *Self, result: zq.JSValue) !HttpResponse {
-        return self.extractResponseInternal(result, false);
-    }
-
     fn extractResponseInternal(self: *Self, result: zq.JSValue, borrow_body: bool) !HttpResponse {
         var response = HttpResponse.init(self.allocator);
 

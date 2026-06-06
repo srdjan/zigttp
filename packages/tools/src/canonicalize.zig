@@ -1762,12 +1762,6 @@ fn findByteBack(source: []const u8, pos: usize, min: usize, target: u8) ?usize {
     return null;
 }
 
-fn skipSpacesInRange(source: []const u8, start: usize, end: usize) usize {
-    var i = start;
-    while (i < end and (source[i] == ' ' or source[i] == '\t')) i += 1;
-    return i;
-}
-
 fn scanIdentEnd(source: []const u8, start: usize, end: usize) ?usize {
     if (start >= end or !isIdentStart(source[start])) return null;
     var i = start + 1;
@@ -1861,36 +1855,6 @@ fn findTopLevelChar(source: []const u8, start: usize, end: usize, target: u8) ?u
                 if (depth == 0 and c == target) return i;
                 i += 1;
             },
-        }
-    }
-    return null;
-}
-
-fn findParamBoundary(source: []const u8, start: usize, end: usize) ?usize {
-    var i = start;
-    var depth: i32 = 0;
-    while (i < end) {
-        const c = source[i];
-        switch (c) {
-            '(', '[', '{' => {
-                depth += 1;
-                i += 1;
-            },
-            ')', ']', '}' => {
-                if (depth == 0) return if (c == ')') i else null;
-                depth -= 1;
-                i += 1;
-            },
-            ',' => {
-                if (depth == 0) return i;
-                i += 1;
-            },
-            '"', '\'', '`' => {
-                const after = scanStringForward(source, i, c) orelse return null;
-                if (after > end) return null;
-                i = after;
-            },
-            else => i += 1,
         }
     }
     return null;

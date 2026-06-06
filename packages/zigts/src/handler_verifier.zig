@@ -885,11 +885,6 @@ pub const HandlerVerifier = struct {
         }
     }
 
-    /// Check if a call expression calls a result-producing function.
-    fn isResultProducingCall(self: *HandlerVerifier, node: NodeIndex) bool {
-        return self.resultProducingCallSource(node) != null;
-    }
-
     /// Return the ResultFnSlot for a result-producing call, or null if not one.
     fn resultProducingCallSource(self: *HandlerVerifier, node: NodeIndex) ?ResultFnSlot {
         const tag = self.ir_view.getTag(node) orelse return null;

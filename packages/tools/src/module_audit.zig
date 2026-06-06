@@ -483,10 +483,6 @@ fn parseBindingSpecifier(content: []const u8) ?[]const u8 {
     return parseAssignedString(content, "specifier = ");
 }
 
-fn parseSpecSpecifier(content: []const u8) ?[]const u8 {
-    return parseJsonStringField(content, "\"specifier\"");
-}
-
 fn parseBindingCapabilities(allocator: std.mem.Allocator, content: []const u8) !std.ArrayList([]const u8) {
     var caps: std.ArrayList([]const u8) = .empty;
     errdefer caps.deinit(allocator);
@@ -515,42 +511,9 @@ fn parseBindingCapabilities(allocator: std.mem.Allocator, content: []const u8) !
     return caps;
 }
 
-fn parseSpecCapabilities(allocator: std.mem.Allocator, content: []const u8) !std.ArrayList([]const u8) {
-    var caps: std.ArrayList([]const u8) = .empty;
-    errdefer caps.deinit(allocator);
-
-    const marker = "\"requiredCapabilities\"";
-    const field_idx = std.mem.indexOf(u8, content, marker) orelse return caps;
-    const list_start = std.mem.indexOfScalarPos(u8, content, field_idx + marker.len, '[') orelse return caps;
-    const list_end = std.mem.indexOfScalarPos(u8, content, list_start + 1, ']') orelse return caps;
-    const body = content[list_start + 1 .. list_end];
-
-    var i: usize = 0;
-    while (i < body.len) : (i += 1) {
-        if (body[i] != '"') continue;
-        const start_name = i + 1;
-        const end_name = std.mem.indexOfScalarPos(u8, body, start_name, '"') orelse break;
-        const cap = body[start_name..end_name];
-        if (!containsString(caps.items, cap)) {
-            try caps.append(allocator, cap);
-        }
-        i = end_name;
-    }
-
-    return caps;
-}
-
 fn parseAssignedString(content: []const u8, marker: []const u8) ?[]const u8 {
     const idx = std.mem.indexOf(u8, content, marker) orelse return null;
     const first_quote = std.mem.indexOfScalarPos(u8, content, idx + marker.len, '"') orelse return null;
-    const end_quote = std.mem.indexOfScalarPos(u8, content, first_quote + 1, '"') orelse return null;
-    return content[first_quote + 1 .. end_quote];
-}
-
-fn parseJsonStringField(content: []const u8, field_name: []const u8) ?[]const u8 {
-    const idx = std.mem.indexOf(u8, content, field_name) orelse return null;
-    const colon_idx = std.mem.indexOfScalarPos(u8, content, idx + field_name.len, ':') orelse return null;
-    const first_quote = std.mem.indexOfScalarPos(u8, content, colon_idx + 1, '"') orelse return null;
     const end_quote = std.mem.indexOfScalarPos(u8, content, first_quote + 1, '"') orelse return null;
     return content[first_quote + 1 .. end_quote];
 }
@@ -598,14 +561,6 @@ fn resolveCompanionPath(
         input_path[0..prefix_len],
         canonical_target,
     });
-}
-
-fn sameStringSet(a: []const []const u8, b: []const []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a) |item| {
-        if (!containsString(b, item)) return false;
-    }
-    return true;
 }
 
 fn sameCapabilities(
