@@ -1337,7 +1337,13 @@ fn compareApiParams(
         if (schema_change == .additive) has_addition = true;
     }
     for (new_items) |new_item| {
-        if (findApiParam(old_items, new_item.name) == null) has_addition = true;
+        if (findApiParam(old_items, new_item.name) == null) {
+            // A newly-added *required* query/header param breaks existing
+            // callers that don't send it; only a new optional param is purely
+            // additive.
+            if (new_item.required) return .breaking;
+            has_addition = true;
+        }
     }
     return if (has_addition) .additive else .unchanged;
 }

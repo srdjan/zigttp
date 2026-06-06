@@ -1378,6 +1378,12 @@ pub const ContractBuilder = struct {
                 // Per-extension copy AND top-level mirror.
                 try self.extractLiteralArgAt(call, rule.arg_position, .{ .list = &bucket.egress_hosts, .dynamic = &bucket.egress_dynamic }, transform);
                 try self.extractLiteralArgAt(call, rule.arg_position, .{ .list = &self.egress_hosts, .dynamic = &self.egress_dynamic }, transform);
+                // Mirror the full URL into egress_urls as well (matching the bare
+                // fetchSync path), so system_linker can resolve cross-handler
+                // internal calls made through the `zigttp:fetch` module import -
+                // otherwise "every internal fetch matches a declared route"
+                // holds vacuously for module-import callers.
+                try self.extractLiteralArgAt(call, rule.arg_position, .{ .list = &self.egress_urls, .dynamic = &self.egress_dynamic }, null);
             },
             .extension_specific => {
                 const tag = rule.extension_category orelse return;

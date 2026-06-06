@@ -125,7 +125,7 @@ fn stepWithTimeoutNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const va
     }
 
     const clamped = @max(timeout_ms_f, 0);
-    const timeout_ms: i64 = @intFromFloat(clamped);
+    const timeout_ms: i64 = std.math.lossyCast(i64, clamped);
     return callbacks.step_with_timeout_fn(callbacks.runtime_ptr, ctx, name, timeout_ms, args[2]);
 }
 
@@ -147,7 +147,7 @@ fn sleepNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValu
     }
 
     const clamped = @max(delay_ms_f, 0);
-    const delay_ms: i64 = @intFromFloat(clamped);
+    const delay_ms: i64 = std.math.lossyCast(i64, clamped);
     const now_ms = unixMillis();
     const until_ms = std.math.add(i64, now_ms, delay_ms) catch std.math.maxInt(i64);
     return callbacks.sleep_until_fn(callbacks.runtime_ptr, ctx, until_ms);
@@ -170,7 +170,7 @@ fn sleepUntilNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
         return util.throwError(ctx, "TypeError", "sleepUntil() timestamp must be finite");
     }
 
-    const until_ms: i64 = @intFromFloat(until_ms_f);
+    const until_ms: i64 = std.math.lossyCast(i64, until_ms_f);
     return callbacks.sleep_until_fn(callbacks.runtime_ptr, ctx, until_ms);
 }
 
@@ -233,7 +233,7 @@ fn signalAtNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
         return util.throwError(ctx, "TypeError", "signalAt() timestamp must be finite");
     }
 
-    const at_ms: i64 = @intFromFloat(at_ms_f);
+    const at_ms: i64 = std.math.lossyCast(i64, at_ms_f);
     const payload = if (args.len >= 4) args[3] else value.JSValue.undefined_val;
     return callbacks.signal_at_fn(callbacks.runtime_ptr, ctx, key, name, at_ms, payload);
 }

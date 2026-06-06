@@ -179,6 +179,13 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
 pub const JsonParser = struct {
     data: []const u8,
     pos: usize = 0,
+    /// Current object/array nesting depth while skipping values. Bounds the
+    /// mutual recursion of skipValue/skipObject/skipArray so adversarial deep
+    /// nesting in untrusted contract JSON cannot overflow the native stack.
+    depth: u16 = 0,
+
+    /// Maximum object/array nesting accepted by the value-skipper.
+    const max_skip_depth: u16 = 512;
 
     pub fn init(data: []const u8) JsonParser {
         return .{ .data = data };
@@ -237,12 +244,23 @@ pub const JsonParser = struct {
         self.skipWhitespace();
         var val: u32 = 0;
         var found = false;
+        var overflow = false;
         while (self.pos < self.data.len and self.data[self.pos] >= '0' and self.data[self.pos] <= '9') {
-            val = val * 10 + @as(u32, self.data[self.pos] - '0');
+            // Consume every digit so `pos` stays consistent, but flag overflow
+            // (a 20-digit number must not wrap or panic on untrusted input).
+            if (!overflow) {
+                const mul = @mulWithOverflow(val, 10);
+                const add = @addWithOverflow(mul[0], @as(u32, self.data[self.pos] - '0'));
+                if (mul[1] != 0 or add[1] != 0) {
+                    overflow = true;
+                } else {
+                    val = add[0];
+                }
+            }
             self.pos += 1;
             found = true;
         }
-        if (!found) return null;
+        if (!found or overflow) return null;
         return val;
     }
 
@@ -281,10 +299,25 @@ pub const JsonParser = struct {
     pub fn skipValue(self: *JsonParser) void {
         self.skipWhitespace();
         if (self.pos >= self.data.len) return;
+        if (self.depth >= max_skip_depth) {
+            // Too deeply nested: abandon parsing by consuming the rest of the
+            // input. Every enclosing skipObject/skipArray loop is bounded by
+            // `pos < data.len`, so this unwinds the recursion without overflow.
+            self.pos = self.data.len;
+            return;
+        }
         switch (self.data[self.pos]) {
             '"' => _ = self.readString(),
-            '{' => self.skipObject(),
-            '[' => self.skipArray(),
+            '{' => {
+                self.depth += 1;
+                self.skipObject();
+                self.depth -= 1;
+            },
+            '[' => {
+                self.depth += 1;
+                self.skipArray();
+                self.depth -= 1;
+            },
             't', 'f' => _ = self.readBool(),
             'n' => _ = self.readNull(),
             else => {
@@ -1934,7 +1967,8 @@ fn parseBehaviors(parser: *JsonParser, allocator: std.mem.Allocator, contract: *
             } else if (std.mem.eql(u8, key, "pattern")) {
                 path.route_pattern = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
             } else if (std.mem.eql(u8, key, "status")) {
-                path.response_status = @intCast(parser.readU32() orelse 0);
+                // Range-checked: a status > 65535 must not panic the @intCast.
+                path.response_status = parser.readU16() orelse 0;
             } else if (std.mem.eql(u8, key, "ioDepth")) {
                 path.io_depth = parser.readU32() orelse 0;
             } else if (std.mem.eql(u8, key, "failurePath")) {
@@ -2311,4 +2345,41 @@ fn parseStringArray(parser: *JsonParser, allocator: std.mem.Allocator, list: *st
         const val = parser.readString() orelse return error.InvalidJson;
         try list.append(allocator, try allocator.dupe(u8, val));
     }
+}
+
+test "JsonParser.readU32 rejects an overflowing number instead of wrapping" {
+    var p = JsonParser.init("99999999999999999999"); // 20 digits, > maxInt(u32)
+    try std.testing.expect(p.readU32() == null);
+    // The whole number is consumed so the parser position stays consistent.
+    try std.testing.expectEqual(@as(usize, 20), p.pos);
+}
+
+test "JsonParser.readU16 rejects a number above the u16 range" {
+    var p = JsonParser.init("99999999");
+    try std.testing.expect(p.readU16() == null);
+}
+
+test "JsonParser.skipValue bounds recursion on deeply nested input" {
+    const allocator = std.testing.allocator;
+    // Far deeper than max_skip_depth: this would overflow the native stack via
+    // skipValue/skipArray mutual recursion without the depth cap.
+    const n = 5000;
+    const buf = try allocator.alloc(u8, n);
+    defer allocator.free(buf);
+    @memset(buf, '[');
+
+    var p = JsonParser.init(buf);
+    p.skipValue(); // must return, not crash
+    // On hitting the cap the skipper abandons the rest of the input.
+    try std.testing.expectEqual(buf.len, p.pos);
+}
+
+test "parseFromJson surfaces InvalidJson on adversarial deep nesting" {
+    const allocator = std.testing.allocator;
+    const n = 4000;
+    const buf = try allocator.alloc(u8, n);
+    defer allocator.free(buf);
+    @memset(buf, '[');
+
+    try std.testing.expectError(error.InvalidJson, parseFromJson(allocator, buf));
 }
