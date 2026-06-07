@@ -6,9 +6,11 @@ This plan is the output of a comprehensive read-only technical and architectural
 audit of `zigttp` (230K LOC of Zig across 7 packages), run as a 12-agent
 workflow covering the runtime/server, the `zigts` engine (IR/bytecode, two-tier
 JIT, generational GC), the `zigttp:*` modules, engine<->runtime coupling,
-binary-size/dependency management, idiomatic-Zig quality, and VM-loop
-duplication. Findings were cross-checked against source by an adversarial critic
-and by direct verification.
+binary-size/dependency management, and idiomatic-Zig quality. The audit also
+identified VM-loop duplication; that work is now tracked in
+[Deferred VM Loop Dedupe Plan](DEFERRED_VM_LOOP_DEDUPE_PLAN.md). Findings were
+cross-checked against source by an adversarial critic and by direct
+verification.
 
 **Why this work matters.** The architecture is fundamentally sound - the
 generational GC is real (nursery + tenured + remembered set + tri-color
@@ -32,19 +34,18 @@ production-grade FaaS use:
    112k req/s, 3.5ms cold start, 13MB RSS) are documented but **not** measured by
    the in-repo benchmark (`benchmark.zig` only runs a latency corpus) and not
    CI-gated.
-3. **Maintainability debt** - opcode semantics are implemented three times
-   (interpreter dispatch + baseline JIT + optimized JIT), risking silent
-   divergence; `zruntime.zig` is 7,846 LOC conflating engine-adapter and
-   server concerns; SQLite (`deps/sqlite/sqlite3.c`) links into the deployed
+3. **Maintainability debt** - `zruntime.zig` is 7,846 LOC conflating
+   engine-adapter and server concerns; runtime tests and wiring still reach into
+   engine internals; SQLite (`deps/sqlite/sqlite3.c`) links into the deployed
    runtime unconditionally.
 
-**Intended outcome.** A sequenced plan that (per the chosen approach) **lands a
-foundation of correctness fixes + safety nets first**, then runs **two
-interleaved tracks** - architecture/code-quality and feature/hardening - with
-the high-blast-radius refactors gated behind green tests. Scope decisions
-confirmed with the user: directory work is **facade completion** (packages are
-already split), and new modules are **table-stakes only** (multipart + fetch
-resilience), with cloud-adapter modules documented as a separate evaluated track.
+**Intended outcome.** A sequenced near-term plan that lands a foundation of
+correctness fixes and safety nets first, then runs two interleaved tracks:
+engine-boundary work and production FaaS hardening. Scope decisions confirmed
+with the user: directory work is facade completion (packages are already split),
+and new modules are table-stakes only (multipart + fetch resilience), with
+cloud-adapter modules documented as a separate evaluated track. VM-loop dedupe is
+deferred until the production table stakes and engine facade gates are green.
 
 > Constraints honored throughout: never add the deliberately-excluded JS features
 > (classes/async/while/switch/try-catch/regex); preserve the small-binary +
@@ -84,10 +85,6 @@ Tracks A and B safe to run in parallel.
   validation in `value.zig` NaN-boxing.
 
 ### 0b. Test + measurement gates (unblock the refactors)
-- **Opcode semantic parity test** - drive a corpus through interpreter vs
-  baseline JIT vs optimized JIT and assert identical results for mixed-type
-  arithmetic, comparison, property access, and calls. This is the hard gate for
-  the VM-loop dedup. Model it on the existing `test-zigts` harness.
 - **`test-server` integration suite** - handler execution, error paths,
   timeouts, keep-alive, graceful shutdown; the gate for the engine/runtime
   boundary refactor. (The coupling audit notes JIT/interpreter internals are
@@ -102,13 +99,12 @@ Tracks A and B safe to run in parallel.
   and gated. (Connects to the deferred "performance as proof" idea - signed
   reproducible perf receipts via `zigttp bench`.)
 
-**Verify:** `zig build test-zigts`, new `zig build test-server`, parity test
-green; SIGTERM drains in the integration suite; binary-size + perf baselines
-recorded in CI.
+**Verify:** `zig build test-zigts`, new `zig build test-server`, SIGTERM drains
+in the integration suite; binary-size + perf baselines recorded in CI.
 
 ---
 
-## Track A - Architecture & Code Quality (runs after Phase 0, interleaved with Track B)
+## Track A - Engine Boundary & Code Quality (runs after Phase 0, interleaved with Track B)
 
 ### A1. Complete the engine<->runtime facade
 Packages are already split and `engine_adapter.zig` exists - **extend it, don't
@@ -131,22 +127,7 @@ inverting `Runtime`/`HandlerPool` ownership risks reference cycles in the
 lock-free pool, so change visibility/placement, not lifecycle. Do **not** relocate
 server-owned fields into the pool context in this pass.
 
-### A3. Deduplicate the VM execution loop (the user's flagged item)
-Opcode semantics are implemented in three tiers (`interpreter.zig:409-495`,
-`jit/baseline.zig:1387-1415,2386-2505`, `jit/optimized.zig:1238-1332`).
-- Build a **comptime-generated opcode-semantics single source of truth** (shared
-  `arith.zig` / `cmp.zig` / `overflow.zig` semantic helpers + a comptime table),
-  consumed by all three tiers. **Comptime, not runtime vtables** - the critic
-  flagged that a function-pointer vtable would break JIT inline-ability and
-  hurt the icache; keep the generated code direct-dispatch.
-- Factor the polymorphic-inline-cache logic into a shared helper
-  (`interpreter/ic.zig`) consulted by both the interpreter and the JIT (today the
-  JIT ignores the PIC and always issues a helper call).
-- **Staged rollout:** migrate one opcode family (arithmetic) first, prove it
-  against the Phase-0 parity test + perf gate, then comparison, property access,
-  calls.
-
-### A4. Idiomatic-Zig cleanup (Zig 0.16 / Zen-of-Zig)
+### A3. Idiomatic-Zig cleanup (Zig 0.16 / Zen-of-Zig)
 - Replace the production-path `catch unreachable` sites (25 total; e.g.
   `precompile.zig:1443`, `cli_help.zig:215`) with explicit error propagation or a
   documented `@panic(@errorName(err))`.
@@ -157,7 +138,7 @@ Opcode semantics are implemented in three tiers (`interpreter.zig:409-495`,
 - Consolidate scattered error sets into semantically-grouped sets; document the
   raised comptime branch quotas (`interpreter.zig:212`, `module_binding.zig:1457`).
 
-### A5. Binary-size / dependency management
+### A4. Binary-size / dependency management
 - **`-Druntime_sqlite` build flag** to exclude `deps/sqlite/sqlite3.c` from the
   deployed runtime. Reuse the `-Dstudio`/`-Dedge` + `runtime_features.zig`
   compile-out pattern. Pair with **compile-time capability gating** (A-cross-B):
@@ -170,7 +151,7 @@ Opcode semantics are implemented in three tiers (`interpreter.zig:409-495`,
 
 ---
 
-## Track B - Feature Completeness & Production Hardening (runs interleaved with Track A)
+## Track B - Production FaaS Table Stakes & Hardening (runs interleaved with Track A)
 
 ### B1. Production-safety hardening (the urgent runtime gaps)
 - **Per-request deadline** - cooperative checks at interpreter back-edges/
@@ -203,7 +184,7 @@ Opcode semantics are implemented in three tiers (`interpreter.zig:409-495`,
 ### B3. Compile-time capability verification
 Lift capability enforcement from runtime-only (`module_binding.zig:126-129,
 235-238`) to a compile-time check in the verifier/type-checker, surfacing
-capability mismatches (and SQLite-excluded `zigttp:sql` use, see A5) as
+capability mismatches (and SQLite-excluded `zigttp:sql` use, see A4) as
 compile errors with suggestions.
 
 ### B4. JIT compile-time DoS guard
@@ -226,10 +207,15 @@ Low-risk conformance fixes, no new language features:
 
 ---
 
-## Documented but NOT scheduled (separate evaluated track)
+## Deferred Work
+
+VM-loop dedupe is not part of this near-term plan. It lives in
+[Deferred VM Loop Dedupe Plan](DEFERRED_VM_LOOP_DEDUPE_PLAN.md) and starts only
+after the production table stakes, engine facade, and measurement gates are
+stable.
 
 Per the table-stakes-only decision, these are evaluated FaaS gaps that need cloud
-adapters / a hosted-control-plane decision and are out of scope here:
+adapters / a hosted-control-plane decision and are also out of scope here:
 `zigttp:secrets` (Secrets Manager / Key Vault), `zigttp:storage` (S3/GCS/Blob),
 `zigttp:queue` (SQS/SNS/PubSub/Service Bus), `zigttp:schedule` (cron), edge KV
 (Durable Objects / CF KV), streaming request/response, distributed tracing
@@ -250,13 +236,10 @@ handler isolation side-channels; proof-cache `Vary`/multi-variant edge cases.
 - **Per change:** `zig build test-zigts`, `zig build test-zruntime`,
   `zig build test-cli`, plus the new `zig build test-server`. Run per-target (not
   the combined step - it can stall in the test-runner IPC).
-- **Phase 0 gates stay green** after every Track A/B change: opcode parity test,
-  `test-server`, binary-size within 2%, perf receipts not regressed.
+- **Phase 0 gates stay green** after every Track A/B change: `test-server`,
+  binary-size within 2%, perf receipts not regressed.
 - **GC fixes:** debug-build tenured->nursery edge assertion + GC stress test under
   the leak-detecting allocator (`std.testing.allocator` / `FailingAllocator`).
-- **VM dedup:** one opcode family at a time, parity test + `zig build bench` after
-  each family; revert-to-separate-switches fallback if divergence or icache
-  regression appears.
 - **Facade refactor:** `test-server` green + `zig build bench` shows no hot-path
   regression; confirm no runtime file imports engine internals outside
   `engine_facade.zig` (grep gate).

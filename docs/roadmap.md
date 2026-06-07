@@ -37,6 +37,14 @@ behavior lives in [User Guide](user-guide.md).
 
 ## Planned Work
 
+- Land production FaaS table stakes before hosted deploy claims: per-request
+  deadlines, graceful shutdown, health/readiness probes, structured JSON logs,
+  panic isolation, and per-handler memory caps.
+- Finish the engine<->runtime boundary refactor by routing runtime calls through
+  a strict facade, exposing stable runtime-facing engine types, and splitting
+  `zruntime.zig` by concern without changing ownership semantics.
+- Keep near-term module work limited to table-stakes gaps: multipart decoding and
+  fetch resilience. Cloud-adapter modules stay in a separate evaluated track.
 - Keep `zigttp help --all`, `packages/zigts/src/builtin_modules.zig`, and
   `packages/modules/module-specs/` as the sources of truth for CLI and module
   docs.
@@ -45,3 +53,6 @@ behavior lives in [User Guide](user-guide.md).
   handled with `zigttp:ratelimit`.
 - Promote hosted deploy only after the control-plane path has CI smoke coverage
   and user-facing commands are present in default docs.
+- Defer VM-loop dedupe until the FaaS hardening, engine facade, and measurement
+  gates are stable. The standalone plan lives in
+  [Deferred VM Loop Dedupe Plan](../DEFERRED_VM_LOOP_DEDUPE_PLAN.md).
