@@ -102,6 +102,57 @@ pub fn closeUpvaluesAbove(self: *Interpreter, local_idx: u8) void {
     }
 }
 
+/// Execute a JIT-compiled function body and reconcile its fault representation
+/// with the interpreter's. The JIT signals a fault by setting ctx.exception and
+/// returning the exception_val sentinel as an ordinary value (it does not poll
+/// ctx.exception in straight-line code), so a pending exception after the call
+/// means the compiled code faulted: surface it as error.NativeFunctionError - the
+/// interpreter's canonical "an exception is pending" tag (call.zig, interpreter.zig)
+/// - so a caller's `try` aborts the enclosing frame instead of running on over a
+/// sentinel-poisoned stack. The JIT cannot reconstruct the specific dispatch tag
+/// the interpreter fallback would return (TypeError/NotCallable), only that a fault
+/// occurred. CONSUME the side channel (clearException) when converting - otherwise a
+/// stale sentinel would trip this same check on a later execution (run() is the top
+/// frame and has no popState to restore it). Saves/restores the interpreter's code
+/// cursor and JIT-frame bookkeeping; the single boundary for `run` and
+/// `callBytecodeFunction`. `inline` to preserve the pre-extraction codegen (this was
+/// literal inline code at both call sites on the JIT-call hot path).
+inline fn executeCompiled(
+    self: *Interpreter,
+    func: *const bytecode.FunctionBytecode,
+    cc: *jit.CompiledCode,
+) InterpreterError!value.JSValue {
+    const prev_func = self.current_func;
+    const prev_constants = self.constants;
+    const prev_code_end = self.code_end;
+    const prev_pc = self.pc;
+    self.current_func = func;
+    self.constants = func.constants;
+    self.code_end = func.code.ptr + func.code.len;
+    self.pc = func.code.ptr;
+    defer {
+        self.current_func = prev_func;
+        self.constants = prev_constants;
+        self.code_end = prev_code_end;
+        self.pc = prev_pc;
+    }
+    const prev_interp = interpreter.current_interpreter;
+    interpreter.current_interpreter = self;
+    defer interpreter.current_interpreter = prev_interp;
+    self.ctx.enterJitFrame();
+    defer self.ctx.leaveJitFrame();
+    // Set interpreter pointer in context for IC fast path
+    self.ctx.jit_interpreter = @ptrCast(self);
+    defer self.ctx.jit_interpreter = null;
+
+    const result_raw = cc.execute(self.ctx);
+    if (self.ctx.hasException()) {
+        self.ctx.clearException();
+        return error.NativeFunctionError;
+    }
+    return value.JSValue{ .raw = result_raw };
+}
+
 pub fn callBytecodeFunction(
     self: *Interpreter,
     func_val: value.JSValue,
@@ -144,40 +195,9 @@ pub fn callBytecodeFunction(
     if (!jit_policy.jitDisabled() and !self.ctx.jit_inhibited and (func_bc.tier == .baseline or func_bc.tier == .optimized)) {
         if (func_bc.compiled_code) |cc_opaque| {
             const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
-            const prev_func = self.current_func;
-            const prev_constants = self.constants;
-            const prev_code_end = self.code_end;
-            const prev_pc = self.pc;
-            self.current_func = func_bc;
-            self.constants = func_bc.constants;
-            self.code_end = func_bc.code.ptr + func_bc.code.len;
-            self.pc = func_bc.code.ptr;
-            defer {
-                self.current_func = prev_func;
-                self.constants = prev_constants;
-                self.code_end = prev_code_end;
-                self.pc = prev_pc;
-            }
-            const prev_interp = interpreter.current_interpreter;
-            interpreter.current_interpreter = self;
-            defer interpreter.current_interpreter = prev_interp;
-            self.ctx.enterJitFrame();
-            defer self.ctx.leaveJitFrame();
-            // Set interpreter pointer in context for IC fast path
-            self.ctx.jit_interpreter = @ptrCast(self);
-            defer self.ctx.jit_interpreter = null;
-            const result_raw = cc.execute(self.ctx);
-            // The JIT signals a fault by setting ctx.exception and returning the
-            // exception_val sentinel, then running the remaining opcodes (it does
-            // not poll ctx.exception in straight-line code). Reconcile that with
-            // the interpreter's error-based fault here at the tier boundary:
-            // surface a pending exception as the same Zig error the interpreter
-            // fallback returns, so doCall's `try` aborts the enclosing frame
-            // instead of pushing the sentinel and continuing. The errdefer above
-            // unwinds the frame on this error path, exactly like the interpreter
-            // path below.
-            if (self.ctx.hasException()) return error.NativeFunctionError;
-            const result = value.JSValue{ .raw = result_raw };
+            // On a fault executeCompiled returns the error; the errdefer above
+            // unwinds the pushed frame, exactly like the interpreter path below.
+            const result = try executeCompiled(self, func_bc, cc);
 
             closeUpvaluesAbove(self, 0);
             _ = self.ctx.popFrame();
@@ -236,35 +256,7 @@ pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) Interpret
     if (!jit_policy.jitDisabled() and !self.ctx.jit_inhibited and (func.tier == .baseline or func.tier == .optimized)) {
         if (func.compiled_code) |cc_opaque| {
             const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
-            const prev_func = self.current_func;
-            const prev_constants = self.constants;
-            const prev_code_end = self.code_end;
-            const prev_pc = self.pc;
-            self.current_func = func;
-            self.constants = func.constants;
-            self.code_end = func.code.ptr + func.code.len;
-            self.pc = func.code.ptr;
-            defer {
-                self.current_func = prev_func;
-                self.constants = prev_constants;
-                self.code_end = prev_code_end;
-                self.pc = prev_pc;
-            }
-            const prev_interp = interpreter.current_interpreter;
-            interpreter.current_interpreter = self;
-            defer interpreter.current_interpreter = prev_interp;
-            self.ctx.enterJitFrame();
-            defer self.ctx.leaveJitFrame();
-            // Set interpreter pointer in context for IC fast path
-            self.ctx.jit_interpreter = @ptrCast(self);
-            defer self.ctx.jit_interpreter = null;
-            const result_raw = cc.execute(self.ctx);
-            // Mirror the interpreter's error-based fault representation at the JIT
-            // boundary: a pending exception means the compiled code faulted (and
-            // returned the exception_val sentinel), so propagate it as an error
-            // rather than handing back a post-fault value. See callBytecodeFunction.
-            if (self.ctx.hasException()) return error.NativeFunctionError;
-            return value.JSValue{ .raw = result_raw };
+            return try executeCompiled(self, func, cc);
         }
     }
 

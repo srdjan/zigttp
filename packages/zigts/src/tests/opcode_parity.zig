@@ -580,3 +580,79 @@ test "opcode parity: a fault makes run() return an error on every tier, not a po
     }
     interp.ctx.clearException();
 }
+
+// A JIT fault must consume its own exception side channel. run() is the top frame
+// (no pushState/popState to restore ctx.exception), so if the boundary leaves the
+// sentinel set after converting it to a Zig error, the NEXT compiled run() on the
+// same Context sees the stale exception via hasException() and spuriously errors a
+// clean function. Run a faulting compiled function (leaving ctx.exception exactly
+// as the boundary left it - NO manual clear), then a clean compiled function: the
+// clean one must return its value, not inherit the prior fault.
+const clean_ret_42_code = [_]u8{ op(.push_i8), 42, op(.ret) };
+
+test "opcode parity: a JIT fault does not poison the next run() on the same context" {
+    const allocator = std.testing.allocator;
+
+    const prev_policy = jit_policy.getJitPolicy();
+    const prev_threshold = jit_policy.getJitThreshold();
+    const prev_warmup = jit_policy.getJitFeedbackWarmup();
+    defer {
+        jit_policy.setJitPolicy(prev_policy);
+        jit_policy.setJitThreshold(prev_threshold);
+        jit_policy.setJitFeedbackWarmup(prev_warmup);
+    }
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    var interp = Interpreter.init(ctx);
+
+    jit_policy.setJitPolicy(.eager);
+    if (jit_policy.jitDisabled()) return;
+
+    jit_policy.setJitThreshold(1);
+    jit_policy.setJitFeedbackWarmup(1);
+
+    var fault_func = faultFunc(.{ .name = "fault", .code = &fault_then_continue_code, .expect_err = error.TypeError });
+    defer jit_compile.cleanupCompiledCode(allocator, &fault_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, &fault_func);
+    const clean_case = Case{ .name = "clean", .code = &clean_ret_42_code, .kind = .number, .expected_num = 42 };
+    var clean_func = buildFunc(clean_case);
+    defer jit_compile.cleanupCompiledCode(allocator, &clean_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, &clean_func);
+
+    // Warm both to baseline (clear the fault between warm runs so warmup proceeds).
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        interp.ctx.clearException();
+        _ = interp.run(&fault_func) catch {};
+        interp.ctx.clearException();
+        _ = interp.run(&clean_func) catch {};
+    }
+    try std.testing.expect(fault_func.compiled_code != null);
+    try std.testing.expect(clean_func.compiled_code != null);
+
+    // Clean slate, then fault and DO NOT clear afterward.
+    interp.ctx.clearException();
+    try std.testing.expect(runReturnedError(&interp, &fault_func));
+
+    // The boundary must have consumed the exception: a clean compiled run now
+    // returns 42, not a spurious error inherited from the fault above.
+    const result = try interp.run(&clean_func);
+    try checkExpected(clean_case, result);
+}
+
+// Optimized-tier coverage note. After the executeCompiled extraction there is ONE
+// compiled-execution boundary shared by `run`, `callBytecodeFunction`, AND both the
+// baseline and optimized tiers - the tier changes only how the BODY compiles, never
+// how a fault is reconciled (the optimized body faults through the same
+// Context.jitAdd / jitCall helpers as baseline) - so the baseline fault assertions
+// above are the guarantee for the optimized tier too. The "a fault makes run()
+// return an error on every tier" test above already asserts the optimized
+// fault->error path opportunistically (its `if (opt_func.tier == .optimized)`
+// block), though a loopless body never reaches .optimized on the dev host. A
+// dedicated forced-.optimized fault test is omitted because it needs a hot SMI loop
+// and the only post-loop faulting opcodes either are unsupported at the optimized
+// tier (push_undefined) or bail the optimized compiler (an always-faulting `call` ->
+// error.OutOfMemory on that synthetic shape, which real codegen never emits).
