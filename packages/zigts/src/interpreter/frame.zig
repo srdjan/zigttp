@@ -138,8 +138,10 @@ pub fn callBytecodeFunction(
         }
     }
 
-    // Check if function is JIT-compiled and execute via JIT
-    if (!jit_policy.jitDisabled() and (func_bc.tier == .baseline or func_bc.tier == .optimized)) {
+    // Check if function is JIT-compiled and execute via JIT. A jit-inhibited
+    // context (durable) never enters compiled code even if the shared bytecode
+    // was compiled elsewhere - the interpreter tier preserves the suspend.
+    if (!jit_policy.jitDisabled() and !self.ctx.jit_inhibited and (func_bc.tier == .baseline or func_bc.tier == .optimized)) {
         if (func_bc.compiled_code) |cc_opaque| {
             const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
             const prev_func = self.current_func;
@@ -165,6 +167,16 @@ pub fn callBytecodeFunction(
             self.ctx.jit_interpreter = @ptrCast(self);
             defer self.ctx.jit_interpreter = null;
             const result_raw = cc.execute(self.ctx);
+            // The JIT signals a fault by setting ctx.exception and returning the
+            // exception_val sentinel, then running the remaining opcodes (it does
+            // not poll ctx.exception in straight-line code). Reconcile that with
+            // the interpreter's error-based fault here at the tier boundary:
+            // surface a pending exception as the same Zig error the interpreter
+            // fallback returns, so doCall's `try` aborts the enclosing frame
+            // instead of pushing the sentinel and continuing. The errdefer above
+            // unwinds the frame on this error path, exactly like the interpreter
+            // path below.
+            if (self.ctx.hasException()) return error.NativeFunctionError;
             const result = value.JSValue{ .raw = result_raw };
 
             closeUpvaluesAbove(self, 0);
@@ -218,8 +230,10 @@ pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) Interpret
         try self.ctx.push(value.JSValue.undefined_val);
     }
 
-    // Check if function is JIT-compiled and execute via JIT
-    if (!jit_policy.jitDisabled() and (func.tier == .baseline or func.tier == .optimized)) {
+    // Check if function is JIT-compiled and execute via JIT. A jit-inhibited
+    // context (durable) never enters compiled code even if the shared bytecode
+    // was compiled elsewhere - the interpreter tier preserves the suspend.
+    if (!jit_policy.jitDisabled() and !self.ctx.jit_inhibited and (func.tier == .baseline or func.tier == .optimized)) {
         if (func.compiled_code) |cc_opaque| {
             const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
             const prev_func = self.current_func;
@@ -245,6 +259,11 @@ pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) Interpret
             self.ctx.jit_interpreter = @ptrCast(self);
             defer self.ctx.jit_interpreter = null;
             const result_raw = cc.execute(self.ctx);
+            // Mirror the interpreter's error-based fault representation at the JIT
+            // boundary: a pending exception means the compiled code faulted (and
+            // returned the exception_val sentinel), so propagate it as an error
+            // rather than handing back a post-fault value. See callBytecodeFunction.
+            if (self.ctx.hasException()) return error.NativeFunctionError;
             return value.JSValue{ .raw = result_raw };
         }
     }

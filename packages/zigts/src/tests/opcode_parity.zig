@@ -26,6 +26,8 @@ const value = @import("../value.zig");
 const context = @import("../context.zig");
 const gc = @import("../gc.zig");
 const interpreter = @import("../interpreter.zig");
+const object = @import("../object.zig");
+const arena_mod = @import("../arena.zig");
 const jit_compile = @import("../interpreter/jit_compile.zig");
 const jit_policy = @import("../interpreter/jit_policy.zig");
 
@@ -88,6 +90,35 @@ const nan_lt_consts = [_]JSValue{JSValue.fromFloat(std.math.nan(f64))};
 // it exceeds maxInt(i32) - not a negative int. push_i8 0xFF is the signed byte -1.
 const ushr_neg_code = [_]u8{ op(.push_i8), 0xFF, op(.push_i8), 0, op(.ushr), op(.ret) };
 
+// --- Property-access cases (write then read back the same slot) ---
+// new_object; dup; push_i8 42; put_field .length; get_field .length; ret.
+// put_field pops [val, obj] (val on top) and pushes nothing, so the dup keeps a
+// second obj for get_field; reading back must yield the stored 42 on every tier.
+// Atom.length = 4 -> little-endian operand bytes 4,0. All four property opcodes
+// are baseline-emitted (none hit the UnsupportedOpcode else arm), so the
+// baseline_compiled invariant holds; loopless bodies skip the optimized tier
+// exactly like the arithmetic corpus. This is the positive control for the
+// hidden-class store path the write-barrier work touched on every tier.
+const get_put_field_code = [_]u8{
+    op(.new_object),       // [obj]
+    op(.dup),              // [obj, obj]
+    op(.push_i8),     42,  // [obj, obj, 42]
+    op(.put_field),   4, 0, // obj.length = 42; [obj]
+    op(.get_field),   4, 0, // [obj.length]
+    op(.ret),              // returns 42
+};
+// Same semantics through the inline-cache opcodes. The +u16 cache_idx (0,0)
+// indexes Interpreter.pic_cache[512]; the first run misses then self-populates,
+// so the read-back parity also pins miss-then-hit IC agreement across tiers.
+const get_put_field_ic_code = [_]u8{
+    op(.new_object),              // [obj]
+    op(.dup),                     // [obj, obj]
+    op(.push_i8),     42,         // [obj, obj, 42]
+    op(.put_field_ic), 4, 0, 0, 0, // obj.length = 42; atom=4 cache=0; [obj]
+    op(.get_field_ic), 4, 0, 0, 0, // [obj.length]; atom=4 cache=0
+    op(.ret),                     // returns 42
+};
+
 const cases = [_]Case{
     .{ .name = "add", .code = &add_code, .kind = .number, .expected_num = 8 },
     .{ .name = "sub", .code = &sub_code, .kind = .number, .expected_num = 6 },
@@ -103,6 +134,8 @@ const cases = [_]Case{
     .{ .name = "mod_zero", .code = &mod_zero_code, .kind = .number, .expect_nan = true },
     .{ .name = "nan_lt", .code = &nan_lt_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = false },
     .{ .name = "ushr_neg", .code = &ushr_neg_code, .kind = .number, .expected_num = 4294967295 },
+    .{ .name = "get_put_field", .code = &get_put_field_code, .kind = .number, .expected_num = 42 },
+    .{ .name = "get_put_field_ic", .code = &get_put_field_ic_code, .kind = .number, .expected_num = 42 },
 };
 
 fn buildFunc(case: Case) bytecode.FunctionBytecode {
@@ -164,6 +197,18 @@ test "opcode parity: interpreter, baseline, and optimized tiers agree" {
     defer gc_state.deinit();
     var ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
+
+    // The property cases run `new_object`, which in non-hybrid mode allocates
+    // GC-managed objects from the raw allocator that this corpus never collects.
+    // A request-scoped arena (the production allocation path) reclaims every such
+    // object at deinit, so `testing.allocator` still flags genuine leaks in the
+    // JIT/feedback machinery. Inline NaN-boxed floats from the arithmetic cases
+    // need no heap, so the arena only catches the object allocations.
+    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 8192 });
+    defer req_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{ .persistent = allocator, .arena = &req_arena };
+    ctx.setHybridAllocator(&hybrid);
+
     var interp = Interpreter.init(ctx);
 
     // JIT may be disabled by environment or unavailable on the host arch. The
@@ -226,4 +271,312 @@ test "opcode parity: interpreter, baseline, and optimized tiers agree" {
         // Every case must have genuinely exercised the baseline tier.
         try std.testing.expectEqual(cases.len, baseline_compiled);
     }
+}
+
+// `call` needs a callee FUNCTION value that only exists once `ctx`/the allocator
+// do (createBytecodeFunction stores a heap pointer), so it cannot be a comptime
+// `Case` literal like the corpus above. This second gate builds the callee at
+// runtime and runs the same three-tier protocol, asserting the call returns 42
+// identically on interpreter, baseline JIT, and (when reached) optimized JIT.
+test "opcode parity: call returns identical value across tiers" {
+    const allocator = std.testing.allocator;
+
+    const prev_policy = jit_policy.getJitPolicy();
+    const prev_threshold = jit_policy.getJitThreshold();
+    const prev_warmup = jit_policy.getJitFeedbackWarmup();
+    defer {
+        jit_policy.setJitPolicy(prev_policy);
+        jit_policy.setJitThreshold(prev_threshold);
+        jit_policy.setJitFeedbackWarmup(prev_warmup);
+    }
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    var interp = Interpreter.init(ctx);
+
+    jit_policy.setJitPolicy(.eager);
+    const jit_available = !jit_policy.jitDisabled();
+
+    // Callee body: push_i8 42; ret. Heap-allocated because createBytecodeFunction
+    // stores a pointer and destroyFull frees both the code and the FunctionBytecode.
+    // The callee runs via doCall's interpreter path (its own body is never JIT'd),
+    // so any opcodes are fair game here - only the OUTER body is tier-forced.
+    const callee_code = try allocator.alloc(u8, 3);
+    callee_code[0] = op(.push_i8);
+    callee_code[1] = 42;
+    callee_code[2] = op(.ret);
+    const callee_func = try allocator.create(bytecode.FunctionBytecode);
+    callee_func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 4,
+        .flags = .{},
+        .code = callee_code,
+        .constants = &.{},
+        .source_map = null,
+    };
+    const callee_obj = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, callee_func, .length);
+    defer callee_obj.destroyFull(allocator); // frees callee_code + the FunctionBytecode
+
+    // Outer body: push_const 0 (the callee object); call argc=0; ret. push_const,
+    // call, and ret all baseline- AND optimized-compile (call routes through the
+    // extern jitCall -> doCall, the same dispatch the interpreter uses). MUST NOT
+    // use make_function/make_closure - those hit the UnsupportedOpcode else arm
+    // and would leave the outer function interpreted, so the callee lives in
+    // constants[0] instead (mirroring the existing call_ic parity test).
+    const call_consts = [_]JSValue{callee_obj.toValue()};
+    const call_code = [_]u8{ op(.push_const), 0, 0, op(.call), 0, op(.ret) };
+    const call_case = Case{ .name = "call", .code = &call_code, .constants = &call_consts, .kind = .number, .expected_num = 42 };
+
+    // Tier 1: interpreter. Pin thresholds so maybePromote never compiles.
+    jit_policy.setJitThreshold(std.math.maxInt(u32));
+    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
+    var interp_func = buildFunc(call_case);
+    const interp_result = try interp.run(&interp_func);
+    try std.testing.expectEqual(bytecode.CompilationTier.interpreted, interp_func.tier);
+    try checkExpected(call_case, interp_result);
+
+    if (!jit_available) return;
+
+    // Tier 2: baseline JIT. Eager + threshold 1 forces compilation quickly.
+    jit_policy.setJitPolicy(.eager);
+    jit_policy.setJitThreshold(1);
+    jit_policy.setJitFeedbackWarmup(1);
+    var base_func = buildFunc(call_case);
+    defer jit_compile.cleanupCompiledCode(allocator, &base_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
+    var base_result: JSValue = undefined;
+    var i: usize = 0;
+    while (i < 6) : (i += 1) base_result = try interp.run(&base_func);
+    try std.testing.expect(base_func.compiled_code != null); // genuinely compiled, not silently interpreted
+    try checkExpected(call_case, base_result);
+    try std.testing.expect(sameValue(interp_result, base_result));
+
+    // Tier 3: optimized JIT. Loopless, so it won't reach .optimized on most archs;
+    // parity is asserted only when it does, exactly like the corpus above.
+    jit_policy.setJitPolicy(.lazy);
+    jit_policy.setJitThreshold(std.math.maxInt(u32));
+    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
+    var opt_func = buildFunc(call_case);
+    defer jit_compile.cleanupCompiledCode(allocator, &opt_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, &opt_func);
+    try jit_compile.allocateTypeFeedback(&interp, &opt_func);
+    var w: usize = 0;
+    while (w < 8) : (w += 1) _ = try interp.run(&opt_func);
+    jit_compile.tryCompileOptimized(&interp, &opt_func) catch {};
+    if (opt_func.tier == .optimized) {
+        const opt_result = try interp.run(&opt_func);
+        try checkExpected(call_case, opt_result);
+        try std.testing.expect(sameValue(interp_result, opt_result));
+    }
+}
+
+// Failure-path parity. The two fault representations DIFFER BY DESIGN: the
+// interpreter returns an `error` from run(); the JIT does not poll ctx.exception
+// in straight-line code, so it returns the `exception_val` sentinel (with
+// ctx.exception set) as an ordinary JSValue and keeps going. A raw value compare
+// across tiers is therefore structurally impossible - sameValue(exception_val, _)
+// is false and the interpreter side is an `error`, not a value. The meaningful,
+// tier-stable comparison is the fault VERDICT ("did this fault?"). Each case is
+// the fault op immediately followed by `ret`, so the JIT's first post-fault value
+// is exactly the sentinel and `isException() or hasException()` is a reliable
+// normalizer; clear ctx.exception between runs so a sticky sentinel can't poison
+// the next case's verdict.
+const FaultCase = struct {
+    name: []const u8,
+    code: []const u8,
+    constants: []const JSValue = &.{},
+    expect_err: Interpreter.InterpreterError,
+};
+
+// add of two undefineds: addValuesSlow returns error.TypeError (interpreter) /
+// jitAdd's toNumber() orelse jitThrow() returns the sentinel (JIT).
+const fault_type_error_code = [_]u8{ op(.push_undefined), op(.push_undefined), op(.add), op(.ret) };
+// call on a non-callable (the integer 1): doCall's !isCallable() returns
+// error.NotCallable (interpreter) / jitCall's catch returns the sentinel (JIT).
+const fault_not_callable_code = [_]u8{ op(.push_i8), 1, op(.call), 0, op(.ret) };
+
+const fault_cases = [_]FaultCase{
+    .{ .name = "add_type_error", .code = &fault_type_error_code, .expect_err = error.TypeError },
+    .{ .name = "call_not_callable", .code = &fault_not_callable_code, .expect_err = error.NotCallable },
+};
+
+fn faultFunc(case: FaultCase) bytecode.FunctionBytecode {
+    return .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 8,
+        .flags = .{},
+        .code = case.code,
+        .constants = case.constants,
+        .source_map = null,
+    };
+}
+
+/// A JIT run faulted iff it returned the sentinel or left ctx.exception set.
+fn jitFaulted(interp: *Interpreter, result: JSValue) bool {
+    return result.isException() or interp.ctx.hasException();
+}
+
+test "opcode parity: failure paths fault identically across tiers" {
+    const allocator = std.testing.allocator;
+
+    const prev_policy = jit_policy.getJitPolicy();
+    const prev_threshold = jit_policy.getJitThreshold();
+    const prev_warmup = jit_policy.getJitFeedbackWarmup();
+    defer {
+        jit_policy.setJitPolicy(prev_policy);
+        jit_policy.setJitThreshold(prev_threshold);
+        jit_policy.setJitFeedbackWarmup(prev_warmup);
+    }
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    var interp = Interpreter.init(ctx);
+
+    jit_policy.setJitPolicy(.eager);
+    const jit_available = !jit_policy.jitDisabled();
+
+    for (fault_cases) |case| {
+        // Tier 1: interpreter. The run() must return the pinned error tag.
+        jit_policy.setJitPolicy(.eager);
+        jit_policy.setJitThreshold(std.math.maxInt(u32));
+        jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
+        interp.ctx.clearException();
+        var interp_func = faultFunc(case);
+        try std.testing.expectError(case.expect_err, interp.run(&interp_func));
+
+        if (!jit_available) continue;
+
+        // Tier 2: baseline JIT. Warm to force compilation, then assert the run
+        // faults (returns the sentinel and/or sets ctx.exception). The
+        // interpreter faulted, so baseline must too: faulted == faulted.
+        jit_policy.setJitPolicy(.eager);
+        jit_policy.setJitThreshold(1);
+        jit_policy.setJitFeedbackWarmup(1);
+        var base_func = faultFunc(case);
+        defer jit_compile.cleanupCompiledCode(allocator, &base_func);
+        defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
+        var base_faulted = false;
+        var i: usize = 0;
+        while (i < 6) : (i += 1) {
+            interp.ctx.clearException();
+            const r = interp.run(&base_func) catch {
+                // Pre-compile warm runs fall back to the interpreter and may
+                // return the error directly; that is still a fault.
+                base_faulted = true;
+                continue;
+            };
+            base_faulted = jitFaulted(&interp, r);
+        }
+        try std.testing.expect(base_func.compiled_code != null); // genuinely compiled
+        try std.testing.expect(base_faulted); // interpreter faulted; baseline must agree
+        interp.ctx.clearException();
+    }
+}
+
+// Post-fault continuation. The body faults at `add` (undefined + undefined ->
+// TypeError) and is FOLLOWED by `push_i8 99; ret`. The interpreter aborts at the
+// fault: run() returns the error and the trailing opcodes never execute. A tier
+// that keeps running past the fault pushes 99 over the sentinel and `ret` returns
+// 99, so run() yields an ORDINARY value (not even the sentinel) for a program that
+// faulted. The tier-stable contract is "a fault makes run() return an error"; a
+// raw `cc.execute` boundary that never polls ctx.exception breaks it by handing
+// back a post-fault value instead. (`add` of undefineds is a guaranteed sentinel
+// path: undefined operands never earn .smi feedback, so the baseline emits the
+// general emitBinaryOp -> jitAdd helper call, not a deopt-to-interpreter.)
+const fault_then_continue_code = [_]u8{
+    op(.push_undefined), op(.push_undefined), op(.add), // faults: TypeError
+    op(.push_i8),        99, // executes only if the tier ran past the fault
+    op(.ret),
+};
+
+/// run() that returned a Zig error faulted; run() that returned ANY value did not
+/// (even the exception_val sentinel counts as "did not return an error").
+fn runReturnedError(interp: *Interpreter, func: *bytecode.FunctionBytecode) bool {
+    if (interp.run(func)) |_| {
+        return false;
+    } else |_| {
+        return true;
+    }
+}
+
+test "opcode parity: a fault makes run() return an error on every tier, not a post-fault value" {
+    const allocator = std.testing.allocator;
+
+    const prev_policy = jit_policy.getJitPolicy();
+    const prev_threshold = jit_policy.getJitThreshold();
+    const prev_warmup = jit_policy.getJitFeedbackWarmup();
+    defer {
+        jit_policy.setJitPolicy(prev_policy);
+        jit_policy.setJitThreshold(prev_threshold);
+        jit_policy.setJitFeedbackWarmup(prev_warmup);
+    }
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    var interp = Interpreter.init(ctx);
+
+    jit_policy.setJitPolicy(.eager);
+    const jit_available = !jit_policy.jitDisabled();
+
+    const case = FaultCase{ .name = "fault_then_continue", .code = &fault_then_continue_code, .expect_err = error.TypeError };
+
+    // Tier 1: interpreter aborts at the fault; run() returns the error.
+    jit_policy.setJitThreshold(std.math.maxInt(u32));
+    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
+    interp.ctx.clearException();
+    var interp_func = faultFunc(case);
+    try std.testing.expectError(error.TypeError, interp.run(&interp_func));
+
+    if (!jit_available) return;
+
+    // Tier 2: baseline JIT. Warm to force compilation, then the compiled run must
+    // ALSO surface the fault as a run() error - not return 99 from the opcode that
+    // executed past the fault point.
+    jit_policy.setJitPolicy(.eager);
+    jit_policy.setJitThreshold(1);
+    jit_policy.setJitFeedbackWarmup(1);
+    var base_func = faultFunc(case);
+    defer jit_compile.cleanupCompiledCode(allocator, &base_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        interp.ctx.clearException();
+        _ = interp.run(&base_func) catch {};
+    }
+    try std.testing.expect(base_func.compiled_code != null); // genuinely compiled
+    interp.ctx.clearException();
+    try std.testing.expect(runReturnedError(&interp, &base_func));
+    interp.ctx.clearException();
+
+    // Tier 3: optimized JIT, when reached. Same boundary contract.
+    jit_policy.setJitPolicy(.lazy);
+    jit_policy.setJitThreshold(std.math.maxInt(u32));
+    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
+    var opt_func = faultFunc(case);
+    defer jit_compile.cleanupCompiledCode(allocator, &opt_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, &opt_func);
+    try jit_compile.allocateTypeFeedback(&interp, &opt_func);
+    var w: usize = 0;
+    while (w < 8) : (w += 1) {
+        interp.ctx.clearException();
+        _ = interp.run(&opt_func) catch {};
+    }
+    jit_compile.tryCompileOptimized(&interp, &opt_func) catch {};
+    if (opt_func.tier == .optimized) {
+        interp.ctx.clearException();
+        try std.testing.expect(runReturnedError(&interp, &opt_func));
+    }
+    interp.ctx.clearException();
 }

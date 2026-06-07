@@ -91,6 +91,13 @@ pub fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.he
         zq.interpreter.setJitThreshold(threshold);
     }
     ctx.setJitCodeMaxBytes(config.jit_code_max_bytes);
+
+    // Durable execution must stay on the interpreter tier: the JIT loses the
+    // suspend (jitCall swallows error.DurableSuspended into a sentinel and runs
+    // on), so a hot durable handler would 500 instead of suspending and could
+    // fire side effects past a suspend point. Inhibit JIT for the whole context
+    // when a durable oplog is configured (the server runs in one mode).
+    ctx.jit_inhibited = config.durable_oplog_dir != null;
 }
 
 pub fn applyEmbeddedCapabilityPolicy(ctx: *zq.Context, config: RuntimeConfig) void {

@@ -271,6 +271,13 @@ pub const Context = struct {
     jit_active_frames: u32 = 0,
     /// Set when code pages exceed the cap while native frames are active.
     jit_eviction_pending: bool = false,
+    /// When set, this context never promotes functions to the JIT and never
+    /// enters compiled code - execution stays on the interpreter tier. The
+    /// runtime sets this for durable mode: the JIT signals a fault by returning
+    /// a sentinel and running on, which loses the durable runtime's suspend
+    /// (jitCall swallows error.DurableSuspended). The interpreter's error-based
+    /// suspend is exact, so durable handlers stay interpreted.
+    jit_inhibited: bool = false,
     /// JIT compilation metrics (compiled out in ReleaseFast)
     jit_metrics: JitMetricsState,
     /// Interpreter pointer for JIT IC fast path access
@@ -357,6 +364,7 @@ pub const Context = struct {
             .jit_code_max_bytes = 16 * 1024 * 1024,
             .jit_active_frames = 0,
             .jit_eviction_pending = false,
+            .jit_inhibited = false,
             .jit_metrics = .{},
             .builtin_objects = .empty,
             .bytecode_functions = .empty,

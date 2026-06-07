@@ -5364,6 +5364,71 @@ test "durable sleepUntil returns pending response without duplicating wait" {
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "\"type\":\"resume_timer\""));
 }
 
+// A durable run() callback that suspends must keep suspending correctly even when
+// it gets hot enough to JIT-compile. The JIT signals a fault by setting
+// ctx.exception and returning a sentinel; jitCall swallows the durable runtime's
+// error.DurableSuspended into that sentinel, so a JIT-compiled suspending callback
+// loses the suspend (durableRun's catch never sees DurableSuspended) and the
+// request errors out instead of returning the 202 pending response. Worse, the
+// compiled callback runs its opcodes PAST the suspend point (side effects that
+// must wait). The fix keeps durable execution on the interpreter tier (the JIT is
+// inhibited when the runtime is durable), where suspend is exact. This test forces
+// eager compilation and drives the callback well past the compile threshold with
+// distinct keys; every request must still return the timer-pending 202.
+test "durable suspend survives JIT promotion of the run() callback" {
+    if (std.c.getenv("ZTS_DISABLE_JIT_TESTS") != null or std.c.getenv("ZTS_DISABLE_JIT") != null) {
+        return error.SkipZigTest;
+    }
+
+    const prev_policy = zq.interpreter.getJitPolicy();
+    const prev_threshold = zq.interpreter.getJitThreshold();
+    const prev_warmup = zq.interpreter.getJitFeedbackWarmup();
+    defer {
+        zq.interpreter.setJitPolicy(prev_policy);
+        zq.interpreter.setJitThreshold(prev_threshold);
+        zq.interpreter.setJitFeedbackWarmup(prev_warmup);
+    }
+    zq.interpreter.setJitPolicy(.eager);
+    zq.interpreter.setJitThreshold(1);
+    zq.interpreter.setJitFeedbackWarmup(1);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    // Distinct key per request (req.url) so the callback genuinely executes and
+    // suspends every time (no replay dedup) - that accumulates the profile counts
+    // that promote its shared bytecode to the baseline JIT.
+    const handler_code =
+        \\import { run, sleepUntil } from "zigttp:durable";
+        \\function handler(req) {
+        \\  return run(req.url, () => {
+        \\    sleepUntil(4102444800000);
+        \\    return Response.json({ ok: true });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-jit-suspend>");
+
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        const path = try std.fmt.allocPrint(allocator, "/k{d}", .{i});
+        var request = try makeTestRequest(allocator, "GET", path, null);
+        defer request.deinit(allocator);
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+        try std.testing.expectEqual(@as(u16, 202), response.status);
+        try std.testing.expect(std.mem.indexOf(u8, response.body, "\"type\":\"timer\"") != null);
+    }
+}
+
 test "durable waitSignal resumes from queued signal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

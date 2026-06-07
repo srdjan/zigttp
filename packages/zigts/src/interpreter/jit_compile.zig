@@ -308,6 +308,11 @@ pub fn cleanupCompiledCode(allocator: std.mem.Allocator, func: *bytecode.Functio
 pub const PromotionMode = enum { entry, nested };
 
 pub fn maybePromote(interp: *Interpreter, func: *bytecode.FunctionBytecode, mode: PromotionMode) void {
+    // Durable (and any other jit-inhibited) contexts stay on the interpreter:
+    // the JIT loses the durable suspend (see context.jit_inhibited). Skip all
+    // promotion so no function this context runs ever gains compiled code.
+    if (interp.ctx.jit_inhibited) return;
+
     const is_candidate = interp.profileFunctionEntry(func);
     if (is_candidate) {
         allocateTypeFeedback(interp, func) catch {};
