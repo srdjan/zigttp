@@ -131,22 +131,16 @@ pub fn replayOne(
 
     try parseHeadersFromJson(allocator, group.request.headers_json, &headers_list);
 
-    // Unescape the request body, matching test_runner. Both runners take the
-    // body from the same backslash-escaped JSONL slice, so without this a
-    // capsule decodes differently under `--replay` than under `--test`.
-    const request_body: ?[]const u8 = if (group.request.body) |b|
-        (trace.unescapeJson(allocator, b) catch b)
-    else
-        null;
-    defer if (group.request.body) |orig| {
-        if (request_body) |rb| if (rb.ptr != orig.ptr) allocator.free(rb);
-    };
+    // Unescape the request body (shared with test_runner) so a capsule decodes
+    // identically under `--replay` and `--test`.
+    const ub = trace.unescapeBody(allocator, group.request.body);
+    defer if (ub.owned) |owned| allocator.free(owned);
 
     const request = HttpRequestView{
         .method = group.request.method,
         .url = group.request.url,
         .headers = headers_list,
-        .body = request_body,
+        .body = ub.slice,
     };
 
     // Execute handler

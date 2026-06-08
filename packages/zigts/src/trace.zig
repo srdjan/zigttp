@@ -755,10 +755,46 @@ pub const ReplayState = struct {
         return std.mem.eql(u8, entry.module, module_name) and std.mem.eql(u8, entry.func, fn_name);
     }
 
+    /// Consume the head entry after `peekMatches` confirmed a match. The caller
+    /// must have just observed `peekMatches == true` (cursor in bounds, names
+    /// equal), so this advances without re-checking bounds or names.
+    pub fn consumeHead(self: *ReplayState) IoEntry {
+        const entry = self.io_calls[self.cursor];
+        self.cursor += 1;
+        return entry;
+    }
+
+    /// Does any not-yet-consumed entry target this module/function? Used by a
+    /// pure-function fallback to tell a genuinely-new call (no recording -> run
+    /// real silently) from a recorded call that drifted out of order (-> flag a
+    /// divergence so replay verification still fails closed on structural drift).
+    pub fn hasEntryAhead(self: *const ReplayState, module_name: []const u8, fn_name: []const u8) bool {
+        var i = self.cursor;
+        while (i < self.io_calls.len) : (i += 1) {
+            const e = self.io_calls[i];
+            if (std.mem.eql(u8, e.module, module_name) and std.mem.eql(u8, e.func, fn_name)) return true;
+        }
+        return false;
+    }
+
     pub fn deinitOpaque(_: *anyopaque, _: std.mem.Allocator) void {
         // ReplayState does not own its io_calls (owned by trace parser).
     }
 };
+
+/// Parse a recorded entry's result back to a JSValue and count a divergence if
+/// a non-null/undefined recording failed to parse. Shared tail of both replay
+/// stubs so the parse-failure heuristic has a single owner.
+fn replayRecordedEntry(state: *ReplayState, ctx: *context.Context, entry: IoEntry) value.JSValue {
+    const result = jsonToJSValue(ctx, entry.result_json);
+    if (result.isUndefined() and entry.result_json.len > 0 and
+        !std.mem.eql(u8, entry.result_json, "null") and
+        !std.mem.eql(u8, entry.result_json, "undefined"))
+    {
+        state.divergences += 1;
+    }
+    return result;
+}
 
 /// Generate a replay stub NativeFn at compile time.
 /// The stub reads the next recorded I/O entry from the ReplayState in
@@ -776,16 +812,7 @@ pub fn makeReplayStub(
             const entry = state.nextIO(module_name, fn_name) orelse {
                 return value.JSValue.undefined_val;
             };
-            const result = jsonToJSValue(ctx, entry.result_json);
-            // If the recorded result was not "null"/"undefined" but parsed as
-            // undefined, it indicates a parse failure - count as divergence.
-            if (result.isUndefined() and entry.result_json.len > 0 and
-                !std.mem.eql(u8, entry.result_json, "null") and
-                !std.mem.eql(u8, entry.result_json, "undefined"))
-            {
-                state.divergences += 1;
-            }
-            return result;
+            return replayRecordedEntry(state, ctx, entry);
         }
     }.call;
 }
@@ -808,23 +835,18 @@ pub fn makeReplayStubWithFallback(
             const state = ctx.getModuleState(ReplayState, REPLAY_STATE_SLOT) orelse {
                 return original_fn(ctx_ptr, this, args);
             };
-            // Only consume an entry when one was recorded for this call; otherwise
-            // run the real (deterministic) implementation and leave the cursor for
-            // the next genuinely-recorded I/O.
-            if (!state.peekMatches(module_name, fn_name)) {
-                return original_fn(ctx_ptr, this, args);
+            // A recorded entry at the head: consume and replay it (trusting the
+            // peek, so no second scan).
+            if (state.peekMatches(module_name, fn_name)) {
+                return replayRecordedEntry(state, ctx, state.consumeHead());
             }
-            const entry = state.nextIO(module_name, fn_name) orelse {
-                return original_fn(ctx_ptr, this, args);
-            };
-            const result = jsonToJSValue(ctx, entry.result_json);
-            if (result.isUndefined() and entry.result_json.len > 0 and
-                !std.mem.eql(u8, entry.result_json, "null") and
-                !std.mem.eql(u8, entry.result_json, "undefined"))
-            {
-                state.divergences += 1;
-            }
-            return result;
+            // No entry at the head. If one for this call exists further on, the
+            // recorded order/count drifted - flag a divergence so replay
+            // verification still fails closed. Either way run the real
+            // (deterministic) implementation; a genuinely-new call (no recording)
+            // stays silent.
+            if (state.hasEntryAhead(module_name, fn_name)) state.divergences += 1;
+            return original_fn(ctx_ptr, this, args);
         }
     }.call;
 }
@@ -1030,6 +1052,16 @@ fn skipWhitespace(json: []const u8, start: usize) usize {
 }
 
 /// Unescape a JSON string value (convert \" to ", \n to newline, \uXXXX to UTF-8, etc.).
+/// Resolve JSON escapes in an optional request body before it reaches a handler.
+/// Returns the decoded `slice` plus the allocation to free in `owned` (null when
+/// the body was null or allocation failed and the input is aliased). Shared by
+/// the test runner and replay runner so both decode a recorded body identically.
+pub fn unescapeBody(allocator: std.mem.Allocator, body: ?[]const u8) struct { slice: ?[]const u8, owned: ?[]u8 } {
+    const b = body orelse return .{ .slice = null, .owned = null };
+    const out = unescapeJson(allocator, b) catch return .{ .slice = b, .owned = null };
+    return .{ .slice = out, .owned = out };
+}
+
 pub fn unescapeJson(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
@@ -1995,6 +2027,34 @@ test "ReplayState peekMatches does not consume or count divergence" {
 
     // Exhausted: peek is false without underflow.
     try std.testing.expect(!state.peekMatches("validate", "validateJson"));
+}
+
+test "ReplayState consumeHead and hasEntryAhead" {
+    const io_calls = [_]IoEntry{
+        .{ .seq = 0, .module = "http", .func = "fetchSync", .args_json = "[]", .result_json = "{}" },
+        .{ .seq = 1, .module = "validate", .func = "validateJson", .args_json = "[]", .result_json = "{\"ok\":true}" },
+    };
+    var state = ReplayState{ .io_calls = &io_calls, .cursor = 0, .divergences = 0 };
+
+    // A pure call whose recorded entry sits AHEAD of the head (the head is a
+    // different, effectful call): hasEntryAhead is true -> the fallback flags a
+    // divergence rather than silently absorbing the drift.
+    try std.testing.expect(!state.peekMatches("validate", "validateJson"));
+    try std.testing.expect(state.hasEntryAhead("validate", "validateJson"));
+
+    // A genuinely-new pure call appears in no recording: no divergence.
+    try std.testing.expect(!state.hasEntryAhead("crypto", "sha256"));
+
+    // consumeHead trusts a prior peek: advances exactly one without touching
+    // divergence, returning the head entry.
+    try std.testing.expect(state.peekMatches("http", "fetchSync"));
+    const head = state.consumeHead();
+    try std.testing.expectEqualStrings("http", head.module);
+    try std.testing.expectEqual(@as(u32, 1), state.cursor);
+    try std.testing.expectEqual(@as(u32, 0), state.divergences);
+
+    // Now validate is at the head and no longer "ahead".
+    try std.testing.expect(state.peekMatches("validate", "validateJson"));
 }
 
 test "ReplayState divergence on mismatch" {

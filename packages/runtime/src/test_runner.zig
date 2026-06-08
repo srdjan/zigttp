@@ -180,25 +180,18 @@ fn runOneTest(
     // target and set .path via the same helper the real server path uses.
     const request_path = runtime_natives.splitPathAndQuery(request.url).path;
 
-    // Unescape the request body the same way the expect-body is unescaped
-    // (below), so a JSONL body like "{\"title\":\"x\"}" reaches the handler as
-    // real JSON rather than the backslash-escaped literal. unescapeJson returns
-    // a fresh allocation; only the `catch b` OOM path aliases the input, which
-    // the `rb.ptr != orig.ptr` guard below skips freeing.
-    const request_body: ?[]const u8 = if (request.body) |b|
-        (trace.unescapeJson(allocator, b) catch b)
-    else
-        null;
-    defer if (request.body) |orig| {
-        if (request_body) |rb| if (rb.ptr != orig.ptr) allocator.free(rb);
-    };
+    // Unescape the request body (shared with the replay runner) so a JSONL body
+    // like "{\"title\":\"x\"}" reaches the handler as real JSON rather than the
+    // backslash-escaped literal.
+    const ub = trace.unescapeBody(allocator, request.body);
+    defer if (ub.owned) |owned| allocator.free(owned);
 
     var response = rt.executeHandler(.{
         .method = request.method,
         .url = request.url,
         .path = request_path,
         .headers = headers_list,
-        .body = request_body,
+        .body = ub.slice,
     }) catch |err| {
         return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
     };
