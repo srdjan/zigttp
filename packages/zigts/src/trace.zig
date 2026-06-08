@@ -268,87 +268,10 @@ pub const TraceRecorder = struct {
     const MAX_JSON_DEPTH = 32;
 
     fn appendJSValue(self: *TraceRecorder, ctx: *context.Context, val: value.JSValue) ?void {
-        self.appendJSValueDepth(ctx, val, 0) orelse return null;
-    }
-
-    fn appendJSValueDepth(self: *TraceRecorder, ctx: *context.Context, val: value.JSValue, depth: u32) ?void {
-        if (depth >= MAX_JSON_DEPTH) {
-            self.append("null") orelse return null;
-            return;
-        }
-        if (val.isNull() or val.isUndefined()) {
-            self.append("null") orelse return null;
-        } else if (val.isTrue()) {
-            self.append("true") orelse return null;
-        } else if (val.isFalse()) {
-            self.append("false") orelse return null;
-        } else if (val.isInt()) {
-            self.appendInt(val.getInt()) orelse return null;
-        } else if (val.isFloat64()) {
-            const f = val.getFloat64();
-            if (std.math.isNan(f) or std.math.isInf(f)) {
-                self.append("null") orelse return null;
-            } else {
-                self.appendFmt("{d}", .{f}) orelse return null;
-            }
-        } else if (val.isAnyString()) {
-            self.appendByte('"') orelse return null;
-            const data = extractStringData(val) orelse "";
-            self.appendEscaped(data) orelse return null;
-            self.appendByte('"') orelse return null;
-        } else if (val.isObject()) {
-            const obj = object.JSObject.fromValue(val);
-            if (obj.class_id == .array) {
-                self.appendByte('[') orelse return null;
-                const len = obj.getArrayLength();
-                for (0..len) |i| {
-                    if (i > 0) self.appendByte(',') orelse return null;
-                    if (obj.getIndex(@intCast(i))) |elem| {
-                        self.appendJSValueDepth(ctx, elem, depth + 1) orelse return null;
-                    } else {
-                        self.append("null") orelse return null;
-                    }
-                }
-                self.appendByte(']') orelse return null;
-            } else {
-                self.appendByte('{') orelse return null;
-                var first = true;
-                const pool = ctx.hidden_class_pool orelse {
-                    self.appendByte('}') orelse return null;
-                    return;
-                };
-                const class_idx = obj.hidden_class_idx;
-                if (!class_idx.isNone()) {
-                    const idx = class_idx.toInt();
-                    if (idx < pool.count) {
-                        const prop_count = pool.property_counts.items[idx];
-                        if (prop_count > 0) {
-                            const start = pool.properties_starts.items[idx];
-                            if (start + prop_count <= pool.property_names.items.len and
-                                start + prop_count <= pool.property_offsets.items.len)
-                            {
-                                for (0..prop_count) |pi| {
-                                    const atom = pool.property_names.items[start + pi];
-                                    const offset = pool.property_offsets.items[start + pi];
-                                    const prop_val = obj.getSlot(offset);
-                                    if (prop_val.isUndefined()) continue;
-                                    if (!first) self.appendByte(',') orelse return null;
-                                    first = false;
-                                    self.appendByte('"') orelse return null;
-                                    const name = atomToString(atom, ctx) orelse "?";
-                                    self.appendEscaped(name) orelse return null;
-                                    self.append("\":") orelse return null;
-                                    self.appendJSValueDepth(ctx, prop_val, depth + 1) orelse return null;
-                                }
-                            }
-                        }
-                    }
-                }
-                self.appendByte('}') orelse return null;
-            }
-        } else {
-            self.append("null") orelse return null;
-        }
+        // One serializer shared with the durable oplog (appendJSValueBuf) and
+        // replay arg-checking, so recording, oplog, and replay comparison all
+        // produce byte-identical JSON.
+        return appendJSValueBuf(&self.buf, self.allocator, ctx, val, 0);
     }
 };
 
@@ -785,7 +708,24 @@ pub const ReplayState = struct {
 /// Parse a recorded entry's result back to a JSValue and count a divergence if
 /// a non-null/undefined recording failed to parse. Shared tail of both replay
 /// stubs so the parse-failure heuristic has a single owner.
-fn replayRecordedEntry(state: *ReplayState, ctx: *context.Context, entry: IoEntry) value.JSValue {
+/// A recorded entry replayed against changed arguments is a behavior drift.
+/// Returns true when the live args diverge from what was recorded. Skips when
+/// the recording did not pin args ("[]" or empty), so zero-arg calls and
+/// hand-written fixtures that omit args are not flagged. Both sides are produced
+/// by the same serializer (serializeArgsJson <-> recorded args_json), so a match
+/// is byte-exact by construction.
+fn argsDrifted(recorded_args_json: []const u8, live_args_json: []const u8) bool {
+    if (recorded_args_json.len == 0 or std.mem.eql(u8, recorded_args_json, "[]")) return false;
+    return !std.mem.eql(u8, live_args_json, recorded_args_json);
+}
+
+fn replayRecordedEntry(state: *ReplayState, ctx: *context.Context, entry: IoEntry, args: []const value.JSValue) value.JSValue {
+    // Count a divergence so replay verification fails closed on an argument
+    // change at the matched path.
+    if (serializeArgsJson(ctx.allocator, ctx, args)) |live| {
+        defer ctx.allocator.free(live);
+        if (argsDrifted(entry.args_json, live)) state.divergences += 1;
+    }
     const result = jsonToJSValue(ctx, entry.result_json);
     if (result.isUndefined() and entry.result_json.len > 0 and
         !std.mem.eql(u8, entry.result_json, "null") and
@@ -804,7 +744,7 @@ pub fn makeReplayStub(
     comptime fn_name: []const u8,
 ) object.NativeFn {
     return struct {
-        fn call(ctx_ptr: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+        fn call(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
             const ctx = util.castContext(ctx_ptr);
             const state = ctx.getModuleState(ReplayState, REPLAY_STATE_SLOT) orelse {
                 return value.JSValue.undefined_val;
@@ -812,7 +752,7 @@ pub fn makeReplayStub(
             const entry = state.nextIO(module_name, fn_name) orelse {
                 return value.JSValue.undefined_val;
             };
-            return replayRecordedEntry(state, ctx, entry);
+            return replayRecordedEntry(state, ctx, entry, args);
         }
     }.call;
 }
@@ -838,7 +778,7 @@ pub fn makeReplayStubWithFallback(
             // A recorded entry at the head: consume and replay it (trusting the
             // peek, so no second scan).
             if (state.peekMatches(module_name, fn_name)) {
-                return replayRecordedEntry(state, ctx, state.consumeHead());
+                return replayRecordedEntry(state, ctx, state.consumeHead(), args);
             }
             // No entry at the head. If one for this call exists further on, the
             // recorded order/count drifted - flag a divergence so replay
@@ -1669,6 +1609,22 @@ fn appendJSValueBuf(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, ctx: 
     }
 }
 
+/// Serialize a call's arguments to the recorded `args_json` shape
+/// (`[arg0,arg1,...]`) using the shared value serializer, so the result can be
+/// compared byte-for-byte against a recorded `IoEntry.args_json`. The caller
+/// owns the returned slice; returns null on allocation failure.
+fn serializeArgsJson(allocator: std.mem.Allocator, ctx: *context.Context, args: []const value.JSValue) ?[]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    appendByte(&buf, allocator, '[') orelse return null;
+    for (args, 0..) |arg, i| {
+        if (i > 0) appendByte(&buf, allocator, ',') orelse return null;
+        appendJSValueBuf(&buf, allocator, ctx, arg, 0) orelse return null;
+    }
+    appendByte(&buf, allocator, ']') orelse return null;
+    return buf.toOwnedSlice(allocator) catch null;
+}
+
 /// Current wall-clock time in milliseconds since Unix epoch.
 /// Freestanding/wasm has no POSIX clock; the analyzer never executes handler
 /// I/O, so the clock code is comptime-elided there and the call returns 0.
@@ -2055,6 +2011,21 @@ test "ReplayState consumeHead and hasEntryAhead" {
 
     // Now validate is at the head and no longer "ahead".
     try std.testing.expect(state.peekMatches("validate", "validateJson"));
+}
+
+test "argsDrifted flags changed args, skips unpinned recordings" {
+    // Same args -> no drift.
+    try std.testing.expect(!argsDrifted("[\"AAA\"]", "[\"AAA\"]"));
+    // Changed arg -> drift (the matched-path divergence #5 detects).
+    try std.testing.expect(argsDrifted("[\"AAA\"]", "[\"BBB\"]"));
+    // Different arity -> drift.
+    try std.testing.expect(argsDrifted("[\"a\",\"b\"]", "[\"a\"]"));
+    // Recording did not pin args ("[]"/empty) -> never flagged, regardless of
+    // live args (protects zero-arg calls and hand-written fixtures).
+    try std.testing.expect(!argsDrifted("[]", "[\"a\"]"));
+    try std.testing.expect(!argsDrifted("", "[\"a\"]"));
+    // Zero-arg call against a zero-arg recording -> no drift.
+    try std.testing.expect(!argsDrifted("[]", "[]"));
 }
 
 test "ReplayState divergence on mismatch" {
