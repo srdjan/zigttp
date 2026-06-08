@@ -745,6 +745,16 @@ pub const ReplayState = struct {
         return entry;
     }
 
+    /// Non-consuming check: does the head entry target this module/function?
+    /// Pure-function fallback stubs use this to decide replay-vs-real without
+    /// disturbing the cursor (or counting a divergence) when no matching entry
+    /// was recorded.
+    pub fn peekMatches(self: *const ReplayState, module_name: []const u8, fn_name: []const u8) bool {
+        if (self.cursor >= self.io_calls.len) return false;
+        const entry = self.io_calls[self.cursor];
+        return std.mem.eql(u8, entry.module, module_name) and std.mem.eql(u8, entry.func, fn_name);
+    }
+
     pub fn deinitOpaque(_: *anyopaque, _: std.mem.Allocator) void {
         // ReplayState does not own its io_calls (owned by trace parser).
     }
@@ -769,6 +779,45 @@ pub fn makeReplayStub(
             const result = jsonToJSValue(ctx, entry.result_json);
             // If the recorded result was not "null"/"undefined" but parsed as
             // undefined, it indicates a parse failure - count as divergence.
+            if (result.isUndefined() and entry.result_json.len > 0 and
+                !std.mem.eql(u8, entry.result_json, "null") and
+                !std.mem.eql(u8, entry.result_json, "undefined"))
+            {
+                state.divergences += 1;
+            }
+            return result;
+        }
+    }.call;
+}
+
+/// Generate a replay stub that falls through to the real implementation when
+/// no matching I/O entry sits at the cursor head. Installed only for pure
+/// functions (those declaring `Law.pure`): re-running them is deterministic,
+/// so a test or capsule that did not record the call still observes the real
+/// result instead of `undefined`. A recorded entry, when present, is consumed
+/// and replayed exactly as `makeReplayStub` would, so divergence accounting and
+/// existing fixtures are unchanged.
+pub fn makeReplayStubWithFallback(
+    comptime module_name: []const u8,
+    comptime fn_name: []const u8,
+    comptime original_fn: object.NativeFn,
+) object.NativeFn {
+    return struct {
+        fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+            const ctx = util.castContext(ctx_ptr);
+            const state = ctx.getModuleState(ReplayState, REPLAY_STATE_SLOT) orelse {
+                return original_fn(ctx_ptr, this, args);
+            };
+            // Only consume an entry when one was recorded for this call; otherwise
+            // run the real (deterministic) implementation and leave the cursor for
+            // the next genuinely-recorded I/O.
+            if (!state.peekMatches(module_name, fn_name)) {
+                return original_fn(ctx_ptr, this, args);
+            }
+            const entry = state.nextIO(module_name, fn_name) orelse {
+                return original_fn(ctx_ptr, this, args);
+            };
+            const result = jsonToJSValue(ctx, entry.result_json);
             if (result.isUndefined() and entry.result_json.len > 0 and
                 !std.mem.eql(u8, entry.result_json, "null") and
                 !std.mem.eql(u8, entry.result_json, "undefined"))
@@ -1916,6 +1965,36 @@ test "ReplayState nextIO" {
     // Exhausted
     try std.testing.expect(state.nextIO("env", "env") == null);
     try std.testing.expectEqual(@as(u32, 1), state.divergences);
+}
+
+test "ReplayState peekMatches does not consume or count divergence" {
+    const io_calls = [_]IoEntry{
+        .{ .seq = 0, .module = "validate", .func = "validateJson", .args_json = "[]", .result_json = "{\"ok\":true}" },
+    };
+    var state = ReplayState{
+        .io_calls = &io_calls,
+        .cursor = 0,
+        .divergences = 0,
+    };
+
+    // Head matches: peek is true and leaves the cursor and divergence untouched.
+    try std.testing.expect(state.peekMatches("validate", "validateJson"));
+    try std.testing.expectEqual(@as(u32, 0), state.cursor);
+    try std.testing.expectEqual(@as(u32, 0), state.divergences);
+
+    // Head does not match this (pure) call: peek is false, still no consume,
+    // so a fallback stub can run the real impl and leave the entry for the
+    // genuinely-recorded call that follows.
+    try std.testing.expect(!state.peekMatches("crypto", "sha256"));
+    try std.testing.expectEqual(@as(u32, 0), state.cursor);
+    try std.testing.expectEqual(@as(u32, 0), state.divergences);
+
+    // The matching entry is still available to consume normally.
+    try std.testing.expect(state.nextIO("validate", "validateJson") != null);
+    try std.testing.expectEqual(@as(u32, 1), state.cursor);
+
+    // Exhausted: peek is false without underflow.
+    try std.testing.expect(!state.peekMatches("validate", "validateJson"));
 }
 
 test "ReplayState divergence on mismatch" {

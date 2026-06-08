@@ -43,9 +43,9 @@ document assumes the type-system mechanics covered in
 
 A note on the examples. Every tip with a code companion links to a handler under
 `examples/patterns/`, and all six are on disk and compile: each passes
-`zigttp check --types`, and four of them (`validate-external`,
-`discriminated-union-match`, `literal-types-no-enum`, and `annotate-not-assert`)
-also run as behavioral suites under `scripts/test-examples.sh`. A few snippets
+`zigttp check --types`, and the two with request-dependent behavior
+(`validate-external` and `discriminated-union-match`) also run as behavioral
+suites under `scripts/test-examples.sh`. A few snippets
 below are shortened excerpts of those files, or of the matching sections in
 [TypeScript](typescript.md) and [User Guide](user-guide.md) that exercise the
 same constructs. Every snippet in this document compiles in the subset.
@@ -181,6 +181,13 @@ validation the canon reaches for a library to do. Excerpted from the "JSON And
 Validation" section of [User Guide](user-guide.md); the companion example is
 [validate-external.ts](../examples/patterns/validate-external.ts).
 
+Testing note: `zigttp:validate` and `zigttp:decode` are pure (their result is a
+function of their arguments and the compiled schema), so a handler test under
+`serve --test` runs them for real without an `io` mock. The
+`validate-external.test.jsonl` suite posts a body and asserts the 201/400 path
+against the real validator. Effectful modules (`fetch`, `cache`, `sql`, `env`,
+random-backed `id`) still need recorded `io` entries to stay deterministic.
+
 ### 12. Generics that infer automatically
 
 Idiom: write one generic helper and reuse it across element types by naming the
@@ -250,25 +257,21 @@ shows the declared-alias form. The reverse derivation is listed under Gaps.
 
 ### 6. Exhaustive checks with `never`
 
-Idiom: `match` exhaustiveness is native, so the `never`-typed `assertNever` is
-the explicit, optional form rather than the only safety net.
+Idiom: `match` exhaustiveness is native, so the `never`-typed `assertNever`
+trick is unnecessary.
 
-In plain TypeScript, the standard exhaustiveness trick is a `default` branch
-that assigns the discriminant to a `never`-typed parameter (`assertNever(x:
-never)`), which fails to compile when a variant is added. zigts checks `match`
-exhaustiveness natively, so a missing variant is already a compile error without
-the helper. An `assertNever(x: never)` call from a `default` arm is the explicit
-form when you want it spelled out.
-
-A caveat the type checker forces: whether that `assertNever` call itself
-compiles depends on how the `default` arm narrows the discriminant. A
-`default`/null-pattern arm does not narrow the discriminant down to `never`, so
-passing it to a `never` parameter can be rejected by argument checking
-(`isAssignableTo(Command, never)` is false). When that happens, rely on the
-native `match` exhaustiveness alone and drop the helper. This is a
-compiler-forced choice; the
+In plain TypeScript the standard exhaustiveness guard is a `default` branch that
+assigns the discriminant to a `never`-typed parameter (`assertNever(x: never)`),
+which stops compiling when a new variant is added. zigts checks `match`
+exhaustiveness directly: a `default` / `when _:` catch-all proves the match
+exhaustive for any discriminant, and when the discriminant's type is known (a
+local binding) full variant coverage is proven without a catch-all. For a
+`match` over a function parameter, carry a `default` arm - the analyzer credits
+the catch-all even though it does not yet resolve the parameter's declared type.
+So the `never`-parameter helper buys nothing here. The companion
 [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts)
-example records which form held when it was checked.
+dispatches on a parameter, carries a `default` arm, and checks with every
+property proven and no warnings.
 
 ### 7. `as const` for config and constants
 

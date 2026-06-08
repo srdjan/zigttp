@@ -3,12 +3,9 @@
 // A tagged union makes impossible states unrepresentable: every value
 // carries a `kind` discriminant, so `match` narrows each arm to exactly
 // one variant. There is one absent-value sentinel, `undefined`, never
-// `null`. `match` exhaustiveness is checked natively, so a missing variant
-// is a compile error on its own; the `default` arm below is the explicit
-// catch-all. When checked, the native exhaustiveness held and the
-// `assertNever(x: never)` helper was not needed (a `default` arm does not
-// narrow the discriminant to `never`, so passing it to a `never` parameter
-// is rejected by argument checking).
+// `null`. `match` exhaustiveness is checked natively: the `default` arm below
+// proves the match exhaustive (the reliable form for a parameter discriminant).
+// No `assertNever(x: never)` helper is needed to get that guarantee.
 
 import type { Spec } from "zigttp:types";
 

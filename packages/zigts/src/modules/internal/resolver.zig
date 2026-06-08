@@ -98,7 +98,13 @@ pub fn registerVirtualModuleReplay(comptime binding: mb.ModuleBinding, ctx: *con
         const func = if (comptime isFetchExport(binding, exp))
             base_func
         else if (comptime shouldWrapExport(binding, exp))
-            comptime trace.makeReplayStub(binding.name, exp.name)
+            // Pure functions (Law.pure) run for real when no I/O entry was
+            // recorded for the call, so handler tests need not mock them; a
+            // recorded entry is still consumed and replayed.
+            (if (comptime isReplayPure(exp))
+                comptime trace.makeReplayStubWithFallback(binding.name, exp.name, base_func)
+            else
+                comptime trace.makeReplayStub(binding.name, exp.name))
         else
             base_func;
         const name_atom = try ctx.atoms.intern(exp.name);
@@ -146,6 +152,22 @@ fn registerNativeExport(
 
 fn shouldWrapExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) bool {
     return !binding.comptime_only and !binding.self_managed_io and func_binding.traceable;
+}
+
+/// A function is replay-pure when running it live during replay is hermetic:
+/// its result depends only on its arguments (and in-process setup like a
+/// compiled schema). `Law.pure` alone is NOT sufficient - it is the algebraic
+/// property "adjacent equal calls collapse", which `env()` satisfies even
+/// though it reads the host environment and returns secret-labeled data. So a
+/// function that returns host-sourced sensitive data (a `secret` or
+/// `credential` return label) is excluded: passing it through would leak host
+/// state into the response and break replay reproducibility across machines.
+fn isReplayPure(comptime func_binding: mb.FunctionBinding) bool {
+    if (func_binding.return_labels.secret or func_binding.return_labels.credential) return false;
+    inline for (func_binding.laws) |law| {
+        if (std.meta.activeTag(law) == .pure) return true;
+    }
+    return false;
 }
 
 fn isFetchExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) bool {

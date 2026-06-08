@@ -43,6 +43,23 @@ run_tests() {
     fi
 }
 
+# Assert a handler type-checks clean (exit 0, no errors/warnings) under the
+# analyzer. Used for examples whose value is the static proof, not runtime I/O.
+check_types() {
+    local handler=$1
+    local name
+    name=$(echo "$handler" | sed 's|examples/||')
+
+    if "$ZIGTTP" check "$handler" --types >/dev/null 2>&1; then
+        echo "  PASS  $name (check --types)"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL  $name (check --types)"
+        "$ZIGTTP" check "$handler" --types 2>&1 | grep -iE "error|warning" | head -5 | sed 's/^/        /'
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 echo "Example Handler Tests"
 echo "====================="
 echo ""
@@ -72,11 +89,14 @@ run_tests "examples/routing/router.ts"         "examples/routing/router.test.jso
 run_tests "examples/routing/guard-compose.ts"  "examples/routing/guard-compose.test.jsonl"
 run_tests "examples/routing/match-handler.ts"  "examples/routing/match-handler.test.jsonl"
 
-# patterns/
-run_tests "examples/patterns/literal-types-no-enum.ts"     "examples/patterns/literal-types-no-enum.test.jsonl"
-run_tests "examples/patterns/annotate-not-assert.ts"       "examples/patterns/annotate-not-assert.test.jsonl"
+# patterns/ - every pattern example must type-check clean; the two
+# request-dependent handlers additionally get behavioral suites.
+for h in examples/patterns/*.ts; do check_types "$h"; done
 run_tests "examples/patterns/validate-external.ts"         "examples/patterns/validate-external.test.jsonl"
 run_tests "examples/patterns/discriminated-union-match.ts" "examples/patterns/discriminated-union-match.test.jsonl"
+
+# `zigttp check` writes a zigttp.d.ts typings stub into the cwd; drop it.
+rm -f zigttp.d.ts
 
 echo ""
 echo "====================="

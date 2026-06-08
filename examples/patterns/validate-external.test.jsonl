@@ -1,8 +1,9 @@
-{"type":"test","name":"valid body passes validation and returns 201"}
+{"type":"test","name":"valid body passes real validation and returns 201"}
 {"type":"request","method":"POST","url":"/","headers":{},"body":"{\"title\":\"buy milk\"}"}
-{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["todo","{\"title\":\"buy milk\"}"],"result":{"ok":true,"value":{"title":"buy milk"}}}
 {"type":"expect","status":201,"bodyContains":"buy milk"}
 {"type":"test","name":"missing required field is rejected with 400"}
 {"type":"request","method":"POST","url":"/","headers":{},"body":"{}"}
-{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["todo","{}"],"result":{"ok":false,"errors":["missing required field"]}}
+{"type":"expect","status":400,"bodyContains":"invalid body"}
+{"type":"test","name":"malformed JSON body is rejected with 400"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"not json{"}
 {"type":"expect","status":400,"bodyContains":"invalid body"}
