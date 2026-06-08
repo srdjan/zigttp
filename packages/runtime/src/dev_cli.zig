@@ -59,6 +59,59 @@ test {
     _ = @import("verify_cli.zig");
 }
 
+/// Validate, configure, and launch the expert agent. Shared by the `expert`
+/// command and by `init --expert` (which scaffolds, chdir's into the project,
+/// then calls this with no extra args).
+fn dispatchExpert(allocator: std.mem.Allocator, expert_args: []const []const u8) !void {
+    if (hasHelpFlag(expert_args)) {
+        cli_help.printExpertHelp();
+        return;
+    }
+    switch (cli_args.validateExpertArgs(expert_args)) {
+        .ok => {},
+        .unknown_flag => |flag| {
+            std.debug.print("zigttp expert does not accept flag '{s}'. See `zigttp expert --help`.\n", .{flag});
+            std.process.exit(1);
+        },
+        .unexpected_arg => |arg| {
+            std.debug.print(
+                "zigttp expert does not accept subcommand or positional argument '{s}'. See `zigttp expert --help`.\n",
+                .{arg},
+            );
+            std.process.exit(1);
+        },
+    }
+    _ = pi_app.parseExpertFlags(expert_args) catch |err| {
+        std.debug.print("{s}", .{pi_app.flagErrorMessage(err)});
+        std.process.exit(2);
+    };
+    if (!pi_app.envHasModelBackend()) {
+        std.debug.print(
+            \\zigttp expert needs a model backend.
+            \\
+            \\Quickest path:
+            \\  zigttp auth claude   # paste your key once, stored at ~/.zigttp/providers.json
+            \\
+            \\Or set one of these environment variables and run `zigttp expert` again:
+            \\  ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
+            \\  OPENAI_API_KEY
+            \\
+            \\See `zigttp expert --help` for details.
+            \\
+        , .{});
+        std.process.exit(1);
+    }
+    const witness_replay_lib = @import("witness_replay_lib.zig");
+    const perf_probe_lib = @import("perf_probe_lib.zig");
+    const equivalence_probe_lib = @import("equivalence_probe_lib.zig");
+    pi_app.setInvocationArgv(expert_args);
+    pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
+    pi_app.perf_probe.setProbeFn(perf_probe_lib.recordPerfReceipt);
+    pi_app.equivalence_probe.setProbeFn(equivalence_probe_lib.recordEquivalenceReceipt);
+    pi_app.capsule_probe.setProbeFn(dev_command.capsuleReplayProbe);
+    try pi_app.run(allocator);
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
         if (builtin.mode == .Debug) .init else {};
@@ -105,7 +158,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     if (std.mem.eql(u8, command, "init")) {
-        init_command.initCommand(allocator, user_args[1..]) catch |err| {
+        const outcome = init_command.initCommand(allocator, user_args[1..]) catch |err| {
             if (err == error.HelpRequested) {
                 init_command.printInitHelp();
                 return;
@@ -142,6 +195,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
             return err;
         };
+        if (outcome.enter_expert) {
+            if (outcome.project_name) |proj| {
+                // Stored provider keys are injected for the `expert` command;
+                // do the same before handing off from `init --expert`.
+                cli_auth.injectStoredProvidersIntoEnv(allocator);
+                std.Io.Threaded.chdir(proj) catch |e| {
+                    std.debug.print("init --expert: could not enter '{s}': {s}\n", .{ proj, @errorName(e) });
+                    std.process.exit(1);
+                };
+                return dispatchExpert(allocator, &.{});
+            }
+        }
         return;
     }
     if (std.mem.eql(u8, command, "dev")) {
@@ -346,54 +411,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "expert")) {
-        if (hasHelpFlag(user_args[1..])) {
-            cli_help.printExpertHelp();
-            return;
-        }
-        switch (cli_args.validateExpertArgs(user_args[1..])) {
-            .ok => {},
-            .unknown_flag => |flag| {
-                std.debug.print("zigttp expert does not accept flag '{s}'. See `zigttp expert --help`.\n", .{flag});
-                std.process.exit(1);
-            },
-            .unexpected_arg => |arg| {
-                std.debug.print(
-                    "zigttp expert does not accept subcommand or positional argument '{s}'. See `zigttp expert --help`.\n",
-                    .{arg},
-                );
-                std.process.exit(1);
-            },
-        }
-        _ = pi_app.parseExpertFlags(user_args[1..]) catch |err| {
-            std.debug.print("{s}", .{pi_app.flagErrorMessage(err)});
-            std.process.exit(2);
-        };
-        if (!pi_app.envHasModelBackend()) {
-            std.debug.print(
-                \\zigttp expert needs a model backend.
-                \\
-                \\Quickest path:
-                \\  zigttp auth claude   # paste your key once, stored at ~/.zigttp/providers.json
-                \\
-                \\Or set one of these environment variables and run `zigttp expert` again:
-                \\  ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
-                \\  OPENAI_API_KEY
-                \\
-                \\See `zigttp expert --help` for details.
-                \\
-            , .{});
-            std.process.exit(1);
-        }
-        const witness_replay_lib = @import("witness_replay_lib.zig");
-        const perf_probe_lib = @import("perf_probe_lib.zig");
-        const equivalence_probe_lib = @import("equivalence_probe_lib.zig");
-        pi_app.setInvocationArgv(user_args[1..]);
-        pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
-        pi_app.perf_probe.setProbeFn(perf_probe_lib.recordPerfReceipt);
-        pi_app.equivalence_probe.setProbeFn(equivalence_probe_lib.recordEquivalenceReceipt);
-        pi_app.capsule_probe.setProbeFn(dev_command.capsuleReplayProbe);
-        try pi_app.run(allocator);
-        return;
+        return dispatchExpert(allocator, user_args[1..]);
     }
     if (std.mem.eql(u8, command, "deploy")) {
         if (deployArgsRequestCloud(user_args[1..])) |flag| {

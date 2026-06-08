@@ -14,12 +14,21 @@ const cli_templates = @import("cli_templates.zig");
 const Template = cli_templates.Template;
 const parseTemplate = cli_templates.parseTemplate;
 
-pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+/// What `initCommand` decided after scaffolding. `enter_expert` asks the
+/// dispatcher to chdir into the new project and launch `zigttp expert` (the
+/// `--expert` flag); `project_name` borrows from argv.
+pub const InitOutcome = struct {
+    enter_expert: bool = false,
+    project_name: ?[]const u8 = null,
+};
+
+pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !InitOutcome {
     if (argv.len == 0) return error.MissingProjectName;
 
     var template_name: []const u8 = "basic";
     var project_name: ?[]const u8 = null;
     var extension_name: ?[]const u8 = null;
+    var enter_expert = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -33,6 +42,10 @@ pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         }
         if (std.mem.eql(u8, arg, "--extension")) {
             extension_name = try shared.takeArg(&i, argv, error.MissingExtensionName);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--expert")) {
+            enter_expert = true;
             continue;
         }
         if (std.mem.startsWith(u8, arg, "-")) {
@@ -49,7 +62,7 @@ pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         try validateProjectName(name);
         try scaffoldExtension(allocator, name);
         printInitExtensionNextSteps(name);
-        return;
+        return .{};
     }
 
     const name = project_name orelse return error.MissingProjectName;
@@ -57,7 +70,12 @@ pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     const template = parseTemplate(template_name) orelse return error.InvalidTemplate;
 
     try scaffoldProject(allocator, name, template);
+    if (enter_expert) {
+        printInitExpertHandoff(name);
+        return .{ .enter_expert = true, .project_name = name };
+    }
     printInitNextSteps(name, template);
+    return .{};
 }
 
 fn validateProjectName(name: []const u8) !void {
@@ -282,12 +300,25 @@ fn printInitNextSteps(name: []const u8, template: Template) void {
     std.debug.print("\n", .{});
 }
 
+/// `init --expert` scaffolds, then hands off to the expert agent. Keep this
+/// short: the expert REPL paints its own banner right after.
+fn printInitExpertHandoff(name: []const u8) void {
+    const tty = shared.stderrIsTty();
+    const c = shared.palette(tty);
+    std.debug.print("\n", .{});
+    std.debug.print("  {s}+{s} initialized zigttp project in {s}{s}{s}\n", .{ c.green, c.reset, c.bold, name, c.reset });
+    std.debug.print("  {s}entering expert mode - describe the handler you want{s}\n", .{ c.dim, c.reset });
+    std.debug.print("\n", .{});
+}
+
 pub fn printInitHelp() void {
     const help =
-        \\zigttp init <name> [--template basic|api|htmx]
+        \\zigttp init <name> [--template basic|api|htmx] [--expert]
         \\zigttp init --extension <name>
         \\
         \\Create a new zigttp project or extension directory.
+        \\With --expert, scaffold the project and then enter `zigttp expert`
+        \\(the interactive compiler-in-the-loop agent) inside it.
         \\Names may contain letters, numbers, '-' and '_', and must start with
         \\a letter or number.
         \\
@@ -316,6 +347,7 @@ pub fn printInitHelp() void {
         \\
         \\Examples:
         \\  zigttp init my-app
+        \\  zigttp init my-app --expert
         \\  zigttp init --extension my-partner
         \\
     ;
@@ -851,6 +883,33 @@ test "initCommand scaffolds the v1 project layout" {
     const handler = try zigts.file_io.readFile(testing.allocator, "demo/src/handler.ts", 64 * 1024);
     defer testing.allocator.free(handler);
     try testing.expect(std.mem.indexOf(u8, handler, "function handler(req: Request): Response") != null);
+}
+
+test "initCommand --expert scaffolds and asks the dispatcher to enter expert mode" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const outcome = try initCommand(testing.allocator, &.{ "demo", "--expert" });
+    try testing.expect(outcome.enter_expert);
+    try testing.expectEqualStrings("demo", outcome.project_name.?);
+
+    // --expert still scaffolds the project before the handoff.
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/src/handler.ts", .{});
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/tests/handler.test.jsonl", .{});
+
+    // Without --expert there is no handoff.
+    const plain = try initCommand(testing.allocator, &.{"demo2"});
+    try testing.expect(!plain.enter_expert);
+    try testing.expect(plain.project_name == null);
 }
 
 test "initCommand writes template-specific starter README files" {
