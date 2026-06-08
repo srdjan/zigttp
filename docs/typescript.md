@@ -311,6 +311,26 @@ cfg.port = 8080;     // ERROR: cannot assign to readonly property
 
 `Readonly<T>` marks all fields readonly.
 
+### Utility Types
+
+The object-deriving utility types build a new record type from an existing one,
+so a field stays declared in a single source type instead of being copied into
+hand-written aliases that drift:
+
+```typescript
+type User = { id: number; name: string; email: string };
+
+type Summary = Pick<User, "id" | "name">; // keep only id and name
+type Safe = Omit<User, "email">;          // drop email
+type UserPatch = Partial<User>;           // every field optional
+type FullUser = Required<UserPatch>;      // every field required again
+```
+
+`Pick<T, Keys>` and `Omit<T, Keys>` filter fields by a string-literal key (or a
+union of them); `Partial<T>` makes every field optional and `Required<T>` makes
+every field required. They resolve structurally against a named source type or
+an inline object literal, alongside `Readonly<T>`.
+
 ### Template Literal Types
 
 Template literal types validate string patterns at build time:

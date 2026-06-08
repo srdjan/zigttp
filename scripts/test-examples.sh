@@ -89,11 +89,12 @@ run_tests "examples/routing/router.ts"         "examples/routing/router.test.jso
 run_tests "examples/routing/guard-compose.ts"  "examples/routing/guard-compose.test.jsonl"
 run_tests "examples/routing/match-handler.ts"  "examples/routing/match-handler.test.jsonl"
 
-# patterns/ - every pattern example must type-check clean; the two
+# patterns/ - every pattern example must type-check clean; the
 # request-dependent handlers additionally get behavioral suites.
 for h in examples/patterns/*.ts; do check_types "$h"; done
 run_tests "examples/patterns/validate-external.ts"         "examples/patterns/validate-external.test.jsonl"
 run_tests "examples/patterns/discriminated-union-match.ts" "examples/patterns/discriminated-union-match.test.jsonl"
+run_tests "examples/patterns/derive-types.ts"              "examples/patterns/derive-types.test.jsonl"
 
 # `zigttp check` writes a zigttp.d.ts typings stub into the cwd; drop it.
 rm -f zigttp.d.ts

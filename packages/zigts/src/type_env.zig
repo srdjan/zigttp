@@ -28,6 +28,18 @@ const TypeMapEntry = type_map_mod.TypeMapEntry;
 /// Sized to be unmistakable for any user-authored field.
 pub const spec_marker_field = "__zigttp_spec__";
 
+/// Built-in object-deriving utility types. Recognized by name in
+/// tryInstantiateGenericApp; the transforms themselves live in TypePool.
+const UtilityKind = enum { pick, omit, partial, required };
+
+fn utilityKind(name: []const u8) ?UtilityKind {
+    if (std.mem.eql(u8, name, "Pick")) return .pick;
+    if (std.mem.eql(u8, name, "Omit")) return .omit;
+    if (std.mem.eql(u8, name, "Partial")) return .partial;
+    if (std.mem.eql(u8, name, "Required")) return .required;
+    return null;
+}
+
 /// The field name marking the body of an instantiated `Effects<...>` generic
 /// alias. Distinct from `spec_marker_field` so a return type carrying both
 /// (`Effects<Response, "env"> & Spec<"deterministic">`) keeps capability
@@ -457,6 +469,33 @@ pub const TypeEnv = struct {
                 if (info.base == null_type_idx) return idx;
                 const base_name = self.pool.getRefName(info.base);
                 if (base_name.len == 0) return idx;
+
+                // Built-in utility types Pick/Omit/Partial/Required. Resolved
+                // here (not at parse time like Readonly<T>) because resolving
+                // a named source type to its record needs the alias/interface
+                // maps, which only exist on TypeEnv.
+                if (utilityKind(base_name)) |kind| {
+                    const want_args: usize = switch (kind) {
+                        .partial, .required => 1,
+                        .pick, .omit => 2,
+                    };
+                    if (info.args.len < want_args) return idx;
+                    // Copy args before any transform: generic-app args live in
+                    // the pool's shared members list, which a transform's
+                    // addRecord/addUnion may reallocate.
+                    var raw_args: [8]TypeIndex = undefined;
+                    const uargc = @min(info.args.len, raw_args.len);
+                    @memcpy(raw_args[0..uargc], info.args[0..uargc]);
+                    const src = self.resolveRefToRecord(self.tryInstantiateGenericApp(raw_args[0]));
+                    if (src == null_type_idx) return idx;
+                    return switch (kind) {
+                        .partial => self.pool.makePartial(self.allocator, src),
+                        .required => self.pool.makeRequired(self.allocator, src),
+                        .pick => self.pool.pickFields(self.allocator, src, raw_args[1]),
+                        .omit => self.pool.omitFields(self.allocator, src, raw_args[1]),
+                    };
+                }
+
                 const alias = self.generic_aliases.get(base_name) orelse return idx;
                 if (info.args.len != alias.param_count) return idx;
                 // Instantiate nested generic-app arguments first, so a composed
@@ -501,6 +540,22 @@ pub const TypeEnv = struct {
             },
             else => return idx,
         }
+    }
+
+    /// Resolve a type to a record: pass a record through unchanged, resolve a
+    /// named ref via the alias then interface map, otherwise null_type_idx.
+    /// Used by the utility-type path to find the source object's fields.
+    fn resolveRefToRecord(self: *const TypeEnv, idx: TypeIndex) TypeIndex {
+        if (idx == null_type_idx) return null_type_idx;
+        const tag = self.pool.getTag(idx) orelse return null_type_idx;
+        if (tag == .t_record) return idx;
+        if (tag == .t_ref) {
+            const name = self.pool.getRefName(idx);
+            if (name.len == 0) return null_type_idx;
+            if (self.type_aliases.get(name)) |r| return r;
+            if (self.interfaces.get(name)) |r| return r;
+        }
+        return null_type_idx;
     }
 
     /// Look up a variable's declared type by name.
@@ -1073,6 +1128,84 @@ test "TypeEnv return-type intersection X & Y" {
     const sig = env.getFnSigByLoc(7);
     try std.testing.expect(sig != null);
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_intersection, pool.getTag(sig.?.return_type).?);
+}
+
+test "resolveType Pick<User, keys> keeps only the named fields" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const user = parseTypeExpr(&pool, allocator, "{ id: number; name: string; age: number }");
+    env.type_aliases.put(allocator, env.internName("User"), user) catch unreachable;
+
+    const picked = env.resolveType("Pick<User, \"id\" | \"name\">");
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(picked).?);
+    try std.testing.expectEqual(@as(usize, 2), pool.getRecordFields(picked).len);
+    try std.testing.expect(pool.lookupRecordField(picked, "id") != null);
+    try std.testing.expect(pool.lookupRecordField(picked, "name") != null);
+    try std.testing.expect(pool.lookupRecordField(picked, "age") == null);
+}
+
+test "resolveType Omit<User, key> drops the named field" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const user = parseTypeExpr(&pool, allocator, "{ id: number; name: string; age: number }");
+    env.type_aliases.put(allocator, env.internName("User"), user) catch unreachable;
+
+    const omitted = env.resolveType("Omit<User, \"age\">");
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(omitted).?);
+    try std.testing.expectEqual(@as(usize, 2), pool.getRecordFields(omitted).len);
+    try std.testing.expect(pool.lookupRecordField(omitted, "id") != null);
+    try std.testing.expect(pool.lookupRecordField(omitted, "age") == null);
+}
+
+test "resolveType Partial<User> makes fields optional and assignable from a subset" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const user = parseTypeExpr(&pool, allocator, "{ id: number; name: string }");
+    env.type_aliases.put(allocator, env.internName("User"), user) catch unreachable;
+
+    const partial = env.resolveType("Partial<User>");
+    const fields = pool.getRecordFields(partial);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expect(fields[0].optional);
+    try std.testing.expect(fields[1].optional);
+
+    // An object missing a field is assignable to Partial<User> but not to the
+    // original required type - the transform flows into the assignability check.
+    const subset = parseTypeExpr(&pool, allocator, "{ id: number }");
+    try std.testing.expect(pool.isAssignableTo(subset, partial));
+    try std.testing.expect(!pool.isAssignableTo(subset, user));
+}
+
+test "resolveType Required<Conf> clears optional and rejects a missing field" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const conf = parseTypeExpr(&pool, allocator, "{ host?: string; port?: number }");
+    env.type_aliases.put(allocator, env.internName("Conf"), conf) catch unreachable;
+
+    const req = env.resolveType("Required<Conf>");
+    const fields = pool.getRecordFields(req);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expect(!fields[0].optional);
+    try std.testing.expect(!fields[1].optional);
+
+    const subset = parseTypeExpr(&pool, allocator, "{ host: string }");
+    try std.testing.expect(!pool.isAssignableTo(subset, req));
 }
 
 test "TypeEnv registers Spec<S> built-in alias on init" {

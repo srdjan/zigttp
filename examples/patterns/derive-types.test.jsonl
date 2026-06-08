@@ -1,0 +1,3 @@
+{"type":"test","name":"utility-derived shapes serialize through the handler"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"summary\":{\"id\":1,\"name\":\"Ada\"}"}

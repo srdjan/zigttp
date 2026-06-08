@@ -527,6 +527,116 @@ pub const TypePool = struct {
         return self.addRecord(allocator, ro_fields[0..count]);
     }
 
+    /// Create a new record type with all fields optional (Partial<T> utility).
+    pub fn makePartial(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex) TypeIndex {
+        const fields = self.getRecordFields(idx);
+        if (fields.len == 0) return idx;
+        var out: [32]RecordField = undefined;
+        const count = @min(fields.len, 32);
+        for (fields[0..count], 0..) |field, i| {
+            out[i] = field;
+            out[i].optional = true;
+        }
+        return self.addRecord(allocator, out[0..count]);
+    }
+
+    /// Create a new record type with all fields required (Required<T> utility).
+    pub fn makeRequired(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex) TypeIndex {
+        const fields = self.getRecordFields(idx);
+        if (fields.len == 0) return idx;
+        var out: [32]RecordField = undefined;
+        const count = @min(fields.len, 32);
+        for (fields[0..count], 0..) |field, i| {
+            out[i] = field;
+            out[i].optional = false;
+        }
+        return self.addRecord(allocator, out[0..count]);
+    }
+
+    /// Create a new record type with only the named fields (Pick<T, Keys>).
+    /// `keys_idx` is a string literal or a union of string literals. A
+    /// non-literal key argument or non-record source returns the source
+    /// unchanged.
+    pub fn pickFields(self: *TypePool, allocator: std.mem.Allocator, record_idx: TypeIndex, keys_idx: TypeIndex) TypeIndex {
+        const fields = self.getRecordFields(record_idx);
+        if (fields.len == 0) return record_idx;
+        var keys_buf: [32][]const u8 = undefined;
+        const key_count = self.collectStringKeys(keys_idx, &keys_buf);
+        if (key_count == 0) return record_idx;
+        var out: [32]RecordField = undefined;
+        var n: usize = 0;
+        for (fields) |field| {
+            if (n >= out.len) break;
+            const name = self.getName(field.name_start, field.name_len);
+            for (keys_buf[0..key_count]) |k| {
+                if (std.mem.eql(u8, name, k)) {
+                    out[n] = field;
+                    n += 1;
+                    break;
+                }
+            }
+        }
+        return self.addRecord(allocator, out[0..n]);
+    }
+
+    /// Create a new record type without the named fields (Omit<T, Keys>).
+    /// `keys_idx` is a string literal or a union of string literals. A
+    /// non-literal key argument or non-record source returns the source
+    /// unchanged.
+    pub fn omitFields(self: *TypePool, allocator: std.mem.Allocator, record_idx: TypeIndex, keys_idx: TypeIndex) TypeIndex {
+        const fields = self.getRecordFields(record_idx);
+        if (fields.len == 0) return record_idx;
+        var keys_buf: [32][]const u8 = undefined;
+        const key_count = self.collectStringKeys(keys_idx, &keys_buf);
+        if (key_count == 0) return record_idx;
+        var out: [32]RecordField = undefined;
+        var n: usize = 0;
+        for (fields) |field| {
+            if (n >= out.len) break;
+            const name = self.getName(field.name_start, field.name_len);
+            var omit = false;
+            for (keys_buf[0..key_count]) |k| {
+                if (std.mem.eql(u8, name, k)) {
+                    omit = true;
+                    break;
+                }
+            }
+            if (!omit) {
+                out[n] = field;
+                n += 1;
+            }
+        }
+        return self.addRecord(allocator, out[0..n]);
+    }
+
+    /// Collect the literal-string names from a Pick/Omit key argument,
+    /// which is a single string literal ("id") or a union of them
+    /// ("id" | "name"). Non-literal members are skipped. Returns the count
+    /// written into `buf`.
+    fn collectStringKeys(self: *const TypePool, keys_idx: TypeIndex, buf: [][]const u8) usize {
+        const tag = self.getTag(keys_idx) orelse return 0;
+        var n: usize = 0;
+        if (tag == .t_literal_string) {
+            if (self.getLiteralStringValue(keys_idx)) |v| {
+                if (n < buf.len) {
+                    buf[n] = v;
+                    n += 1;
+                }
+            }
+            return n;
+        }
+        if (tag == .t_union) {
+            for (self.getUnionMembers(keys_idx)) |m| {
+                if (n >= buf.len) break;
+                if (self.getLiteralStringValue(m)) |v| {
+                    buf[n] = v;
+                    n += 1;
+                }
+            }
+        }
+        return n;
+    }
+
     /// Get the string value of a literal string type.
     pub fn getLiteralStringValue(self: *const TypePool, idx: TypeIndex) ?[]const u8 {
         if (self.getTag(idx) != .t_literal_string) return null;
@@ -1965,6 +2075,76 @@ test "makeReadonly marks all fields readonly" {
     try std.testing.expectEqual(@as(usize, 2), fields.len);
     try std.testing.expect(fields[0].readonly);
     try std.testing.expect(fields[1].readonly);
+}
+
+test "makePartial marks all fields optional" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const idx = parseTypeExpr(&pool, allocator, "{ id: number; name: string }");
+    const partial = pool.makePartial(allocator, idx);
+    const fields = pool.getRecordFields(partial);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expect(fields[0].optional);
+    try std.testing.expect(fields[1].optional);
+}
+
+test "makeRequired clears optional on all fields" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const idx = parseTypeExpr(&pool, allocator, "{ id?: number; name?: string }");
+    const required = pool.makeRequired(allocator, idx);
+    const fields = pool.getRecordFields(required);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expect(!fields[0].optional);
+    try std.testing.expect(!fields[1].optional);
+}
+
+test "pickFields keeps only the named fields" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const rec = parseTypeExpr(&pool, allocator, "{ id: number; name: string; age: number }");
+    const keys = parseTypeExpr(&pool, allocator, "\"id\" | \"name\"");
+    const picked = pool.pickFields(allocator, rec, keys);
+    const fields = pool.getRecordFields(picked);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expect(pool.lookupRecordField(picked, "id") != null);
+    try std.testing.expect(pool.lookupRecordField(picked, "name") != null);
+    try std.testing.expect(pool.lookupRecordField(picked, "age") == null);
+}
+
+test "pickFields with a single string-literal key" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const rec = parseTypeExpr(&pool, allocator, "{ id: number; name: string }");
+    const keys = parseTypeExpr(&pool, allocator, "\"id\"");
+    const picked = pool.pickFields(allocator, rec, keys);
+    const fields = pool.getRecordFields(picked);
+    try std.testing.expectEqual(@as(usize, 1), fields.len);
+    try std.testing.expect(pool.lookupRecordField(picked, "id") != null);
+    try std.testing.expect(pool.lookupRecordField(picked, "name") == null);
+}
+
+test "omitFields drops the named fields" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const rec = parseTypeExpr(&pool, allocator, "{ id: number; name: string; age: number }");
+    const keys = parseTypeExpr(&pool, allocator, "\"age\"");
+    const omitted = pool.omitFields(allocator, rec, keys);
+    const fields = pool.getRecordFields(omitted);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expect(pool.lookupRecordField(omitted, "id") != null);
+    try std.testing.expect(pool.lookupRecordField(omitted, "name") != null);
+    try std.testing.expect(pool.lookupRecordField(omitted, "age") == null);
 }
 
 test "parseTypeExpr template literal type" {

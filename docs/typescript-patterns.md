@@ -11,9 +11,9 @@ guarantees: `any` and `enum` are hard errors, `null` is gone (the single
 absent-value sentinel is `undefined`), and `match` does exhaustiveness checking
 natively. It adapts a few tips because the underlying construct works
 differently here: zigts rejects both `as` and `satisfies`, so a conformance
-check lives on the declaration instead. And it drops a couple, because the
-relevant TypeScript machinery (the `Pick`/`Omit`/`Partial` utility family,
-`typeof`-type extraction) is not implemented.
+check lives on the declaration instead. And it leaves one construct out by
+design: `typeof`-type extraction would derive a type from a value, the inverse
+of the contract-first direction the rest of this runtime depends on.
 
 For the full allow and reject list see
 [Feature Detection](feature-detection.md). For why each cut exists and what
@@ -28,12 +28,12 @@ document assumes the type-system mechanics covered in
 | 1 | Prefer `unknown` over `any` | Enforced | `any` is a hard error; `unknown` plus a type guard is the only path -> [unknown-and-guards.ts](../examples/patterns/unknown-and-guards.ts) |
 | 2 | Let type inference do the work | Direct fit | annotate boundaries, infer internals -> [infer-and-generics.ts](../examples/patterns/infer-and-generics.ts) |
 | 3 | Prefer `satisfies` over `as` | Adapted | both rejected; annotate the declaration -> [annotate-not-assert.ts](../examples/patterns/annotate-not-assert.ts) |
-| 4 | Derive types from values | Partial | `typeof`-extraction unsupported; declare the alias, `const` keeps literals -> [annotate-not-assert.ts](../examples/patterns/annotate-not-assert.ts) |
+| 4 | Derive types from values | Partial | `typeof`-extraction absent by design; declare the alias, `const` keeps literals -> [annotate-not-assert.ts](../examples/patterns/annotate-not-assert.ts) |
 | 5 | Discriminated unions for impossible states | Direct fit (core) | tagged unions plus `match` narrowing; `undefined`-only sentinel -> [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts) |
-| 6 | Exhaustive checks with `never` | Adapted (native) | `match` exhaustiveness is native; `assertNever(x: never)` is the explicit form -> [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts) |
+| 6 | Exhaustive checks with `never` | Adapted (native) | `match` exhaustiveness is native with a required `default` arm; the `never`-helper is unneeded -> [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts) |
 | 7 | `as const` for config and constants | Adapted | `const` bindings preserve literals automatically; no `as const` -> [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts) |
 | 8 | Type predicates for reusable narrowing | Direct fit | `x is T` guards; pairs with `assert` -> [unknown-and-guards.ts](../examples/patterns/unknown-and-guards.ts) |
-| 9 | Build new types from existing (`Pick`/`Omit`/`Partial`) | Not supported | utility types absent except `Readonly<T>`; compose explicit aliases plus `&` (see Gaps) |
+| 9 | Build new types from existing (`Pick`/`Omit`/`Partial`) | Direct fit | `Pick`/`Omit`/`Partial`/`Required` derive shapes from a source type, joining `Readonly<T>` -> [derive-types.ts](../examples/patterns/derive-types.ts) |
 | 10 | Validate external data at runtime | Direct fit (built-in) | `zigttp:validate` plus `zigttp:decode` replace Zod -> [validate-external.ts](../examples/patterns/validate-external.ts) |
 | 11 | Avoid `enum` | Enforced | `enum` is a hard error; literal unions only -> [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts) |
 | 12 | Generics that infer automatically | Direct fit | generics plus inference (up to 8 params) -> [infer-and-generics.ts](../examples/patterns/infer-and-generics.ts) |
@@ -42,9 +42,9 @@ document assumes the type-system mechanics covered in
 | 15 | Type-safe is not runtime-safe | Direct fit (thesis) | proof receipts, contracts, and runtime validation; the restrictions-to-proofs story ([restrictions-to-proofs.md](restrictions-to-proofs.md), the proof-receipt section of [user-guide.md](user-guide.md)) |
 
 A note on the examples. Every tip with a code companion links to a handler under
-`examples/patterns/`, and all six are on disk and compile: each passes
-`zigttp check --types`, and the two with request-dependent behavior
-(`validate-external` and `discriminated-union-match`) also run as behavioral
+`examples/patterns/`, and all seven are on disk and compile: each passes
+`zigttp check --types`, and three (`validate-external`,
+`discriminated-union-match`, and `derive-types`) also run as behavioral
 suites under `scripts/test-examples.sh`. A few snippets
 below are shortened excerpts of those files, or of the matching sections in
 [TypeScript](typescript.md) and [User Guide](user-guide.md) that exercise the
@@ -216,6 +216,28 @@ intent, enforced). Excerpted from
 [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts); see
 also "Template Literal Types" in [TypeScript](typescript.md).
 
+### 9. Build new types from existing (`Pick`/`Omit`/`Partial`/`Required`)
+
+Idiom: the utility-type family derives a related shape from one source type, so
+each field stays declared in a single place.
+
+`Pick<T, Keys>` keeps only the named fields, `Omit<T, Keys>` drops them,
+`Partial<T>` makes every field optional, and `Required<T>` makes every field
+required. They resolve structurally and work against a named source type, not
+just an inline object, joining the already-supported `Readonly<T>` (see
+"Readonly Fields" in [TypeScript](typescript.md)).
+
+```typescript
+type User = { id: number; name: string; email: string; age: number };
+type Summary = Pick<User, "id" | "name">; // { id: number; name: string }
+type Safe = Omit<User, "email">;          // id, name, age
+type UserPatch = Partial<User>;           // every field optional
+```
+
+See [derive-types.ts](../examples/patterns/derive-types.ts). Intersection (`&`)
+still composes narrower types where a utility does not fit:
+`type WithMeta = Base & { createdAt: string }`.
+
 ## Adapted
 
 These tips map to a different construct, because the canonical TypeScript
@@ -244,16 +266,18 @@ of [TypeScript](typescript.md).
 
 ### 4. Derive types from values
 
-Idiom: `typeof`-type extraction is unsupported, so the type alias is the single
-source of truth; a `const` binding keeps its literal type from the annotation
-without `as const`.
+Idiom: `typeof`-type extraction is left out by design, so the type alias is the
+declared contract the value is checked against; a `const` binding keeps its
+literal type from the annotation without `as const`.
 
 In plain TypeScript you can write `type Config = typeof config` to derive a type
-from a value. That direction is not available here. Instead the alias is
-declared first and the value is checked against it, which keeps one source of
-truth (the alias) rather than two that can drift. The same
+from a value. That direction is not available here, and its absence is the
+point: the alias is declared first and the value is checked against it, so the
+type stays an independent contract. A type derived from the value it describes
+would have nothing left to check. The same
 [annotate-not-assert.ts](../examples/patterns/annotate-not-assert.ts) example
-shows the declared-alias form. The reverse derivation is listed under Gaps.
+shows the declared-alias form, and the rationale is under Deliberately Absent
+below.
 
 ### 6. Exhaustive checks with `never`
 
@@ -302,21 +326,6 @@ rather than by flag. See [Sound Mode](sound-mode.md) and
 [Canonical Profile](canonical-profile.md). The canon's "turn on every strict
 option" reduces to "the strict options are the only options."
 
-## Not Supported
-
-### 9. Build new types from existing (`Pick`/`Omit`/`Partial`)
-
-Idiom: the `Pick`/`Omit`/`Partial`/`Required` utility-type family is not
-implemented. The only built-in mapped utility is `Readonly<T>` (see "Readonly
-Fields" in [TypeScript](typescript.md)). To build a related type, write the
-explicit alias and compose with intersection (`&`).
-
-Where plain TypeScript writes `type Summary = Pick<User, "id" | "name">`, a
-zigts author declares `type Summary = { id: number; name: string }`. It is more
-typing and the two can drift, which is the tradeoff. Intersection composes
-narrower types: `type WithMeta = Base & { createdAt: string }`. This gap is the
-first candidate in the section below.
-
 ## Type-Safe Is Not Runtime-Safe (Tip 15)
 
 The closing tip of the canon is the thesis of this whole runtime, so it gets
@@ -331,25 +340,23 @@ verifies. See [Restrictions to Proofs](restrictions-to-proofs.md) for the
 cut-to-proof table and the proof-receipt section of
 [User Guide](user-guide.md) for the signed receipts.
 
-## Gaps Worth Revisiting
+## Deliberately Absent
 
-These are candidates, not committed work. Each notes what it would buy a zigts
-author and the current workaround. No implementation is proposed.
+Two constructs a TypeScript author might reach for are missing, and both
+absences are choices rather than unfinished work. They are listed here so the
+omission reads as deliberate.
 
-The `Pick`/`Omit`/`Partial`/`Required` utility family would let an author derive
-a related shape from one source type instead of maintaining a second hand-written
-alias that can drift. The current workaround is an explicit alias plus
-intersection (`&`), which is the only composition available beyond the built-in
-`Readonly<T>`.
+`typeof`-type extraction (`type Config = typeof config`) derives a type from a
+value. That inverts the relationship the rest of this runtime depends on: a type
+is the independent contract a value is checked against, and a contract derived
+from the value it describes cannot be violated by that value. The declared-alias
+direction (tip 4) keeps the type as the spec and the value as the thing measured
+against it, which is the whole point of a checker.
 
-`typeof`-type extraction (`type Config = typeof config`) would let the value be
-the single source of truth and the type follow from it, which is the natural
-direction for configuration objects. Today the direction is reversed: the alias
-is declared first and the value is checked against it (tip 4).
-
-A proof-friendly `satisfies` would restore the canon's "check conformance
-without widening" in one expression, instead of requiring a separate annotated
-binding. The current workaround, an annotated `const`, already gives the
-checking and the narrow type (tip 3); the gap is purely ergonomic, and any
-revisit would have to keep the assertion-free property that made `as` and
-`satisfies` rejectable in the first place.
+An assertion-form `satisfies` is the operator the subset removed on purpose. `as`
+and `satisfies` are both assertions, and rejecting them is what lets an
+annotated `const` stand as the single source of truth (tip 3). A `satisfies`
+that checks without widening would hand back the narrower-than-declared shape:
+the second, drifting type the rejection was meant to eliminate. The ergonomic
+saving is real and small; the assertion-free guarantee is the larger thing, and
+not worth trading for it.
