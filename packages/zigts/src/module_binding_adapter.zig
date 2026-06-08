@@ -90,6 +90,7 @@ fn adaptFunctionBinding(
         .returns = @enumFromInt(@intFromEnum(binding.returns)),
         .param_types = &param_types,
         .traceable = binding.traceable,
+        .replay_pure = binding.replay_pure,
         .contract_extractions = &contract_extractions,
         .contract_flags = .{
             .sets_scope_used = binding.contract_flags.sets_scope_used,

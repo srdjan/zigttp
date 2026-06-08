@@ -1386,6 +1386,16 @@ pub const FunctionBinding = struct {
     /// false for setup-only functions (schemaCompile, schemaDrop, sql register).
     traceable: bool = true,
 
+    /// Whether this function is safe to execute live during replay/`serve --test`
+    /// when no recorded I/O entry matches: its result must depend only on its
+    /// arguments and in-process setup (e.g. a compiled schema), with no read of
+    /// host/external or non-deterministic state. This is a stronger property
+    /// than `Law.pure` (which is algebraic - `env()` is `.pure` yet reads the
+    /// host environment), so it is an explicit, audited opt-in rather than
+    /// inferred. Default false: a replay-stubbed function returns the recorded
+    /// result or `undefined`.
+    replay_pure: bool = false,
+
     /// Contract extraction rules for this function's arguments.
     contract_extractions: []const ContractExtraction = &.{},
 

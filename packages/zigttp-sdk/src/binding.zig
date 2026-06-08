@@ -163,6 +163,11 @@ pub const FunctionBinding = struct {
     returns: ReturnKind = .unknown,
     param_types: []const ReturnKind = &.{},
     traceable: bool = true,
+    /// Safe to execute live during replay/`serve --test` when no recorded I/O
+    /// entry matches: result depends only on arguments and in-process setup,
+    /// with no host/external or non-deterministic read. Explicit, audited
+    /// opt-in (stronger than `Law.pure`); default false keeps it replay-stubbed.
+    replay_pure: bool = false,
     contract_extractions: []const ContractExtraction = &.{},
     contract_flags: ContractFlags = .{},
     return_labels: LabelSet = .{},

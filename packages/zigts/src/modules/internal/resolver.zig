@@ -156,18 +156,14 @@ fn shouldWrapExport(comptime binding: mb.ModuleBinding, comptime func_binding: m
 
 /// A function is replay-pure when running it live during replay is hermetic:
 /// its result depends only on its arguments (and in-process setup like a
-/// compiled schema). `Law.pure` alone is NOT sufficient - it is the algebraic
-/// property "adjacent equal calls collapse", which `env()` satisfies even
-/// though it reads the host environment and returns secret-labeled data. So a
-/// function that returns host-sourced sensitive data (a `secret` or
-/// `credential` return label) is excluded: passing it through would leak host
-/// state into the response and break replay reproducibility across machines.
+/// compiled schema), with no read of host/external or non-deterministic state.
+/// This is an explicit, audited opt-in (`FunctionBinding.replay_pure`), NOT
+/// inferred from `Law.pure` - the latter is the algebraic "adjacent equal calls
+/// collapse" property, which `env()` satisfies while reading the host
+/// environment. Default false keeps a function replay-stubbed (recorded result
+/// or `undefined`).
 fn isReplayPure(comptime func_binding: mb.FunctionBinding) bool {
-    if (func_binding.return_labels.secret or func_binding.return_labels.credential) return false;
-    inline for (func_binding.laws) |law| {
-        if (std.meta.activeTag(law) == .pure) return true;
-    }
-    return false;
+    return func_binding.replay_pure;
 }
 
 fn isFetchExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) bool {

@@ -21,6 +21,7 @@ pub const binding = sdk.ModuleBinding{
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
             .laws = &.{.pure},
+            .replay_pure = true,
         },
         .{
             .name = "validateObject",
@@ -32,6 +33,7 @@ pub const binding = sdk.ModuleBinding{
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
             .laws = &.{.pure},
+            .replay_pure = true,
         },
         .{
             .name = "coerceJson",
@@ -43,6 +45,7 @@ pub const binding = sdk.ModuleBinding{
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
             .laws = &.{.pure},
+            .replay_pure = true,
         },
         .{ .name = "schemaDrop", .module_func = schemaDropImpl, .arg_count = 1, .returns = .boolean, .param_types = &.{.string}, .traceable = false },
     },

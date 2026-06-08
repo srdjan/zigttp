@@ -11,6 +11,7 @@ const context = @import("context.zig");
 const type_env_mod = @import("type_env.zig");
 const type_checker_mod = @import("type_checker.zig");
 const type_pool_mod = @import("type_pool.zig");
+const match_analysis_mod = @import("match_analysis.zig");
 const bool_checker = @import("bool_checker.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 
@@ -1193,12 +1194,7 @@ pub const StrictChecker = struct {
     }
 
     fn matchHasDefault(self: *const StrictChecker, match: ir.Node.MatchExpr) bool {
-        for (0..match.arms_count) |i| {
-            const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
-            const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-            if (arm.pattern == null_node) return true;
-        }
-        return false;
+        return match_analysis_mod.hasDefaultArm(self.ir_view, match);
     }
 
     fn isStaticComputedKey(self: *const StrictChecker, node: NodeIndex) bool {

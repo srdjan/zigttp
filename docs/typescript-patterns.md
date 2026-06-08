@@ -263,12 +263,12 @@ trick is unnecessary.
 In plain TypeScript the standard exhaustiveness guard is a `default` branch that
 assigns the discriminant to a `never`-typed parameter (`assertNever(x: never)`),
 which stops compiling when a new variant is added. zigts checks `match`
-exhaustiveness directly: a `default` / `when _:` catch-all proves the match
-exhaustive for any discriminant, and when the discriminant's type is known (a
-local binding) full variant coverage is proven without a catch-all. For a
-`match` over a function parameter, carry a `default` arm - the analyzer credits
-the catch-all even though it does not yet resolve the parameter's declared type.
-So the `never`-parameter helper buys nothing here. The companion
+exhaustiveness directly, and the canonical profile requires every `match` to
+carry a `default` / `when _:` catch-all arm so the unexpected case is always
+handled. Full variant coverage satisfies the type-level exhaustiveness check but
+does not lift that requirement - it applies to a local discriminant just as much
+as a parameter. So the rule is simple: give every `match` a `default` arm, and
+the `never`-parameter helper buys nothing. The companion
 [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts)
 dispatches on a parameter, carries a `default` arm, and checks with every
 property proven and no warnings.

@@ -9,6 +9,19 @@ const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
 const null_type_idx = type_pool_mod.null_type_idx;
 
+/// True when the match has a catch-all (`default:` / `when _:`) arm, which the
+/// parser records with a null pattern. A catch-all handles every residual case,
+/// so its presence alone makes the match exhaustive. Single owner of the rule,
+/// shared by the type checker, handler verifier, and strict checker.
+pub fn hasDefaultArm(ir_view: IrView, me: ir.Node.MatchExpr) bool {
+    for (0..me.arms_count) |i| {
+        const arm_idx = ir_view.getListIndex(me.arms_start, @intCast(i));
+        const arm = ir_view.getMatchArm(arm_idx) orelse continue;
+        if (arm.pattern == null_node) return true;
+    }
+    return false;
+}
+
 pub const MatchAnalysis = struct {
     allocator: std.mem.Allocator,
     ir_view: IrView,
@@ -40,11 +53,7 @@ pub const MatchAnalysis = struct {
     pub fn isMatchExhaustive(self: *const MatchAnalysis, discriminant_type: TypeIndex, me: ir.Node.MatchExpr) bool {
         if (discriminant_type == null_type_idx) return false;
 
-        for (0..me.arms_count) |i| {
-            const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
-            const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-            if (arm.pattern == null_node) return true;
-        }
+        if (hasDefaultArm(self.ir_view, me)) return true;
 
         var variants = std.ArrayList(TypeIndex).empty;
         defer variants.deinit(self.allocator);

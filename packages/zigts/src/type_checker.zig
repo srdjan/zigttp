@@ -1634,25 +1634,13 @@ pub const TypeChecker = struct {
         return analysis.narrowTypeForPattern(union_type, pattern);
     }
 
-    /// True when the match has a catch-all (`default:` / `when _:`) arm, which
-    /// the parser records with a null pattern. A catch-all handles every
-    /// residual case, so its presence proves exhaustiveness on its own.
-    fn matchHasDefaultArm(self: *const TypeChecker, me: ir.Node.MatchExpr) bool {
-        for (0..me.arms_count) |i| {
-            const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
-            const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-            if (arm.pattern == ir.null_node) return true;
-        }
-        return false;
-    }
-
     fn isMatchExhaustive(self: *const TypeChecker, me: ir.Node.MatchExpr) bool {
         // A catch-all arm makes the match exhaustive by construction, regardless
         // of whether inferType could resolve the discriminant type. inferType
         // does not resolve a plain function parameter's declared type, so
         // checking this first avoids a spurious non-exhaustive warning on the
         // common `match (param) { ... default: ... }` idiom.
-        if (self.matchHasDefaultArm(me)) return true;
+        if (match_analysis_mod.hasDefaultArm(self.ir_view, me)) return true;
         const disc_type = self.inferType(me.discriminant);
         if (disc_type == null_type_idx) return false;
         const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool);
@@ -2097,13 +2085,15 @@ test "TypeChecker: param-discriminant match with default arm is exhaustive (no w
 }
 
 test "TypeChecker: param-discriminant match without a default warns (Option B gap)" {
-    // Characterizes the current limitation: inferType does not resolve a plain
-    // parameter's declared type, so a no-default match over a parameter cannot
-    // run variant-coverage analysis and warns even when EVERY variant is
-    // covered (full coverage below, no default). The default-arm fix above does
-    // not change this - it only credits a catch-all; resolving the parameter
-    // type (Option B) would flip this to 0 warnings. Until then, a parameter
-    // discriminant needs a `default:` arm to prove exhaustive.
+    // Characterizes the type-level limitation: inferType does not resolve a
+    // plain parameter's declared type, so a no-default match over a parameter
+    // cannot run variant-coverage analysis and warns even when EVERY variant is
+    // covered (full coverage below, no default). This warning is advisory and
+    // moot in practice: the canonical profile (strict_checker) separately
+    // requires a `default` arm on EVERY match, so a no-default match is a hard
+    // error regardless of the discriminant. The rule is just: add a `default`
+    // arm. Resolving the parameter type would only silence this redundant
+    // warning, not change what compiles.
     try checkTypedSource(
         \\type C = { kind: "echo", text: string } | { kind: "ping", text: string };
         \\function run(c: C): string {

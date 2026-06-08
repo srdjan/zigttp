@@ -1067,11 +1067,7 @@ pub const HandlerVerifier = struct {
     }
 
     fn isMatchExhaustive(self: *const HandlerVerifier, me: ir.Node.MatchExpr) bool {
-        for (0..me.arms_count) |i| {
-            const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
-            const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-            if (arm.pattern == null_node) return true;
-        }
+        if (match_analysis_mod.hasDefaultArm(self.ir_view, me)) return true;
 
         const disc_type = self.resolveMatchDiscriminantType(me.discriminant);
         if (disc_type == null_type_idx) return false;
