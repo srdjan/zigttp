@@ -1,0 +1,35 @@
+{"type":"test","name":"GET /forecast parses Open-Meteo JSON for the requested coordinates"}
+{"type":"request","method":"GET","url":"/forecast?latitude=48.85&longitude=2.35","headers":{},"body":null}
+{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":[],"result":{"status":200,"statusText":"OK","headers":{"content-type":"application/json"},"body":"{\"latitude\":48.85,\"longitude\":2.35,\"timezone\":\"Europe/Paris\",\"current_units\":{\"temperature_2m\":\"C\",\"relative_humidity_2m\":\"%\",\"wind_speed_10m\":\"km/h\",\"is_day\":\"\"},\"current\":{\"time\":\"2026-06-08T19:30\",\"temperature_2m\":17.4,\"relative_humidity_2m\":68,\"wind_speed_10m\":12.3,\"is_day\":1}}"}}
+{"type":"expect","status":200,"bodyContains":"Weather Forecast"}
+
+{"type":"test","name":"GET /forecast surfaces the parsed timezone for the coordinates"}
+{"type":"request","method":"GET","url":"/forecast?latitude=48.85&longitude=2.35","headers":{},"body":null}
+{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":[],"result":{"status":200,"statusText":"OK","headers":{"content-type":"application/json"},"body":"{\"latitude\":48.85,\"longitude\":2.35,\"timezone\":\"Europe/Paris\",\"current_units\":{\"temperature_2m\":\"C\",\"relative_humidity_2m\":\"%\",\"wind_speed_10m\":\"km/h\",\"is_day\":\"\"},\"current\":{\"time\":\"2026-06-08T19:30\",\"temperature_2m\":17.4,\"relative_humidity_2m\":68,\"wind_speed_10m\":12.3,\"is_day\":1}}"}}
+{"type":"expect","status":200,"bodyContains":"Europe/Paris"}
+
+{"type":"test","name":"GET /forecast reports upstream failure as 502"}
+{"type":"request","method":"GET","url":"/forecast?latitude=48.85&longitude=2.35","headers":{},"body":null}
+{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":[],"result":{"status":503,"statusText":"Service Unavailable","headers":{"content-type":"application/json"},"body":"{\"reason\":\"maintenance\"}"}}
+{"type":"expect","status":502,"bodyContains":"weather_unavailable"}
+
+{"type":"test","name":"GET /forecast without coordinates is rejected before any egress"}
+{"type":"request","method":"GET","url":"/forecast","headers":{},"body":null}
+{"type":"expect","status":400,"bodyContains":"missing_coordinates"}
+
+{"type":"test","name":"GET / serves the frontend UI without any egress"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"Get Weather"}
+
+{"type":"test","name":"POST /forecast is rejected before any egress"}
+{"type":"request","method":"POST","url":"/forecast","headers":{},"body":null}
+{"type":"expect","status":405,"bodyContains":"method_not_allowed"}
+
+{"type":"test","name":"GET /unknown returns 404 without fetching"}
+{"type":"request","method":"GET","url":"/unknown","headers":{},"body":null}
+{"type":"expect","status":404,"bodyContains":"not_found"}
+
+{"type":"test","name":"malformed upstream JSON still returns the open-meteo envelope"}
+{"type":"request","method":"GET","url":"/forecast?latitude=48.85&longitude=2.35","headers":{},"body":null}
+{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":[],"result":{"status":200,"statusText":"OK","headers":{"content-type":"application/json"},"body":"not json{"}}
+{"type":"expect","status":200,"bodyContains":"open-meteo"}
