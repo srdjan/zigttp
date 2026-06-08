@@ -463,3 +463,56 @@ test "witness round-trip: solved witness replays into an executable leak" {
     );
     try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
 }
+
+// Build a replay runtime, install a single recorded crypto.sha256 entry, run a
+// handler that hashes `live_arg`, and return the resulting divergence count.
+fn replaySha256ArgDivergences(allocator: std.mem.Allocator, comptime live_arg: []const u8) !u32 {
+    const handler_code =
+        "import { sha256 } from \"zigttp:crypto\";\n" ++
+        "function handler(req) {\n" ++
+        "  return Response.json({ h: sha256(\"" ++ live_arg ++ "\") });\n" ++
+        "}\n";
+
+    const rt = try Runtime.init(allocator, .{ .replay_file_path = "argcheck-test" });
+    defer rt.deinit();
+
+    // Recording captured the call with the argument "AAA".
+    const io_calls = [_]trace.IoEntry{
+        .{ .seq = 0, .module = "crypto", .func = "sha256", .args_json = "[\"AAA\"]", .result_json = "\"deadbeef\"" },
+    };
+    var replay_state = trace.ReplayState{ .io_calls = &io_calls, .cursor = 0, .divergences = 0 };
+    rt.ctx.setModuleState(
+        trace.REPLAY_STATE_SLOT,
+        @ptrCast(&replay_state),
+        &trace.ReplayState.deinitOpaque,
+    );
+    defer rt.ctx.module_state[trace.REPLAY_STATE_SLOT] = null;
+
+    try rt.loadCode(handler_code, "<argcheck>");
+
+    var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    const request = HttpRequestView{ .method = "GET", .url = "/", .headers = headers, .body = null };
+
+    var response = try rt.executeHandler(request);
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    return replay_state.divergences;
+}
+
+test "replay flags an argument change at the matched path (#5)" {
+    // The recording captured sha256("AAA"); the replayed handler calls
+    // sha256("BBB"). The stub still matches on module+func and returns the
+    // recorded result, but the matched-path arg check must count a divergence so
+    // replay verification fails closed on the behavior change.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect(try replaySha256ArgDivergences(arena.allocator(), "BBB") > 0);
+}
+
+test "replay does not flag matching arguments (#5 control)" {
+    // Same recording, handler calls sha256 with the recorded "AAA": no drift.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqual(@as(u32, 0), try replaySha256ArgDivergences(arena.allocator(), "AAA"));
+}
