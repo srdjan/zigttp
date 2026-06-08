@@ -1,0 +1,7 @@
+{"type":"test","name":"literal union method and template-literal route"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"method\":\"GET\""}
+
+{"type":"test","name":"template literal route under /api/"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"route\":\"/api/health\""}

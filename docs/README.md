@@ -24,6 +24,8 @@ path.
 - [Verification](verification.md) - compile-time handler checks.
 - [TypeScript](typescript.md) - type stripping, type checking, TSX, and
   `comptime()`.
+- [TypeScript Patterns](typescript-patterns.md) - the "TypeScript Tips Everyone
+  Should Know" canon mapped onto the zigts subset.
 - [Feature Detection](feature-detection.md) - allowed and rejected language
   features.
 - [Restrictions to Proofs](restrictions-to-proofs.md) - why each language cut

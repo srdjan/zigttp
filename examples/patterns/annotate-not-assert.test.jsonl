@@ -1,0 +1,7 @@
+{"type":"test","name":"annotated const config conforms without as/satisfies"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"port\":8080"}
+
+{"type":"test","name":"declared alias is the source of truth"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"version\":\"1.0\""}

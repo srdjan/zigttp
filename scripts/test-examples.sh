@@ -72,6 +72,12 @@ run_tests "examples/routing/router.ts"         "examples/routing/router.test.jso
 run_tests "examples/routing/guard-compose.ts"  "examples/routing/guard-compose.test.jsonl"
 run_tests "examples/routing/match-handler.ts"  "examples/routing/match-handler.test.jsonl"
 
+# patterns/
+run_tests "examples/patterns/literal-types-no-enum.ts"     "examples/patterns/literal-types-no-enum.test.jsonl"
+run_tests "examples/patterns/annotate-not-assert.ts"       "examples/patterns/annotate-not-assert.test.jsonl"
+run_tests "examples/patterns/validate-external.ts"         "examples/patterns/validate-external.test.jsonl"
+run_tests "examples/patterns/discriminated-union-match.ts" "examples/patterns/discriminated-union-match.test.jsonl"
+
 echo ""
 echo "====================="
 echo "Suites: $((PASS + FAIL)) total, $PASS passed, $FAIL failed"

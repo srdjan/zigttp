@@ -8,6 +8,9 @@ must use compiler-visible literal keys, dynamic computed property access
 is rejected unless the key is a literal or const literal alias, and a
 `let` binding is only allowed when the binding is actually reassigned.
 
+See also [TypeScript Patterns](typescript-patterns.md), which maps the common
+TypeScript-tips canon onto this subset.
+
 ---
 
 ## Type Stripper
