@@ -25,6 +25,7 @@ const HttpResponse = @import("http_types.zig").HttpResponse;
 const ServerConfig = @import("server.zig").ServerConfig;
 const handler_loader = @import("handler_loader.zig");
 const runtime_natives = @import("runtime_natives.zig");
+const http_parser = @import("http_parser.zig");
 
 const trace = zq.trace;
 const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
@@ -178,7 +179,17 @@ fn runOneTest(
     // without this split a url like "/?probe=1" would make req.path "/?probe=1"
     // and break handlers that check req.path === "/". Keep .url as the full
     // target and set .path via the same helper the real server path uses.
-    const request_path = runtime_natives.splitPathAndQuery(request.url).path;
+    const split = runtime_natives.splitPathAndQuery(request.url);
+    const request_path = split.path;
+
+    // Parse the query string into params so req.query is populated, exactly as
+    // the live server does (server.zig). Without this, a handler that reads
+    // req.query.* would see an empty object under `serve --test` even though the
+    // request URL carried query params.
+    const qr = http_parser.parseQueryString(allocator, split.query_string, http_parser.DEFAULT_MAX_QUERY_LENGTH) catch
+        http_parser.QueryParseResult{ .storage = null, .params = &.{}, .decoded_storage = null };
+    defer if (qr.storage) |s| allocator.free(s);
+    defer if (qr.decoded_storage) |s| allocator.free(s);
 
     // Unescape the request body (shared with the replay runner) so a JSONL body
     // like "{\"title\":\"x\"}" reaches the handler as real JSON rather than the
@@ -190,6 +201,7 @@ fn runOneTest(
         .method = request.method,
         .url = request.url,
         .path = request_path,
+        .query_params = qr.params,
         .headers = headers_list,
         .body = ub.slice,
     }) catch |err| {
@@ -529,6 +541,47 @@ test "runOneTest: request url with query string yields path without query (CLI-1
     };
 
     const result = runOneTest(allocator, config, handler_code, "<scaffold>", &test_case);
+    defer result.deinitFailures(allocator);
+
+    try std.testing.expect(result.err == null);
+    try std.testing.expect(result.pass);
+}
+
+test "runOneTest: req.query is populated from the url query string" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Echo a query param back. Mirrors the weather app, which reads
+    // req.query.latitude/longitude. Without query_params plumbed into the test
+    // request, req.query would be empty and this would 400.
+    const handler_code =
+        \\function handler(req) {
+        \\  const lat = req.query.latitude;
+        \\  if (lat === undefined) {
+        \\    return Response.text("missing", { status: 400 });
+        \\  }
+        \\  return Response.text("lat=" + lat);
+        \\}
+    ;
+
+    const config = RuntimeConfig{
+        .replay_file_path = "test",
+        .enforce_arena_escape = false,
+    };
+
+    const test_case = TestCase{
+        .name = "query echo",
+        .request = .{
+            .method = "GET",
+            .url = "/forecast?latitude=48.85&longitude=2.35",
+            .headers_json = "{}",
+            .body = null,
+        },
+        .assertions = .{ .status = 200, .body_contains = "lat=48.85" },
+    };
+
+    const result = runOneTest(allocator, config, handler_code, "<query>", &test_case);
     defer result.deinitFailures(allocator);
 
     try std.testing.expect(result.err == null);
