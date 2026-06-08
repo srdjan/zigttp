@@ -2830,18 +2830,88 @@ fn parseFetchArgs(rt: *Runtime, pool: *const zq.HiddenClassPool, args: []const z
         break :blk url_str;
     };
 
-    const uri = std.Uri.parse(url) catch {
+    // The base `url` is the compile-time literal (so egress stays provable);
+    // any dynamic `query` object in the init is appended here at runtime.
+    const final_url = switch (try buildFetchUrl(rt, pool, url, init_obj)) {
+        .ok => |u| u,
+        .err => |e| return .{ .err = e },
+    };
+    // From here `final_url` is owned on rt.allocator and the caller frees it.
+    // The local .err returns below must free it explicitly: a union .err is a
+    // normal (non-error) return, so an errdefer would not fire.
+    const uri = std.Uri.parse(final_url) catch {
+        rt.allocator.free(final_url);
         return .{ .err = try createFetchErrorResponse(rt, "InvalidUrl", "url parse failed") };
     };
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
     const host = uri.getHost(&host_buf) catch {
+        rt.allocator.free(final_url);
         return .{ .err = try createFetchErrorResponse(rt, "InvalidUrl", "url host is required") };
     };
     if (outboundHostViolation(rt, host.bytes)) |details| {
+        rt.allocator.free(final_url);
         return .{ .err = try createFetchErrorResponse(rt, "HostNotAllowed", details) };
     }
 
-    return .{ .ok = .{ .url = url, .uri = uri, .init_obj = init_obj } };
+    return .{ .ok = .{ .url = final_url, .uri = uri, .init_obj = init_obj } };
+}
+
+const FetchUrlResult = union(enum) {
+    ok: []const u8,
+    err: zq.JSValue,
+};
+
+/// Build the final fetch URL from the literal base plus an optional dynamic
+/// `query` object on the init. The base URL stays a compile-time literal so
+/// the contract proves the egress host; the query object carries the dynamic,
+/// possibly user-supplied values (e.g. weather coordinates), percent-encoded
+/// here. Mirrors the appendServiceQuery encoding used by zigttp:service.
+///
+/// Returns an owned slice on `rt.allocator` (a copy of the base when there is
+/// no query, for uniform caller ownership), or a JS error response if `query`
+/// is present but not an object / holds an unencodable value.
+fn buildFetchUrl(
+    rt: *Runtime,
+    pool: *const zq.HiddenClassPool,
+    base_url: []const u8,
+    init_obj: ?*zq.JSObject,
+) !FetchUrlResult {
+    const query_obj = blk: {
+        const init = init_obj orelse break :blk null;
+        const query_val = getDynamicProperty(rt.ctx, init, pool, "query") orelse break :blk null;
+        if (query_val.isUndefined() or query_val.isNull()) break :blk null;
+        if (!query_val.isObject()) {
+            return .{ .err = try createFetchErrorResponse(rt, "InvalidQuery", "query must be object<string, string|number|boolean>") };
+        }
+        break :blk query_val.toPtr(zq.JSObject);
+    };
+
+    const q = query_obj orelse return .{ .ok = try rt.allocator.dupe(u8, base_url) };
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(rt.allocator);
+    try buf.appendSlice(rt.allocator, base_url);
+
+    const keys = try q.getOwnEnumerableKeys(rt.allocator, pool);
+    defer rt.allocator.free(keys);
+
+    var wrote_any = std.mem.indexOfScalar(u8, base_url, '?') != null;
+    for (keys) |key_atom| {
+        const key_name = rt.ctx.atoms.getName(key_atom) orelse continue;
+        const item = q.getOwnProperty(pool, key_atom) orelse continue;
+        if (item.isUndefined()) continue;
+
+        try buf.append(rt.allocator, if (wrote_any) '&' else '?');
+        try appendPercentEncoded(rt, &buf, key_name);
+        try buf.append(rt.allocator, '=');
+        if (!try appendEncodedJsValue(rt, &buf, item)) {
+            buf.deinit(rt.allocator);
+            return .{ .err = try createFetchErrorResponse(rt, "InvalidQuery", "query values must be string|number|boolean") };
+        }
+        wrote_any = true;
+    }
+
+    return .{ .ok = try buf.toOwnedSlice(rt.allocator) };
 }
 
 fn parseFetchInitOptions(
@@ -2970,6 +3040,7 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
         .ok => |fa| fa,
         .err => |err_val| return err_val,
     };
+    defer rt.allocator.free(fetch_args.url);
     const uri = fetch_args.uri;
     const init_obj = fetch_args.init_obj;
 
@@ -3089,6 +3160,7 @@ fn collectFetchForParallel(rt: *Runtime, collector: *zq.modules.io.ParallelColle
         .err => |err_val| return err_val,
     };
     const url = fetch_args.url;
+    defer rt.allocator.free(fetch_args.url);
     const init_obj = fetch_args.init_obj;
 
     var options = switch (try parseFetchInitOptions(rt, a, pool, init_obj)) {
@@ -6644,6 +6716,85 @@ test "buildServiceUrl renders service params and query" {
     defer allocator.free(url);
 
     try std.testing.expectEqualStrings("http://users.internal/inspect/42?mode=a%20b", url);
+}
+
+test "buildFetchUrl appends a dynamic query to a literal base and percent-encodes values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const pool = rt.ctx.hidden_class_pool.?;
+
+    // The shape the weather app builds: user-supplied coordinates plus static
+    // request params, all riding in the dynamic `query` object.
+    const query = try rt.ctx.createObject(null);
+    try rt.ctx.setPropertyChecked(query, try rt.ctx.atoms.intern("latitude"), try rt.ctx.createString("40.71"));
+    try rt.ctx.setPropertyChecked(query, try rt.ctx.atoms.intern("longitude"), try rt.ctx.createString("-74.01"));
+    try rt.ctx.setPropertyChecked(query, try rt.ctx.atoms.intern("current"), try rt.ctx.createString("temperature_2m,wind_speed_10m"));
+    try rt.ctx.setPropertyChecked(query, try rt.ctx.atoms.intern("timezone"), try rt.ctx.createString("auto"));
+
+    const init = try rt.ctx.createObject(null);
+    try rt.ctx.setPropertyChecked(init, try rt.ctx.atoms.intern("query"), query.toValue());
+
+    const url = switch (try buildFetchUrl(rt, pool, "https://api.open-meteo.com/v1/forecast", init)) {
+        .ok => |u| u,
+        .err => return error.UnexpectedFetchUrlError,
+    };
+    defer allocator.free(url);
+
+    // Insertion order is preserved; `-` and `.` are unreserved, the comma is encoded.
+    try std.testing.expectEqualStrings(
+        "https://api.open-meteo.com/v1/forecast?latitude=40.71&longitude=-74.01&current=temperature_2m%2Cwind_speed_10m&timezone=auto",
+        url,
+    );
+}
+
+test "buildFetchUrl returns a copy of the literal base when there is no query" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const pool = rt.ctx.hidden_class_pool.?;
+
+    // An init object with only non-query fields leaves the URL untouched.
+    const init = try rt.ctx.createObject(null);
+    try rt.ctx.setPropertyChecked(init, try rt.ctx.atoms.intern("method"), try rt.ctx.createString("GET"));
+
+    const url = switch (try buildFetchUrl(rt, pool, "https://api.open-meteo.com/v1/forecast", init)) {
+        .ok => |u| u,
+        .err => return error.UnexpectedFetchUrlError,
+    };
+    defer allocator.free(url);
+
+    try std.testing.expectEqualStrings("https://api.open-meteo.com/v1/forecast", url);
+}
+
+test "buildFetchUrl uses & when the literal base already has a query string" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const pool = rt.ctx.hidden_class_pool.?;
+
+    const query = try rt.ctx.createObject(null);
+    try rt.ctx.setPropertyChecked(query, try rt.ctx.atoms.intern("latitude"), try rt.ctx.createString("1.5"));
+
+    const init = try rt.ctx.createObject(null);
+    try rt.ctx.setPropertyChecked(init, try rt.ctx.atoms.intern("query"), query.toValue());
+
+    const url = switch (try buildFetchUrl(rt, pool, "https://api.example.com/v1?format=json", init)) {
+        .ok => |u| u,
+        .err => return error.UnexpectedFetchUrlError,
+    };
+    defer allocator.free(url);
+
+    try std.testing.expectEqualStrings("https://api.example.com/v1?format=json&latitude=1.5", url);
 }
 
 test "fetchSync enforces response byte limits" {
