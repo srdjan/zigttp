@@ -343,12 +343,13 @@ fn parseSchemaType(s: []const u8) ?SchemaType {
 }
 
 fn jsonToU32(v: std.json.Value) ?u32 {
+    const max: f64 = @floatFromInt(std.math.maxInt(u32));
     return switch (v) {
-        .integer => |i| if (i >= 0) @intCast(i) else null,
-        .float => |f| blk: {
-            const i: i64 = @intFromFloat(f);
-            break :blk if (i >= 0) @intCast(i) else null;
-        },
+        .integer => |i| if (i >= 0 and i <= std.math.maxInt(u32)) @intCast(i) else null,
+        // Guard finiteness and range before the cast: a schema number like
+        // 5e9 or 1e400 (NaN/Inf) would otherwise make @intFromFloat illegal
+        // behaviour rather than a rejected constraint.
+        .float => |f| if (std.math.isFinite(f) and f >= 0 and f <= max) @intFromFloat(@trunc(f)) else null,
         else => null,
     };
 }
@@ -576,7 +577,11 @@ fn validateRecursive(
 }
 
 fn isWholeNumber(f: f64) bool {
-    return f == @as(f64, @floatFromInt(@as(i64, @intFromFloat(f))));
+    // A finite number with no fractional part is integer-valued. Compare against
+    // @trunc directly rather than round-tripping through i64: a JSON integer can
+    // exceed i64 range (e.g. 1e308 from an untrusted request body), and the old
+    // `@intFromFloat` round-trip was illegal behaviour for such inputs.
+    return std.math.isFinite(f) and @trunc(f) == f;
 }
 
 fn buildPath(allocator: std.mem.Allocator, prefix: []const u8, field: []const u8) ![]const u8 {
@@ -760,6 +765,26 @@ test "parseNumberString" {
     try std.testing.expect(parseNumberString("42").getInt() == 42);
     try std.testing.expect(parseNumberString("3.14").isNumber());
     try std.testing.expect(parseNumberString("not a number").isUndefined());
+}
+
+test "isWholeNumber: out-of-i64-range value does not panic" {
+    // An untrusted request body number for an `integer`-typed field. The old
+    // round-trip through i64 was illegal behaviour for these magnitudes.
+    try std.testing.expect(isWholeNumber(1e308));
+    try std.testing.expect(isWholeNumber(-1e308));
+    try std.testing.expect(isWholeNumber(42.0));
+    try std.testing.expect(!isWholeNumber(2.5));
+    try std.testing.expect(!isWholeNumber(std.math.nan(f64)));
+    try std.testing.expect(!isWholeNumber(std.math.inf(f64)));
+}
+
+test "jsonToU32: large and non-finite values reject instead of panicking" {
+    try std.testing.expectEqual(@as(?u32, 42), jsonToU32(.{ .integer = 42 }));
+    try std.testing.expectEqual(@as(?u32, null), jsonToU32(.{ .integer = 5_000_000_000 }));
+    try std.testing.expectEqual(@as(?u32, null), jsonToU32(.{ .integer = -1 }));
+    try std.testing.expectEqual(@as(?u32, 7), jsonToU32(.{ .float = 7.0 }));
+    try std.testing.expectEqual(@as(?u32, null), jsonToU32(.{ .float = 1e400 }));
+    try std.testing.expectEqual(@as(?u32, null), jsonToU32(.{ .float = 5e9 }));
 }
 
 test "parseSchemaType" {

@@ -21,8 +21,9 @@ pub inline fn modValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
 /// ECMAScript ToInt32 on a raw f64. Reduces modulo 2^32 *before* the integer
 /// cast, so it is total over every finite input - the naive
 /// `@intFromFloat(@trunc(f))` is illegal behavior (panic in safe builds, UB in
-/// ReleaseFast) for `|f| >= 2^63`, e.g. `1e30 | 0`.
-inline fn floatToInt32(f: f64) i32 {
+/// ReleaseFast) for `|f| >= 2^63`, e.g. `1e30 | 0`. Shared with the comptime
+/// evaluator so compile-time and run-time bitwise ops agree.
+pub inline fn floatToInt32(f: f64) i32 {
     if (!std.math.isFinite(f)) return 0;
     const t = @trunc(f);
     const m = @mod(t, 4294967296.0); // in [0, 2^32)

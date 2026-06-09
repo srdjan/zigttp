@@ -221,6 +221,11 @@ pub export fn jitGetFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_
 
 /// JIT helper: put_field_ic using the interpreter's PIC cache.
 pub export fn jitPutFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_idx: u16, val: value.JSValue, cache_idx: u16) value.JSValue {
+    // A compiled frame keeps running tail opcodes after a faulting call; refuse
+    // the store while a fault is pending so the exception sentinel never lands
+    // in a field of a module-scope object that outlives the request (see
+    // Context.jitPutGlobal).
+    if (ctx.hasException()) return value.JSValue.exception_val;
     const interp = interpreter.current_interpreter orelse {
         ctx.throwException(value.JSValue.exception_val);
         return value.JSValue.exception_val;

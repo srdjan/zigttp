@@ -58,7 +58,33 @@ pub const Config = struct {
     /// `onMessage(ws, data)` to JS. When null the loop behaves as a pure
     /// codec echo (unit tests, degraded mode).
     handler_pool: ?*HandlerPool = null,
+    /// Live-reload contract lock (server-owned, stable for the server
+    /// lifetime). Held shared around each JS dispatch so a `--watch` swap's
+    /// exclusive `updateContract` drains in-flight `onMessage`/`onOpen`/
+    /// `onClose` runs before the generation-retirement frees the dev
+    /// capability policy those runtimes borrow. Mirrors the HTTP request
+    /// path's guard. Null outside dev/watch.
+    contract_lock: ?*engine.RwLock = null,
+    /// Pointer to the server's `reload_active` flag; the shared lock is taken
+    /// only while it is set, matching the HTTP path's per-request gate.
+    reload_active: ?*const bool = null,
 };
+
+/// Take the contract lock shared when live reload is active. Returns whether
+/// the lock was taken so the matching release can be a no-op otherwise.
+fn lockReloadShared(cfg: Config) bool {
+    const active = if (cfg.reload_active) |ra| ra.* else false;
+    if (active) {
+        if (cfg.contract_lock) |cl| cl.lockShared();
+    }
+    return active;
+}
+
+fn unlockReloadShared(cfg: Config, locked: bool) void {
+    if (locked) {
+        if (cfg.contract_lock) |cl| cl.unlockShared();
+    }
+}
 
 /// Run the frame loop until the connection closes. Owns the fd: on
 /// return, the fd is closed and the pool entry for `id` is removed.
@@ -84,6 +110,8 @@ pub fn run(cfg: Config) void {
     // from onOpen still keeps the socket usable for subsequent messages.
     if (cfg.handler_pool) |hp| {
         if (cfg.pool.snapshot(cfg.id)) |snap| {
+            const locked = lockReloadShared(cfg);
+            defer unlockReloadShared(cfg, locked);
             dispatchOnOpen(hp, cfg.pool, cfg.id, snap.room) catch |err| {
                 std.log.warn("ws onOpen dispatch failed (id={d}): {}", .{ cfg.id, err });
             };
@@ -92,6 +120,8 @@ pub fn run(cfg: Config) void {
 
     defer {
         if (cfg.handler_pool) |hp| {
+            const locked = lockReloadShared(cfg);
+            defer unlockReloadShared(cfg, locked);
             dispatchOnClose(hp, cfg.pool, cfg.id, close_metadata.code, close_metadata.reason) catch |err| {
                 std.log.warn("ws onClose dispatch failed (id={d}): {}", .{ cfg.id, err });
             };
@@ -152,6 +182,12 @@ pub fn run(cfg: Config) void {
                         defer cfg.alloc.free(response_bytes);
                         ws.writeMessage(response_bytes, msg.opcode) catch return;
                     } else {
+                        // Hold the contract lock shared across the JS dispatch so
+                        // a concurrent live-reload swap drains this in-flight
+                        // onMessage before retiring the dev policy its runtime
+                        // borrows (mirrors the HTTP request path).
+                        const locked = lockReloadShared(cfg);
+                        defer unlockReloadShared(cfg, locked);
                         dispatchOnMessage(pool, cfg.pool, cfg.id, msg.data) catch |err| {
                             std.log.warn("ws onMessage dispatch failed (id={d}): {}", .{ cfg.id, err });
                         };

@@ -869,6 +869,11 @@ const ConnectionPool = struct {
             .alloc = self.server.allocator,
             .echo = handler_pool_ptr == null,
             .handler_pool = handler_pool_ptr,
+            // Let WS dispatches participate in the live-reload drain so a swap's
+            // generation-retirement cannot free a dev policy an in-flight
+            // onMessage still borrows (SR1).
+            .contract_lock = &self.server.contract_lock,
+            .reload_active = &self.server.reload_active,
         };
         const thread = try std.Thread.spawn(.{}, ws_frame_loop.run, .{cfg});
         thread.detach();
@@ -1350,7 +1355,9 @@ pub const Server = struct {
         self.clearAttestation();
 
         const p = self.contract.?.properties();
-        if (p.pure or (p.deterministic and p.read_only)) {
+        if ((p.pure or (p.deterministic and p.read_only)) and
+            !self.contract.?.view().reads_request_state)
+        {
             self.proof_cache = proof_adapter.ProofCache.init(
                 self.allocator,
                 p,
@@ -1358,6 +1365,29 @@ pub const Server = struct {
             );
         }
 
+        _ = self.applyPoolingPolicy();
+    }
+
+    /// Invalidate the proof cache and route pre-filter after a handler swap that
+    /// produced NO new contract (no contract extracted, contract-diff or
+    /// upgrade-analysis failure, or a plain non-prove `--watch`). Without this,
+    /// the proof cache keeps serving the previous handler's responses (up to
+    /// TTL) and the route pre-filter keeps matching the old contract, 404-ing
+    /// the new handler's routes. Drops the stale contract so matchesRoute passes
+    /// everything (the handler itself decides) and serves nothing cached.
+    pub fn invalidateContractCaches(self: *Self) void {
+        self.contract_lock.lock();
+        defer self.contract_lock.unlock();
+
+        if (self.contract) |*c| {
+            c.deinit();
+            self.contract = null;
+        }
+        if (self.proof_cache) |*pc| {
+            pc.deinit();
+            self.proof_cache = null;
+        }
+        self.clearAttestation();
         _ = self.applyPoolingPolicy();
     }
 
@@ -1411,6 +1441,22 @@ pub const Server = struct {
         if (claim_hex.len != 64) return false;
         const live_hex = std.fmt.bytesToHex(live, .lower);
         return std.mem.eql(u8, &live_hex, claim_hex);
+    }
+
+    /// True only when the signed `claim_hex` is pinned (64 non-all-zero hex
+    /// chars) AND equals sha256(bytecode). This binds the attestation to the
+    /// bytecode actually loaded into the pool, anchored on the untamperable
+    /// signed claim rather than the contract's self-reported `artifact_sha256`
+    /// field (which a tamperer can zero to slip past the all-zero skip in
+    /// `contract_runtime.validate`). An unpinned claim cannot bind a running
+    /// artifact, so it returns false: attestation is fail-closed.
+    fn bytecodeMatchesClaim(bytecode: []const u8, claim_hex: []const u8) bool {
+        if (claim_hex.len != 64) return false;
+        if (std.mem.allEqual(u8, claim_hex, '0')) return false;
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytecode, &digest, .{});
+        const live_hex = std.fmt.bytesToHex(digest, .lower);
+        return std.ascii.eqlIgnoreCase(&live_hex, claim_hex);
     }
 
     pub fn installDevAttestation(
@@ -1612,16 +1658,24 @@ pub const Server = struct {
             }
         }
 
-        // Initialize proof-driven response cache if handler is deterministic + read_only
+        // Initialize proof-driven response cache if handler is deterministic +
+        // read_only AND its response does not depend on request headers/body.
+        // The cache keys on method+URL only, so a handler that reads request
+        // headers (auth, content-negotiation) is excluded - otherwise one
+        // caller's response would be replayed to every other caller of the URL.
         if (self.contract) |*contract| {
             const p = contract.properties();
             if (p.pure or (p.deterministic and p.read_only)) {
-                self.proof_cache = proof_adapter.ProofCache.init(
-                    self.allocator,
-                    p,
-                    .{},
-                );
-                std.log.info("   Proof cache: enabled (handler proven deterministic + read_only)", .{});
+                if (contract.view().reads_request_state) {
+                    std.log.info("   Proof cache: disabled (handler reads request headers/body; method+URL key would be unsound)", .{});
+                } else {
+                    self.proof_cache = proof_adapter.ProofCache.init(
+                        self.allocator,
+                        p,
+                        .{},
+                    );
+                    std.log.info("   Proof cache: enabled (handler proven deterministic + read_only + input-independent)", .{});
+                }
             }
         }
 
@@ -1630,58 +1684,77 @@ pub const Server = struct {
         // memcpy per header into the response buffer.
         if (self.contract) |*contract| {
             if (self.config.attestation_jws) |jws| {
-                self.attestation_headers = attest_header_strings.build(
-                    self.allocator,
-                    contract.properties(),
-                    jws,
-                ) catch |err| blk: {
-                    std.log.warn("attestation: failed to build response headers: {} (continuing without)", .{err});
-                    break :blk null;
-                };
-                if (self.attestation_headers != null) {
-                    std.log.info("   Attestation: response headers enabled", .{});
-                }
+                // Fail-closed attestation: emit the Zigttp-Proofs / Zigttp-Attest
+                // response headers and the /.well-known doc ONLY after the
+                // embedded JWS is proven to bind to the artifact this server
+                // actually loaded. `attest_envelope.verify` only proves the JWS
+                // was signed - the binding checks below are what tie it to this
+                // run. A tampered binary (swapped bytecode, or a contract.json
+                // that no longer hashes to the signed claim) therefore emits no
+                // attestation at all, so a third-party `zigttp verify` reports it
+                // unattested rather than trusting a signature over different
+                // bytecode. Every failure path leaves attestation cleared.
+                attest: {
+                    const cj = self.config.contract_json orelse {
+                        std.log.warn("attestation: JWS present but no embedded contract (attestation disabled)", .{});
+                        break :attest;
+                    };
 
-                // Slice 2 item B: precompute the /.well-known/zigttp-attest body.
-                // `attest_envelope.verify` only checks the Ed25519 signature over
-                // the JWS; it does NOT compare the signed claim hashes to what the
-                // server actually loaded. Artifact/policy binding to the running
-                // bytecode is enforced separately and fail-closed by
-                // `contract_runtime.validate` above (the server will not start on
-                // drift). Here we additionally cross-check the verified claim
-                // hashes against the live loaded contract so a validly-signed JWS
-                // that *describes* different bytecode is not served as if it
-                // matched; on mismatch we disable attestation entirely.
-                build_well_known: {
-                    const cj = self.config.contract_json orelse break :build_well_known;
                     var verify_result = attest_envelope.verify(self.allocator, jws) catch |err| {
-                        std.log.warn("attestation: embedded JWS failed self-verify: {} (well-known disabled)", .{err});
-                        break :build_well_known;
+                        std.log.warn("attestation: embedded JWS failed self-verify: {} (attestation disabled)", .{err});
+                        break :attest;
                     };
                     defer verify_result.deinit();
 
-                    if (!attestationClaimsMatchContract(verify_result.claims, contract.view())) {
-                        std.log.err(
-                            "attestation: signed JWS claims do not match loaded contract hashes - disabling attestation",
-                            .{},
-                        );
-                        self.clearAttestation();
-                        break :build_well_known;
+                    // Bind to the bytecode actually loaded into the pool via the
+                    // signed claim, not the contract's self-reported (tamperable)
+                    // artifact field. No embedded bytecode means we cannot bind:
+                    // fail closed.
+                    const live_bytecode = self.embedded_bytecode orelse {
+                        std.log.warn("attestation: JWS present but no embedded bytecode to bind it to (attestation disabled)", .{});
+                        break :attest;
+                    };
+                    if (!bytecodeMatchesClaim(live_bytecode, verify_result.claims.bytecode_sha256)) {
+                        std.log.err("attestation: running bytecode does not match the signed claim (attestation disabled)", .{});
+                        break :attest;
                     }
 
-                    self.well_known_doc = attest_well_known.build(
+                    // Defense in depth: cross-check the verified claim hashes
+                    // against the live loaded contract.
+                    if (!attestationClaimsMatchContract(verify_result.claims, contract.view())) {
+                        std.log.err("attestation: signed JWS claims do not match the loaded contract hashes (attestation disabled)", .{});
+                        break :attest;
+                    }
+
+                    // Fails closed if the served contract.json does not hash to
+                    // the signed contractSha256 claim.
+                    var doc = attest_well_known.build(
                         self.allocator,
                         cj,
                         jws,
                         verify_result.public_key,
                         verify_result.claims.contract_sha256,
                     ) catch |err| {
-                        std.log.warn("attestation: failed to build well-known doc: {} (continuing without)", .{err});
-                        break :build_well_known;
+                        std.log.err("attestation: well-known build failed: {} (attestation disabled)", .{err});
+                        break :attest;
                     };
+
+                    // Binding proven: now emit the response headers. On failure,
+                    // free the doc and emit nothing (break is not an error return,
+                    // so an errdefer would not fire).
+                    self.attestation_headers = attest_header_strings.build(
+                        self.allocator,
+                        contract.properties(),
+                        jws,
+                    ) catch |err| {
+                        doc.deinit(self.allocator);
+                        std.log.warn("attestation: failed to build response headers: {} (attestation disabled)", .{err});
+                        break :attest;
+                    };
+                    self.well_known_doc = doc;
                     self.signer_fingerprint_hex = verify_result.fingerprint_hex;
                     self.syncStudioCallerReceipt();
-                    std.log.info("   Attestation: /.well-known/zigttp-attest enabled", .{});
+                    std.log.info("   Attestation: enabled (bound to running bytecode)", .{});
                 }
             }
         }
@@ -2598,4 +2671,21 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
     // mirroring contract_runtime's skip-on-zero semantics for live reload.
     live.policy_hash = [_]u8{0} ** 32;
     try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
+}
+
+test "bytecodeMatchesClaim binds attestation to the running bytecode (fail-closed)" {
+    const bytecode = "fake-bytecode-blob";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytecode, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+
+    // Pinned claim matching the running bytecode passes.
+    try std.testing.expect(Server.bytecodeMatchesClaim(bytecode, &hex));
+    // Swapped bytecode (the tamper case) fails - the signed claim no longer
+    // describes what is loaded, so attestation is disabled.
+    try std.testing.expect(!Server.bytecodeMatchesClaim("other-bytecode", &hex));
+    // An unpinned (all-zero) claim cannot bind a running artifact: fail closed.
+    try std.testing.expect(!Server.bytecodeMatchesClaim(bytecode, &([_]u8{'0'} ** 64)));
+    // A malformed (non-64-char) claim is rejected.
+    try std.testing.expect(!Server.bytecodeMatchesClaim(bytecode, "abc"));
 }

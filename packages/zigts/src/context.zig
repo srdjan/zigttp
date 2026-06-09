@@ -1090,6 +1090,13 @@ pub const Context = struct {
     /// JIT helper: set global by atom index
     /// Returns the assigned value (or exception_val on error).
     pub fn jitPutGlobal(self: *Context, atom_idx: u16, val: value.JSValue) callconv(.c) value.JSValue {
+        // A compiled frame keeps executing tail opcodes after a faulting call
+        // (the exception is reconciled only at frame exit). Refuse the store
+        // while a fault is pending so the exception sentinel - or post-fault
+        // garbage - never lands in a module-scope global that outlives the
+        // request on a pooled runtime. The interpreter aborts before its
+        // put_global, so this only guards the JIT path.
+        if (self.hasException()) return value.JSValue.exception_val;
         const atom: object.Atom = @enumFromInt(atom_idx);
         self.setGlobal(atom, val) catch return self.jitThrow();
         return val;
@@ -1146,6 +1153,9 @@ pub const Context = struct {
     /// JIT helper: set property by atom index
     /// Returns the assigned value (or exception_val on error).
     pub fn jitPutField(self: *Context, obj_val: value.JSValue, atom_idx: u16, val: value.JSValue) callconv(.c) value.JSValue {
+        // See jitPutGlobal: do not store while a fault is pending in this
+        // compiled frame (the field's object may be a module-scope global).
+        if (self.hasException()) return value.JSValue.exception_val;
         if (obj_val.isObject()) {
             const obj = object.JSObject.fromValue(obj_val);
             self.setPropertyChecked(obj, @enumFromInt(atom_idx), val) catch return self.jitThrow();
@@ -1157,6 +1167,8 @@ pub const Context = struct {
     /// JIT helper: write a precomputed slot index for object literal initialization.
     /// Used as the overflow fallback for `set_slot` when the slot is not inline.
     pub fn jitSetSlot(self: *Context, obj_val: value.JSValue, slot_idx: u16, val: value.JSValue) callconv(.c) value.JSValue {
+        // See jitPutGlobal: skip the store while a fault is pending.
+        if (self.hasException()) return value.JSValue.exception_val;
         if (obj_val.isObject()) {
             const obj = object.JSObject.fromValue(obj_val);
             self.setSlotBarriered(obj, slot_idx, val) catch return self.jitThrow();
@@ -1230,6 +1242,8 @@ pub const Context = struct {
     /// JIT helper: set element by index
     /// Returns the assigned value (or exception_val on error).
     pub fn jitPutElem(self: *Context, obj_val: value.JSValue, index_val: value.JSValue, val: value.JSValue) callconv(.c) value.JSValue {
+        // See jitPutGlobal: skip the store while a fault is pending.
+        if (self.hasException()) return value.JSValue.exception_val;
         if (obj_val.isObject() and index_val.isInt()) {
             const obj = object.JSObject.fromValue(obj_val);
             const idx = index_val.getInt();

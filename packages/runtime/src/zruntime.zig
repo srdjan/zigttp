@@ -2906,6 +2906,11 @@ fn buildFetchUrl(
         try buf.append(rt.allocator, '=');
         if (!try appendEncodedJsValue(rt, &buf, item)) {
             buf.deinit(rt.allocator);
+            // Disarm the errdefer: a `.err` union return does not trip it, but
+            // the fallible createFetchErrorResponse below would, double-deinit'ing
+            // the just-freed (now undefined) buffer. Reset to empty so the
+            // errdefer's deinit is a safe no-op on either exit.
+            buf = .empty;
             return .{ .err = try createFetchErrorResponse(rt, "InvalidQuery", "query values must be string|number|boolean") };
         }
         wrote_any = true;
@@ -3544,6 +3549,7 @@ fn runDurableFetch(
     // duplicates a sliver of parseFetchArgs' work but keeps the hash
     // stable even if parseFetchArgs later normalizes fields.
     const summary = try summarizeFetchRequest(rt, args);
+    defer rt.allocator.free(summary.url); // owned effective url (see summarizeFetchRequest)
     const hash = durable_fetch.computeRequestHash(opts.key, summary.method, summary.url, summary.body);
 
     var store = durable_store_mod.DurableStore.initFs(rt.allocator, durable_dir);
@@ -3626,7 +3632,18 @@ fn summarizeFetchRequest(rt: *Runtime, args: []const zq.JSValue) !RequestSummary
             };
     }
 
-    return .{ .method = method, .url = url, .body = body };
+    // Hash the EFFECTIVE url (literal base + appended dynamic `query`), not the
+    // bare literal, so two durable fetches differing only in `query` don't
+    // collide on one cache entry. buildFetchUrl is the same effective-URL
+    // builder the live fetch uses; on error (e.g. egress violation) the real
+    // fetch surfaces it, so here we fall back to the literal for a stable hash.
+    // The returned url is owned; the caller frees `summary.url`.
+    const effective_url: []const u8 = switch (try buildFetchUrl(rt, pool, url, init_obj)) {
+        .ok => |u| u,
+        .err => try rt.allocator.dupe(u8, url),
+    };
+
+    return .{ .method = method, .url = effective_url, .body = body };
 }
 
 fn extractResponseStatus(rt: *Runtime, response: zq.JSValue) u16 {
@@ -4133,7 +4150,10 @@ fn appendServiceQuery(
     const keys = try query_obj.getOwnEnumerableKeys(rt.allocator, pool);
     defer rt.allocator.free(keys);
 
-    var wrote_any = false;
+    // Seed from the already-built URL/path so a base or route pattern that
+    // already carries a query string ('?...') appends with '&', not a second
+    // '?' (mirrors buildFetchUrl).
+    var wrote_any = std.mem.indexOfScalar(u8, buf.items, '?') != null;
     for (keys) |key_atom| {
         const key_name = ctx.atoms.getName(key_atom) orelse continue;
         const query_item = query_obj.getOwnProperty(pool, key_atom) orelse continue;

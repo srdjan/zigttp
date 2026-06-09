@@ -488,23 +488,36 @@ pub const TypeEnv = struct {
                     @memcpy(raw_args[0..uargc], info.args[0..uargc]);
                     const src = self.resolveRefToRecord(self.tryInstantiateGenericApp(raw_args[0]));
                     if (src == null_type_idx) return idx;
+                    // Resolve the keys argument through the alias map too, so
+                    // `type K = "id" | "name"; Pick<User, K>` sees the literal
+                    // union instead of an unresolved t_ref (which collectStringKeys
+                    // reads as zero keys, silently returning the full source - an
+                    // unsound over-accept).
+                    const keys = if (kind == .pick or kind == .omit)
+                        self.resolveRef(self.tryInstantiateGenericApp(raw_args[1]))
+                    else
+                        null_type_idx;
                     return switch (kind) {
                         .partial => self.pool.makePartial(self.allocator, src),
                         .required => self.pool.makeRequired(self.allocator, src),
-                        .pick => self.pool.pickFields(self.allocator, src, raw_args[1]),
-                        .omit => self.pool.omitFields(self.allocator, src, raw_args[1]),
+                        .pick => self.pool.pickFields(self.allocator, src, keys),
+                        .omit => self.pool.omitFields(self.allocator, src, keys),
                     };
                 }
 
                 const alias = self.generic_aliases.get(base_name) orelse return idx;
                 if (info.args.len != alias.param_count) return idx;
-                // Instantiate nested generic-app arguments first, so a composed
-                // type like `Proof<Effects<string, "env">, "pure">` carries
-                // both the proof marker and the effect marker.
+                // Copy args before instantiating: info.args is a slice into the
+                // pool's shared members list, and a nested instantiation's
+                // addRecord/addUnion may reallocate it, dangling the slice
+                // mid-loop. Instantiate nested generic-app arguments first, so a
+                // composed type like `Proof<Effects<string, "env">, "pure">`
+                // carries both the proof marker and the effect marker.
                 var inst_args: [8]TypeIndex = undefined;
                 const argc = @min(info.args.len, inst_args.len);
-                for (info.args[0..argc], 0..) |a, i| {
-                    inst_args[i] = self.tryInstantiateGenericApp(a);
+                @memcpy(inst_args[0..argc], info.args[0..argc]);
+                for (0..argc) |i| {
+                    inst_args[i] = self.tryInstantiateGenericApp(inst_args[i]);
                 }
                 return self.pool.instantiate(
                     self.allocator,
@@ -515,9 +528,14 @@ pub const TypeEnv = struct {
                 );
             },
             .t_intersection => {
-                const members = self.pool.getIntersectionMembers(idx);
+                // Copy members before the loop: getIntersectionMembers returns a
+                // slice into the pool's shared members list, which a nested
+                // instantiation may reallocate (UAF / garbage TypeIndex).
+                const live = self.pool.getIntersectionMembers(idx);
+                var members: [16]TypeIndex = undefined;
+                const count = @min(live.len, 16);
+                @memcpy(members[0..count], live[0..count]);
                 var new_members: [16]TypeIndex = undefined;
-                const count = @min(members.len, 16);
                 var changed = false;
                 for (members[0..count], 0..) |m, i| {
                     new_members[i] = self.tryInstantiateGenericApp(m);
@@ -527,9 +545,12 @@ pub const TypeEnv = struct {
                 return self.pool.addIntersection(self.allocator, new_members[0..count]);
             },
             .t_union => {
-                const members = self.pool.getUnionMembers(idx);
+                // Copy members before the loop (see t_intersection above).
+                const live = self.pool.getUnionMembers(idx);
+                var members: [32]TypeIndex = undefined;
+                const count = @min(live.len, 32);
+                @memcpy(members[0..count], live[0..count]);
                 var new_members: [32]TypeIndex = undefined;
-                const count = @min(members.len, 32);
                 var changed = false;
                 for (members[0..count], 0..) |m, i| {
                     new_members[i] = self.tryInstantiateGenericApp(m);
@@ -542,20 +563,33 @@ pub const TypeEnv = struct {
         }
     }
 
-    /// Resolve a type to a record: pass a record through unchanged, resolve a
-    /// named ref via the alias then interface map, otherwise null_type_idx.
-    /// Used by the utility-type path to find the source object's fields.
+    /// Follow a t_ref through the alias then interface map to its underlying
+    /// type, chasing chains (`type A = B; type B = {...}` stores A as t_ref(B))
+    /// up to a small depth with a self-reference guard. Non-ref types and
+    /// unresolved refs pass through unchanged.
+    fn resolveRef(self: *const TypeEnv, idx: TypeIndex) TypeIndex {
+        var cur = idx;
+        var depth: u8 = 0;
+        while (depth < 8) : (depth += 1) {
+            const tag = self.pool.getTag(cur) orelse return cur;
+            if (tag != .t_ref) return cur;
+            const name = self.pool.getRefName(cur);
+            if (name.len == 0) return cur;
+            const next = self.type_aliases.get(name) orelse self.interfaces.get(name) orelse return cur;
+            if (next == cur) return cur;
+            cur = next;
+        }
+        return cur;
+    }
+
+    /// Resolve a type to a record: a record passes through, a named ref resolves
+    /// via resolveRef (following alias chains), otherwise null_type_idx. Used by
+    /// the utility-type path to find the source object's fields.
     fn resolveRefToRecord(self: *const TypeEnv, idx: TypeIndex) TypeIndex {
         if (idx == null_type_idx) return null_type_idx;
-        const tag = self.pool.getTag(idx) orelse return null_type_idx;
-        if (tag == .t_record) return idx;
-        if (tag == .t_ref) {
-            const name = self.pool.getRefName(idx);
-            if (name.len == 0) return null_type_idx;
-            if (self.type_aliases.get(name)) |r| return r;
-            if (self.interfaces.get(name)) |r| return r;
-        }
-        return null_type_idx;
+        const resolved = self.resolveRef(idx);
+        const tag = self.pool.getTag(resolved) orelse return null_type_idx;
+        return if (tag == .t_record) resolved else null_type_idx;
     }
 
     /// Look up a variable's declared type by name.
@@ -1146,6 +1180,52 @@ test "resolveType Pick<User, keys> keeps only the named fields" {
     try std.testing.expect(pool.lookupRecordField(picked, "id") != null);
     try std.testing.expect(pool.lookupRecordField(picked, "name") != null);
     try std.testing.expect(pool.lookupRecordField(picked, "age") == null);
+}
+
+test "resolveType Pick<User, Keys> resolves an aliased key union (not the full source)" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const user = parseTypeExpr(&pool, allocator, "{ id: number; name: string; age: number }");
+    env.type_aliases.put(allocator, env.internName("User"), user) catch unreachable;
+    // Keys is a named alias of a string-literal union. Previously the keys
+    // argument was not alias-resolved, so collectStringKeys saw a t_ref, found
+    // zero keys, and Pick silently returned the full User - an unsound
+    // over-accept. It must now resolve to exactly {id, name}.
+    const keys = parseTypeExpr(&pool, allocator, "\"id\" | \"name\"");
+    env.type_aliases.put(allocator, env.internName("Keys"), keys) catch unreachable;
+
+    const picked = env.resolveType("Pick<User, Keys>");
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(picked).?);
+    try std.testing.expectEqual(@as(usize, 2), pool.getRecordFields(picked).len);
+    try std.testing.expect(pool.lookupRecordField(picked, "id") != null);
+    try std.testing.expect(pool.lookupRecordField(picked, "name") != null);
+    try std.testing.expect(pool.lookupRecordField(picked, "age") == null);
+}
+
+test "resolveType Required<A> follows a forward alias chain to the record" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // `type A = B` (forward) stores A as a t_ref(B); B is the record. Previously
+    // resolveRefToRecord returned the t_ref unchanged, so Required<A> no-op'd and
+    // accepted any record. It must now chase the chain and clear `host?`.
+    const b = parseTypeExpr(&pool, allocator, "{ host?: string }");
+    env.type_aliases.put(allocator, env.internName("B"), b) catch unreachable;
+    const a = parseTypeExpr(&pool, allocator, "B");
+    env.type_aliases.put(allocator, env.internName("A"), a) catch unreachable;
+
+    const required = env.resolveType("Required<A>");
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(required).?);
+    const fields = pool.getRecordFields(required);
+    try std.testing.expectEqual(@as(usize, 1), fields.len);
+    try std.testing.expect(!fields[0].optional);
 }
 
 test "resolveType Omit<User, key> drops the named field" {

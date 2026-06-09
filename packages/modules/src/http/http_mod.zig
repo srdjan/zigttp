@@ -247,7 +247,10 @@ fn corsImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue
         }
         if (getNumberProp(handle, opts, "maxAge")) |max_age| {
             var num_buf: [20]u8 = undefined;
-            const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{@as(i64, @intFromFloat(max_age))}) catch "0";
+            // lossyCast saturates a non-finite or out-of-range maxAge; a raw
+            // @intFromFloat (e.g. cors({maxAge: Infinity})) is illegal behaviour.
+            // Mirrors setCookie's maxAge handling.
+            const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{std.math.lossyCast(i64, max_age)}) catch "0";
             try sdk.objectSet(handle, obj, "Access-Control-Max-Age", try sdk.createString(handle, num_str));
         }
         if (getBoolProp(handle, opts, "credentials")) |creds| {

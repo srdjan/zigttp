@@ -19,6 +19,9 @@
 //! - new, this, eval, assignments, loops
 
 const std = @import("std");
+// Shared ECMAScript ToInt32 so compile-time bitwise folding matches the
+// interpreter and never hits the `@intFromFloat` out-of-range panic.
+const floatToInt32 = @import("interpreter/util.zig").floatToInt32;
 
 // ============================================================================
 // Error Types
@@ -344,7 +347,7 @@ pub const ComptimeEvaluator = struct {
                 if (std.math.isNan(n) or std.math.isInf(n)) {
                     break :blk .{ .number = -1 };
                 }
-                const i: i32 = @intFromFloat(@trunc(n));
+                const i: i32 = floatToInt32(n);
                 break :blk .{ .number = @floatFromInt(~i) };
             },
             '-' => blk: {
@@ -983,7 +986,7 @@ pub const ComptimeEvaluator = struct {
                 return .{ .number = 0 };
             }
             if (std.mem.eql(u8, name, "clz32")) {
-                const i: u32 = @bitCast(@as(i32, @intFromFloat(@trunc(n))));
+                const i: u32 = @bitCast(floatToInt32(n));
                 return .{ .number = @floatFromInt(@clz(i)) };
             }
             if (std.mem.eql(u8, name, "fround")) {
@@ -1001,8 +1004,8 @@ pub const ComptimeEvaluator = struct {
             if (std.mem.eql(u8, name, "atan2")) return .{ .number = std.math.atan2(a, b) };
             if (std.mem.eql(u8, name, "hypot")) return .{ .number = std.math.hypot(a, b) };
             if (std.mem.eql(u8, name, "imul")) {
-                const ai: i32 = @intFromFloat(@trunc(a));
-                const bi: i32 = @intFromFloat(@trunc(b));
+                const ai: i32 = floatToInt32(a);
+                const bi: i32 = floatToInt32(b);
                 return .{ .number = @floatFromInt(ai *% bi) };
             }
         }
@@ -1262,8 +1265,8 @@ pub const ComptimeEvaluator = struct {
         _ = self;
         const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
         const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
-        const li: i32 = @intFromFloat(@trunc(ln));
-        const ri: i32 = @intFromFloat(@trunc(rn));
+        const li: i32 = floatToInt32(ln);
+        const ri: i32 = floatToInt32(rn);
         return .{ .number = @floatFromInt(li | ri) };
     }
 
@@ -1271,8 +1274,8 @@ pub const ComptimeEvaluator = struct {
         _ = self;
         const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
         const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
-        const li: i32 = @intFromFloat(@trunc(ln));
-        const ri: i32 = @intFromFloat(@trunc(rn));
+        const li: i32 = floatToInt32(ln);
+        const ri: i32 = floatToInt32(rn);
         return .{ .number = @floatFromInt(li & ri) };
     }
 
@@ -1280,8 +1283,8 @@ pub const ComptimeEvaluator = struct {
         _ = self;
         const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
         const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
-        const li: i32 = @intFromFloat(@trunc(ln));
-        const ri: i32 = @intFromFloat(@trunc(rn));
+        const li: i32 = floatToInt32(ln);
+        const ri: i32 = floatToInt32(rn);
         return .{ .number = @floatFromInt(li ^ ri) };
     }
 
@@ -1291,8 +1294,8 @@ pub const ComptimeEvaluator = struct {
         _ = self;
         const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
         const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
-        const li: i32 = @intFromFloat(@trunc(ln));
-        const shift: u5 = @intCast(@as(u32, @bitCast(@as(i32, @intFromFloat(@trunc(rn))))) & 0x1f);
+        const li: i32 = floatToInt32(ln);
+        const shift: u5 = @intCast(@as(u32, @bitCast(floatToInt32(rn))) & 0x1f);
 
         return switch (dir) {
             .left => .{ .number = @floatFromInt(li << shift) },
@@ -1960,6 +1963,27 @@ test "comptime Math" {
     var eval3 = ComptimeEvaluator.init(allocator, "Math.max(1, 5, 3)", 1, 1);
     const r3 = try eval3.evaluate();
     try std.testing.expectEqual(@as(f64, 5), r3.number);
+}
+
+test "comptime bitwise ops fold via ToInt32 without panicking on large operands" {
+    const allocator = std.testing.allocator;
+
+    // Regression: the bitwise ops did a raw @intFromFloat into i32, which is
+    // illegal behavior for |operand| >= 2^31 (e.g. 0xFFFFFFFF). They now share
+    // the interpreter's ECMAScript ToInt32, so compile-time folding matches the
+    // runtime instead of crashing the analyzer.
+    const Case = struct { src: []const u8, want: f64 };
+    const cases = [_]Case{
+        .{ .src = "0xFFFFFFFF & 1", .want = 1 }, // 0xFFFFFFFF -> -1, -1 & 1 = 1
+        .{ .src = "2147483648 | 0", .want = -2147483648 }, // wraps to i32 min
+        .{ .src = "~3000000000", .want = 1294967295 }, // ToInt32(3e9) = -1294967296, ~ = 1294967295
+        .{ .src = "1 << 31", .want = -2147483648 },
+    };
+    for (cases) |c| {
+        var ev = ComptimeEvaluator.init(allocator, c.src, 1, 1);
+        const r = try ev.evaluate();
+        try std.testing.expectEqual(c.want, r.number);
+    }
 }
 
 test "comptime string" {

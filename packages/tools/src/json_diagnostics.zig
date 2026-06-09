@@ -247,7 +247,10 @@ pub fn fromStripError(diag: zigts.StripDiagnostic, file: []const u8) JsonDiagnos
         .message = parts.msg,
         .file = file,
         .line = diag.line,
-        .column = @intCast(diag.column),
+        // Clamp instead of @intCast: a strip error past column 65535 (a minified
+        // single-line bundle is one long line) would otherwise panic
+        // `zigttp check --json`.
+        .column = @intCast(@min(diag.column, std.math.maxInt(u16))),
         .suggestion = parts.suggestion,
     };
 }

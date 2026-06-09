@@ -8,6 +8,7 @@ const ascii = std.ascii;
 
 const http_types = @import("http_types.zig");
 const QueryParam = http_types.QueryParam;
+const http_parser = @import("http_parser.zig");
 
 const zruntime = @import("zruntime.zig");
 const Runtime = zruntime.Runtime;
@@ -214,6 +215,40 @@ pub fn splitPathAndQuery(url: []const u8) struct {
     };
 }
 
+/// Parsed request target for a recorded or synthetic request: req.path split
+/// from the query string, plus the parsed req.query params and their backing
+/// storage. Every recorded-request consumer (test runner, replay runner,
+/// durable recovery, intent assertions) builds an HttpRequestView from a raw
+/// URL; without this split, zruntime falls back to the full url for req.path
+/// (keeping the "?query" suffix) and req.query is empty - diverging from the
+/// live server and causing false replay regressions on unchanged handlers.
+pub const RequestTarget = struct {
+    path: []const u8,
+    params: []const QueryParam,
+    storage: ?[]QueryParam = null,
+    decoded_storage: ?[]u8 = null,
+
+    pub fn deinit(self: RequestTarget, allocator: std.mem.Allocator) void {
+        if (self.storage) |s| allocator.free(s);
+        if (self.decoded_storage) |s| allocator.free(s);
+    }
+};
+
+/// Split `url` into req.path and parsed req.query params exactly as the live
+/// server does (server.zig). A query-parse failure degrades to an empty param
+/// set rather than aborting the recorded run.
+pub fn parseRequestTarget(allocator: std.mem.Allocator, url: []const u8) RequestTarget {
+    const split = splitPathAndQuery(url);
+    const qr = http_parser.parseQueryString(allocator, split.query_string, http_parser.DEFAULT_MAX_QUERY_LENGTH) catch
+        http_parser.QueryParseResult{ .storage = null, .params = &.{}, .decoded_storage = null };
+    return .{
+        .path = split.path,
+        .params = qr.params,
+        .storage = qr.storage,
+        .decoded_storage = qr.decoded_storage,
+    };
+}
+
 pub fn buildQueryObject(ctx: *zq.Context, query_params: []const QueryParam) !*zq.JSObject {
     const query_obj = try ctx.createObject(null);
     for (query_params) |param| {
@@ -240,4 +275,20 @@ pub fn upgradeResponseValue(ctx: *zq.Context, value: zq.JSValue) !zq.JSValue {
         }
     }
     return value;
+}
+
+test "parseRequestTarget splits path and parses query params" {
+    const allocator = std.testing.allocator;
+    const t = parseRequestTarget(allocator, "/forecast?lat=52&lon=13");
+    defer t.deinit(allocator);
+    try std.testing.expectEqualStrings("/forecast", t.path);
+    try std.testing.expectEqual(@as(usize, 2), t.params.len);
+}
+
+test "parseRequestTarget with no query yields the full path and empty params" {
+    const allocator = std.testing.allocator;
+    const t = parseRequestTarget(allocator, "/health");
+    defer t.deinit(allocator);
+    try std.testing.expectEqualStrings("/health", t.path);
+    try std.testing.expectEqual(@as(usize, 0), t.params.len);
 }

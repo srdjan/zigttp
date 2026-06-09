@@ -123,10 +123,12 @@ causing a 500 on first request), proven routes reject non-matching
 requests at the HTTP layer before entering JS, and proven handler
 properties are logged for operator visibility.
 
-Handlers proven `deterministic` and `read_only` also have their
-GET/HEAD responses cached at runtime and served from Zig memory
-without entering JS. The `X-Zigttp-Proof-Cache: hit` response header
-confirms a cache hit.
+Handlers proven `deterministic` and `read_only` that also read no
+request headers or body have their GET/HEAD responses cached at
+runtime and served from Zig memory without entering JS. The cache key
+is method+URL only, so a handler whose response depends on a request
+header (auth, content negotiation) is excluded. The
+`X-Zigttp-Proof-Cache: hit` response header confirms a cache hit.
 
 ### When each contract assertion is enforced
 
@@ -174,8 +176,10 @@ won't boot" and "individual requests get rejected".
   to the handler and route matching is the handler's responsibility
   — the contract surface stops being a runtime gate for routing.
 - Proof cache lookup: handlers proven `deterministic` + `read_only`
-  serve `GET`/`HEAD` from the Zig-side cache without entering JS
-  (`X-Zigttp-Proof-Cache: hit`).
+  that read no request headers or body serve `GET`/`HEAD` from the
+  Zig-side cache without entering JS (`X-Zigttp-Proof-Cache: hit`).
+  Header/body-dependent handlers are excluded because the cache key is
+  method+URL only.
 - Per-name policy checks for SDK-facing categories (env, cache, sql,
   sql-write): the runtime exposes `allows{Env,CacheNamespace,SqlQuery,
   SqlWrite}ForActiveModule` in `module_binding.zig`. Each consults

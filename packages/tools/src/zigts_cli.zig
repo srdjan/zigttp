@@ -219,11 +219,17 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     const system_path = explicit_system_path orelse discovered_system;
 
-    var result = try precompile.runCheckOnlyWithOptions(allocator, target, .{
+    var result = precompile.runCheckOnlyWithOptions(allocator, target, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = json_mode,
         .system_path = system_path,
-    });
+    }) catch |err| switch (err) {
+        // The analyzer already printed the actionable "zigttp:sql queries
+        // require --sql-schema <...>" line; surface it as a clean non-zero exit
+        // instead of dumping an error-return trace at the user.
+        error.MissingSqlSchema => std.process.exit(1),
+        else => return err,
+    };
     defer result.deinit(allocator);
 
     // Opt-in docs mode: ask exported helpers to carry explicit capsules

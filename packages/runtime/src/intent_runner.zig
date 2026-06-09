@@ -22,6 +22,7 @@ const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const HttpResponse = @import("http_types.zig").HttpResponse;
 const handler_loader = @import("handler_loader.zig");
+const runtime_natives = @import("runtime_natives.zig");
 const trace = zigts.trace;
 
 const HandlerContract = zigts.handler_contract.HandlerContract;
@@ -207,9 +208,16 @@ fn runOne(
         try headers_list.append(allocator, .{ .key = "content-type", .value = "application/json" });
     }
 
+    // assertion.path includes any query string; split it so req.path and
+    // req.query match what the live server would produce for the assertion.
+    const target = runtime_natives.parseRequestTarget(allocator, assertion.path);
+    defer target.deinit(allocator);
+
     var response = try rt.executeHandler(.{
         .method = assertion.method,
         .url = assertion.path,
+        .path = target.path,
+        .query_params = target.params,
         .headers = headers_list,
         .body = assertion.request_body_json,
     });

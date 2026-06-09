@@ -25,7 +25,6 @@ const HttpResponse = @import("http_types.zig").HttpResponse;
 const ServerConfig = @import("server.zig").ServerConfig;
 const handler_loader = @import("handler_loader.zig");
 const runtime_natives = @import("runtime_natives.zig");
-const http_parser = @import("http_parser.zig");
 
 const trace = zq.trace;
 const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
@@ -175,21 +174,13 @@ fn runOneTest(
     defer headers_list.deinit(allocator);
     parseHeadersFromJson(allocator, request.headers_json, &headers_list) catch {};
 
-    // zruntime falls back to the full url for req.path when path is empty, so
-    // without this split a url like "/?probe=1" would make req.path "/?probe=1"
-    // and break handlers that check req.path === "/". Keep .url as the full
-    // target and set .path via the same helper the real server path uses.
-    const split = runtime_natives.splitPathAndQuery(request.url);
-    const request_path = split.path;
-
-    // Parse the query string into params so req.query is populated, exactly as
-    // the live server does (server.zig). Without this, a handler that reads
-    // req.query.* would see an empty object under `serve --test` even though the
-    // request URL carried query params.
-    const qr = http_parser.parseQueryString(allocator, split.query_string, http_parser.DEFAULT_MAX_QUERY_LENGTH) catch
-        http_parser.QueryParseResult{ .storage = null, .params = &.{}, .decoded_storage = null };
-    defer if (qr.storage) |s| allocator.free(s);
-    defer if (qr.decoded_storage) |s| allocator.free(s);
+    // Split req.path and parse req.query exactly as the live server does, via
+    // the shared helper every recorded-request consumer uses. Without it,
+    // zruntime falls back to the full url for req.path (keeping the "?query"
+    // suffix) and a handler reading req.query.* would see an empty object under
+    // `serve --test`.
+    const target = runtime_natives.parseRequestTarget(allocator, request.url);
+    defer target.deinit(allocator);
 
     // Unescape the request body (shared with the replay runner) so a JSONL body
     // like "{\"title\":\"x\"}" reaches the handler as real JSON rather than the
@@ -200,8 +191,8 @@ fn runOneTest(
     var response = rt.executeHandler(.{
         .method = request.method,
         .url = request.url,
-        .path = request_path,
-        .query_params = qr.params,
+        .path = target.path,
+        .query_params = target.params,
         .headers = headers_list,
         .body = ub.slice,
     }) catch |err| {
@@ -210,6 +201,17 @@ fn runOneTest(
     defer response.deinit();
 
     checkAssertions(allocator, &response, &test_case.assertions, &failures);
+
+    // NOTE (RS1/RS2): serve --test deliberately does NOT fail on
+    // replay_state.divergences. The counter conflates real drift (a reordered
+    // effectful call) with benign noise - hand-written fixtures whose arg JSON
+    // is non-canonical (argsDrifted byte-compares), and pure modules that run
+    // for real under --test without consuming their recorded entry. Failing on
+    // it here false-positives on legitimate example fixtures. Making the signal
+    // usable requires precise divergence accounting (distinguish name-mismatch
+    // from arg-formatting); until then the strict consumed-all/divergence gate
+    // lives only in the replay verifier (replay_runner), which uses
+    // recorder-produced capsules.
 
     return .{
         .pass = failures.items.len == 0,

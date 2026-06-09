@@ -17,6 +17,7 @@ const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const ServerConfig = @import("server.zig").ServerConfig;
 const handler_loader = @import("handler_loader.zig");
+const runtime_natives = @import("runtime_natives.zig");
 
 const c = @cImport({
     @cInclude("dirent.h");
@@ -187,9 +188,16 @@ fn recoverOne(
         null;
     defer if (body) |owned| allocator.free(owned);
 
+    // Split req.path / req.query so a durable handler that routes on req.path or
+    // reads req.query re-executes the same branch during recovery as it did live.
+    const target = runtime_natives.parseRequestTarget(allocator, parsed.request.url);
+    defer target.deinit(allocator);
+
     const request = HttpRequestView{
         .method = parsed.request.method,
         .url = parsed.request.url,
+        .path = target.path,
+        .query_params = target.params,
         .headers = headers_list,
         .body = body,
     };

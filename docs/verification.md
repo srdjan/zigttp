@@ -297,7 +297,7 @@ from real function bodies, never an assumed claim. The opt-in
 Verified properties also control runtime behavior:
 
 - **Route pre-filtering**: proven routes reject non-matching requests at the HTTP layer before entering JS (`contract_runtime.zig`).
-- **Response memoization**: when a handler is proven `deterministic` (no Date.now or Math.random) and `read_only` (no write-classified virtual module calls), GET/HEAD responses are cached in memory and served without JS execution. Cached responses include an `X-Zigttp-Proof-Cache: hit` header (`proof_adapter.zig`).
+- **Response memoization**: when a handler is proven `deterministic` (no Date.now or Math.random) and `read_only` (no write-classified virtual module calls), and its contract shows it reads no request headers or body, GET/HEAD responses are cached in memory and served without JS execution. The header/body condition is required because the cache key is method+URL only: a handler whose response varies on a request header (auth, content negotiation) is excluded so one caller's response is never replayed to another. Cached responses include an `X-Zigttp-Proof-Cache: hit` header (`proof_adapter.zig`).
 
 Both rely on the same property that makes verification tractable: the IR tree is the control flow graph, with no back-edges and no exceptions.
 

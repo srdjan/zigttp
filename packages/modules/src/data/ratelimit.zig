@@ -88,7 +88,7 @@ pub const RateStore = struct {
 
         var iter = self.entries.iterator();
         while (iter.next()) |entry| {
-            if (now >= entry.value_ptr.window_start + entry.value_ptr.window_sec) {
+            if (now >= entry.value_ptr.window_start +| entry.value_ptr.window_sec) {
                 // Best-effort on OOM: remove whatever was collected so far.
                 expired.append(self.allocator, entry.key_ptr.*) catch break;
             }
@@ -110,7 +110,9 @@ pub const RateStore = struct {
         }
 
         if (self.entries.getPtr(key)) |entry| {
-            const window_end = entry.window_start + entry.window_sec;
+            // Saturating arithmetic: window_sec is lossyCast-saturated at the
+            // caller and can be near maxInt(i64), so a plain +/* would overflow.
+            const window_end = entry.window_start +| entry.window_sec;
 
             if (now >= window_end) {
                 entry.count = 1;
@@ -119,7 +121,7 @@ pub const RateStore = struct {
                 return .{
                     .allowed = true,
                     .remaining = if (limit > 1) limit - 1 else 0,
-                    .reset_at_ms = (now + window_sec) * 1000,
+                    .reset_at_ms = (now +| window_sec) *| 1000,
                 };
             }
 
@@ -127,7 +129,7 @@ pub const RateStore = struct {
                 return .{
                     .allowed = false,
                     .remaining = 0,
-                    .reset_at_ms = window_end * 1000,
+                    .reset_at_ms = window_end *| 1000,
                 };
             }
 
@@ -135,7 +137,7 @@ pub const RateStore = struct {
             return .{
                 .allowed = true,
                 .remaining = limit - entry.count,
-                .reset_at_ms = window_end * 1000,
+                .reset_at_ms = window_end *| 1000,
             };
         }
 
@@ -148,7 +150,7 @@ pub const RateStore = struct {
         return .{
             .allowed = true,
             .remaining = if (limit > 1) limit - 1 else 0,
-            .reset_at_ms = (now + window_sec) * 1000,
+            .reset_at_ms = (now +| window_sec) *| 1000,
         };
     }
 
@@ -231,6 +233,18 @@ test "RateStore: basic check" {
 
     const r4 = try store.check("test-key", 3, 60, 1003);
     try std.testing.expect(!r4.allowed);
+}
+
+test "RateStore: huge window_sec does not overflow reset_at_ms" {
+    // window_sec is lossyCast-saturated at the caller and can approach
+    // maxInt(i64); reset_at_ms = (now + window_sec) * 1000 must saturate, not
+    // overflow-panic.
+    var store = RateStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+
+    const r = try store.check("k", 5, std.math.maxInt(i64), 1000);
+    try std.testing.expect(r.allowed);
+    try std.testing.expectEqual(@as(i64, std.math.maxInt(i64)), r.reset_at_ms);
 }
 
 test "RateStore: reset" {

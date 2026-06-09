@@ -39,7 +39,12 @@ pub const binding = sdk.ModuleBinding{
             .module_func = sqlOneImpl,
             .arg_count = 2,
             .returns = .optional_object,
+            // sqlOne(name, params?): the params object is optional (impl uses it
+            // only when args.len >= 2), so `sqlOne("listTodos")` is valid. Without
+            // required_arg_count the arity rule defaulted to param_count (2) and
+            // rejected the shipped one-arg form with ZTS202.
             .param_types = &.{ .string, .object },
+            .required_arg_count = 1,
             .failure_severity = .expected,
             .return_labels = .{ .internal = true },
         },
@@ -49,6 +54,7 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 2,
             .returns = .object,
             .param_types = &.{ .string, .object },
+            .required_arg_count = 1,
             .return_labels = .{ .internal = true },
         },
         .{
@@ -58,6 +64,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .write,
             .returns = .object,
             .param_types = &.{ .string, .object },
+            .required_arg_count = 1,
         },
     },
 };

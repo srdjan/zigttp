@@ -1,5 +1,23 @@
+import type { Spec } from "zigttp:types";
 import { schemaCompile, validateJson } from "zigttp:validate";
 import { sql, sqlExec, sqlMany } from "zigttp:sql";
+
+// A stateful (zigttp:sql) handler cannot hold the default profile's
+// pure/stateless/idempotent/retry_safe, so it declares the narrow set it does
+// hold. Without a Spec the compiler must prove the full default profile (ZTS500).
+type CrudGuarantees = Spec<
+    | "deterministic"
+    | "state_isolated"
+    | "fault_covered"
+    | "result_safe"
+    | "optional_safe"
+    | "no_secret_leakage"
+    | "no_credential_leakage"
+    | "input_validated"
+    | "pii_contained"
+    | "injection_safe"
+    | "canonical"
+>;
 
 schemaCompile("todo.create", JSON.stringify({
     type: "object",
@@ -12,7 +30,7 @@ schemaCompile("todo.create", JSON.stringify({
 sql("listTodos", "SELECT id, title, done FROM todos ORDER BY id ASC");
 sql("createTodo", "INSERT INTO todos (title, done) VALUES (:title, 0)");
 
-function handler(req) {
+function handler(req: Request): Response & CrudGuarantees {
     if (req.method === "GET") {
         return Response.json({ items: sqlMany("listTodos") });
     }

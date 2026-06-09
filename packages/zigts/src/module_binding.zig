@@ -1537,6 +1537,20 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                     }
                 }
             }
+            // replay_pure is a stronger claim than Law.pure ("depends only on
+            // args, no ambient state"; env() is .pure yet reads the host env).
+            // The flag is SDK-exposed, so enforce the invariant the resolver
+            // relies on at the binding boundary - otherwise the zigttp:env leak
+            // class (a secret-labeled function running for real under serve
+            // --test) recurs one mis-declared flag away.
+            if (f.replay_pure) {
+                if (f.effect == .write) {
+                    @compileError("replay_pure is invalid on the write-effect function " ++ b.specifier ++ "." ++ f.name);
+                }
+                if (f.return_labels.secret or f.return_labels.credential) {
+                    @compileError("replay_pure is invalid on " ++ b.specifier ++ "." ++ f.name ++ ": a secret/credential return would leak host state into replayed/test responses");
+                }
+            }
         }
     }
     // Check unique specifiers

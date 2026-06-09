@@ -17,6 +17,7 @@ const HttpHeader = @import("http_types.zig").HttpHeader;
 const HttpResponse = @import("http_types.zig").HttpResponse;
 const ServerConfig = @import("server.zig").ServerConfig;
 const handler_loader = @import("handler_loader.zig");
+const runtime_natives = @import("runtime_natives.zig");
 
 const trace = zq.trace;
 
@@ -136,9 +137,17 @@ pub fn replayOne(
     const ub = trace.unescapeBody(allocator, group.request.body);
     defer if (ub.owned) |owned| allocator.free(owned);
 
+    // Split req.path / req.query exactly as the live server and test_runner do,
+    // so a capsule recorded from `GET /x?lat=52` replays with the same req.path
+    // and req.query instead of a false regression on an unchanged handler.
+    const target = runtime_natives.parseRequestTarget(allocator, group.request.url);
+    defer target.deinit(allocator);
+
     const request = HttpRequestView{
         .method = group.request.method,
         .url = group.request.url,
+        .path = target.path,
+        .query_params = target.params,
         .headers = headers_list,
         .body = ub.slice,
     };
@@ -198,8 +207,14 @@ pub fn replayOne(
     else
         &.{};
 
+    // A faithful replay consumes every recorded I/O entry. Leftover entries mean
+    // the edited handler dropped a recorded effect (e.g. a trailing cacheSet),
+    // which must fail closed - otherwise a deleted side effect reads as
+    // "reproduced".
+    const leftover = replay_state.unconsumedCount();
+
     return ReplayResult{
-        .match = status_match and body_match and replay_state.divergences == 0,
+        .match = status_match and body_match and replay_state.divergences == 0 and leftover == 0,
         .expected_status = expected.status,
         .actual_status = response.status,
         .body_match = body_match,

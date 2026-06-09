@@ -276,12 +276,32 @@ pub fn compoundAssignReplacement(allocator: std.mem.Allocator, line: []const u8)
         if (!isSimpleLvalue(lhs)) return error.UnsupportedRefactor;
         if (rhs.len == 0) return error.UnsupportedRefactor;
 
-        return std.fmt.allocPrint(allocator, "{s}{s} = {s} {c} {s}", .{
-            indent,
-            lhs,
-            lhs,
-            op_char,
-            rhs,
+        // Separate the expression from a trailing ';' so we parenthesize only
+        // the expression. Refuse anything with an interior ';' or a comment -
+        // those defeat the simple textual split and must be edited by hand.
+        const rhs_trimmed = trimRight(rhs, " \t");
+        const has_semi = rhs_trimmed.len > 0 and rhs_trimmed[rhs_trimmed.len - 1] == ';';
+        const expr = if (has_semi) trimRight(rhs_trimmed[0 .. rhs_trimmed.len - 1], " \t") else rhs_trimmed;
+        const trailer: []const u8 = if (has_semi) ";" else "";
+        if (expr.len == 0) return error.UnsupportedRefactor;
+        if (std.mem.indexOfScalar(u8, expr, ';') != null) return error.UnsupportedRefactor;
+        if (std.mem.indexOf(u8, expr, "//") != null or std.mem.indexOf(u8, expr, "/*") != null) {
+            return error.UnsupportedRefactor;
+        }
+
+        // A single atom (identifier, number, dotted chain) needs no parens, so
+        // `n += 1` stays `n = n + 1`. Any compound expression MUST be
+        // parenthesized: `total -= fee + tax` becomes `total = total - (fee +
+        // tax)`, not `total = total - fee + tax` which reassociates to
+        // `(total - fee) + tax` and silently changes the result.
+        if (isAtomicRhs(expr)) {
+            return std.fmt.allocPrint(allocator, "{s}{s} = {s} {c} {s}{s}", .{
+                indent, lhs, lhs, op_char, expr, trailer,
+            });
+        }
+        if (!delimitersBalanced(expr)) return error.UnsupportedRefactor;
+        return std.fmt.allocPrint(allocator, "{s}{s} = {s} {c} ({s}){s}", .{
+            indent, lhs, lhs, op_char, expr, trailer,
         });
     }
     return error.UnsupportedRefactor;
@@ -289,6 +309,18 @@ pub fn compoundAssignReplacement(allocator: std.mem.Allocator, line: []const u8)
 
 fn isArithmeticOpChar(c: u8) bool {
     return c == '+' or c == '-' or c == '*' or c == '/' or c == '%';
+}
+
+/// True when `expr` is a single atom needing no parentheses on the right of a
+/// rewritten compound assignment: an identifier, number, or dotted chain. Any
+/// expression containing a top-level operator, call, index, or string literal
+/// returns false and is parenthesized to preserve operator precedence.
+fn isAtomicRhs(expr: []const u8) bool {
+    if (expr.len == 0) return false;
+    for (expr) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '.' or c == '$')) return false;
+    }
+    return true;
 }
 
 /// ZTS620: rewrite `x === true` / `x !== false` -> `x` and `x === false`
@@ -3773,6 +3805,44 @@ test "normalizeSource refuses entries alias rewrite when pair binding is still r
     try std.testing.expect(nr.residual >= 1);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "for (const pair of items.entries())") != null);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "Response.text(pair[1]);") != null);
+}
+
+test "compoundAssignReplacement parenthesizes a compound rhs to preserve precedence" {
+    const allocator = std.testing.allocator;
+
+    // A single atom needs no parens (and must not gain any, to match the
+    // canonical form and the existing repair tests).
+    {
+        const out = try compoundAssignReplacement(allocator, "  n += 1;");
+        defer allocator.free(out);
+        try std.testing.expectEqualStrings("  n = n + 1;", out);
+    }
+    {
+        const out = try compoundAssignReplacement(allocator, "  state.total *= factor;");
+        defer allocator.free(out);
+        try std.testing.expectEqualStrings("  state.total = state.total * factor;", out);
+    }
+
+    // A compound rhs MUST be parenthesized: without parens this reassociates to
+    // (total - fee) + tax and silently changes the value.
+    {
+        const out = try compoundAssignReplacement(allocator, "  total -= fee + tax;");
+        defer allocator.free(out);
+        try std.testing.expectEqualStrings("  total = total - (fee + tax);", out);
+    }
+    {
+        const out = try compoundAssignReplacement(allocator, "  x /= a * b;");
+        defer allocator.free(out);
+        try std.testing.expectEqualStrings("  x = x / (a * b);", out);
+    }
+    // No trailing semicolon: still parenthesized.
+    {
+        const out = try compoundAssignReplacement(allocator, "  x -= a - b");
+        defer allocator.free(out);
+        try std.testing.expectEqualStrings("  x = x - (a - b)", out);
+    }
+    // A trailing comment defeats the textual split; refuse rather than mangle.
+    try std.testing.expectError(error.UnsupportedRefactor, compoundAssignReplacement(allocator, "  n += a + b; // note"));
 }
 
 test "delimitersBalanced detects expressions that do not finish on the line" {

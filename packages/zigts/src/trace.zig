@@ -270,8 +270,14 @@ pub const TraceRecorder = struct {
     fn appendJSValue(self: *TraceRecorder, ctx: *context.Context, val: value.JSValue) ?void {
         // One serializer shared with the durable oplog (appendJSValueBuf) and
         // replay arg-checking, so recording, oplog, and replay comparison all
-        // produce byte-identical JSON.
-        return appendJSValueBuf(&self.buf, self.allocator, ctx, val, 0);
+        // produce byte-identical JSON. On failure, deactivate the recorder like
+        // the other append helpers: a partial line must stop all further
+        // recording, not let the next record concatenate onto it and corrupt
+        // the capsule JSONL.
+        return appendJSValueBuf(&self.buf, self.allocator, ctx, val, 0) orelse {
+            self.active = false;
+            return null;
+        };
     }
 };
 
@@ -698,6 +704,16 @@ pub const ReplayState = struct {
             if (std.mem.eql(u8, e.module, module_name) and std.mem.eql(u8, e.func, fn_name)) return true;
         }
         return false;
+    }
+
+    /// Count of recorded I/O entries the replay never consumed. A faithful
+    /// replay re-makes every recorded call (each consumes its head entry), so a
+    /// non-zero leftover means the edited handler DROPPED a recorded effect
+    /// (e.g. a trailing cacheSet/sqlExec). Replay verification must fail closed
+    /// on this, otherwise a deleted side effect reads as "reproduced".
+    pub fn unconsumedCount(self: *const ReplayState) u32 {
+        if (self.cursor >= self.io_calls.len) return 0;
+        return @intCast(self.io_calls.len - self.cursor);
     }
 
     pub fn deinitOpaque(_: *anyopaque, _: std.mem.Allocator) void {
@@ -1545,7 +1561,11 @@ fn appendJSValueBuf(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, ctx: 
         if (std.math.isNan(f) or std.math.isInf(f)) {
             appendSlice(buf, allocator, "null") orelse return null;
         } else {
-            var tmp: [64]u8 = undefined;
+            // f64 decimal rendering can need up to ~347 bytes (e.g. a
+            // small-magnitude value like 1e-300); a 64-byte buffer overflowed
+            // and aborted the record mid-line, corrupting the capsule. Size for
+            // the worst case so any finite float serializes.
+            var tmp: [512]u8 = undefined;
             const slice = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return null;
             appendSlice(buf, allocator, slice) orelse return null;
         }
@@ -1615,14 +1635,30 @@ fn appendJSValueBuf(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, ctx: 
 /// owns the returned slice; returns null on allocation failure.
 fn serializeArgsJson(allocator: std.mem.Allocator, ctx: *context.Context, args: []const value.JSValue) ?[]u8 {
     var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    appendByte(&buf, allocator, '[') orelse return null;
+    // This function returns ?[]u8 (no error set), so an `errdefer` would never
+    // fire - every failure path must free the partial buffer explicitly.
+    appendByte(&buf, allocator, '[') orelse {
+        buf.deinit(allocator);
+        return null;
+    };
     for (args, 0..) |arg, i| {
-        if (i > 0) appendByte(&buf, allocator, ',') orelse return null;
-        appendJSValueBuf(&buf, allocator, ctx, arg, 0) orelse return null;
+        if (i > 0) appendByte(&buf, allocator, ',') orelse {
+            buf.deinit(allocator);
+            return null;
+        };
+        appendJSValueBuf(&buf, allocator, ctx, arg, 0) orelse {
+            buf.deinit(allocator);
+            return null;
+        };
     }
-    appendByte(&buf, allocator, ']') orelse return null;
-    return buf.toOwnedSlice(allocator) catch null;
+    appendByte(&buf, allocator, ']') orelse {
+        buf.deinit(allocator);
+        return null;
+    };
+    return buf.toOwnedSlice(allocator) catch {
+        buf.deinit(allocator);
+        return null;
+    };
 }
 
 /// Current wall-clock time in milliseconds since Unix epoch.
@@ -2011,6 +2047,26 @@ test "ReplayState consumeHead and hasEntryAhead" {
 
     // Now validate is at the head and no longer "ahead".
     try std.testing.expect(state.peekMatches("validate", "validateJson"));
+}
+
+test "ReplayState unconsumedCount flags a dropped trailing effect" {
+    const io_calls = [_]IoEntry{
+        .{ .seq = 0, .module = "cache", .func = "cacheGet", .args_json = "[]", .result_json = "{}" },
+        .{ .seq = 1, .module = "cache", .func = "cacheSet", .args_json = "[]", .result_json = "{}" },
+    };
+    var state = ReplayState{ .io_calls = &io_calls, .cursor = 0, .divergences = 0 };
+
+    // Nothing consumed yet: both entries are leftover.
+    try std.testing.expectEqual(@as(u32, 2), state.unconsumedCount());
+
+    // Edited handler made only the cacheGet (dropped the trailing cacheSet):
+    // one entry stays unconsumed, so replay must fail closed.
+    _ = state.consumeHead();
+    try std.testing.expectEqual(@as(u32, 1), state.unconsumedCount());
+
+    // Faithful replay consumes every entry: no leftover.
+    _ = state.consumeHead();
+    try std.testing.expectEqual(@as(u32, 0), state.unconsumedCount());
 }
 
 test "argsDrifted flags changed args, skips unpinned recordings" {

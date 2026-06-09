@@ -10,8 +10,8 @@ pub const binding = sdk.ModuleBinding{
         .{ .name = "escapeHtml", .module_func = escapeHtmlImpl, .arg_count = 1, .returns = .string, .param_types = &.{.string}, .return_labels = .{ .validated = true }, .laws = &.{.pure} },
         .{ .name = "unescapeHtml", .module_func = unescapeHtmlImpl, .arg_count = 1, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
         .{ .name = "slugify", .module_func = slugifyImpl, .arg_count = 1, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
-        .{ .name = "truncate", .module_func = truncateImpl, .arg_count = 3, .returns = .string, .param_types = &.{ .string, .number, .string }, .laws = &.{.pure} },
-        .{ .name = "mask", .module_func = maskImpl, .arg_count = 2, .returns = .string, .param_types = &.{ .string, .number }, .return_labels = .{ .internal = true }, .laws = &.{.pure} },
+        .{ .name = "truncate", .module_func = truncateImpl, .arg_count = 3, .returns = .string, .param_types = &.{ .string, .number, .string }, .required_arg_count = 2, .laws = &.{.pure} },
+        .{ .name = "mask", .module_func = maskImpl, .arg_count = 2, .returns = .string, .param_types = &.{ .string, .number }, .required_arg_count = 1, .return_labels = .{ .internal = true }, .laws = &.{.pure} },
     },
 };
 

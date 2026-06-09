@@ -31,7 +31,11 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 2,
             .effect = .read,
             .returns = .optional_string,
-            .param_types = &.{.string},
+            // cacheGet(namespace, key): both required. The old single-`.string`
+            // declaration under-required, so `cacheGet("ns")` type-checked but
+            // always returned undefined at runtime (impl needs args.len >= 2).
+            .param_types = &.{ .string, .string },
+            .required_arg_count = 2,
             .failure_severity = .expected,
             .contract_extractions = &.{.{ .category = .cache_namespace }},
             .return_labels = .{ .internal = true },
@@ -42,7 +46,11 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 4,
             .effect = .write,
             .returns = .boolean,
-            .param_types = &.{ .string, .string },
+            // cacheSet(namespace, key, value, ttl?): the old `{string,string}`
+            // declaration let `cacheSet("ns", value)` (missing the key, or value)
+            // type-check clean while the impl silently returned false (no write).
+            .param_types = &.{ .string, .string, .string, .number },
+            .required_arg_count = 3,
             .contract_extractions = &.{.{ .category = .cache_namespace }},
             .laws = &.{.idempotent_call},
         },
@@ -52,7 +60,9 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 2,
             .effect = .write,
             .returns = .boolean,
-            .param_types = &.{.string},
+            // cacheDelete(namespace, key): both required.
+            .param_types = &.{ .string, .string },
+            .required_arg_count = 2,
             .contract_extractions = &.{.{ .category = .cache_namespace }},
             .laws = &.{.idempotent_call},
         },
@@ -62,7 +72,9 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 4,
             .effect = .write,
             .returns = .number,
-            .param_types = &.{.string},
+            // cacheIncr(namespace, key, delta?, ttl?): namespace+key required.
+            .param_types = &.{ .string, .string, .number, .number },
+            .required_arg_count = 2,
             .contract_extractions = &.{.{ .category = .cache_namespace }},
         },
         .{

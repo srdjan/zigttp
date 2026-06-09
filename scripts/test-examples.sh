@@ -97,6 +97,18 @@ run_tests "examples/patterns/validate-external.ts"         "examples/patterns/va
 run_tests "examples/patterns/discriminated-union-match.ts" "examples/patterns/discriminated-union-match.test.jsonl"
 run_tests "examples/patterns/derive-types.ts"              "examples/patterns/derive-types.test.jsonl"
 
+# sql/ - a zigttp:sql handler needs its schema to type-check; assert it proves
+# clean (this is the example whose one-arg sqlMany("listTodos") regressed when
+# the sql bindings lacked required_arg_count).
+if "$ZIGTTP" check examples/sql/sql-crud.ts --sql-schema examples/sql/schema.sql >/dev/null 2>&1; then
+    echo "  PASS  sql/sql-crud.ts (check --sql-schema)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL  sql/sql-crud.ts (check --sql-schema)"
+    "$ZIGTTP" check examples/sql/sql-crud.ts --sql-schema examples/sql/schema.sql 2>&1 | grep -iE "error|warning" | head -5 | sed 's/^/        /'
+    FAIL=$((FAIL + 1))
+fi
+
 # `zigttp check` writes a zigttp.d.ts typings stub into the cwd; drop it.
 rm -f zigttp.d.ts
 

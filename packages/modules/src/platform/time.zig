@@ -27,9 +27,16 @@ const DateComponents = struct {
     day_of_week: u3,
 };
 
+// 9999-12-31T23:59:59Z. `calculateYearDay` walks `year += 1` over a u16 year,
+// so an unbounded `secs` (e.g. formatIso(1e19) after extractEpochMs saturates to
+// ~9.2e18) overflows the year past 65535 -> panic in safe builds / multi-hundred-
+// million-iteration spin in ReleaseFast. Clamp to the conventional max date.
+const MAX_EPOCH_SECS: u64 = 253402300799;
+
 fn epochMsToComponents(epoch_ms: i64) DateComponents {
     const ms_remainder: u16 = @intCast(@mod(@as(u64, @intCast(@max(0, epoch_ms))), 1000));
-    const total_secs: u64 = @intCast(@divTrunc(@as(u64, @intCast(@max(0, epoch_ms))), 1000));
+    const raw_secs: u64 = @intCast(@divTrunc(@as(u64, @intCast(@max(0, epoch_ms))), 1000));
+    const total_secs: u64 = @min(raw_secs, MAX_EPOCH_SECS);
 
     const es = epoch.EpochSeconds{ .secs = total_secs };
     const epoch_day = es.getEpochDay();
@@ -221,6 +228,16 @@ test "epochMsToComponents: known date" {
     try std.testing.expectEqual(@as(u4, 3), c.month);
     try std.testing.expectEqual(@as(u5, 15), c.day);
     try std.testing.expectEqual(@as(u16, 123), c.ms);
+}
+
+test "epochMsToComponents: huge timestamp clamps instead of overflowing the u16 year" {
+    // formatIso(1e19): extractEpochMs saturates to ~maxInt(i64); without the
+    // clamp, calculateYearDay's `year += 1` loop overflows u16 (panic in safe
+    // builds, multi-hundred-million-iteration spin in ReleaseFast).
+    const c = epochMsToComponents(std.math.maxInt(i64));
+    try std.testing.expectEqual(@as(u16, 9999), c.year);
+    try std.testing.expectEqual(@as(u4, 12), c.month);
+    try std.testing.expectEqual(@as(u5, 31), c.day);
 }
 
 test "parseIsoString: full ISO 8601" {

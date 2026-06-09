@@ -788,6 +788,12 @@ pub const LiveReloadState = struct {
             if (self.server.proof_cache != null) {
                 printProve("Proof cache: enabled (deterministic + read_only)\n", .{});
             }
+        } else {
+            // No new contract this swap (no contract extracted, contract-diff or
+            // upgrade-analysis failure, or plain --watch). Invalidate the stale
+            // proof cache and route pre-filter so we never serve the previous
+            // handler's cached responses or 404 the new handler's routes.
+            self.server.invalidateContractCaches();
         }
 
         printReload("Handler swapped. {d} runtime(s) invalidated.\n", .{invalidated});

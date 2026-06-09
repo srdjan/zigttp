@@ -87,6 +87,14 @@ pub const RuntimeContract = struct {
     env_dynamic: bool,
     routes: []const Route,
     routes_dynamic: bool,
+    /// True when any route reads request headers or body (the contract carried
+    /// non-empty `headerParams`/`bodyParams` or their `*Dynamic` flags). The
+    /// proof cache keys on method+URL only, so a handler whose response depends
+    /// on request headers (auth, content-negotiation) must not be cached - one
+    /// caller's response would be replayed to every other caller of the same
+    /// URL. Defaults false; an older contract that omits the param lists is
+    /// treated as header-independent.
+    reads_request_state: bool = false,
     properties: Properties,
     websocket: WebSocketInfo = .{},
     /// Null when the embedded contract did not emit a sandbox block (old
@@ -308,6 +316,7 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
         routes.deinit(allocator);
     }
     var routes_dynamic = false;
+    var reads_request_state = false;
     if (root.get("api")) |api_val| {
         if (api_val == .object) {
             const api_obj = api_val.object;
@@ -322,6 +331,7 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
                         const method_val = route_obj.get("method") orelse continue;
                         const path_val = route_obj.get("path") orelse continue;
                         if (method_val != .string or path_val != .string) continue;
+                        if (routeReadsRequestState(route_obj)) reads_request_state = true;
                         // Stage both dupes so a failure on the second one
                         // (or on append) does not leak the first.
                         const method = try allocator.dupe(u8, method_val.string);
@@ -409,6 +419,7 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
         .env_dynamic = env_dynamic,
         .routes = routes_slice,
         .routes_dynamic = routes_dynamic,
+        .reads_request_state = reads_request_state,
         .properties = properties,
         .websocket = websocket,
         .capabilities = capabilities,
@@ -417,6 +428,25 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
         .modules = modules_slice,
         .allocator = allocator,
     } };
+}
+
+/// True when a contract.json route object reads request headers or body: a
+/// non-empty `headerParams`/`bodyParams` array or a `headerParamsDynamic`/
+/// `bodyParamsDynamic` flag. The proof cache (method+URL key) is unsound for
+/// such handlers. `queryParams` are deliberately excluded - the query string is
+/// part of the URL and therefore already in the cache key.
+fn routeReadsRequestState(route_obj: std.json.ObjectMap) bool {
+    inline for (.{ "headerParams", "bodyParams" }) |list_key| {
+        if (route_obj.get(list_key)) |v| {
+            if (v == .array and v.array.items.len > 0) return true;
+        }
+    }
+    inline for (.{ "headerParamsDynamic", "bodyParamsDynamic" }) |dyn_key| {
+        if (route_obj.get(dyn_key)) |v| {
+            if (v == .bool and v.bool) return true;
+        }
+    }
+    return false;
 }
 
 fn readSandboxHex(obj: std.json.ObjectMap, key: []const u8, out: *[32]u8) void {
@@ -555,7 +585,11 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         }
         routes.deinit(allocator);
     }
+    var reads_request_state = false;
     for (hc.api.routes.items) |api_route| {
+        if (api_route.header_params.items.len > 0 or api_route.header_params_dynamic) {
+            reads_request_state = true;
+        }
         const method = try allocator.dupe(u8, api_route.method);
         errdefer allocator.free(method);
         const path = try allocator.dupe(u8, api_route.path);
@@ -589,6 +623,7 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         .env_dynamic = hc.env.dynamic,
         .routes = try routes.toOwnedSlice(allocator),
         .routes_dynamic = hc.api.routes_dynamic,
+        .reads_request_state = reads_request_state,
         .properties = .{
             .pure = hp.pure,
             .read_only = hp.read_only,
@@ -829,6 +864,38 @@ test "parseContractJson with properties and routes" {
     try std.testing.expect(p.fault_covered);
     try std.testing.expect(p.result_safe);
     try std.testing.expect(p.optional_safe);
+
+    // Both routes carry empty headerParams, so the handler is input-independent
+    // and the proof cache stays eligible.
+    try std.testing.expect(!contract.reads_request_state);
+}
+
+test "parseContractJson flags reads_request_state when a route reads headers" {
+    const allocator = std.testing.allocator;
+    // A route declaring a non-empty headerParams (e.g. reads req.headers
+    // ['x-api-key']). The proof cache keys on method+URL only, so this handler
+    // must be excluded from caching.
+    const source =
+        \\{
+        \\  "api": {"routes": [{"method": "GET", "path": "/me", "headerParams": [{"name": "x-api-key", "kind": "header"}], "headerParamsDynamic": false}], "routesDynamic": false},
+        \\  "properties": {"pure": false, "readOnly": true, "stateless": true, "retrySafe": true, "deterministic": true, "hasEgress": false}
+        \\}
+    ;
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
+    try std.testing.expect(raw.inner.reads_request_state);
+}
+
+test "parseContractJson flags reads_request_state on dynamic header access" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "api": {"routes": [{"method": "GET", "path": "/me", "headerParams": [], "headerParamsDynamic": true}], "routesDynamic": false}
+        \\}
+    ;
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
+    try std.testing.expect(raw.inner.reads_request_state);
 }
 
 // Regression: parseContractJson handles allocator failure at every internal

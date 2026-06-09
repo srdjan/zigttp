@@ -9,6 +9,12 @@ pub const binding = sdk.ModuleBinding{
     .name = "decode",
     .stateful = false,
     .exports = &.{
+        // decodeJson/decodeForm/decodeQuery delegate to the same in-process
+        // validate machinery as validateJson/coerceJson (which are replay_pure):
+        // argument-deterministic, no ambient state, and a `.validated` (not
+        // secret/credential) return label. Mark them replay_pure so they run for
+        // real under `serve --test` instead of returning undefined without an io
+        // mock - matching their validate siblings.
         .{
             .name = "decodeJson",
             .module_func = decodeJsonImpl,
@@ -18,6 +24,8 @@ pub const binding = sdk.ModuleBinding{
             .failure_severity = .critical,
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
+            .laws = &.{.pure},
+            .replay_pure = true,
         },
         .{
             .name = "decodeForm",
@@ -28,6 +36,8 @@ pub const binding = sdk.ModuleBinding{
             .failure_severity = .critical,
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
+            .laws = &.{.pure},
+            .replay_pure = true,
         },
         .{
             .name = "decodeQuery",
@@ -38,6 +48,8 @@ pub const binding = sdk.ModuleBinding{
             .failure_severity = .critical,
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
+            .laws = &.{.pure},
+            .replay_pure = true,
         },
     },
 };

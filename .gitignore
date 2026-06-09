@@ -57,9 +57,6 @@ codedb.snapshot
 /????????????????/
 docs/pi-tui-demo.gif
 docs/pi-tui-demo.tape
-docs/pi-tui-demo.tape
-demo/proof-review/proof-review.mov
-demo/proof-review/.ffmpeg.log
 .zigttp/
 
 # Generator output from `zigts check --types`. Regenerated on demand;

@@ -1162,6 +1162,11 @@ pub const IrTranspiler = struct {
                 const val_tag = self.ir.getTag(prop.value) orelse return .dynamic;
                 if (val_tag == .lit_int) {
                     const val = self.ir.getIntValue(prop.value) orelse return .dynamic;
+                    // A status outside u16 range (e.g. {status: 70000} or -1)
+                    // cannot be a literal status code; fall back to the dynamic
+                    // path (the runtime clamps to 100-599) rather than panicking
+                    // the AOT compiler on @intCast.
+                    if (val < 0 or val > std.math.maxInt(u16)) return .dynamic;
                     return .{ .literal = @intCast(val) };
                 }
                 // status key present but value is not an integer literal.
