@@ -60,10 +60,16 @@ fn execute(
     const relative = common.relativeToRoot(root, absolute);
 
     const has_explicit_output = args.len > 1 and args[1].len > 0;
+    var output_abs_owned: ?[]u8 = null;
+    defer if (output_abs_owned) |p| allocator.free(p);
     var output_path_owned: ?[]u8 = null;
     defer if (output_path_owned) |p| allocator.free(p);
 
-    const output_path: []const u8 = if (has_explicit_output) args[1] else blk: {
+    const output_path: []const u8 = if (has_explicit_output) blk: {
+        const output_abs = try common.resolveInsideWorkspace(allocator, root, args[1]);
+        output_abs_owned = output_abs;
+        break :blk common.relativeToRoot(root, output_abs);
+    } else blk: {
         const ext = std.fs.path.extension(relative);
         const stem = relative[0 .. relative.len - ext.len];
         const owned = try std.fmt.allocPrint(allocator, "{s}.test.jsonl", .{stem});
@@ -92,4 +98,15 @@ test "missing args returns not-ok" {
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "requires handler_path") != null);
+}
+
+test "out-of-workspace output_path is rejected" {
+    try testing.expectError(
+        error.PathOutsideWorkspace,
+        execute(testing.allocator, &.{ "handler.ts", "/etc/evil.test.jsonl" }),
+    );
+    try testing.expectError(
+        error.PathOutsideWorkspace,
+        execute(testing.allocator, &.{ "handler.ts", "../../../../../../outside.test.jsonl" }),
+    );
 }

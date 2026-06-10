@@ -842,6 +842,20 @@ const Stripper = struct {
                 continue;
             }
 
+            // Comments inside the annotation: skip wholesale so their
+            // content cannot unbalance the depth counters below.
+            if (c == '/' and self.pos + 1 < self.source.len) {
+                const next = self.source[self.pos + 1];
+                if (next == '/') {
+                    self.skipLineComment();
+                    continue;
+                }
+                if (next == '*') {
+                    try self.skipBlockComment();
+                    continue;
+                }
+            }
+
             // Check identifiers for banned types
             if (isIdentifierStart(c)) {
                 try self.checkForAnyType();
@@ -1369,7 +1383,12 @@ const Stripper = struct {
 
         // Check if this is a comparison operator
         if (self.looksLikeComparison()) {
-            return false;
+            // Explicit type arguments on a call (`f<number>(x)`) also sit
+            // right after an expression. Per the TypeScript disambiguation
+            // rule, a balanced `<...>` of type syntax whose closing `>` lands
+            // directly on `(` is a type-argument list, not a comparison; only
+            // then fall through to the strip below.
+            if (!self.looksLikeCallTypeArguments()) return false;
         }
 
         // Try to parse as generic params. The probe below advances pos via
@@ -1442,6 +1461,109 @@ const Stripper = struct {
             // Could be comparison like `a < b` or `foo() < bar`
             // Need more context - for now, be conservative
             return true;
+        }
+        return false;
+    }
+
+    /// Probe from a `<` that follows an expression: returns true when the
+    /// balanced `<...>` reads as an explicit type-argument list on a call,
+    /// i.e. its closing `>` is directly followed by `(` and the content stays
+    /// inside type-argument grammar. Anything a type-argument list cannot
+    /// contain (`&&`, `||`, arithmetic, a top-level `?`/`:`/`;`, an unbalanced
+    /// closer) means comparison, so the probe rejects and the source passes
+    /// through unchanged. Side-effect-free: pos/line/col are restored.
+    fn looksLikeCallTypeArguments(self: *Self) bool {
+        const saved_pos = self.pos;
+        const saved_line = self.line;
+        const saved_col = self.col;
+        defer {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            self.col = saved_col;
+        }
+
+        self.pos += 1;
+        self.col += 1;
+        var angle_depth: u16 = 1;
+        var paren_depth: u16 = 0;
+        var bracket_depth: u16 = 0;
+        var brace_depth: u16 = 0;
+
+        while (self.pos < self.source.len) {
+            const c = self.source[self.pos];
+
+            if (c == '"' or c == '\'' or c == '`') {
+                self.skipString(c) catch return false;
+                continue;
+            }
+            if (c == '/' and self.pos + 1 < self.source.len) {
+                const next = self.source[self.pos + 1];
+                if (next == '/') {
+                    self.skipLineComment();
+                    continue;
+                }
+                if (next == '*') {
+                    self.skipBlockComment() catch return false;
+                    continue;
+                }
+            }
+
+            if (c == '>') {
+                if (angle_depth == 1) {
+                    return paren_depth == 0 and bracket_depth == 0 and brace_depth == 0 and
+                        self.pos + 1 < self.source.len and self.source[self.pos + 1] == '(';
+                }
+                angle_depth -= 1;
+            } else if (c == '<') {
+                angle_depth += 1;
+            } else if (c == '(') {
+                paren_depth += 1;
+            } else if (c == ')') {
+                if (paren_depth == 0) return false;
+                paren_depth -= 1;
+            } else if (c == '[') {
+                bracket_depth += 1;
+            } else if (c == ']') {
+                if (bracket_depth == 0) return false;
+                bracket_depth -= 1;
+            } else if (c == '{') {
+                brace_depth += 1;
+            } else if (c == '}') {
+                if (brace_depth == 0) return false;
+                brace_depth -= 1;
+            } else if (c == '=') {
+                // Only `=>` of a function type; a bare `=` cannot appear in
+                // type arguments. Consume both so the `>` does not close the
+                // angle scan.
+                if (self.pos + 1 >= self.source.len or self.source[self.pos + 1] != '>') return false;
+                self.pos += 2;
+                self.col += 2;
+                continue;
+            } else if (c == '|' or c == '&') {
+                // Union/intersection are single; doubled is a logical operator.
+                if (self.pos + 1 < self.source.len and self.source[self.pos + 1] == c) return false;
+            } else if (c == '?' or c == ':') {
+                // Valid only nested (function-type params, object/tuple
+                // members); at the top level these read as ternary syntax.
+                if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) return false;
+            } else if (c == ';') {
+                if (brace_depth == 0) return false;
+            } else if (c == '-') {
+                // Negative numeric literal type; anything else is arithmetic.
+                if (self.pos + 1 >= self.source.len or !std.ascii.isDigit(self.source[self.pos + 1])) return false;
+            } else if (c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == ',' or c == '.') {
+                // Allowed separators.
+            } else if (!isIdentifierContinue(c)) {
+                return false;
+            }
+
+            if (c == '\n') {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
+            self.pos += 1;
         }
         return false;
     }
@@ -1599,6 +1721,20 @@ const Stripper = struct {
                 continue;
             }
 
+            // Comments inside the annotation: skip wholesale so their
+            // content cannot match a delimiter or unbalance the depths below.
+            if (c == '/' and self.pos + 1 < self.source.len) {
+                const next = self.source[self.pos + 1];
+                if (next == '/') {
+                    self.skipLineComment();
+                    continue;
+                }
+                if (next == '*') {
+                    try self.skipBlockComment();
+                    continue;
+                }
+            }
+
             // Check identifiers for banned types (catches nested 'any' in Record<string, any> etc.)
             if (isIdentifierStart(c)) {
                 if (!(brace_depth > 0 and self.isObjectTypeMemberKey(self.pos))) {
@@ -1707,6 +1843,20 @@ const Stripper = struct {
             if (c == '"' or c == '\'' or c == '`') {
                 self.skipString(c) catch return false;
                 continue;
+            }
+
+            // Comments inside the generic: skip wholesale so a `<` or `>`
+            // in the comment text cannot unbalance the depth count.
+            if (c == '/' and self.pos + 1 < self.source.len) {
+                const next = self.source[self.pos + 1];
+                if (next == '/') {
+                    self.skipLineComment();
+                    continue;
+                }
+                if (next == '*') {
+                    self.skipBlockComment() catch return false;
+                    continue;
+                }
             }
 
             if (c == '<') {
@@ -2910,4 +3060,139 @@ test "export distinct type stripped" {
         }
     }
     try std.testing.expect(found_distinct);
+}
+
+// ============================================================================
+// Explicit Type Arguments on Calls
+// ============================================================================
+
+test "explicit type argument on call stripped" {
+    // `f<number>(x)` must not survive as chained comparisons (f < number) > (x).
+    const result = try strip(std.testing.allocator, "const r = f<number>(x);", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "<") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "(x);") != null);
+}
+
+test "several explicit type arguments on call stripped" {
+    const result = try strip(std.testing.allocator, "const r = g<string, number>(a, b);", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "<") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "string") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "(a, b);") != null);
+}
+
+test "nested generic type arguments on call stripped" {
+    const result = try strip(std.testing.allocator, "const r = h<Array<number>>(x);", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "<") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "Array") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "(x);") != null);
+}
+
+test "string literal type argument with angle bracket inside stripped" {
+    const result = try strip(std.testing.allocator, "const r = f<\"a>b\">(x);", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "<") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "a>b") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "(x);") != null);
+}
+
+test "explicit type argument on method call stripped" {
+    const result = try strip(std.testing.allocator, "const r = obj.pick<string>(key);", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "<") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "obj.pick") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "(key);") != null);
+}
+
+test "comparison chain is not treated as type arguments" {
+    const source = "const r = a < b > c;";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "comparison with logical operator is not treated as type arguments" {
+    // `i<j && k>(l)` reads as (i < j) && (k > (l)); `&&` cannot appear in a
+    // type-argument list, so the probe must reject it.
+    const source = "const ok = i<j && k>(l);";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "ternary between comparisons is not treated as type arguments" {
+    // `t ? a<b : c>(d)` is (t ? (a < b) : (c > (d))); a top-level `:` cannot
+    // appear in a type-argument list.
+    const source = "const v = t ? a<b : c>(d);";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "comparison whose right operand is not a call is unchanged" {
+    const source = "const r = x<y>z;";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "block comment inside call type arguments stripped" {
+    const result = try strip(std.testing.allocator, "const r = f</* c: a<b */ number>(x);", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "/*") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "(x);") != null);
+}
+
+// ============================================================================
+// Comments Inside Type Annotations
+// ============================================================================
+
+test "block comment inside variable annotation stripped" {
+    // The `<` and `:` inside the comment must not derail the type skipper.
+    const result = try strip(std.testing.allocator, "let x: number /* note: a<b */ = 2;", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "/*") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "let x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "= 2;") != null);
+}
+
+test "block comment with brace inside variable annotation stripped" {
+    const result = try strip(std.testing.allocator, "let x: number /* { */ = 1;", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "{") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "= 1;") != null);
+}
+
+test "line comment inside variable annotation stripped" {
+    const source = "let x: number // note: a<b\n  = 1;";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "//") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "= 1;") != null);
+}
+
+test "block comment inside param annotation stripped" {
+    const source = "function f(a: number /* c: x<y */, b: string) { return b; }";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": string") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ", b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "return b;") != null);
+}
+
+test "block comment inside generic annotation stripped" {
+    const result = try strip(std.testing.allocator, "let x: Array</* a<b */ number> = [];", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "Array") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "/*") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "= [];") != null);
 }

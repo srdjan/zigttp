@@ -15,10 +15,12 @@
 //! fails loudly.
 //!
 //! The corpus is restricted to integer / boolean / numeric-overflow results.
-//! String results are intentionally excluded: comparing them safely needs the
-//! ctx-bound rope/slice flatten path (a raw toPtr(JSString) cast is unsound on
-//! slices and ropes), and the families this gate exists to protect are the
-//! arithmetic/comparison opcodes the tiers each reimplement.
+//! String results are intentionally excluded from RAW comparison: comparing
+//! them safely needs the ctx-bound rope/slice flatten path (a raw
+//! toPtr(JSString) cast is unsound on slices and ropes). String-PRODUCING
+//! opcodes are still covered by a dedicated gate below that reduces every
+//! string result to a boolean inside the VM (strict_eq against an expected
+//! constant), so no tier's string output is ever inspected via raw casts here.
 
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
@@ -46,6 +48,7 @@ const Case = struct {
     expected_num: f64 = 0,
     expected_bool: bool = false,
     expect_nan: bool = false,
+    expect_neg_zero: bool = false,
 };
 
 fn op(comptime o: O) u8 {
@@ -90,6 +93,97 @@ const nan_lt_consts = [_]JSValue{JSValue.fromFloat(std.math.nan(f64))};
 // it exceeds maxInt(i32) - not a negative int. push_i8 0xFF is the signed byte -1.
 const ushr_neg_code = [_]u8{ op(.push_i8), 0xFF, op(.push_i8), 0, op(.ushr), op(.ret) };
 
+// --- Negative-zero cases ---
+// IEEE -0.0 NaN-boxes as the sign-bit-only raw double (0x8000_0000_0000_0000,
+// prefix 0x8000 < 0xFFFC), so it survives push_const unmolested on every tier.
+// `1 / -0 == -Infinity` is the observable that distinguishes -0 from +0 (===
+// cannot, per spec); `1 / -Infinity` PRODUCES -0 arithmetically rather than
+// just round-tripping a constant. checkExpected asserts the sign bit via
+// expect_neg_zero (expectEqual passes for -0 vs +0, so a plain expected_num
+// of 0 would be vacuous), and sameValue compares zero signs across tiers.
+const neg_zero_const_code = [_]u8{ op(.push_const), 0, 0, op(.ret) };
+const neg_zero_consts = [_]JSValue{JSValue.fromFloat(-0.0)};
+const div_neg_zero_code = [_]u8{ op(.push_i8), 1, op(.push_const), 0, 0, op(.div), op(.ret) };
+const div_neg_inf_code = [_]u8{ op(.push_i8), 1, op(.push_const), 0, 0, op(.div), op(.ret) };
+const div_neg_inf_consts = [_]JSValue{JSValue.fromFloat(-std.math.inf(f64))};
+// -1.0 * 0 multiplies through the float slow path (mixed float/int operands)
+// and must yield -0, not +0, on every tier.
+const mul_neg_zero_code = [_]u8{ op(.push_const), 0, 0, op(.push_i8), 0, op(.mul), op(.ret) };
+const mul_neg_zero_consts = [_]JSValue{JSValue.fromFloat(-1.0)};
+// `-0.0 === 0.0` is true per ECMAScript (=== treats the zeros as equal); both
+// operands are raw doubles so this exercises the float equality lane, not the
+// raw-bits fast path.
+const neg_zero_strict_eq_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.strict_eq), op(.ret) };
+const neg_zero_strict_eq_consts = [_]JSValue{ JSValue.fromFloat(-0.0), JSValue.fromFloat(0.0) };
+// Unary minus on float +0.0 produces -0 on the interpreter (negValue's float
+// lane) but +0 on the baseline JIT - a recorded tier divergence, so this case
+// lives in its own KNOWN DIVERGENCE test below instead of the corpus.
+const neg_float_zero_code = [_]u8{ op(.push_const), 0, 0, op(.neg), op(.ret) };
+const neg_float_zero_consts = [_]JSValue{JSValue.fromFloat(0.0)};
+
+// --- NaN comparison cases ---
+// nan_lt above covers NaN-on-the-left vs an int operand (helper-call lane,
+// since the int's tag prefix bails the emitted fast path). These extend the
+// family: NaN on the right, the remaining relational operators, and float
+// operands chosen so the baseline's emitted raw-double compare (fcmp/ucomisd
+// unordered handling) runs instead of the helper - 0.3's bit pattern has LSB
+// 1, which steers the emitted code off the integer guard onto the float lane.
+const lt_nan_rhs_code = [_]u8{ op(.push_i8), 5, op(.push_const), 0, 0, op(.lt), op(.ret) };
+const nan_gt_code = [_]u8{ op(.push_const), 0, 0, op(.push_i8), 5, op(.gt), op(.ret) };
+const nan_float_consts = [_]JSValue{ JSValue.fromFloat(std.math.nan(f64)), JSValue.fromFloat(0.3) };
+const nan_lt_float_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.lt), op(.ret) };
+const nan_eq_float_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.eq), op(.ret) };
+const float_gte_nan_code = [_]u8{ op(.push_const), 1, 0, op(.push_const), 0, 0, op(.gte), op(.ret) };
+// Identical-bit NaN equality: every tier short-circuits on raw-bits equality
+// BEFORE any NaN check (strictEquals/looseEquals fast path in the interpreter,
+// the emitted raw-compare fast path in the baseline), so `NaN === NaN` reads
+// true engine-wide when both operands come from the same constant. That is an
+// ES deviation (spec says false) pinned here as TIER AGREEMENT: if any tier
+// gains a NaN guard on its fast path this case flags the divergence, and the
+// expectation flips to false only when all tiers move together.
+const nan_strict_eq_self_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 0, 0, op(.strict_eq), op(.ret) };
+const nan_eq_self_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 0, 0, op(.eq), op(.ret) };
+// Different-bit NaNs (canonical vs sign-flipped) dodge the raw fast path and
+// land on the real NaN handling: false on every tier, ES-correct.
+const nan_diff_consts = [_]JSValue{ JSValue.fromFloat(std.math.nan(f64)), JSValue.fromFloat(-std.math.nan(f64)) };
+const nan_strict_eq_diff_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.strict_eq), op(.ret) };
+const nan_eq_diff_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.eq), op(.ret) };
+// NaN comparison feeding a branch. `NaN < 5` is false, so if_true falls
+// through and the program returns 7; a tier that read the comparison as true
+// returns 9 instead. Branch offsets are i16 little-endian relative to the pc
+// after the operand bytes (if_true at 6, operands at 7..8, next pc 9, taken
+// target 9 + 3 = 12).
+const nan_branch_code = [_]u8{
+    op(.push_const), 0, 0, // NaN
+    op(.push_i8),    5,
+    op(.lt), // false
+    op(.if_true),
+    3,
+    0,
+    op(.push_i8),
+    7,
+    op(.ret),
+    op(.push_i8),
+    9,
+    op(.ret),
+};
+// Taken-branch polarity: `NaN != 5` is true (the one comparison NaN satisfies),
+// so if_true jumps and the program returns 9.
+const nan_neq_branch_code = [_]u8{
+    op(.push_const), 0, 0, // NaN
+    op(.push_i8),    5,
+    op(.neq), // true
+    op(.if_true),
+    3,
+    0,
+    op(.push_i8),
+    7,
+    op(.ret),
+    op(.push_i8),
+    9,
+    op(.ret),
+};
+
 // --- Property-access cases (write then read back the same slot) ---
 // new_object; dup; push_i8 42; put_field .length; get_field .length; ret.
 // put_field pops [val, obj] (val on top) and pushes nothing, so the dup keeps a
@@ -100,23 +194,23 @@ const ushr_neg_code = [_]u8{ op(.push_i8), 0xFF, op(.push_i8), 0, op(.ushr), op(
 // exactly like the arithmetic corpus. This is the positive control for the
 // hidden-class store path the write-barrier work touched on every tier.
 const get_put_field_code = [_]u8{
-    op(.new_object),       // [obj]
-    op(.dup),              // [obj, obj]
-    op(.push_i8),     42,  // [obj, obj, 42]
-    op(.put_field),   4, 0, // obj.length = 42; [obj]
-    op(.get_field),   4, 0, // [obj.length]
-    op(.ret),              // returns 42
+    op(.new_object), // [obj]
+    op(.dup), // [obj, obj]
+    op(.push_i8), 42, // [obj, obj, 42]
+    op(.put_field), 4, 0, // obj.length = 42; [obj]
+    op(.get_field), 4, 0, // [obj.length]
+    op(.ret), // returns 42
 };
 // Same semantics through the inline-cache opcodes. The +u16 cache_idx (0,0)
 // indexes Interpreter.pic_cache[512]; the first run misses then self-populates,
 // so the read-back parity also pins miss-then-hit IC agreement across tiers.
 const get_put_field_ic_code = [_]u8{
-    op(.new_object),              // [obj]
-    op(.dup),                     // [obj, obj]
-    op(.push_i8),     42,         // [obj, obj, 42]
+    op(.new_object), // [obj]
+    op(.dup), // [obj, obj]
+    op(.push_i8), 42, // [obj, obj, 42]
     op(.put_field_ic), 4, 0, 0, 0, // obj.length = 42; atom=4 cache=0; [obj]
     op(.get_field_ic), 4, 0, 0, 0, // [obj.length]; atom=4 cache=0
-    op(.ret),                     // returns 42
+    op(.ret), // returns 42
 };
 
 const cases = [_]Case{
@@ -134,6 +228,22 @@ const cases = [_]Case{
     .{ .name = "mod_zero", .code = &mod_zero_code, .kind = .number, .expect_nan = true },
     .{ .name = "nan_lt", .code = &nan_lt_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = false },
     .{ .name = "ushr_neg", .code = &ushr_neg_code, .kind = .number, .expected_num = 4294967295 },
+    .{ .name = "neg_zero_const", .code = &neg_zero_const_code, .constants = &neg_zero_consts, .kind = .number, .expect_neg_zero = true },
+    .{ .name = "div_one_by_neg_zero", .code = &div_neg_zero_code, .constants = &neg_zero_consts, .kind = .number, .expected_num = -std.math.inf(f64) },
+    .{ .name = "div_one_by_neg_inf", .code = &div_neg_inf_code, .constants = &div_neg_inf_consts, .kind = .number, .expect_neg_zero = true },
+    .{ .name = "mul_neg_zero", .code = &mul_neg_zero_code, .constants = &mul_neg_zero_consts, .kind = .number, .expect_neg_zero = true },
+    .{ .name = "neg_zero_strict_eq_zero", .code = &neg_zero_strict_eq_code, .constants = &neg_zero_strict_eq_consts, .kind = .boolean, .expected_bool = true },
+    .{ .name = "lt_nan_rhs", .code = &lt_nan_rhs_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = false },
+    .{ .name = "nan_gt", .code = &nan_gt_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = false },
+    .{ .name = "nan_lt_float", .code = &nan_lt_float_code, .constants = &nan_float_consts, .kind = .boolean, .expected_bool = false },
+    .{ .name = "nan_eq_float", .code = &nan_eq_float_code, .constants = &nan_float_consts, .kind = .boolean, .expected_bool = false },
+    .{ .name = "float_gte_nan", .code = &float_gte_nan_code, .constants = &nan_float_consts, .kind = .boolean, .expected_bool = false },
+    .{ .name = "nan_strict_eq_self", .code = &nan_strict_eq_self_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = true },
+    .{ .name = "nan_eq_self", .code = &nan_eq_self_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = true },
+    .{ .name = "nan_strict_eq_diff", .code = &nan_strict_eq_diff_code, .constants = &nan_diff_consts, .kind = .boolean, .expected_bool = false },
+    .{ .name = "nan_eq_diff", .code = &nan_eq_diff_code, .constants = &nan_diff_consts, .kind = .boolean, .expected_bool = false },
+    .{ .name = "nan_branch_not_taken", .code = &nan_branch_code, .constants = &nan_lt_consts, .kind = .number, .expected_num = 7 },
+    .{ .name = "nan_neq_branch_taken", .code = &nan_neq_branch_code, .constants = &nan_lt_consts, .kind = .number, .expected_num = 9 },
     .{ .name = "get_put_field", .code = &get_put_field_code, .kind = .number, .expected_num = 42 },
     .{ .name = "get_put_field_ic", .code = &get_put_field_ic_code, .kind = .number, .expected_num = 42 },
 };
@@ -154,12 +264,15 @@ fn buildFunc(case: Case) bytecode.FunctionBytecode {
 
 /// Numerically/structurally equal across tiers. Identical NaN-box encoding is the
 /// fast path (ints, bools, inline doubles); an overflowing add may box its f64
-/// result differently per tier, so fall back to numeric comparison.
+/// result differently per tier, so fall back to numeric comparison. Zeros compare
+/// by sign bit (SameValue, not ==): a tier returning +0 where another returns -0
+/// is a real divergence that `an == bn` would wave through.
 fn sameValue(a: JSValue, b: JSValue) bool {
     if (a.raw == b.raw) return true;
     const an = a.toNumber() orelse return false;
     const bn = b.toNumber() orelse return false;
     if (std.math.isNan(an) and std.math.isNan(bn)) return true;
+    if (an == 0 and bn == 0) return std.math.signbit(an) == std.math.signbit(bn);
     return an == bn;
 }
 
@@ -170,6 +283,10 @@ fn checkExpected(case: Case, result: JSValue) !void {
             const n = result.toNumber() orelse return error.ExpectedNumber;
             if (case.expect_nan) {
                 try std.testing.expect(std.math.isNan(n));
+            } else if (case.expect_neg_zero) {
+                // expectEqual cannot see the sign of zero (-0.0 == 0.0).
+                try std.testing.expectEqual(@as(f64, 0), n);
+                try std.testing.expect(std.math.signbit(n));
             } else {
                 try std.testing.expectEqual(case.expected_num, n);
             }
@@ -221,6 +338,7 @@ test "opcode parity: interpreter, baseline, and optimized tiers agree" {
     var optimized_reached: usize = 0;
 
     for (cases) |case| {
+        errdefer std.debug.print("opcode parity: failing case '{s}'\n", .{case.name});
         // Tier 1: interpreter. Pin thresholds so maybePromote never compiles.
         jit_policy.setJitThreshold(std.math.maxInt(u32));
         jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
@@ -271,6 +389,66 @@ test "opcode parity: interpreter, baseline, and optimized tiers agree" {
         // Every case must have genuinely exercised the baseline tier.
         try std.testing.expectEqual(cases.len, baseline_compiled);
     }
+}
+
+// KNOWN DIVERGENCE (recorded, not fixed here): unary minus on float +0.0.
+// The interpreter's negValue takes the float lane and returns -0.0 per spec;
+// the baseline JIT's emitNeg guards its integer fast path by LSB alone, so the
+// raw double +0.0 (bits all zero, LSB 0) is misclassified as an SMI and
+// integer-negated to raw 0 = +0.0 - the sign bit is lost. A prefix-correct
+// guard ((raw >> 48) == 0xFFFD, as emitMathRoundingOp already uses) would
+// route +0.0 to the jitNeg helper and preserve -0. This test pins BOTH current
+// behaviors so the divergence stays visible: when the baseline guard is fixed,
+// the final assertion fires - flip the case into the main corpus with
+// expect_neg_zero and delete this test.
+test "opcode parity: KNOWN DIVERGENCE - baseline emitNeg drops the sign of -(+0.0)" {
+    const allocator = std.testing.allocator;
+
+    const prev_policy = jit_policy.getJitPolicy();
+    const prev_threshold = jit_policy.getJitThreshold();
+    const prev_warmup = jit_policy.getJitFeedbackWarmup();
+    defer {
+        jit_policy.setJitPolicy(prev_policy);
+        jit_policy.setJitThreshold(prev_threshold);
+        jit_policy.setJitFeedbackWarmup(prev_warmup);
+    }
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    var interp = Interpreter.init(ctx);
+
+    jit_policy.setJitPolicy(.eager);
+    const jit_available = !jit_policy.jitDisabled();
+
+    const case = Case{ .name = "neg_float_zero", .code = &neg_float_zero_code, .constants = &neg_float_zero_consts, .kind = .number, .expect_neg_zero = true };
+
+    // Tier 1: interpreter returns -0 (sign bit set).
+    jit_policy.setJitThreshold(std.math.maxInt(u32));
+    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
+    var interp_func = buildFunc(case);
+    const interp_result = try interp.run(&interp_func);
+    try std.testing.expectEqual(bytecode.CompilationTier.interpreted, interp_func.tier);
+    try checkExpected(case, interp_result);
+
+    if (!jit_available) return;
+
+    // Tier 2: baseline JIT currently returns +0 (sign bit lost).
+    jit_policy.setJitPolicy(.eager);
+    jit_policy.setJitThreshold(1);
+    jit_policy.setJitFeedbackWarmup(1);
+    var base_func = buildFunc(case);
+    defer jit_compile.cleanupCompiledCode(allocator, &base_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
+    var base_result: JSValue = undefined;
+    var i: usize = 0;
+    while (i < 6) : (i += 1) base_result = try interp.run(&base_func);
+    try std.testing.expect(base_func.compiled_code != null); // genuinely compiled, not silently interpreted
+    const n = base_result.toNumber() orelse return error.ExpectedNumber;
+    try std.testing.expectEqual(@as(f64, 0), n);
+    // The divergence: a fixed emitNeg makes this signbit TRUE - see the header.
+    try std.testing.expect(!std.math.signbit(n));
 }
 
 // `call` needs a callee FUNCTION value that only exists once `ctx`/the allocator
@@ -372,6 +550,136 @@ test "opcode parity: call returns identical value across tiers" {
         const opt_result = try interp.run(&opt_func);
         try checkExpected(call_case, opt_result);
         try std.testing.expect(sameValue(interp_result, opt_result));
+    }
+}
+
+// String-valued results. The header's exclusion holds for RAW comparison: this
+// harness must never toPtr/flatten a tier's string output. The dodge is doing
+// the comparison INSIDE the VM - concatenate, then strict_eq against an
+// expected constant - so every case still reduces to a boolean and sameValue
+// stays number/bool-only. That observable is also the only meaningful one: the
+// interpreter's add builds a rope while jitAdd builds a flat string, so the
+// tiers legitimately return different representations of the same content and
+// only in-VM content equality (which strictEquals defines across flat/rope/
+// slice) can compare them. String constants need ctx (arena-backed
+// allocation), so like `call` these cannot be comptime Case literals.
+test "opcode parity: string-producing opcodes agree across tiers via in-VM comparison" {
+    const allocator = std.testing.allocator;
+
+    const prev_policy = jit_policy.getJitPolicy();
+    const prev_threshold = jit_policy.getJitThreshold();
+    const prev_warmup = jit_policy.getJitFeedbackWarmup();
+    defer {
+        jit_policy.setJitPolicy(prev_policy);
+        jit_policy.setJitThreshold(prev_threshold);
+        jit_policy.setJitFeedbackWarmup(prev_warmup);
+    }
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Arena-backed hybrid allocation (the production path): every string this
+    // corpus creates - the constants below and the concat results inside the
+    // VM - is reclaimed at arena deinit, so testing.allocator still flags
+    // genuine leaks in the JIT/feedback machinery.
+    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 8192 });
+    defer req_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{ .persistent = allocator, .arena = &req_arena };
+    ctx.setHybridAllocator(&hybrid);
+
+    var interp = Interpreter.init(ctx);
+
+    jit_policy.setJitPolicy(.eager);
+    const jit_available = !jit_policy.jitDisabled();
+
+    const s_foo = try ctx.createString("foo");
+    const s_bar = try ctx.createString("bar");
+    const s_foobar = try ctx.createString("foobar");
+    const s_foobaz = try ctx.createString("foobaz");
+    const s_foo_dup = try ctx.createString("foo");
+    const s_v = try ctx.createString("v");
+    const s_v5 = try ctx.createString("v5");
+
+    // add on two strings concatenates; strict_eq then compares content.
+    const concat_eq_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.add), op(.push_const), 2, 0, op(.strict_eq), op(.ret) };
+    const concat_eq_consts = [_]JSValue{ s_foo, s_bar, s_foobar };
+    // Negative control: the same concat against the wrong constant must read
+    // false, guarding against a tier (or strict_eq itself) degenerating to
+    // always-true.
+    const concat_wrong_consts = [_]JSValue{ s_foo, s_bar, s_foobaz };
+    // Content equality across two DISTINCT heap strings: pointer inequality
+    // with byte equality, so the raw-bits fast path cannot answer this one.
+    const content_eq_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.strict_eq), op(.ret) };
+    const content_eq_consts = [_]JSValue{ s_foo, s_foo_dup };
+    // Number-to-string coercion inside concat ("v" + 5 -> "v5") pins the
+    // int-toString lane (small-int cache) across tiers.
+    const num_concat_code = [_]u8{ op(.push_const), 0, 0, op(.push_i8), 5, op(.add), op(.push_const), 1, 0, op(.strict_eq), op(.ret) };
+    const num_concat_consts = [_]JSValue{ s_v, s_v5 };
+    // concat_n is the dedicated N-way concatenation opcode (template literals);
+    // +u8 count operand.
+    const concat_n_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.concat_n), 2, op(.push_const), 2, 0, op(.strict_eq), op(.ret) };
+
+    const string_cases = [_]Case{
+        .{ .name = "str_concat_eq", .code = &concat_eq_code, .constants = &concat_eq_consts, .kind = .boolean, .expected_bool = true },
+        .{ .name = "str_concat_wrong", .code = &concat_eq_code, .constants = &concat_wrong_consts, .kind = .boolean, .expected_bool = false },
+        .{ .name = "str_content_eq", .code = &content_eq_code, .constants = &content_eq_consts, .kind = .boolean, .expected_bool = true },
+        .{ .name = "str_num_concat", .code = &num_concat_code, .constants = &num_concat_consts, .kind = .boolean, .expected_bool = true },
+        .{ .name = "str_concat_n", .code = &concat_n_code, .constants = &concat_eq_consts, .kind = .boolean, .expected_bool = true },
+    };
+
+    var baseline_compiled: usize = 0;
+
+    for (string_cases) |case| {
+        errdefer std.debug.print("opcode parity: failing case '{s}'\n", .{case.name});
+        // Tier 1: interpreter. Pin thresholds so maybePromote never compiles.
+        jit_policy.setJitThreshold(std.math.maxInt(u32));
+        jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
+        var interp_func = buildFunc(case);
+        const interp_result = try interp.run(&interp_func);
+        try std.testing.expectEqual(bytecode.CompilationTier.interpreted, interp_func.tier);
+        try checkExpected(case, interp_result);
+
+        if (!jit_available) continue;
+
+        // Tier 2: baseline JIT. Eager + threshold 1 forces compilation quickly.
+        jit_policy.setJitPolicy(.eager);
+        jit_policy.setJitThreshold(1);
+        jit_policy.setJitFeedbackWarmup(1);
+        var base_func = buildFunc(case);
+        defer jit_compile.cleanupCompiledCode(allocator, &base_func);
+        defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
+        var base_result: JSValue = undefined;
+        var i: usize = 0;
+        while (i < 6) : (i += 1) base_result = try interp.run(&base_func);
+        try std.testing.expect(base_func.compiled_code != null); // genuinely compiled, not silently interpreted
+        baseline_compiled += 1;
+        try checkExpected(case, base_result);
+        try std.testing.expect(sameValue(interp_result, base_result));
+
+        // Tier 3: optimized JIT. Loopless bodies may not reach .optimized;
+        // parity is asserted only when reached, exactly like the corpus above.
+        jit_policy.setJitPolicy(.lazy);
+        jit_policy.setJitThreshold(std.math.maxInt(u32));
+        jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
+        var opt_func = buildFunc(case);
+        defer jit_compile.cleanupCompiledCode(allocator, &opt_func);
+        defer jit_compile.cleanupTypeFeedback(allocator, &opt_func);
+        try jit_compile.allocateTypeFeedback(&interp, &opt_func);
+        var w: usize = 0;
+        while (w < 8) : (w += 1) _ = try interp.run(&opt_func);
+        jit_compile.tryCompileOptimized(&interp, &opt_func) catch {};
+        if (opt_func.tier == .optimized) {
+            const opt_result = try interp.run(&opt_func);
+            try checkExpected(case, opt_result);
+            try std.testing.expect(sameValue(interp_result, opt_result));
+        }
+    }
+
+    if (jit_available) {
+        // Every case must have genuinely exercised the baseline tier.
+        try std.testing.expectEqual(string_cases.len, baseline_compiled);
     }
 }
 
@@ -495,7 +803,7 @@ test "opcode parity: failure paths fault identically across tiers" {
 // general emitBinaryOp -> jitAdd helper call, not a deopt-to-interpreter.)
 const fault_then_continue_code = [_]u8{
     op(.push_undefined), op(.push_undefined), op(.add), // faults: TypeError
-    op(.push_i8),        99, // executes only if the tier ran past the fault
+    op(.push_i8), 99, // executes only if the tier ran past the fault
     op(.ret),
 };
 

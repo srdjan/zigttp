@@ -181,16 +181,31 @@ const SearchOutput = struct {
     }
 };
 
+/// The trailing "--" ends rg's flag parsing, so a model-controlled query
+/// beginning with "-" (e.g. "--pre", which executes a command) is always
+/// treated as the search pattern, never as an rg option.
+const rg_argv_prefix = [_][]const u8{ "rg", "-n", "--no-heading", "--color", "never", "--hidden", "-g", "!.git", "-g", "!zig-out", "-g", "!.zig-cache", "-g", "!node_modules", "--" };
+
+fn buildRgArgv(
+    buf: *[rg_argv_prefix.len + 2][]const u8,
+    relative: []const u8,
+    query: []const u8,
+) []const []const u8 {
+    @memcpy(buf[0..rg_argv_prefix.len], &rg_argv_prefix);
+    buf[rg_argv_prefix.len] = query;
+    if (std.mem.eql(u8, relative, ".")) return buf[0 .. rg_argv_prefix.len + 1];
+    buf[rg_argv_prefix.len + 1] = relative;
+    return buf[0 .. rg_argv_prefix.len + 2];
+}
+
 fn searchWithRipgrep(
     allocator: std.mem.Allocator,
     root: []const u8,
     relative: []const u8,
     query: []const u8,
 ) !SearchOutput {
-    const argv: []const []const u8 = if (std.mem.eql(u8, relative, "."))
-        &.{ "rg", "-n", "--no-heading", "--color", "never", "--hidden", "-g", "!.git", "-g", "!zig-out", "-g", "!.zig-cache", "-g", "!node_modules", query }
-    else
-        &.{ "rg", "-n", "--no-heading", "--color", "never", "--hidden", "-g", "!.git", "-g", "!zig-out", "-g", "!.zig-cache", "-g", "!node_modules", query, relative };
+    var argv_buf: [rg_argv_prefix.len + 2][]const u8 = undefined;
+    const argv = buildRgArgv(&argv_buf, relative, query);
 
     var outcome = try common.runCommand(allocator, root, argv);
     // Capture the verdict fields before deinit clears them, then move the
@@ -341,6 +356,19 @@ test "workspace_search_text: malformed JSON returns structured error" {
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "invalid JSON input") != null);
+}
+
+test "workspace_search_text: dash-leading query reaches rg as a pattern, after --" {
+    var buf: [rg_argv_prefix.len + 2][]const u8 = undefined;
+
+    const argv_root = buildRgArgv(&buf, ".", "--pre=touch");
+    try testing.expectEqualStrings("--", argv_root[argv_root.len - 2]);
+    try testing.expectEqualStrings("--pre=touch", argv_root[argv_root.len - 1]);
+
+    const argv_sub = buildRgArgv(&buf, "src", "-e");
+    try testing.expectEqualStrings("--", argv_sub[argv_sub.len - 3]);
+    try testing.expectEqualStrings("-e", argv_sub[argv_sub.len - 2]);
+    try testing.expectEqualStrings("src", argv_sub[argv_sub.len - 1]);
 }
 
 test "workspace_search_text: ../ escape is rejected by resolveInsideWorkspace" {

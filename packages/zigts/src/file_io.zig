@@ -33,7 +33,9 @@ pub fn fileExists(allocator: std.mem.Allocator, path: []const u8) bool {
     return true;
 }
 
-/// Write a file synchronously using POSIX operations.
+/// Write a file synchronously using POSIX operations. New files are created
+/// 0600: callers include session transcripts and project memory, which carry
+/// tool output that must not be world-readable.
 pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
@@ -42,7 +44,7 @@ pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u
         std.posix.AT.FDCWD,
         path_z,
         .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
-        0o644,
+        0o600,
     );
     defer std.Io.Threaded.closeFd(fd);
 
@@ -55,8 +57,9 @@ pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u
     }
 }
 
-/// Open a file for append writes, creating it if missing. Returns the raw
-/// POSIX fd; caller is responsible for closing with `std.Io.Threaded.closeFd`.
+/// Open a file for append writes, creating it (0600, see writeFile) if
+/// missing. Returns the raw POSIX fd; caller is responsible for closing with
+/// `std.Io.Threaded.closeFd`.
 pub fn openAppend(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
@@ -65,7 +68,7 @@ pub fn openAppend(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
         std.posix.AT.FDCWD,
         path_z,
         .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
-        0o644,
+        0o600,
     ) catch return error.FileOpenFailed;
 }
 
@@ -76,4 +79,60 @@ pub fn readFileForModuleGraph(allocator: std.mem.Allocator, path: []const u8) mo
         error.FileTooBig => return error.FileTooBig,
         else => return error.FileNotFound,
     };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const builtin = @import("builtin");
+const testing = std.testing;
+
+// std.testing.tmpDir creates `.zig-cache/tmp/<sub_path>` under cwd but exposes
+// only an `Io.Dir` and the sub_path string. Reconstruct the absolute path from
+// cwd so the absolute-path file ops in this module can reach the tmpdir.
+fn tmpFilePath(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, name: []const u8) ![]u8 {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.c.getcwd(&cwd_buf, cwd_buf.len) == null) return error.CwdUnavailable;
+    const cwd = std.mem.sliceTo(&cwd_buf, 0);
+    return std.fs.path.join(allocator, &.{ cwd, ".zig-cache", "tmp", &tmp.sub_path, name });
+}
+
+fn statMode(allocator: std.mem.Allocator, path: []const u8) !std.c.mode_t {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(fd);
+    var stat: std.c.Stat = undefined;
+    if (std.c.fstat(fd, &stat) != 0) return error.StatFailed;
+    return stat.mode;
+}
+
+test "writeFile creates new files with mode 0600" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try tmpFilePath(allocator, tmp, "transcript.jsonl");
+    defer allocator.free(path);
+    try writeFile(allocator, path, "line\n");
+
+    const mode = try statMode(allocator, path);
+    try testing.expectEqual(@as(std.c.mode_t, 0o600), mode & 0o777);
+}
+
+test "openAppend creates new files with mode 0600" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try tmpFilePath(allocator, tmp, "memory.md");
+    defer allocator.free(path);
+    const fd = try openAppend(allocator, path);
+    std.Io.Threaded.closeFd(fd);
+
+    const mode = try statMode(allocator, path);
+    try testing.expectEqual(@as(std.c.mode_t, 0o600), mode & 0o777);
 }

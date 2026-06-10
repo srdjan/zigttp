@@ -12,11 +12,15 @@
 //!
 //! Hard redaction guardrail: the bundle is built from explicit file
 //! arguments only. `rejectSuspiciousPath` blocks parent-dir traversal and
-//! system roots. Contracts are not introspected for value fields; the
-//! contract format is the authority on what fields exist.
+//! system roots. `verify` additionally rejects manifest component paths
+//! that are absolute or contain `..` segments, so a crafted bundle.json
+//! cannot make the verifier hash files outside the bundle directory.
+//! Contracts are not introspected for value fields; the contract format
+//! is the authority on what fields exist.
 
 const std = @import("std");
 const zigts = @import("zigts");
+const static_mod = @import("../server_static.zig");
 
 pub const tool_version: []const u8 = "zigttp-bundle-1";
 
@@ -156,7 +160,7 @@ pub fn verify(allocator: std.mem.Allocator, bundle_dir_path: []const u8, stdout:
         for (verdicts.items) |v| allocator.free(v.name);
         verdicts.deinit(allocator);
     }
-    try verifyComponents(allocator, bundle_dir_path, manifest_bytes, &verdicts);
+    try verifyComponents(allocator, bundle_dir_path, manifest_bytes, &verdicts, stderr);
 
     var any_failed = false;
     for (verdicts.items) |v| {
@@ -178,9 +182,16 @@ fn verifyComponents(
     bundle_dir_path: []const u8,
     manifest_bytes: []const u8,
     out: *std.ArrayList(ComponentVerdict),
+    stderr: *std.Io.Writer,
 ) !void {
     var offset: usize = 0;
     while (findNextComponent(manifest_bytes, offset)) |entry| : (offset = entry.next_offset) {
+        // The manifest is untrusted input: an absolute or `..`-containing
+        // component path would make the verifier hash arbitrary files.
+        if (!static_mod.isPathSafe(entry.path)) {
+            try stderr.print("zigttp proofs verify: component path '{s}' escapes the bundle directory\n", .{entry.path});
+            return error.SuspiciousPath;
+        }
         const file_full = try std.fs.path.join(allocator, &.{ bundle_dir_path, entry.path });
         defer allocator.free(file_full);
 
@@ -307,4 +318,95 @@ test "findNextComponent walks multiple entries via next_offset" {
     const second = findNextComponent(manifest, first.next_offset) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("binary", second.name);
     try std.testing.expect(findNextComponent(manifest, second.next_offset) == null);
+}
+
+const test_chdir = @import("../proof_ledger.zig").chdirTmpForTest;
+
+test "verify rejects a manifest component path with parent traversal" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    // The target exists outside the bundle dir and its sha256 matches the
+    // manifest, so a verifier that read it would report the component OK.
+    try zigts.file_io.writeFile(std.testing.allocator, "secret", "outside-the-bundle");
+    try ensureDir(std.testing.allocator, "bundle");
+    const secret_sha = sha256Hex("outside-the-bundle");
+    var manifest_buf: [256]u8 = undefined;
+    const manifest = try std.fmt.bufPrint(
+        &manifest_buf,
+        "{{\n  \"components\": {{\n    \"contract\": {{ \"path\": \"../secret\", \"sha256\": \"{s}\" }}\n  }}\n}}\n",
+        .{secret_sha},
+    );
+    try zigts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.SuspiciousPath, verify(std.testing.allocator, "bundle", &out.writer, &err.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "OK") == null);
+    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "../secret") != null);
+}
+
+test "verify rejects an absolute manifest component path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try zigts.file_io.writeFile(std.testing.allocator, "secret", "outside-the-bundle");
+    const cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+    const abs_secret = try std.fs.path.join(std.testing.allocator, &.{ cwd, "secret" });
+    defer std.testing.allocator.free(abs_secret);
+
+    try ensureDir(std.testing.allocator, "bundle");
+    const secret_sha = sha256Hex("outside-the-bundle");
+    const manifest = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\n  \"components\": {{\n    \"contract\": {{ \"path\": \"{s}\", \"sha256\": \"{s}\" }}\n  }}\n}}\n",
+        .{ abs_secret, secret_sha },
+    );
+    defer std.testing.allocator.free(manifest);
+    try zigts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.SuspiciousPath, verify(std.testing.allocator, "bundle", &out.writer, &err.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "OK") == null);
+    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), abs_secret) != null);
+}
+
+test "verify passes a bundle written by writeBundle" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try zigts.file_io.writeFile(std.testing.allocator, "contract.json", "{\"routes\":[]}");
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try writeBundle(std.testing.allocator, .{
+        .contract_path = "contract.json",
+        .out_dir = "bundle",
+    }, &out.writer, &err.writer);
+
+    var verify_out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer verify_out.deinit();
+    var verify_err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer verify_err.deinit();
+    try verify(std.testing.allocator, "bundle", &verify_out.writer, &verify_err.writer);
+    const text = verify_out.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Bundle verified") != null);
 }

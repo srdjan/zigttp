@@ -51,6 +51,7 @@ test {
     _ = @import("init_command.zig");
     _ = @import("build_command.zig");
     _ = @import("dev_command.zig");
+    _ = @import("ratchet_command.zig");
     _ = @import("cli_help.zig");
     // cli_auth and verify_cli are likewise only reached via main's dispatch;
     // reference them so their tests (API-key store 0600 perms/masking, and the

@@ -3029,6 +3029,65 @@ fn readResponseBody(response: *std.http.Client.Response, allocator: std.mem.Allo
     return reader.allocRemaining(allocator, std.Io.Limit.limited(max_bytes));
 }
 
+/// Wall-clock deadline for one outbound exchange, enforced by a watchdog
+/// thread that full-shutdowns the socket once the deadline passes. The std
+/// paths cannot bound this themselves: ConnectTcpOptions.timeout is declared
+/// but never read by std.http.Client, and SO_RCVTIMEO is unusable because the
+/// Threaded backend treats a socket EAGAIN as a programmer bug (panics in
+/// Debug). After shutdown, blocked reads surface EndOfStream and blocked
+/// writes SocketUnconnected, which the call sites map to a clean fetch error.
+/// `disarm` must run before the connection is released so the watchdog can
+/// never shut down a recycled fd.
+const FetchDeadline = struct {
+    stream: std.Io.net.Stream,
+    timeout_ms: u32,
+    io: std.Io,
+    event: std.Io.Event = .unset,
+    fired: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    thread: ?std.Thread = null,
+
+    fn arm(self: *FetchDeadline) void {
+        if (self.timeout_ms == 0) return;
+        self.thread = std.Thread.spawn(.{}, watch, .{self}) catch null;
+    }
+
+    fn watch(self: *FetchDeadline) void {
+        const duration: std.Io.Clock.Duration = .{
+            .raw = std.Io.Duration.fromMilliseconds(@intCast(self.timeout_ms)),
+            .clock = .awake,
+        };
+        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, duration);
+        while (true) {
+            if (self.event.waitTimeout(self.io, .{ .deadline = deadline })) |_| {
+                return;
+            } else |err| switch (err) {
+                error.Canceled => return,
+                // waitTimeout reports spurious wakeups as Timeout; trust
+                // only the clock.
+                error.Timeout => if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) break,
+            }
+        }
+        if (self.event.isSet()) return;
+        self.fired.store(true, .seq_cst);
+        self.stream.shutdown(self.io, .both) catch {};
+    }
+
+    fn disarm(self: *FetchDeadline) void {
+        const thread = self.thread orelse return;
+        self.event.set(self.io);
+        thread.join();
+        self.thread = null;
+    }
+
+    fn expired(self: *const FetchDeadline) bool {
+        return self.fired.load(.seq_cst);
+    }
+
+    fn failCode(self: *const FetchDeadline, fallback: []const u8) []const u8 {
+        return if (self.expired()) "TimedOut" else fallback;
+    }
+};
+
 fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     if (!rt.config.outbound_http_enabled) {
         return createFetchErrorResponse(rt, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
@@ -3101,28 +3160,37 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     };
     defer req.deinit();
 
+    var deadline: FetchDeadline = .{
+        .stream = connection.stream_reader.stream,
+        .timeout_ms = rt.config.outbound_timeout_ms,
+        .io = client.io,
+    };
+    deadline.arm();
+    // Declared after req's deinit defer so disarm joins the watchdog first.
+    defer deadline.disarm();
+
     if (options.body) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
         var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
-            return createFetchErrorResponse(rt, "RequestSendFailed", @errorName(err));
+            return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
         request_body.writer.writeAll(payload) catch |err| {
-            return createFetchErrorResponse(rt, "RequestSendFailed", @errorName(err));
+            return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
         request_body.end() catch |err| {
-            return createFetchErrorResponse(rt, "RequestSendFailed", @errorName(err));
+            return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
         req.connection.?.flush() catch |err| {
-            return createFetchErrorResponse(rt, "RequestSendFailed", @errorName(err));
+            return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
     } else {
         req.sendBodiless() catch |err| {
-            return createFetchErrorResponse(rt, "RequestSendFailed", @errorName(err));
+            return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
     }
 
     var response = req.receiveHead(&.{}) catch |err| {
-        return createFetchErrorResponse(rt, "ResponseHeadFailed", @errorName(err));
+        return createFetchErrorResponse(rt, deadline.failCode("ResponseHeadFailed"), @errorName(err));
     };
     const status = @intFromEnum(response.head.status);
     var owned_head = try snapshotResponseHead(rt.allocator, response.head);
@@ -3130,9 +3198,15 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
 
     const response_body = readResponseBody(&response, rt.allocator, options.max_response_bytes) catch |err| switch (err) {
         error.StreamTooLong => return createFetchErrorResponse(rt, "ResponseTooLarge", "response exceeded max_response_bytes"),
-        else => return createFetchErrorResponse(rt, "ResponseReadFailed", @errorName(err)),
+        else => return createFetchErrorResponse(rt, deadline.failCode("ResponseReadFailed"), @errorName(err)),
     };
     defer rt.allocator.free(response_body);
+
+    // A connection-close body terminated by the watchdog's shutdown reads as
+    // a clean EOF; reject it instead of returning a truncated response.
+    if (deadline.expired()) {
+        return createFetchErrorResponse(rt, "TimedOut", "exceeded outbound_timeout_ms");
+    }
 
     const created = try createFetchResponse(rt, status, owned_head.reason, response_body, owned_head.contentType());
     for (owned_head.headers.items) |header| {
@@ -4360,13 +4434,22 @@ fn doFetchWorkerInner(
     };
     defer req.deinit();
 
+    var deadline: FetchDeadline = .{
+        .stream = connection.stream_reader.stream,
+        .timeout_ms = config.outbound_timeout_ms,
+        .io = client.io,
+    };
+    deadline.arm();
+    // Declared after req's deinit defer so disarm joins the watchdog first.
+    defer deadline.disarm();
+
     if (desc.body) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
         var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
             return zq.modules.io.FetchResult{
                 .status = 599,
                 .ok = false,
-                .error_code = try allocator.dupe(u8, "RequestSendFailed"),
+                .error_code = try allocator.dupe(u8, deadline.failCode("RequestSendFailed")),
                 .error_details = try allocator.dupe(u8, @errorName(err)),
             };
         };
@@ -4374,7 +4457,7 @@ fn doFetchWorkerInner(
             return zq.modules.io.FetchResult{
                 .status = 599,
                 .ok = false,
-                .error_code = try allocator.dupe(u8, "RequestSendFailed"),
+                .error_code = try allocator.dupe(u8, deadline.failCode("RequestSendFailed")),
                 .error_details = try allocator.dupe(u8, @errorName(err)),
             };
         };
@@ -4382,7 +4465,7 @@ fn doFetchWorkerInner(
             return zq.modules.io.FetchResult{
                 .status = 599,
                 .ok = false,
-                .error_code = try allocator.dupe(u8, "RequestSendFailed"),
+                .error_code = try allocator.dupe(u8, deadline.failCode("RequestSendFailed")),
                 .error_details = try allocator.dupe(u8, @errorName(err)),
             };
         };
@@ -4390,7 +4473,7 @@ fn doFetchWorkerInner(
             return zq.modules.io.FetchResult{
                 .status = 599,
                 .ok = false,
-                .error_code = try allocator.dupe(u8, "RequestSendFailed"),
+                .error_code = try allocator.dupe(u8, deadline.failCode("RequestSendFailed")),
                 .error_details = try allocator.dupe(u8, @errorName(err)),
             };
         };
@@ -4399,7 +4482,7 @@ fn doFetchWorkerInner(
             return zq.modules.io.FetchResult{
                 .status = 599,
                 .ok = false,
-                .error_code = try allocator.dupe(u8, "RequestSendFailed"),
+                .error_code = try allocator.dupe(u8, deadline.failCode("RequestSendFailed")),
                 .error_details = try allocator.dupe(u8, @errorName(err)),
             };
         };
@@ -4409,7 +4492,7 @@ fn doFetchWorkerInner(
         return zq.modules.io.FetchResult{
             .status = 599,
             .ok = false,
-            .error_code = try allocator.dupe(u8, "ResponseHeadFailed"),
+            .error_code = try allocator.dupe(u8, deadline.failCode("ResponseHeadFailed")),
             .error_details = try allocator.dupe(u8, @errorName(err)),
         };
     };
@@ -4432,11 +4515,23 @@ fn doFetchWorkerInner(
             return zq.modules.io.FetchResult{
                 .status = 599,
                 .ok = false,
-                .error_code = try allocator.dupe(u8, "ResponseReadFailed"),
+                .error_code = try allocator.dupe(u8, deadline.failCode("ResponseReadFailed")),
                 .error_details = try allocator.dupe(u8, @errorName(err)),
             };
         },
     };
+
+    // A connection-close body terminated by the watchdog's shutdown reads as
+    // a clean EOF; reject it instead of returning a truncated response.
+    if (deadline.expired()) {
+        allocator.free(response_body);
+        return zq.modules.io.FetchResult{
+            .status = 599,
+            .ok = false,
+            .error_code = try allocator.dupe(u8, "TimedOut"),
+            .error_details = try allocator.dupe(u8, "exceeded outbound_timeout_ms"),
+        };
+    }
 
     // Build response headers list
     var resp_headers: std.ArrayList(zq.modules.io.FetchResult.ResponseHeader) = .empty;
@@ -4639,28 +4734,37 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
     };
     defer req.deinit();
 
+    var deadline: FetchDeadline = .{
+        .stream = connection.stream_reader.stream,
+        .timeout_ms = rt.config.outbound_timeout_ms,
+        .io = client.io,
+    };
+    deadline.arm();
+    // Declared after req's deinit defer so disarm joins the watchdog first.
+    defer deadline.disarm();
+
     if (body) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
         var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
-            return try httpRequestErrorJsonAlloc(a, "RequestSendFailed", @errorName(err));
+            return try httpRequestErrorJsonAlloc(a, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
         request_body.writer.writeAll(payload) catch |err| {
-            return try httpRequestErrorJsonAlloc(a, "RequestSendFailed", @errorName(err));
+            return try httpRequestErrorJsonAlloc(a, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
         request_body.end() catch |err| {
-            return try httpRequestErrorJsonAlloc(a, "RequestSendFailed", @errorName(err));
+            return try httpRequestErrorJsonAlloc(a, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
         req.connection.?.flush() catch |err| {
-            return try httpRequestErrorJsonAlloc(a, "RequestSendFailed", @errorName(err));
+            return try httpRequestErrorJsonAlloc(a, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
     } else {
         req.sendBodiless() catch |err| {
-            return try httpRequestErrorJsonAlloc(a, "RequestSendFailed", @errorName(err));
+            return try httpRequestErrorJsonAlloc(a, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
     }
 
     var response = req.receiveHead(&.{}) catch |err| {
-        return try httpRequestErrorJsonAlloc(a, "ResponseHeadFailed", @errorName(err));
+        return try httpRequestErrorJsonAlloc(a, deadline.failCode("ResponseHeadFailed"), @errorName(err));
     };
     const status = @intFromEnum(response.head.status);
     const ok = response.head.status.class() != .server_error and response.head.status.class() != .client_error;
@@ -4669,9 +4773,15 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
 
     const response_body = readResponseBody(&response, a, max_response_bytes) catch |err| switch (err) {
         error.StreamTooLong => return try httpRequestErrorJsonAlloc(a, "ResponseTooLarge", "response exceeded max_response_bytes"),
-        else => return try httpRequestErrorJsonAlloc(a, "ResponseReadFailed", @errorName(err)),
+        else => return try httpRequestErrorJsonAlloc(a, deadline.failCode("ResponseReadFailed"), @errorName(err)),
     };
     defer a.free(response_body);
+
+    // A connection-close body terminated by the watchdog's shutdown reads as
+    // a clean EOF; reject it instead of returning a truncated response.
+    if (deadline.expired()) {
+        return try httpRequestErrorJsonAlloc(a, "TimedOut", "exceeded outbound_timeout_ms");
+    }
 
     var aw: std.Io.Writer.Allocating = .init(a);
     defer aw.deinit();
@@ -4842,6 +4952,7 @@ const TestHttpServer = struct {
     const Mode = enum {
         echo_request_json,
         large_plain_text,
+        silent_hold,
     };
 
     fn init(allocator: std.mem.Allocator, mode: Mode) !TestHttpServer {
@@ -4902,6 +5013,19 @@ const TestHttpServer = struct {
         switch (self.mode) {
             .echo_request_json => try self.respondWithEcho(&stream, io),
             .large_plain_text => try self.respondWithLargeBody(&stream, io),
+            .silent_hold => try self.holdSilently(&stream, io),
+        }
+    }
+
+    /// Accepts the request but never writes a byte back; returns once the
+    /// client gives up and closes its end.
+    fn holdSilently(self: *TestHttpServer, stream: *std.Io.net.Stream, io: std.Io) !void {
+        _ = self;
+        while (true) {
+            var chunk: [1024]u8 = undefined;
+            var vecs: [1][]u8 = .{chunk[0..]};
+            const n = io.vtable.netRead(io.userdata, stream.socket.handle, &vecs) catch break;
+            if (n == 0) break;
         }
     }
 
@@ -6873,6 +6997,67 @@ test "fetchSync enforces response byte limits" {
     try std.testing.expectEqual(false, obj.get("ok").?.bool);
     try std.testing.expectEqualStrings("ResponseTooLarge", obj.get("error").?.string);
     try std.testing.expectEqualStrings("response exceeded max_response_bytes", obj.get("details").?.string);
+}
+
+test "fetchSync times out instead of hanging when upstream accepts and goes silent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server = try TestHttpServer.init(allocator, .silent_hold);
+    defer server.join() catch {};
+    try server.start();
+
+    const url = try server.url(allocator, "/never-answers");
+    defer allocator.free(url);
+
+    const rt = try Runtime.init(allocator, .{
+        .outbound_http_enabled = true,
+        .outbound_allow_host = "127.0.0.1",
+        .outbound_timeout_ms = 200,
+    });
+    defer rt.deinit();
+
+    const handler_code = try std.fmt.allocPrint(
+        allocator,
+        \\function handler(req) {{
+        \\  const resp = fetchSync("{s}");
+        \\  const data = resp.json();
+        \\  return Response.json({{
+        \\    status: resp.status,
+        \\    ok: resp.ok,
+        \\    error: data.error
+        \\  }});
+        \\}}
+    ,
+        .{url},
+    );
+    defer allocator.free(handler_code);
+    try rt.loadHandler(handler_code, "<fetchsync-timeout>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    const clock_io = server.io_backend.io();
+    const started = std.Io.Clock.awake.now(clock_io);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    const elapsed_ms = started.untilNow(clock_io, .awake).toMilliseconds();
+    try server.join();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 599), obj.get("status").?.integer);
+    try std.testing.expectEqual(false, obj.get("ok").?.bool);
+    try std.testing.expectEqualStrings("TimedOut", obj.get("error").?.string);
+    // 200ms deadline; anything near a second means the watchdog never fired.
+    try std.testing.expect(elapsed_ms < 2000);
 }
 
 test "HandlerPool basic operations" {

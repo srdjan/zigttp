@@ -653,6 +653,57 @@ pub const IrTranspiler = struct {
             \\
             \\
         );
+
+        // Integer arithmetic helpers. JS numbers are f64: when an i32
+        // fast-path result is not representable (overflow, fractional or
+        // non-finite quotient), the helper bails to the bytecode interpreter,
+        // which computes the JS f64 result. Mirrors the interpreter's
+        // overflow-to-float promotion in interpreter.zig.
+        self.emit(
+            \\fn jsIntAdd(a: i32, b: i32) error{AotBail}!i32 {
+            \\    const sum, const overflow = @addWithOverflow(a, b);
+            \\    if (overflow != 0) return error.AotBail;
+            \\    return sum;
+            \\}
+            \\
+            \\fn jsIntSub(a: i32, b: i32) error{AotBail}!i32 {
+            \\    const diff, const overflow = @subWithOverflow(a, b);
+            \\    if (overflow != 0) return error.AotBail;
+            \\    return diff;
+            \\}
+            \\
+            \\fn jsIntMul(a: i32, b: i32) error{AotBail}!i32 {
+            \\    const product, const overflow = @mulWithOverflow(a, b);
+            \\    if (overflow != 0) return error.AotBail;
+            \\    return product;
+            \\}
+            \\
+            \\fn jsIntDiv(a: i32, b: i32) error{AotBail}!i32 {
+            \\    // x / 0 is Infinity or NaN in JS; minInt / -1 overflows i32.
+            \\    if (b == 0) return error.AotBail;
+            \\    if (a == std.math.minInt(i32) and b == -1) return error.AotBail;
+            \\    const quotient = @divTrunc(a, b);
+            \\    // A fractional quotient is a non-integer f64 in JS.
+            \\    if (quotient * b != a) return error.AotBail;
+            \\    return quotient;
+            \\}
+            \\
+            \\fn jsIntMod(a: i32, b: i32) error{AotBail}!i32 {
+            \\    // JS % keeps the dividend's sign (@rem, not @mod); x % 0 is NaN.
+            \\    if (b == 0) return error.AotBail;
+            \\    // Guard minInt % -1 (quotient overflow); the JS result is -0/+0.
+            \\    if (b == -1) return 0;
+            \\    return @rem(a, b);
+            \\}
+            \\
+            \\fn jsIntNeg(a: i32) error{AotBail}!i32 {
+            \\    // -minInt is not representable as i32; JS promotes to f64.
+            \\    if (a == std.math.minInt(i32)) return error.AotBail;
+            \\    return -a;
+            \\}
+            \\
+            \\
+        );
     }
 
     // ============ Phase 4: Top-Level Helper Functions ============
@@ -721,7 +772,7 @@ pub const IrTranspiler = struct {
     }
 
     fn emitIntegerFunction(self: *IrTranspiler, func_info: *FunctionInfo, func: *const ir.Node.FunctionExpr, _: *const FunctionSig) void {
-        // fn aot_fibonacci(n: i32) i32 {
+        // fn aot_fibonacci(n: i32) error{AotBail}!i32 {
         self.emitFmt("fn aot_{s}(", .{func_info.name});
         var p: u8 = 0;
         while (p < func.params_count) : (p += 1) {
@@ -738,7 +789,7 @@ pub const IrTranspiler = struct {
             const arg_binding = BindingRef{ .kind = .argument, .scope_id = func.scope_id, .slot = p };
             self.registerLocal(arg_binding, param_name, .i32_type, false);
         }
-        self.emit(") i32 {\n");
+        self.emit(") error{AotBail}!i32 {\n");
         self.pushIndent();
 
         // Set current function body for mutability analysis
@@ -769,7 +820,7 @@ pub const IrTranspiler = struct {
 
         // Call the specialized function
         self.emitIndent();
-        self.emit("return zq.JSValue.fromInt(aot_");
+        self.emit("return zq.JSValue.fromInt(try aot_");
         self.emit(func_info.name);
         self.emitByte('(');
         p = 0;
@@ -1659,7 +1710,7 @@ pub const IrTranspiler = struct {
                         self.emit("{\n");
                         self.pushIndent();
                         self.emitIndent();
-                        self.emitFmt("const v = aot_{s}(", .{func_name});
+                        self.emitFmt("const v = try aot_{s}(", .{func_name});
                         var a: u8 = 0;
                         while (a < call.args_count) : (a += 1) {
                             if (a > 0) self.emit(", ");
@@ -2114,7 +2165,7 @@ pub const IrTranspiler = struct {
         }
     }
 
-    /// Transpile url.substring(offset) -> url_name[offset..]
+    /// Transpile url.substring(offset) -> url_name[@min(url_name.len, offset)..]
     fn tryTranspileSubstringExpr(self: *IrTranspiler, idx: NodeIndex) bool {
         const call = self.ir.getCall(idx) orelse return false;
         const callee_tag = self.ir.getTag(call.callee) orelse return false;
@@ -2138,7 +2189,13 @@ pub const IrTranspiler = struct {
 
         // Try to resolve offset as a compile-time constant
         if (self.resolveCompileTimeInt(offset_arg)) |offset| {
-            self.emitFmt("{s}[@intCast({d})..]", .{ obj_name, offset });
+            // JS substring clamps out-of-range offsets to [0, len] instead of
+            // trapping (mirrors stringSubstring in string_builtins.zig).
+            if (offset <= 0) {
+                self.emitFmt("{s}[0..]", .{obj_name});
+            } else {
+                self.emitFmt("{s}[@min({s}.len, {d})..]", .{ obj_name, obj_name, offset });
+            }
             return true;
         }
 
@@ -2252,14 +2309,14 @@ pub const IrTranspiler = struct {
             return;
         };
 
-        self.emitFmt("aot_{s}(", .{func_name});
+        self.emitFmt("(try aot_{s}(", .{func_name});
         var a: u8 = 0;
         while (a < call.args_count) : (a += 1) {
             if (a > 0) self.emit(", ");
             const arg = self.ir.getListIndex(call.args_start, a);
             self.transpileIntExpr(arg);
         }
-        self.emit(")");
+        self.emit("))");
     }
 
     fn transpileBinaryOp(self: *IrTranspiler, idx: NodeIndex) void {
@@ -2267,46 +2324,49 @@ pub const IrTranspiler = struct {
         const lt = self.inferExprType(bin.left);
         const rt = self.inferExprType(bin.right);
 
+        // Arithmetic goes through the jsInt* helpers: any result that is not
+        // representable as i32 (overflow, zero divisor, fractional quotient)
+        // bails to the interpreter, which computes the JS f64 result.
         switch (bin.op) {
             .add => {
                 if (lt == .string_type or rt == .string_type) {
                     // String concatenation - not directly emittable in Zig
                     self.emit("error.AotBail");
                 } else {
-                    self.emit("(");
+                    self.emit("(try jsIntAdd(");
                     self.transpileIntExpr(bin.left);
-                    self.emit(" + ");
+                    self.emit(", ");
                     self.transpileIntExpr(bin.right);
-                    self.emit(")");
+                    self.emit("))");
                 }
             },
             .sub => {
-                self.emit("(");
+                self.emit("(try jsIntSub(");
                 self.transpileIntExpr(bin.left);
-                self.emit(" - ");
+                self.emit(", ");
                 self.transpileIntExpr(bin.right);
-                self.emit(")");
+                self.emit("))");
             },
             .mul => {
-                self.emit("(");
+                self.emit("(try jsIntMul(");
                 self.transpileIntExpr(bin.left);
-                self.emit(" * ");
+                self.emit(", ");
                 self.transpileIntExpr(bin.right);
-                self.emit(")");
+                self.emit("))");
             },
             .div => {
-                self.emit("@divTrunc(");
+                self.emit("(try jsIntDiv(");
                 self.transpileIntExpr(bin.left);
                 self.emit(", ");
                 self.transpileIntExpr(bin.right);
-                self.emit(")");
+                self.emit("))");
             },
             .mod => {
-                self.emit("@mod(");
+                self.emit("(try jsIntMod(");
                 self.transpileIntExpr(bin.left);
                 self.emit(", ");
                 self.transpileIntExpr(bin.right);
-                self.emit(")");
+                self.emit("))");
             },
             else => self.emit("error.AotBail"),
         }
@@ -2316,8 +2376,9 @@ pub const IrTranspiler = struct {
         const un = self.ir.getUnary(idx) orelse return;
         switch (un.op) {
             .neg => {
-                self.emit("-");
+                self.emit("(try jsIntNeg(");
                 self.transpileIntExpr(un.operand);
+                self.emit("))");
             },
             .not => {
                 self.emit("!");
@@ -2559,4 +2620,97 @@ pub const IrTranspiler = struct {
 
 // ============ Tests ============
 
-// Tests removed from tools/ - transpiler is tested via integration (build + run)
+const testing = std.testing;
+
+/// Parse `source` and transpile it, returning the generated Zig source.
+/// Everything (parser, atoms, transpiler) is allocated from `arena`, so no
+/// per-object deinit is needed; the arena owner frees it all.
+fn transpileForTest(arena: std.mem.Allocator, source: []const u8) ![]const u8 {
+    const atoms = try arena.create(zigts.context.AtomTable);
+    atoms.* = zigts.context.AtomTable.init(arena);
+    const js_parser = try arena.create(zigts.parser.JsParser);
+    js_parser.* = zigts.parser.JsParser.init(arena, source);
+    js_parser.setAtomTable(atoms);
+    const root = try js_parser.parse();
+    const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const transpiler = try arena.create(IrTranspiler);
+    transpiler.* = IrTranspiler.init(arena, view, atoms);
+    const result = try transpiler.transpileHandler(root);
+    return result.source;
+}
+
+fn expectContains(haystack: []const u8, needle: []const u8) !void {
+    if (std.mem.indexOf(u8, haystack, needle) == null) {
+        std.debug.print("expected to find:\n{s}\nin generated source:\n{s}\n", .{ needle, haystack });
+        return error.TestExpectedContains;
+    }
+}
+
+test "emitted integer add is overflow-guarded and bails instead of panicking" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const src = try transpileForTest(arena_state.allocator(),
+        \\function add(a, b) { return a + b; }
+        \\function handler(req) {
+        \\  const url = req.url;
+        \\  const n = url.length;
+        \\  const y = add(n, 3);
+        \\  return Response.json({ y: y });
+        \\}
+    );
+    try expectContains(src, "fn jsIntAdd(a: i32, b: i32) error{AotBail}!i32");
+    try expectContains(src, "fn aot_add(p0: i32, p1: i32) error{AotBail}!i32 {");
+    try expectContains(src, "return (try jsIntAdd(p0, p1));");
+    // Handler-side call into the integer function propagates the bail.
+    try expectContains(src, "(try aot_add(");
+    try expectContains(src, "return zq.JSValue.fromInt(try aot_add(args[0].getInt(), args[1].getInt()));");
+}
+
+test "emitted division and modulo guard zero divisors and JS remainder sign" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const src = try transpileForTest(arena_state.allocator(),
+        \\function calc(a, b) { return a / b + a % b; }
+        \\function handler(req) {
+        \\  return Response.json({ r: calc(7, 2) });
+        \\}
+    );
+    try expectContains(src, "(try jsIntDiv(p0, p1))");
+    try expectContains(src, "(try jsIntMod(p0, p1))");
+    try expectContains(src, "if (b == 0) return error.AotBail;");
+    // JS % takes the dividend's sign: @rem, never @mod.
+    try expectContains(src, "return @rem(a, b);");
+    try testing.expect(std.mem.indexOf(u8, src, "@mod(") == null);
+}
+
+test "handler-local integer arithmetic uses guarded helpers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    // Use a runtime operand (url.length): literal-only arithmetic is
+    // constant-folded by the parser and never reaches transpileBinaryOp.
+    const src = try transpileForTest(arena_state.allocator(),
+        \\function handler(req) {
+        \\  const url = req.url;
+        \\  const n = url.length;
+        \\  const x = n + 2000000000;
+        \\  return Response.json({ x: x });
+        \\}
+    );
+    try expectContains(src, ": i32 = (try jsIntAdd(aot_local_2, 2000000000));");
+}
+
+test "emitted substring clamps out-of-range offsets like JS" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const src = try transpileForTest(arena_state.allocator(),
+        \\function handler(req) {
+        \\  const url = req.url;
+        \\  const tail = url.substring(11);
+        \\  const all = url.substring(0);
+        \\  return Response.text(tail);
+        \\}
+    );
+    try expectContains(src, "= aot_url[@min(aot_url.len, 11)..];");
+    try expectContains(src, "= aot_url[0..];");
+    try testing.expect(std.mem.indexOf(u8, src, "@intCast(11)") == null);
+}

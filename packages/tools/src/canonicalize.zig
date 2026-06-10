@@ -1264,7 +1264,11 @@ fn scanStringBack(source: []const u8, close: usize, quote: u8) ?usize {
 /// literal start; a multi-line template or statement is refused so the
 /// line-local splice never straddles a construct it cannot see). Any interp
 /// whose `${...}` cannot be balanced is refused, leaving ZTS615 a flagged hard
-/// error.
+/// error. A template inside a function that opens on the same line (an arrow
+/// or a `function` keyword before the backtick) is also refused: the hoisted
+/// `const` would land outside that function, capturing the wrong binding for
+/// any parameter or local the interpolation references and moving evaluation
+/// from call time to definition time.
 fn templateHoistRewrite(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -1285,6 +1289,12 @@ fn templateHoistRewrite(
     // after the hoist. Refuse when anything but a binding/return precedes the
     // template: a `;` in the prefix signals a prior statement on the line.
     if (std.mem.indexOfScalar(u8, source[line_start..tmpl_start], ';') != null) {
+        return error.UnsupportedRefactor;
+    }
+
+    // A function opening before the template on this line would put the
+    // hoisted `const` outside that function's scope.
+    if (prefixOpensFunctionScope(source[line_start..tmpl_start])) {
         return error.UnsupportedRefactor;
     }
 
@@ -1428,6 +1438,24 @@ fn matchingBrace(source: []const u8, start: usize, limit: usize) ?usize {
 /// doubt the text is treated as complex (hoisted), never as simple.
 fn isSimpleTemplateInterpText(s: []const u8) bool {
     return isSimpleLvalue(s);
+}
+
+/// True when `prefix` (the statement-line text before the template literal)
+/// opens a function scope: an `=>` arrow or a word-bounded `function` keyword.
+/// Purely textual and deliberately over-broad (a `=>` inside a string in the
+/// prefix also matches): a false positive only suppresses the auto-fix and
+/// leaves ZTS615 a flagged hard error, never produces a wrong rewrite.
+fn prefixOpensFunctionScope(prefix: []const u8) bool {
+    if (std.mem.indexOf(u8, prefix, "=>") != null) return true;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, prefix, i, "function")) |at| {
+        const before_ok = at == 0 or !isIdentContinue(prefix[at - 1]);
+        const after = at + "function".len;
+        const after_ok = after >= prefix.len or !isIdentContinue(prefix[after]);
+        if (before_ok and after_ok) return true;
+        i = at + 1;
+    }
+    return false;
 }
 
 /// ZTS617 canonical_default_parameter: remove a simple signature-site default
@@ -3538,6 +3566,34 @@ test "templateHoistRewrite refuses a template with only simple interpolations" {
     try std.testing.expectError(error.UnsupportedRefactor, templateHoistRewrite(std.testing.allocator, source, 1, 13));
 }
 
+test "templateHoistRewrite refuses a template inside a same-line arrow function" {
+    // Hoisting above the line would move `n.toUpperCase()` outside the arrow,
+    // where `n` is unbound (or a different outer binding).
+    const source = "  const rows = names.map((n) => `Row ${n.toUpperCase()}`);\n";
+    const bt = std.mem.indexOfScalar(u8, source, '`').?;
+    try std.testing.expectError(
+        error.UnsupportedRefactor,
+        templateHoistRewrite(std.testing.allocator, source, 1, @intCast(bt + 1)),
+    );
+}
+
+test "templateHoistRewrite refuses a template inside a same-line function body" {
+    const source = "  function greet(u) { return `Hi ${u.up()}`; }\n";
+    const bt = std.mem.indexOfScalar(u8, source, '`').?;
+    try std.testing.expectError(
+        error.UnsupportedRefactor,
+        templateHoistRewrite(std.testing.allocator, source, 1, @intCast(bt + 1)),
+    );
+}
+
+test "templateHoistRewrite still hoists when `function` only prefixes an identifier" {
+    const source = "  const functionalGreeting = `Hi ${u.up()}!`;\n";
+    const bt = std.mem.indexOfScalar(u8, source, '`').?;
+    var rw = try templateHoistRewrite(std.testing.allocator, source, 1, @intCast(bt + 1));
+    defer rw.deinit(std.testing.allocator);
+    try std.testing.expectEqual(RepairIntent.name_const_above_template, rw.intent);
+}
+
 test "normalizeSource hoists a complex template interpolation and is fully canonical" {
     const source =
         \\function handler(req: Request): Response {
@@ -3632,6 +3688,24 @@ test "normalizeSource refuses to hoist a multi-line template (left as residual)"
     try std.testing.expect(nr.converged);
     try std.testing.expect(!nr.fully_canonical);
     try std.testing.expect(nr.residual >= 1);
+}
+
+test "normalizeSource refuses to hoist inside a single-line function (left as residual)" {
+    // The interpolation references the function's parameter `n`; a hoisted
+    // const above the line would sit outside the function where `n` is
+    // unbound (or a different outer binding).
+    const source =
+        \\function greet(n: string): string { return `Row ${n.toUpperCase()}`; }
+        \\function handler(req: Request): Response {
+        \\  return Response.text(greet("a"));
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(nr.converged);
+    try std.testing.expect(!nr.fully_canonical);
+    try std.testing.expect(nr.residual >= 1);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "`Row ${n.toUpperCase()}`") != null);
 }
 
 test "normalizeSource reports dynamic computed access as residual diagnostic" {

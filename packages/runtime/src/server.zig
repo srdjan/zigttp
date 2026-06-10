@@ -377,8 +377,12 @@ const ConnectionPool = struct {
         defer if (fd_owned) std.Io.Threaded.closeFd(fd);
 
         // TCP_NODELAY: disable Nagle's algorithm for lower latency
-        // This reduces response latency by sending data immediately
-        std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
+        // This reduces response latency by sending data immediately.
+        // Raw syscall, result discarded: the option does not exist on
+        // non-TCP fds (tests drive this loop over a socketpair), and the
+        // std.posix wrapper dumps a stack trace to stderr for the unmapped
+        // errno under test builds.
+        _ = std.posix.system.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)), @sizeOf(c_int));
 
         // Bound how long a slow client can occupy this worker thread. SO_RCVTIMEO
         // makes a blocking read return error.WouldBlock once an idle gap exceeds
@@ -398,6 +402,7 @@ const ConnectionPool = struct {
         var requests_on_connection: u32 = 0;
 
         while (true) {
+            if (requests_on_connection > 0 and !self.waitForNextRequest(fd)) break;
             _ = arena.reset(.retain_capacity);
             const req_allocator = arena.allocator();
             const outcome = self.handleSingleRequestSync(fd, requests_on_connection, req_allocator) catch break;
@@ -413,6 +418,23 @@ const ConnectionPool = struct {
             if (self.server.config.keep_alive_max_requests > 0 and
                 requests_on_connection >= self.server.config.keep_alive_max_requests) break;
         }
+    }
+
+    /// Bound the idle gap between keep-alive requests by keep_alive_timeout_ms
+    /// instead of timeout_ms: the pool has only cpu_count*2 workers, so a few
+    /// idle connections each holding a worker for the full request timeout
+    /// would starve the server. Polls for readability without consuming bytes,
+    /// so SO_RCVTIMEO (timeout_ms) still bounds the request once its first
+    /// byte arrives, and data already buffered by a pipelining client returns
+    /// immediately. Returns false when the idle timeout expires or polling
+    /// fails: normal keep-alive expiry, the caller closes without logging.
+    fn waitForNextRequest(self: *ConnectionPool, fd: std.posix.fd_t) bool {
+        var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        const timeout: i32 = @intCast(@min(self.server.config.keep_alive_timeout_ms, std.math.maxInt(i32)));
+        const ready = std.posix.poll(&fds, timeout) catch return false;
+        // POLLHUP/POLLERR also count as ready: the subsequent read surfaces
+        // EOF or the reset, which maps to a clean close.
+        return ready > 0;
     }
 
     /// Outcome of a single request on a keep-alive connection. `keep_alive`
@@ -1021,9 +1043,10 @@ pub const ServerConfig = struct {
     /// Enable HTTP keep-alive connections
     keep_alive: bool = true,
 
-    /// Keep-alive idle timeout in milliseconds (max time between requests)
-    /// Note: Currently the overall connection timeout (timeout_ms) applies to the entire
-    /// keep-alive session. This field is reserved for future per-request idle timeout.
+    /// Keep-alive idle timeout in milliseconds (max time between requests).
+    /// A connection idling between requests is closed after this long;
+    /// timeout_ms still bounds receiving each request once its first byte
+    /// arrives.
     keep_alive_timeout_ms: u32 = 5_000,
 
     /// Maximum requests per keep-alive connection (0 = unlimited)
@@ -2406,6 +2429,83 @@ test "threaded handleSingleRequestSync returns 413 for oversized body" {
     var buf: [256]u8 = undefined;
     const n = try std.posix.read(fds[1], &buf);
     try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "HTTP/1.1 413 Payload Too Large\r\n"));
+}
+
+test "threaded waitForNextRequest closes idle keep-alive connection early" {
+    var server: Server = undefined;
+    server.config = .{
+        .handler = .{ .inline_code = "" },
+        .timeout_ms = 30_000,
+        .keep_alive_timeout_ms = 50,
+    };
+
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &server,
+        .allocator = std.testing.allocator,
+    };
+
+    const fds = try createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    // No bytes pending: the idle wait expires at keep_alive_timeout_ms, far
+    // below the 30s request timeout that previously pinned the worker.
+    var timer = try engine.Timer.start();
+    try std.testing.expect(!pool.waitForNextRequest(fds[0]));
+    const elapsed_ms = timer.read() / std.time.ns_per_ms;
+    try std.testing.expect(elapsed_ms >= 40);
+    try std.testing.expect(elapsed_ms < 5_000);
+
+    // Bytes already buffered: no idle wait at all.
+    try writeAllFd(fds[1], "G");
+    try std.testing.expect(pool.waitForNextRequest(fds[0]));
+}
+
+test "threaded keep-alive connection serves two sequential requests" {
+    var server: Server = undefined;
+    server.config = .{
+        .handler = .{ .inline_code = "" },
+        .timeout_ms = 2_000,
+        .keep_alive_timeout_ms = 500,
+    };
+    server.reload_active = false;
+    server.contract = null;
+    server.well_known_doc = .{ .body = "{\"v\":1}", .etag_hex = [_]u8{'0'} ** 64 };
+
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &server,
+        .allocator = std.testing.allocator,
+    };
+
+    const fds = try createUnixSocketPair();
+    var server_fd_owned = true;
+    defer if (server_fd_owned) std.Io.Threaded.closeFd(fds[0]);
+
+    // handleConnection owns fds[0] and closes it on exit. Defers run LIFO:
+    // closing fds[1] first wakes the idle wait so the join cannot hang.
+    const worker = try std.Thread.spawn(.{}, ConnectionPool.handleConnection, .{ &pool, fds[0] });
+    server_fd_owned = false;
+    defer worker.join();
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    const request = "GET " ++ attest_well_known.route_path ++ " HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    for (0..2) |_| {
+        try writeAllFd(fds[1], request);
+        var buf: [512]u8 = undefined;
+        var len: usize = 0;
+        while (std.mem.indexOf(u8, buf[0..len], "{\"v\":1}") == null) {
+            const n = try std.posix.read(fds[1], buf[len..]);
+            try std.testing.expect(n > 0);
+            len += n;
+        }
+        try std.testing.expect(std.mem.startsWith(u8, buf[0..len], "HTTP/1.1 200 OK\r\n"));
+    }
 }
 
 test "parseRequestFromBuffer rejects duplicate content length" {

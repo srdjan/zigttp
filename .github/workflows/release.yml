@@ -40,7 +40,7 @@ jobs:
         if: ${{ vars.PROOF_LEDGER_PATH != '' }}
         run: |
           test -f "$PROOF_LEDGER_PATH"
-          ./zig-out/bin/zigts ledger replay --input "$PROOF_LEDGER_PATH" --onto "$PROOF_LEDGER_ONTO"
+          ./zig-out/bin/zigttp ledger replay --input "$PROOF_LEDGER_PATH" --onto "$PROOF_LEDGER_ONTO"
 
       - name: Run example handler tests
         run: bash scripts/test-examples.sh

@@ -36,8 +36,11 @@ steps.
 5. The server validates response headers, writes the response, and releases the
    runtime slot.
 
-Each request runs with isolated runtime state. Request-scoped allocations are
-bulk-reset between requests.
+Each request runs with isolated runtime state. Request isolation is
+arena-based: request-scoped allocations are bulk-reset between requests. The
+engine includes a garbage collector, but the default serving configuration
+uses the hybrid arena allocator, which disables collection on the serving path
+(`Context.setHybridAllocator` in `packages/zigts/src/context.zig`).
 
 ## Compiler Pipeline
 
