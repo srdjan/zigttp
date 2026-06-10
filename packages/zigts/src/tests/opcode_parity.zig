@@ -115,11 +115,43 @@ const mul_neg_zero_consts = [_]JSValue{JSValue.fromFloat(-1.0)};
 // raw-bits fast path.
 const neg_zero_strict_eq_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.strict_eq), op(.ret) };
 const neg_zero_strict_eq_consts = [_]JSValue{ JSValue.fromFloat(-0.0), JSValue.fromFloat(0.0) };
-// Unary minus on float +0.0 produces -0 on the interpreter (negValue's float
-// lane) but +0 on the baseline JIT - a recorded tier divergence, so this case
-// lives in its own KNOWN DIVERGENCE test below instead of the corpus.
+// --- Unary minus across the int and float lanes ---
+// The baseline's emitNeg once guarded its fast path by LSB alone (a
+// shift-tagged-SMI leftover that never matched this engine's NaN-boxing):
+// every value with an even low bit - even ints, INT_MIN, floats like 2.5,
+// and +0.0 - was sar/neg/shl'd on the full raw word into a garbage double
+// (or, for +0.0, into sign-stripped +0). These cases pin the prefix-correct
+// behavior: int payload negation on the fast path (int 0 stays int 0, like
+// negValue), with floats and INT_MIN routed to the jitNeg helper, which
+// preserves -0 via the float lane and promotes -INT_MIN to f64.
 const neg_float_zero_code = [_]u8{ op(.push_const), 0, 0, op(.neg), op(.ret) };
 const neg_float_zero_consts = [_]JSValue{JSValue.fromFloat(0.0)};
+const neg_even_int_code = [_]u8{ op(.push_i8), 4, op(.neg), op(.ret) };
+const neg_odd_int_code = [_]u8{ op(.push_i8), 3, op(.neg), op(.ret) };
+// push_i8 0xFC is the signed byte -4; -(-4) covers negative (sign-extended) payloads.
+const neg_negative_int_code = [_]u8{ op(.push_i8), 0xFC, op(.neg), op(.ret) };
+const neg_int_zero_code = [_]u8{ op(.push_i8), 0, op(.neg), op(.ret) };
+const neg_int_min_code = [_]u8{ op(.push_const), 0, 0, op(.neg), op(.ret) };
+const neg_int_min_consts = [_]JSValue{JSValue.fromInt(std.math.minInt(i32))};
+const neg_float_code = [_]u8{ op(.push_const), 0, 0, op(.neg), op(.ret) };
+const neg_float_consts = [_]JSValue{JSValue.fromFloat(2.5)};
+
+// --- inc / dec ---
+// Same broken-LSB history as neg: emitIncDec once sar/op/shl'd the full raw
+// word, so inc on an even int landed on payload bit 1 (4 -> 6), dec on
+// INT_MIN and inc on a float produced garbage doubles, and only odd-LSB
+// values escaped to the (correct) helper. No codegen site emits inc/dec
+// today (the language bans ++/--), but the opcodes are interpreter- and
+// JIT-implemented, so the corpus pins them at the bytecode level.
+const inc_even_int_code = [_]u8{ op(.push_i8), 4, op(.inc), op(.ret) };
+const inc_odd_int_code = [_]u8{ op(.push_i8), 3, op(.inc), op(.ret) };
+const dec_even_int_code = [_]u8{ op(.push_i8), 4, op(.dec), op(.ret) };
+const inc_int_max_code = [_]u8{ op(.push_const), 0, 0, op(.inc), op(.ret) };
+const inc_int_max_consts = [_]JSValue{JSValue.fromInt(std.math.maxInt(i32))};
+const dec_int_min_code = [_]u8{ op(.push_const), 0, 0, op(.dec), op(.ret) };
+const dec_int_min_consts = [_]JSValue{JSValue.fromInt(std.math.minInt(i32))};
+const inc_float_code = [_]u8{ op(.push_const), 0, 0, op(.inc), op(.ret) };
+const inc_float_consts = [_]JSValue{JSValue.fromFloat(2.5)};
 
 // --- NaN comparison cases ---
 // nan_lt above covers NaN-on-the-left vs an int operand (helper-call lane,
@@ -233,6 +265,19 @@ const cases = [_]Case{
     .{ .name = "div_one_by_neg_inf", .code = &div_neg_inf_code, .constants = &div_neg_inf_consts, .kind = .number, .expect_neg_zero = true },
     .{ .name = "mul_neg_zero", .code = &mul_neg_zero_code, .constants = &mul_neg_zero_consts, .kind = .number, .expect_neg_zero = true },
     .{ .name = "neg_zero_strict_eq_zero", .code = &neg_zero_strict_eq_code, .constants = &neg_zero_strict_eq_consts, .kind = .boolean, .expected_bool = true },
+    .{ .name = "neg_even_int", .code = &neg_even_int_code, .kind = .number, .expected_num = -4 },
+    .{ .name = "neg_odd_int", .code = &neg_odd_int_code, .kind = .number, .expected_num = -3 },
+    .{ .name = "neg_negative_int", .code = &neg_negative_int_code, .kind = .number, .expected_num = 4 },
+    .{ .name = "neg_int_zero", .code = &neg_int_zero_code, .kind = .number, .expected_num = 0 },
+    .{ .name = "neg_int_min", .code = &neg_int_min_code, .constants = &neg_int_min_consts, .kind = .number, .expected_num = 2147483648 },
+    .{ .name = "neg_float", .code = &neg_float_code, .constants = &neg_float_consts, .kind = .number, .expected_num = -2.5 },
+    .{ .name = "neg_float_zero", .code = &neg_float_zero_code, .constants = &neg_float_zero_consts, .kind = .number, .expect_neg_zero = true },
+    .{ .name = "inc_even_int", .code = &inc_even_int_code, .kind = .number, .expected_num = 5 },
+    .{ .name = "inc_odd_int", .code = &inc_odd_int_code, .kind = .number, .expected_num = 4 },
+    .{ .name = "dec_even_int", .code = &dec_even_int_code, .kind = .number, .expected_num = 3 },
+    .{ .name = "inc_int_max", .code = &inc_int_max_code, .constants = &inc_int_max_consts, .kind = .number, .expected_num = 2147483648 },
+    .{ .name = "dec_int_min", .code = &dec_int_min_code, .constants = &dec_int_min_consts, .kind = .number, .expected_num = -2147483649 },
+    .{ .name = "inc_float", .code = &inc_float_code, .constants = &inc_float_consts, .kind = .number, .expected_num = 3.5 },
     .{ .name = "lt_nan_rhs", .code = &lt_nan_rhs_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = false },
     .{ .name = "nan_gt", .code = &nan_gt_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = false },
     .{ .name = "nan_lt_float", .code = &nan_lt_float_code, .constants = &nan_float_consts, .kind = .boolean, .expected_bool = false },
@@ -389,66 +434,6 @@ test "opcode parity: interpreter, baseline, and optimized tiers agree" {
         // Every case must have genuinely exercised the baseline tier.
         try std.testing.expectEqual(cases.len, baseline_compiled);
     }
-}
-
-// KNOWN DIVERGENCE (recorded, not fixed here): unary minus on float +0.0.
-// The interpreter's negValue takes the float lane and returns -0.0 per spec;
-// the baseline JIT's emitNeg guards its integer fast path by LSB alone, so the
-// raw double +0.0 (bits all zero, LSB 0) is misclassified as an SMI and
-// integer-negated to raw 0 = +0.0 - the sign bit is lost. A prefix-correct
-// guard ((raw >> 48) == 0xFFFD, as emitMathRoundingOp already uses) would
-// route +0.0 to the jitNeg helper and preserve -0. This test pins BOTH current
-// behaviors so the divergence stays visible: when the baseline guard is fixed,
-// the final assertion fires - flip the case into the main corpus with
-// expect_neg_zero and delete this test.
-test "opcode parity: KNOWN DIVERGENCE - baseline emitNeg drops the sign of -(+0.0)" {
-    const allocator = std.testing.allocator;
-
-    const prev_policy = jit_policy.getJitPolicy();
-    const prev_threshold = jit_policy.getJitThreshold();
-    const prev_warmup = jit_policy.getJitFeedbackWarmup();
-    defer {
-        jit_policy.setJitPolicy(prev_policy);
-        jit_policy.setJitThreshold(prev_threshold);
-        jit_policy.setJitFeedbackWarmup(prev_warmup);
-    }
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-    var interp = Interpreter.init(ctx);
-
-    jit_policy.setJitPolicy(.eager);
-    const jit_available = !jit_policy.jitDisabled();
-
-    const case = Case{ .name = "neg_float_zero", .code = &neg_float_zero_code, .constants = &neg_float_zero_consts, .kind = .number, .expect_neg_zero = true };
-
-    // Tier 1: interpreter returns -0 (sign bit set).
-    jit_policy.setJitThreshold(std.math.maxInt(u32));
-    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-    var interp_func = buildFunc(case);
-    const interp_result = try interp.run(&interp_func);
-    try std.testing.expectEqual(bytecode.CompilationTier.interpreted, interp_func.tier);
-    try checkExpected(case, interp_result);
-
-    if (!jit_available) return;
-
-    // Tier 2: baseline JIT currently returns +0 (sign bit lost).
-    jit_policy.setJitPolicy(.eager);
-    jit_policy.setJitThreshold(1);
-    jit_policy.setJitFeedbackWarmup(1);
-    var base_func = buildFunc(case);
-    defer jit_compile.cleanupCompiledCode(allocator, &base_func);
-    defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
-    var base_result: JSValue = undefined;
-    var i: usize = 0;
-    while (i < 6) : (i += 1) base_result = try interp.run(&base_func);
-    try std.testing.expect(base_func.compiled_code != null); // genuinely compiled, not silently interpreted
-    const n = base_result.toNumber() orelse return error.ExpectedNumber;
-    try std.testing.expectEqual(@as(f64, 0), n);
-    // The divergence: a fixed emitNeg makes this signbit TRUE - see the header.
-    try std.testing.expect(!std.math.signbit(n));
 }
 
 // `call` needs a callee FUNCTION value that only exists once `ctx`/the allocator

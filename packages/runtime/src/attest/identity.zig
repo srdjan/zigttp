@@ -10,6 +10,7 @@
 //! Mode 0600 enforced on both write and load.
 
 const std = @import("std");
+const zigts = @import("zigts");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -77,8 +78,7 @@ fn loadExisting(file_path: []const u8) !SignerIdentity {
     };
     defer std.Io.Threaded.closeFd(fd);
 
-    var stat: std.c.Stat = undefined;
-    if (std.c.fstat(fd, &stat) != 0) return error.KeyFileMalformed;
+    const stat = zigts.file_io.fstatFd(fd) catch return error.KeyFileMalformed;
     if (stat.size != file_size_bytes) return error.KeyFileMalformed;
     if (stat.mode & permission_group_bits != 0) return error.KeyFilePermissionsTooOpen;
 
@@ -236,9 +236,8 @@ test "generated file is exactly 64 bytes" {
     const path_z = try toCStr(&path_buf, paths[1]);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.Io.Threaded.closeFd(fd);
-    var stat: std.c.Stat = undefined;
-    try testing.expect(std.c.fstat(fd, &stat) == 0);
-    try testing.expectEqual(@as(@TypeOf(stat.size), file_size_bytes), stat.size);
+    const stat = try zigts.file_io.fstatFd(fd);
+    try testing.expectEqual(@as(u64, file_size_bytes), stat.size);
 }
 
 test "loading a file with permissions wider than 0600 is rejected" {

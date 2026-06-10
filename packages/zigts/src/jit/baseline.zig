@@ -2499,7 +2499,17 @@ pub const BaselineCompiler = struct {
         }
     }
 
+    /// Unary minus. Fast path negates the i32 payload of int-tagged values
+    /// only ((raw >> 48) == 0xFFFD); everything else - floats (so -(+0.0)
+    /// keeps its sign via the helper's float lane), pointers, specials - and
+    /// the INT_MIN payload (whose negation does not fit i32) takes jitNeg.
+    /// The payload is negated by shifting it to the top word: `neg` on
+    /// payload << 32 sets the overflow flag exactly when payload == INT_MIN,
+    /// and the logical shift back down leaves the u32 bit pattern of the
+    /// result ready to rebox with the int prefix. Int 0 stays int 0, matching
+    /// the interpreter's negValue.
     fn emitNeg(self: *BaselineCompiler) CompileError!void {
+        const int_prefix_16: u64 = value_mod.JSValue.INT_PREFIX >> 48;
         if (is_x86_64) {
             const slow = self.newLocalLabel();
             const done = self.newLocalLabel();
@@ -2507,15 +2517,16 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.rax);
             self.emitter.movRegReg(.r8, .rax) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rcx, .rax) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.rcx, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.rcx, 0) catch return CompileError.OutOfMemory;
+            self.emitter.shrRegImm(.rcx, 48) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.rcx, @intCast(int_prefix_16)) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            // Unbox, negate, rebox
-            self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+            self.emitter.shlRegImm(.rax, 32) catch return CompileError.OutOfMemory;
             self.emitter.negReg(.rax) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.o, slow);
-            self.emitter.shlRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+            self.emitter.shrRegImm(.rax, 32) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rcx, value_mod.JSValue.INT_PREFIX) catch return CompileError.OutOfMemory;
+            self.emitter.orRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.rax);
             try self.emitJmpToLabel(done);
 
@@ -2534,14 +2545,17 @@ pub const BaselineCompiler = struct {
 
             try self.emitPopReg(.x9);
             self.emitter.movRegReg(.x12, .x9) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x11, .x9, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x11, 0) catch return CompileError.OutOfMemory;
+            self.emitter.lsrRegImm(.x11, .x9, 48) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x14, int_prefix_16) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x11, .x14) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            self.emitter.asrRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+            self.emitter.lslRegImm(.x9, .x9, 32) catch return CompileError.OutOfMemory;
             self.emitter.negsReg(.x9, .x9) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.vs, slow);
-            self.emitter.lslRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+            self.emitter.lsrRegImm(.x9, .x9, 32) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x10, value_mod.JSValue.INT_PREFIX) catch return CompileError.OutOfMemory;
+            self.emitter.orrRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.x9);
             try self.emitJmpToLabel(done);
 
@@ -3825,7 +3839,15 @@ pub const BaselineCompiler = struct {
         }
     }
 
+    /// inc/dec. Same shape as emitNeg: the fast path fires only on int-tagged
+    /// values ((raw >> 48) == 0xFFFD) and adjusts the i32 payload in the top
+    /// word - adding or subtracting 1 << 32 to payload << 32 sets the overflow
+    /// flag exactly when the i32 result would not fit (INT_MAX inc, INT_MIN
+    /// dec), which routes to the jitInc/jitDec helper for the float promotion.
+    /// Floats and non-numbers always take the helper.
     fn emitIncDec(self: *BaselineCompiler, is_inc: bool) CompileError!void {
+        const int_prefix_16: u64 = value_mod.JSValue.INT_PREFIX >> 48;
+        const one_in_top_word: u64 = 1 << 32;
         if (is_x86_64) {
             const slow = self.newLocalLabel();
             const done = self.newLocalLabel();
@@ -3834,19 +3856,21 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.r8, .rax) catch return CompileError.OutOfMemory;
 
             self.emitter.movRegReg(.rcx, .rax) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.rcx, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.rcx, 0) catch return CompileError.OutOfMemory;
+            self.emitter.shrRegImm(.rcx, 48) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.rcx, @intCast(int_prefix_16)) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+            self.emitter.shlRegImm(.rax, 32) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rcx, one_in_top_word) catch return CompileError.OutOfMemory;
             if (is_inc) {
-                self.emitter.addRegImm32(.rax, 1) catch return CompileError.OutOfMemory;
+                self.emitter.addRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
             } else {
-                self.emitter.subRegImm32(.rax, 1) catch return CompileError.OutOfMemory;
+                self.emitter.subRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
             }
             try self.emitJccToLabel(.o, slow);
-
-            self.emitter.shlRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+            self.emitter.shrRegImm(.rax, 32) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rcx, value_mod.JSValue.INT_PREFIX) catch return CompileError.OutOfMemory;
+            self.emitter.orRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.rax);
             try self.emitJmpToLabel(done);
 
@@ -3866,20 +3890,22 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.x9);
             self.emitter.movRegReg(.x12, .x9) catch return CompileError.OutOfMemory;
 
-            self.emitter.andRegImm(.x11, .x9, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x11, 0) catch return CompileError.OutOfMemory;
+            self.emitter.lsrRegImm(.x11, .x9, 48) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x14, int_prefix_16) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x11, .x14) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            self.emitter.asrRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.lslRegImm(.x9, .x9, 32) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x10, one_in_top_word) catch return CompileError.OutOfMemory;
             if (is_inc) {
                 self.emitter.addsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
             } else {
                 self.emitter.subsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
             }
             try self.emitBcondToLabel(.vs, slow);
-
-            self.emitter.lslRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+            self.emitter.lsrRegImm(.x9, .x9, 32) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x10, value_mod.JSValue.INT_PREFIX) catch return CompileError.OutOfMemory;
+            self.emitter.orrRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.x9);
             try self.emitJmpToLabel(done);
 

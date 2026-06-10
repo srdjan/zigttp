@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const module_graph = @import("modules/internal/module_graph.zig");
 
 /// Read a file synchronously using POSIX operations (for use before Io is initialized).
@@ -57,6 +58,25 @@ pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u
     }
 }
 
+pub const FdStat = struct { size: u64, mode: u32 };
+
+/// Size and permission bits of an open fd. `std.c.fstat` is deliberately
+/// unexported on Linux (glibc versions its stat symbols), so the Linux arm
+/// goes through the statx syscall - the stable kernel interface std.Io's own
+/// backend uses - and other POSIX systems use libc fstat.
+pub fn fstatFd(fd: std.c.fd_t) error{StatFailed}!FdStat {
+    if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        var stx = std.mem.zeroes(linux.Statx);
+        const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .MODE = true, .SIZE = true }, &stx);
+        if (linux.errno(rc) != .SUCCESS) return error.StatFailed;
+        return .{ .size = stx.size, .mode = stx.mode };
+    }
+    var st: std.c.Stat = undefined;
+    if (std.c.fstat(fd, &st) != 0) return error.StatFailed;
+    return .{ .size = @intCast(st.size), .mode = st.mode };
+}
+
 /// Open a file for append writes, creating it (0600, see writeFile) if
 /// missing. Returns the raw POSIX fd; caller is responsible for closing with
 /// `std.Io.Threaded.closeFd`.
@@ -85,7 +105,6 @@ pub fn readFileForModuleGraph(allocator: std.mem.Allocator, path: []const u8) mo
 // Tests
 // ---------------------------------------------------------------------------
 
-const builtin = @import("builtin");
 const testing = std.testing;
 
 // std.testing.tmpDir creates `.zig-cache/tmp/<sub_path>` under cwd but exposes
@@ -98,14 +117,12 @@ fn tmpFilePath(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, name: []co
     return std.fs.path.join(allocator, &.{ cwd, ".zig-cache", "tmp", &tmp.sub_path, name });
 }
 
-fn statMode(allocator: std.mem.Allocator, path: []const u8) !std.c.mode_t {
+fn statMode(allocator: std.mem.Allocator, path: []const u8) !u32 {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.Io.Threaded.closeFd(fd);
-    var stat: std.c.Stat = undefined;
-    if (std.c.fstat(fd, &stat) != 0) return error.StatFailed;
-    return stat.mode;
+    return (try fstatFd(fd)).mode;
 }
 
 test "writeFile creates new files with mode 0600" {
@@ -119,7 +136,7 @@ test "writeFile creates new files with mode 0600" {
     try writeFile(allocator, path, "line\n");
 
     const mode = try statMode(allocator, path);
-    try testing.expectEqual(@as(std.c.mode_t, 0o600), mode & 0o777);
+    try testing.expectEqual(@as(u32, 0o600), mode & 0o777);
 }
 
 test "openAppend creates new files with mode 0600" {
@@ -134,5 +151,5 @@ test "openAppend creates new files with mode 0600" {
     std.Io.Threaded.closeFd(fd);
 
     const mode = try statMode(allocator, path);
-    try testing.expectEqual(@as(std.c.mode_t, 0o600), mode & 0o777);
+    try testing.expectEqual(@as(u32, 0o600), mode & 0o777);
 }

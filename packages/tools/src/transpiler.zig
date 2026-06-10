@@ -2249,6 +2249,7 @@ pub const IrTranspiler = struct {
                 self.emit(self.localName(binding));
             },
             .binary_op => self.transpileBinaryOp(idx),
+            .unary_op => self.transpileUnaryOp(idx),
             .call, .method_call => {
                 // Check if calling a known integer function
                 self.transpileIntCallExpr(idx);
@@ -2713,4 +2714,22 @@ test "emitted substring clamps out-of-range offsets like JS" {
     try expectContains(src, "= aot_url[@min(aot_url.len, 11)..];");
     try expectContains(src, "= aot_url[0..];");
     try testing.expect(std.mem.indexOf(u8, src, "@intCast(11)") == null);
+}
+
+test "integer negation lowers to jsIntNeg, not a literal 0" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    // -n on a runtime operand: literal negation is constant-folded by the
+    // parser, so url.length forces the unary_op node through transpileIntExpr.
+    const src = try transpileForTest(arena_state.allocator(),
+        \\function handler(req) {
+        \\  const url = req.url;
+        \\  const n = url.length;
+        \\  const x = -n;
+        \\  return Response.json({ x: x });
+        \\}
+    );
+    try expectContains(src, "(try jsIntNeg(aot_local_2))");
+    // -INT_MIN bails to the interpreter instead of wrapping.
+    try expectContains(src, "fn jsIntNeg(a: i32) error{AotBail}!i32");
 }

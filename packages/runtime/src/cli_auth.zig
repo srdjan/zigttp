@@ -382,9 +382,8 @@ fn readProvidersFile(allocator: std.mem.Allocator) ![]u8 {
     // from a file looser than 0600. The write path always tightens to 0600;
     // this guards against another tool having created it with loose bits.
     // Mirrors the attest keypair loader's permission check.
-    var st: std.c.Stat = undefined;
-    if (std.c.fstat(file.handle, &st) != 0) return error.ProvidersStatFailed;
-    if (st.mode & 0o077 != 0) return error.ProvidersPermissionsTooOpen;
+    const st = file.stat(io) catch return error.ProvidersStatFailed;
+    if (st.permissions.toMode() & 0o077 != 0) return error.ProvidersPermissionsTooOpen;
 
     var buf: [4096]u8 = undefined;
     var reader = file.reader(io, &buf);
