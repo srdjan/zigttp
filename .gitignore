@@ -39,7 +39,6 @@ build_link.log
 /my-app/
 .codex/skills/
 proof-report.txt
-policy-hash.txt
 proof.json
 codedb.snapshot
 .codegraph/

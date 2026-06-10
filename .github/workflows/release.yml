@@ -47,9 +47,14 @@ jobs:
 
       - name: Assert policy hash unchanged
         run: |
-          EXPECTED=$(cat policy-hash.txt 2>/dev/null || echo "")
+          if [ ! -f policy-hash.txt ]; then
+            echo "::error::policy-hash.txt is missing - the policy hash baseline must be committed"
+            echo "Run: ./zig-out/bin/zigts describe-rule --hash > policy-hash.txt"
+            exit 1
+          fi
+          EXPECTED=$(cat policy-hash.txt)
           ACTUAL=$(./zig-out/bin/zigts describe-rule --hash)
-          if [ -n "$EXPECTED" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "::error::Policy hash mismatch - rules changed without updating policy-hash.txt"
             echo "Expected: $EXPECTED"
             echo "Actual:   $ACTUAL"
