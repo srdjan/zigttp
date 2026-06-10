@@ -34,8 +34,11 @@ pub const DurableScheduler = struct {
         };
         const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
+        var tracker = durable_recovery.RetryTracker.init(allocator);
+        defer tracker.deinit();
+
         while (!self.stop_requested.load(.acquire)) {
-            _ = durable_recovery.recoverIncompleteOplogs(allocator, self.config) catch |err| {
+            _ = durable_recovery.recoverIncompleteOplogsTracked(allocator, self.config, &tracker) catch |err| {
                 std.log.err("Durable scheduler poll failed: {}", .{err});
             };
             if (self.stop_requested.load(.acquire)) break;

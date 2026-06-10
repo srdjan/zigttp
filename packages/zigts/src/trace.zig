@@ -1211,7 +1211,7 @@ pub const DurableState = struct {
         return .execute;
     }
 
-    pub fn beginTimerWait(self: *DurableState, until_ms: i64) DurableTimerWaitReplay {
+    pub fn beginTimerWait(self: *DurableState) DurableTimerWaitReplay {
         if (self.is_live) return .live;
         if (self.cursor >= self.oplog_events.len) {
             self.is_live = true;
@@ -1219,6 +1219,11 @@ pub const DurableState = struct {
         }
 
         const event = self.oplog_events[self.cursor];
+        // The recorded deadline is authoritative: a relative sleep()
+        // recomputes now+delay on every recovery pass, so the caller's
+        // until_ms never equals the recorded value. Matching on it would
+        // bail to live, persist a fresh wait_timer, and re-arm the deadline
+        // forever; timer waits replay positionally, like steps.
         const wait = switch (event) {
             .wait_timer => |w| w,
             else => {
@@ -1226,10 +1231,6 @@ pub const DurableState = struct {
                 return .live;
             },
         };
-        if (wait.until_ms != until_ms) {
-            self.is_live = true;
-            return .live;
-        }
 
         self.cursor += 1;
         if (self.cursor < self.oplog_events.len) {
@@ -1696,7 +1697,19 @@ fn fsyncFd(fd: std.c.fd_t) void {
 
 /// Check if a trace file represents an incomplete (recoverable) oplog.
 /// An oplog is incomplete if it has a request entry but no "complete" marker.
-pub fn isIncompleteOplog(source: []const u8) bool {
+/// A crash can tear the final oplog line mid-append. Every durably written
+/// line ends with a newline, so a trailing fragment without one is a
+/// truncation point, not an event: the lenient field defaults in
+/// parseTraceLine would otherwise fabricate an event from it (for example a
+/// resume_timer with fired_at_ms=0, faking a fired sleep).
+fn completeOplogLines(source: []const u8) []const u8 {
+    if (source.len == 0 or source[source.len - 1] == '\n') return source;
+    const last_nl = std.mem.lastIndexOfScalar(u8, source, '\n') orelse return source[0..0];
+    return source[0 .. last_nl + 1];
+}
+
+pub fn isIncompleteOplog(raw_source: []const u8) bool {
+    const source = completeOplogLines(raw_source);
     var has_request = false;
     var has_complete = false;
     var lines = std.mem.splitScalar(u8, source, '\n');
@@ -1722,7 +1735,8 @@ pub const DurableLog = struct {
     }
 };
 
-pub fn parseDurableOplog(allocator: std.mem.Allocator, source: []const u8) !DurableLog {
+pub fn parseDurableOplog(allocator: std.mem.Allocator, raw_source: []const u8) !DurableLog {
+    const source = completeOplogLines(raw_source);
     var events: std.ArrayList(DurableEvent) = .empty;
     errdefer events.deinit(allocator);
     var run_key: ?[]const u8 = null;
@@ -2229,4 +2243,62 @@ test "DurableState beginStep executes incomplete step" {
     const replay = state.beginStep("charge");
     try std.testing.expectEqual(DurableStepReplay.execute, replay);
     try std.testing.expectEqual(@as(u32, 1), state.cursor);
+}
+
+test "DurableState beginTimerWait resumes from the recorded deadline" {
+    // A relative sleep() recomputes now+delay on every recovery pass, so the
+    // recomputed deadline never equals the recorded one. The recorded
+    // deadline is authoritative; bailing to live re-arms a fresh timer and
+    // the suspended sleep recedes forever.
+    const events = [_]DurableEvent{
+        .{ .wait_timer = .{ .until_ms = 1000 } },
+    };
+    var state = DurableState.init(std.testing.allocator, &events, -1);
+    defer state.deinit();
+
+    switch (state.beginTimerWait()) {
+        .pending => |wait| try std.testing.expectEqual(@as(i64, 1000), wait.until_ms),
+        else => return error.ExpectedPendingTimer,
+    }
+}
+
+test "DurableState beginTimerWait ready after recorded resume" {
+    const events = [_]DurableEvent{
+        .{ .wait_timer = .{ .until_ms = 1000 } },
+        .{ .resume_timer = .{ .fired_at_ms = 1200 } },
+    };
+    var state = DurableState.init(std.testing.allocator, &events, -1);
+    defer state.deinit();
+
+    switch (state.beginTimerWait()) {
+        .ready => {},
+        else => return error.ExpectedReadyTimer,
+    }
+    try std.testing.expect(!state.is_live);
+}
+
+test "parseDurableOplog treats a torn final line as truncation" {
+    // A crash mid-append leaves a fragment without a terminating newline.
+    // Lenient field defaults would fabricate an event from it (here a
+    // resume_timer with fired_at_ms=0, which would fake a fired sleep).
+    const source =
+        "{\"type\":\"durable_run\",\"key\":\"order:1\"}\n" ++
+        "{\"type\":\"wait_timer\",\"until_ms\":5000}\n" ++
+        "{\"type\":\"resume_timer\",\"fired_at_";
+    var parsed = try parseDurableOplog(std.testing.allocator, source);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.events.len);
+    switch (parsed.events[0]) {
+        .wait_timer => |w| try std.testing.expectEqual(@as(i64, 5000), w.until_ms),
+        else => return error.UnexpectedTraceType,
+    }
+}
+
+test "isIncompleteOplog ignores a torn final line" {
+    // A torn complete marker did not durably land; the run is incomplete.
+    const torn =
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/a\",\"headers\":{},\"body\":null}\n" ++
+        "{\"type\":\"complete\"}";
+    try std.testing.expect(isIncompleteOplog(torn));
 }

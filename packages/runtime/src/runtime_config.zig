@@ -41,18 +41,45 @@ pub fn openTraceFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t
     return zq.file_io.openAppend(allocator, path);
 }
 
-pub fn openOplogFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
+fn openOplogWritable(allocator: std.mem.Allocator, path: []const u8, truncate: bool) !std.c.fd_t {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
     const fd = std.posix.openatZ(
         std.posix.AT.FDCWD,
         path_z,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = truncate },
         0o644,
     ) catch return error.FileOpenFailed;
 
     return fd;
+}
+
+pub fn openOplogFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
+    return openOplogWritable(allocator, path, true);
+}
+
+/// Open a fresh oplog for a new live run: create WITHOUT truncating, take the
+/// oplog lock, then truncate. open() ignores advisory locks, so truncating
+/// before holding the lock would wipe the lines a concurrent same-key holder
+/// already appended.
+pub fn openLockedFreshOplog(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
+    const fd = try openOplogWritable(allocator, path, false);
+    errdefer std.Io.Threaded.closeFd(fd);
+    try tryLockOplogFd(fd);
+    if (std.c.ftruncate(fd, 0) != 0) return error.FileOpenFailed;
+    return fd;
+}
+
+/// Take the same advisory lock durable_recovery's OplogClaim holds during a
+/// recovery re-execution, on an already-open oplog fd. Non-blocking: a held
+/// lock means either a recovery pass is re-executing this run or another
+/// live request owns the same key; mutating the log concurrently from here
+/// would double-apply effects. Released automatically when the fd closes.
+pub fn tryLockOplogFd(fd: std.c.fd_t) error{DurableRunBusy}!void {
+    if (std.c.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB) != 0) {
+        return error.DurableRunBusy;
+    }
 }
 
 pub fn openOplogAppendFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {

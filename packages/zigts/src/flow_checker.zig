@@ -245,6 +245,13 @@ pub fn parseExternalLabels(allocator: std.mem.Allocator, json_bytes: []const u8)
 // FlowChecker
 // ---------------------------------------------------------------------------
 
+/// Caps for callee return-label summaries and return-value resolution. Beyond
+/// these the checker falls back to the conservative direction (labels kept,
+/// label-only sink check) rather than dropping taint.
+const max_summary_params = 8;
+const max_summary_depth = 4;
+const response_resolve_limit = 16;
+
 pub const FlowChecker = struct {
     allocator: std.mem.Allocator,
     ir_view: IrView,
@@ -266,6 +273,22 @@ pub const FlowChecker = struct {
     /// Result binding tracking: packed(scope_id, slot) -> return_labels from the producing call.
     /// When accessing .value on these bindings, the return_labels are merged in.
     result_binding_labels: std.AutoHashMapUnmanaged(u32, LabelSet),
+    /// Defining value nodes per binding: packed(scope_id, slot) -> every init
+    /// and assignment value recorded during the walk. Lets the response-sink
+    /// check resolve a returned identifier back to the Response call(s) that
+    /// produced it; without this, `const r = Response.html(x); return r;`
+    /// skips the sink analysis entirely.
+    binding_value_nodes: std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged(NodeIndex)),
+    /// User function declarations: packed binding key -> function expression
+    /// node. Feeds callee return-label summaries in `userCallLabels`.
+    user_fn_decls: std.AutoHashMapUnmanaged(u32, NodeIndex),
+    /// When non-null, the walk is summarizing a callee body: return statements
+    /// merge their labels here instead of running sink checks, and expression
+    /// sinks stay silent (diagnostics belong to the handler walk).
+    summary_returns: ?*LabelSet,
+    /// Callee summaries in progress (recursion guard).
+    summary_stack: [max_summary_depth]u32,
+    summary_depth: u8,
     /// Guard provenance for validated bindings: packed(scope_id, slot) -> the
     /// validator call that set the `.validated` label. Lets a defended path
     /// name the guard ("validated by schemaCompile()"). Populated alongside
@@ -308,6 +331,11 @@ pub const FlowChecker = struct {
             .binding_origin = .empty,
             .result_binding_labels = .empty,
             .result_binding_guard = .empty,
+            .binding_value_nodes = .empty,
+            .user_fn_decls = .empty,
+            .summary_returns = null,
+            .summary_stack = @splat(0),
+            .summary_depth = 0,
             .defended_paths = .empty,
             .req_binding_key = null,
             .env_fn_slot = null,
@@ -337,6 +365,12 @@ pub const FlowChecker = struct {
         self.result_binding_labels.deinit(self.allocator);
         self.result_binding_guard.deinit(self.allocator);
         self.defended_paths.deinit(self.allocator);
+        var value_node_iter = self.binding_value_nodes.valueIterator();
+        while (value_node_iter.next()) |list| {
+            list.deinit(self.allocator);
+        }
+        self.binding_value_nodes.deinit(self.allocator);
+        self.user_fn_decls.deinit(self.allocator);
 
         // Free dynamically formatted diagnostic messages
         for (self.allocated_messages.items) |msg| {
@@ -363,6 +397,7 @@ pub const FlowChecker = struct {
     /// Returns the number of errors found.
     pub fn check(self: *FlowChecker, handler_func: NodeIndex) !u32 {
         self.scanImports();
+        self.scanFunctionDecls();
         self.findHandlerParam(handler_func);
         self.walkStmt(handler_func);
         self.recordContainedSecrets();
@@ -653,6 +688,29 @@ pub const FlowChecker = struct {
         }
     }
 
+    /// Index user function declarations (and function-valued const/let
+    /// bindings) so call-label inference can summarize callee bodies instead
+    /// of dropping labels at every user-defined call boundary.
+    fn scanFunctionDecls(self: *FlowChecker) void {
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .function_decl and tag != .var_decl) continue;
+
+            // function_decl shares the var_decl layout: binding + init
+            // function expression.
+            const vd = self.ir_view.getVarDecl(idx) orelse continue;
+            if (vd.init == null_node or vd.pattern != null_node) continue;
+            if (tag == .var_decl) {
+                const init_tag = self.ir_view.getTag(vd.init) orelse continue;
+                if (init_tag != .function_expr and init_tag != .arrow_function) continue;
+            }
+            const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
+            self.user_fn_decls.put(self.allocator, key, vd.init) catch {};
+        }
+    }
+
     fn findHandlerParam(self: *FlowChecker, handler_func: NodeIndex) void {
         const func = self.ir_view.getFunction(handler_func) orelse return;
         if (func.params_count == 0) return;
@@ -739,6 +797,18 @@ pub const FlowChecker = struct {
         }
     }
 
+    /// Record a defining value node for a binding so the response-sink check
+    /// can resolve returned identifiers. Every value is kept (not just the
+    /// last) so a tainted branch assignment is still found when a later
+    /// branch overwrites the labels.
+    fn recordBindingValue(self: *FlowChecker, binding: ir.BindingRef, value: NodeIndex) void {
+        if (value == null_node) return;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const gop = self.binding_value_nodes.getOrPut(self.allocator, key) catch return;
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        gop.value_ptr.append(self.allocator, value) catch {};
+    }
+
     fn walkStmt(self: *FlowChecker, node: NodeIndex) void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
@@ -790,6 +860,9 @@ pub const FlowChecker = struct {
                             self.binding_labels.put(self.allocator, key, labels) catch {};
                         }
                     }
+                    if (vd.pattern == null_node) {
+                        self.recordBindingValue(vd.binding, vd.init);
+                    }
                     self.trackModuleCallInit(vd);
                     // Track result bindings from validation calls for .value label narrowing
                     self.trackResultBinding(vd);
@@ -812,6 +885,7 @@ pub const FlowChecker = struct {
                         // Simple assignment: replace
                         self.binding_labels.put(self.allocator, key, labels) catch {};
                     }
+                    self.recordBindingValue(binding, asgn.value);
                 } else if (target_tag == .member_access or target_tag == .optional_chain) {
                     // `obj.field = secret` / `obj[k] = secret`: taint the base
                     // object so a later read of `obj` keeps the label. Merge
@@ -827,9 +901,13 @@ pub const FlowChecker = struct {
             },
 
             .return_stmt => {
-                // Check if returning data via Response helpers
                 if (self.ir_view.getOptValue(node)) |ret_val| {
-                    self.checkResponseSink(ret_val);
+                    if (self.summary_returns) |acc| {
+                        acc.* = LabelSet.merge(acc.*, self.inferLabels(ret_val));
+                    } else {
+                        // Check if returning data via Response helpers
+                        self.checkResponseSink(ret_val);
+                    }
                 }
             },
 
@@ -863,6 +941,9 @@ pub const FlowChecker = struct {
             },
 
             .function_decl, .function_expr, .arrow_function => {
+                // While summarizing a callee, a nested function's returns are
+                // not the callee's returns; skip its body.
+                if (self.summary_returns != null) return;
                 const func = self.ir_view.getFunction(node) orelse return;
                 self.walkStmt(func.body);
             },
@@ -1058,25 +1139,100 @@ pub const FlowChecker = struct {
                 return base_labels;
             }
 
-            // User-defined function call: unknown labels (conservative)
-            return LabelSet.empty;
+            // User-defined function call: summarize the callee body when its
+            // declaration is visible; otherwise keep the union of argument
+            // labels. Returning empty here would launder taint through any
+            // wrapper function.
+            return self.userCallLabels(binding, call_data);
         }
 
         return LabelSet.empty;
     }
 
+    /// Labels for a call to a user-defined function: seed the callee's
+    /// parameters with the argument labels, walk its body with sink checks
+    /// suppressed, and union the labels of every return value. Falls back to
+    /// the union of argument labels when the body is unavailable, recursive,
+    /// or beyond the summary caps.
+    fn userCallLabels(self: *FlowChecker, binding: ir.BindingRef, call_data: Node.CallExpr) LabelSet {
+        var arg_labels: [max_summary_params]LabelSet = @splat(LabelSet.empty);
+        var arg_union = LabelSet.empty;
+        for (0..call_data.args_count) |i| {
+            const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+            const labels = self.inferLabels(arg);
+            if (i < max_summary_params) arg_labels[i] = labels;
+            arg_union = LabelSet.merge(arg_union, labels);
+        }
+
+        const fn_key = packBindingKey(binding.scope_id, binding.slot);
+        const fn_node = self.user_fn_decls.get(fn_key) orelse return arg_union;
+        if (self.summary_depth >= max_summary_depth) return arg_union;
+        for (self.summary_stack[0..self.summary_depth]) |active| {
+            if (active == fn_key) return arg_union;
+        }
+        const func = self.ir_view.getFunction(fn_node) orelse return arg_union;
+        if (func.params_count > max_summary_params) return arg_union;
+
+        for (0..func.params_count) |i| {
+            const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+            const pb = self.paramBinding(param_idx) orelse continue;
+            const key = packBindingKey(pb.scope_id, pb.slot);
+            const labels = if (i < call_data.args_count) arg_labels[i] else LabelSet.empty;
+            self.binding_labels.put(self.allocator, key, labels) catch return arg_union;
+        }
+
+        self.summary_stack[self.summary_depth] = fn_key;
+        self.summary_depth += 1;
+        defer self.summary_depth -= 1;
+
+        const body_tag = self.ir_view.getTag(func.body) orelse return arg_union;
+        if (body_tag == .block or body_tag == .program) {
+            var collected = LabelSet.empty;
+            const saved = self.summary_returns;
+            self.summary_returns = &collected;
+            defer self.summary_returns = saved;
+            self.walkStmt(func.body);
+            return collected;
+        }
+        // Arrow expression body: the body is the return expression.
+        return self.inferLabels(func.body);
+    }
+
     fn checkResponseSink(self: *FlowChecker, ret_val: NodeIndex) void {
-        const tag = self.ir_view.getTag(ret_val) orelse return;
+        var visited: [response_resolve_limit]u32 = undefined;
+        var visited_len: usize = 0;
+        if (!self.checkResponseValue(ret_val, &visited, &visited_len)) {
+            // No Response-helper call shape was reachable for this return
+            // value; run a label-only response-sink check so taint cannot
+            // ride out through a binding the resolver could not follow.
+            self.checkSinkLabels(self.inferLabels(ret_val), ret_val, .response);
+        }
+    }
 
-        // Response.json(data), Response.text(data), Response.html(data), Response.redirect(url)
-        if (tag == .method_call or tag == .call) {
-            const call_data = self.ir_view.getCall(ret_val) orelse return;
+    /// Run the response-sink checks on a returned value, resolving through
+    /// ternary arms and locally recorded binding values. Returns true when
+    /// every reachable shape ended at a Response-helper call that was
+    /// sink-checked; false tells the caller to fall back to a label-only
+    /// check on the original return value.
+    fn checkResponseValue(
+        self: *FlowChecker,
+        node: NodeIndex,
+        visited: *[response_resolve_limit]u32,
+        visited_len: *usize,
+    ) bool {
+        if (node == null_node) return false;
+        const tag = self.ir_view.getTag(node) orelse return false;
 
-            if (self.isResponseHelper(call_data.callee)) {
+        switch (tag) {
+            // Response.json(data), Response.text(data), Response.html(data), Response.redirect(url)
+            .method_call, .call => {
+                const call_data = self.ir_view.getCall(node) orelse return false;
+                if (!self.isResponseHelper(call_data.callee)) return false;
+
                 if (call_data.args_count > 0) {
                     const data_arg = self.ir_view.getListIndex(call_data.args_start, 0);
                     const labels = self.inferLabels(data_arg);
-                    self.checkSinkLabels(labels, ret_val, .response);
+                    self.checkSinkLabels(labels, node, .response);
 
                     // XSS check: Response.html with unvalidated user input
                     if (labels.has(.user_input) and !labels.has(.validated)) {
@@ -1084,7 +1240,7 @@ pub const FlowChecker = struct {
                             self.addDiagnostic(.{
                                 .severity = .warning,
                                 .kind = .unvalidated_input_in_egress,
-                                .node = ret_val,
+                                .node = node,
                                 .message = "unvalidated user input in Response.html (potential XSS)",
                                 .help = "use JSX with renderToString() for auto-escaping, or pass input through validateObject() first",
                                 .repair_intent = .insert_guard_before_line,
@@ -1097,15 +1253,47 @@ pub const FlowChecker = struct {
                         // because the value passed a named validator (e.g.
                         // escapeHtml/validateObject), so the guard is real.
                         if (self.isGlobalMethodCall(call_data.callee, "Response", &.{"html"})) {
-                            self.recordValidated(.injection_safe, data_arg, ret_val, "an HTML response body");
+                            self.recordValidated(.injection_safe, data_arg, node, "an HTML response body");
                         }
                     }
                 }
-            }
+                return true;
+            },
+
+            .ternary => {
+                const t = self.ir_view.getTernary(node) orelse return false;
+                const then_covered = self.checkResponseValue(t.then_branch, visited, visited_len);
+                const else_covered = self.checkResponseValue(t.else_branch, visited, visited_len);
+                return then_covered and else_covered;
+            },
+
+            .identifier => {
+                const binding = self.ir_view.getBinding(node) orelse return false;
+                const key = packBindingKey(binding.scope_id, binding.slot);
+                for (visited[0..visited_len.*]) |seen| {
+                    if (seen == key) return true;
+                }
+                if (visited_len.* >= visited.len) return false;
+                visited[visited_len.*] = key;
+                visited_len.* += 1;
+
+                const values = self.binding_value_nodes.get(key) orelse return false;
+                if (values.items.len == 0) return false;
+                var all_covered = true;
+                for (values.items) |value| {
+                    if (!self.checkResponseValue(value, visited, visited_len)) all_covered = false;
+                }
+                return all_covered;
+            },
+
+            else => return false,
         }
     }
 
     fn checkExprSinks(self: *FlowChecker, node: NodeIndex) void {
+        // While summarizing a callee body, expression sinks stay silent:
+        // diagnostics belong to the handler walk.
+        if (self.summary_returns != null) return;
         const tag = self.ir_view.getTag(node) orelse return;
         if (tag != .call and tag != .method_call) return;
 
@@ -2482,27 +2670,7 @@ test "setExternalLabels registers short form from qualified name" {
     // We cannot construct a full FlowChecker without a valid IrView,
     // so test the external label maps directly via a minimal instance.
     // The IrView is only used by check/walkStmt, not by setExternalLabels.
-    var checker = FlowChecker{
-        .allocator = std.testing.allocator,
-        .ir_view = undefined,
-        .atoms = null,
-        .diagnostics = .empty,
-        .binding_labels = .empty,
-        .module_fn_labels = .empty,
-        .module_fn_meta = .empty,
-        .binding_origin = .empty,
-        .result_binding_labels = .empty,
-        .result_binding_guard = .empty,
-        .defended_paths = .empty,
-        .req_binding_key = null,
-        .env_fn_slot = null,
-        .working_constraints = .empty,
-        .working_io_calls = .empty,
-        .external_labels = .empty,
-        .external_reasons = .empty,
-        .allocated_messages = .empty,
-        .properties = .{},
-    };
+    var checker = FlowChecker.init(std.testing.allocator, undefined, null);
     defer {
         // Clean up only the maps we populated (skip ir_view-dependent deinit)
         var li = checker.external_labels.iterator();
@@ -2644,4 +2812,179 @@ test "secret_in_response diagnostic carries repair_intent = insert_guard_before_
         }
     }
     try std.testing.expect(saw_secret_leak);
+}
+
+test "FlowChecker flags secret returned through a variable-held response" {
+    // The sink check must resolve `return res` back to the Response call that
+    // produced it; a binding hop must not skip the response-sink analysis.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  const res = Response.json({ leaked: secret });
+        \\  return res;
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind == .secret_in_response) found = true;
+    }
+    try std.testing.expect(found);
+    try std.testing.expect(!checker.getProperties().no_secret_leakage);
+}
+
+test "FlowChecker flags unvalidated input in a variable-held Response.html" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  const page = Response.html(req.query.q);
+        \\  return page;
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind == .unvalidated_input_in_egress) found = true;
+    }
+    try std.testing.expect(found);
+    try std.testing.expect(!checker.getProperties().injection_safe);
+}
+
+test "FlowChecker flags secret returned through a ternary response" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  return req.query.debug ? Response.json({ leaked: secret }) : Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind == .secret_in_response) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "FlowChecker keeps taint through a user-defined wrapper call" {
+    // A helper that returns its argument must not strip labels; dropping them
+    // here launders any taint through a one-line wrapper.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function wrap(v) { return v; }
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  return Response.json({ leaked: wrap(secret) });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind == .secret_in_response) found = true;
+    }
+    try std.testing.expect(found);
+    try std.testing.expect(!checker.getProperties().no_secret_leakage);
+}
+
+test "FlowChecker keeps validated label through a wrapper returning a validator result" {
+    // The callee summary must carry the callee's actual return labels: a
+    // wrapper around escapeHtml yields .validated, not the argument union,
+    // so no false XSS warning fires.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { escapeHtml } from "zigttp:text";
+        \\function clean(v) { return escapeHtml(v); }
+        \\function handler(req) {
+        \\  return Response.html(clean(req.query.q));
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    for (checker.getDiagnostics()) |d| {
+        try std.testing.expect(d.kind != .unvalidated_input_in_egress);
+    }
+    try std.testing.expect(checker.getProperties().injection_safe);
 }

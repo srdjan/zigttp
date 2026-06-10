@@ -40,7 +40,9 @@ const runtime_config_mod = @import("runtime_config.zig");
 pub const RuntimeConfig = runtime_config_mod.RuntimeConfig;
 const openTraceFile = runtime_config_mod.openTraceFile;
 const openOplogFile = runtime_config_mod.openOplogFile;
+const openLockedFreshOplog = runtime_config_mod.openLockedFreshOplog;
 const openOplogAppendFile = runtime_config_mod.openOplogAppendFile;
+const tryLockOplogFd = runtime_config_mod.tryLockOplogFd;
 const applyRuntimeConfig = runtime_config_mod.applyRuntimeConfig;
 const applyEmbeddedCapabilityPolicy = runtime_config_mod.applyEmbeddedCapabilityPolicy;
 
@@ -1372,6 +1374,7 @@ pub const Runtime = struct {
         const active = self.openActiveDurableRun(key) catch |err| switch (err) {
             error.DurableRecoveryKeyMismatch => return zq.modules.util.throwError(ctx, "Error", "durable recovery key did not match run() key"),
             error.DurableKeyCollision => return zq.modules.util.throwError(ctx, "Error", "durable key collision detected for oplog path"),
+            error.DurableRunBusy => return zq.modules.util.throwError(ctx, "Error", "durable run is busy: another process holds this run's oplog"),
             else => return err,
         };
 
@@ -1494,7 +1497,7 @@ pub const Runtime = struct {
         }
 
         const now_ms = unixMillis();
-        switch (active.state.beginTimerWait(until_ms)) {
+        switch (active.state.beginTimerWait()) {
             .ready => return zq.JSValue.undefined_val,
             .pending => |wait| {
                 if (wait.until_ms <= now_ms) {
@@ -1530,28 +1533,21 @@ pub const Runtime = struct {
 
         switch (active.state.beginSignalWait(name)) {
             .delivered => |payload_json| return zq.trace.jsonToJSValue(ctx, payload_json),
-            .pending => {
-                if (try store.tryConsumeSignal(active.key, name, now_ms)) |payload| {
-                    var consumed = payload;
-                    defer consumed.deinit();
-                    active.state.persistResumeSignal(name, consumed.payload_json);
-                    return zq.trace.jsonToJSValue(ctx, consumed.payload_json);
-                }
-                try active.setPendingSignal(self.allocator, name);
-                return error.DurableSuspended;
-            },
-            .live => {
-                active.state.persistWaitSignal(name);
-                if (try store.tryConsumeSignal(active.key, name, now_ms)) |payload| {
-                    var consumed = payload;
-                    defer consumed.deinit();
-                    active.state.persistResumeSignal(name, consumed.payload_json);
-                    return zq.trace.jsonToJSValue(ctx, consumed.payload_json);
-                }
-                try active.setPendingSignal(self.allocator, name);
-                return error.DurableSuspended;
-            },
+            .live => active.state.persistWaitSignal(name),
+            .pending => {},
         }
+
+        if (try store.tryConsumeSignal(active.key, name, now_ms)) |payload| {
+            var consumed = payload;
+            defer consumed.deinit();
+            active.state.persistResumeSignal(name, consumed.payload_json);
+            // Unlink only after the consumption is durably in the oplog; the
+            // reverse order loses the signal on a crash in between.
+            store.finalizeConsumedSignal(&consumed);
+            return zq.trace.jsonToJSValue(ctx, consumed.payload_json);
+        }
+        try active.setPendingSignal(self.allocator, name);
+        return error.DurableSuspended;
     }
 
     fn durableSignal(self: *Self, ctx: *zq.Context, key: []const u8, name: []const u8, payload: zq.JSValue) anyerror!zq.JSValue {
@@ -1688,6 +1684,10 @@ pub const Runtime = struct {
         if (self.pending_durable_recovery) |pending| {
             if (!std.mem.eql(u8, pending.key, key)) return error.DurableRecoveryKeyMismatch;
 
+            // No lock here: the recovery pass (durable_recovery.OplogClaim)
+            // already holds the oplog lock on its own fd for the duration of
+            // this re-execution; taking it again on a second fd would
+            // self-deadlock.
             const fd = try openOplogAppendFile(self.allocator, pending.oplog_path);
             const state = try self.allocator.create(zq.trace.DurableState);
             state.* = zq.trace.DurableState.init(self.allocator, pending.events, fd);
@@ -1702,7 +1702,16 @@ pub const Runtime = struct {
         const path = try self.buildDurableOplogPath(key);
         errdefer self.allocator.free(path);
 
-        if (try self.readDurableLogIfExists(path)) |source| {
+        if (zq.file_io.fileExists(self.allocator, path)) {
+            // Lock before reading the snapshot: a concurrent recovery pass
+            // (or a second live request on the same key) appending between
+            // the read and our first write would double-apply effects.
+            const fd = try openOplogAppendFile(self.allocator, path);
+            errdefer std.Io.Threaded.closeFd(fd);
+            try tryLockOplogFd(fd);
+
+            const source = (try self.readDurableLogIfExists(path)) orelse
+                return error.FileOpenFailed;
             errdefer self.allocator.free(source);
 
             var parsed = try zq.trace.parseDurableOplog(self.allocator, source);
@@ -1716,7 +1725,6 @@ pub const Runtime = struct {
             const events = parsed.events;
             parsed.events = &.{};
 
-            const fd = try openOplogAppendFile(self.allocator, path);
             const state = try self.allocator.create(zq.trace.DurableState);
             state.* = zq.trace.DurableState.init(self.allocator, events, fd);
             return .{
@@ -1730,7 +1738,7 @@ pub const Runtime = struct {
         }
 
         const request = self.active_request orelse return error.NoActiveRequest;
-        const fd = try openOplogFile(self.allocator, path);
+        const fd = try openLockedFreshOplog(self.allocator, path);
         errdefer std.Io.Threaded.closeFd(fd);
 
         const state = try self.allocator.create(zq.trace.DurableState);
@@ -6241,7 +6249,8 @@ test "fetchSync respects embedded capability policy host allowlist" {
 // Regression guard: the concurrent fetch path (zigttp:io parallel) shares
 // parseFetchArgs with the sync path, so the egress allowlist is enforced at
 // collection time. A disallowed host is rejected before a descriptor is
-// registered, so it never opens a socket and drops out of the results array.
+// registered, so it never opens a socket; its position in the results array
+// stays (undefined) because parallel() is positional.
 test "parallel fetch enforces egress allowlist - disallowed host never registers" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -6254,14 +6263,15 @@ test "parallel fetch enforces egress allowlist - disallowed host never registers
     };
 
     // Both thunks target a disallowed host: no descriptor registers, so
-    // parallel() returns an empty array and example.com is never connected.
+    // both positions are undefined and example.com is never connected.
     const handler_code =
         \\import { parallel } from "zigttp:io";
         \\function a() { return fetchSync("http://example.com/one"); }
         \\function b() { return fetchSync("http://example.com/two"); }
         \\function handler(req) {
         \\  const results = parallel([a, b]);
-        \\  return Response.json({ count: results.length });
+        \\  const blocked = results[0] === undefined && results[1] === undefined;
+        \\  return Response.json({ count: results.length, blocked: blocked });
         \\}
     ;
     try rt.loadHandler(handler_code, "<parallel-egress-blocked>");
@@ -6279,11 +6289,13 @@ test "parallel fetch enforces egress allowlist - disallowed host never registers
 
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(i64, 0), parsed.value.object.get("count").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.object.get("count").?.integer);
+    try std.testing.expect(parsed.value.object.get("blocked").?.bool);
 }
 
 // Discrimination: an allowlisted host passes through the parallel path
-// (registers, executes, returns 200) while a disallowed sibling drops out.
+// (registers, executes, returns 200) while a disallowed sibling yields
+// undefined at its own position.
 test "parallel fetch allows allowlisted host and drops disallowed one" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -6310,7 +6322,8 @@ test "parallel fetch allows allowlisted host and drops disallowed one" {
         \\  const results = parallel([allowed, blocked]);
         \\  return Response.json({{
         \\    count: results.length,
-        \\    status: results.length > 0 ? results[0].status : 0
+        \\    status: results[0] === undefined ? 0 : results[0].status,
+        \\    blockedUndefined: results[1] === undefined
         \\  }});
         \\}}
     , .{allowed_url});
@@ -6330,10 +6343,11 @@ test "parallel fetch allows allowlisted host and drops disallowed one" {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
     defer parsed.deinit();
     const obj = parsed.value.object;
-    try std.testing.expectEqual(@as(i64, 1), obj.get("count").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), obj.get("count").?.integer);
     // The allowlisted host actually executed and returned the echo server's
-    // 201; the disallowed host dropped out (count == 1, not 2).
+    // 201 at its own position; the disallowed host's position is undefined.
     try std.testing.expectEqual(@as(i64, 201), obj.get("status").?.integer);
+    try std.testing.expect(obj.get("blockedUndefined").?.bool);
 }
 
 // Change 2: the dev/serve contract-derived allowlist arrives via
@@ -6412,7 +6426,9 @@ test "dev_capability_policy config enforces egress on parallel fetch" {
         \\function a() { return fetchSync("http://example.com/one"); }
         \\function b() { return fetchSync("http://example.com/two"); }
         \\function handler(req) {
-        \\  return Response.json({ count: parallel([a, b]).length });
+        \\  const results = parallel([a, b]);
+        \\  const blocked = results[0] === undefined && results[1] === undefined;
+        \\  return Response.json({ count: results.length, blocked: blocked });
         \\}
     ;
     try rt.loadHandler(handler_code, "<dev-egress-parallel>");
@@ -6430,7 +6446,8 @@ test "dev_capability_policy config enforces egress on parallel fetch" {
 
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(i64, 0), parsed.value.object.get("count").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.object.get("count").?.integer);
+    try std.testing.expect(parsed.value.object.get("blocked").?.bool);
 }
 
 test "fetchSync sends request data and exposes response helpers" {
@@ -8260,4 +8277,56 @@ test "HandlerPool init under FailingAllocator never leaks" {
             return error.TestExpectedSuccess;
         }
     }
+}
+
+test "durable run refuses the oplog while a recovery claim holds it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    try seedIncompleteDurableRandomStep(allocator, durable_dir, "order:busy", "charge", "0.5");
+
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run, step } from "zigttp:durable";
+        \\function handler(req) {
+        \\  const key = req.headers.get("idempotency-key") ?? "missing";
+        \\  return run(key, () => {
+        \\    const seed = step("charge", () => Math.random());
+        \\    return Response.json({ seed: seed });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-busy>");
+
+    const path = try rt.buildDurableOplogPath("order:busy");
+    defer allocator.free(path);
+
+    // Hold the recovery-style advisory lock, as durable_recovery.OplogClaim
+    // does for the duration of a re-execution.
+    const path_z = try allocator.dupeZ(u8, path);
+    const lock_fd = std.c.open(path_z, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    try std.testing.expect(lock_fd >= 0);
+    defer _ = std.c.close(lock_fd);
+    try tryLockOplogFd(lock_fd);
+
+    var request = try makeTestRequest(allocator, "GET", "/", "order:busy");
+    defer request.deinit(allocator);
+
+    const request_val = try rt.createRequestObject(request.asView());
+    current_runtime = rt;
+    defer current_runtime = null;
+    try std.testing.expectError(error.NativeFunctionError, rt.callGlobalFunction("handler", &[_]zq.JSValue{request_val}));
+    rt.resetForNextRequest();
+
+    // The refused run must not have touched the locked oplog.
+    const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"fn\":\"Math.random\""));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, source, 1, "\"type\":\"complete\""));
 }

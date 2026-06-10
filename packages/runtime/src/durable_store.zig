@@ -6,6 +6,7 @@
 //! `DurableStore` surface so a non-filesystem backend can replace it later.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zq = @import("zigts");
 const trace = zq.trace;
 
@@ -77,12 +78,6 @@ pub const DurableStore = union(enum) {
         };
     }
 
-    pub fn deleteSignal(self: *DurableStore, claimed: *const Signal) void {
-        switch (self.*) {
-            .fs => |*store| store.deleteSignal(claimed),
-        }
-    }
-
     pub fn tryConsumeSignal(
         self: *DurableStore,
         key: []const u8,
@@ -92,6 +87,14 @@ pub const DurableStore = union(enum) {
         return switch (self.*) {
             .fs => |*store| store.tryConsumeSignal(key, name, now_ms),
         };
+    }
+
+    /// Remove the claimed file behind a consumed signal. Call only after the
+    /// consumption has been persisted to the run oplog.
+    pub fn finalizeConsumedSignal(self: *DurableStore, consumed: *const ConsumedSignal) void {
+        switch (self.*) {
+            .fs => deletePath(consumed.path),
+        }
     }
 };
 
@@ -113,10 +116,18 @@ pub const Signal = struct {
 
 pub const ConsumedSignal = struct {
     payload_json: []const u8,
+    /// Claimed on-disk file backing this signal. The caller deletes it via
+    /// `finalizeConsumedSignal` only AFTER the consumption is durably
+    /// persisted to the run oplog; unlinking first would lose the signal on
+    /// a crash between unlink and persist. An unfinalized claim is never
+    /// re-delivered (scans skip `.claim-` files), so consume stays
+    /// idempotent across crashes.
+    path: []const u8,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *ConsumedSignal) void {
         self.allocator.free(self.payload_json);
+        self.allocator.free(self.path);
     }
 };
 
@@ -205,10 +216,6 @@ const FsDurableStore = struct {
         };
     }
 
-    fn deleteSignal(_: *Self, claimed: *const Signal) void {
-        deletePath(claimed.path);
-    }
-
     fn tryConsumeSignal(self: *Self, key: []const u8, name: []const u8, now_ms: i64) !?ConsumedSignal {
         const candidates = try self.scanSignals(self.allocator, now_ms);
         defer {
@@ -222,10 +229,15 @@ const FsDurableStore = struct {
 
             var claimed = (try self.tryClaimSignal(candidate)) orelse continue;
             defer claimed.deinit();
-            defer self.deleteSignal(&claimed);
 
+            // The claimed file is NOT deleted here: the caller persists the
+            // consumption to the run oplog first, then finalizes. See
+            // ConsumedSignal.path.
+            const payload_json = try self.allocator.dupe(u8, claimed.payload_json);
+            errdefer self.allocator.free(payload_json);
             return .{
-                .payload_json = try self.allocator.dupe(u8, claimed.payload_json),
+                .payload_json = payload_json,
+                .path = try self.allocator.dupe(u8, claimed.path),
                 .allocator = self.allocator,
             };
         }
@@ -262,7 +274,17 @@ const FsDurableStore = struct {
             };
             defer allocator.free(source);
 
-            var parsed = try parseSignalEnvelope(allocator, source);
+            // One torn or malformed signal file must not poison every scan
+            // (and with it all signal consumption) forever: move it aside
+            // and keep going.
+            var parsed = parseSignalEnvelope(allocator, source) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {
+                    self.quarantineSignalFile(full_path);
+                    allocator.free(full_path);
+                    continue;
+                },
+            };
             errdefer parsed.deinit();
 
             if (scheduled_only) {
@@ -298,12 +320,30 @@ const FsDurableStore = struct {
         return std.fmt.allocPrint(self.allocator, "{s}/scheduled", .{self.durable_dir});
     }
 
+    /// Rename an unparseable signal file out of the scanned namespace
+    /// (the scan only considers `.json` suffixes) so it stops poisoning
+    /// consumption but stays on disk for inspection.
+    fn quarantineSignalFile(self: *Self, path: []const u8) void {
+        const quarantined = std.fmt.allocPrint(self.allocator, "{s}.quarantined", .{path}) catch return;
+        defer self.allocator.free(quarantined);
+        _ = renamePath(path, quarantined) catch return;
+        if (!builtin.is_test) {
+            std.log.warn("durable: quarantined unreadable signal file {s}", .{path});
+        }
+    }
+
     fn allocUniqueSignalPath(self: *Self, dir_path: []const u8) ![]u8 {
         const id = counter.value.fetchAdd(1, .acq_rel) + 1;
         const now_ms = unixMillis();
-        return std.fmt.allocPrint(self.allocator, "{s}/signal-{d}-{x}.json", .{
+        // The counter is process-local: a second process (server vs
+        // scheduler) can mint the same (timestamp, counter) pair within one
+        // millisecond and silently overwrite the other's signal file. The
+        // pid disambiguates across processes.
+        const pid: u32 = @intCast(std.c.getpid());
+        return std.fmt.allocPrint(self.allocator, "{s}/signal-{d}-{x}-{x}.json", .{
             dir_path,
             now_ms,
+            pid,
             id,
         });
     }
@@ -544,4 +584,59 @@ test "durable store hides future scheduled signals until due" {
     var consumed = (try store.tryConsumeSignal("order:123", "approved", now_ms + 60_000)).?;
     defer consumed.deinit();
     try std.testing.expectEqualStrings("{\"ok\":true}", consumed.payload_json);
+}
+
+test "durable store consume is crash-safe: unlink only at finalize" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = DurableStore.initFs(allocator, durable_dir);
+    try store.enqueueSignal("order:9", "approved", "{\"ok\":true}");
+
+    var consumed = (try store.tryConsumeSignal("order:9", "approved", unixMillis())).?;
+    defer consumed.deinit();
+
+    // The claimed file still exists until finalize (a crash here must not
+    // lose the signal before the oplog records it)...
+    const claim_bytes = try zq.file_io.readFile(allocator, consumed.path, 64 * 1024);
+    allocator.free(claim_bytes);
+    // ...but a rescan never re-delivers a claimed signal.
+    try std.testing.expect((try store.tryConsumeSignal("order:9", "approved", unixMillis())) == null);
+
+    store.finalizeConsumedSignal(&consumed);
+    try std.testing.expectError(error.FileNotFound, zq.file_io.readFile(allocator, consumed.path, 64 * 1024));
+}
+
+test "durable store quarantines a torn signal file instead of poisoning scans" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = DurableStore.initFs(allocator, durable_dir);
+    try store.enqueueSignal("order:1", "approved", "{\"ok\":true}");
+
+    // A crash mid-write leaves a truncated envelope behind.
+    const torn_path = try std.fmt.allocPrint(allocator, "{s}/signals/signal-torn.json", .{durable_dir});
+    try zq.file_io.writeFile(allocator, torn_path, "{\"key\":\"order");
+
+    // The good signal is still consumable...
+    var consumed = (try store.tryConsumeSignal("order:1", "approved", unixMillis())).?;
+    defer consumed.deinit();
+    try std.testing.expectEqualStrings("{\"ok\":true}", consumed.payload_json);
+    store.finalizeConsumedSignal(&consumed);
+
+    // ...and the torn file was moved aside, not deleted.
+    try std.testing.expectError(error.FileNotFound, zq.file_io.readFile(allocator, torn_path, 64 * 1024));
+    const quarantined = try std.fmt.allocPrint(allocator, "{s}.quarantined", .{torn_path});
+    const quarantined_bytes = try zq.file_io.readFile(allocator, quarantined, 64 * 1024);
+    allocator.free(quarantined_bytes);
 }

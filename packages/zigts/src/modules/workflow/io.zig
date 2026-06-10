@@ -181,25 +181,41 @@ fn parallelNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
         .capacity = @intCast(count),
     };
 
-    // Install collector - fetchSync will check this threadlocal
+    // Install collector - fetchSync will check this threadlocal. The defer
+    // restores it on every exit (supports nested parallel, though unusual)
+    // and frees collected descriptors on the abort paths, which include a
+    // throwError return that plain errdefer would miss.
     const prev_collector = parallel_collector;
     parallel_collector = &collector;
-
-    // Execute each thunk (fetchSync records URL instead of blocking)
-    for (0..count) |i| {
-        const thunk = arr.getIndex(@intCast(i)) orelse continue;
-        if (!thunk.isObject()) continue;
-        _ = callbacks.call_thunk_fn(callbacks.runtime_ptr, thunk) catch {};
+    var collection_done = false;
+    defer {
+        parallel_collector = prev_collector;
+        if (!collection_done) freeDescriptors(&descriptor_buf, collector.count, ctx.allocator);
     }
 
-    // Restore previous collector state (supports nested parallel, though unusual)
-    parallel_collector = prev_collector;
+    // Execute each thunk (fetchSync records URL instead of blocking),
+    // tracking which descriptor belongs to which position. The contract is
+    // positional ("results are returned in declaration order"), so thunk i
+    // must produce result i: a thunk with no fetch yields undefined at its
+    // position, and a thrown thunk aborts the whole call - the language
+    // subset has no try/catch, so swallowing the error here would silently
+    // shift every later result one position left.
+    var desc_for_thunk: [MAX_PARALLEL]?u32 = @splat(null);
+    for (0..count) |i| {
+        const before = collector.count;
+        const thunk = arr.getIndex(@intCast(i)) orelse value.JSValue.undefined_val;
+        if (!thunk.isObject()) {
+            return util.throwError(ctx, "TypeError", "parallel() expects an array of functions");
+        }
+        _ = try callbacks.call_thunk_fn(callbacks.runtime_ptr, thunk);
+        if (collector.count > before) {
+            // A thunk's value is its last fetch (earlier ones are effects).
+            desc_for_thunk[i] = collector.count - 1;
+        }
+    }
+    collection_done = true;
 
     const desc_count = collector.count;
-    if (desc_count == 0) {
-        // No fetchSync calls were intercepted - thunks had no I/O effects
-        return (try ctx.createArray()).toValue();
-    }
 
     // Phase 2: Execute all collected HTTP fetches concurrently
     var results: [MAX_PARALLEL]FetchResult = undefined;
@@ -207,26 +223,36 @@ fn parallelNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
         results[i] = .{};
     }
 
-    callbacks.execute_fetches_fn(
-        callbacks.runtime_ptr,
-        descriptor_buf[0..desc_count],
-        results[0..desc_count],
-    );
-
-    // Phase 3: Build JS Response objects and return array
-    const result_arr = try ctx.createArray();
-    for (0..desc_count) |i| {
-        const resp_val = callbacks.build_response_fn(callbacks.runtime_ptr, &results[i]) catch value.JSValue.undefined_val;
-        try result_arr.arrayPush(ctx.allocator, resp_val);
-        results[i].deinit(ctx.allocator);
+    if (desc_count > 0) {
+        callbacks.execute_fetches_fn(
+            callbacks.runtime_ptr,
+            descriptor_buf[0..desc_count],
+            results[0..desc_count],
+        );
     }
 
-    // Free collected descriptors
+    // Phase 3: Build one result per thunk position
+    const result_arr = try ctx.createArray();
+    for (0..count) |i| {
+        const resp_val = if (desc_for_thunk[i]) |desc_idx|
+            callbacks.build_response_fn(callbacks.runtime_ptr, &results[desc_idx]) catch value.JSValue.undefined_val
+        else
+            value.JSValue.undefined_val;
+        try result_arr.arrayPush(ctx.allocator, resp_val);
+    }
+
     for (0..desc_count) |i| {
+        results[i].deinit(ctx.allocator);
         descriptor_buf[i].deinit(ctx.allocator);
     }
 
     return result_arr.toValue();
+}
+
+fn freeDescriptors(buf: []FetchDescriptor, n: u32, allocator: std.mem.Allocator) void {
+    for (0..n) |i| {
+        buf[i].deinit(allocator);
+    }
 }
 
 // ============================================================================
@@ -281,14 +307,20 @@ fn raceNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue
 
     const prev_collector = parallel_collector;
     parallel_collector = &collector;
-
-    for (0..count) |i| {
-        const thunk = arr.getIndex(@intCast(i)) orelse continue;
-        if (!thunk.isObject()) continue;
-        _ = callbacks.call_thunk_fn(callbacks.runtime_ptr, thunk) catch {};
+    var collection_done = false;
+    defer {
+        parallel_collector = prev_collector;
+        if (!collection_done) freeDescriptors(&descriptor_buf, collector.count, ctx.allocator);
     }
 
-    parallel_collector = prev_collector;
+    for (0..count) |i| {
+        const thunk = arr.getIndex(@intCast(i)) orelse value.JSValue.undefined_val;
+        if (!thunk.isObject()) {
+            return util.throwError(ctx, "TypeError", "race() expects an array of functions");
+        }
+        _ = try callbacks.call_thunk_fn(callbacks.runtime_ptr, thunk);
+    }
+    collection_done = true;
 
     const desc_count = collector.count;
     if (desc_count == 0) {
@@ -441,4 +473,160 @@ test "getCallbacks returns installed runtime callback state under capability con
     defer mb.popActiveModuleContext(token);
 
     try std.testing.expect(getCallbacks(ctx) != null);
+}
+
+test "parallel: results stay aligned to thunk positions" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../../gc.zig");
+    const heap_mod = @import("../../heap.zig");
+
+    const gc_state = try allocator.create(gc_mod.GC);
+    gc_state.* = try gc_mod.GC.init(allocator, .{});
+    const heap_state = try allocator.create(heap_mod.Heap);
+    heap_state.* = heap_mod.Heap.init(allocator, .{});
+    gc_state.setHeap(heap_state);
+    const ctx = try context.Context.init(allocator, gc_state, .{});
+    defer {
+        ctx.deinit();
+        heap_state.deinit();
+        gc_state.deinit();
+        allocator.destroy(heap_state);
+        allocator.destroy(gc_state);
+    }
+
+    // Thunk 0 and thunk 2 each record one fetch; thunk 1 records none.
+    // The old per-descriptor result array came back [resp, resp] and shifted
+    // thunk 2's response into position 1.
+    const Stubs = struct {
+        var calls: u32 = 0;
+        fn callThunk(_: *anyopaque, _: value.JSValue) anyerror!value.JSValue {
+            const i = calls;
+            calls += 1;
+            if (i != 1) {
+                const col = parallel_collector.?;
+                col.descriptors[col.count] = .{
+                    .url = try col.allocator.dupe(u8, "https://x"),
+                    .method = .GET,
+                    .body = null,
+                    .headers = .empty,
+                    .max_response_bytes = 1024,
+                };
+                col.count += 1;
+            }
+            return value.JSValue.undefined_val;
+        }
+        fn exec(_: *anyopaque, _: []const FetchDescriptor, results: []FetchResult) void {
+            for (results) |*r| r.ok = true;
+        }
+        fn build(_: *anyopaque, _: *const FetchResult) anyerror!value.JSValue {
+            return value.JSValue.true_val;
+        }
+    };
+    Stubs.calls = 0;
+
+    const callbacks = try allocator.create(IoCallbacks);
+    callbacks.* = .{
+        .call_thunk_fn = Stubs.callThunk,
+        .execute_fetches_fn = Stubs.exec,
+        .build_response_fn = Stubs.build,
+        .runtime_ptr = @ptrFromInt(0x1),
+    };
+    ctx.setModuleState(MODULE_STATE_SLOT, @ptrCast(callbacks), &IoCallbacks.deinitOpaque);
+
+    const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+    defer mb.popActiveModuleContext(token);
+
+    const arr = try ctx.createArray();
+    defer arr.destroy(allocator);
+    var thunks: [3]*object.JSObject = undefined;
+    for (0..3) |i| {
+        thunks[i] = try ctx.createObject(ctx.object_prototype);
+        try arr.arrayPush(ctx.allocator, thunks[i].toValue());
+    }
+    defer for (thunks) |t| t.destroy(allocator);
+
+    const result = try parallelNative(ctx, value.JSValue.undefined_val, &.{arr.toValue()});
+    const result_obj = result.toPtr(object.JSObject);
+    defer result_obj.destroy(allocator);
+
+    try std.testing.expectEqual(@as(u32, 3), result_obj.getArrayLength());
+    try std.testing.expect(result_obj.getIndex(0).?.isBool());
+    const middle = result_obj.getIndex(1);
+    try std.testing.expect(middle == null or middle.?.isUndefined());
+    try std.testing.expect(result_obj.getIndex(2).?.isBool());
+}
+
+test "parallel: a thrown thunk propagates instead of being swallowed" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../../gc.zig");
+    const heap_mod = @import("../../heap.zig");
+
+    const gc_state = try allocator.create(gc_mod.GC);
+    gc_state.* = try gc_mod.GC.init(allocator, .{});
+    const heap_state = try allocator.create(heap_mod.Heap);
+    heap_state.* = heap_mod.Heap.init(allocator, .{});
+    gc_state.setHeap(heap_state);
+    const ctx = try context.Context.init(allocator, gc_state, .{});
+    defer {
+        ctx.deinit();
+        heap_state.deinit();
+        gc_state.deinit();
+        allocator.destroy(heap_state);
+        allocator.destroy(gc_state);
+    }
+
+    const Stubs = struct {
+        var calls: u32 = 0;
+        fn callThunk(_: *anyopaque, _: value.JSValue) anyerror!value.JSValue {
+            const i = calls;
+            calls += 1;
+            if (i == 0) {
+                // First thunk records a fetch whose descriptor must be freed
+                // on the abort path (the leak check enforces it).
+                const col = parallel_collector.?;
+                col.descriptors[col.count] = .{
+                    .url = try col.allocator.dupe(u8, "https://x"),
+                    .method = .GET,
+                    .body = null,
+                    .headers = .empty,
+                    .max_response_bytes = 1024,
+                };
+                col.count += 1;
+                return value.JSValue.undefined_val;
+            }
+            return error.ThunkFailed;
+        }
+        fn exec(_: *anyopaque, _: []const FetchDescriptor, _: []FetchResult) void {}
+        fn build(_: *anyopaque, _: *const FetchResult) anyerror!value.JSValue {
+            return value.JSValue.true_val;
+        }
+    };
+    Stubs.calls = 0;
+
+    const callbacks = try allocator.create(IoCallbacks);
+    callbacks.* = .{
+        .call_thunk_fn = Stubs.callThunk,
+        .execute_fetches_fn = Stubs.exec,
+        .build_response_fn = Stubs.build,
+        .runtime_ptr = @ptrFromInt(0x1),
+    };
+    ctx.setModuleState(MODULE_STATE_SLOT, @ptrCast(callbacks), &IoCallbacks.deinitOpaque);
+
+    const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+    defer mb.popActiveModuleContext(token);
+
+    const arr = try ctx.createArray();
+    defer arr.destroy(allocator);
+    var thunks: [2]*object.JSObject = undefined;
+    for (0..2) |i| {
+        thunks[i] = try ctx.createObject(ctx.object_prototype);
+        try arr.arrayPush(ctx.allocator, thunks[i].toValue());
+    }
+    defer for (thunks) |t| t.destroy(allocator);
+
+    try std.testing.expectError(
+        error.ThunkFailed,
+        parallelNative(ctx, value.JSValue.undefined_val, &.{arr.toValue()}),
+    );
+    try std.testing.expect(parallel_collector == null);
 }

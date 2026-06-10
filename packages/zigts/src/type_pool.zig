@@ -945,9 +945,13 @@ pub const TypePool = struct {
         }
 
         // Unresolved refs are effectively unknown: the TypePool cannot
-        // resolve ref names to their definitions (that requires the TypeEnv).
-        // Accept records against refs rather than rejecting valid code.
-        if (src_tag == .t_record and tgt_tag == .t_ref) return true;
+        // resolve ref names to their definitions (that requires the TypeEnv),
+        // and a generic type parameter (`T` in `first<T>(xs: T[]): T`) never
+        // resolves there at all. A ref that survives to this point matched
+        // neither the nominal nor the same-name rule above, so defer on
+        // either side rather than rejecting valid code.
+        if (src_tag == .t_ref or src_tag == .t_generic_param) return true;
+        if (tgt_tag == .t_ref or tgt_tag == .t_generic_param) return true;
 
         return false;
     }
@@ -2373,4 +2377,31 @@ test "isAssignableTo source intersection combines record fields" {
         .{ .name_start = b_name.start, .name_len = b_name.len, .type_idx = pool.idx_string, .optional = false },
     });
     try std.testing.expect(!pool.isAssignableTo(source, wrong_target));
+}
+
+test "isAssignableTo defers on unresolved generic param targets" {
+    // Call-site checking of a generic helper (`first<T>(xs: T[]): T`)
+    // reaches isAssignableTo with `T` still unresolved; the pool must defer
+    // rather than reject every generic call.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const t_param = pool.addGenericParam(allocator, "T");
+    const t_array_of_param = pool.addArray(allocator, t_param);
+    const strings = pool.addArray(allocator, pool.idx_string);
+
+    // string[] -> T[]
+    try std.testing.expect(pool.isAssignableTo(strings, t_array_of_param));
+    // tuple of string literals -> T[]
+    const lit = parseTypeExpr(&pool, allocator, "\"alice\"");
+    const tuple = pool.addTuple(allocator, &.{ lit, lit });
+    try std.testing.expect(pool.isAssignableTo(tuple, t_array_of_param));
+    // T -> string (return-position: `const head: string = first<string>(xs)`)
+    try std.testing.expect(pool.isAssignableTo(t_param, pool.idx_string));
+    // Unresolved named ref -> number
+    const ref = parseTypeExpr(&pool, allocator, "SomeAlias");
+    try std.testing.expect(pool.isAssignableTo(ref, pool.idx_number));
+    // Concrete mismatches still reject
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_number, pool.idx_string));
 }

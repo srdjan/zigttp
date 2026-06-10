@@ -10,12 +10,14 @@
 //! response.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zq = @import("zigts");
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 const Runtime = @import("zruntime.zig").Runtime;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const ServerConfig = @import("server.zig").ServerConfig;
+const tryLockOplogFd = @import("runtime_config.zig").tryLockOplogFd;
 const handler_loader = @import("handler_loader.zig");
 const runtime_natives = @import("runtime_natives.zig");
 
@@ -25,9 +27,84 @@ const c = @cImport({
 
 const trace = zq.trace;
 
+/// Per-oplog retry state for the polling scheduler. A run whose recovery
+/// FAILS (handler error, unreadable log) backs off exponentially and is
+/// quarantined after repeated failures, instead of hot-retrying at the poll
+/// rate forever. Runs that are merely still suspended on a wait are neutral:
+/// backing those off would delay their resumption.
+pub const RetryTracker = struct {
+    const quarantine_threshold: u32 = 10;
+    const base_backoff_ms: i64 = 1_000;
+    const max_backoff_ms: i64 = 60_000;
+
+    const Entry = struct {
+        consecutive_failures: u32 = 0,
+        next_attempt_ms: i64 = 0,
+    };
+
+    allocator: std.mem.Allocator,
+    map: std.StringHashMapUnmanaged(Entry) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator) RetryTracker {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *RetryTracker) void {
+        var it = self.map.iterator();
+        while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
+        self.map.deinit(self.allocator);
+    }
+
+    pub fn shouldAttempt(self: *const RetryTracker, name: []const u8, now_ms: i64) bool {
+        const entry = self.map.get(name) orelse return true;
+        if (entry.consecutive_failures >= quarantine_threshold) return false;
+        return now_ms >= entry.next_attempt_ms;
+    }
+
+    pub fn recordFailure(self: *RetryTracker, name: []const u8, now_ms: i64) void {
+        const gop = self.map.getOrPut(self.allocator, name) catch return;
+        if (!gop.found_existing) {
+            gop.key_ptr.* = self.allocator.dupe(u8, name) catch {
+                _ = self.map.remove(name);
+                return;
+            };
+            gop.value_ptr.* = .{};
+        }
+        gop.value_ptr.consecutive_failures += 1;
+        if (gop.value_ptr.consecutive_failures >= quarantine_threshold) {
+            if (gop.value_ptr.consecutive_failures == quarantine_threshold and !builtin.is_test) {
+                std.log.warn(
+                    "Durable run '{s}' quarantined after {d} consecutive recovery failures",
+                    .{ name, gop.value_ptr.consecutive_failures },
+                );
+            }
+            return;
+        }
+        const shift: u6 = @intCast(@min(gop.value_ptr.consecutive_failures - 1, 6));
+        const backoff = @min(base_backoff_ms << shift, max_backoff_ms);
+        gop.value_ptr.next_attempt_ms = now_ms + backoff;
+    }
+
+    pub fn clear(self: *RetryTracker, name: []const u8) void {
+        if (self.map.fetchRemove(name)) |removed| {
+            self.allocator.free(removed.key);
+        }
+    }
+};
+
 /// Scan the durable directory and recover any incomplete runs.
 /// Returns the number of runs recovered.
 pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfig) !u32 {
+    return recoverIncompleteOplogsTracked(allocator, config, null);
+}
+
+/// Like `recoverIncompleteOplogs`, with per-oplog retry backoff state for
+/// the polling scheduler.
+pub fn recoverIncompleteOplogsTracked(
+    allocator: std.mem.Allocator,
+    config: ServerConfig,
+    tracker: ?*RetryTracker,
+) !u32 {
     const oplog_dir = config.runtime_config.durable_oplog_dir orelse return 0;
 
     const dir_path_z = try allocator.dupeZ(u8, oplog_dir);
@@ -64,9 +141,16 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ oplog_dir, filename }) catch continue;
 
+        // Gate on the tracker before any I/O: a backed-off or quarantined
+        // run must not be re-read and re-parsed every poll second.
+        if (tracker) |t| {
+            if (!t.shouldAttempt(filename, trace.unixMillis())) continue;
+        }
+
         // Read oplog file
         const source = readFile(allocator, full_path) catch |err| {
             std.log.err("Failed to read oplog '{s}': {}", .{ full_path, err });
+            if (tracker) |t| t.recordFailure(filename, trace.unixMillis());
             continue;
         };
         defer allocator.free(source);
@@ -79,6 +163,7 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
         // Parse the incomplete oplog
         var parsed = trace.parseIncompleteOplog(allocator, source) catch |err| {
             std.log.err("Failed to parse oplog '{s}': {}", .{ full_path, err });
+            if (tracker) |t| t.recordFailure(filename, trace.unixMillis());
             continue;
         };
         defer parsed.deinit();
@@ -88,6 +173,16 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
             continue;
         };
 
+        // A run suspended on a timer whose recorded deadline is still in the
+        // future would provably re-suspend; skip the Runtime spin-up and
+        // handler replay until the deadline passes.
+        if (parsed.events.len > 0) {
+            switch (parsed.events[parsed.events.len - 1]) {
+                .wait_timer => |w| if (w.until_ms > trace.unixMillis()) continue,
+                else => {},
+            }
+        }
+
         std.log.info("Recovering durable run: {s} {s} {s} ({d} recorded events)", .{
             run_key,
             parsed.request.method,
@@ -95,13 +190,19 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
             parsed.events.len,
         });
 
-        const success = recoverOne(allocator, config, &parsed, full_path) catch |err| {
+        const outcome = recoverOne(allocator, config, &parsed, full_path) catch |err| blk: {
             std.log.err("Recovery failed for '{s}': {}", .{ full_path, err });
-            continue;
+            break :blk .failed;
         };
 
-        if (success) {
-            recovered += 1;
+        switch (outcome) {
+            .recovered => {
+                recovered += 1;
+                if (tracker) |t| t.clear(filename);
+            },
+            // Still suspended on a wait (or claimed elsewhere): neutral.
+            .pending => {},
+            .failed => if (tracker) |t| t.recordFailure(filename, trace.unixMillis()),
         }
     }
 
@@ -118,7 +219,10 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
 /// request that still owns the oplog) could re-execute the same handler
 /// concurrently and double-apply its effects. `flock(LOCK_EX | LOCK_NB)` fails
 /// closed: if the lock is already held the second claimant skips the file. The
-/// lock is advisory and released when the fd closes.
+/// lock is advisory and released when the fd closes. The live request path
+/// takes the same lock on its own oplog fd (zruntime.openActiveDurableRun via
+/// runtime_config.tryLockOplogFd), so a recovery pass and a live run on the
+/// same key exclude each other in both directions.
 const OplogClaim = struct {
     fd: c_int,
 
@@ -129,10 +233,10 @@ const OplogClaim = struct {
         defer allocator.free(path_z);
         const fd = std.c.open(path_z, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
         if (fd < 0) return null;
-        if (std.c.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB) != 0) {
+        tryLockOplogFd(fd) catch {
             _ = std.c.close(fd);
             return null;
-        }
+        };
         return .{ .fd = fd };
     }
 
@@ -144,15 +248,17 @@ const OplogClaim = struct {
     }
 };
 
+const RecoverOutcome = enum { recovered, pending, failed };
+
 fn recoverOne(
     allocator: std.mem.Allocator,
     config: ServerConfig,
     parsed: *const trace.IncompleteOplog,
     oplog_path: []const u8,
-) !bool {
+) !RecoverOutcome {
     // Claim the oplog before re-executing. If another pass already holds it,
     // skip rather than double-execute the handler.
-    const claim = OplogClaim.acquire(allocator, oplog_path) orelse return false;
+    const claim = OplogClaim.acquire(allocator, oplog_path) orelse return .pending;
     defer claim.release();
 
     const recovery_config = config.runtime_config;
@@ -205,16 +311,30 @@ fn recoverOne(
     // Execute handler - durable wrappers will replay from oplog, then continue live
     var response = rt.executeHandler(request) catch |err| {
         std.log.err("Recovery handler execution failed: {}", .{err});
-        return false;
+        return .failed;
     };
     defer response.deinit();
 
-    const updated = readFile(allocator, oplog_path) catch return false;
+    const updated = readFile(allocator, oplog_path) catch return .failed;
     defer allocator.free(updated);
-    if (trace.isIncompleteOplog(updated)) return false;
+    if (trace.isIncompleteOplog(updated)) {
+        // A trailing un-resumed wait means the run legitimately suspended
+        // again; anything else incomplete is a failed execution.
+        return if (endsWithPendingWait(allocator, updated)) .pending else .failed;
+    }
 
     std.log.info("Recovered: {s} {s} -> {d}", .{ parsed.request.method, parsed.request.url, response.status });
-    return true;
+    return .recovered;
+}
+
+fn endsWithPendingWait(allocator: std.mem.Allocator, source: []const u8) bool {
+    var parsed = trace.parseDurableOplog(allocator, source) catch return false;
+    defer parsed.deinit();
+    if (parsed.events.len == 0) return false;
+    return switch (parsed.events[parsed.events.len - 1]) {
+        .wait_timer, .wait_signal => true,
+        else => false,
+    };
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
@@ -295,4 +415,47 @@ test "durable recovery: full path buffer fits oplog dir + filename beyond 512 by
 
     try testing.expect(full_path.len > 512);
     try testing.expect(std.mem.endsWith(u8, full_path, filename));
+}
+
+test "durable recovery: RetryTracker backs off and quarantines persistent failures" {
+    var tracker = RetryTracker.init(testing.allocator);
+    defer tracker.deinit();
+
+    const name = "durable-abc.jsonl";
+    try testing.expect(tracker.shouldAttempt(name, 0));
+
+    // First failure: 1s backoff.
+    tracker.recordFailure(name, 0);
+    try testing.expect(!tracker.shouldAttempt(name, 500));
+    try testing.expect(tracker.shouldAttempt(name, 1_000));
+
+    // Backoff doubles and caps at 60s.
+    tracker.recordFailure(name, 1_000);
+    try testing.expect(!tracker.shouldAttempt(name, 2_500));
+    try testing.expect(tracker.shouldAttempt(name, 3_000));
+    for (0..5) |_| tracker.recordFailure(name, 10_000);
+    try testing.expect(!tracker.shouldAttempt(name, 10_000 + 59_999));
+    try testing.expect(tracker.shouldAttempt(name, 10_000 + 60_000));
+
+    // Success clears the entry entirely.
+    tracker.clear(name);
+    try testing.expect(tracker.shouldAttempt(name, 0));
+
+    // Ten consecutive failures quarantine the run for good.
+    for (0..RetryTracker.quarantine_threshold) |_| tracker.recordFailure(name, 0);
+    try testing.expect(!tracker.shouldAttempt(name, std.math.maxInt(i64)));
+}
+
+test "durable recovery: a trailing un-resumed wait reads as pending, not failed" {
+    const suspended =
+        "{\"type\":\"durable_run\",\"key\":\"order:1\"}\n" ++
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/a\",\"headers\":{},\"body\":null}\n" ++
+        "{\"type\":\"wait_timer\",\"until_ms\":99999999999}\n";
+    try testing.expect(endsWithPendingWait(testing.allocator, suspended));
+
+    const failed_midway =
+        "{\"type\":\"durable_run\",\"key\":\"order:1\"}\n" ++
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/a\",\"headers\":{},\"body\":null}\n" ++
+        "{\"type\":\"io\",\"seq\":0,\"module\":\"env\",\"fn\":\"env\",\"args\":[\"K\"],\"result\":\"V\"}\n";
+    try testing.expect(!endsWithPendingWait(testing.allocator, failed_midway));
 }
