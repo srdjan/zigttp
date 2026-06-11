@@ -739,7 +739,7 @@ pub const Interpreter = struct {
                     continue :sw @enumFromInt(self.pc[0]);
                 } else {
                     @branchHint(.cold);
-                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.lessThan(a, b));
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(self.ctx.lessThanCtx(a, b));
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
@@ -754,7 +754,7 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.lessEqual(a, b));
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(self.ctx.lessEqualCtx(a, b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -768,7 +768,7 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.greaterThan(a, b));
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(self.ctx.greaterThanCtx(a, b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -782,7 +782,7 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 }
-                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp.greaterEqual(a, b));
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(self.ctx.greaterEqualCtx(a, b));
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },

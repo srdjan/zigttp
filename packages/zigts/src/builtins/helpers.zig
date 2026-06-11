@@ -156,6 +156,15 @@ pub fn getStringDataCtx(val: value.JSValue, ctx: *context.Context) ?[]const u8 {
     return getStringDataImpl(val, ctx);
 }
 
+/// Opaque-pointer variant for callers (e.g. cmp.zig) that cannot import
+/// context.zig without creating a circular dependency. The caller must pass
+/// a *Context cast to *anyopaque; null is treated as no-context (c_allocator
+/// fallback, same as getStringData).
+pub fn getStringDataAnyCtx(val: value.JSValue, ctx: ?*anyopaque) ?[]const u8 {
+    const typed_ctx: ?*context.Context = if (ctx) |c| @ptrCast(@alignCast(c)) else null;
+    return getStringDataImpl(val, typed_ctx);
+}
+
 pub fn getStringDataImpl(val: value.JSValue, ctx: ?*context.Context) ?[]const u8 {
     if (val.isString()) {
         return val.toPtr(string.JSString).data();

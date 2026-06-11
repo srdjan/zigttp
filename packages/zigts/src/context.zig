@@ -1593,14 +1593,32 @@ pub const Context = struct {
         return self.jitCompare(a, b, .gte);
     }
 
-    fn jitCompare(_: *Context, a: value.JSValue, b: value.JSValue, op: enum { lt, lte, gt, gte }) value.JSValue {
-        // Single source of truth shared with the interpreter: the cmp helpers
-        // encode the ECMAScript "unordered (NaN / non-numeric) -> false" rule.
+    pub fn lessThanCtx(self: *Context, a: value.JSValue, b: value.JSValue) bool {
+        const o = cmp.compareValuesCtx(a, b, self) orelse return false;
+        return o == .lt;
+    }
+
+    pub fn lessEqualCtx(self: *Context, a: value.JSValue, b: value.JSValue) bool {
+        const o = cmp.compareValuesCtx(a, b, self) orelse return false;
+        return o == .lt or o == .eq;
+    }
+
+    pub fn greaterThanCtx(self: *Context, a: value.JSValue, b: value.JSValue) bool {
+        const o = cmp.compareValuesCtx(a, b, self) orelse return false;
+        return o == .gt;
+    }
+
+    pub fn greaterEqualCtx(self: *Context, a: value.JSValue, b: value.JSValue) bool {
+        const o = cmp.compareValuesCtx(a, b, self) orelse return false;
+        return o == .gt or o == .eq;
+    }
+
+    fn jitCompare(self: *Context, a: value.JSValue, b: value.JSValue, op: enum { lt, lte, gt, gte }) value.JSValue {
         return value.JSValue.fromBool(switch (op) {
-            .lt => cmp.lessThan(a, b),
-            .lte => cmp.lessEqual(a, b),
-            .gt => cmp.greaterThan(a, b),
-            .gte => cmp.greaterEqual(a, b),
+            .lt => self.lessThanCtx(a, b),
+            .lte => self.lessEqualCtx(a, b),
+            .gt => self.greaterThanCtx(a, b),
+            .gte => self.greaterEqualCtx(a, b),
         });
     }
 

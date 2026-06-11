@@ -18,7 +18,22 @@ const helpers = @import("../builtins/helpers.zig");
 /// source of truth for `<`/`<=`/`>`/`>=` across the interpreter and both JIT
 /// tiers (Context.jitCompare), so string relational comparisons agree on
 /// every tier.
+///
+/// Context-aware callers (interpreter, JIT) should use compareValuesCtx and
+/// pass the request Context so that concat-rope flattening uses the arena
+/// rather than c_allocator. compareValues is kept for context-free sites
+/// (tests, analyzer-only paths) and delegates to compareValuesCtx(a, b, null).
 pub inline fn compareValues(a: value.JSValue, b: value.JSValue) ?std.math.Order {
+    return compareValuesCtx(a, b, null);
+}
+
+/// Context-aware variant. Pass `ctx` as `*Context` cast to `*anyopaque` to
+/// route concat-rope flattening through the request arena; pass `null` for the
+/// context-free (c_allocator) path. The `?*anyopaque` indirection avoids a
+/// circular import: context.zig imports cmp.zig, and cmp.zig imports
+/// helpers.zig which imports context.zig, so cmp.zig cannot name *Context
+/// directly.
+pub inline fn compareValuesCtx(a: value.JSValue, b: value.JSValue, ctx: ?*anyopaque) ?std.math.Order {
     // Integer fast path
     if (a.isInt() and b.isInt()) {
         return std.math.order(a.getInt(), b.getInt());
@@ -31,7 +46,7 @@ pub inline fn compareValues(a: value.JSValue, b: value.JSValue) ?std.math.Order 
     // machinery does not bloat every inlined comparison site (a measured ~9%
     // recursion-benchmark regression when inlined).
     if (a.isAnyString() and b.isAnyString()) {
-        return orderStrings(a, b);
+        return orderStrings(a, b, ctx);
     }
     // Float comparison
     const an = a.toNumber() orelse return null;
@@ -40,10 +55,10 @@ pub inline fn compareValues(a: value.JSValue, b: value.JSValue) ?std.math.Order 
     return std.math.order(an, bn);
 }
 
-/// Cold string-ordering path; see the call site in `compareValues`.
-noinline fn orderStrings(a: value.JSValue, b: value.JSValue) ?std.math.Order {
-    const ab = helpers.getStringData(a) orelse return null;
-    const bb = helpers.getStringData(b) orelse return null;
+/// Cold string-ordering path; see the call site in `compareValuesCtx`.
+noinline fn orderStrings(a: value.JSValue, b: value.JSValue, ctx: ?*anyopaque) ?std.math.Order {
+    const ab = helpers.getStringDataAnyCtx(a, ctx) orelse return null;
+    const bb = helpers.getStringDataAnyCtx(b, ctx) orelse return null;
     return string.compareStrings(ab, bb);
 }
 

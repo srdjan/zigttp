@@ -496,7 +496,6 @@ const Stripper = struct {
         self.skipWhitespaceTracked();
 
         if (self.pos < self.source.len and self.source[self.pos] == ':') {
-            const colon_pos = self.pos;
             self.pos += 1;
             self.col += 1;
             self.skipWhitespaceTracked();
@@ -509,8 +508,8 @@ const Stripper = struct {
                 self.skipWhitespaceTracked();
                 const kind = classifyReturnType(self.source[ret_type_start..ret_type_end]);
                 self.recordTypeAnnotation(kind, ret_type_start, ret_type_end, fn_name_start, fn_name_end);
-                // Blank the return type annotation (but preserve final whitespace)
-                self.blankSpan(colon_pos, self.pos);
+                // Blank from ws3_start (includes whitespace before ':') to preserve output length.
+                self.blankSpan(ws3_start, self.pos);
             }
         } else {
             // No return type - output the whitespace we skipped
@@ -646,7 +645,6 @@ const Stripper = struct {
         self.skipWhitespaceTracked();
 
         if (self.pos < self.source.len and self.source[self.pos] == ':') {
-            const colon_pos = self.pos;
             self.pos += 1;
             self.col += 1;
             self.skipWhitespaceTracked();
@@ -664,7 +662,7 @@ const Stripper = struct {
                     const arrow_kind = classifyReturnType(self.source[ret_type_start..ret_type_end]);
                     self.recordTypeAnnotation(arrow_kind, ret_type_start, ret_type_end, 0, 0);
                     // Blank just the return type, not the =>
-                    self.blankSpan(colon_pos, self.pos);
+                    self.blankSpan(ws_start, self.pos);
                     return;
                 }
             }
@@ -2483,6 +2481,15 @@ test "function return type stripped" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, "function add(a, b)") != null);
 }
 
+test "function return type with space before colon preserves output length" {
+    const src = "function f(x) : string { return x; }";
+    const result = try strip(std.testing.allocator, src, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqual(src.len, result.code.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": string") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "function f(x)") != null);
+}
+
 test "function object return type stripped" {
     const source = "function make(): { ok: boolean } { return { ok: true }; }";
     const result = try strip(std.testing.allocator, source, .{});
@@ -2517,6 +2524,15 @@ test "arrow function annotation stripped" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, ": string") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "const f = (x") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "=> x.trim()") != null);
+}
+
+test "arrow function return type with space before colon preserves output length" {
+    const src = "const f = (x) : string => x;";
+    const result = try strip(std.testing.allocator, src, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqual(src.len, result.code.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "=> x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": string") == null);
 }
 
 test "arrow function object return type stripped" {
