@@ -26,10 +26,11 @@ pub fn setConstructor(ctx: *context.Context, _: value.JSValue, args: []const val
     ctx.setPropertyChecked(set_obj, values_atom, values_arr.toValue()) catch return value.JSValue.undefined_val;
     ctx.setPropertyChecked(set_obj, size_atom, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
 
-    // If iterable provided, add values
-    if (args.len > 0 and args[0].isObject()) {
-        // TODO: Handle iterable initialization
-    }
+    // Iterable initialization is intentionally absent: this constructor is
+    // not installed as a global and `new` is rejected at parse time, so no
+    // language path reaches it with arguments. Implement iteration here if
+    // Set is ever exposed to handlers.
+    _ = args;
 
     return set_obj.toValue();
 }

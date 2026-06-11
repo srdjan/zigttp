@@ -2253,6 +2253,23 @@ pub const IrView = struct {
 
     // ============ Pattern Accessors ============
 
+    /// Single-binding parameter extraction. The parser emits each function
+    /// parameter either as a bare `.identifier` node or as a
+    /// `.pattern_element` wrapper; destructuring patterns (object/array)
+    /// carry no single binding slot and return null. Shared by the type
+    /// checker and flow checker so the parameter-node shape is encoded once.
+    pub fn paramBinding(self: IrView, param_idx: NodeIndex) ?BindingRef {
+        const tag = self.getTag(param_idx) orelse return null;
+        if (tag == .identifier) {
+            return self.getBinding(param_idx);
+        }
+        if (tag == .pattern_element) {
+            const pe = self.getPatternElem(param_idx) orelse return null;
+            return pe.binding;
+        }
+        return null;
+    }
+
     /// Get pattern element data
     pub fn getPatternElem(self: IrView, idx: NodeIndex) ?Node.PatternElem {
         return switch (self.impl) {

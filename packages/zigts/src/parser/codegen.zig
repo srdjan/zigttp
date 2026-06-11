@@ -1934,8 +1934,10 @@ pub const CodeGen = struct {
                     self.popStack(1);
                 },
                 .rest => {
-                    // TODO: Implement rest element for objects
-                    // Requires creating a new object with remaining properties
+                    // Unreachable from source: parse.zig rejects rest elements
+                    // in object destructuring as an unsupported feature, so no
+                    // IR with this kind reaches codegen. Kept as a no-op so a
+                    // future parser change cannot silently emit broken code.
                 },
             }
         }
@@ -2007,8 +2009,10 @@ pub const CodeGen = struct {
                     self.popStack(1);
                 },
                 .rest => {
-                    // TODO: Implement rest element for arrays
-                    // Requires slicing remaining elements into new array
+                    // Unreachable from source: parse.zig rejects rest elements
+                    // in array destructuring as an unsupported feature, so no
+                    // IR with this kind reaches codegen. Kept as a no-op so a
+                    // future parser change cannot silently emit broken code.
                 },
             }
 

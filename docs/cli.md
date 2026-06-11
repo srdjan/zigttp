@@ -51,6 +51,7 @@ Common `dev` and `serve` flags:
 | `-h`, `--host <host>` | Listen host. |
 | `-e`, `--eval <code>` | Inline handler source. |
 | `-m`, `--memory <size>` | Per-runtime JS memory ceiling. |
+| `--max-body-size <size>` | Request body limit (default 1m); oversize returns 413. |
 | `-n`, `--pool <count>` | Runtime pool size. |
 | `--watch` | Watch handler files. |
 | `--prove` | Diff contracts before hot-swap when watching. |

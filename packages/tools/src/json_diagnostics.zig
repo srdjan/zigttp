@@ -830,7 +830,7 @@ const features = [_]Feature{
     .{
         .name = "delete",
         .status = .blocked,
-        .alternative = "use destructuring: const { key, ...rest } = obj",
+        .alternative = "build a new object literal with only the keys you keep",
         .blocked_reason = "delete mutates hidden-class shape, defeating shape-stable property access.",
         .failure_class = "hidden-class shape mutation",
         .proof_unlocked = "shape-stable property access",

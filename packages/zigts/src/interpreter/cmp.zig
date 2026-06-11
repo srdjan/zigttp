@@ -1,26 +1,50 @@
 //! Pure ECMAScript-style value primitives: ordering, loose equality, and
 //! string-length lookup across flat/rope/slice representations. None take
-//! an Interpreter -- referentially transparent, safe to call from anywhere.
+//! an Interpreter -- safe to call from anywhere. (String ordering may flatten
+//! a concat rope on first access; the result is cached in the rope node, so
+//! observable behavior stays referentially transparent.)
 
 const std = @import("std");
 const value = @import("../value.zig");
 const string = @import("../string.zig");
+const helpers = @import("../builtins/helpers.zig");
 
-/// Numeric ordering of two values, or `null` when the operands are "unordered"
-/// (a NaN operand, or an operand that does not coerce to a number). Per
-/// ECMAScript every relational operator yields `false` for unordered operands -
-/// e.g. `NaN < 5`, `undefined > 0` - so callers must treat `null` as false, not
-/// as a thrown error.
+/// Ordering of two values, or `null` when the operands are "unordered" (a NaN
+/// operand, or an operand that does not coerce to a number). Per ECMAScript
+/// every relational operator yields `false` for unordered operands - e.g.
+/// `NaN < 5`, `undefined > 0` - so callers must treat `null` as false, not as
+/// a thrown error. Two strings order lexicographically (byte-wise over UTF-8,
+/// matching the engine's string equality semantics); this is the single
+/// source of truth for `<`/`<=`/`>`/`>=` across the interpreter and both JIT
+/// tiers (Context.jitCompare), so string relational comparisons agree on
+/// every tier.
 pub inline fn compareValues(a: value.JSValue, b: value.JSValue) ?std.math.Order {
     // Integer fast path
     if (a.isInt() and b.isInt()) {
         return std.math.order(a.getInt(), b.getInt());
+    }
+    // Lexicographic string ordering. Without this branch, two strings fell
+    // through to toNumber() -> null and EVERY string relational comparison
+    // silently evaluated false ("a" < "b" included) even though the analyzer
+    // accepts same-type string comparisons. Only the cheap tag test lives in
+    // this inline body: the compare itself is `noinline` so the flatten
+    // machinery does not bloat every inlined comparison site (a measured ~9%
+    // recursion-benchmark regression when inlined).
+    if (a.isAnyString() and b.isAnyString()) {
+        return orderStrings(a, b);
     }
     // Float comparison
     const an = a.toNumber() orelse return null;
     const bn = b.toNumber() orelse return null;
     if (std.math.isNan(an) or std.math.isNan(bn)) return null;
     return std.math.order(an, bn);
+}
+
+/// Cold string-ordering path; see the call site in `compareValues`.
+noinline fn orderStrings(a: value.JSValue, b: value.JSValue) ?std.math.Order {
+    const ab = helpers.getStringData(a) orelse return null;
+    const bb = helpers.getStringData(b) orelse return null;
+    return string.compareStrings(ab, bb);
 }
 
 /// `a < b` with ECMAScript unordered-is-false semantics.
@@ -63,7 +87,11 @@ pub inline fn looseEquals(a: value.JSValue, b: value.JSValue) bool {
         return an == bn;
     }
 
-    // TODO: String coercion, object coercion
+    // String and object coercion are intentionally absent: `==`/`!=` are
+    // rejected at parse time ("use === / !=="), so the .eq/.neq opcodes are
+    // never emitted from source - this function is reachable only from
+    // hand-built bytecode. Implementing loose-coercion paths would reintroduce
+    // exactly the control flow the language cut bans.
     return false;
 }
 
@@ -82,6 +110,36 @@ pub inline fn getAnyStringLength(val: value.JSValue) value.JSValue {
         return value.JSValue.fromInt(@intCast(slice.len));
     }
     return value.JSValue.fromInt(0);
+}
+
+test "regression: string relational comparison orders lexicographically" {
+    const allocator = std.testing.allocator;
+
+    const a = try string.createString(allocator, "a");
+    defer string.freeString(allocator, a);
+    const b = try string.createString(allocator, "b");
+    defer string.freeString(allocator, b);
+    const a_val = value.JSValue.fromPtr(a);
+    const b_val = value.JSValue.fromPtr(b);
+
+    try std.testing.expect(lessThan(a_val, b_val));
+    try std.testing.expect(!lessThan(b_val, a_val));
+    try std.testing.expect(greaterThan(b_val, a_val));
+    try std.testing.expect(lessEqual(a_val, a_val));
+    try std.testing.expect(greaterEqual(a_val, a_val));
+    try std.testing.expect(!lessThan(a_val, a_val));
+
+    // Slice representation: "bc" sliced from "abc" orders after "a".
+    const abc = try string.createString(allocator, "abc");
+    defer string.freeString(allocator, abc);
+    const slice = try string.createSlice(allocator, abc, 1, 2);
+    defer string.freeSlice(allocator, slice);
+    try std.testing.expect(lessThan(a_val, value.JSValue.fromPtr(slice)));
+
+    // Mixed string/number stays unordered (analyzer rejects it; runtime must
+    // not invent a coercion).
+    try std.testing.expect(!lessThan(a_val, value.JSValue.fromInt(5)));
+    try std.testing.expect(!greaterThan(a_val, value.JSValue.fromInt(5)));
 }
 
 test "regression: getAnyStringLength handles all string types" {

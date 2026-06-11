@@ -8,6 +8,7 @@
 const std = @import("std");
 const zigts = @import("zigts");
 const precompile = @import("precompile.zig");
+const project_config_mod = @import("project_config");
 const json_diag = precompile.json_diag;
 const rule_error = zigts.rule_error;
 const file_io = zigts.file_io;
@@ -18,6 +19,11 @@ pub const EditSimulateInput = struct {
     file: []const u8,
     content: []const u8,
     before: ?[]const u8 = null,
+    /// SQL schema for zigttp:sql query validation. Boundary callers that own
+    /// project context (the expert veto, the edit-simulate CLI) resolve it
+    /// via `discoverProjectSqlSchemaPath`; when null, zigttp:sql edits fail
+    /// analysis with MissingSqlSchema exactly like a schema-less `check`.
+    sql_schema_path: ?[]const u8 = null,
 };
 
 pub const SimulatedViolation = struct {
@@ -61,7 +67,7 @@ pub fn simulate(
         allocator.free(tmp_path);
     }
 
-    var new_check = try precompile.runCheckOnly(allocator, tmp_path, null, true, null);
+    var new_check = try precompile.runCheckOnly(allocator, tmp_path, input.sql_schema_path, true, null);
     defer new_check.deinit(allocator);
 
     var baseline_keys: ?std.AutoHashMapUnmanaged(ViolationKey, void) = null;
@@ -74,7 +80,7 @@ pub fn simulate(
             allocator.free(before_path);
         }
 
-        var old_check = try precompile.runCheckOnly(allocator, before_path, null, true, null);
+        var old_check = try precompile.runCheckOnly(allocator, before_path, input.sql_schema_path, true, null);
         defer old_check.deinit(allocator);
 
         baseline_keys = .empty;
@@ -262,7 +268,7 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
     var owned_file: ?[]const u8 = null;
     defer if (owned_file) |f| allocator.free(f);
 
-    const input: EditSimulateInput = if (stdin_json) blk: {
+    var input: EditSimulateInput = if (stdin_json) blk: {
         const parsed = try readStdinJson(allocator);
         owned_file = parsed.file;
         owned_content = parsed.content;
@@ -281,10 +287,36 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
         };
     };
 
+    // CLI boundary: resolve the project's SQL schema once per invocation so
+    // zigttp:sql edits validate the way `zigttp dev`/`test` validate them.
+    const discovered_schema = discoverProjectSqlSchemaPath(allocator, null);
+    defer if (discovered_schema) |p| allocator.free(p);
+    input.sql_schema_path = discovered_schema;
+
     var result = try simulate(allocator, input);
     defer result.deinit(allocator);
 
     try writeResultJson(writer, &result);
+}
+
+/// Resolve the project's SQL schema for analysis: the `sqlite` entry in the
+/// nearest `zigttp.json` walking up from `start_path` (or cwd when null),
+/// resolved against the project root. This is the same source `zigttp dev`,
+/// `zigttp test`, and `zigttp doctor` pass to the analyzer. Returns null when
+/// there is no project, no `sqlite` entry, or the manifest cannot be read:
+/// a broken zigttp.json degrades to schema-less analysis rather than failing
+/// the edit. Caller frees the returned slice.
+pub fn discoverProjectSqlSchemaPath(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var project = project_config_mod.discover(allocator, io, start_path) catch return null;
+    defer if (project) |*p| p.deinit(allocator);
+    if (project) |*cfg| {
+        return cfg.resolvedSqlitePath(allocator) catch null;
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +392,9 @@ fn printHelp() void {
         \\Options:
         \\  --stdin-json    Read input as JSON from stdin: {"file", "content", "before"?}
         \\  --before FILE   Original file for diff-aware analysis
+        \\
+        \\zigttp:sql queries validate against the project's SQL schema, discovered
+        \\from the "sqlite" entry in the nearest zigttp.json.
         \\
         \\Output: JSON with violations array and summary (total, new, preexisting).
         \\

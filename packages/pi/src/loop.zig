@@ -228,6 +228,11 @@ pub fn runTurnWith(
     // prompt feeds the whole history (not just the latest envelope) so the model
     // does not re-introduce a violation it already fixed on an earlier attempt.
     var diag_history: []const u8 = "";
+    // Project SQL schema for the veto, discovered lazily on the first edit
+    // attempt and reused for every retry in the turn (the discovery walks the
+    // filesystem for zigttp.json; once per turn is enough). Arena-owned.
+    var sql_schema_resolved = false;
+    var sql_schema_path: ?[]u8 = null;
 
     while (true) {
         const action = machine.transition(next_event);
@@ -290,11 +295,15 @@ pub fn runTurnWith(
                     },
                     else => return err,
                 };
-                const veto_result = try veto.runVeto(ta, .{
+                if (!sql_schema_resolved) {
+                    sql_schema_resolved = true;
+                    sql_schema_path = veto.discoverSqlSchemaPath(ta);
+                }
+                const veto_result = try veto.runVetoWithSchema(ta, .{
                     .file = prepared.edit.file,
                     .content = prepared.edit.content,
                     .before = prepared.edit.before,
-                });
+                }, sql_schema_path);
                 if (veto_result.outcome.ok and !options.replay_mode) {
                     // The bytes that will actually be written (post-normalization).
                     // Bound here so the approval preview shows exactly what lands.

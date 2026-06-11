@@ -7,7 +7,7 @@ reported.
 
 | Limit | Default / Value | Notes |
 |---|---:|---|
-| Request body size | 1 MB | Fixed in the binary. Oversized requests return `413 Payload Too Large`. |
+| Request body size | 1 MB | Set with `--max-body-size`. Oversized requests return `413 Payload Too Large`. |
 | JavaScript memory | no explicit limit | Set per runtime with `-m` / `--memory`. |
 | Runtime pool size | `cpu_count * 2`, clamped 8-128 | Set with `-n` / `--pool`. |
 | Value stack | 1 MB | 131,072 JSValue slots. |

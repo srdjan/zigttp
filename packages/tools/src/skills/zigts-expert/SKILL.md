@@ -245,7 +245,7 @@ The IR tree IS the control flow graph. No cycles, no hidden exception paths, no 
 | `new` (constructors) | Factory functions, object literals |
 | `this` | Explicit parameter passing |
 | `async`/`await`/`Promise` | `fetchSync()`, `parallel()`, `race()` |
-| `delete` | `const { key, ...rest } = obj` |
+| `delete` | New object literal with only the keys you keep |
 
 ### Error Handling
 

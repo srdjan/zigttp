@@ -78,10 +78,11 @@ pub fn weakMapConstructor(ctx: *context.Context, _: value.JSValue, args: []const
     data.* = WeakMapData.init(data_allocator);
     weak_map.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA] = value.JSValue.fromExternPtr(data);
 
-    // If iterable argument provided, add entries
-    if (args.len > 0 and args[0].isObject()) {
-        // TODO: Iterate over argument and add entries
-    }
+    // Iterable initialization is intentionally absent: this constructor is
+    // not installed as a global and `new` is rejected at parse time, so no
+    // language path reaches it with arguments. Implement iteration here if
+    // WeakMap is ever exposed to handlers.
+    _ = args;
 
     return weak_map.toValue();
 }
@@ -200,10 +201,11 @@ pub fn weakSetConstructor(ctx: *context.Context, _: value.JSValue, args: []const
     data.* = WeakSetData.init(data_allocator);
     weak_set.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA] = value.JSValue.fromExternPtr(data);
 
-    // If iterable argument provided, add entries
-    if (args.len > 0 and args[0].isObject()) {
-        // TODO: Iterate over argument and add entries
-    }
+    // Iterable initialization is intentionally absent: this constructor is
+    // not installed as a global and `new` is rejected at parse time, so no
+    // language path reaches it with arguments. Implement iteration here if
+    // WeakSet is ever exposed to handlers.
+    _ = args;
 
     return weak_set.toValue();
 }

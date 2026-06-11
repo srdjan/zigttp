@@ -648,6 +648,58 @@ pub const TypeEnv = struct {
         self.collectMarkedMembers(idx, out, effect_marker_field, 0);
     }
 
+    /// Strip phantom proof-marker members (the capsule records behind
+    /// `Spec<...>`, `Proof<...>`, and `Effects<...>`) from a declared type,
+    /// returning the value type a returned expression must actually satisfy.
+    /// Markers are compile-time obligations discharged by the verifier and
+    /// the contract extractor, never by the runtime value, so `return s`
+    /// with `s: string` satisfies a declared `Effects<string, "env">`.
+    /// Non-intersection types pass through unchanged.
+    pub fn stripProofMarkers(self: *TypeEnv, idx: TypeIndex) TypeIndex {
+        if (idx == null_type_idx) return idx;
+        const tag = self.pool.getTag(idx) orelse return idx;
+        if (tag != .t_intersection) return idx;
+
+        var kept: [8]TypeIndex = undefined;
+        var kept_count: usize = 0;
+        for (self.pool.getIntersectionMembers(idx)) |member| {
+            if (self.isProofMarkerRecord(member)) continue;
+            // Wider intersections than the buffer: keep the declared type
+            // unchanged rather than silently dropping members.
+            if (kept_count >= kept.len) return idx;
+            kept[kept_count] = member;
+            kept_count += 1;
+        }
+        if (kept_count == 0) return idx;
+        if (kept_count == 1) return kept[0];
+        return self.pool.addIntersection(self.allocator, kept[0..kept_count]);
+    }
+
+    /// True when `idx` is (or aliases to) a single-field record whose only
+    /// field is one of the phantom proof-marker fields.
+    fn isProofMarkerRecord(self: *const TypeEnv, idx0: TypeIndex) bool {
+        var idx = idx0;
+        var depth: u8 = 0;
+        while (depth < 8) : (depth += 1) {
+            const tag = self.pool.getTag(idx) orelse return false;
+            switch (tag) {
+                .t_ref => {
+                    const name = self.pool.getRefName(idx);
+                    idx = self.type_aliases.get(name) orelse return false;
+                },
+                .t_record => {
+                    const fields = self.pool.getRecordFields(idx);
+                    if (fields.len != 1) return false;
+                    const fname = self.pool.getName(fields[0].name_start, fields[0].name_len);
+                    return std.mem.eql(u8, fname, spec_marker_field) or
+                        std.mem.eql(u8, fname, effect_marker_field);
+                },
+                else => return false,
+            }
+        }
+        return false;
+    }
+
     fn collectMarkedMembers(
         self: *const TypeEnv,
         idx: TypeIndex,

@@ -732,15 +732,7 @@ pub const FlowChecker = struct {
     /// (object_pattern / array_pattern) return null; those don't carry a
     /// single binding slot and callers treat the request as unnamed.
     fn paramBinding(self: *const FlowChecker, param_idx: NodeIndex) ?ir.BindingRef {
-        const tag = self.ir_view.getTag(param_idx) orelse return null;
-        if (tag == .identifier) {
-            return self.ir_view.getBinding(param_idx);
-        }
-        if (tag == .pattern_element) {
-            const pe = self.ir_view.getPatternElem(param_idx) orelse return null;
-            return pe.binding;
-        }
-        return null;
+        return self.ir_view.paramBinding(param_idx);
     }
 
     /// Conservatively attach `labels` to every binding bound by a destructuring

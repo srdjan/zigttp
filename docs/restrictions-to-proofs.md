@@ -32,7 +32,7 @@ earned each `[+]` chip.
 | `== / !=` | implicit coercion paths | sound type-directed comparison | use === / !== |
 | `++ / --` | hidden in-place mutation in expressions | explicit assignment effects and state isolation | use x = x + 1 |
 | `regex` | opaque accept set and catastrophic backtracking | shape-checkable validation via zigttp:validate schemas | use string methods (includes, startsWith, etc.) |
-| `delete` | hidden-class shape mutation | shape-stable property access | use destructuring: const { key, ...rest } = obj |
+| `delete` | hidden-class shape mutation | shape-stable property access | build a new object literal with only the keys you keep |
 | `enum` | dual numeric/string lookup and non-exhaustive cases | exhaustive match coverage on discriminated unions | use object literals or discriminated unions |
 | `decorator (@)` | implicit metaprogramming and target rewriting | static call-graph and visible effect composition | use function composition |
 | `namespace` | module-graph blind spots | AST-driven contract extraction | use ES6 modules |

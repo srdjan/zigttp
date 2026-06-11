@@ -597,6 +597,7 @@ fn printServeHelp() void {
         \\  -h, --host <HOST>     Host to bind to
         \\  -e, --eval <CODE>     Evaluate inline JavaScript handler
         \\  -m, --memory <SIZE>   JS runtime memory limit
+        \\  --max-body-size <SIZE> Request body limit (default 1m); oversize returns 413
         \\  -n, --pool <N>        Runtime pool size
         \\  -q, --quiet           Disable request logging
         \\  --static <DIR>        Serve static files from directory

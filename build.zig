@@ -213,6 +213,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     canonicalize_tests.root_module.addImport("zigts", zigts_host_mod);
+    // edit_simulate.zig (reached from canonicalize.zig's test graph) resolves
+    // the project SQL schema through the shared project_config module.
+    canonicalize_tests.root_module.addImport("project_config", project_config_mod);
     const run_canonicalize_tests = b.addRunArtifact(canonicalize_tests);
     const canonicalize_test_step = b.step("test-canonicalize", "Run canonicalize/normalize tool tests");
     canonicalize_test_step.dependOn(&run_canonicalize_tests.step);

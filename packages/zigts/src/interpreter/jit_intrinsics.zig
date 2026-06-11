@@ -20,10 +20,31 @@ const cmp = @import("cmp.zig");
 const frame = @import("frame.zig");
 const call = @import("call.zig");
 
+/// Shared entry guard for the call intrinsics: when a fault is pending,
+/// refuse to invoke the callee AND consume the operands the compiled code
+/// pushed (args + callee, plus `this` for method calls), so the guarded
+/// path's stack effect matches a normal call's. Without the pop, every
+/// refused post-fault call would leave argc+1(+1) values behind and a
+/// post-fault tail loop would ratchet sp upward.
+fn refusePendingFaultCall(ctx: *context.Context, argc: u8, is_method: u8) bool {
+    if (!ctx.hasException()) return false;
+    const consumed = @as(usize, argc) + 1 + @as(usize, @intFromBool(is_method != 0));
+    ctx.sp -= @min(ctx.sp, consumed);
+    return true;
+}
+
 /// JIT helper: perform a call/call_method from compiled code.
 /// Pops arguments and function from the context stack using interpreter logic,
 /// then returns the result as a JSValue.
 pub export fn jitCall(ctx: *context.Context, argc: u8, is_method: u8) value.JSValue {
+    // A compiled frame keeps running tail opcodes after a faulting helper
+    // (the fault is reconciled only at the executeCompiled boundary). Refuse
+    // to invoke a callee while a fault is pending: the interpreter aborts at
+    // the fault and never reaches this call, so running the callee here would
+    // execute user code - with observable side effects - that the interpreter
+    // tier never executes. Store-side twins: Context.jitPutGlobal,
+    // jitPutFieldIC.
+    if (refusePendingFaultCall(ctx, argc, is_method)) return value.JSValue.exception_val;
     const interp = interpreter.current_interpreter orelse {
         ctx.throwException(value.JSValue.exception_val);
         return value.JSValue.exception_val;
@@ -46,6 +67,8 @@ pub export fn jitCallBytecode(
     argc: u8,
     is_method: u8,
 ) value.JSValue {
+    // Post-fault call guard; see jitCall.
+    if (refusePendingFaultCall(ctx, argc, is_method)) return value.JSValue.exception_val;
     const interp = interpreter.current_interpreter orelse {
         ctx.throwException(value.JSValue.exception_val);
         return value.JSValue.exception_val;
@@ -132,6 +155,8 @@ pub export fn jitCallBytecodeFast(
     argc: u8,
     is_method: u8,
 ) value.JSValue {
+    // Post-fault call guard; see jitCall.
+    if (refusePendingFaultCall(ctx, argc, is_method)) return value.JSValue.exception_val;
     const interp = interpreter.current_interpreter orelse {
         ctx.throwException(value.JSValue.exception_val);
         return value.JSValue.exception_val;
@@ -359,6 +384,60 @@ pub export fn jitForOfNext(ctx: *context.Context) u64 {
         }
     }
     return 0;
+}
+
+// Tripwire: every effectful intrinsic compiled code can reach must refuse to
+// act while a fault is pending, or post-fault tail opcodes diverge from the
+// interpreter (which aborts at the fault). When adding a new intrinsic that
+// stores state or invokes user code, add it here.
+test "effectful jit intrinsics refuse work while a fault is pending" {
+    const testing = @import("std").testing;
+    const gc = @import("../gc.zig");
+
+    var gc_state = try gc.GC.init(testing.allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(testing.allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    ctx.throwException(value.JSValue.exception_val);
+    defer ctx.clearException();
+
+    // Calls: refused at entry (no interpreter needed - the guard fires first),
+    // and the guard consumes the operands a compiled call site pushed.
+    try ctx.push(value.JSValue.fromInt(1)); // callee a compiled site pushed
+    const sp_before = ctx.sp;
+    try testing.expect(jitCall(ctx, 0, 0).isException());
+    try testing.expectEqual(sp_before - 1, ctx.sp);
+
+    var dummy_code = [_]u8{0}; // never executed
+    var dummy = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 4,
+        .flags = .{},
+        .code = &dummy_code,
+        .constants = &.{},
+        .source_map = null,
+    };
+    try ctx.push(value.JSValue.fromInt(1));
+    try testing.expect(jitCallBytecode(ctx, &dummy, 0, 0).isException());
+    try ctx.push(value.JSValue.fromInt(1));
+    try testing.expect(jitCallBytecodeFast(ctx, &dummy, 0, 0).isException());
+
+    // Stores: refused; no value lands.
+    const atom = try ctx.atoms.intern("__fault_guard_probe");
+    const atom_idx: u16 = @intCast(@intFromEnum(atom));
+    try testing.expect(ctx.jitPutGlobal(atom_idx, value.JSValue.fromInt(7)).isException());
+    try testing.expect(ctx.getGlobal(atom) == null);
+
+    const obj = try ctx.createObject(null);
+    defer obj.destroy(testing.allocator);
+    try testing.expect(ctx.jitPutField(obj.toValue(), atom_idx, value.JSValue.fromInt(7)).isException());
+    try testing.expect(ctx.jitSetSlot(obj.toValue(), 0, value.JSValue.fromInt(7)).isException());
+    try testing.expect(ctx.jitPutElem(obj.toValue(), value.JSValue.fromInt(0), value.JSValue.fromInt(7)).isException());
+    try testing.expect(jitPutFieldIC(ctx, obj.toValue(), atom_idx, value.JSValue.fromInt(7), 0).isException());
 }
 
 /// JIT helper: for_of_next_put_loc - same as forOfNext but stores to local.

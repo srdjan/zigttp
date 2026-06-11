@@ -80,33 +80,80 @@ pub const VetoResult = struct {
 /// structured report. The outcome's `llm_text` is an allocator-owned slice
 /// carrying the v1 edit-simulate JSON envelope. The report owns a copy of the
 /// policy hash string. Call `VetoResult.deinit` to free both.
+///
+/// zigttp:sql edits validate against the project's SQL schema, discovered from
+/// the `sqlite` entry in the nearest zigttp.json (the same source `zigttp dev`
+/// and `zigttp test` feed the analyzer). Callers issuing several veto attempts
+/// (the turn loop's retries) should discover once with
+/// `discoverSqlSchemaPath` and call `runVetoWithSchema` per attempt.
 pub fn runVeto(
     allocator: std.mem.Allocator,
     edit: turn.Edit,
 ) !VetoResult {
-    // zigttp:sql handlers need a --sql-schema the expert does not thread through
-    // yet, so the whole module is unsupported in the expert for this beta.
+    const discovered_schema = discoverSqlSchemaPath(allocator);
+    defer if (discovered_schema) |path| allocator.free(path);
+    return runVetoWithSchema(allocator, edit, discovered_schema);
+}
+
+/// Resolve the project's SQL schema from the nearest zigttp.json (cwd-anchored).
+/// Returns null when no project or no `sqlite` entry. Caller frees.
+pub fn discoverSqlSchemaPath(allocator: std.mem.Allocator) ?[]u8 {
+    return edit_simulate.discoverProjectSqlSchemaPath(allocator, null);
+}
+
+/// `runVeto` with an explicit SQL schema path instead of project discovery.
+/// Public for tests; `runVeto` is the production entry point.
+pub fn runVetoWithSchema(
+    allocator: std.mem.Allocator,
+    edit: turn.Edit,
+    sql_schema_path: ?[]const u8,
+) !VetoResult {
+    // A zigttp:sql edit without a configured schema cannot be verified.
     // Detecting the import up front (rather than relying on the analyzer's
     // schema-less failure, which varies by build configuration) gives the model
     // deterministic, actionable guidance instead of an opaque MissingSqlSchema
-    // that crashes the turn or loops on an unsatisfiable diagnostic.
-    // TODO: drop this up-front short-circuit once sql_schema_path threads through
-    // the expert apply path; the `catch error.MissingSqlSchema` backstop below is
-    // the correct-altitude guard and should outlive it.
-    if (importsSqlModule(edit.content)) {
-        return try sqlUnsupportedResult(allocator);
+    // that crashes the turn or loops on an unsatisfiable diagnostic. The
+    // `catch error.MissingSqlSchema` backstop below is the correct-altitude
+    // guard for analyzer paths that still surface the failure as an error.
+    if (sql_schema_path == null and importsSqlModule(edit.content)) {
+        return try failedVetoWithGuidance(allocator, sql_unsupported_guidance);
     }
 
     const input: edit_simulate.EditSimulateInput = .{
         .file = edit.file,
         .content = edit.content,
         .before = edit.before,
+        .sql_schema_path = sql_schema_path,
     };
 
     var result = edit_simulate.simulate(allocator, input) catch |err| switch (err) {
         // Backstop for any analyzer path that still surfaces the schema-less
         // failure as an error rather than a clean diagnostic.
-        error.MissingSqlSchema => return try sqlUnsupportedResult(allocator),
+        error.MissingSqlSchema => return try failedVetoWithGuidance(allocator, sql_unsupported_guidance),
+        // The analyzer reports query-vs-schema failures as errors, not
+        // diagnostics. A bad query in a draft is the model's mistake to fix,
+        // not a fatal agent error: end the turn with a failed veto carrying
+        // guidance instead of crashing it.
+        error.InvalidSqlQuery,
+        error.UnsupportedSqlStatement,
+        error.PositionalSqlParameter,
+        error.SqlitePrepareFailed,
+        => return try failedVetoWithGuidance(allocator, sql_validation_guidance),
+        // A configured schema that cannot be loaded (stale `sqlite` entry in
+        // zigttp.json, missing or unreadable file, invalid schema SQL) must
+        // not crash the turn either. Attribute file errors to the schema only
+        // when one was actually configured; otherwise they are real analyzer
+        // failures that should propagate.
+        error.SqliteOpenFailed,
+        error.SqliteExecFailed,
+        error.FileNotFound,
+        error.AccessDenied,
+        => {
+            if (sql_schema_path != null) {
+                return try failedVetoWithGuidance(allocator, sql_schema_load_guidance);
+            }
+            return err;
+        },
         else => return err,
     };
     defer result.deinit(allocator);
@@ -135,6 +182,7 @@ pub fn runVeto(
                     .file = edit.file,
                     .content = nr.canonical_source,
                     .before = edit.before,
+                    .sql_schema_path = sql_schema_path,
                 })) |r2_value| {
                     var r2 = r2_value;
                     if (r2.new_count == 0) {
@@ -282,17 +330,39 @@ fn stringLiteralEquals(tok: zigts.parser.Token, content: []const u8, expected: [
     return std.mem.eql(u8, text[1 .. text.len - 1], expected);
 }
 
-/// A failed veto whose llm_text tells the model (and, through it, the user) that
-/// zigttp:sql handlers are not verifiable by the expert in this beta, and what
-/// to do instead. Used in place of the opaque MissingSqlSchema error so the turn
-/// ends with guidance rather than crashing or looping.
-fn sqlUnsupportedResult(allocator: std.mem.Allocator) !VetoResult {
-    const guidance =
-        "This edit imports zigttp:sql, which the expert cannot verify yet: the analyzer " ++
-        "needs a --sql-schema and that is not threaded through the expert in this beta. " ++
-        "Do not retry this edit. Either avoid zigttp:sql (for example use zigttp:cache " ++
-        "instead), or tell the user to verify the handler directly with " ++
-        "`zigttp check --sql-schema <schema.sql> <handler.ts>`.";
+/// No schema configured: tell the model (and, through it, the user) how to
+/// configure one, or to avoid zigttp:sql. Used in place of the opaque
+/// MissingSqlSchema error so the turn ends with guidance rather than crashing
+/// or looping.
+const sql_unsupported_guidance =
+    "This edit imports zigttp:sql but the project has no SQL schema configured, " ++
+    "so the analyzer cannot verify the queries. Do not retry this edit unchanged. " ++
+    "Either ask the user to add a \"sqlite\" entry pointing at their schema to " ++
+    "zigttp.json (for example \"sqlite\": \"schema.sql\") and then retry, or avoid " ++
+    "zigttp:sql (for example use zigttp:cache instead). The handler can also be " ++
+    "verified directly with `zigttp check --sql-schema <schema.sql> <handler.ts>`.";
+
+/// A schema IS configured; the draft's SQL is what needs fixing.
+const sql_validation_guidance =
+    "This edit's zigttp:sql queries failed validation against the project's " ++
+    "configured SQL schema: a declared query did not prepare (unknown table or " ++
+    "column, unsupported statement shape, or positional parameters - only named " ++
+    "parameters are supported). Fix the query to match the schema and emit a " ++
+    "new, complete edit.";
+
+/// A schema is configured but cannot be loaded: the config, not the draft,
+/// needs fixing.
+const sql_schema_load_guidance =
+    "This edit needs the project's SQL schema, but the configured schema could " ++
+    "not be loaded: the \"sqlite\" entry in zigttp.json points at a file that is " ++
+    "missing, unreadable, or not a valid schema. Do not retry this edit " ++
+    "unchanged. Ask the user to fix the \"sqlite\" path or restore the schema " ++
+    "file, then retry.";
+
+/// A failed veto carrying actionable guidance instead of an analyzer error
+/// that would crash the turn. The guidance string must be a static literal
+/// (duped into the result so deinit stays uniform).
+fn failedVetoWithGuidance(allocator: std.mem.Allocator, guidance: []const u8) !VetoResult {
     const llm_text = try allocator.dupe(u8, guidance);
     errdefer allocator.free(llm_text);
 
@@ -531,8 +601,8 @@ test "broken handler (var) fails the veto and body surfaces ZTS001" {
     try testing.expect(result.report.new >= 1);
 }
 
-test "sqlUnsupportedResult yields a failed veto with actionable guidance" {
-    var result = try sqlUnsupportedResult(testing.allocator);
+test "failedVetoWithGuidance yields a failed veto with actionable guidance" {
+    var result = try failedVetoWithGuidance(testing.allocator, sql_unsupported_guidance);
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.outcome.ok);
@@ -555,6 +625,8 @@ test "importsSqlModule matches only static zigttp sql imports" {
 }
 
 test "a zigttp:sql handler fails the veto with guidance instead of crashing" {
+    // No project schema is discoverable from the test cwd, so the edit is
+    // short-circuited to configuration guidance.
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
         .content = "import { sqlOne } from \"zigttp:sql\";\n" ++
@@ -566,6 +638,106 @@ test "a zigttp:sql handler fails the veto with guidance instead of crashing" {
     try testing.expect(!result.outcome.ok);
     try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "zigttp:sql") != null);
     try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "sql-schema") != null);
+}
+
+test "a zigttp:sql edit passes the veto when a schema is configured" {
+    // Mirrors the doctor fixture: the schema validates the declared query, so
+    // the edit verifies end-to-end through the same pipeline `zigttp check
+    // --sql-schema` uses. Before schema threading landed, every zigttp:sql
+    // edit was short-circuited to "unsupported".
+    const schema_sql =
+        \\CREATE TABLE users (
+        \\    id INTEGER PRIMARY KEY,
+        \\    name TEXT NOT NULL
+        \\);
+    ;
+    var uniquifier: u8 = undefined;
+    const addr = @intFromPtr(&uniquifier);
+    const schema_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "/tmp/zigts-veto-schema-{x}.sql",
+        .{addr},
+        0,
+    );
+    defer testing.allocator.free(schema_path);
+    try zigts.file_io.writeFile(testing.allocator, schema_path, schema_sql);
+    defer _ = std.c.unlink(schema_path);
+
+    var result = try runVetoWithSchema(testing.allocator, .{
+        .file = "handler.ts",
+        .content = "import { sql, sqlMany } from \"zigttp:sql\";\n" ++
+            "\n" ++
+            "sql(\"listUsers\", \"SELECT id, name FROM users ORDER BY id ASC\");\n" ++
+            "\n" ++
+            "function handler(req: Request): Response & Spec<\"state_isolated\"> {\n" ++
+            "    return Response.json({ users: sqlMany(\"listUsers\", {}) });\n" ++
+            "}\n",
+        .before = null,
+    }, schema_path);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.outcome.ok);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "sql-schema") == null);
+    try testing.expectEqual(@as(u32, 0), result.report.new);
+}
+
+test "a zigttp:sql edit with an unloadable configured schema fails the veto with guidance" {
+    // A stale `sqlite` entry (file moved or deleted) must end the turn with
+    // configuration guidance, not propagate error.FileNotFound out of the
+    // veto and crash the agent.
+    var result = try runVetoWithSchema(testing.allocator, .{
+        .file = "handler.ts",
+        .content = "import { sql, sqlMany } from \"zigttp:sql\";\n" ++
+            "\n" ++
+            "sql(\"listUsers\", \"SELECT id, name FROM users ORDER BY id ASC\");\n" ++
+            "\n" ++
+            "function handler(req: Request): Response & Spec<\"state_isolated\"> {\n" ++
+            "    return Response.json({ users: sqlMany(\"listUsers\", {}) });\n" ++
+            "}\n",
+        .before = null,
+    }, "/nonexistent/zigttp-veto-missing-schema.sql");
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.outcome.ok);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "could not be loaded") != null);
+}
+
+test "a zigttp:sql edit against a mismatched schema fails the veto with diagnostics" {
+    // The query references a column the schema does not define: the analyzer
+    // must reject the edit through normal diagnostics, not crash with
+    // MissingSqlSchema and not pass unverified.
+    const schema_sql =
+        \\CREATE TABLE users (
+        \\    id INTEGER PRIMARY KEY
+        \\);
+    ;
+    var uniquifier: u8 = undefined;
+    const addr = @intFromPtr(&uniquifier);
+    const schema_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "/tmp/zigts-veto-schema-bad-{x}.sql",
+        .{addr},
+        0,
+    );
+    defer testing.allocator.free(schema_path);
+    try zigts.file_io.writeFile(testing.allocator, schema_path, schema_sql);
+    defer _ = std.c.unlink(schema_path);
+
+    var result = try runVetoWithSchema(testing.allocator, .{
+        .file = "handler.ts",
+        .content = "import { sql, sqlMany } from \"zigttp:sql\";\n" ++
+            "\n" ++
+            "sql(\"listUsers\", \"SELECT id, name FROM users ORDER BY id ASC\");\n" ++
+            "\n" ++
+            "function handler(req: Request): Response & Spec<\"state_isolated\"> {\n" ++
+            "    return Response.json({ users: sqlMany(\"listUsers\", {}) });\n" ++
+            "}\n",
+        .before = null,
+    }, schema_path);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.outcome.ok);
+    try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "failed validation") != null);
 }
 
 test "a non-sql handler mentioning zigttp sql as text still runs normal veto" {

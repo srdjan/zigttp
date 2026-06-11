@@ -949,3 +949,188 @@ test "opcode parity: a JIT fault does not poison the next run() on the same cont
 // and the only post-loop faulting opcodes either are unsupported at the optimized
 // tier (push_undefined) or bail the optimized compiler (an always-faulting `call` ->
 // error.OutOfMemory on that synthetic shape, which real codegen never emits).
+
+// Post-fault SIDE EFFECTS in the innermost compiled frame. The boundary
+// (executeCompiled) converts a pending exception into a run() error, so the
+// return-value contract holds even when compiled code runs past a fault - but
+// any STORE the tail opcodes perform is an observable divergence: the
+// interpreter aborts at the fault and never executes it. The body calls a
+// non-callable (faults NotCallable via the jitCall sentinel), then stores 99
+// to a global. On every tier the global must stay undefined after a faulting
+// run: compiled call sites must bail to the fault exit on the sentinel
+// instead of executing the tail opcodes.
+test "opcode parity: compiled code performs no side effects past a faulted call" {
+    const allocator = std.testing.allocator;
+
+    const prev_policy = jit_policy.getJitPolicy();
+    const prev_threshold = jit_policy.getJitThreshold();
+    const prev_warmup = jit_policy.getJitFeedbackWarmup();
+    defer {
+        jit_policy.setJitPolicy(prev_policy);
+        jit_policy.setJitThreshold(prev_threshold);
+        jit_policy.setJitFeedbackWarmup(prev_warmup);
+    }
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    var interp = Interpreter.init(ctx);
+
+    jit_policy.setJitPolicy(.eager);
+    if (jit_policy.jitDisabled()) return;
+
+    const leak_atom = try ctx.atoms.intern("__parity_fault_leak");
+    const atom_idx: u16 = @intCast(@intFromEnum(leak_atom));
+
+    const code = [_]u8{
+        op(.push_i8),    1, // non-callable callee
+        op(.call),       0, // faults: NotCallable
+        op(.drop), // tail opcodes the interpreter never reaches
+        op(.push_i8),    99,
+        op(.put_global), @intCast(atom_idx & 0xFF), @intCast(atom_idx >> 8),
+        op(.ret_undefined),
+    };
+
+    // Interpreter: aborts at the fault; the store never runs.
+    jit_policy.setJitThreshold(std.math.maxInt(u32));
+    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
+    interp.ctx.clearException();
+    var interp_func = faultFunc(.{ .name = "fault_store", .code = &code, .expect_err = error.NotCallable });
+    try std.testing.expectError(error.NotCallable, interp.run(&interp_func));
+    try std.testing.expect(ctx.getGlobal(leak_atom) == null);
+
+    // Baseline: warm to compiled, reset the global, then a compiled faulting
+    // run must leave the global unset - the tail store must not execute.
+    jit_policy.setJitThreshold(1);
+    jit_policy.setJitFeedbackWarmup(1);
+    var base_func = faultFunc(.{ .name = "fault_store", .code = &code, .expect_err = error.NotCallable });
+    defer jit_compile.cleanupCompiledCode(allocator, &base_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        interp.ctx.clearException();
+        _ = interp.run(&base_func) catch {};
+    }
+    try std.testing.expect(base_func.compiled_code != null); // genuinely compiled
+    try ctx.setGlobal(leak_atom, JSValue.undefined_val);
+    interp.ctx.clearException();
+    _ = interp.run(&base_func) catch {};
+    interp.ctx.clearException();
+    const leaked = ctx.getGlobal(leak_atom) orelse JSValue.undefined_val;
+    try std.testing.expect(leaked.isUndefined());
+}
+
+
+// Post-fault tail CALLS in the innermost compiled frame. Store helpers refuse
+// writes while a fault is pending (Context.jitPutGlobal, jitPutFieldIC), but a
+// post-fault tail CALL would execute an entire callee - interpreted, with all
+// of its side effects unguarded - that the interpreter tier never reaches. The
+// jitCall/jitCallBytecode/jitCallBytecodeFast entry guards refuse the call on a
+// pending fault. Body: fault at `add` (undefined + undefined, a guaranteed
+// sentinel path), then call a callee that stores 77 to a global. The global
+// must stay undefined on every tier.
+test "opcode parity: compiled code does not invoke callees past a fault" {
+    const allocator = std.testing.allocator;
+
+    const prev_policy = jit_policy.getJitPolicy();
+    const prev_threshold = jit_policy.getJitThreshold();
+    const prev_warmup = jit_policy.getJitFeedbackWarmup();
+    defer {
+        jit_policy.setJitPolicy(prev_policy);
+        jit_policy.setJitThreshold(prev_threshold);
+        jit_policy.setJitFeedbackWarmup(prev_warmup);
+    }
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    var interp = Interpreter.init(ctx);
+
+    jit_policy.setJitPolicy(.eager);
+    if (jit_policy.jitDisabled()) return;
+
+    const leak_atom = try ctx.atoms.intern("__parity_fault_callee_leak");
+    const atom_idx: u16 = @intCast(@intFromEnum(leak_atom));
+
+    // Callee: call_spread (interpreter no-op pushing undefined, but REJECTED by
+    // the baseline compiler) pins the callee to the interpreter tier even at
+    // threshold 1 - a compiled callee would route its store through the already
+    // guarded Context.jitPutGlobal and mask the call-entry hole. Then: drop;
+    // push_i8 77; put_global <atom>; ret_undefined. The interpreted put_global
+    // has no pending-fault guard - exactly the side effect the call-entry
+    // guards must prevent. Heap-allocated because createBytecodeFunction stores
+    // a pointer and destroyFull frees both the code and the FunctionBytecode.
+    const callee_code = try allocator.alloc(u8, 8);
+    callee_code[0] = op(.call_spread);
+    callee_code[1] = op(.drop);
+    callee_code[2] = op(.push_i8);
+    callee_code[3] = 77;
+    callee_code[4] = op(.put_global);
+    callee_code[5] = @intCast(atom_idx & 0xFF);
+    callee_code[6] = @intCast(atom_idx >> 8);
+    callee_code[7] = op(.ret_undefined);
+    const callee_func = try allocator.create(bytecode.FunctionBytecode);
+    callee_func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 4,
+        .flags = .{},
+        .code = callee_code,
+        .constants = &.{},
+        .source_map = null,
+    };
+    const callee_obj = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, callee_func, .length);
+    defer callee_obj.destroyFull(allocator); // frees callee_code + the FunctionBytecode
+
+    const consts = [_]JSValue{callee_obj.toValue()};
+    const code = [_]u8{
+        op(.push_undefined), op(.push_undefined), op(.add), // faults: TypeError
+        op(.drop), // tail opcodes the interpreter never reaches
+        op(.push_const),     0,                   0,
+        op(.call),           0,
+        op(.drop),
+        op(.ret_undefined),
+    };
+
+    // Interpreter: aborts at the fault; the callee never runs.
+    jit_policy.setJitThreshold(std.math.maxInt(u32));
+    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
+    interp.ctx.clearException();
+    var interp_func = faultFunc(.{
+        .name = "fault_callee",
+        .code = &code,
+        .constants = &consts,
+        .expect_err = error.TypeError,
+    });
+    try std.testing.expectError(error.TypeError, interp.run(&interp_func));
+    try std.testing.expect(ctx.getGlobal(leak_atom) == null);
+
+    // Baseline: warm to compiled, reset the global, then a compiled faulting
+    // run must not invoke the callee - the global stays undefined.
+    jit_policy.setJitThreshold(1);
+    jit_policy.setJitFeedbackWarmup(1);
+    var base_func = faultFunc(.{
+        .name = "fault_callee",
+        .code = &code,
+        .constants = &consts,
+        .expect_err = error.TypeError,
+    });
+    defer jit_compile.cleanupCompiledCode(allocator, &base_func);
+    defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        interp.ctx.clearException();
+        _ = interp.run(&base_func) catch {};
+    }
+    try std.testing.expect(base_func.compiled_code != null); // genuinely compiled
+    try ctx.setGlobal(leak_atom, JSValue.undefined_val);
+    interp.ctx.clearException();
+    _ = interp.run(&base_func) catch {};
+    interp.ctx.clearException();
+    const leaked = ctx.getGlobal(leak_atom) orelse JSValue.undefined_val;
+    try std.testing.expect(leaked.isUndefined());
+}

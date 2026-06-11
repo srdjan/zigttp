@@ -97,6 +97,13 @@ pub const TypeChecker = struct {
 
     /// Inferred types for const/let bindings: packed(scope_id, slot) -> TypeIndex
     binding_types: std.AutoHashMapUnmanaged(u32, TypeIndex),
+    /// Declared parameter types keyed by (scope_id, slot). Kept SEPARATE from
+    /// `binding_types` deliberately: feeding parameter types into general
+    /// identifier inference would subject every `req: Request` argument to
+    /// module-signature assignability checks the pool cannot discharge yet.
+    /// Consulted only where a declared parameter type is load-bearing:
+    /// match-discriminant exhaustiveness.
+    param_types: std.AutoHashMapUnmanaged(u32, TypeIndex),
     /// Flow-sensitive narrowing: binding key -> narrowed TypeIndex
     narrowed: std.AutoHashMapUnmanaged(u32, TypeIndex),
     /// Track current function's declared return type for return statement checking
@@ -118,6 +125,7 @@ pub const TypeChecker = struct {
             .diagnostics = .empty,
             .compiled_schemas = .empty,
             .binding_types = .empty,
+            .param_types = .empty,
             .narrowed = .empty,
         };
     }
@@ -134,6 +142,7 @@ pub const TypeChecker = struct {
         }
         self.compiled_schemas.deinit(self.allocator);
         self.binding_types.deinit(self.allocator);
+        self.param_types.deinit(self.allocator);
         self.narrowed.deinit(self.allocator);
     }
 
@@ -356,7 +365,12 @@ pub const TypeChecker = struct {
                 const sig = if (loc) |l| self.env.getFnSigByLoc(l.line) else null;
                 const saved_return = self.current_return_type;
                 if (sig) |s| {
-                    self.current_return_type = s.return_type;
+                    // Proof markers (Spec/Proof/Effects capsules) are
+                    // obligations for the verifier, not shapes the returned
+                    // value can satisfy; compare returns against the value
+                    // type only.
+                    self.current_return_type = self.env.stripProofMarkers(s.return_type);
+                    self.registerParamTypes(func, s);
                 }
                 self.walkStmt(func.body);
                 self.current_return_type = saved_return;
@@ -1634,14 +1648,44 @@ pub const TypeChecker = struct {
         return analysis.narrowTypeForPattern(union_type, pattern);
     }
 
+    /// Register a function's declared parameter types under their binding keys
+    /// (into the dedicated `param_types` map; see its doc comment for why this
+    /// stays out of general identifier inference). Entries are keyed by
+    /// (scope_id, slot), which is unique per function scope, so no
+    /// save/restore is needed.
+    fn registerParamTypes(self: *TypeChecker, func: ir.Node.FunctionExpr, sig: type_env_mod.FunctionSig) void {
+        const count = @min(func.params_count, sig.param_count);
+        for (0..count) |i| {
+            const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+            const binding = self.ir_view.paramBinding(param_idx) orelse continue;
+            const param_type = sig.param_types[i];
+            if (param_type == null_type_idx) continue;
+            const key = packBindingKey(binding.scope_id, binding.slot);
+            self.param_types.put(self.allocator, key, param_type) catch {};
+        }
+    }
+
+    /// Declared type of an identifier that is a function parameter, or
+    /// null_type_idx. Fallback for sites where the declared type is
+    /// load-bearing and general inference cannot see it.
+    fn paramDeclaredType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+        const tag = self.ir_view.getTag(node) orelse return null_type_idx;
+        if (tag != .identifier) return null_type_idx;
+        const binding = self.ir_view.getBinding(node) orelse return null_type_idx;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        return self.param_types.get(key) orelse null_type_idx;
+    }
+
+
     fn isMatchExhaustive(self: *const TypeChecker, me: ir.Node.MatchExpr) bool {
         // A catch-all arm makes the match exhaustive by construction, regardless
-        // of whether inferType could resolve the discriminant type. inferType
-        // does not resolve a plain function parameter's declared type, so
-        // checking this first avoids a spurious non-exhaustive warning on the
-        // common `match (param) { ... default: ... }` idiom.
+        // of whether the discriminant type resolves.
         if (match_analysis_mod.hasDefaultArm(self.ir_view, me)) return true;
-        const disc_type = self.inferType(me.discriminant);
+        // General inference does not resolve a plain parameter reference; fall
+        // back to the declared parameter type so a full-variant
+        // `match (param)` without a default is recognized as exhaustive.
+        var disc_type = self.inferType(me.discriminant);
+        if (disc_type == null_type_idx) disc_type = self.paramDeclaredType(me.discriminant);
         if (disc_type == null_type_idx) return false;
         const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool);
         return analysis.isMatchExhaustive(disc_type, me);
@@ -2084,22 +2128,55 @@ test "TypeChecker: param-discriminant match with default arm is exhaustive (no w
     , 0, 0);
 }
 
-test "TypeChecker: param-discriminant match without a default warns (Option B gap)" {
-    // Characterizes the type-level limitation: inferType does not resolve a
-    // plain parameter's declared type, so a no-default match over a parameter
-    // cannot run variant-coverage analysis and warns even when EVERY variant is
-    // covered (full coverage below, no default). This warning is advisory and
-    // moot in practice: the canonical profile (strict_checker) separately
-    // requires a `default` arm on EVERY match, so a no-default match is a hard
-    // error regardless of the discriminant. The rule is just: add a `default`
-    // arm. Resolving the parameter type would only silence this redundant
-    // warning, not change what compiles.
+test "TypeChecker: typed return satisfies a marker-carrying declared return type" {
+    // `Effects<string, "env">` instantiates to `string & { __zigttp_effect__ }`.
+    // The phantom marker is a verifier obligation, never a value shape, so a
+    // returned `string` must pass the return-type check. Without
+    // stripProofMarkers the intersection comparison spuriously failed for any
+    // return expression whose type inference resolves (annotated locals).
+    try checkTypedSource(
+        \\function digest(): Effects<string, "env"> {
+        \\  const s: string = "x";
+        \\  return s;
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: marker stripping still rejects a genuinely wrong return" {
+    try checkTypedSource(
+        \\function digest(): Effects<string, "env"> {
+        \\  const n: number = 1;
+        \\  return n;
+        \\}
+    , 1, 0);
+}
+
+test "TypeChecker: full-variant param-discriminant match without a default is exhaustive" {
+    // Option B: declared parameter types are registered into binding_types on
+    // function entry (registerParamTypes), so the discriminant of a
+    // `match (param)` resolves to the declared union and variant-coverage
+    // analysis runs. Full coverage without a default arm is exhaustive - no
+    // warning. (The canonical profile still separately requires a default arm
+    // on every match; this only fixes the type-checker layer's false warn.)
     try checkTypedSource(
         \\type C = { kind: "echo", text: string } | { kind: "ping", text: string };
         \\function run(c: C): string {
         \\  return match (c) {
         \\    when { kind: "echo" }: c.text,
         \\    when { kind: "ping" }: "pong",
+        \\  };
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: partial param-discriminant match without a default still warns" {
+    // The same parameter-type resolution must not silence REAL gaps: one of
+    // two variants covered, no default - warn.
+    try checkTypedSource(
+        \\type C = { kind: "echo", text: string } | { kind: "ping", text: string };
+        \\function run(c: C): string {
+        \\  return match (c) {
+        \\    when { kind: "echo" }: c.text,
         \\  };
         \\}
     , 0, 1);
