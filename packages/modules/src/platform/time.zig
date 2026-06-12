@@ -123,10 +123,12 @@ fn parseIsoString(s: []const u8) ?i64 {
         hour = parseInt(u8, s[11..13]) orelse return null;
         if (s[13] != ':') return null;
         minute = parseInt(u8, s[14..16]) orelse return null;
+        if (hour > 23 or minute > 59) return null;
 
         if (s.len > 16 and s[16] == ':') {
             if (s.len < 19) return null;
             second = parseInt(u8, s[17..19]) orelse return null;
+            if (second > 59) return null;
 
             if (s.len > 19 and s[19] == '.') {
                 var end: usize = 20;
@@ -252,6 +254,12 @@ test "parseIsoString: invalid" {
     try std.testing.expect(parseIsoString("not-a-date") == null);
     try std.testing.expect(parseIsoString("2024") == null);
     try std.testing.expect(parseIsoString("") == null);
+}
+
+test "parseIsoString: invalid clock fields" {
+    try std.testing.expect(parseIsoString("2024-03-15T24:00:00Z") == null);
+    try std.testing.expect(parseIsoString("2024-03-15T14:60:00Z") == null);
+    try std.testing.expect(parseIsoString("2024-03-15T14:30:60Z") == null);
 }
 
 test "isLeapYear" {

@@ -651,37 +651,21 @@ const Stripper = struct {
 
             if (self.looksLikeTypeStart()) {
                 const ret_type_start = self.pos;
-                // A return type can be a function type like (x: T) => R, whose inner =>
-                // is NOT the arrow function separator. Probe past each => we stop at: if
-                // there is another => beyond it (before {), the one we stopped at is part
-                // of a function-type annotation; keep scanning. Stop when the probe finds
-                // { instead of =>, meaning we have located the actual arrow separator.
+                // A return type can itself be a function type like
+                // `(x: T) => R`, whose inner `=>` is not the arrow function
+                // separator. Only continue past a stopped arrow when the type
+                // prefix before it has that function-type shape. A later arrow
+                // in the next statement must not make a simple `: Response =>`
+                // consume unrelated source.
                 while (true) {
                     try self.skipTypeExpressionUntilDelimiter(&[_]u8{'{'}, true);
-                    if (!(self.pos + 1 < self.source.len and
-                        self.source[self.pos] == '=' and self.source[self.pos + 1] == '>'))
-                    {
+                    if (!(self.pos + 1 < self.source.len and self.source[self.pos] == '=' and self.source[self.pos + 1] == '>')) {
                         break; // hit { or EOF - no arrow found at depth 0
                     }
-                    const probe_pos = self.pos;
-                    const probe_line = self.line;
-                    const probe_col = self.col;
+                    if (!isFunctionTypePrefix(self.source[ret_type_start..self.pos])) break;
                     self.pos += 2;
                     self.col += 2;
                     self.skipWhitespaceTracked();
-                    try self.skipTypeExpressionUntilDelimiter(&[_]u8{'{'}, true);
-                    if (self.pos + 1 < self.source.len and
-                        self.source[self.pos] == '=' and self.source[self.pos + 1] == '>')
-                    {
-                        // Probe => was inside a function type; continue from current pos.
-                        continue;
-                    } else {
-                        // Probe => was the actual arrow function separator; restore.
-                        self.pos = probe_pos;
-                        self.line = probe_line;
-                        self.col = probe_col;
-                        break;
-                    }
                 }
                 const ret_type_end = self.pos;
                 // Check for =>
@@ -823,6 +807,32 @@ const Stripper = struct {
                 self.pos += 1;
             }
             return false;
+        }
+
+        return false;
+    }
+
+    fn isFunctionTypePrefix(raw: []const u8) bool {
+        const text = std.mem.trim(u8, raw, " \t\r\n");
+        if (text.len < 2 or text[0] != '(' or text[text.len - 1] != ')') return false;
+        const params = std.mem.trim(u8, text[1 .. text.len - 1], " \t\r\n");
+        if (params.len == 0) return true; // `() => T`
+
+        var depth: usize = 0;
+        var i: usize = 0;
+        while (i < params.len) : (i += 1) {
+            switch (params[i]) {
+                '(', '[', '{', '<' => depth += 1,
+                ')', ']', '}' => {
+                    if (depth > 0) depth -= 1;
+                },
+                '>' => {
+                    if (depth > 0) depth -= 1;
+                },
+                ':', ',' => if (depth == 0) return true,
+                '.' => if (depth == 0 and i + 2 < params.len and std.mem.eql(u8, params[i..][0..3], "...")) return true,
+                else => {},
+            }
         }
 
         return false;
@@ -2563,6 +2573,26 @@ test "arrow function return type with space before colon preserves output length
     try std.testing.expectEqual(src.len, result.code.len);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "=> x") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, ": string") == null);
+}
+
+test "arrow return type stops at its own arrow" {
+    const source =
+        \\const load = (id: string): Response => Response.text(id);
+        \\const parse = (x: number): number => x;
+    ;
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "Response.text(id)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "const parse") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "=> x") != null);
+}
+
+test "arrow return type keeps parenthesized object annotation out of output" {
+    const source = "const f = (): ({ ok: boolean }) => ({ ok: true });";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "({ ok: boolean })") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "=> ({ ok: true })") != null);
 }
 
 test "arrow function object return type stripped" {

@@ -166,7 +166,8 @@ fn jwtSignImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSVa
     const payload_b64 = encodeBase64url(allocator, claims_json) catch return sdk.JSValue.undefined_val;
     defer allocator.free(payload_b64);
 
-    const signing_input_len = HEADER_HS256_B64.len + 1 + payload_b64.len;
+    const signing_input_len = checkedJoinLen(HEADER_HS256_B64.len, 1, payload_b64.len) orelse
+        return sdk.JSValue.undefined_val;
     const signing_input = allocator.alloc(u8, signing_input_len) catch return sdk.JSValue.undefined_val;
     defer allocator.free(signing_input);
     @memcpy(signing_input[0..HEADER_HS256_B64.len], HEADER_HS256_B64);
@@ -179,7 +180,8 @@ fn jwtSignImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSVa
     const sig_b64 = encodeBase64url(allocator, &mac) catch return sdk.JSValue.undefined_val;
     defer allocator.free(sig_b64);
 
-    const total_len = signing_input_len + 1 + sig_b64.len;
+    const total_len = checkedJoinLen(signing_input_len, 1, sig_b64.len) orelse
+        return sdk.JSValue.undefined_val;
     const result = allocator.alloc(u8, total_len) catch return sdk.JSValue.undefined_val;
     defer allocator.free(result);
     @memcpy(result[0..signing_input_len], signing_input);
@@ -243,6 +245,11 @@ fn encodeBase64url(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     const buf = try allocator.alloc(u8, encoded_len);
     _ = base64url.Encoder.encode(buf, data);
     return buf;
+}
+
+fn checkedJoinLen(a: usize, b: usize, c: usize) ?usize {
+    const ab = std.math.add(usize, a, b) catch return null;
+    return std.math.add(usize, ab, c) catch null;
 }
 
 const JwtHeaderError = error{
@@ -354,6 +361,12 @@ test "base64url encode/decode round-trip for arbitrary bytes" {
         defer allocator.free(decoded);
         try testing.expectEqualSlices(u8, input, decoded);
     }
+}
+
+test "checkedJoinLen rejects overflow" {
+    try testing.expectEqual(@as(?usize, 6), checkedJoinLen(1, 2, 3));
+    try testing.expect(checkedJoinLen(std.math.maxInt(usize), 1, 0) == null);
+    try testing.expect(checkedJoinLen(std.math.maxInt(usize) - 1, 1, 1) == null);
 }
 
 test "decodeBase64url tolerates trailing `=` padding the encoder never emits" {

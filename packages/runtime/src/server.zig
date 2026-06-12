@@ -599,12 +599,8 @@ const ConnectionPool = struct {
                 .headers = request.headers,
                 .body = request.body,
             }) catch |err| {
-                const status: u16 = if (err == error.PoolExhausted) 503
-                    else if (err == error.RequestTimeout) 504
-                    else 500;
-                const message = if (err == error.PoolExhausted) "Service Unavailable"
-                    else if (err == error.RequestTimeout) "Gateway Timeout"
-                    else "Internal Server Error";
+                const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else 500;
+                const message = if (err == error.PoolExhausted) "Service Unavailable" else if (err == error.RequestTimeout) "Gateway Timeout" else "Internal Server Error";
                 self.sendErrorSync(fd, status, message) catch |send_err| {
                     std.log.warn("failed to send error response: {}", .{send_err});
                 };

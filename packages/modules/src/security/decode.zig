@@ -202,8 +202,8 @@ fn parseMultipartObject(handle: *sdk.ModuleHandle, body: []const u8, boundary: [
     var delim_buf: [72]u8 = undefined;
     delim_buf[0] = '-';
     delim_buf[1] = '-';
-    @memcpy(delim_buf[2..2 + boundary.len], boundary);
-    const delim = delim_buf[0..2 + boundary.len];
+    @memcpy(delim_buf[2 .. 2 + boundary.len], boundary);
+    const delim = delim_buf[0 .. 2 + boundary.len];
 
     var it = std.mem.splitSequence(u8, body, delim);
     // Skip the preamble (everything before the first delimiter)

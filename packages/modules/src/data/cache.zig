@@ -195,7 +195,7 @@ pub const CacheStore = struct {
             self.allocator.free(existing.cache_value);
             existing.cache_value = new_value;
             existing.byte_size = existing.key.len + existing.ns.len + existing.cache_value.len;
-            existing.expires_at = if (ttl) |t| now_s + t else null;
+            existing.expires_at = expiresAt(now_s, ttl);
             self.total_bytes += existing.byte_size;
             self.promoteToHead(existing);
             // Overwriting with a larger value can push total_bytes past the
@@ -227,7 +227,7 @@ pub const CacheStore = struct {
             .key = key_owned,
             .ns = ns_owned,
             .cache_value = val_owned,
-            .expires_at = if (ttl) |t| now_s + t else null,
+            .expires_at = expiresAt(now_s, ttl),
             .byte_size = key_owned.len + ns_owned.len + val_owned.len,
             .prev = null,
             .next = null,
@@ -308,6 +308,15 @@ fn nowSeconds(handle: *sdk.ModuleHandle) !i64 {
     return @divTrunc(ms, 1000);
 }
 
+fn expiresAt(now_s: i64, ttl: ?i64) ?i64 {
+    const t = ttl orelse return null;
+    return now_s +| t;
+}
+
+fn addCacheDelta(current: i64, delta: i64) ?i64 {
+    return std.math.add(i64, current, delta) catch null;
+}
+
 /// Returns the thrown exception JSValue if the namespace is denied, null
 /// if allowed. Callers propagate the exception by returning it directly.
 fn denyIfNamespaceBlocked(handle: *sdk.ModuleHandle, ns: []const u8) ?sdk.JSValue {
@@ -376,7 +385,7 @@ fn cacheIncrImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
 
     const current_str = store.get(ns, key, now_s) orelse "0";
     const current = std.fmt.parseInt(i64, current_str, 10) catch 0;
-    const new_val = current + delta;
+    const new_val = addCacheDelta(current, delta) orelse return sdk.JSValue.undefined_val;
 
     var buf: [32]u8 = undefined;
     const new_str = std.fmt.bufPrint(&buf, "{d}", .{new_val}) catch return sdk.JSValue.undefined_val;
@@ -454,6 +463,20 @@ test "CacheStore: TTL expiry" {
     try std.testing.expect(store.get("ns", "key1", 1000) == null);
 }
 
+test "CacheStore: TTL expiry arithmetic saturates" {
+    var store = CacheStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+
+    try store.set("ns", "future", "value", 1, std.math.maxInt(i64));
+    const ns_cache = store.namespaces.get("ns") orelse return error.TestFailed;
+    const future = ns_cache.entries.get("future") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(?i64, std.math.maxInt(i64)), future.expires_at);
+
+    try store.set("ns", "past", "value", -1, std.math.minInt(i64));
+    const past = ns_cache.entries.get("past") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(?i64, std.math.minInt(i64)), past.expires_at);
+}
+
 test "CacheStore: LRU eviction" {
     var store = CacheStore.init(std.testing.allocator);
     defer store.deinitSelf();
@@ -517,4 +540,10 @@ test "CacheStore: stats tracking" {
     try std.testing.expectEqual(@as(u64, 1), ns_cache.hits);
     try std.testing.expectEqual(@as(u64, 1), ns_cache.misses);
     try std.testing.expectEqual(@as(usize, 1), store.total_entries);
+}
+
+test "addCacheDelta rejects signed overflow" {
+    try std.testing.expectEqual(@as(?i64, 3), addCacheDelta(1, 2));
+    try std.testing.expect(addCacheDelta(std.math.maxInt(i64), 1) == null);
+    try std.testing.expect(addCacheDelta(std.math.minInt(i64), -1) == null);
 }

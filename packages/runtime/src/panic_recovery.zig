@@ -24,15 +24,12 @@ pub const c = @cImport(@cInclude("setjmp.h"));
 // that @cImport may not expose as callable symbols. Use _setjmp/_longjmp
 // (no signal mask) on Linux to avoid the macro issue.
 pub fn setjmpFn(env: *c.jmp_buf) c_int {
-    return if (comptime builtin.os.tag == .linux)
-        blk: {
-            const S = struct {
-                extern fn _setjmp(e: *c.jmp_buf) c_int;
-            };
-            break :blk S._setjmp(env);
-        }
-    else
-        c.setjmp(env);
+    return if (comptime builtin.os.tag == .linux) blk: {
+        const S = struct {
+            extern fn _setjmp(e: *c.jmp_buf) c_int;
+        };
+        break :blk S._setjmp(env);
+    } else c.setjmp(env);
 }
 
 pub fn longjmpFn(env: *c.jmp_buf, val: c_int) noreturn {

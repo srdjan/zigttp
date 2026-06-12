@@ -537,7 +537,7 @@ test "verify: inline-cache index out of bounds rejected" {
         .code = &.{
             @intFromEnum(Opcode.get_field_ic),
             0, 0, // atom index 0
-            0x58, 0x02, // cache_idx = 600, >= IC_CACHE_SIZE (512)
+            0x58,                               0x02, // cache_idx = 600, >= IC_CACHE_SIZE (512)
             @intFromEnum(Opcode.ret_undefined),
         },
         .constants = &.{},

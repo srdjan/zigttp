@@ -1682,7 +1682,6 @@ pub const TypeChecker = struct {
         return self.param_types.get(key) orelse null_type_idx;
     }
 
-
     fn isMatchExhaustive(self: *const TypeChecker, me: ir.Node.MatchExpr) bool {
         // A catch-all arm makes the match exhaustive by construction, regardless
         // of whether the discriminant type resolves.

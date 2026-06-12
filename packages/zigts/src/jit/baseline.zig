@@ -916,8 +916,8 @@ pub const BaselineCompiler = struct {
         const fn_ptr = @intFromPtr(&jitPutFieldIC);
 
         if (is_x86_64) {
-            try self.emitPopReg(.r8);  // value
-            try self.emitPopReg(.r9);  // object (raw JSValue)
+            try self.emitPopReg(.r8); // value
+            try self.emitPopReg(.r9); // object (raw JSValue)
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rsi, .r9) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rdx, atom_idx) catch return CompileError.OutOfMemory;
@@ -926,8 +926,8 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.rax);
         } else if (is_aarch64) {
-            try self.emitPopReg(.x12);  // value
-            try self.emitPopReg(.x13);  // object (raw JSValue)
+            try self.emitPopReg(.x12); // value
+            try self.emitPopReg(.x13); // object (raw JSValue)
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x1, .x13) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x2, atom_idx) catch return CompileError.OutOfMemory;

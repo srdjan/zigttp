@@ -147,7 +147,8 @@ fn urlEncodeImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     const input = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
 
     const allocator = sdk.getAllocator(handle);
-    const buf = allocator.alloc(u8, input.len * 3) catch return sdk.JSValue.undefined_val;
+    const max_encoded_len = maxUrlEncodedLen(input.len) orelse return sdk.JSValue.undefined_val;
+    const buf = allocator.alloc(u8, max_encoded_len) catch return sdk.JSValue.undefined_val;
     defer allocator.free(buf);
 
     var out: usize = 0;
@@ -165,6 +166,10 @@ fn urlEncodeImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     }
 
     return sdk.createString(handle, buf[0..out]) catch sdk.JSValue.undefined_val;
+}
+
+fn maxUrlEncodedLen(input_len: usize) ?usize {
+    return std.math.mul(usize, input_len, 3) catch null;
 }
 
 fn urlDecodeImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
@@ -228,4 +233,10 @@ test "isUnreserved" {
     try std.testing.expect(!isUnreserved(' '));
     try std.testing.expect(!isUnreserved('&'));
     try std.testing.expect(!isUnreserved('/'));
+}
+
+test "maxUrlEncodedLen rejects multiplication overflow" {
+    try std.testing.expectEqual(@as(?usize, 0), maxUrlEncodedLen(0));
+    try std.testing.expectEqual(@as(?usize, 9), maxUrlEncodedLen(3));
+    try std.testing.expect(maxUrlEncodedLen(std.math.maxInt(usize) / 3 + 1) == null);
 }

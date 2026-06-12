@@ -1355,6 +1355,41 @@ test "canonical profile warns on reused arrow helper" {
     try testing.expect(saw);
 }
 
+test "canonical profile counts reused arrow helper after typed arrow" {
+    const source =
+        \\const load = (id: string): Response => Response.text(id);
+        \\const parse = (x: number): number => x;
+        \\function handler(req: Request): Response {
+        \\  const a = parse(1);
+        \\  const b = parse(2);
+        \\  return Response.json({ a, b });
+        \\}
+    ;
+    var stripped = try @import("stripper.zig").strip(testing.allocator, source, .{});
+    defer stripped.deinit();
+
+    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, stripped.code);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var pool = type_pool_mod.TypePool.init(testing.allocator);
+    defer pool.deinit(testing.allocator);
+    var env = TypeEnv.init(testing.allocator, &pool);
+    defer env.deinit();
+    env.populateFromTypeMap(&stripped.type_map);
+    var tc = TypeChecker.init(testing.allocator, view, null, &env, null);
+    defer tc.deinit();
+    _ = try tc.check(root);
+    var checker = StrictChecker.init(testing.allocator, view, null, &env, &tc);
+    defer checker.deinit();
+    _ = try checker.check(root);
+    var saw = false;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind == .canonical_arrow_helper) saw = true;
+    }
+    try testing.expect(saw);
+}
+
 test "strict checker accepts one-off arrow helper value" {
     const source = "const parse = (x) => x; function handler(req) { const a = parse(1); return Response.json({a}); }";
     var parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);

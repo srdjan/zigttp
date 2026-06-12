@@ -984,11 +984,14 @@ test "opcode parity: compiled code performs no side effects past a faulted call"
     const atom_idx: u16 = @intCast(@intFromEnum(leak_atom));
 
     const code = [_]u8{
-        op(.push_i8),    1, // non-callable callee
-        op(.call),       0, // faults: NotCallable
+        op(.push_i8), 1, // non-callable callee
+        op(.call), 0, // faults: NotCallable
         op(.drop), // tail opcodes the interpreter never reaches
-        op(.push_i8),    99,
-        op(.put_global), @intCast(atom_idx & 0xFF), @intCast(atom_idx >> 8),
+        op(.push_i8),
+        99,
+        op(.put_global),
+        @intCast(atom_idx & 0xFF),
+        @intCast(atom_idx >> 8),
         op(.ret_undefined),
     };
 
@@ -1020,7 +1023,6 @@ test "opcode parity: compiled code performs no side effects past a faulted call"
     const leaked = ctx.getGlobal(leak_atom) orelse JSValue.undefined_val;
     try std.testing.expect(leaked.isUndefined());
 }
-
 
 // Post-fault tail CALLS in the innermost compiled frame. Store helpers refuse
 // writes while a fault is pending (Context.jitPutGlobal, jitPutFieldIC), but a
@@ -1090,8 +1092,11 @@ test "opcode parity: compiled code does not invoke callees past a fault" {
     const code = [_]u8{
         op(.push_undefined), op(.push_undefined), op(.add), // faults: TypeError
         op(.drop), // tail opcodes the interpreter never reaches
-        op(.push_const),     0,                   0,
-        op(.call),           0,
+        op(.push_const),
+        0,
+        0,
+        op(.call),
+        0,
         op(.drop),
         op(.ret_undefined),
     };
