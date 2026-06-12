@@ -818,19 +818,37 @@ const Stripper = struct {
         const params = std.mem.trim(u8, text[1 .. text.len - 1], " \t\r\n");
         if (params.len == 0) return true; // `() => T`
 
-        var depth: usize = 0;
+        // Track each bracket kind separately. A bare `>` (e.g. the arrow in a
+        // method member `() => T` inside an object type) must only cancel a
+        // `<`, never a `(`/`[`/`{`. A single shared counter would let that `>`
+        // "close" the object brace and wrongly expose an inner `:` at depth 0,
+        // misreading the whole `(...)` as a function-type parameter list.
+        var paren_depth: usize = 0;
+        var bracket_depth: usize = 0;
+        var brace_depth: usize = 0;
+        var angle_depth: usize = 0;
         var i: usize = 0;
         while (i < params.len) : (i += 1) {
+            const at_top = paren_depth == 0 and bracket_depth == 0 and brace_depth == 0 and angle_depth == 0;
             switch (params[i]) {
-                '(', '[', '{', '<' => depth += 1,
-                ')', ']', '}' => {
-                    if (depth > 0) depth -= 1;
+                '(' => paren_depth += 1,
+                '[' => bracket_depth += 1,
+                '{' => brace_depth += 1,
+                '<' => angle_depth += 1,
+                ')' => {
+                    if (paren_depth > 0) paren_depth -= 1;
+                },
+                ']' => {
+                    if (bracket_depth > 0) bracket_depth -= 1;
+                },
+                '}' => {
+                    if (brace_depth > 0) brace_depth -= 1;
                 },
                 '>' => {
-                    if (depth > 0) depth -= 1;
+                    if (angle_depth > 0) angle_depth -= 1;
                 },
-                ':', ',' => if (depth == 0) return true,
-                '.' => if (depth == 0 and i + 2 < params.len and std.mem.eql(u8, params[i..][0..3], "...")) return true,
+                ':', ',' => if (at_top) return true,
+                '.' => if (at_top and i + 2 < params.len and std.mem.eql(u8, params[i..][0..3], "...")) return true,
                 else => {},
             }
         }
@@ -2592,6 +2610,23 @@ test "arrow return type keeps parenthesized object annotation out of output" {
     const result = try strip(std.testing.allocator, source, .{});
     defer @constCast(&result).deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.code, "({ ok: boolean })") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "=> ({ ok: true })") != null);
+}
+
+test "arrow return type parenthesized object with method member strips cleanly" {
+    // The inner `=> string` arrow inside the parenthesized object return type
+    // produces a `>` with no matching `<`. A single shared bracket-depth
+    // counter wrongly treats that `>` as closing the object brace, exposing the
+    // `ok:` separator at depth 0 and misreading the whole `(...)` as a
+    // function-type parameter list. The real arrow is then consumed and the raw
+    // TS annotation leaks into the output.
+    const source = "const f = (): ({ json: () => string; ok: boolean }) => ({ ok: true });";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqual(source.len, result.code.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": (") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "json") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "boolean") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "=> ({ ok: true })") != null);
 }
 
