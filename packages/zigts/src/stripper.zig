@@ -651,8 +651,38 @@ const Stripper = struct {
 
             if (self.looksLikeTypeStart()) {
                 const ret_type_start = self.pos;
-                // Skip to => or {
-                try self.skipTypeExpressionUntilDelimiter(&[_]u8{'{'}, true);
+                // A return type can be a function type like (x: T) => R, whose inner =>
+                // is NOT the arrow function separator. Probe past each => we stop at: if
+                // there is another => beyond it (before {), the one we stopped at is part
+                // of a function-type annotation; keep scanning. Stop when the probe finds
+                // { instead of =>, meaning we have located the actual arrow separator.
+                while (true) {
+                    try self.skipTypeExpressionUntilDelimiter(&[_]u8{'{'}, true);
+                    if (!(self.pos + 1 < self.source.len and
+                        self.source[self.pos] == '=' and self.source[self.pos + 1] == '>'))
+                    {
+                        break; // hit { or EOF - no arrow found at depth 0
+                    }
+                    const probe_pos = self.pos;
+                    const probe_line = self.line;
+                    const probe_col = self.col;
+                    self.pos += 2;
+                    self.col += 2;
+                    self.skipWhitespaceTracked();
+                    try self.skipTypeExpressionUntilDelimiter(&[_]u8{'{'}, true);
+                    if (self.pos + 1 < self.source.len and
+                        self.source[self.pos] == '=' and self.source[self.pos + 1] == '>')
+                    {
+                        // Probe => was inside a function type; continue from current pos.
+                        continue;
+                    } else {
+                        // Probe => was the actual arrow function separator; restore.
+                        self.pos = probe_pos;
+                        self.line = probe_line;
+                        self.col = probe_col;
+                        break;
+                    }
+                }
                 const ret_type_end = self.pos;
                 // Check for =>
                 self.skipWhitespaceTracked();

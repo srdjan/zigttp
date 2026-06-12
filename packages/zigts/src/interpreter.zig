@@ -1486,7 +1486,12 @@ pub const Interpreter = struct {
 
                     if (source.getProperty(pool, .length)) |len_val| {
                         if (len_val.isInt()) {
-                            const src_len: usize = @intCast(len_val.getInt());
+                            const src_len_int = len_val.getInt();
+                            if (src_len_int < 0) {
+                                try self.ctx.push(idx_val);
+                                continue :sw @enumFromInt(self.pc[0]);
+                            }
+                            const src_len: usize = @intCast(src_len_int);
                             for (0..src_len) |i| {
                                 const elem = source.getIndex(@intCast(i)) orelse value.JSValue.undefined_val;
                                 if (self.ctx.enforce_arena_escape and self.ctx.hybrid != null and !target.flags.is_arena and self.ctx.isEphemeralValue(elem)) {
@@ -1672,7 +1677,8 @@ pub const Interpreter = struct {
                                 @branchHint(.likely);
                                 const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
                                 const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
-                                try self.ctx.push(value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
+                                const elem_i64: i64 = @as(i64, start) + @as(i64, @intCast(idx_u)) * @as(i64, step);
+                                try self.ctx.push(value.JSValue.fromInt(@intCast(elem_i64)));
                                 self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
                                 continue :sw @enumFromInt(self.pc[0]);
                             }
@@ -1716,7 +1722,8 @@ pub const Interpreter = struct {
                                 @branchHint(.likely);
                                 const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
                                 const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
-                                self.ctx.setLocal(local_idx, value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
+                                const elem_i64: i64 = @as(i64, start) + @as(i64, @intCast(idx_u)) * @as(i64, step);
+                                self.ctx.setLocal(local_idx, value.JSValue.fromInt(@intCast(elem_i64)));
                                 self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
                                 continue :sw @enumFromInt(self.pc[0]);
                             }
@@ -1852,7 +1859,7 @@ pub const Interpreter = struct {
                     const div: i64 = divisor_val.getInt();
                     if (div != 0) {
                         const sum = ai + bi;
-                        const result: i32 = @intCast(@mod(sum, div));
+                        const result: i32 = @intCast(@rem(sum, div));
                         self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
                         self.ctx.sp = sp - 1;
                         continue :sw @enumFromInt(self.pc[0]);
@@ -1879,7 +1886,7 @@ pub const Interpreter = struct {
                     const div: i64 = divisor_val.getInt();
                     if (div != 0) {
                         const diff = ai - bi;
-                        const result: i32 = @intCast(@mod(diff, div));
+                        const result: i32 = @intCast(@rem(diff, div));
                         self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
                         self.ctx.sp = sp - 1;
                         continue :sw @enumFromInt(self.pc[0]);
@@ -1905,7 +1912,7 @@ pub const Interpreter = struct {
                     const div: i64 = divisor_val.getInt();
                     if (div != 0) {
                         const product = ai * bi;
-                        const result: i32 = @intCast(@mod(product, div));
+                        const result: i32 = @intCast(@rem(product, div));
                         self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
                         self.ctx.sp = sp - 1;
                         continue :sw @enumFromInt(self.pc[0]);

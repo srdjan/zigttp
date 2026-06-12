@@ -2140,20 +2140,23 @@ pub const JSObject = extern struct {
         return obj;
     }
 
+    fn computeRangeLength(start: i32, end: i32, step: i32) u32 {
+        if (step == 0) return 0;
+        if (step > 0) {
+            if (end <= start) return 0;
+            const len_i64 = @divTrunc(@as(i64, end) - @as(i64, start) + @as(i64, step) - 1, @as(i64, step));
+            return @intCast(len_i64);
+        } else {
+            if (start <= end) return 0;
+            const len_i64 = @divTrunc(@as(i64, start) - @as(i64, end) - @as(i64, step) - 1, -@as(i64, step));
+            return @intCast(len_i64);
+        }
+    }
+
     /// Create a lazy range iterator object
     /// Unlike createArray, this doesn't pre-allocate elements - values are computed on access
     pub fn createRangeIterator(allocator: std.mem.Allocator, class_idx: HiddenClassIndex, start: i32, end: i32, step: i32) !*JSObject {
-        // Compute length once at creation (avoid division in hot loop)
-        const length: u32 = blk: {
-            if (step == 0) break :blk 0;
-            if (step > 0) {
-                if (end <= start) break :blk 0;
-                break :blk @intCast(@divTrunc(end - start + step - 1, step));
-            } else {
-                if (start <= end) break :blk 0;
-                break :blk @intCast(@divTrunc(start - end - step - 1, -step));
-            }
-        };
+        const length = computeRangeLength(start, end, step);
 
         const obj = try allocator.create(JSObject);
         obj.* = .{
@@ -2177,16 +2180,7 @@ pub const JSObject = extern struct {
 
     /// Create a lazy range iterator object using arena allocation (ephemeral)
     pub fn createRangeIteratorWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex, start: i32, end: i32, step: i32) ?*JSObject {
-        const length: u32 = blk: {
-            if (step == 0) break :blk 0;
-            if (step > 0) {
-                if (end <= start) break :blk 0;
-                break :blk @intCast(@divTrunc(end - start + step - 1, step));
-            } else {
-                if (start <= end) break :blk 0;
-                break :blk @intCast(@divTrunc(start - end - step - 1, -step));
-            }
-        };
+        const length = computeRangeLength(start, end, step);
 
         const obj = arena.create(JSObject) orelse return null;
         obj.* = .{

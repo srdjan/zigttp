@@ -1532,6 +1532,8 @@ pub const Server = struct {
         bytecode: []const u8,
         contract: *const engine.HandlerContract,
     ) !void {
+        self.contract_lock.lock();
+        defer self.contract_lock.unlock();
         self.clearAttestation();
 
         const jws = try attest_build_receipt.buildDevJws(self.allocator, contract_json, bytecode, contract);

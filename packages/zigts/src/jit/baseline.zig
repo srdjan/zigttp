@@ -907,47 +907,17 @@ pub const BaselineCompiler = struct {
         }
     }
 
-    /// Emit monomorphic put field when type feedback shows consistent hidden class.
-    /// Hardcodes the hidden class check and slot offset, skipping PIC lookup entirely.
+    /// Emit put-field via jitPutFieldIC (which fires the GC write barrier).
+    /// The former monomorphic fast path (direct slot store) was removed because it
+    /// bypassed the write barrier and caused UAF under minor GC.
     fn emitMonomorphicPutField(self: *BaselineCompiler, hc_idx: object.HiddenClassIndex, slot: u16, atom_idx: u16, cache_idx: u16) CompileError!void {
+        _ = hc_idx;
+        _ = slot;
         const fn_ptr = @intFromPtr(&jitPutFieldIC);
 
         if (is_x86_64) {
-            const slow = self.newLocalLabel();
-            const done = self.newLocalLabel();
-
-            // Pop value into r8, object into r9
-            try self.emitPopReg(.r8);
-            try self.emitPopReg(.r9);
-
-            // Pointer prefix check: (raw >> 48) == 0xFFFC
-            self.emitter.movRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
-            self.emitter.shrRegImm(.r10, 48) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 0xFFFC) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, slow);
-
-            // Extract object pointer (clear prefix, low 3 bits naturally 0)
-            try self.emitExtractPtr(.r10, .r9);
-
-            // Check MemTag.object in header
-            self.emitter.movRegMem32(.r11, .r10, 0) catch return CompileError.OutOfMemory;
-            self.emitter.shrRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r11, 0xF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, slow);
-
-            // Check hidden class matches expected
-            self.emitter.movRegMem32(.r11, .r10, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r11, @bitCast(@intFromEnum(hc_idx))) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, slow);
-
-            // Fast path: store directly to inline slot
-            const slot_offset: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, slot) * 8;
-            self.emitter.movMemReg(.r10, slot_offset, .r8) catch return CompileError.OutOfMemory;
-            try self.emitJmpToLabel(done);
-
-            // Slow path: call helper
-            try self.markLabel(slow);
+            try self.emitPopReg(.r8);  // value
+            try self.emitPopReg(.r9);  // object (raw JSValue)
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rsi, .r9) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rdx, atom_idx) catch return CompileError.OutOfMemory;
@@ -955,41 +925,9 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegImm32(.r8, cache_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.rax);
-
-            try self.markLabel(done);
         } else if (is_aarch64) {
-            const slow = self.newLocalLabel();
-            const done = self.newLocalLabel();
-
-            // Pop value into x12, object into x13
-            try self.emitPopReg(.x12);
-            try self.emitPopReg(.x13);
-
-            // Pointer prefix check: (raw >> 48) == 0xFFFC
-            self.emitter.lsrRegImm(.x9, .x13, 48) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x14, 0xFFFC) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegReg(.x9, .x14) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
-
-            // Extract object pointer (clear prefix, low 3 bits naturally 0)
-            try self.emitExtractPtr(.x9, .x13);
-
-            // Skip MemTag check - pointer prefix already confirms object pointer
-            // Hidden class check will catch any type mismatches
-
-            // Check hidden class matches expected
-            self.emitter.ldrImmW(.x10, .x9, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x11, @intFromEnum(hc_idx)) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegReg(.x10, .x11) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
-
-            // Fast path: store directly to inline slot
-            const slot_offset: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, slot) * 8;
-            self.emitter.strImm(.x12, .x9, slot_offset) catch return CompileError.OutOfMemory;
-            try self.emitJmpToLabel(done);
-
-            // Slow path: call helper
-            try self.markLabel(slow);
+            try self.emitPopReg(.x12);  // value
+            try self.emitPopReg(.x13);  // object (raw JSValue)
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x1, .x13) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x2, atom_idx) catch return CompileError.OutOfMemory;
@@ -997,8 +935,6 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegImm64(.x4, cache_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.x9);
-
-            try self.markLabel(done);
         }
     }
 

@@ -198,6 +198,7 @@ fn parseMultipartObject(handle: *sdk.ModuleHandle, body: []const u8, boundary: [
     const obj = try sdk.createObject(handle);
 
     // Build the delimiter: "--<boundary>" (RFC 2046: boundary <= 70 chars)
+    if (boundary.len > 70) return error.BoundaryTooLong;
     var delim_buf: [72]u8 = undefined;
     delim_buf[0] = '-';
     delim_buf[1] = '-';

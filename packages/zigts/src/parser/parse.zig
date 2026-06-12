@@ -2431,9 +2431,8 @@ pub const Parser = struct {
             // x => ...
             const state = self.tokenizer.saveState();
             const tok1 = self.tokenizer.next();
-            const tok2 = self.tokenizer.next();
             self.tokenizer.restoreState(state);
-            return tok1.type == .identifier and tok2.type == .arrow;
+            return tok1.type == .arrow;
         }
 
         if (self.check(.lparen)) {

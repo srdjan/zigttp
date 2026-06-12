@@ -905,26 +905,11 @@ pub const HandlerPool = struct {
 
         // Fallback: runtime compilation (for development without -Dhandler)
         const key = bytecode_cache.BytecodeCache.cacheKey(self.handler_code);
-        const cache_ok = !self.cache_disabled.load(.monotonic);
 
-        // Fast path: check cache without lock (read-only, safe for concurrent access)
-        if (cache_ok) {
-            if (self.cache.getRaw(key)) |cached_data| {
-                rt.loadFromCachedBytecode(cached_data) catch |err| {
-                    std.log.warn(
-                        "bytecode cache deserialize failed for {s}: {}; recompiling from source",
-                        .{ self.handler_filename, err },
-                    );
-                    self.cache_disabled.store(true, .monotonic);
-                    self.cache.clear();
-                    return self.loadHandlerCached(rt);
-                };
-                return;
-            }
-        }
-
-        // Slow path: acquire lock for parsing (double-checked locking pattern)
-        // This prevents "thundering herd" where multiple threads all parse on cold start
+        // Acquire lock for parsing (double-checked locking pattern).
+        // The old lockless fast path was unsafe: getRaw() releases its internal
+        // lock before returning the slice, so a concurrent cache.clear() could
+        // free the backing memory while we were reading from it (UAF).
         self.cache_mutex.lock();
         defer self.cache_mutex.unlock();
 

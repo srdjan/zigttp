@@ -378,7 +378,13 @@ pub const TypeChecker = struct {
 
             .function_expr, .arrow_function => {
                 const func = self.ir_view.getFunction(node) orelse return;
+                const loc = self.ir_view.getLoc(node);
+                const sig = if (loc) |l| self.env.getFnSigByLoc(l.line) else null;
                 const saved_return = self.current_return_type;
+                if (sig) |s| {
+                    self.current_return_type = self.env.stripProofMarkers(s.return_type);
+                    self.registerParamTypes(func, s);
+                }
                 self.walkStmt(func.body);
                 self.current_return_type = saved_return;
             },
