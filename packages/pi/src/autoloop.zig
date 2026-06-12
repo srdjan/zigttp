@@ -155,6 +155,16 @@ pub fn drive(
             if (patches_without_progress >= options.budget.max_patches_without_progress) {
                 return finalize(allocator, transcript, options, .stalled, iter + 1);
             }
+            // Emit intermediate progress notes so the user is not left silent
+            // while the loop burns iterations. Note 1 is informational; note 2
+            // is a warning that one more stall ends the run.
+            writeStallProgress(
+                patches_without_progress,
+                options.budget.max_patches_without_progress,
+                options.goals,
+                transcript,
+                options.file,
+            );
         } else if (current_met > last_goals_met_count) {
             patches_without_progress = 0;
         }
@@ -187,6 +197,43 @@ fn countMetGoals(
         if (session_state.propertyByName(props, goal)) count += 1;
     }
     return count;
+}
+
+/// Write a stall-progress notice to stderr. Called after each increment of
+/// `patches_without_progress` so the user sees intermediate state instead of
+/// silence followed by a sudden `.stalled` verdict. The first notice is
+/// informational; the second is a warning that the next stall ends the loop.
+/// Notes are best-effort (stderr write failures are silently dropped).
+fn writeStallProgress(
+    count: u32,
+    max: u32,
+    goals: []const []const u8,
+    transcript: *const transcript_mod.Transcript,
+    file: []const u8,
+) void {
+    if (count == 0 or count >= max) return; // max case is handled by finalize
+    const prefix = if (count == 1)
+        "autoloop: patch applied but no property goals changed. Attempt "
+    else
+        "autoloop: two patches without progress. If this continues, the loop will stop. Attempt ";
+    _ = std.c.write(std.c.STDERR_FILENO, prefix.ptr, prefix.len);
+
+    var nums_buf: [64]u8 = undefined;
+    const nums = std.fmt.bufPrint(&nums_buf, "{d}/{d}. Goals still unmet:", .{ count, max }) catch return;
+    _ = std.c.write(std.c.STDERR_FILENO, nums.ptr, nums.len);
+
+    const props = session_state.currentProperties(transcript, file);
+    var any_unmet = false;
+    for (goals) |goal| {
+        const met = if (props) |p| session_state.propertyByName(p, goal) else false;
+        if (!met) {
+            _ = std.c.write(std.c.STDERR_FILENO, " ", 1);
+            _ = std.c.write(std.c.STDERR_FILENO, goal.ptr, goal.len);
+            any_unmet = true;
+        }
+    }
+    if (!any_unmet) _ = std.c.write(std.c.STDERR_FILENO, " (none)", 7);
+    _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
 }
 
 fn finalize(

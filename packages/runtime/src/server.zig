@@ -495,6 +495,24 @@ const ConnectionPool = struct {
             };
         }
 
+        // Health and readiness probes - before WebSocket, static, and JS handler
+        if (std.mem.eql(u8, request.path, "/_health")) {
+            self.sendErrorSync(fd, 200, "OK") catch {};
+            return outcome_if_alive;
+        }
+        if (std.mem.eql(u8, request.path, "/_readiness")) {
+            const pool_full = if (self.server.pool) |*pool|
+                pool.getInUse() >= pool.max_size
+            else
+                false;
+            if (pool_full) {
+                self.sendErrorSync(fd, 503, "Service Unavailable") catch {};
+                return .close;
+            }
+            self.sendErrorSync(fd, 200, "OK") catch {};
+            return outcome_if_alive;
+        }
+
         // WebSocket upgrade: if the handler contract advertises an
         // onMessage export and the request carries an RFC 6455 upgrade,
         // hand the fd off to the ws frame-loop thread. `.transferred`
@@ -581,11 +599,12 @@ const ConnectionPool = struct {
                 .headers = request.headers,
                 .body = request.body,
             }) catch |err| {
-                const status: u16 = if (err == error.PoolExhausted) 503 else 500;
-                const message = if (err == error.PoolExhausted)
-                    "Service Unavailable"
-                else
-                    "Internal Server Error";
+                const status: u16 = if (err == error.PoolExhausted) 503
+                    else if (err == error.RequestTimeout) 504
+                    else 500;
+                const message = if (err == error.PoolExhausted) "Service Unavailable"
+                    else if (err == error.RequestTimeout) "Gateway Timeout"
+                    else "Internal Server Error";
                 self.sendErrorSync(fd, status, message) catch |send_err| {
                     std.log.warn("failed to send error response: {}", .{send_err});
                 };
@@ -1206,6 +1225,32 @@ fn ignoreSigpipe() void {
     std.posix.sigaction(std.posix.SIG.PIPE, &act, null);
 }
 
+/// Process-wide shutdown flag. Set by the SIGTERM/SIGINT handler; polled by
+/// the accept loop. A bare bool is unsafe from a signal handler, but posix
+/// requires signal handlers to use `volatile` or `sig_atomic_t`; here we
+/// match the repo's existing pattern (see ignoreSigpipe) and treat a single
+/// non-torn store/load of a bool as the accepted minimum on all targets.
+var g_shutdown_requested: bool = false;
+
+fn sigShutdownHandler(_: std.c.SIG) callconv(.c) void {
+    g_shutdown_requested = true;
+}
+
+fn installShutdownSignals() void {
+    if (comptime builtin.os.tag == .windows) return;
+    // SA_RESETHAND: the first signal sets the shutdown flag (graceful intent);
+    // the handler is then reset to default disposition so a second SIGINT/SIGTERM
+    // terminates the process. Without this, a blocked accept() never observes
+    // the flag on an idle server and Ctrl+C appears dead.
+    var act = std.posix.Sigaction{
+        .handler = .{ .handler = sigShutdownHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.RESETHAND,
+    };
+    std.posix.sigaction(std.posix.SIG.TERM, &act, null);
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+}
+
 pub const Server = struct {
     config: ServerConfig,
     allocator: std.mem.Allocator,
@@ -1646,10 +1691,14 @@ pub const Server = struct {
         }
 
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
+        // Wire the server-level request timeout into the runtime config so the
+        // interpreter's cooperative deadline check is enforced per handler call.
+        var pool_rt_config = self.config.runtime_config;
+        pool_rt_config.request_timeout_ms = self.config.timeout_ms;
         var pool_timer = engine.Timer.start() catch null;
         self.pool = try engine.initHandlerPool(
             self.allocator,
-            self.config.runtime_config,
+            pool_rt_config,
             self.handler_code,
             self.handler_filename,
             self.config.pool_size,
@@ -1802,6 +1851,7 @@ pub const Server = struct {
         self.conn_pool = try ConnectionPool.init(self.allocator, self, worker_count);
         std.log.info("   Connection pool: {d} workers", .{worker_count});
 
+        installShutdownSignals();
         self.running = true;
 
         std.log.info("Server listening on http://{s}:{d}", .{ self.config.host, self.config.port });
@@ -1834,7 +1884,7 @@ pub const Server = struct {
         const io = self.io_backend.io();
         var listener = self.listener orelse return error.NotStarted;
 
-        while (self.running) {
+        while (self.running and !g_shutdown_requested) {
             const stream = listener.accept(io) catch |err| switch (err) {
                 // Per-connection hiccup: drop it and keep serving.
                 error.ConnectionAborted => continue,
@@ -1862,6 +1912,33 @@ pub const Server = struct {
                 // start() initializes conn_pool before setting running=true.
                 std.Io.Threaded.closeFd(fd);
                 return error.NotStarted;
+            }
+        }
+    }
+
+    /// Graceful shutdown: stop accepting new connections, then drain in-flight
+    /// JS executions. Returns once all in-flight requests complete or the grace
+    /// period expires. Safe to call from any thread (sets `running = false` and
+    /// closes the listener so the accept loop exits on its next iteration).
+    pub fn shutdown(self: *Self, grace_ms: u32) void {
+        self.running = false;
+        // Close listener so a blocked accept() wakes immediately.
+        if (self.evented_ready) {
+            const io = self.io_backend.io();
+            if (self.listener) |*l| {
+                l.deinit(io);
+                self.listener = null;
+            }
+        }
+        // Drain: wait up to grace_ms for active JS executions to finish.
+        // std.time.sleep/milliTimestamp do not exist in Zig 0.16; poll with
+        // std.c.nanosleep (same pattern as fetchWithRetry in modules/net/fetch.zig).
+        if (self.pool) |*p| {
+            var waited_ms: u32 = 0;
+            while (p.getInUse() > 0 and waited_ms < grace_ms) {
+                const ts = std.c.timespec{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&ts, null);
+                waited_ms += 5;
             }
         }
     }

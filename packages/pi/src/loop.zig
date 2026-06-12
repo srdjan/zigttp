@@ -63,6 +63,10 @@ pub const ApprovalPreview = struct {
     before: ?[]const u8 = null,
     after: []const u8 = "",
     properties: ?ui_payload_mod.PropertiesSnapshot = null,
+    /// Canonical-normalization rewrites applied during salvage. Non-empty when
+    /// the veto auto-fixed canonical violations before approval. Borrows from
+    /// the veto report; does not outlive the run_veto arm's arena.
+    rewrite_trace: []const []u8 = &.{},
 };
 
 pub const ApprovalFn = union(enum) {
@@ -173,6 +177,11 @@ pub const RunOptions = struct {
     max_tool_calls_per_turn: usize = 16,
     max_tool_batch_size: usize = 8,
     replay_mode: bool = false,
+    /// Per-turn wall-time limit in milliseconds. When elapsed at the start of
+    /// a model roundtrip, the turn is cut short the same way a roundtrip-budget
+    /// exhaustion is: the model sees a "budget exhausted" prompt and the turn
+    /// returns in .awaiting_user state. 0 disables the limit.
+    turn_timeout_ms: u64 = 60_000,
 };
 
 /// Verification attempts granted to interactive and `--print` turns. Higher
@@ -224,6 +233,11 @@ pub fn runTurnWith(
     // `.prompt_user` arm reads it to append a concrete next step to the bare
     // "budget exhausted" line so the user is not left at a dead end.
     var hit_roundtrip_budget = false;
+    // Set when the per-turn wall-time budget is exhausted. The `.prompt_user`
+    // arm reads it to show a timeout-specific message instead of the generic
+    // round-trip exhaustion text.
+    var hit_timeout_budget = false;
+    const turn_start_ms: i64 = nowMonotonicMs();
     // Accumulated diagnostics across failed verification attempts. The retry
     // prompt feeds the whole history (not just the latest envelope) so the model
     // does not re-introduce a violation it already fixed on an earlier attempt.
@@ -233,6 +247,12 @@ pub fn runTurnWith(
     // filesystem for zigttp.json; once per turn is enough). Arena-owned.
     var sql_schema_resolved = false;
     var sql_schema_path: ?[]u8 = null;
+    // How many times a SQL veto has failed in this turn. When it reaches 2, an
+    // extra escalation hint is injected before the next model retry so the model
+    // gets diagnostic guidance without burning another attempt blind.
+    var sql_veto_fail_count: u32 = 0;
+    // Set when a SQL escalation hint should be prepended to the next retry prompt.
+    var inject_sql_escalation = false;
 
     while (true) {
         const action = machine.transition(next_event);
@@ -240,6 +260,13 @@ pub fn runTurnWith(
             .request_model => {
                 if (model_roundtrips >= options.max_model_roundtrips_per_turn) {
                     hit_roundtrip_budget = true;
+                    next_event = .budget_exhausted;
+                    continue;
+                }
+                if (options.turn_timeout_ms > 0 and
+                    nowMonotonicMs() - turn_start_ms >= @as(i64, @intCast(options.turn_timeout_ms)))
+                {
+                    hit_timeout_budget = true;
                     next_event = .budget_exhausted;
                     continue;
                 }
@@ -254,19 +281,34 @@ pub fn runTurnWith(
                     next_event = .budget_exhausted;
                     continue;
                 }
+                if (options.turn_timeout_ms > 0 and
+                    nowMonotonicMs() - turn_start_ms >= @as(i64, @intCast(options.turn_timeout_ms)))
+                {
+                    hit_timeout_budget = true;
+                    next_event = .budget_exhausted;
+                    continue;
+                }
                 model_roundtrips += 1;
                 diag_history = try std.fmt.allocPrint(
                     ta,
                     "{s}--- attempt {d} diagnostic ---\n{s}\n\n",
                     .{ diag_history, payload.attempt, payload.diagnostic },
                 );
+                const sql_hint: []const u8 = if (inject_sql_escalation) blk: {
+                    inject_sql_escalation = false;
+                    break :blk "\n\nYou have failed the SQL check twice. Common causes: " ++
+                        "(a) the query references a table or column not in the schema, " ++
+                        "(b) you used a non-supported SQL statement (only SELECT/INSERT/UPDATE/DELETE with named parameters). " ++
+                        "Use the zigts_expert_describe_rule tool to look up ZTS3xx SQL rules, " ++
+                        "or ask the user to verify the schema path in zigttp.json.";
+                } else "";
                 const prompt = try std.fmt.allocPrint(
                     ta,
                     "Your previous edit failed compiler verification (attempt {d}/{d}). " ++
                         "Below are the diagnostics from every failed attempt so far. Fix all " ++
                         "flagged violations and do NOT re-introduce one you already fixed in an " ++
-                        "earlier attempt. Emit a new, complete edit.\n\n{s}",
-                    .{ payload.attempt, payload.max_attempts, diag_history },
+                        "earlier attempt. Emit a new, complete edit.\n\n{s}{s}",
+                    .{ payload.attempt, payload.max_attempts, diag_history, sql_hint },
                 );
                 const result = try callModel(allocator, ta, client, transcript, prompt);
                 turn_usage.add(result.usage);
@@ -308,12 +350,29 @@ pub fn runTurnWith(
                     // The bytes that will actually be written (post-normalization).
                     // Bound here so the approval preview shows exactly what lands.
                     const applied_content = veto_result.report.normalized_content orelse prepared.edit.content;
+                    // Log canonical normalization to stderr in auto-approve mode
+                    // so the user knows what changed even when there is no prompt.
+                    if (options.approval_fn == null and veto_result.report.rewrite_trace.len > 0) {
+                        var buf: [512]u8 = undefined;
+                        var fw = std.Io.Writer.fixed(&buf);
+                        fw.writeAll("note: canonical normalization applied ") catch {};
+                        fw.print("{d}", .{veto_result.report.rewrite_trace.len}) catch {};
+                        fw.writeAll(" rewrite(s): ") catch {};
+                        for (veto_result.report.rewrite_trace, 0..) |name, ri| {
+                            if (ri > 0) fw.writeAll(", ") catch {};
+                            fw.writeAll(name) catch {};
+                        }
+                        fw.writeByte('\n') catch {};
+                        const out = fw.buffered();
+                        _ = std.c.write(std.c.STDERR_FILENO, out.ptr, out.len);
+                    }
                     if (options.approval_fn) |approve| {
                         const preview: ApprovalPreview = .{
                             .file = prepared.edit.file,
                             .before = prepared.edit.before,
                             .after = applied_content,
                             .properties = veto_result.report.after_properties,
+                            .rewrite_trace = veto_result.report.rewrite_trace,
                         };
                         if (!try approve.call(preview)) {
                             try transcript.append(allocator, .{ .tool_result = .{
@@ -346,6 +405,10 @@ pub fn runTurnWith(
                         post_apply,
                     );
                 }
+                if (!veto_result.outcome.ok and veto_result.sql_failure) {
+                    sql_veto_fail_count += 1;
+                    if (sql_veto_fail_count >= 2) inject_sql_escalation = true;
+                }
                 next_event = .{ .edit_verified = veto_result.outcome };
             },
             .invoke_tool_batch => |calls| {
@@ -358,7 +421,7 @@ pub fn runTurnWith(
                 if (mixed_apply_edit or over_budget) {
                     for (calls) |call| {
                         const message = if (mixed_apply_edit)
-                            "apply_edit must be the only tool call in a single assistant response"
+                            "apply_edit was grouped with other tool calls. It must be issued alone in a single response so the compiler veto can run cleanly. Re-issue just the apply_edit call without any other tools."
                         else
                             "tool-call budget exceeded for this turn";
                         try transcript.append(allocator, .{ .tool_result = .{
@@ -392,7 +455,13 @@ pub fn runTurnWith(
                 return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage };
             },
             .prompt_user => |question| {
-                const text = if (hit_roundtrip_budget)
+                const text = if (hit_timeout_budget)
+                    try std.fmt.allocPrint(
+                        ta,
+                        "{s}\nTurn time limit reached ({d}s). Run /compact or narrow the task and retry.",
+                        .{ question, options.turn_timeout_ms / 1000 },
+                    )
+                else if (hit_roundtrip_budget)
                     try std.fmt.allocPrint(ta, "{s}\n{s}", .{ question, budget_exhausted_next_step })
                 else
                     question;
@@ -403,6 +472,12 @@ pub fn runTurnWith(
             .none => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage },
         }
     }
+}
+
+/// Monotonic time in milliseconds. Delegates to zigts.compat.monotonicNowNs
+/// which reads CLOCK_MONOTONIC directly and is safe for interval checks.
+fn nowMonotonicMs() i64 {
+    return @intCast((zigts.compat.monotonicNowNs() catch 0) / 1_000_000);
 }
 
 fn invokeToolRecovering(

@@ -238,22 +238,23 @@ fn requireActiveCapability(capability: ModuleCapability) ActiveCapabilityError!v
     return error.MissingModuleCapability;
 }
 
-fn panicCapabilityError(err: ActiveCapabilityError, capability: ModuleCapability) noreturn {
+fn panicCapabilityError(err: ActiveCapabilityError, capability: ModuleCapability) error{CapabilityViolation} {
     const spec = currentActiveModuleSpecifier();
     switch (err) {
-        error.MissingModuleCapability => std.debug.panic(
+        error.MissingModuleCapability => std.log.err(
             "module '{s}' used undeclared capability '{s}'",
             .{ spec, @tagName(capability) },
         ),
-        error.ClockUnavailable => std.debug.panic(
+        error.ClockUnavailable => std.log.err(
             "module '{s}' failed to access clock capability",
             .{spec},
         ),
-        error.StderrWriteFailed => std.debug.panic(
+        error.StderrWriteFailed => std.log.err(
             "module '{s}' failed to write to stderr capability",
             .{spec},
         ),
     }
+    return error.CapabilityViolation;
 }
 
 pub fn nowMsForActiveModule() ActiveCapabilityError!i64 {
@@ -266,16 +267,16 @@ pub fn nowNsForActiveModule() ActiveCapabilityError!u64 {
     return compat.realtimeNowNs() catch error.ClockUnavailable;
 }
 
-pub fn clockNowMsChecked() i64 {
-    return nowMsForActiveModule() catch |err| panicCapabilityError(err, .clock);
+pub fn clockNowMsChecked() error{CapabilityViolation}!i64 {
+    return nowMsForActiveModule() catch |err| return panicCapabilityError(err, .clock);
 }
 
-pub fn clockNowNsChecked() u64 {
-    return nowNsForActiveModule() catch |err| panicCapabilityError(err, .clock);
+pub fn clockNowNsChecked() error{CapabilityViolation}!u64 {
+    return nowNsForActiveModule() catch |err| return panicCapabilityError(err, .clock);
 }
 
-pub fn clockNowSecsChecked() i64 {
-    return @divTrunc(clockNowMsChecked(), 1000);
+pub fn clockNowSecsChecked() error{CapabilityViolation}!i64 {
+    return @divTrunc(try clockNowMsChecked(), 1000);
 }
 
 pub fn fillRandomForActiveModule(buf: []u8) ActiveCapabilityError!void {
@@ -322,8 +323,8 @@ fn fillOsEntropy(buf: []u8) !void {
     }
 }
 
-pub fn fillRandomChecked(buf: []u8) void {
-    fillRandomForActiveModule(buf) catch |err| panicCapabilityError(err, .random);
+pub fn fillRandomChecked(buf: []u8) error{CapabilityViolation}!void {
+    fillRandomForActiveModule(buf) catch |err| return panicCapabilityError(err, .random);
 }
 
 pub fn writeStderrForActiveModule(buf: []const u8) ActiveCapabilityError!void {
@@ -334,20 +335,20 @@ pub fn writeStderrForActiveModule(buf: []const u8) ActiveCapabilityError!void {
     if (written != @as(isize, @intCast(buf.len))) return error.StderrWriteFailed;
 }
 
-pub fn writeStderrChecked(buf: []const u8) void {
-    writeStderrForActiveModule(buf) catch |err| panicCapabilityError(err, .stderr);
+pub fn writeStderrChecked(buf: []const u8) error{CapabilityViolation}!void {
+    writeStderrForActiveModule(buf) catch |err| return panicCapabilityError(err, .stderr);
 }
 
-pub fn runtimeCallbackCapabilityChecked() void {
-    requireActiveCapability(.runtime_callback) catch |err| panicCapabilityError(err, .runtime_callback);
+pub fn runtimeCallbackCapabilityChecked() error{CapabilityViolation}!void {
+    requireActiveCapability(.runtime_callback) catch |err| return panicCapabilityError(err, .runtime_callback);
 }
 
 pub fn getRuntimeCallbackStateChecked(
     ctx: *context.Context,
     comptime T: type,
     slot: usize,
-) ?*T {
-    runtimeCallbackCapabilityChecked();
+) error{CapabilityViolation}!?*T {
+    try runtimeCallbackCapabilityChecked();
     return ctx.getModuleState(T, slot);
 }
 
@@ -356,7 +357,7 @@ pub fn readFileChecked(
     path: []const u8,
     max_size: usize,
 ) ![]u8 {
-    requireActiveCapability(.filesystem) catch |err| panicCapabilityError(err, .filesystem);
+    requireActiveCapability(.filesystem) catch |err| return panicCapabilityError(err, .filesystem);
     return file_io.readFile(allocator, path, max_size);
 }
 
@@ -366,20 +367,20 @@ pub fn readEnvForActiveModule(name_z: [:0]const u8) ActiveCapabilityError!?[]con
     return std.mem.sliceTo(result, 0);
 }
 
-pub fn readEnvChecked(name_z: [:0]const u8) ?[]const u8 {
-    return readEnvForActiveModule(name_z) catch |err| panicCapabilityError(err, .env);
+pub fn readEnvChecked(name_z: [:0]const u8) error{CapabilityViolation}!?[]const u8 {
+    return readEnvForActiveModule(name_z) catch |err| return panicCapabilityError(err, .env);
 }
 
-pub fn sqliteCapabilityChecked() void {
-    requireActiveCapability(.sqlite) catch |err| panicCapabilityError(err, .sqlite);
+pub fn sqliteCapabilityChecked() error{CapabilityViolation}!void {
+    requireActiveCapability(.sqlite) catch |err| return panicCapabilityError(err, .sqlite);
 }
 
 pub fn getSqliteStateChecked(
     ctx: *context.Context,
     comptime T: type,
     slot: usize,
-) ?*T {
-    sqliteCapabilityChecked();
+) error{CapabilityViolation}!?*T {
+    try sqliteCapabilityChecked();
     return ctx.getModuleState(T, slot);
 }
 
@@ -387,7 +388,7 @@ pub fn openSqliteDbChecked(
     allocator: std.mem.Allocator,
     path: []const u8,
 ) !sqlite_runtime.Db {
-    sqliteCapabilityChecked();
+    try sqliteCapabilityChecked();
     return sqlite_runtime.Db.openReadWriteCreate(allocator, path);
 }
 
@@ -413,16 +414,16 @@ pub fn sha256ForActiveModule(
 pub fn sha256Checked(
     out: *[std.crypto.hash.sha2.Sha256.digest_length]u8,
     data: []const u8,
-) void {
-    sha256ForActiveModule(out, data) catch |err| panicCapabilityError(err, .crypto);
+) error{CapabilityViolation}!void {
+    sha256ForActiveModule(out, data) catch |err| return panicCapabilityError(err, .crypto);
 }
 
 pub fn hmacSha256Checked(
     out: *[std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8,
     data: []const u8,
     key: []const u8,
-) void {
-    hmacSha256ForActiveModule(out, data, key) catch |err| panicCapabilityError(err, .crypto);
+) error{CapabilityViolation}!void {
+    hmacSha256ForActiveModule(out, data, key) catch |err| return panicCapabilityError(err, .crypto);
 }
 
 fn emitPolicyDenial(kind: security_events.SecurityEventKind, name: []const u8) void {
@@ -443,8 +444,8 @@ pub fn allowsCacheNamespaceForActiveModule(
     return allowed;
 }
 
-pub fn allowsCacheNamespaceChecked(ctx: *context.Context, ns: []const u8) bool {
-    return allowsCacheNamespaceForActiveModule(ctx, ns) catch |err| panicCapabilityError(err, .policy_check);
+pub fn allowsCacheNamespaceChecked(ctx: *context.Context, ns: []const u8) error{CapabilityViolation}!bool {
+    return allowsCacheNamespaceForActiveModule(ctx, ns) catch |err| return panicCapabilityError(err, .policy_check);
 }
 
 pub fn allowsEnvForActiveModule(
@@ -457,8 +458,8 @@ pub fn allowsEnvForActiveModule(
     return allowed;
 }
 
-pub fn allowsEnvChecked(ctx: *context.Context, name: []const u8) bool {
-    return allowsEnvForActiveModule(ctx, name) catch |err| panicCapabilityError(err, .policy_check);
+pub fn allowsEnvChecked(ctx: *context.Context, name: []const u8) error{CapabilityViolation}!bool {
+    return allowsEnvForActiveModule(ctx, name) catch |err| return panicCapabilityError(err, .policy_check);
 }
 
 pub fn allowsSqlQueryForActiveModule(
@@ -471,8 +472,8 @@ pub fn allowsSqlQueryForActiveModule(
     return allowed;
 }
 
-pub fn allowsSqlQueryChecked(ctx: *context.Context, name: []const u8) bool {
-    return allowsSqlQueryForActiveModule(ctx, name) catch |err| panicCapabilityError(err, .policy_check);
+pub fn allowsSqlQueryChecked(ctx: *context.Context, name: []const u8) error{CapabilityViolation}!bool {
+    return allowsSqlQueryForActiveModule(ctx, name) catch |err| return panicCapabilityError(err, .policy_check);
 }
 
 pub fn allowsSqlWriteForActiveModule(
@@ -495,8 +496,8 @@ pub fn allowsSqlWriteForActiveModule(
     return allowed;
 }
 
-pub fn allowsSqlWriteChecked(ctx: *context.Context, name: []const u8) bool {
-    return allowsSqlWriteForActiveModule(ctx, name) catch |err| panicCapabilityError(err, .policy_check);
+pub fn allowsSqlWriteChecked(ctx: *context.Context, name: []const u8) error{CapabilityViolation}!bool {
+    return allowsSqlWriteForActiveModule(ctx, name) catch |err| return panicCapabilityError(err, .policy_check);
 }
 
 /// SDK C-ABI bridge. These `export` functions are the runtime half of the
@@ -822,7 +823,7 @@ pub const sdk_bridge = struct {
         var buf: [256]u8 = undefined;
         @memcpy(buf[0..name_len], name_ptr[0..name_len]);
         buf[name_len] = 0;
-        const result = readEnvChecked(buf[0..name_len :0]) orelse return false;
+        const result = (readEnvChecked(buf[0..name_len :0]) catch return false) orelse return false;
         out_ptr.* = result.ptr;
         out_len.* = result.len;
         return true;
@@ -834,7 +835,7 @@ pub const sdk_bridge = struct {
         name_len: usize,
     ) bool {
         const ctx = handleToContext(handle);
-        return allowsEnvChecked(ctx, name_ptr[0..name_len]);
+        return allowsEnvChecked(ctx, name_ptr[0..name_len]) catch return false;
     }
 
     pub export fn zigttpSdkAllowsCacheNamespace(
@@ -843,7 +844,7 @@ pub const sdk_bridge = struct {
         ns_len: usize,
     ) bool {
         const ctx = handleToContext(handle);
-        return allowsCacheNamespaceChecked(ctx, ns_ptr[0..ns_len]);
+        return allowsCacheNamespaceChecked(ctx, ns_ptr[0..ns_len]) catch return false;
     }
 
     pub export fn zigttpSdkAllowsSqlQuery(
@@ -852,7 +853,7 @@ pub const sdk_bridge = struct {
         name_len: usize,
     ) bool {
         const ctx = handleToContext(handle);
-        return allowsSqlQueryChecked(ctx, name_ptr[0..name_len]);
+        return allowsSqlQueryChecked(ctx, name_ptr[0..name_len]) catch return false;
     }
 
     pub export fn zigttpSdkAllowsSqlWrite(
@@ -861,7 +862,7 @@ pub const sdk_bridge = struct {
         name_len: usize,
     ) bool {
         const ctx = handleToContext(handle);
-        return allowsSqlWriteChecked(ctx, name_ptr[0..name_len]);
+        return allowsSqlWriteChecked(ctx, name_ptr[0..name_len]) catch return false;
     }
 
     pub export fn zigttpSdkArrayPush(
@@ -1996,7 +1997,7 @@ test "wrapNativeFnWithCapabilities activates context for built-in native fns" {
     const wrapped = comptime wrapNativeFnWithCapabilities(
         struct {
             fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
-                _ = clockNowMsChecked();
+                _ = clockNowMsChecked() catch 0;
                 return value.JSValue.true_val;
             }
         }.f,

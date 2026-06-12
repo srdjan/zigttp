@@ -63,7 +63,7 @@ pub const exports = binding.toModuleExports();
 
 fn runNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "run() requires --durable <DIR>");
     };
 
@@ -83,7 +83,7 @@ fn runNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue)
 
 fn stepNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "step() requires --durable <DIR>");
     };
 
@@ -103,7 +103,7 @@ fn stepNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue
 
 fn stepWithTimeoutNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "stepWithTimeout() requires --durable <DIR>");
     };
 
@@ -131,7 +131,7 @@ fn stepWithTimeoutNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const va
 
 fn sleepNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "sleep() requires --durable <DIR>");
     };
 
@@ -155,7 +155,7 @@ fn sleepNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValu
 
 fn sleepUntilNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "sleepUntil() requires --durable <DIR>");
     };
 
@@ -176,7 +176,7 @@ fn sleepUntilNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
 
 fn waitSignalNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "waitSignal() requires --durable <DIR>");
     };
 
@@ -192,7 +192,7 @@ fn waitSignalNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
 
 fn signalNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "signal() requires --durable <DIR>");
     };
 
@@ -212,7 +212,7 @@ fn signalNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSVal
 
 fn signalAtNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "signalAt() requires --durable <DIR>");
     };
 
@@ -238,7 +238,7 @@ fn signalAtNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
     return callbacks.signal_at_fn(callbacks.runtime_ptr, ctx, key, name, at_ms, payload);
 }
 
-fn getCallbacks(ctx: *context.Context) ?*DurableCallbacks {
+fn getCallbacks(ctx: *context.Context) error{CapabilityViolation}!?*DurableCallbacks {
     return mb.getRuntimeCallbackStateChecked(ctx, DurableCallbacks, MODULE_STATE_SLOT);
 }
 

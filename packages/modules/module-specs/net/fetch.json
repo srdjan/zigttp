@@ -18,6 +18,18 @@
           "transform": "extract_host"
         }
       ]
+    },
+    {
+      "name": "fetchWithRetry",
+      "effect": "write",
+      "returns": "object",
+      "contractExtractions": [
+        {
+          "argPosition": 0,
+          "category": "fetch_host",
+          "transform": "extract_host"
+        }
+      ]
     }
   ]
 }

@@ -674,11 +674,17 @@ pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
     flags: ExpertFlags,
-    policy: loop.ApprovalPolicy,
+    /// Explicit policy from `--yes` / `--no-edit`. Null means the user did not
+    /// pass a policy flag; the session's stored policy (from a prior `--yes` run,
+    /// persisted via meta.json) is used when available, falling back to `.ask`.
+    explicit_policy: ?loop.ApprovalPolicy,
 ) !void {
-    const approval_fn = selectApprovalFn(policy);
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) writeBanner(allocator);
+
+    // Encode the explicit policy as a string tag so it can be written to
+    // meta.json and restored on --resume without events.zig importing loop.zig.
+    const policy_tag: ?[]const u8 = if (explicit_policy) |p| @tagName(p) else null;
 
     var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
         .no_session = flags.no_session,
@@ -688,8 +694,16 @@ pub fn run(
         .resume_latest = flags.resume_latest,
         .fork_session_id = flags.fork_session_id,
         .model = flags.model,
+        .approval_policy_tag = policy_tag,
     });
     defer session.deinit(allocator);
+
+    // Effective policy: explicit flag wins; fall back to the stored policy from
+    // the resumed session's meta.json; finally default to .ask.
+    const policy: loop.ApprovalPolicy = explicit_policy orelse
+        session.stored_approval_policy orelse
+        .ask;
+    const approval_fn = selectApprovalFn(policy);
 
     // Confirm a restore the user asked for (otherwise resume is silent), and
     // surface any policy-drift note that would otherwise reach only the model.
@@ -948,6 +962,7 @@ fn approveEdit(preview: loop.ApprovalPreview) !bool {
     ) catch "\nVerified edit\n";
     _ = std.c.write(std.c.STDOUT_FILENO, header.ptr, header.len);
     if (preview.properties) |props| writeProvenProperties(props);
+    if (preview.rewrite_trace.len > 0) writeRewriteTrace(preview.rewrite_trace);
 
     while (true) {
         const prompt = "Apply this edit? [y/N, d=show proposed file] ";
@@ -962,13 +977,70 @@ fn approveEdit(preview: loop.ApprovalPreview) !bool {
             'y', 'Y' => return true,
             'd', 'D' => {
                 _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
-                _ = std.c.write(std.c.STDOUT_FILENO, preview.after.ptr, preview.after.len);
-                if (preview.after.len == 0 or preview.after[preview.after.len - 1] != '\n') {
-                    _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
-                }
+                writeMaybeTruncated(preview.after);
                 continue;
             },
             else => return false,
+        }
+    }
+}
+
+/// Lines above this threshold trigger head/tail truncation in the `d` diff preview.
+const diff_truncate_lines: usize = 100;
+
+/// Write `content` to stdout. When the content exceeds `diff_truncate_lines` lines,
+/// show the first 50 and last 20 lines separated by a truncation notice.
+fn writeMaybeTruncated(content: []const u8) void {
+    const n = lineCount(content);
+    if (n <= diff_truncate_lines) {
+        _ = std.c.write(std.c.STDOUT_FILENO, content.ptr, content.len);
+        if (content.len == 0 or content[content.len - 1] != '\n') {
+            _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+        }
+        return;
+    }
+    // Split into head (first 50 lines) and tail (last 20 lines).
+    const head_lines: usize = 50;
+    const tail_lines: usize = 20;
+    const omitted = n - head_lines - tail_lines;
+    // Find byte offset after `head_lines` newlines.
+    var head_end: usize = 0;
+    var found: usize = 0;
+    while (head_end < content.len) : (head_end += 1) {
+        if (content[head_end] == '\n') {
+            found += 1;
+            if (found >= head_lines) {
+                head_end += 1; // include the newline
+                break;
+            }
+        }
+    }
+    // Find byte offset before the last `tail_lines` newlines.
+    var tail_start: usize = content.len;
+    var found_tail: usize = 0;
+    var i: usize = content.len;
+    while (i > 0) {
+        i -= 1;
+        if (content[i] == '\n') {
+            found_tail += 1;
+            if (found_tail > tail_lines) {
+                tail_start = i + 1;
+                break;
+            }
+        }
+    }
+    _ = std.c.write(std.c.STDOUT_FILENO, content.ptr, head_end);
+    var trunc_buf: [128]u8 = undefined;
+    const trunc_msg = std.fmt.bufPrint(
+        &trunc_buf,
+        "... [{d} lines truncated] ...\n",
+        .{omitted},
+    ) catch "... [lines truncated] ...\n";
+    _ = std.c.write(std.c.STDOUT_FILENO, trunc_msg.ptr, trunc_msg.len);
+    if (tail_start < content.len) {
+        _ = std.c.write(std.c.STDOUT_FILENO, content[tail_start..].ptr, content.len - tail_start);
+        if (content[content.len - 1] != '\n') {
+            _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
         }
     }
 }
@@ -1002,6 +1074,21 @@ fn writeProvenProperties(props: anytype) void {
     }
     if (first) w.writeAll("(no properties established)") catch {};
     w.writeAll("\n") catch {};
+    const out = w.buffered();
+    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
+}
+
+/// Write canonical-normalization rewrite names applied during salvage, e.g.
+/// "  normalized: ternary-redundancy-elimination (line 12), bool-compare-redundancy".
+fn writeRewriteTrace(trace: []const []u8) void {
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    w.writeAll("  normalized: ") catch {};
+    for (trace, 0..) |name, i| {
+        if (i > 0) w.writeAll(", ") catch {};
+        w.writeAll(name) catch {};
+    }
+    w.writeByte('\n') catch {};
     const out = w.buffered();
     _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
 }

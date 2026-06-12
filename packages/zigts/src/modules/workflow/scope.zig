@@ -216,7 +216,7 @@ pub fn endRequest(ctx: *context.Context) void {
 
 fn scopeNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "scope() requires request lifecycle support");
     };
     const state = callbacks.current_state orelse {
@@ -247,7 +247,7 @@ fn scopeNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValu
 
 fn usingNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "using() requires request lifecycle support");
     };
     const state = callbacks.current_state orelse {
@@ -273,7 +273,7 @@ fn usingNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValu
 
 fn ensureNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "ensure() requires request lifecycle support");
     };
     const state = callbacks.current_state orelse {
@@ -294,7 +294,7 @@ fn ensureNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSVal
     return value.JSValue.undefined_val;
 }
 
-fn getCallbacks(ctx: *context.Context) ?*ScopeCallbacks {
+fn getCallbacks(ctx: *context.Context) error{CapabilityViolation}!?*ScopeCallbacks {
     return mb.getRuntimeCallbackStateChecked(ctx, ScopeCallbacks, MODULE_STATE_SLOT);
 }
 

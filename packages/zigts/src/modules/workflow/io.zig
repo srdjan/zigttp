@@ -156,7 +156,7 @@ fn parallelNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
     }
 
     // Get runtime callbacks from module state after handling no-op cases.
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "parallel() requires outbound HTTP to be enabled");
     };
 
@@ -282,7 +282,7 @@ fn raceNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue
         return util.throwError(ctx, "RangeError", "race() supports at most 8 concurrent operations");
     }
 
-    const callbacks = getCallbacks(ctx) orelse {
+    const callbacks = try getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "race() requires outbound HTTP to be enabled");
     };
 
@@ -368,7 +368,7 @@ fn raceNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue
 // Helpers
 // ============================================================================
 
-fn getCallbacks(ctx: *context.Context) ?*IoCallbacks {
+fn getCallbacks(ctx: *context.Context) error{CapabilityViolation}!?*IoCallbacks {
     return mb.getRuntimeCallbackStateChecked(ctx, IoCallbacks, MODULE_STATE_SLOT);
 }
 
@@ -472,7 +472,7 @@ test "getCallbacks returns installed runtime callback state under capability con
     const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
     defer mb.popActiveModuleContext(token);
 
-    try std.testing.expect(getCallbacks(ctx) != null);
+    try std.testing.expect(try getCallbacks(ctx) != null);
 }
 
 test "parallel: results stay aligned to thunk positions" {

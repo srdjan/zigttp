@@ -1,6 +1,8 @@
 const std = @import("std");
 const cli = @import("dev_cli.zig");
 
+pub const panic = std.debug.FullPanic(@import("panic_recovery.zig").handlePanic);
+
 pub fn main(init: std.process.Init.Minimal) !void {
     return cli.main(init);
 }

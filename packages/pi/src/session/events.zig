@@ -21,6 +21,20 @@ const EventKind = enum {
     verified_patch,
     system_note,
     autoloop_outcome,
+    turn_end,
+};
+
+pub const TurnEndReason = enum {
+    approved,
+    veto_exhausted,
+    budget_roundtrips,
+    budget_tool_calls,
+    approval_denied,
+    error_exit,
+};
+
+pub const TurnEnd = struct {
+    reason: TurnEndReason,
 };
 
 pub const AutoloopVerdict = enum {
@@ -78,6 +92,7 @@ pub const EventRecord = union(EventKind) {
     verified_patch: DisplayMessage,
     system_note: []const u8,
     autoloop_outcome: AutoloopOutcome,
+    turn_end: TurnEnd,
 };
 
 pub const Meta = struct {
@@ -87,6 +102,10 @@ pub const Meta = struct {
     created_at_unix_ms: i64,
     parent_id: ?[]const u8 = null,
     policy_hash: ?[]const u8 = null,
+    /// String tag of the ApprovalPolicy in effect when the session was created
+    /// ("ask", "auto_approve", "auto_reject"). Written on first create; re-read
+    /// on --resume so the policy persists across sessions without re-passing flags.
+    approval_policy: ?[]const u8 = null,
 };
 
 pub fn appendEvent(
@@ -136,6 +155,7 @@ fn kindTag(record: EventRecord) []const u8 {
         .verified_patch => "verified_patch",
         .system_note => "system_note",
         .autoloop_outcome => "autoloop_outcome",
+        .turn_end => "turn_end",
     };
 }
 
@@ -174,6 +194,12 @@ fn writePayload(writer: *std.Io.Writer, record: EventRecord) !void {
         .diagnostic_box => |message| try writeDisplayPayload(writer, message),
         .verified_patch => |message| try writeDisplayPayload(writer, message),
         .autoloop_outcome => |outcome| try writeAutoloopOutcomePayload(writer, outcome),
+        .turn_end => |te| {
+            try writer.writeByte('{');
+            try writer.writeAll("\"reason\":");
+            try json_writer.writeString(writer, @tagName(te.reason));
+            try writer.writeByte('}');
+        },
     }
 }
 
@@ -261,6 +287,12 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
         null;
     errdefer if (policy_hash) |hash| allocator.free(hash);
 
+    const approval_policy = if (getRequiredString(obj, "approval_policy")) |ap|
+        try allocator.dupe(u8, ap)
+    else
+        null;
+    errdefer if (approval_policy) |ap| allocator.free(ap);
+
     return .{
         .schema_version = version,
         .session_id = session_id_copy,
@@ -268,6 +300,7 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
         .created_at_unix_ms = created_at.integer,
         .parent_id = parent_id,
         .policy_hash = policy_hash,
+        .approval_policy = approval_policy,
     };
 }
 
@@ -297,6 +330,10 @@ pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta
         try stream.objectField("policy_hash");
         try stream.write(hash);
     }
+    if (meta.approval_policy) |ap| {
+        try stream.objectField("approval_policy");
+        try stream.write(ap);
+    }
     try stream.endObject();
     try aw.writer.writeByte('\n');
 
@@ -317,6 +354,7 @@ pub fn freeMeta(allocator: std.mem.Allocator, meta: *Meta) void {
     allocator.free(meta.workspace_realpath);
     if (meta.parent_id) |parent_id| allocator.free(parent_id);
     if (meta.policy_hash) |hash| allocator.free(hash);
+    if (meta.approval_policy) |ap| allocator.free(ap);
     meta.* = .{
         .schema_version = schema_version,
         .session_id = &.{},
@@ -324,6 +362,7 @@ pub fn freeMeta(allocator: std.mem.Allocator, meta: *Meta) void {
         .created_at_unix_ms = 0,
         .parent_id = null,
         .policy_hash = null,
+        .approval_policy = null,
     };
 }
 
@@ -557,4 +596,20 @@ test "readMeta accepts older schema versions" {
     var meta = try readMeta(allocator, path);
     defer freeMeta(allocator, &meta);
     try testing.expectEqual(@as(u32, 1), meta.schema_version);
+}
+
+test "appendEvent serializes turn_end with reason" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .budget_roundtrips } });
+
+    const raw = try readWhole(allocator, path);
+    defer allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"turn_end\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"reason\":\"budget_roundtrips\"") != null);
 }

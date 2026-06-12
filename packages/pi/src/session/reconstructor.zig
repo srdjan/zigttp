@@ -110,6 +110,9 @@ fn appendFromLine(
     } else if (std.mem.eql(u8, kind, "autoloop_outcome")) {
         // Session-level summary; not rebuilt into the transcript.
         return;
+    } else if (std.mem.eql(u8, kind, "turn_end")) {
+        // Session-level turn marker; not rebuilt into the transcript.
+        return;
     } else {
         return error.CorruptEventsLog;
     }
@@ -338,6 +341,32 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
     }
     switch (tr.at(4).*) {
         .proof_card => |body| try testing.expectEqualStrings("contract ok", body.llm_text),
+        else => return error.TestFailed,
+    }
+}
+
+test "reconstructTranscript skips turn_end records" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    try events.appendEvent(allocator, path, .{ .user_text = "before" });
+    try events.appendEvent(allocator, path, .{ .turn_end = .{ .reason = .budget_roundtrips } });
+    try events.appendEvent(allocator, path, .{ .model_text = "after" });
+
+    var tr = try reconstructTranscript(allocator, path, null);
+    defer tr.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), tr.len());
+    switch (tr.at(0).*) {
+        .user_text => |body| try testing.expectEqualStrings("before", body),
+        else => return error.TestFailed,
+    }
+    switch (tr.at(1).*) {
+        .model_text => |body| try testing.expectEqualStrings("after", body),
         else => return error.TestFailed,
     }
 }

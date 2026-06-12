@@ -307,6 +307,11 @@ pub const Context = struct {
     module_state: [MAX_MODULE_STATE_SLOTS]?ModuleStateEntry,
     /// Embedded capability policy for precompiled handlers.
     capability_policy: handler_policy.RuntimePolicy,
+    /// Cooperative per-request interrupt. Self-set by the deadline check at loop
+    /// back-edges; may be set by any thread (atomic) for forced aborts.
+    interrupt_requested: std.atomic.Value(bool),
+    /// Monotonic deadline in ns for the current request. 0 = no deadline.
+    deadline_ns: u64,
 
     pub fn init(allocator: std.mem.Allocator, gc_state: *gc.GC, config: ContextConfig) !*Context {
         const ctx = try allocator.create(Context);
@@ -375,6 +380,8 @@ pub const Context = struct {
             .literal_shapes = .empty,
             .module_state = .{null} ** MAX_MODULE_STATE_SLOTS,
             .capability_policy = .{},
+            .interrupt_requested = std.atomic.Value(bool).init(false),
+            .deadline_ns = 0,
         };
         errdefer {
             ctx.literal_shapes.deinit(allocator);

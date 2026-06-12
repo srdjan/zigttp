@@ -36,6 +36,17 @@
           "category": "request_schema"
         }
       ]
+    },
+    {
+      "name": "decodeFormMultipart",
+      "effect": "none",
+      "returns": "result",
+      "failureSeverity": "critical",
+      "contractExtractions": [
+        {
+          "category": "request_schema"
+        }
+      ]
     }
   ]
 }

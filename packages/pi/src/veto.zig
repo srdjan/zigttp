@@ -69,6 +69,11 @@ pub const VetoReport = struct {
 pub const VetoResult = struct {
     outcome: turn.EditOutcome,
     report: VetoReport,
+    /// True when the veto failed specifically due to a missing or invalid SQL
+    /// schema. Set on the `sql_unsupported_guidance` and `sql_schema_load_guidance`
+    /// failure paths so the turn loop can track escalation without re-parsing the
+    /// edit content.
+    sql_failure: bool = false,
 
     pub fn deinit(self: *VetoResult, allocator: std.mem.Allocator) void {
         self.outcome.deinit(allocator);
@@ -116,7 +121,7 @@ pub fn runVetoWithSchema(
     // `catch error.MissingSqlSchema` backstop below is the correct-altitude
     // guard for analyzer paths that still surface the failure as an error.
     if (sql_schema_path == null and importsSqlModule(edit.content)) {
-        return try failedVetoWithGuidance(allocator, sql_unsupported_guidance);
+        return try failedVetoWithGuidance(allocator, sql_unsupported_guidance, true);
     }
 
     const input: edit_simulate.EditSimulateInput = .{
@@ -129,7 +134,7 @@ pub fn runVetoWithSchema(
     var result = edit_simulate.simulate(allocator, input) catch |err| switch (err) {
         // Backstop for any analyzer path that still surfaces the schema-less
         // failure as an error rather than a clean diagnostic.
-        error.MissingSqlSchema => return try failedVetoWithGuidance(allocator, sql_unsupported_guidance),
+        error.MissingSqlSchema => return try failedVetoWithGuidance(allocator, sql_unsupported_guidance, true),
         // The analyzer reports query-vs-schema failures as errors, not
         // diagnostics. A bad query in a draft is the model's mistake to fix,
         // not a fatal agent error: end the turn with a failed veto carrying
@@ -138,7 +143,7 @@ pub fn runVetoWithSchema(
         error.UnsupportedSqlStatement,
         error.PositionalSqlParameter,
         error.SqlitePrepareFailed,
-        => return try failedVetoWithGuidance(allocator, sql_validation_guidance),
+        => return try failedVetoWithGuidance(allocator, sql_validation_guidance, true),
         // A configured schema that cannot be loaded (stale `sqlite` entry in
         // zigttp.json, missing or unreadable file, invalid schema SQL) must
         // not crash the turn either. Attribute file errors to the schema only
@@ -150,7 +155,7 @@ pub fn runVetoWithSchema(
         error.AccessDenied,
         => {
             if (sql_schema_path != null) {
-                return try failedVetoWithGuidance(allocator, sql_schema_load_guidance);
+                return try failedVetoWithGuidance(allocator, sql_schema_load_guidance, true);
             }
             return err;
         },
@@ -361,8 +366,9 @@ const sql_schema_load_guidance =
 
 /// A failed veto carrying actionable guidance instead of an analyzer error
 /// that would crash the turn. The guidance string must be a static literal
-/// (duped into the result so deinit stays uniform).
-fn failedVetoWithGuidance(allocator: std.mem.Allocator, guidance: []const u8) !VetoResult {
+/// (duped into the result so deinit stays uniform). Pass `is_sql = true` for
+/// SQL-related failures so the turn loop can escalate after repeated attempts.
+fn failedVetoWithGuidance(allocator: std.mem.Allocator, guidance: []const u8, is_sql: bool) !VetoResult {
     const llm_text = try allocator.dupe(u8, guidance);
     errdefer allocator.free(llm_text);
 
@@ -379,6 +385,7 @@ fn failedVetoWithGuidance(allocator: std.mem.Allocator, guidance: []const u8) !V
             .preexisting = 0,
             .after_properties = null,
         },
+        .sql_failure = is_sql,
     };
 }
 
@@ -602,7 +609,7 @@ test "broken handler (var) fails the veto and body surfaces ZTS001" {
 }
 
 test "failedVetoWithGuidance yields a failed veto with actionable guidance" {
-    var result = try failedVetoWithGuidance(testing.allocator, sql_unsupported_guidance);
+    var result = try failedVetoWithGuidance(testing.allocator, sql_unsupported_guidance, true);
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.outcome.ok);

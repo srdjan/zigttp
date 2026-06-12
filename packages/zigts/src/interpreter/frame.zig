@@ -160,6 +160,7 @@ pub fn callBytecodeFunction(
     this_val: value.JSValue,
     args: []const value.JSValue,
 ) InterpreterError!value.JSValue {
+    if (self.ctx.deadline_ns != 0 and self.ctx.interrupt_requested.load(.monotonic)) return error.RequestTimeout;
     trace.traceCall(self, "bc enter", @intCast(args.len), false);
     defer trace.traceCall(self, "bc exit", @intCast(args.len), false);
     // const_cast safe: only profiling fields are mutated below.
@@ -238,6 +239,7 @@ pub fn callBytecodeFunction(
 /// seeded with `undefined` rather than caller-supplied args, JIT-compiled
 /// path returns directly without re-entering upvalue cleanup.
 pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
+    if (self.ctx.deadline_ns != 0 and self.ctx.interrupt_requested.load(.monotonic)) return error.RequestTimeout;
     // const_cast safe: only profiling fields are mutated below.
     const func_mut = @constCast(func);
 

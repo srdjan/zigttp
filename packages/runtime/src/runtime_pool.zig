@@ -25,6 +25,7 @@ const HttpResponse = http_types.HttpResponse;
 
 const zruntime = @import("zruntime.zig");
 const Runtime = zruntime.Runtime;
+const panic_recovery = @import("panic_recovery.zig");
 
 pub const HandlerPool = struct {
     allocator: std.mem.Allocator,
@@ -46,6 +47,10 @@ pub const HandlerPool = struct {
     persistent_escape_failures: std.atomic.Value(u64),
     /// Runtimes recycled (destroyed, not returned to pool) by policy.
     recycles: std.atomic.Value(u64),
+    /// Handler panics isolated via setjmp recovery. Each quarantines the slot.
+    panics: std.atomic.Value(u64),
+    /// Requests that exceeded the per-request timeout deadline.
+    timeouts: std.atomic.Value(u64),
     /// Contract-derived lifecycle policy. Set by the server after contract parse.
     pooling_policy: contract_runtime.PoolingPolicy = .reuse_bounded_by_count,
     pooling_thresholds: contract_runtime.PoolingThresholds = .{},
@@ -157,6 +162,8 @@ pub const HandlerPool = struct {
             .arena_audit_failures = std.atomic.Value(u64).init(0),
             .persistent_escape_failures = std.atomic.Value(u64).init(0),
             .recycles = std.atomic.Value(u64).init(0),
+            .panics = std.atomic.Value(u64).init(0),
+            .timeouts = std.atomic.Value(u64).init(0),
             .wait_percentiles = .{},
             .exec_percentiles = .{},
             .pool = pool,
@@ -293,9 +300,6 @@ pub const HandlerPool = struct {
     pub fn executeHandler(self: *Self, request: HttpRequestView) !HttpResponse {
         const request_id = self.nextRequestId();
         const base_rt = try self.acquireForRequest();
-        defer {
-            self.releaseForRequest(base_rt);
-        }
         var exec_timer: ?compat.Timer = null;
         if (collect_pool_metrics) {
             exec_timer = compat.Timer.start() catch null;
@@ -304,11 +308,24 @@ pub const HandlerPool = struct {
             if (exec_timer) |*t| self.recordExec(t.read());
         };
 
+        var slot_disposed = false;
+        defer if (!slot_disposed) self.releaseForRequest(base_rt);
         var attempt: u8 = 0;
         var last_err: ?anyerror = null;
         while (attempt < 2) : (attempt += 1) {
             const rt = try self.ensureRuntime(base_rt);
-            const result = rt.executeHandlerWithId(request, request_id) catch |err| {
+            const result = self.callHandlerGuarded(rt, request, request_id, false) catch |err| {
+                if (err == error.HandlerPanicked) {
+                    slot_disposed = true;
+                    self.quarantineSlot(base_rt);
+                    return err;
+                }
+                if (err == error.RequestTimeout) {
+                    _ = self.timeouts.fetchAdd(1, .monotonic);
+                    std.log.warn("Handler timed out after {d}ms, invalidating runtime", .{self.config.request_timeout_ms});
+                    self.invalidateRuntime(base_rt);
+                    return err;
+                }
                 if (isHandlerInvalid(err)) {
                     std.log.warn("Handler invalid, rebuilding runtime (err={})", .{err});
                     self.invalidateRuntime(base_rt);
@@ -330,7 +347,8 @@ pub const HandlerPool = struct {
     pub fn executeHandlerBorrowed(self: *Self, request: HttpRequestView) !ResponseHandle {
         const request_id = self.nextRequestId();
         const base_rt = try self.acquireForRequest();
-        errdefer self.releaseForRequest(base_rt);
+        var slot_disposed = false;
+        errdefer if (!slot_disposed) self.releaseForRequest(base_rt);
         var exec_timer: ?compat.Timer = null;
         if (collect_pool_metrics) {
             exec_timer = compat.Timer.start() catch null;
@@ -343,7 +361,18 @@ pub const HandlerPool = struct {
         var last_err: ?anyerror = null;
         while (attempt < 2) : (attempt += 1) {
             const rt = try self.ensureRuntime(base_rt);
-            const response = rt.executeHandlerBorrowedWithId(request, request_id) catch |err| {
+            const response = self.callHandlerGuarded(rt, request, request_id, true) catch |err| {
+                if (err == error.HandlerPanicked) {
+                    slot_disposed = true;
+                    self.quarantineSlot(base_rt);
+                    return err;
+                }
+                if (err == error.RequestTimeout) {
+                    _ = self.timeouts.fetchAdd(1, .monotonic);
+                    std.log.warn("Handler timed out after {d}ms, invalidating runtime", .{self.config.request_timeout_ms});
+                    self.invalidateRuntime(base_rt);
+                    return err;
+                }
                 if (isHandlerInvalid(err)) {
                     std.log.warn("Handler invalid, rebuilding runtime (err={})", .{err});
                     self.invalidateRuntime(base_rt);
@@ -378,7 +407,20 @@ pub const HandlerPool = struct {
         var attempt: u8 = 0;
         var last_err: ?anyerror = null;
         while (attempt < 2) : (attempt += 1) {
+            lease.runtime.armRequestDeadline();
             const response = lease.runtime.executeHandlerBorrowedWithId(request, request_id) catch |err| {
+                lease.runtime.clearRequestDeadline();
+                if (err == error.HandlerPanicked) {
+                    // Lease path: panic during WebSocket frame - close the connection.
+                    return err;
+                }
+                if (err == error.RequestTimeout) {
+                    _ = self.timeouts.fetchAdd(1, .monotonic);
+                    std.log.warn("Leased handler timed out after {d}ms, invalidating runtime", .{self.config.request_timeout_ms});
+                    self.invalidateRuntime(lease.base_rt);
+                    lease.runtime = try self.ensureRuntime(lease.base_rt);
+                    return err;
+                }
                 if (isHandlerInvalid(err)) {
                     std.log.warn("Leased runtime invalid, rebuilding (err={})", .{err});
                     self.invalidateRuntime(lease.base_rt);
@@ -388,6 +430,7 @@ pub const HandlerPool = struct {
                 }
                 return err;
             };
+            lease.runtime.clearRequestDeadline();
             return response;
         }
         return last_err orelse error.HandlerNotCallable;
@@ -663,6 +706,8 @@ pub const HandlerPool = struct {
         arena_audit_failures: u64,
         persistent_escape_failures: u64,
         recycles: u64,
+        panics: u64,
+        timeouts: u64,
         pooling_policy: contract_runtime.PoolingPolicy,
     } {
         const requests = self.request_seq.load(.acquire);
@@ -684,6 +729,8 @@ pub const HandlerPool = struct {
             .arena_audit_failures = self.arena_audit_failures.load(.acquire),
             .persistent_escape_failures = self.persistent_escape_failures.load(.acquire),
             .recycles = self.recycles.load(.acquire),
+            .panics = self.panics.load(.acquire),
+            .timeouts = self.timeouts.load(.acquire),
             .pooling_policy = self.pooling_policy,
         };
     }
@@ -708,6 +755,52 @@ pub const HandlerPool = struct {
         if (base_rt.user_data != null) {
             runtimeUserDeinit(base_rt, self.allocator);
         }
+    }
+
+    /// Panic path only: destroy the whole base slot without running release-time
+    /// audits or prepareForPoolRelease - the runtime heap may be mid-mutation.
+    /// LockFreePool.dropRuntime destroys the slot's GC/arena; the next acquire
+    /// builds a fresh runtime via ensureRuntime.
+    fn quarantineSlot(self: *Self, base_rt: *zq.LockFreePool.Runtime) void {
+        _ = self.panics.fetchAdd(1, .monotonic);
+        _ = self.recycles.fetchAdd(1, .monotonic);
+        self.pool.dropRuntime(base_rt);
+        _ = self.in_use.fetchSub(1, .monotonic);
+    }
+
+    /// Run one handler invocation under panic recovery and the per-request
+    /// deadline. MUST remain noinline and minimal: after the second setjmp return,
+    /// only `frame` (address-taken) and thread-local state are valid; `rt` must
+    /// not be touched on the panic path.
+    noinline fn callHandlerGuarded(
+        self: *Self,
+        rt: *Runtime,
+        request: HttpRequestView,
+        request_id: u64,
+        comptime borrowed: bool,
+    ) !HttpResponse {
+        var frame: panic_recovery.Frame = undefined;
+        if (panic_recovery.setjmpFn(&frame.jb) != 0) {
+            // Handler panicked. Defers in the skipped zruntime frames did NOT run.
+            zruntime.clearThreadStateAfterPanic();
+            std.log.err("handler panicked (isolated): {s}", .{frame.message()});
+            return error.HandlerPanicked;
+        }
+        panic_recovery.arm(&frame);
+        defer panic_recovery.disarm();
+
+        rt.armRequestDeadline();
+        const result = if (borrowed)
+            rt.executeHandlerBorrowedWithId(request, request_id)
+        else
+            rt.executeHandlerWithId(request, request_id);
+        const response = result catch |err| {
+            rt.clearRequestDeadline();
+            return err;
+        };
+        rt.clearRequestDeadline();
+        _ = self; // suppress unused warning; self used for quarantine caller side
+        return response;
     }
 
     fn updateMax(target: *std.atomic.Value(u64), value: u64) void {

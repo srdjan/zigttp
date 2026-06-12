@@ -169,7 +169,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         return;
     }
 
-    try repl.run(allocator, &registry, flags, flags.policy orelse .ask);
+    try repl.run(allocator, &registry, flags, flags.policy);
 }
 
 pub fn runLedgerCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {

@@ -191,3 +191,19 @@ test "populateModuleTypes keeps jwtVerify algorithm optional" {
     try std.testing.expectEqual(pool.idx_string, sig.param_types[1]);
     try std.testing.expectEqual(pool.idx_string, sig.param_types[2]);
 }
+
+test "populateModuleTypes keeps fetchWithRetry options optional" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    populateModuleTypes(&env, &pool, allocator);
+
+    const sig = env.getFnSigByName("fetchWithRetry") orelse return error.MissingFetchWithRetry;
+    try std.testing.expectEqual(@as(u8, 3), sig.param_count);
+    try std.testing.expectEqual(@as(u8, 1), sig.required_param_count orelse sig.param_count);
+    try std.testing.expectEqual(pool.idx_string, sig.param_types[0]);
+}

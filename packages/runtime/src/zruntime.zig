@@ -61,6 +61,15 @@ const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
 /// (e.g., renderToString needs to call component functions)
 threadlocal var current_runtime: ?*Runtime = null;
 
+/// Clear thread-local interpreter state after a handler panic.
+/// Called from the setjmp recovery branch before returning error.HandlerPanicked.
+/// Must only touch thread-locals - the runtime heap may be mid-mutation.
+pub fn clearThreadStateAfterPanic() void {
+    current_runtime = null;
+    zq.http.clearCallFunctionCallback();
+    zq.interpreter.current_interpreter = null;
+}
+
 const AotOverrideFn = *const fn (ctx: *zq.Context, args: []const zq.JSValue) anyerror!zq.JSValue;
 threadlocal var aot_override: ?AotOverrideFn = null;
 
@@ -1123,6 +1132,23 @@ pub const Runtime = struct {
         return writer.getWritten();
     }
 
+    /// Arm the per-request execution deadline on this runtime's context.
+    /// No-op when request_timeout_ms == 0.
+    pub fn armRequestDeadline(self: *Self) void {
+        self.ctx.interrupt_requested.store(false, .monotonic);
+        self.ctx.deadline_ns = 0;
+        const ms = self.config.request_timeout_ms;
+        if (ms == 0) return;
+        const now = compat.monotonicNowNs() catch return;
+        self.ctx.deadline_ns = now + @as(u64, ms) * std.time.ns_per_ms;
+    }
+
+    /// Clear the per-request execution deadline and interrupt flag.
+    pub fn clearRequestDeadline(self: *Self) void {
+        self.ctx.deadline_ns = 0;
+        self.ctx.interrupt_requested.store(false, .monotonic);
+    }
+
     /// Execute the handler function with a request
     pub fn executeHandler(self: *Self, request: HttpRequestView) !HttpResponse {
         return self.executeHandlerWithId(request, 0);
@@ -1291,6 +1317,7 @@ pub const Runtime = struct {
         defer zq.modules.scope.endRequest(self.ctx);
 
         const result = self.callFunction(handler_obj, args) catch |err| {
+            if (err == error.RequestTimeout) return error.RequestTimeout;
             std.log.err("Handler execution failed: {}", .{err});
             return error.HandlerError;
         };
@@ -2181,7 +2208,7 @@ pub const Runtime = struct {
         var response = HttpResponse.init(self.allocator);
 
         if (!result.isObject()) {
-            // If result is a string, use it as body
+            // If result is a string, use it as body (supported return type)
             if (result.isString()) {
                 const str = result.toPtr(zq.JSString);
                 if (borrow_body) {
@@ -2190,7 +2217,14 @@ pub const Runtime = struct {
                     const owned = try self.allocator.dupe(u8, str.data());
                     response.setBodyOwned(owned);
                 }
+                return response;
             }
+            // Non-string, non-object: handler returned a primitive (number, bool, undefined).
+            // Return 500 instead of a silent empty 200.
+            response.status = 500;
+            const body_owned = try self.allocator.dupe(u8, "handler did not return a Response object");
+            response.setBodyOwned(body_owned);
+            try response.putHeader("Content-Type", "text/plain; charset=utf-8");
             return response;
         }
 

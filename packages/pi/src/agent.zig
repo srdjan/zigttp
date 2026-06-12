@@ -66,6 +66,10 @@ pub const SessionConfig = struct {
     /// outlives the session). Applied once here so every entry point inherits
     /// it; null leaves the compile-time default in place.
     model: ?[]const u8 = null,
+    /// Approval policy to store in meta.json so --resume can restore it.
+    /// The tag name string ("ask", "auto_approve", "auto_reject") is stored
+    /// rather than the enum so events.zig stays free of loop.zig imports.
+    approval_policy_tag: ?[]const u8 = null,
 };
 
 const stub_reply_text =
@@ -123,6 +127,10 @@ pub const AgentSession = struct {
     last_persisted_len: usize = 0,
     /// Running total of tokens consumed by all turns in this session.
     token_totals: turn.Usage = .{},
+    /// Approval policy read from the resumed session's meta.json. Non-null only
+    /// after a --resume when the source session had an approval_policy stored.
+    /// app.zig applies it as the session default when no flag override is present.
+    stored_approval_policy: ?loop.ApprovalPolicy = null,
 
     pub fn initStub() AgentSession {
         return .{};
@@ -378,6 +386,7 @@ pub fn initFromEnvWithSessionConfig(
             .created_at_unix_ms = nowUnixMs(),
             .parent_id = fork_id,
             .policy_hash = current_hash,
+            .approval_policy = config.approval_policy_tag,
         });
     } else {
         try session_events.writeMeta(allocator, session.meta_path.?, .{
@@ -385,6 +394,7 @@ pub fn initFromEnvWithSessionConfig(
             .workspace_realpath = realpath,
             .created_at_unix_ms = nowUnixMs(),
             .policy_hash = current_hash,
+            .approval_policy = config.approval_policy_tag,
         });
     }
 
@@ -471,6 +481,19 @@ fn injectDriftNote(
     var meta = session_events.readMeta(allocator, meta_path) catch return;
     defer session_events.freeMeta(allocator, &meta);
 
+    // Restore the stored approval policy (if any) so --resume inherits it.
+    // The policy tag string is parsed back to the enum; unknown tags are
+    // silently ignored so old sessions without the field do not break.
+    if (meta.approval_policy) |tag| {
+        if (std.mem.eql(u8, tag, "auto_approve")) {
+            session.stored_approval_policy = .auto_approve;
+        } else if (std.mem.eql(u8, tag, "auto_reject")) {
+            session.stored_approval_policy = .auto_reject;
+        } else if (std.mem.eql(u8, tag, "ask")) {
+            session.stored_approval_policy = .ask;
+        }
+    }
+
     // Pre-Phase-2 sessions (no saved hash) and matching hashes both skip the
     // note; only the drift case appends + persists a system_note. All three
     // cases fall through to a single forward-stamp at the bottom so the next
@@ -503,6 +526,7 @@ fn injectDriftNote(
         .created_at_unix_ms = meta.created_at_unix_ms,
         .parent_id = meta.parent_id,
         .policy_hash = current_hash,
+        .approval_policy = meta.approval_policy,
     });
 }
 
@@ -595,6 +619,16 @@ pub fn runOneTurn(
                 session.persist_opts,
             );
         }
+        // Append a turn_end marker so the session log records why the turn
+        // concluded. Mapped from TurnState: awaiting_user = budget exhausted,
+        // everything else that returns = approved/done.
+        const te_reason: session_events.TurnEndReason = switch (turn_result.final_state) {
+            .awaiting_user => .budget_roundtrips,
+            else => .approved,
+        };
+        session_events.appendEvent(allocator, path, .{ .turn_end = .{
+            .reason = te_reason,
+        } }) catch {}; // best-effort: a log write failure must not crash the turn
     }
 
     return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));

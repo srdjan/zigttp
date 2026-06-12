@@ -25,6 +25,7 @@ const call = @import("interpreter/call.zig");
 const alloc = @import("interpreter/alloc.zig");
 const util = @import("interpreter/util.zig");
 const lifecycle = @import("interpreter/lifecycle.zig");
+const compat = @import("compat.zig");
 
 const tier_count = perf.tier_count;
 
@@ -125,6 +126,26 @@ pub const Interpreter = struct {
         return false;
     }
 
+    /// Check whether the per-request deadline has passed and set the interrupt
+    /// flag if so. Called every 1024 back-edges to amortize the clock read.
+    fn checkDeadline(self: *Interpreter) void {
+        const deadline = self.ctx.deadline_ns;
+        if (deadline == 0) return;
+        const now = compat.monotonicNowNs() catch return;
+        if (now >= deadline) self.ctx.interrupt_requested.store(true, .monotonic);
+    }
+
+    /// Back-edge check: increment counter and poll for a pending request timeout.
+    /// Gated on deadline_ns != 0 so the no-timeout hot path pays only one
+    /// non-atomic compare per backward branch.
+    inline fn checkBackedge(self: *Interpreter) InterpreterError!void {
+        self.backedge_count +%= 1;
+        if (self.ctx.deadline_ns != 0) {
+            if (self.ctx.interrupt_requested.load(.monotonic)) return error.RequestTimeout;
+            if (self.backedge_count & 0x3FF == 0) self.checkDeadline();
+        }
+    }
+
     /// Profile back-edge: increment counter, return true if loop is hot
     inline fn profileBackedge(self: *Interpreter) bool {
         self.backedge_count +%= 1;
@@ -188,6 +209,7 @@ pub const Interpreter = struct {
         NoHiddenClassPool,
         SoundModeViolation, // Non-boolean value in boolean context
         DurableSuspended,
+        RequestTimeout,
     };
 
     /// Main bytecode dispatch loop - executes opcodes until halt, return, or error.
@@ -910,6 +932,11 @@ pub const Interpreter = struct {
                 const offset = util.readI16(self.pc);
                 self.pc += 2;
                 self.offsetPc(offset);
+                // Backward goto = loop back-edge (codegen emits .goto, not .loop,
+                // for all loop constructs). Cooperative per-request deadline check.
+                if (offset < 0) {
+                    try self.checkBackedge();
+                }
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .loop => {
@@ -917,6 +944,7 @@ pub const Interpreter = struct {
                 const offset = util.readI16(self.pc);
                 self.pc += 2;
                 self.offsetPc(-offset);
+                try self.checkBackedge();
                 continue :sw @enumFromInt(self.pc[0]);
             },
             .if_true => {
@@ -1800,6 +1828,11 @@ pub const Interpreter = struct {
                 const offset = util.readI16(self.pc);
                 self.pc += 2;
                 self.offsetPc(offset);
+                // drop_goto is a fused drop+goto; a backward target is a loop
+                // back-edge and needs the same deadline check as .goto.
+                if (offset < 0) {
+                    try self.checkBackedge();
+                }
                 continue :sw @enumFromInt(self.pc[0]);
             },
 
