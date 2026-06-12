@@ -32,8 +32,32 @@ key, user, or route.
 - Stack overflow and call-depth overflow return typed engine errors that fold
   into `500`.
 - Request bodies above the fixed limit return `413` before the body is buffered.
-- A panic is a bug. Zig's default panic handler prints a message and stack trace
-  to stderr, then aborts the process.
+- A handler panic is caught by a setjmp/longjmp boundary around each handler
+  invocation, returns `500`, and quarantines the pool slot. The server and other
+  workers keep running. A panic in server infrastructure outside that boundary
+  still aborts the process.
+
+## Health And Readiness Probes
+
+The server answers two built-in paths before the handler and before WebSocket
+upgrade:
+
+| Path | Meaning |
+|---|---|
+| `/_health` | `200 OK` with body `ok`; always answers if the process is running. |
+| `/_readiness` | `200 OK` when the runtime pool has at least one free slot; `503` when all slots are in use. |
+
+Orchestrators (Kubernetes, ECS, Fly.io) should use `/_health` for liveness and
+`/_readiness` for readiness checks.
+
+## Graceful Shutdown
+
+On `SIGTERM` or `SIGINT`, the server stops accepting new connections and waits
+for in-flight requests to finish, up to the configured request timeout. A second
+signal terminates immediately.
+
+Container stop (`docker stop`, `systemctl stop`, ECS task drain) will complete
+in-flight requests before the process exits.
 
 ## Exit Codes
 

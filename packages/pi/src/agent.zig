@@ -593,7 +593,7 @@ pub fn runOneTurn(
     const replay = session.replay_next_turn;
     session.replay_next_turn = false;
 
-    const turn_result = try loop.runTurnWith(
+    const turn_result = loop.runTurnWith(
         allocator,
         session.modelClient(),
         registry,
@@ -604,7 +604,18 @@ pub fn runOneTurn(
             .replay_mode = replay,
             .max_attempts = loop.interactive_max_attempts,
         },
-    );
+    ) catch |err| {
+        if (session.events_path) |path| {
+            const entries = session.transcript.entries.items;
+            while (session.last_persisted_len < entries.len) : (session.last_persisted_len += 1) {
+                persister.appendEntry(allocator, path, &entries[session.last_persisted_len], session.persist_opts) catch {};
+            }
+            session_events.appendEvent(allocator, path, .{ .turn_end = .{
+                .reason = .error_exit,
+            } }) catch {};
+        }
+        return err;
+    };
     session.token_totals.add(turn_result.usage);
     const tr = &session.transcript;
     std.debug.assert(tr.len() >= 1);
@@ -619,15 +630,8 @@ pub fn runOneTurn(
                 session.persist_opts,
             );
         }
-        // Append a turn_end marker so the session log records why the turn
-        // concluded. Mapped from TurnState: awaiting_user = budget exhausted,
-        // everything else that returns = approved/done.
-        const te_reason: session_events.TurnEndReason = switch (turn_result.final_state) {
-            .awaiting_user => .budget_roundtrips,
-            else => .approved,
-        };
         session_events.appendEvent(allocator, path, .{ .turn_end = .{
-            .reason = te_reason,
+            .reason = turn_result.end_reason,
         } }) catch {}; // best-effort: a log write failure must not crash the turn
     }
 

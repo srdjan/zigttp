@@ -1226,14 +1226,13 @@ fn ignoreSigpipe() void {
 }
 
 /// Process-wide shutdown flag. Set by the SIGTERM/SIGINT handler; polled by
-/// the accept loop. A bare bool is unsafe from a signal handler, but posix
-/// requires signal handlers to use `volatile` or `sig_atomic_t`; here we
-/// match the repo's existing pattern (see ignoreSigpipe) and treat a single
-/// non-torn store/load of a bool as the accepted minimum on all targets.
-var g_shutdown_requested: bool = false;
+/// the accept loop. Atomic so signal-handler stores are visible to the polling
+/// thread without data races; .monotonic ordering is sufficient (no
+/// memory-ordering guarantee is needed between the flag and pool state).
+var g_shutdown_requested: std.atomic.Value(bool) = .init(false);
 
 fn sigShutdownHandler(_: std.c.SIG) callconv(.c) void {
-    g_shutdown_requested = true;
+    g_shutdown_requested.store(true, .monotonic);
 }
 
 fn installShutdownSignals() void {
@@ -1864,6 +1863,7 @@ pub const Server = struct {
     pub fn run(self: *Self) !void {
         try self.start();
         try self.acceptLoop();
+        self.shutdown(self.config.timeout_ms);
     }
 
     /// Start the server, spawn work_fn on a background thread, then
@@ -1878,13 +1878,14 @@ pub const Server = struct {
         const thread = try std.Thread.spawn(.{}, work_fn, .{context});
         defer thread.join();
         try self.acceptLoop();
+        self.shutdown(self.config.timeout_ms);
     }
 
     fn acceptLoop(self: *Self) !void {
         const io = self.io_backend.io();
         var listener = self.listener orelse return error.NotStarted;
 
-        while (self.running and !g_shutdown_requested) {
+        while (self.running and !g_shutdown_requested.load(.monotonic)) {
             const stream = listener.accept(io) catch |err| switch (err) {
                 // Per-connection hiccup: drop it and keep serving.
                 error.ConnectionAborted => continue,

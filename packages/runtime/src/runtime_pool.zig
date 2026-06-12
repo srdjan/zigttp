@@ -77,6 +77,9 @@ pub const HandlerPool = struct {
     trace_file: ?std.c.fd_t,
     /// Mutex protecting concurrent trace file writes
     trace_mutex: ?*zq.trace.TraceMutex,
+    /// E2E panic-injection path for testing longjmp recovery. Set from
+    /// ZIGTTP_DEBUG_PANIC_PATH env var at init; null in production.
+    debug_panic_path: ?[]const u8 = null,
 
     const Self = @This();
     const collect_pool_metrics = builtin.mode == .Debug;
@@ -97,8 +100,11 @@ pub const HandlerPool = struct {
         runtime: *Runtime,
         base_rt: *zq.LockFreePool.Runtime,
         pool: *HandlerPool,
+        active: bool = true,
 
         pub fn deinit(self: *WorkerRuntimeLease) void {
+            if (!self.active) return;
+            self.active = false;
             self.pool.releaseForRequest(self.base_rt);
         }
     };
@@ -175,6 +181,7 @@ pub const HandlerPool = struct {
             .runtime_dep_bytecodes = runtime_dep_bytecodes,
             .trace_file = null,
             .trace_mutex = null,
+            .debug_panic_path = if (std.c.getenv("ZIGTTP_DEBUG_PANIC_PATH")) |raw| std.mem.span(raw) else null,
         };
         errdefer self.deinit();
 
@@ -407,11 +414,10 @@ pub const HandlerPool = struct {
         var attempt: u8 = 0;
         var last_err: ?anyerror = null;
         while (attempt < 2) : (attempt += 1) {
-            lease.runtime.armRequestDeadline();
-            const response = lease.runtime.executeHandlerBorrowedWithId(request, request_id) catch |err| {
-                lease.runtime.clearRequestDeadline();
+            const response = self.callHandlerGuarded(lease.runtime, request, request_id, true) catch |err| {
                 if (err == error.HandlerPanicked) {
                     // Lease path: panic during WebSocket frame - close the connection.
+                    self.quarantineLeasedRuntime(lease);
                     return err;
                 }
                 if (err == error.RequestTimeout) {
@@ -430,7 +436,6 @@ pub const HandlerPool = struct {
                 }
                 return err;
             };
-            lease.runtime.clearRequestDeadline();
             return response;
         }
         return last_err orelse error.HandlerNotCallable;
@@ -768,6 +773,12 @@ pub const HandlerPool = struct {
         _ = self.in_use.fetchSub(1, .monotonic);
     }
 
+    fn quarantineLeasedRuntime(self: *Self, lease: *WorkerRuntimeLease) void {
+        if (!lease.active) return;
+        self.quarantineSlot(lease.base_rt);
+        lease.active = false;
+    }
+
     /// Run one handler invocation under panic recovery and the per-request
     /// deadline. MUST remain noinline and minimal: after the second setjmp return,
     /// only `frame` (address-taken) and thread-local state are valid; `rt` must
@@ -789,6 +800,10 @@ pub const HandlerPool = struct {
         panic_recovery.arm(&frame);
         defer panic_recovery.disarm();
 
+        if (self.debug_panic_path) |pp| {
+            if (std.mem.eql(u8, request.path, pp)) @panic("zigttp_debug_injection");
+        }
+
         rt.armRequestDeadline();
         const result = if (borrowed)
             rt.executeHandlerBorrowedWithId(request, request_id)
@@ -799,7 +814,6 @@ pub const HandlerPool = struct {
             return err;
         };
         rt.clearRequestDeadline();
-        _ = self; // suppress unused warning; self used for quarantine caller side
         return response;
     }
 
@@ -958,3 +972,38 @@ pub const HandlerPool = struct {
         }
     }
 };
+
+const testing = std.testing;
+
+test "WorkerRuntimeLease deinit is a no-op after quarantine" {
+    if (builtin.os.tag == .linux) return error.SkipZigTest;
+
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled },
+        "function handler(req) { return Response.text('ok'); }",
+        "<runtime-pool-test>",
+        1,
+        0,
+    );
+    defer pool.deinit();
+
+    var lease = try pool.acquireWorkerRuntime();
+    try testing.expectEqual(@as(usize, 1), pool.getInUse());
+
+    pool.quarantineLeasedRuntime(&lease);
+    try testing.expectEqual(@as(usize, 0), pool.getInUse());
+    try testing.expect(!lease.active);
+
+    lease.deinit();
+    try testing.expectEqual(@as(usize, 0), pool.getInUse());
+
+    var replacement = try pool.acquireWorkerRuntime();
+    defer replacement.deinit();
+    try testing.expectEqual(@as(usize, 1), pool.getInUse());
+
+    const metrics = pool.getMetrics();
+    try testing.expectEqual(@as(u64, 1), metrics.panics);
+    try testing.expect(metrics.recycles >= 1);
+}

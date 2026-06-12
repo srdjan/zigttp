@@ -13,6 +13,7 @@ const file_io = zigts.file_io;
 const apply_edit = @import("providers/anthropic/apply_edit.zig");
 const tools_common = @import("tools/common.zig");
 const json_writer = @import("providers/anthropic/json_writer.zig");
+const session_events = @import("session/events.zig");
 
 const PostApplyReport = struct {
     ok: bool,
@@ -167,6 +168,7 @@ pub const TurnResult = struct {
     final_state: turn.TurnState,
     attempt: u8,
     usage: turn.Usage = .{},
+    end_reason: session_events.TurnEndReason = .approved,
 };
 
 pub const RunOptions = struct {
@@ -233,6 +235,9 @@ pub fn runTurnWith(
     // `.prompt_user` arm reads it to append a concrete next step to the bare
     // "budget exhausted" line so the user is not left at a dead end.
     var hit_roundtrip_budget = false;
+    // Set when the per-turn tool-call budget is exceeded; causes end_turn/none
+    // to log budget_tool_calls instead of approved.
+    var hit_tool_budget = false;
     // Set when the per-turn wall-time budget is exhausted. The `.prompt_user`
     // arm reads it to show a timeout-specific message instead of the generic
     // round-trip exhaustion text.
@@ -352,7 +357,11 @@ pub fn runTurnWith(
                     const applied_content = veto_result.report.normalized_content orelse prepared.edit.content;
                     // Log canonical normalization to stderr in auto-approve mode
                     // so the user knows what changed even when there is no prompt.
-                    if (options.approval_fn == null and veto_result.report.rewrite_trace.len > 0) {
+                    const is_auto_approve: bool = if (options.approval_fn) |fn_| switch (fn_) {
+                        .bare => |f| f == &autoApprove,
+                        else => false,
+                    } else false;
+                    if (is_auto_approve and veto_result.report.rewrite_trace.len > 0) {
                         var buf: [512]u8 = undefined;
                         var fw = std.Io.Writer.fixed(&buf);
                         fw.writeAll("note: canonical normalization applied ") catch {};
@@ -382,7 +391,7 @@ pub fn runTurnWith(
                                 .llm_text = "edit verified but not applied by user approval policy",
                                 .ui_payload = null,
                             } });
-                            return .{ .final_state = .done, .attempt = machine.attempt, .usage = turn_usage };
+                            return .{ .final_state = .done, .attempt = machine.attempt, .usage = turn_usage, .end_reason = .approval_denied };
                         }
                     }
                     // Normalize-on-apply: `applied_content` (bound above for the
@@ -419,6 +428,7 @@ pub fn runTurnWith(
                     tool_calls_used + calls.len > options.max_tool_calls_per_turn;
 
                 if (mixed_apply_edit or over_budget) {
+                    if (over_budget and !mixed_apply_edit) hit_tool_budget = true;
                     for (calls) |call| {
                         const message = if (mixed_apply_edit)
                             "apply_edit was grouped with other tool calls. It must be issued alone in a single response so the compiler veto can run cleanly. Re-issue just the apply_edit call without any other tools."
@@ -452,7 +462,11 @@ pub fn runTurnWith(
             },
             .render => |msg| {
                 try transcript.append(allocator, msg);
-                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage };
+                const end_reason: session_events.TurnEndReason = switch (msg) {
+                    .diagnostic_box => .veto_exhausted,
+                    else => .approved,
+                };
+                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = end_reason };
             },
             .prompt_user => |question| {
                 const text = if (hit_timeout_budget)
@@ -466,10 +480,10 @@ pub fn runTurnWith(
                 else
                     question;
                 try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = text } });
-                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage };
+                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = .budget_roundtrips };
             },
-            .end_turn => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage },
-            .none => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage },
+            .end_turn => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = if (hit_tool_budget) .budget_tool_calls else .approved },
+            .none => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = if (hit_tool_budget) .budget_tool_calls else .approved },
         }
     }
 }

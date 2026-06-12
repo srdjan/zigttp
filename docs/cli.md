@@ -141,12 +141,26 @@ Useful modes:
 
 ```bash
 zigttp expert --resume
+zigttp expert --yes
+zigttp expert --no-edit
 zigttp expert --model claude-sonnet-4-6
 zigttp expert --print "add a GET /health route"
 zigttp expert --print "..." --mode json
 zigttp expert --mode rpc
 zigttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
+
+| Flag | Purpose |
+|---|---|
+| `--resume` | Continue the last session for the current project. |
+| `--yes` | Apply every verified edit without prompting. |
+| `--no-edit` | Let the model read and analyze files but block all writes. |
+| `--model <id>` | Start on a specific provider model. |
+| `--print <text>` | Non-interactive: send one message, print the response, and exit. |
+| `--mode json` | Emit JSON-encoded turn events to stdout (pairs with `--print`). |
+| `--mode rpc` | Run in RPC mode for editor integrations. |
+| `--handler <file>` | Override the handler file (default: auto-detected from `zigttp.json`). |
+| `--goal <property>` | Restrict the session to edits that achieve a named proof property. |
 
 `--model <id>` starts the session on a specific provider model; run `/model`
 in-session to list the available ids.
