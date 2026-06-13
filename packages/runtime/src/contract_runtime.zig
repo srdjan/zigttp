@@ -507,7 +507,7 @@ fn parseProperties(root: std.json.ObjectMap) Properties {
     props.optional_safe = getBool(obj, "optionalSafe");
 
     if (obj.get("maxIoDepth")) |depth_val| {
-        if (depth_val == .integer) {
+        if (depth_val == .integer and depth_val.integer >= 0 and depth_val.integer <= std.math.maxInt(u32)) {
             props.max_io_depth = @intCast(depth_val.integer);
         }
     }
@@ -587,7 +587,9 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
     }
     var reads_request_state = false;
     for (hc.api.routes.items) |api_route| {
-        if (api_route.header_params.items.len > 0 or api_route.header_params_dynamic) {
+        if (api_route.header_params.items.len > 0 or api_route.header_params_dynamic or
+            api_route.request_bodies.items.len > 0 or api_route.request_bodies_dynamic)
+        {
             reads_request_state = true;
         }
         const method = try allocator.dupe(u8, api_route.method);

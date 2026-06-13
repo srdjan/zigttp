@@ -578,6 +578,9 @@ pub const ComptimeEvaluator = struct {
     fn parseNumber(self: *Self) ComptimeError!ComptimeValue {
         const start = self.pos;
 
+        // Handle optional leading minus (e.g. from JSON.parse("-5"))
+        if (self.peek() == '-') self.advance();
+
         // Handle hex, octal, binary
         if (self.peek() == '0' and self.pos + 1 < self.source.len) {
             const next = self.source[self.pos + 1];
@@ -715,7 +718,7 @@ pub const ComptimeEvaluator = struct {
                     '0' => 0,
                     'x' => blk: {
                         self.advance();
-                        if (self.pos + 1 >= self.source.len) return ComptimeError.InvalidEscape;
+                        if (self.pos + 2 > self.source.len) return ComptimeError.InvalidEscape;
                         const hex = self.source[self.pos .. self.pos + 2];
                         self.pos += 1; // Will advance again below
                         break :blk std.fmt.parseInt(u8, hex, 16) catch return ComptimeError.InvalidEscape;
@@ -1218,8 +1221,10 @@ pub const ComptimeEvaluator = struct {
         // in the stripper); the previous page_allocator made that a
         // cross-allocator free.
         if (left == .string or right == .string) {
-            const ls = valueToString(left);
-            const rs = valueToString(right);
+            const ls = try valueToStringAlloc(self.allocator, left);
+            defer if (left == .number) self.allocator.free(ls);
+            const rs = try valueToStringAlloc(self.allocator, right);
+            defer if (right == .number) self.allocator.free(rs);
             const result = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ls, rs }) catch return ComptimeError.OutOfMemory;
             return .{ .string = result };
         }
@@ -1861,7 +1866,7 @@ fn valueToString(value: ComptimeValue) []const u8 {
         .number => |n| blk: {
             if (std.math.isNan(n)) break :blk "NaN";
             if (std.math.isInf(n)) break :blk if (n < 0) "-Infinity" else "Infinity";
-            break :blk ""; // Would need allocation for proper conversion
+            break :blk ""; // finite numbers need allocation; use valueToStringAlloc
         },
         .boolean => |b| if (b) "true" else "false",
         .null_val => "null",
@@ -1871,6 +1876,20 @@ fn valueToString(value: ComptimeValue) []const u8 {
         .array => "",
         .object => "[object Object]",
     };
+}
+
+fn valueToStringAlloc(allocator: std.mem.Allocator, value: ComptimeValue) error{OutOfMemory}![]const u8 {
+    if (value == .number) {
+        const n = value.number;
+        if (std.math.isNan(n)) return try allocator.dupe(u8, "NaN");
+        if (std.math.isInf(n)) return try allocator.dupe(u8, if (n < 0) "-Infinity" else "Infinity");
+        // Format like JS: integer values as integers, floats with minimal digits.
+        if (n == @trunc(n) and @abs(n) < 1e15) {
+            return std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))});
+        }
+        return std.fmt.allocPrint(allocator, "{}", .{n});
+    }
+    return valueToString(value);
 }
 
 // ============================================================================

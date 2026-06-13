@@ -878,7 +878,7 @@ pub const FlowChecker = struct {
                         self.binding_labels.put(self.allocator, key, labels) catch {};
                     }
                     self.recordBindingValue(binding, asgn.value);
-                } else if (target_tag == .member_access or target_tag == .optional_chain) {
+                } else if (target_tag == .member_access or target_tag == .optional_chain or target_tag == .computed_access) {
                     // `obj.field = secret` / `obj[k] = secret`: taint the base
                     // object so a later read of `obj` keeps the label. Merge
                     // rather than replace, since other fields may already taint it.
@@ -1105,11 +1105,12 @@ pub const FlowChecker = struct {
 
             .method_call => {
                 const call_data = self.ir_view.getCall(node) orelse return LabelSet.empty;
-                if (call_data.args_count > 0) {
-                    const first_arg = self.ir_view.getListIndex(call_data.args_start, 0);
-                    return self.inferLabels(first_arg);
+                var labels = self.inferLabels(call_data.callee);
+                for (0..call_data.args_count) |i| {
+                    const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+                    labels = LabelSet.merge(labels, self.inferLabels(arg));
                 }
-                return LabelSet.empty;
+                return labels;
             },
 
             else => return LabelSet.empty,

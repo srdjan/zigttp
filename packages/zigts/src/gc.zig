@@ -371,7 +371,27 @@ pub const RootSet = struct {
         try self.roots.append(self.allocator, val);
     }
 
-    /// Remove a root value
+    /// Add a root value and return its stable index. The index remains valid
+    /// until removeRootAt is called; GC updates the stored value in place so
+    /// getRoot always returns the current (possibly-forwarded) address.
+    pub fn addRootTracked(self: *RootSet, val: value.JSValue) !usize {
+        const idx = self.roots.items.len;
+        try self.roots.append(self.allocator, val);
+        return idx;
+    }
+
+    /// Read the current (possibly-forwarded) value for a tracked root slot.
+    pub fn getRoot(self: *const RootSet, idx: usize) value.JSValue {
+        return self.roots.items[idx];
+    }
+
+    /// Mark a tracked root slot as removed. The slot is tombstoned with
+    /// undefined_val so GC iteration skips it safely (isPtr returns false).
+    pub fn removeRootAt(self: *RootSet, idx: usize) void {
+        self.roots.items[idx] = value.JSValue.undefined_val;
+    }
+
+    /// Remove a root value by value identity (for non-tracked callers).
     pub fn removeRoot(self: *RootSet, val: value.JSValue) void {
         for (self.roots.items, 0..) |v, i| {
             if (v.raw == val.raw) {
@@ -704,6 +724,21 @@ pub const GC = struct {
     /// Add a GC root
     pub fn addRoot(self: *GC, val: value.JSValue) !void {
         try self.root_set.addRoot(val);
+    }
+
+    /// Add a GC root and return a stable index for later removal via removeRootAt.
+    pub fn addRootTracked(self: *GC, val: value.JSValue) !usize {
+        return self.root_set.addRootTracked(val);
+    }
+
+    /// Read the current (possibly-forwarded) value for a tracked root slot.
+    pub fn getRoot(self: *const GC, idx: usize) value.JSValue {
+        return self.root_set.getRoot(idx);
+    }
+
+    /// Remove a tracked root by its stable index.
+    pub fn removeRootAt(self: *GC, idx: usize) void {
+        self.root_set.removeRootAt(idx);
     }
 
     /// Remove a GC root

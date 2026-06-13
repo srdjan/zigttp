@@ -156,6 +156,41 @@ pub const IrTranspiler = struct {
         if (self.indent > 0) self.indent -= 1;
     }
 
+    /// Return the JSON representation of `str` including surrounding double-quotes
+    /// with all special characters escaped. Caller owns the returned slice.
+    fn jsonStringLiteralAlloc(self: *IrTranspiler, str: []const u8) error{OutOfMemory}![]u8 {
+        var extra: usize = 0;
+        for (str) |c| {
+            switch (c) {
+                '"', '\\', '\n', '\r', '\t' => extra += 1,
+                0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => extra += 5, // \uXXXX = 6 chars - 1
+                else => {},
+            }
+        }
+        const result = try self.allocator.alloc(u8, str.len + extra + 2);
+        result[0] = '"';
+        var di: usize = 1;
+        for (str) |c| {
+            switch (c) {
+                '"'  => { result[di] = '\\'; result[di+1] = '"';  di += 2; },
+                '\\' => { result[di] = '\\'; result[di+1] = '\\'; di += 2; },
+                '\n' => { result[di] = '\\'; result[di+1] = 'n';  di += 2; },
+                '\r' => { result[di] = '\\'; result[di+1] = 'r';  di += 2; },
+                '\t' => { result[di] = '\\'; result[di+1] = 't';  di += 2; },
+                0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => {
+                    const hex = "0123456789abcdef";
+                    result[di]   = '\\'; result[di+1] = 'u';
+                    result[di+2] = '0';  result[di+3] = '0';
+                    result[di+4] = hex[c >> 4]; result[di+5] = hex[c & 0x0f];
+                    di += 6;
+                },
+                else => { result[di] = c; di += 1; },
+            }
+        }
+        result[di] = '"';
+        return result;
+    }
+
     fn emitZigString(self: *IrTranspiler, str: []const u8) void {
         self.emitByte('"');
         for (str) |c| {
@@ -1534,8 +1569,10 @@ pub const IrTranspiler = struct {
                 return true;
             };
 
-            // Emit key as "key":
-            const key_lit = std.fmt.allocPrint(self.allocator, "\"{s}\":", .{key_name}) catch return false;
+            // Emit key as "key": (with proper JSON escaping for special chars in key names)
+            const key_json = self.jsonStringLiteralAlloc(key_name) catch return false;
+            self.name_allocs.append(self.allocator, key_json) catch {};
+            const key_lit = std.fmt.allocPrint(self.allocator, "{s}:", .{key_json}) catch return false;
             self.name_allocs.append(self.allocator, key_lit) catch {};
             self.emitMemcpyLiteral(key_lit);
 
@@ -1577,8 +1614,8 @@ pub const IrTranspiler = struct {
             .lit_string => {
                 const str_idx = self.ir.getStringIdx(idx) orelse return false;
                 const str = self.ir.getString(str_idx) orelse return false;
-                // Emit static string JSON value: "value"
-                const json_val = std.fmt.allocPrint(self.allocator, "\"{s}\"", .{str}) catch return false;
+                // Emit static string JSON value: "value" (with proper JSON escaping)
+                const json_val = self.jsonStringLiteralAlloc(str) catch return false;
                 self.name_allocs.append(self.allocator, json_val) catch {};
                 self.emitMemcpyLiteral(json_val);
                 return true;
@@ -2216,12 +2253,25 @@ pub const IrTranspiler = struct {
             const member = self.ir.getMember(idx) orelse return null;
             if (member.property != @intFromEnum(Atom.length)) return null;
 
-            // lit_string.length -> compile-time constant
+            // lit_string.length -> compile-time constant (UTF-16 code units, not UTF-8 bytes)
             const obj_tag = self.ir.getTag(member.object) orelse return null;
             if (obj_tag == .lit_string) {
                 const str_idx = self.ir.getStringIdx(member.object) orelse return null;
                 const str = self.ir.getString(str_idx) orelse return null;
-                return @intCast(str.len);
+                // Count UTF-16 code units: BMP chars = 1, supplementary (U+10000+) = 2
+                var utf16_len: usize = 0;
+                var i: usize = 0;
+                while (i < str.len) {
+                    const cp_len = std.unicode.utf8ByteSequenceLength(str[i]) catch {
+                        i += 1;
+                        utf16_len += 1;
+                        continue;
+                    };
+                    const cp = std.unicode.utf8Decode(str[i..i + cp_len]) catch 0xFFFD;
+                    utf16_len += if (cp >= 0x10000) 2 else 1;
+                    i += cp_len;
+                }
+                return @intCast(utf16_len);
             }
         }
 

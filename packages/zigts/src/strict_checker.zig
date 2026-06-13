@@ -874,9 +874,8 @@ pub const StrictChecker = struct {
         const binding = self.ir_view.getBinding(callee) orelse return false;
         if (self.annotated_function_bindings.contains(bindingKey(binding))) return false;
         if (self.importedFunctionForSlot(binding.slot) != null) return false;
-        const name = self.resolveAtomName(binding.slot) orelse return false;
-        if (isKnownGlobalFunction(name)) {
-            return false;
+        if (self.resolveAtomName(binding.slot)) |name| {
+            if (isKnownGlobalFunction(name)) return false;
         }
         return true;
     }

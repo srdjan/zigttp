@@ -385,14 +385,22 @@ pub const BoolChecker = struct {
 
             .function_decl => {
                 const func = self.ir_view.getFunction(node) orelse return;
-                // Track function return type for named declarations
+                // Track function return type for named declarations.
+                // Use the binding's scope+slot as the key, not the raw name atom.
+                // Two functions in different scopes with the same name share the same
+                // name_atom but have different (scope_id, slot) pairs.
                 const ret_type = self.inferFunctionReturnType(node);
-                if (ret_type != .unknown and func.name_atom != 0) {
-                    // Function declarations create a binding in the enclosing scope
-                    // Use scope_id=0 + name_atom as key (global function pattern)
-                    const key = @as(u32, func.name_atom);
-                    self.fn_return_types.put(self.allocator, key, ret_type) catch {};
-                    self.const_types.put(self.allocator, key, .function) catch {};
+                if (ret_type != .unknown) {
+                    if (self.ir_view.getBinding(node)) |binding| {
+                        const key = packBindingKey(binding.scope_id, binding.slot);
+                        self.fn_return_types.put(self.allocator, key, ret_type) catch {};
+                        self.const_types.put(self.allocator, key, .function) catch {};
+                    } else if (func.name_atom != 0) {
+                        // Fallback: top-level declarations with no binding info use name atom.
+                        const key = @as(u32, func.name_atom);
+                        self.fn_return_types.put(self.allocator, key, ret_type) catch {};
+                        self.const_types.put(self.allocator, key, .function) catch {};
+                    }
                 }
                 self.walkStmt(func.body);
             },

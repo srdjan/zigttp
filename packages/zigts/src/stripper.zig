@@ -571,6 +571,8 @@ const Stripper = struct {
             // Optional parameter marker in TypeScript: `name?: Type`
             if (c == '?' and paren_depth == 1) {
                 const question_pos = self.pos;
+                const question_line = self.line;
+                const question_col = self.col;
                 self.pos += 1;
                 self.col += 1;
                 self.skipWhitespaceTracked();
@@ -579,7 +581,8 @@ const Stripper = struct {
                     continue;
                 }
                 self.pos = question_pos;
-                self.col -= 1;
+                self.line = question_line;
+                self.col = question_col;
             }
 
             // Strip type annotations in params
@@ -793,6 +796,12 @@ const Stripper = struct {
                     self.skipString(c) catch return false;
                     continue;
                 }
+                // Treat => as a single unit so the > does not close an angle bracket.
+                if (c == '=' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>') {
+                    if (depth == 0) return true;
+                    self.pos += 2; // skip both = and >
+                    continue;
+                }
                 if (c == '(' or c == '[' or c == '{' or c == '<') {
                     depth += 1;
                 } else if (c == ')' or c == ']' or c == '}') {
@@ -801,7 +810,6 @@ const Stripper = struct {
                 } else if (c == '>') {
                     if (depth > 0) depth -= 1;
                 } else if (depth == 0) {
-                    if (c == '=' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>') return true;
                     if (c == ',' or c == ';') return false;
                 }
                 self.pos += 1;

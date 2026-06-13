@@ -923,6 +923,8 @@ const ConnectionPool = struct {
     /// setup errors: a misconfigured durable dir should not silently
     /// degrade to in-memory behaviour.
     fn ensureWebSocketPool(self: *ConnectionPool) !*websocket_pool.Pool {
+        self.server.ws_pool_mutex.lock();
+        defer self.server.ws_pool_mutex.unlock();
         if (self.server.ws_pool == null) {
             var pool = websocket_pool.Pool.init(self.server.allocator);
             errdefer pool.deinit();
@@ -1289,6 +1291,8 @@ pub const Server = struct {
     /// WebSocket connection registry. Initialised lazily on the first
     /// upgrade attempt; a handler with no WS exports pays zero cost.
     ws_pool: ?websocket_pool.Pool = null,
+    /// Guards ws_pool lazy initialisation against concurrent upgrade attempts.
+    ws_pool_mutex: engine.Mutex = .{},
     /// Dev/serve policy backing storage. The contract-derived RuntimePolicy
     /// handed to the pool borrows these slices, so two generations are
     /// retained: a live-reload swap rotates `current` into `previous` (still

@@ -152,6 +152,10 @@ fn appendDisplayMessage(
             .ui_payload = null,
         };
     } else try parseDisplayMessage(allocator, payload);
+    errdefer {
+        allocator.free(message.llm_text);
+        if (message.ui_payload) |*p| p.deinit(allocator);
+    }
 
     try tr.entries.append(allocator, switch (kind) {
         .proof_card => .{ .proof_card = message },
@@ -213,8 +217,6 @@ fn appendToolResult(
     errdefer allocator.free(llm_text_copy);
     var payload_copy = if (obj.get("ui_payload")) |payload_val|
         try ui_payload.parse(allocator, payload_val)
-    else if (obj.get("llm_text") == null)
-        ui_payload.UiPayload{ .plain_text = try allocator.dupe(u8, llm_text_val.string) }
     else
         null;
     errdefer if (payload_copy) |*copied_payload| copied_payload.deinit(allocator);

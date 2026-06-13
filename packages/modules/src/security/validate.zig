@@ -10,7 +10,7 @@ pub const binding = sdk.ModuleBinding{
     .name = "validate",
     .stateful = true,
     .exports = &.{
-        .{ .name = "schemaCompile", .module_func = schemaCompileImpl, .arg_count = 2, .returns = .boolean, .param_types = &.{.string}, .traceable = false, .contract_extractions = &.{.{ .category = .schema_compile }} },
+        .{ .name = "schemaCompile", .module_func = schemaCompileImpl, .arg_count = 2, .returns = .boolean, .param_types = &.{ .string, .string }, .traceable = false, .contract_extractions = &.{.{ .category = .schema_compile }} },
         .{
             .name = "validateJson",
             .module_func = validateJsonImpl,

@@ -460,12 +460,16 @@ pub const TypePool = struct {
 
     /// Create a generic application (e.g., Array<number>).
     pub fn addGenericApp(self: *TypePool, allocator: std.mem.Allocator, base: TypeIndex, type_args: []const TypeIndex) TypeIndex {
+        // Layout: members[start] = count, members[start+1..start+1+count] = type args.
+        // Storing count inline avoids the 8-bit truncation of the previous (start&0xFF)|(count<<8) scheme.
+        if (self.members.items.len > std.math.maxInt(u16)) return null_type_idx;
         const start: u16 = @intCast(self.members.items.len);
         const count: u16 = @intCast(type_args.len);
+        self.members.append(allocator, count) catch return null_type_idx;
         self.members.appendSlice(allocator, type_args) catch return null_type_idx;
         return self.addNode(allocator, .{
             .tag = .t_generic_app,
-            .data = .{ .a = base, .b = (@as(u16, @intCast(start)) & 0xFF) | (count << 8) },
+            .data = .{ .a = base, .b = start },
         });
     }
 
@@ -760,16 +764,13 @@ pub const TypePool = struct {
     }
 
     /// Get function params and return type.
-    /// Layout: data.a = param_start (into params array), data.b = return type index.
-    /// Param count is stored as a members entry at index = node index.
+    /// Layout: data.a = (param_start & 0x0FFF) | (count << 12), data.b = return type index.
     pub fn getFunctionInfo(self: *const TypePool, idx: TypeIndex) struct { params: []const FuncParam, ret: TypeIndex } {
         const data = self.getData(idx) orelse return .{ .params = &.{}, .ret = null_type_idx };
         if (self.getTag(idx) != .t_function) return .{ .params = &.{}, .ret = null_type_idx };
-        const param_start = data.a;
+        const param_start: u16 = data.a & 0x0FFF;
+        const param_count: u16 = data.a >> 12;
         const ret = data.b;
-        // Param count encoded as first member entry for this function
-        const param_count_raw = if (idx < self.members.items.len) self.members.items[idx] else 0;
-        const param_count: u16 = @intCast(@min(param_count_raw, self.params.items.len -| param_start));
         if (param_start + param_count > self.params.items.len) return .{ .params = &.{}, .ret = ret };
         return .{
             .params = self.params.items[param_start .. param_start + param_count],
@@ -779,19 +780,14 @@ pub const TypePool = struct {
 
     /// Create a function type with params and return type.
     pub fn addFunctionWithReturn(self: *TypePool, allocator: std.mem.Allocator, func_params: []const FuncParam, ret: TypeIndex) TypeIndex {
-        const param_start: u16 = @intCast(self.params.items.len);
+        const param_start: u16 = @intCast(@min(self.params.items.len, 0x0FFF));
+        // Count capped at 15 (4 bits); realistic handlers never exceed this.
+        const count: u16 = @intCast(@min(func_params.len, 15));
         self.params.appendSlice(allocator, func_params) catch return null_type_idx;
-        const node_idx = self.addNode(allocator, .{
+        return self.addNode(allocator, .{
             .tag = .t_function,
-            .data = .{ .a = param_start, .b = ret },
+            .data = .{ .a = param_start | (count << 12), .b = ret },
         });
-        // Store param count in members at the node's index for retrieval
-        // Pad members array if needed to match node index
-        while (self.members.items.len < node_idx) {
-            self.members.append(allocator, 0) catch break;
-        }
-        self.members.append(allocator, @intCast(func_params.len)) catch {};
-        return node_idx;
     }
 
     /// Get the array element type.
@@ -820,10 +816,11 @@ pub const TypePool = struct {
     pub fn getGenericAppInfo(self: *const TypePool, idx: TypeIndex) struct { base: TypeIndex, args: []const TypeIndex } {
         const data = self.getData(idx) orelse return .{ .base = null_type_idx, .args = &.{} };
         if (self.getTag(idx) != .t_generic_app) return .{ .base = null_type_idx, .args = &.{} };
-        const start: u16 = data.b & 0xFF;
-        const count: u16 = data.b >> 8;
-        if (start + count > self.members.items.len) return .{ .base = data.a, .args = &.{} };
-        return .{ .base = data.a, .args = self.members.items[start .. start + count] };
+        const start = data.b;
+        if (start >= self.members.items.len) return .{ .base = data.a, .args = &.{} };
+        const count: u16 = self.members.items[start];
+        if (start + 1 + count > self.members.items.len) return .{ .base = data.a, .args = &.{} };
+        return .{ .base = data.a, .args = self.members.items[start + 1 .. start + 1 + count] };
     }
 
     // -------------------------------------------------------------------
@@ -870,6 +867,15 @@ pub const TypePool = struct {
                 .t_nullable => self.isAssignableTo(self.getNullableInner(source), self.getNullableInner(target)),
                 .t_literal_string, .t_literal_number, .t_literal_bool => self.literalEquals(source, target),
                 .t_ref => std.mem.eql(u8, self.getRefName(source), self.getRefName(target)),
+                .t_tuple => blk: {
+                    const src_elems = self.getTupleElements(source);
+                    const tgt_elems = self.getTupleElements(target);
+                    if (src_elems.len != tgt_elems.len) break :blk false;
+                    for (src_elems, tgt_elems) |s, t| {
+                        if (!self.isAssignableTo(s, t)) break :blk false;
+                    }
+                    break :blk true;
+                },
                 else => false,
             };
         }

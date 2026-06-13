@@ -687,7 +687,12 @@ pub const HandlerVerifier = struct {
                     if (if_stmt.else_branch != null_node) {
                         self.setResultChecked(binding, true);
                         self.walkForResultsAndRefs(if_stmt.else_branch);
-                        self.setResultChecked(binding, false);
+                        // Only reset if then-branch did NOT always return: when
+                        // then_returns == .always the early-return guard means all
+                        // post-if code (including after the else) is the ok path.
+                        if (then_returns != .always) {
+                            self.setResultChecked(binding, false);
+                        }
                     }
                 } else if (self.extractOptionalNarrowingCheck(if_stmt.condition)) |info| {
                     // Check 6: optional narrowing via if (val) or if (val !== undefined)

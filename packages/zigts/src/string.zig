@@ -680,7 +680,8 @@ fn simdIndexOf(haystack: []const u8, needle: []const u8) ?u32 {
     }
 
     // Scalar fallback for remainder
-    return scalarIndexOf(haystack[i..], needle);
+    if (scalarIndexOf(haystack[i..], needle)) |idx| return @intCast(i + idx);
+    return null;
 }
 
 /// Scalar substring search
@@ -1270,7 +1271,7 @@ pub fn formatFloatToBuf(buf: []u8, f: f64) []const u8 {
 /// Concatenate a string and a number without intermediate string allocation
 /// Uses arena allocation for the result
 pub fn concatStringNumberWithArena(arena: *arena_mod.Arena, str: *const JSString, num_buf: []const u8) ?*JSString {
-    const total_len = str.len + @as(u32, @intCast(num_buf.len));
+    const total_len = std.math.add(u32, str.len, @intCast(num_buf.len)) catch return null;
     const total_size = @sizeOf(JSString) + total_len;
     const mem = arena.alloc(total_size) orelse return null;
 
@@ -1296,7 +1297,7 @@ pub fn concatStringNumberWithArena(arena: *arena_mod.Arena, str: *const JSString
 /// Concatenate a number and a string without intermediate string allocation
 /// Uses arena allocation for the result
 pub fn concatNumberStringWithArena(arena: *arena_mod.Arena, num_buf: []const u8, str: *const JSString) ?*JSString {
-    const total_len = @as(u32, @intCast(num_buf.len)) + str.len;
+    const total_len = std.math.add(u32, @intCast(num_buf.len), str.len) catch return null;
     const total_size = @sizeOf(JSString) + total_len;
     const mem = arena.alloc(total_size) orelse return null;
 

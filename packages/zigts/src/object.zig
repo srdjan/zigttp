@@ -2142,14 +2142,15 @@ pub const JSObject = extern struct {
 
     fn computeRangeLength(start: i32, end: i32, step: i32) u32 {
         if (step == 0) return 0;
+        const max_len = @as(u32, std.math.maxInt(i32));
         if (step > 0) {
             if (end <= start) return 0;
             const len_i64 = @divTrunc(@as(i64, end) - @as(i64, start) + @as(i64, step) - 1, @as(i64, step));
-            return @intCast(len_i64);
+            return @intCast(@min(len_i64, max_len));
         } else {
             if (start <= end) return 0;
             const len_i64 = @divTrunc(@as(i64, start) - @as(i64, end) - @as(i64, step) - 1, -@as(i64, step));
-            return @intCast(len_i64);
+            return @intCast(@min(len_i64, max_len));
         }
     }
 

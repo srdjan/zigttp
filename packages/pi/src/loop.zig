@@ -428,7 +428,7 @@ pub fn runTurnWith(
                     tool_calls_used + calls.len > options.max_tool_calls_per_turn;
 
                 if (mixed_apply_edit or over_budget) {
-                    if (over_budget and !mixed_apply_edit) hit_tool_budget = true;
+                    if (over_budget) hit_tool_budget = true;
                     for (calls) |call| {
                         const message = if (mixed_apply_edit)
                             "apply_edit was grouped with other tool calls. It must be issued alone in a single response so the compiler veto can run cleanly. Re-issue just the apply_edit call without any other tools."

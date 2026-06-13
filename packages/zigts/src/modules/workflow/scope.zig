@@ -34,8 +34,10 @@ pub const ScopeCallbacks = struct {
 };
 
 const ScopeEntry = struct {
-    close_fn: value.JSValue,
-    resource_value: value.JSValue = value.JSValue.undefined_val,
+    // Stable indices into the GC root set. Values may be forwarded by minor GC;
+    // always read through gc_state.getRoot(idx) rather than caching the raw value.
+    close_fn_idx: usize,
+    resource_value_idx: usize = 0,
     has_resource: bool = false,
 };
 
@@ -80,17 +82,18 @@ const ScopeState = struct {
         has_resource: bool,
     ) !void {
         const frame = self.current_frame orelse return error.NoActiveScope;
-        try self.ctx.gc_state.addRoot(close_fn);
-        errdefer self.ctx.gc_state.removeRoot(close_fn);
+        const close_fn_idx = try self.ctx.gc_state.addRootTracked(close_fn);
+        errdefer self.ctx.gc_state.removeRootAt(close_fn_idx);
 
+        var resource_value_idx: usize = 0;
         if (has_resource) {
-            try self.ctx.gc_state.addRoot(resource_value);
-            errdefer self.ctx.gc_state.removeRoot(resource_value);
+            resource_value_idx = try self.ctx.gc_state.addRootTracked(resource_value);
         }
+        errdefer if (has_resource) self.ctx.gc_state.removeRootAt(resource_value_idx);
 
         try frame.entries.append(self.allocator(), .{
-            .close_fn = close_fn,
-            .resource_value = resource_value,
+            .close_fn_idx = close_fn_idx,
+            .resource_value_idx = resource_value_idx,
             .has_resource = has_resource,
         });
     }
@@ -103,9 +106,9 @@ const ScopeState = struct {
         while (idx > 0) : (idx -= 1) {
             const entry = frame.entries.items[idx - 1];
             self.runCleanup(callbacks, entry);
-            self.ctx.gc_state.removeRoot(entry.close_fn);
+            self.ctx.gc_state.removeRootAt(entry.close_fn_idx);
             if (entry.has_resource) {
-                self.ctx.gc_state.removeRoot(entry.resource_value);
+                self.ctx.gc_state.removeRootAt(entry.resource_value_idx);
             }
         }
 
@@ -114,13 +117,15 @@ const ScopeState = struct {
     }
 
     fn runCleanup(self: *ScopeState, callbacks: *ScopeCallbacks, entry: ScopeEntry) void {
+        const close_fn = self.ctx.gc_state.getRoot(entry.close_fn_idx);
         if (entry.has_resource) {
-            _ = callbacks.call1_fn(callbacks.runtime_ptr, entry.close_fn, entry.resource_value) catch |err| {
+            const resource_value = self.ctx.gc_state.getRoot(entry.resource_value_idx);
+            _ = callbacks.call1_fn(callbacks.runtime_ptr, close_fn, resource_value) catch |err| {
                 logCleanupFailure(self.ctx, err);
                 return;
             };
         } else {
-            _ = callbacks.call0_fn(callbacks.runtime_ptr, entry.close_fn) catch |err| {
+            _ = callbacks.call0_fn(callbacks.runtime_ptr, close_fn) catch |err| {
                 logCleanupFailure(self.ctx, err);
                 return;
             };
@@ -136,9 +141,9 @@ const ScopeState = struct {
         while (frame) |current| {
             frame = current.parent;
             for (current.entries.items) |entry| {
-                self.ctx.gc_state.removeRoot(entry.close_fn);
+                self.ctx.gc_state.removeRootAt(entry.close_fn_idx);
                 if (entry.has_resource) {
-                    self.ctx.gc_state.removeRoot(entry.resource_value);
+                    self.ctx.gc_state.removeRootAt(entry.resource_value_idx);
                 }
             }
             current.entries.deinit(self.allocator());
