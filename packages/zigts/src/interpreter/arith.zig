@@ -79,10 +79,13 @@ pub fn concatToString(interp: *Interpreter, a: value.JSValue, b: value.JSValue) 
 
     // Fast path: string + number (very common pattern)
     const str_a = try valueToString(interp, a);
-    defer if (!a.isAnyString()) string.freeString(interp.ctx.allocator, str_a);
+    // Only free if we allocated a fresh string; cached ints (0-999) must not be freed.
+    const free_a = !a.isAnyString() and !(a.isInt() and interp.ctx.small_int_cache.get(a.getInt()) != null);
+    defer if (free_a) string.freeString(interp.ctx.allocator, str_a);
 
     const str_b = try valueToString(interp, b);
-    defer if (!b.isAnyString()) string.freeString(interp.ctx.allocator, str_b);
+    const free_b = !b.isAnyString() and !(b.isInt() and interp.ctx.small_int_cache.get(b.getInt()) != null);
+    defer if (free_b) string.freeString(interp.ctx.allocator, str_b);
 
     const result = try string.concatStrings(interp.ctx.allocator, str_a, str_b);
     return value.JSValue.fromPtr(result);
@@ -257,20 +260,35 @@ pub fn concatNValues(interp: *Interpreter, count: u8) !value.JSValue {
         values[i - 1] = interp.ctx.pop();
     }
 
-    // Convert all values to strings
-    var strings: [16]*const string.JSString = undefined;
+    // Convert all values to strings; track which are freshly allocated.
+    var strings: [16]*string.JSString = undefined;
+    var fresh: [16]bool = [_]bool{false} ** 16;
     for (0..count) |j| {
-        strings[j] = try valueToString(interp, values[j]);
+        const v = values[j];
+        strings[j] = valueToString(interp, v) catch |err| {
+            for (0..j) |k| if (fresh[k]) string.freeString(interp.ctx.allocator, strings[k]);
+            return err;
+        };
+        fresh[j] = !v.isAnyString() and !(v.isInt() and interp.ctx.small_int_cache.get(v.getInt()) != null);
     }
 
     // Use concatMany for single-allocation concatenation
     if (interp.ctx.hybrid) |h| {
-        const result = string.concatManyWithArena(h.arena, strings[0..count]) orelse
+        // valueToString always allocates via interp.ctx.allocator, not the arena,
+        // so fresh intermediates must be freed explicitly after concatenation.
+        const result = string.concatManyWithArena(h.arena, strings[0..count]) orelse {
+            for (0..count) |j| if (fresh[j]) string.freeString(interp.ctx.allocator, strings[j]);
             return error.OutOfMemory;
+        };
+        for (0..count) |j| if (fresh[j]) string.freeString(interp.ctx.allocator, strings[j]);
         return value.JSValue.fromPtr(result);
     }
 
-    const result = try string.concatMany(interp.ctx.allocator, strings[0..count]);
+    const result = string.concatMany(interp.ctx.allocator, strings[0..count]) catch |err| {
+        for (0..count) |j| if (fresh[j]) string.freeString(interp.ctx.allocator, strings[j]);
+        return err;
+    };
+    for (0..count) |j| if (fresh[j]) string.freeString(interp.ctx.allocator, strings[j]);
     return value.JSValue.fromPtr(result);
 }
 
@@ -314,11 +332,10 @@ pub fn valueToString(interp: *Interpreter, val: value.JSValue) !*string.JSString
     if (val.isObject()) {
         return try interp.createString("[object Object]");
     }
-    // Float
+    // Float: use formatFloatToBuf to correctly emit "NaN", "Infinity", "-Infinity"
     if (val.toNumber()) |n| {
         var buf: [64]u8 = undefined;
-        const slice = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return try interp.createString("NaN");
-        return try interp.createString(slice);
+        return try interp.createString(string.formatFloatToBuf(&buf, n));
     }
     return try interp.createString("undefined");
 }

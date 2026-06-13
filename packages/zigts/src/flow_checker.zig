@@ -986,7 +986,10 @@ pub const FlowChecker = struct {
 
             .ternary => {
                 const t = self.ir_view.getTernary(node) orelse return LabelSet.empty;
-                return LabelSet.merge(self.inferLabels(t.then_branch), self.inferLabels(t.else_branch));
+                return LabelSet.merge(
+                    self.inferLabels(t.condition),
+                    LabelSet.mergeConditional(self.inferLabels(t.then_branch), self.inferLabels(t.else_branch)),
+                );
             },
 
             .template_literal => {
@@ -1081,7 +1084,7 @@ pub const FlowChecker = struct {
 
             .match_expr => {
                 const match_data = self.ir_view.getMatchExpr(node) orelse return LabelSet.empty;
-                var labels = LabelSet.empty;
+                var labels = self.inferLabels(match_data.discriminant);
                 var i: u8 = 0;
                 while (i < match_data.arms_count) : (i += 1) {
                     const arm_idx = self.ir_view.getListIndex(match_data.arms_start, i);
@@ -1523,7 +1526,7 @@ pub const FlowChecker = struct {
     /// Check if callee is `Global.method()` where Global and method match the given names.
     fn isGlobalMethodCall(self: *const FlowChecker, callee: NodeIndex, object_name: []const u8, method_names: []const []const u8) bool {
         const tag = self.ir_view.getTag(callee) orelse return false;
-        if (tag != .member_access) return false;
+        if (tag != .member_access and tag != .optional_chain) return false;
         const member = self.ir_view.getMember(callee) orelse return false;
 
         const obj_tag = self.ir_view.getTag(member.object) orelse return false;
@@ -1559,7 +1562,7 @@ pub const FlowChecker = struct {
 
     fn isReqProperty(self: *const FlowChecker, node: NodeIndex, expected_prop: []const u8) bool {
         const tag = self.ir_view.getTag(node) orelse return false;
-        if (tag != .member_access) return false;
+        if (tag != .member_access and tag != .optional_chain) return false;
         const member = self.ir_view.getMember(node) orelse return false;
 
         // Check if object is the request binding

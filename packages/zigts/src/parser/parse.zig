@@ -957,7 +957,11 @@ pub const Parser = struct {
         }
 
         var value: ?NodeIndex = null;
-        if (!self.check(.semicolon) and !self.check(.rbrace) and !self.check(.eof)) {
+        // ASI: a newline between 'return' and the next token acts as an implicit semicolon.
+        // Only parse an expression when on the same line as the 'return' keyword.
+        if (self.current.line <= self.previous.line and
+            !self.check(.semicolon) and !self.check(.rbrace) and !self.check(.eof))
+        {
             value = try self.parseExpression(.none);
         }
         try self.expectSemicolon();
@@ -1688,6 +1692,12 @@ pub const Parser = struct {
             .question_question,
             .kw_in,
             => {
+                // In JavaScript, a unary operator on the left of ** is a syntax
+                // error (e.g. -3**2 is ambiguous). Require parentheses.
+                if (op_tok.type == .star_star and self.nodes.getTag(left) == .unary_op) {
+                    self.errors.addErrorAt(.unsupported_feature, op_tok, "unary operator before '**' requires parentheses: (-3)**2 or -(3**2)");
+                    return error.ParseError;
+                }
                 self.advance();
                 const right_prec = if (op_tok.type == .star_star)
                     @as(Precedence, @enumFromInt(@intFromEnum(prec) - 1)) // Right associative
@@ -2029,9 +2039,7 @@ pub const Parser = struct {
 
         // Strip quotes
         const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-        // Unescape string escape sequences (\n, \t, \\, etc.)
-        const unescaped = try self.unescapeString(content);
-        const str_idx = try self.addString(unescaped);
+        const str_idx = try self.addUnescapedString(content);
         return try self.nodes.add(Node.litString(loc, str_idx));
     }
 
@@ -2055,7 +2063,7 @@ pub const Parser = struct {
             const text = self.current.text(self.source);
             self.advance();
             const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-            const str_idx = try self.addString(content);
+            const str_idx = try self.addUnescapedString(content);
             return try self.nodes.add(Node.litString(loc, str_idx));
         }
 
@@ -2067,7 +2075,7 @@ pub const Parser = struct {
         var text = self.current.text(self.source);
         self.advance();
         var content = if (text.len >= 3) text[1 .. text.len - 2] else "";
-        var str_idx = try self.addString(content);
+        var str_idx = try self.addUnescapedString(content);
         var str_node = try self.nodes.add(.{
             .tag = .template_part_string,
             .loc = loc,
@@ -2089,7 +2097,7 @@ pub const Parser = struct {
                 text = self.current.text(self.source);
                 self.advance();
                 content = if (text.len >= 3) text[1 .. text.len - 2] else "";
-                str_idx = try self.addString(content);
+                str_idx = try self.addUnescapedString(content);
                 str_node = try self.nodes.add(.{
                     .tag = .template_part_string,
                     .loc = loc,
@@ -2109,7 +2117,7 @@ pub const Parser = struct {
             text = self.current.text(self.source);
             self.advance();
             content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-            str_idx = try self.addString(content);
+            str_idx = try self.addUnescapedString(content);
             str_node = try self.nodes.add(.{
                 .tag = .template_part_string,
                 .loc = loc,
@@ -3475,6 +3483,15 @@ pub const Parser = struct {
         return try self.constants.addString(str);
     }
 
+    /// Unescape `content` then intern it. Frees the unescape buffer when it was
+    /// freshly allocated (i.e. the input contained backslashes), regardless of
+    /// whether the string was new or a duplicate in the constant pool.
+    fn addUnescapedString(self: *Parser, content: []const u8) !u16 {
+        const unescaped = try self.unescapeString(content);
+        defer if (unescaped.ptr != content.ptr) self.allocator.free(unescaped);
+        return self.addString(unescaped);
+    }
+
     /// Unescape a JavaScript string literal, converting escape sequences to actual characters.
     /// Handles: \n, \r, \t, \\, \', \", \0, \xNN (hex), \uNNNN (unicode)
     /// Returns a newly allocated string that must be freed by the caller.
@@ -3571,17 +3588,41 @@ pub const Parser = struct {
                         }
                     },
                     'u' => {
-                        // Unicode escape: \uNNNN
-                        if (i + 5 < input.len) {
+                        // ES6 braced form: \u{XXXXXX} — 1 to 6 hex digits
+                        if (i + 2 < input.len and input[i + 2] == '{') {
+                            var j = i + 3;
+                            while (j < input.len and input[j] != '}' and j - (i + 3) < 6) : (j += 1) {}
+                            if (j < input.len and input[j] == '}' and j > i + 3) {
+                                const hex = input[i + 3 .. j];
+                                const codepoint = std.fmt.parseInt(u21, hex, 16) catch {
+                                    result[out_pos] = input[i];
+                                    out_pos += 1;
+                                    i += 1;
+                                    continue;
+                                };
+                                const len = std.unicode.utf8Encode(codepoint, result[out_pos..]) catch {
+                                    result[out_pos] = input[i];
+                                    out_pos += 1;
+                                    i += 1;
+                                    continue;
+                                };
+                                out_pos += len;
+                                i = j + 1;
+                            } else {
+                                result[out_pos] = input[i];
+                                out_pos += 1;
+                                i += 1;
+                            }
+                        }
+                        // Classic 4-hex form: \uNNNN
+                        else if (i + 5 < input.len) {
                             const hex = input[i + 2 .. i + 6];
                             const codepoint = std.fmt.parseInt(u21, hex, 16) catch {
-                                // Invalid hex, copy literally
                                 result[out_pos] = input[i];
                                 out_pos += 1;
                                 i += 1;
                                 continue;
                             };
-                            // Encode as UTF-8
                             const len = std.unicode.utf8Encode(codepoint, result[out_pos..]) catch {
                                 result[out_pos] = input[i];
                                 out_pos += 1;
@@ -3643,6 +3684,29 @@ pub const Parser = struct {
 };
 
 // ============ Tests ============
+
+test "ASI: return on its own line has no argument" {
+    var parser = Parser.init(std.testing.allocator,
+        \\function handler(req) {
+        \\  return
+        \\  Response.json({ leaked: true });
+        \\}
+    );
+    defer parser.deinit();
+    _ = parser.parse() catch {};
+
+    var found_return = false;
+    var return_has_arg = false;
+    for (parser.nodes.tags.items, 0..) |tag, i| {
+        if (tag == .return_stmt) {
+            found_return = true;
+            return_has_arg = parser.nodes.getData(@intCast(i)).a != null_node;
+        }
+    }
+    // Per JS ASI, a newline after 'return' forces `return;` -> opt_value should be null_node.
+    try std.testing.expect(found_return);
+    try std.testing.expect(!return_has_arg);
+}
 
 test "parse simple expression" {
     var parser = Parser.init(std.testing.allocator, "1 + 2;");

@@ -42,7 +42,7 @@ pub const MatchAnalysis = struct {
         var matches = std.ArrayList(TypeIndex).empty;
         defer matches.deinit(self.allocator);
 
-        self.collectMatchingTypes(source_type, pattern, &matches);
+        self.collectMatchingTypes(source_type, pattern, &matches) catch return null_type_idx;
         return switch (matches.items.len) {
             0 => null_type_idx,
             1 => matches.items[0],
@@ -55,9 +55,27 @@ pub const MatchAnalysis = struct {
 
         if (hasDefaultArm(self.ir_view, me)) return true;
 
+        // Boolean has exactly two inhabitants (true, false). Check that both
+        // literal arms are present rather than trying to cover the wide t_boolean
+        // type with a single literal arm (which patternFullyCoversType rejects).
+        if (self.pool.getTag(discriminant_type) == .t_boolean) {
+            var has_true = false;
+            var has_false = false;
+            for (0..me.arms_count) |i| {
+                const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
+                const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+                const pat_tag = self.ir_view.getTag(arm.pattern) orelse continue;
+                if (pat_tag == .lit_bool) {
+                    const bv = self.ir_view.getBoolValue(arm.pattern) orelse continue;
+                    if (bv) has_true = true else has_false = true;
+                }
+            }
+            return has_true and has_false;
+        }
+
         var variants = std.ArrayList(TypeIndex).empty;
         defer variants.deinit(self.allocator);
-        self.collectVariants(discriminant_type, &variants);
+        self.collectVariants(discriminant_type, &variants) catch return false;
         if (variants.items.len == 0) return false;
 
         for (variants.items) |variant| {
@@ -75,41 +93,41 @@ pub const MatchAnalysis = struct {
         return true;
     }
 
-    fn collectMatchingTypes(self: *const MatchAnalysis, source_type: TypeIndex, pattern: NodeIndex, out: *std.ArrayList(TypeIndex)) void {
+    fn collectMatchingTypes(self: *const MatchAnalysis, source_type: TypeIndex, pattern: NodeIndex, out: *std.ArrayList(TypeIndex)) !void {
         var variants = std.ArrayList(TypeIndex).empty;
         defer variants.deinit(self.allocator);
-        self.collectVariants(source_type, &variants);
+        try self.collectVariants(source_type, &variants);
 
         for (variants.items) |variant| {
             if (self.patternCanMatchType(pattern, variant)) {
-                self.appendUnique(out, variant);
+                try self.appendUnique(out, variant);
             }
         }
     }
 
-    fn collectVariants(self: *const MatchAnalysis, type_idx: TypeIndex, out: *std.ArrayList(TypeIndex)) void {
+    fn collectVariants(self: *const MatchAnalysis, type_idx: TypeIndex, out: *std.ArrayList(TypeIndex)) !void {
         if (type_idx == null_type_idx) return;
 
         const tag = self.pool.getTag(type_idx) orelse return;
         switch (tag) {
             .t_union => {
                 for (self.pool.getUnionMembers(type_idx)) |member| {
-                    self.collectVariants(member, out);
+                    try self.collectVariants(member, out);
                 }
             },
             .t_nullable => {
-                self.collectVariants(self.pool.getNullableInner(type_idx), out);
-                self.appendUnique(out, self.pool.idx_undefined);
+                try self.collectVariants(self.pool.getNullableInner(type_idx), out);
+                try self.appendUnique(out, self.pool.idx_undefined);
             },
-            else => self.appendUnique(out, type_idx),
+            else => try self.appendUnique(out, type_idx),
         }
     }
 
-    fn appendUnique(self: *const MatchAnalysis, out: *std.ArrayList(TypeIndex), type_idx: TypeIndex) void {
+    fn appendUnique(self: *const MatchAnalysis, out: *std.ArrayList(TypeIndex), type_idx: TypeIndex) !void {
         for (out.items) |existing| {
             if (existing == type_idx) return;
         }
-        out.append(self.allocator, type_idx) catch {};
+        try out.append(self.allocator, type_idx);
     }
 
     fn patternCanMatchType(self: *const MatchAnalysis, pattern: NodeIndex, type_idx: TypeIndex) bool {

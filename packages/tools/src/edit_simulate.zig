@@ -354,10 +354,11 @@ fn writeTempFile(allocator: std.mem.Allocator, original_name: []const u8, conten
         break :blk ".ts";
     };
 
-    var uniquifier: u8 = undefined;
-    const addr = @intFromPtr(&uniquifier);
-    const tmp_path = try std.fmt.allocPrint(allocator, "/tmp/zigts-edit-sim-{x}{s}", .{
-        addr,
+    var rand_bytes: [8]u8 = undefined;
+    fillRandom(&rand_bytes);
+    const rand_int = std.mem.readInt(u64, &rand_bytes, .little);
+    const tmp_path = try std.fmt.allocPrint(allocator, "/tmp/zigts-edit-sim-{x:0>16}{s}", .{
+        rand_int,
         ext,
     });
     errdefer allocator.free(tmp_path);
@@ -400,6 +401,25 @@ fn printHelp() void {
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+/// Fill `buf` with cryptographically random bytes via /dev/urandom.
+/// Falls back to leaving `buf` zeroed only if /dev/urandom is unavailable
+/// (which should never happen on any supported platform).
+fn fillRandom(buf: []u8) void {
+    const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return;
+    defer _ = std.c.close(fd);
+    var filled: usize = 0;
+    while (filled < buf.len) {
+        const n = std.c.read(fd, buf[filled..].ptr, buf.len - filled);
+        if (n < 0) {
+            if (std.c.errno(n) == .INTR) continue;
+            return;
+        }
+        if (n == 0) return;
+        filled += @intCast(n);
+    }
 }
 
 // ---------------------------------------------------------------------------

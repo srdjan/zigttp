@@ -194,10 +194,9 @@ pub const TenuredHeap = struct {
         // Process in SIMD chunks of 256 objects
         while (i + VecSize <= self.mark_bitvector.len) : (i += VecSize) {
             const marks: Vec = self.mark_bitvector[i..][0..VecSize].*;
-            const all_zeros: Vec = @splat(0);
 
-            // Check if any unmarked objects in this chunk
-            if (@reduce(.Or, marks ^ all_zeros) != ~@as(u64, 0)) {
+            // Check if any unmarked objects in this chunk (any word has a zero bit)
+            if (@reduce(.And, marks) != ~@as(u64, 0)) {
                 // Some objects unmarked - process individually
                 for (0..VecSize) |j| {
                     const word = self.mark_bitvector[i + j];
@@ -386,16 +385,20 @@ pub const RootSet = struct {
     }
 
     /// Mark a tracked root slot as removed. The slot is tombstoned with
-    /// undefined_val so GC iteration skips it safely (isPtr returns false).
+    /// gc_tombstone_val so GC iteration skips it safely (isPtr returns false)
+    /// and it is distinct from undefined_val (a valid user-visible JS value).
     pub fn removeRootAt(self: *RootSet, idx: usize) void {
-        self.roots.items[idx] = value.JSValue.undefined_val;
+        self.roots.items[idx] = value.JSValue.gc_tombstone_val;
     }
 
     /// Remove a root value by value identity (for non-tracked callers).
+    /// Uses tombstoning (not swapRemove) to preserve stable indices returned
+    /// by addRootTracked; mixing physical removal with tracked indices would
+    /// silently corrupt getRoot lookups.
     pub fn removeRoot(self: *RootSet, val: value.JSValue) void {
         for (self.roots.items, 0..) |v, i| {
             if (v.raw == val.raw) {
-                _ = self.roots.swapRemove(i);
+                self.roots.items[i] = value.JSValue.gc_tombstone_val;
                 return;
             }
         }
@@ -1560,7 +1563,9 @@ test "GC root management" {
     try std.testing.expectEqual(@as(usize, 2), gc_state.root_set.roots.items.len);
 
     gc_state.removeRoot(val1);
-    try std.testing.expectEqual(@as(usize, 1), gc_state.root_set.roots.items.len);
+    // removeRoot tombstones rather than shrinks, so item count is preserved.
+    try std.testing.expectEqual(@as(usize, 2), gc_state.root_set.roots.items.len);
+    try std.testing.expect(gc_state.root_set.roots.items[0].raw == value.JSValue.gc_tombstone_val.raw);
 }
 
 test "GC allocWithGC triggers collection" {

@@ -51,6 +51,10 @@ pub const JSValue = packed struct(u64) {
     pub const true_val: JSValue = .{ .raw = SPECIAL_PREFIX | 2 };
     pub const false_val: JSValue = .{ .raw = SPECIAL_PREFIX | 3 };
     pub const exception_val: JSValue = .{ .raw = SPECIAL_PREFIX | 4 };
+    /// Sentinel used by RootSet to tombstone removed slots. Never produced by
+    /// JS execution and distinct from undefined_val so a root holding
+    /// `undefined` is never confused with a tombstoned slot.
+    pub const gc_tombstone_val: JSValue = .{ .raw = SPECIAL_PREFIX | 5 };
     pub const nan_val: JSValue = .{ .raw = CANONICAL_NAN_BITS };
 
     // ========================================================================
@@ -446,8 +450,12 @@ pub const JSValue = packed struct(u64) {
     pub inline fn strictEquals(self: JSValue, other: JSValue) bool {
         const string = @import("string.zig");
 
-        // Fast path: same raw value (covers same pointer, same int, same special)
-        if (self.raw == other.raw) return true;
+        // Fast path: same raw value (covers same pointer, same int, same special),
+        // but NaN !== NaN per IEEE 754 even when the bit patterns are identical.
+        if (self.raw == other.raw) {
+            if (self.isRawDouble() and std.math.isNan(@as(f64, @bitCast(self.raw)))) return false;
+            return true;
+        }
 
         // Float comparison (handle NaN)
         if (self.isFloat64() and other.isFloat64()) {
@@ -632,7 +640,12 @@ pub const JSValue = packed struct(u64) {
             const f = self.getFloat64();
             return f != 0.0 and !std.math.isNan(f);
         }
-        // Objects are truthy
+        // String: empty string is falsy per ECMAScript ToBoolean
+        const string_mod = @import("string.zig");
+        if (self.isString()) return self.toPtr(string_mod.JSString).len != 0;
+        if (self.isStringSlice()) return self.toPtr(string_mod.SliceString).len != 0;
+        if (self.isRope()) return self.toPtr(string_mod.RopeNode).total_len != 0;
+        // Objects and functions are truthy
         return true;
     }
 
@@ -762,17 +775,30 @@ test "JSValue boolean conversion" {
 }
 
 test "JSValue toBoolean coercion" {
+    const allocator = std.testing.allocator;
+    const string_mod = @import("string.zig");
+
     // Falsy values
     try std.testing.expect(!JSValue.null_val.toBoolean());
     try std.testing.expect(!JSValue.undefined_val.toBoolean());
     try std.testing.expect(!JSValue.false_val.toBoolean());
     try std.testing.expect(!JSValue.fromInt(0).toBoolean());
 
+    // Empty string is falsy
+    const empty_str = try string_mod.createString(allocator, "");
+    defer string_mod.freeString(allocator, empty_str);
+    try std.testing.expect(!JSValue.fromPtr(empty_str).toBoolean());
+
     // Truthy values
     try std.testing.expect(JSValue.true_val.toBoolean());
     try std.testing.expect(JSValue.fromInt(1).toBoolean());
     try std.testing.expect(JSValue.fromInt(-1).toBoolean());
     try std.testing.expect(JSValue.fromInt(42).toBoolean());
+
+    // Non-empty string is truthy
+    const nonempty_str = try string_mod.createString(allocator, "hello");
+    defer string_mod.freeString(allocator, nonempty_str);
+    try std.testing.expect(JSValue.fromPtr(nonempty_str).toBoolean());
 }
 
 test "JSValue typeof" {

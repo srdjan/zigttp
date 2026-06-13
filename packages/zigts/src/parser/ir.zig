@@ -718,6 +718,7 @@ pub const ConstantPool = struct {
     }
 
     pub fn deinit(self: *ConstantPool) void {
+        for (self.strings.items) |str| self.allocator.free(str);
         self.string_index.deinit(self.allocator);
         self.float_index.deinit(self.allocator);
         self.strings.deinit(self.allocator);
@@ -730,9 +731,14 @@ pub const ConstantPool = struct {
         if (result.found_existing) {
             return result.value_ptr.*;
         }
-        // New string - add to array and update hash map
+        // New string - deep-copy so ConstantPool owns the memory and deinit
+        // can free it unconditionally (callers may pass slices into source text
+        // or freshly-allocated unescape buffers; ownership is not transferred).
+        const owned = try self.allocator.dupe(u8, str);
+        errdefer self.allocator.free(owned);
+        result.key_ptr.* = owned;
         const idx: u16 = @intCast(self.strings.items.len);
-        try self.strings.append(self.allocator, str);
+        try self.strings.append(self.allocator, owned);
         result.value_ptr.* = idx;
         return idx;
     }
