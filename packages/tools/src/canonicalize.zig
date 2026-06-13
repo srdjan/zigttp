@@ -182,6 +182,22 @@ fn freeRefactorOwned(allocator: std.mem.Allocator, refactor: *Refactor) void {
     };
 }
 
+/// Find the index of the `=>` that is NOT nested inside parens/brackets/angles.
+/// Returns the index of `=` in the first outermost `=>`, or null if none found.
+fn findOutermostArrow(s: []const u8) ?usize {
+    var depth: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        switch (s[i]) {
+            '(', '[', '<' => depth += 1,
+            ')', ']', '>' => if (depth > 0) { depth -= 1; },
+            '=' => if (depth == 0 and i + 1 < s.len and s[i + 1] == '>') return i,
+            else => {},
+        }
+    }
+    return null;
+}
+
 pub fn canonicalFunctionReplacement(allocator: std.mem.Allocator, line: []const u8) ![]u8 {
     const trimmed = std.mem.trim(u8, line, " \t\r\n");
     const is_export = std.mem.startsWith(u8, trimmed, "export const ");
@@ -197,7 +213,10 @@ pub fn canonicalFunctionReplacement(allocator: std.mem.Allocator, line: []const 
     }
 
     const arrow_source = std.mem.trim(u8, rest[eq + 1 ..], " \t");
-    const arrow = std.mem.indexOf(u8, arrow_source, "=>") orelse return error.UnsupportedRefactor;
+    // Find the outermost `=>` — skip any `=>` that appears inside nested
+    // parentheses, brackets, or angle brackets (e.g. parameter type annotations
+    // like `(fn: (x: number) => string) => body`).
+    const arrow = findOutermostArrow(arrow_source) orelse return error.UnsupportedRefactor;
     const signature = std.mem.trim(u8, arrow_source[0..arrow], " \t");
     if (std.mem.startsWith(u8, signature, "<")) return error.UnsupportedRefactor;
     const needs_param_parens = !std.mem.startsWith(u8, signature, "(");

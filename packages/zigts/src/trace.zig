@@ -492,7 +492,7 @@ pub fn parseTraceLine(line: []const u8) !TraceEntry {
         } };
     } else if (std.mem.eql(u8, type_str, "io")) {
         return .{ .io = .{
-            .seq = @intCast(findJsonIntValue(line, "\"seq\"") orelse 0),
+            .seq = std.math.cast(u32, findJsonIntValue(line, "\"seq\"") orelse 0) orelse 0,
             .module = findJsonStringValue(line, "\"module\"") orelse "",
             .func = findJsonStringValue(line, "\"fn\"") orelse "",
             .args_json = findJsonArrayValue(line, "\"args\"") orelse "[]",
@@ -526,16 +526,16 @@ pub fn parseTraceLine(line: []const u8) !TraceEntry {
         } };
     } else if (std.mem.eql(u8, type_str, "response")) {
         return .{ .response = .{
-            .status = @intCast(findJsonIntValue(line, "\"status\"") orelse 200),
+            .status = std.math.cast(u16, findJsonIntValue(line, "\"status\"") orelse 200) orelse 200,
             .headers_json = findJsonObjectValue(line, "\"headers\"") orelse "{}",
             .body = findJsonStringValue(line, "\"body\"") orelse "",
         } };
     } else if (std.mem.eql(u8, type_str, "meta")) {
         return .{ .meta = .{
-            .duration_us = @intCast(findJsonIntValue(line, "\"duration_us\"") orelse 0),
+            .duration_us = std.math.cast(u64, findJsonIntValue(line, "\"duration_us\"") orelse 0) orelse 0,
             .handler = findJsonStringValue(line, "\"handler\"") orelse "",
-            .pool_slot = @intCast(findJsonIntValue(line, "\"pool_slot\"") orelse 0),
-            .io_count = @intCast(findJsonIntValue(line, "\"io_count\"") orelse 0),
+            .pool_slot = std.math.cast(u32, findJsonIntValue(line, "\"pool_slot\"") orelse 0) orelse 0,
+            .io_count = std.math.cast(u32, findJsonIntValue(line, "\"io_count\"") orelse 0) orelse 0,
         } };
     } else if (std.mem.eql(u8, type_str, "complete")) {
         return .complete;
@@ -1685,7 +1685,10 @@ pub fn writeAll(fd: std.c.fd_t, data: []const u8) void {
     var remaining = data;
     while (remaining.len > 0) {
         const result = std.c.write(fd, remaining.ptr, remaining.len);
-        if (result < 0) break;
+        if (result < 0) {
+            if (std.posix.errno(result) == .INTR) continue;
+            break;
+        }
         remaining = remaining[@intCast(result)..];
     }
 }

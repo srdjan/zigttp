@@ -533,16 +533,17 @@ pub const Interpreter = struct {
                 if (a.isInt() and b.isInt()) {
                     @branchHint(.likely);
                     const bv = b.getInt();
-                    if (bv != 0) {
+                    const av = a.getInt();
+                    if (bv != 0 and !(av == std.math.minInt(i32) and bv == -1)) {
                         @branchHint(.likely);
-                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(@rem(a.getInt(), bv));
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(@rem(av, bv));
                         self.ctx.sp = sp - 1;
                         continue :sw @enumFromInt(self.pc[0]);
                     }
                 }
-                // Float operands and `x % 0` go through the shared helper:
-                // ECMAScript yields NaN for modulo-by-zero and supports float
-                // operands, rather than aborting the handler.
+                // Float operands, `x % 0`, and INT_MIN % -1 go through the shared helper:
+                // ECMAScript yields NaN for modulo-by-zero, -0 for INT_MIN%-1, and supports
+                // float operands rather than aborting the handler.
                 self.ctx.stack[sp - 2] = try util.modValues(a, b);
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
@@ -662,7 +663,9 @@ pub const Interpreter = struct {
                     // round(int) = int
                 } else if (arg.isFloat64()) {
                     const n = arg.getFloat64();
-                    const rounded = @round(n);
+                    // ECMAScript Math.round: ties go toward +Infinity (floor(x+0.5)),
+                    // not away from zero as Zig's @round does.
+                    const rounded = @floor(n + 0.5);
                     if (rounded >= -2147483648 and rounded <= 2147483647) {
                         self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(rounded));
                     } else {
@@ -1221,7 +1224,8 @@ pub const Interpreter = struct {
                             if (idx_u < len) {
                                 const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
                                 const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
-                                self.ctx.stack[sp - 2] = value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step);
+                                const elem_i64: i64 = @as(i64, start) + @as(i64, @intCast(idx_u)) * @as(i64, step);
+                                self.ctx.stack[sp - 2] = value.JSValue.fromInt(@intCast(elem_i64));
                             } else {
                                 self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
                             }
@@ -1969,9 +1973,10 @@ pub const Interpreter = struct {
                 if (a.isInt() and divisor_val.isInt()) {
                     @branchHint(.likely);
                     const div = divisor_val.getInt();
-                    if (div != 0) {
+                    const av = a.getInt();
+                    if (div != 0 and !(av == std.math.minInt(i32) and div == -1)) {
                         @branchHint(.likely);
-                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@rem(a.getInt(), div));
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@rem(av, div));
                         continue :sw @enumFromInt(self.pc[0]);
                     }
                 }
@@ -1987,8 +1992,11 @@ pub const Interpreter = struct {
 
                 if (a.isInt() and divisor != 0) {
                     @branchHint(.likely);
-                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(@rem(a.getInt(), divisor));
-                    continue :sw @enumFromInt(self.pc[0]);
+                    const av = a.getInt();
+                    if (!(av == std.math.minInt(i32) and divisor == -1)) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@rem(av, divisor));
+                        continue :sw @enumFromInt(self.pc[0]);
+                    }
                 }
                 self.ctx.stack[sp - 1] = try util.modValues(a, value.JSValue.fromInt(divisor));
                 continue :sw @enumFromInt(self.pc[0]);
@@ -2698,6 +2706,47 @@ test "Interpreter modulo" {
     const result = try interp.run(&func);
     try std.testing.expect(result.isInt());
     try std.testing.expectEqual(@as(i32, 2), result.getInt());
+}
+
+test "Interpreter modulo INT_MIN % -1 does not panic" {
+    // JS: (-2147483648) % (-1) = -0, treated as 0. Naive @rem(INT_MIN, -1) is
+    // LLVM poison (quotient overflows i32); must return 0 without panicking.
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    // push_const uses a 2-byte little-endian index into the constants slice.
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_const), 0x00, 0x00, // constants[0] = minInt(i32)
+        @intFromEnum(bytecode.Opcode.push_i8),   0xFF,        // -1 (sign-extended)
+        @intFromEnum(bytecode.Opcode.mod),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    const consts = [_]value.JSValue{value.JSValue.fromInt(std.math.minInt(i32))};
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code,
+        .constants = &consts,
+        .source_map = null,
+    };
+
+    const result = try interp.run(&func);
+    // Result is 0 (integer) or a float representing -0
+    const as_num = result.toNumber() orelse 0.0;
+    try std.testing.expectEqual(@as(f64, 0.0), as_num);
 }
 
 test "End-to-end: parse and execute JS" {

@@ -436,12 +436,12 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
 /// such handlers. `queryParams` are deliberately excluded - the query string is
 /// part of the URL and therefore already in the cache key.
 fn routeReadsRequestState(route_obj: std.json.ObjectMap) bool {
-    inline for (.{ "headerParams", "bodyParams" }) |list_key| {
+    inline for (.{ "headerParams", "requestBodies" }) |list_key| {
         if (route_obj.get(list_key)) |v| {
             if (v == .array and v.array.items.len > 0) return true;
         }
     }
-    inline for (.{ "headerParamsDynamic", "bodyParamsDynamic" }) |dyn_key| {
+    inline for (.{ "headerParamsDynamic", "requestBodiesDynamic" }) |dyn_key| {
         if (route_obj.get(dyn_key)) |v| {
             if (v == .bool and v.bool) return true;
         }

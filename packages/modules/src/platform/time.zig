@@ -116,6 +116,7 @@ fn parseIsoString(s: []const u8) ?i64 {
     var minute: u8 = 0;
     var second: u8 = 0;
     var ms: u16 = 0;
+    var tz_start: usize = s.len;
 
     if (s.len > 10) {
         if (s[10] != 'T' and s[10] != 't') return null;
@@ -124,11 +125,13 @@ fn parseIsoString(s: []const u8) ?i64 {
         if (s[13] != ':') return null;
         minute = parseInt(u8, s[14..16]) orelse return null;
         if (hour > 23 or minute > 59) return null;
+        tz_start = 16;
 
         if (s.len > 16 and s[16] == ':') {
             if (s.len < 19) return null;
             second = parseInt(u8, s[17..19]) orelse return null;
             if (second > 59) return null;
+            tz_start = 19;
 
             if (s.len > 19 and s[19] == '.') {
                 var end: usize = 20;
@@ -141,13 +144,32 @@ fn parseIsoString(s: []const u8) ?i64 {
                 } else if (frac_str.len == 1) {
                     ms = (parseInt(u16, frac_str) orelse 0) * 100;
                 }
+                tz_start = end;
             }
+        }
+    }
+
+    // Parse optional timezone offset: Z / +HH:MM / -HH:MM / +HHMM / -HHMM
+    var tz_offset_seconds: i64 = 0;
+    if (tz_start < s.len) {
+        const tz = s[tz_start..];
+        if (tz[0] == 'Z' or tz[0] == 'z') {
+            // UTC - no adjustment needed
+        } else if ((tz[0] == '+' or tz[0] == '-') and tz.len >= 5) {
+            const sign: i64 = if (tz[0] == '+') 1 else -1;
+            const tz_hour = parseInt(u8, tz[1..3]) orelse 0;
+            // Support both +HH:MM (len>=6) and +HHMM (len>=5)
+            const tz_min = if (tz.len >= 6 and tz[3] == ':')
+                parseInt(u8, tz[4..6]) orelse 0
+            else
+                parseInt(u8, tz[3..5]) orelse 0;
+            tz_offset_seconds = sign * (@as(i64, tz_hour) * 3600 + @as(i64, tz_min) * 60);
         }
     }
 
     const days = yearMonthDayToEpochDays(year, month, day) orelse return null;
     const total_seconds = @as(i64, days) * 86400 + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + @as(i64, second);
-    return total_seconds * 1000 + @as(i64, ms);
+    return (total_seconds - tz_offset_seconds) * 1000 + @as(i64, ms);
 }
 
 fn yearMonthDayToEpochDays(year: u16, month: u8, day: u8) ?i64 {

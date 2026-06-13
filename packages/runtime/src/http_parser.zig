@@ -92,6 +92,8 @@ pub const RequestLine = struct {
     url: []const u8,
     path: []const u8,
     query_string: []const u8,
+    /// true when the request line ends with "HTTP/1.0" (keep-alive is opt-in).
+    is_http_10: bool = false,
 };
 
 pub fn parseRequestLine(
@@ -106,6 +108,9 @@ pub fn parseRequestLine(
 
     if (url_slice.len > max_url_length) return error.UriTooLong;
 
+    const version = parts.next() orelse "";
+    const is_http_10 = std.mem.eql(u8, version, "HTTP/1.0");
+
     const method = try copyToStorage(storage, offset, method_slice);
     const url = try copyToStorage(storage, offset, url_slice);
 
@@ -118,6 +123,7 @@ pub fn parseRequestLine(
         .url = url,
         .path = path,
         .query_string = query_string,
+        .is_http_10 = is_http_10,
     };
 }
 
@@ -128,6 +134,9 @@ pub fn parseRequestLineBorrowed(request_line: []const u8, max_url_length: usize)
 
     if (url.len > max_url_length) return error.UriTooLong;
 
+    const version = parts.next() orelse "";
+    const is_http_10 = std.mem.eql(u8, version, "HTTP/1.0");
+
     const query_start = std.mem.indexOf(u8, url, "?");
     const path = if (query_start) |idx| url[0..idx] else url;
     const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
@@ -137,6 +146,7 @@ pub fn parseRequestLineBorrowed(request_line: []const u8, max_url_length: usize)
         .url = url,
         .path = path,
         .query_string = query_string,
+        .is_http_10 = is_http_10,
     };
 }
 

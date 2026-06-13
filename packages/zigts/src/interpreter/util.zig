@@ -10,7 +10,11 @@ pub inline fn modValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
     if (a.isInt() and b.isInt()) {
         const bv = b.getInt();
         if (bv == 0) return value.JSValue.nan_val;
-        return value.JSValue.fromInt(@rem(a.getInt(), bv));
+        const av = a.getInt();
+        // INT_MIN % -1: quotient would overflow i32; LLVM srem is poison here.
+        // JS result is -0 (treated as 0 for integer representation).
+        if (av == std.math.minInt(i32) and bv == -1) return value.JSValue.fromInt(0);
+        return value.JSValue.fromInt(@rem(av, bv));
     }
     const an = a.toNumber() orelse return error.TypeError;
     const bn = b.toNumber() orelse return error.TypeError;

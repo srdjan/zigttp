@@ -88,8 +88,11 @@ pub inline fn greaterEqual(a: value.JSValue, b: value.JSValue) bool {
 
 /// Loose equality (==)
 pub inline fn looseEquals(a: value.JSValue, b: value.JSValue) bool {
-    // Same type - strict equals
-    if (a.raw == b.raw) return true;
+    // Same type - strict equals; NaN != NaN even under loose equality
+    if (a.raw == b.raw) {
+        if (a.isRawDouble() and std.math.isNan(@as(f64, @bitCast(a.raw)))) return false;
+        return true;
+    }
 
     // null == undefined
     if ((a.isNull() and b.isUndefined()) or (a.isUndefined() and b.isNull())) return true;

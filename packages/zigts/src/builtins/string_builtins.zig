@@ -29,9 +29,14 @@ pub fn stringLength(ctx: *context.Context, this: value.JSValue, args: []const va
 pub fn stringCharAt(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.undefined_val;
     var idx: u32 = 0;
-    if (args.len > 0 and args[0].isInt()) {
-        const i = args[0].getInt();
-        if (i < 0) return value.JSValue.undefined_val;
+    if (args.len > 0) {
+        var i: i32 = 0;
+        if (args[0].isInt()) {
+            i = args[0].getInt();
+        } else if (args[0].toNumber()) |n| {
+            if (std.math.isFinite(n)) i = std.math.lossyCast(i32, @trunc(n));
+        }
+        if (i < 0) return value.JSValue.fromPtr(string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val);
         idx = @intCast(i);
     }
     if (idx < data.len) {
@@ -45,8 +50,13 @@ pub fn stringCharAt(ctx: *context.Context, this: value.JSValue, args: []const va
 pub fn stringCharCodeAt(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const data = getStringDataCtx(this, ctx) orelse return allocFloat(ctx, std.math.nan(f64));
     var idx: u32 = 0;
-    if (args.len > 0 and args[0].isInt()) {
-        const i = args[0].getInt();
+    if (args.len > 0) {
+        var i: i32 = 0;
+        if (args[0].isInt()) {
+            i = args[0].getInt();
+        } else if (args[0].toNumber()) |n| {
+            if (std.math.isFinite(n)) i = std.math.lossyCast(i32, @trunc(n));
+        }
         if (i < 0) return allocFloat(ctx, std.math.nan(f64));
         idx = @intCast(i);
     }
@@ -73,19 +83,16 @@ pub fn stringIndexOf(ctx: *context.Context, this: value.JSValue, args: []const v
             }
         } else if (args[1].toNumber()) |n| {
             if (n >= 0) {
-                const floored = @floor(n);
-                if (floored < @as(f64, @floatFromInt(data.len))) {
-                    start = @intFromFloat(floored);
-                }
+                start = std.math.lossyCast(usize, @floor(n));
             }
         }
     }
 
+    // Empty needle: return start clamped to [0, data.len].
+    if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(@min(start, data.len)));
+
     // Clamp start to string length
     if (start >= data.len) return value.JSValue.fromInt(-1);
-
-    // Search in substring from start position
-    if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(start));
     if (needle_data.len > data.len - start) return value.JSValue.fromInt(-1);
 
     // Search manually from start position
@@ -103,10 +110,32 @@ pub fn stringLastIndexOf(ctx: *context.Context, this: value.JSValue, args: []con
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.fromInt(-1);
     const needle_data = getStringDataCtx(args[0], ctx) orelse return value.JSValue.fromInt(-1);
 
-    if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(data.len));
-    if (needle_data.len > data.len) return value.JSValue.fromInt(-1);
+    // Compute search end bound from optional position argument (default = data.len)
+    var end: usize = data.len;
+    if (args.len > 1) {
+        if (args[1].isInt()) {
+            const pos = args[1].getInt();
+            if (pos >= 0) {
+                end = @min(@as(usize, @intCast(pos)) + needle_data.len, data.len);
+            } else {
+                end = 0;
+            }
+        } else if (args[1].toNumber()) |n| {
+            if (std.math.isNan(n)) {
+                // ECMAScript spec: NaN position → +Infinity → search from end; leave end = data.len.
+            } else if (n >= 0) {
+                const floored = std.math.lossyCast(usize, @floor(n));
+                end = @min(floored +| needle_data.len, data.len);
+            } else {
+                end = 0;
+            }
+        }
+    }
 
-    if (std.mem.lastIndexOf(u8, data, needle_data)) |idx| {
+    if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(@min(end, data.len)));
+    if (needle_data.len > end) return value.JSValue.fromInt(-1);
+
+    if (std.mem.lastIndexOf(u8, data[0..end], needle_data)) |idx| {
         return value.JSValue.fromInt(@intCast(idx));
     }
     return value.JSValue.fromInt(-1);
@@ -119,20 +148,40 @@ pub fn stringStartsWith(ctx: *context.Context, this: value.JSValue, args: []cons
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.false_val;
     const prefix_data = getStringDataCtx(args[0], ctx) orelse return value.JSValue.false_val;
 
-    if (prefix_data.len > data.len) return value.JSValue.false_val;
-    return if (string.eqlStrings(data[0..prefix_data.len], prefix_data)) value.JSValue.true_val else value.JSValue.false_val;
+    var pos: usize = 0;
+    if (args.len > 1) {
+        if (args[1].isInt()) {
+            const p = args[1].getInt();
+            if (p > 0) pos = @intCast(p);
+        } else if (args[1].toNumber()) |n| {
+            if (n > 0) pos = std.math.lossyCast(usize, @floor(n));
+        }
+    }
+    if (pos > data.len) return value.JSValue.false_val;
+    const view = data[pos..];
+    if (prefix_data.len > view.len) return value.JSValue.false_val;
+    return if (string.eqlStrings(view[0..prefix_data.len], prefix_data)) value.JSValue.true_val else value.JSValue.false_val;
 }
 
-/// String.prototype.endsWith(searchString, length?) - Check suffix
+/// String.prototype.endsWith(searchString, endPosition?) - Check suffix
 pub fn stringEndsWith(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.false_val;
 
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.false_val;
     const suffix_data = getStringDataCtx(args[0], ctx) orelse return value.JSValue.false_val;
 
-    if (suffix_data.len > data.len) return value.JSValue.false_val;
-    const start = data.len - suffix_data.len;
-    return if (string.eqlStrings(data[start..], suffix_data)) value.JSValue.true_val else value.JSValue.false_val;
+    var end: usize = data.len;
+    if (args.len > 1) {
+        if (args[1].isInt()) {
+            const p = args[1].getInt();
+            if (p >= 0) end = @min(@as(usize, @intCast(p)), data.len);
+        } else if (args[1].toNumber()) |n| {
+            if (n >= 0) end = @min(std.math.lossyCast(usize, @floor(n)), data.len);
+        }
+    }
+    if (suffix_data.len > end) return value.JSValue.false_val;
+    const start = end - suffix_data.len;
+    return if (string.eqlStrings(data[start..end], suffix_data)) value.JSValue.true_val else value.JSValue.false_val;
 }
 
 /// String.prototype.includes(searchString, position?) - Check if contains
@@ -153,12 +202,30 @@ pub fn stringSlice(ctx: *context.Context, this: value.JSValue, args: []const val
     var start: i32 = 0;
     var end: i32 = @intCast(data.len);
 
-    if (args.len > 0 and args[0].isInt()) {
-        start = args[0].getInt();
+    if (args.len > 0) {
+        if (args[0].isInt()) {
+            start = args[0].getInt();
+        } else if (args[0].toNumber()) |n| {
+            if (std.math.isFinite(n)) {
+                start = std.math.lossyCast(i32, @trunc(n));
+            } else if (n > 0) { // +Infinity → clamp to len below
+                start = @intCast(data.len);
+            } // NaN / -Infinity → start stays 0
+        }
         if (start < 0) start = @max(0, @as(i32, @intCast(data.len)) + start);
     }
-    if (args.len > 1 and args[1].isInt()) {
-        end = args[1].getInt();
+    if (args.len > 1) {
+        if (args[1].isInt()) {
+            end = args[1].getInt();
+        } else if (args[1].toNumber()) |n| {
+            if (std.math.isFinite(n)) {
+                end = std.math.lossyCast(i32, @trunc(n));
+            } else if (n > 0) { // +Infinity → len
+                end = @intCast(data.len);
+            } else { // -Infinity / NaN → 0
+                end = 0;
+            }
+        }
         if (end < 0) end = @max(0, @as(i32, @intCast(data.len)) + end);
     }
 
@@ -207,8 +274,30 @@ pub fn stringSubstring(ctx: *context.Context, this: value.JSValue, args: []const
     var start: i32 = 0;
     var end: i32 = @intCast(data.len);
 
-    if (args.len > 0 and args[0].isInt()) start = args[0].getInt();
-    if (args.len > 1 and args[1].isInt()) end = args[1].getInt();
+    if (args.len > 0) {
+        if (args[0].isInt()) {
+            start = args[0].getInt();
+        } else if (args[0].toNumber()) |n| {
+            if (std.math.isFinite(n)) {
+                start = std.math.lossyCast(i32, @trunc(n));
+            } else if (n > 0) { // +Infinity → len
+                start = @intCast(data.len);
+            } // NaN / -Infinity → start stays 0
+        }
+    }
+    if (args.len > 1) {
+        if (args[1].isInt()) {
+            end = args[1].getInt();
+        } else if (args[1].toNumber()) |n| {
+            if (std.math.isFinite(n)) {
+                end = std.math.lossyCast(i32, @trunc(n));
+            } else if (n > 0) { // +Infinity → len
+                end = @intCast(data.len);
+            } else { // NaN / -Infinity → 0 per spec
+                end = 0;
+            }
+        }
+    }
 
     if (start < 0) start = 0;
     if (end < 0) end = 0;
@@ -339,10 +428,19 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
 
     const sep = getStringDataCtx(args[0], ctx) orelse return value.JSValue.undefined_val;
     if (sep.len == 0) {
-        // Simple fallback: return whole string
-        const part_str = string.createString(ctx.allocator, data) catch return value.JSValue.undefined_val;
-        ctx.setIndexChecked(result, 0, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
-        result.setArrayLength(1);
+        // Empty separator: split into individual UTF-8 code points
+        var count: u32 = 0;
+        var i: usize = 0;
+        while (i < data.len) {
+            if (limit) |lim| if (count >= lim) break;
+            const seq_len = std.unicode.utf8ByteSequenceLength(data[i]) catch 1;
+            const end = @min(i + seq_len, data.len);
+            const ch_str = string.createString(ctx.allocator, data[i..end]) catch return value.JSValue.undefined_val;
+            ctx.setIndexChecked(result, count, value.JSValue.fromPtr(ch_str)) catch return value.JSValue.undefined_val;
+            count += 1;
+            i = end;
+        }
+        result.setArrayLength(count);
         return result.toValue();
     }
 
@@ -364,10 +462,15 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
 pub fn stringRepeat(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.undefined_val;
     var count: u32 = 0;
-    if (args.len > 0 and args[0].isInt()) {
-        const c = args[0].getInt();
-        if (c < 0) return value.JSValue.undefined_val;
-        count = @intCast(c);
+    if (args.len > 0) {
+        if (args[0].isInt()) {
+            const c = args[0].getInt();
+            if (c < 0) return value.JSValue.undefined_val;
+            count = @intCast(c);
+        } else if (args[0].toNumber()) |n| {
+            if (n < 0 or std.math.isInf(n)) return value.JSValue.undefined_val;
+            count = std.math.lossyCast(u32, @floor(n));
+        }
     }
     if (count == 0 or data.len == 0) {
         const empty = string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val;
@@ -397,6 +500,9 @@ pub fn stringPadStart(ctx: *context.Context, this: value.JSValue, args: []const 
         if (args[0].isInt()) {
             const t = args[0].getInt();
             break :blk if (t > 0) @intCast(t) else 0;
+        }
+        if (args[0].toNumber()) |n| {
+            if (n > 0) break :blk std.math.lossyCast(usize, @floor(n));
         }
         break :blk 0;
     };
@@ -431,6 +537,9 @@ pub fn stringPadEnd(ctx: *context.Context, this: value.JSValue, args: []const va
         if (args[0].isInt()) {
             const t = args[0].getInt();
             break :blk if (t > 0) @intCast(t) else 0;
+        }
+        if (args[0].toNumber()) |n| {
+            if (n > 0) break :blk std.math.lossyCast(usize, @floor(n));
         }
         break :blk 0;
     };
@@ -598,20 +707,30 @@ pub fn stringFromCharCode(ctx: *context.Context, this: value.JSValue, args: []co
     _ = this;
     if (args.len == 0) return value.JSValue.fromPtr(string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val);
 
-    var buf: [64]u8 = undefined;
-    const len = @min(args.len, buf.len);
-    for (0..len) |i| {
-        if (args[i].isInt()) {
-            const code = args[i].getInt();
-            buf[i] = if (code >= 0 and code <= 255) @intCast(code) else '?';
-        } else if (args[i].toNumber()) |n| {
-            const code: i32 = @intFromFloat(@mod(@trunc(n), 65536));
-            buf[i] = if (code >= 0 and code <= 255) @intCast(code) else '?';
-        } else {
-            buf[i] = 0;
-        }
+    // Each code point needs at most 3 UTF-8 bytes (BMP range 0-0xFFFF)
+    var buf: [64 * 3]u8 = undefined;
+    var out_len: usize = 0;
+    const max_args = @min(args.len, 64);
+    for (0..max_args) |i| {
+        const raw_code: i32 = blk: {
+            if (args[i].isInt()) {
+                break :blk args[i].getInt();
+            } else if (args[i].toNumber()) |n| {
+                // NaN/Infinity: ToUint16 maps both to 0 per the JS spec.
+                break :blk if (std.math.isFinite(n)) @intFromFloat(@mod(@trunc(n), 65536.0)) else 0;
+            } else {
+                break :blk 0;
+            }
+        };
+        // Clamp to valid BMP range (mod 65536 per JS spec); @mod returns [0,65535] for positive divisor
+        const code: u21 = @intCast(@mod(raw_code, @as(i32, 65536)));
+        const enc_len = std.unicode.utf8Encode(code, buf[out_len..]) catch blk: {
+            buf[out_len] = '?';
+            break :blk 1;
+        };
+        out_len += enc_len;
     }
-    const result = string.createString(ctx.allocator, buf[0..len]) catch return value.JSValue.undefined_val;
+    const result = string.createString(ctx.allocator, buf[0..out_len]) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
 }
 

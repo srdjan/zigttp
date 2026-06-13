@@ -1447,8 +1447,19 @@ pub fn findHandlerFunction(ir_view: IrView, root: NodeIndex) ?NodeIndex {
         const stmt_idx = ir_view.getListIndex(block.stmts_start, i);
         const stmt_tag = ir_view.getTag(stmt_idx) orelse continue;
 
-        if (stmt_tag == .function_decl or stmt_tag == .var_decl) {
-            const decl = ir_view.getVarDecl(stmt_idx) orelse continue;
+        // Unwrap `export function handler(...)` -> the inner function_decl/var_decl
+        const effective_stmt: NodeIndex = blk: {
+            if (stmt_tag == .export_decl) {
+                const export_decl = ir_view.getExportDecl(stmt_idx) orelse continue;
+                if (export_decl.declaration == null_node) continue;
+                break :blk export_decl.declaration;
+            }
+            break :blk stmt_idx;
+        };
+        const effective_tag = ir_view.getTag(effective_stmt) orelse continue;
+
+        if (effective_tag == .function_decl or effective_tag == .var_decl) {
+            const decl = ir_view.getVarDecl(effective_stmt) orelse continue;
             if (decl.binding.kind != .global) continue;
             if (decl.binding.slot != @intFromEnum(object.Atom.handler)) continue;
 

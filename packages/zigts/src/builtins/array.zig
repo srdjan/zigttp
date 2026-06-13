@@ -50,6 +50,12 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
     const source = args[0];
     const allocator = ctx.allocator;
 
+    const map_fn: ?*object.JSObject = if (args.len > 1 and args[1].isCallable())
+        args[1].toPtr(object.JSObject)
+    else
+        null;
+    const call_fn = if (map_fn != null) getCallFn() else null;
+
     // Create result array
     const result = ctx.createArray() catch return value.JSValue.undefined_val;
     result.prototype = ctx.array_prototype;
@@ -65,7 +71,12 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
             const char_len = std.unicode.utf8ByteSequenceLength(data[i]) catch 1;
             const char_slice = data[i..@min(i + char_len, data.len)];
             const char_str = string.createString(allocator, char_slice) catch return result.toValue();
-            ctx.setIndexChecked(result, idx, value.JSValue.fromPtr(char_str)) catch return result.toValue();
+            var elem = value.JSValue.fromPtr(char_str);
+            if (map_fn) |mfn| if (call_fn) |cfn| {
+                const call_args = [2]value.JSValue{ elem, value.JSValue.fromInt(@intCast(idx)) };
+                elem = invokeCallback(cfn, mfn, &call_args) orelse elem;
+            };
+            ctx.setIndexChecked(result, idx, elem) catch return result.toValue();
             idx += 1;
             i += char_len;
         }
@@ -81,13 +92,17 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
                 const len = len_val.getInt();
                 var idx: i32 = 0;
                 while (idx < len) : (idx += 1) {
-                    const elem = if (src_obj.class_id == .array)
+                    var elem = if (src_obj.class_id == .array)
                         (src_obj.getIndex(@intCast(idx)) orelse value.JSValue.undefined_val)
                     else blk: {
                         var idx_buf: [32]u8 = undefined;
                         const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch break :blk value.JSValue.undefined_val;
                         const idx_atom = ctx.atoms.intern(idx_slice) catch break :blk value.JSValue.undefined_val;
                         break :blk src_obj.getProperty(pool, idx_atom) orelse value.JSValue.undefined_val;
+                    };
+                    if (map_fn) |mfn| if (call_fn) |cfn| {
+                        const call_args = [2]value.JSValue{ elem, value.JSValue.fromInt(idx) };
+                        elem = invokeCallback(cfn, mfn, &call_args) orelse elem;
                     };
                     ctx.setIndexChecked(result, @intCast(idx), elem) catch return result.toValue();
                 }
@@ -366,9 +381,12 @@ pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value
 
     const len = obj.getArrayLength();
     var separator: []const u8 = ",";
+    var sep_str_owned: ?*string.JSString = null;
+    defer if (sep_str_owned) |s| string.freeString(ctx.allocator, s);
     if (args.len > 0 and !args[0].isUndefined()) {
         const sep_str = valueToStringSimple(ctx.allocator, args[0]) catch return value.JSValue.undefined_val;
         separator = sep_str.data();
+        if (!args[0].isString()) sep_str_owned = sep_str;
     }
 
     // Fast path: build result in a stack buffer (no per-element heap allocation)
@@ -452,6 +470,7 @@ pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value
             continue;
         }
         const elem_str = valueToStringSimple(ctx.allocator, val) catch return value.JSValue.undefined_val;
+        defer if (!val.isString()) string.freeString(ctx.allocator, elem_str);
         buffer.appendSlice(ctx.allocator, elem_str.data()) catch return value.JSValue.undefined_val;
     }
 
@@ -527,17 +546,51 @@ pub fn arraySlice(ctx: *context.Context, this: value.JSValue, args: []const valu
     var start: i32 = 0;
     var end: i32 = len;
 
-    if (args.len > 0 and args[0].isInt()) {
-        start = args[0].getInt();
+    if (args.len > 0 and !args[0].isUndefined()) {
+        if (args[0].isInt()) {
+            start = args[0].getInt();
+        } else if (args[0].toNumber()) |n| {
+            if (std.math.isFinite(n)) {
+                start = std.math.lossyCast(i32, @trunc(n));
+            } else if (n > 0) {
+                start = len;
+            } // NaN / -Infinity -> start stays 0
+        }
         if (start < 0) start = @max(0, len + start);
     }
-    if (args.len > 1 and args[1].isInt()) {
-        end = args[1].getInt();
+    if (args.len > 1 and !args[1].isUndefined()) {
+        if (args[1].isInt()) {
+            end = args[1].getInt();
+        } else if (args[1].toNumber()) |n| {
+            if (std.math.isFinite(n)) {
+                end = std.math.lossyCast(i32, @trunc(n));
+            } else if (n > 0) {
+                end = len; // +Infinity -> end = len
+            } else {
+                end = 0; // -Infinity / NaN -> 0
+            }
+        }
         if (end < 0) end = @max(0, len + end);
     }
 
-    // Return length of slice (proper array creation requires more infrastructure)
-    return value.JSValue.fromInt(@max(0, end - start));
+    if (end <= start) {
+        const result = ctx.createArray() catch return value.JSValue.undefined_val;
+        result.prototype = ctx.array_prototype;
+        result.setArrayLength(0);
+        return result.toValue();
+    }
+
+    const slice_len: u32 = @intCast(end - start);
+    const result = ctx.createArray() catch return value.JSValue.undefined_val;
+    result.prototype = ctx.array_prototype;
+    var dst: u32 = 0;
+    var src: i32 = start;
+    while (src < end) : ({ src += 1; dst += 1; }) {
+        const elem = obj.getIndex(@intCast(src)) orelse value.JSValue.undefined_val;
+        ctx.setIndexChecked(result, dst, elem) catch return value.JSValue.undefined_val;
+    }
+    result.setArrayLength(slice_len);
+    return result.toValue();
 }
 
 /// Array.prototype.concat(...items) - Merge arrays
@@ -589,7 +642,7 @@ pub fn arrayMap(ctx: *context.Context, this: value.JSValue, args: []const value.
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
         const mapped = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.undefined_val;
         result.arrayPush(ctx.allocator, mapped) catch return value.JSValue.undefined_val;
     }
@@ -608,7 +661,7 @@ pub fn arrayFilter(ctx: *context.Context, this: value.JSValue, args: []const val
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
         const keep = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
         if (keep.toBoolean()) {
             result.arrayPush(ctx.allocator, elem) catch return value.JSValue.undefined_val;
@@ -639,7 +692,7 @@ pub fn arrayReduce(ctx: *context.Context, this: value.JSValue, args: []const val
     var i: u32 = start_idx;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        const call_args = [_]value.JSValue{ accumulator, elem, value.JSValue.fromInt(@intCast(i)) };
+        const call_args = [_]value.JSValue{ accumulator, elem, value.JSValue.fromInt(@intCast(i)), this };
         accumulator = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.undefined_val;
     }
     return accumulator;
@@ -655,7 +708,7 @@ pub fn arrayForEach(ctx: *context.Context, this: value.JSValue, args: []const va
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
         _ = invokeCallback(call_fn, callback, &call_args);
     }
     return value.JSValue.undefined_val;
@@ -671,7 +724,7 @@ pub fn arrayEvery(ctx: *context.Context, this: value.JSValue, args: []const valu
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
         const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
         if (!result.toBoolean()) return value.JSValue.false_val;
     }
@@ -688,7 +741,7 @@ pub fn arraySome(ctx: *context.Context, this: value.JSValue, args: []const value
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
         const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
         if (result.toBoolean()) return value.JSValue.true_val;
     }
@@ -705,7 +758,7 @@ pub fn arrayFind(ctx: *context.Context, this: value.JSValue, args: []const value
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
         const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
         if (result.toBoolean()) return elem;
     }
@@ -722,7 +775,7 @@ pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const 
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
         const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
         if (result.toBoolean()) return value.JSValue.fromInt(@intCast(i));
     }

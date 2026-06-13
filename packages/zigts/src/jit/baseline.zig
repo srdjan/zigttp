@@ -3348,6 +3348,14 @@ pub const BaselineCompiler = struct {
         const saved_fp = getInlineFpSaveReg();
 
         if (is_x86_64) {
+            // When already inside an inline (depth >= 1), r14 holds the outer
+            // inline's saved FP.  Save it to the machine stack before we
+            // overwrite it.  We use two slots (sub rsp, 16 + mov) rather than
+            // a single push to keep RSP 16-byte aligned at all inner call sites.
+            if (self.inline_depth >= 1) {
+                self.emitter.subRegImm32(.rsp, 16) catch return CompileError.OutOfMemory;
+                self.emitter.movMemReg(.rsp, 0, saved_fp) catch return CompileError.OutOfMemory;
+            }
             // Save caller fp into r14
             self.emitter.movRegMem(saved_fp, ctx, CTX_FP_OFF) catch return CompileError.OutOfMemory;
             // new fp = sp - argc
@@ -3403,6 +3411,12 @@ pub const BaselineCompiler = struct {
 
             // Restore caller fp
             self.emitter.movMemReg(ctx, CTX_FP_OFF, saved_fp) catch return CompileError.OutOfMemory;
+            // If we saved r14 in the prologue (nested inline), restore it now
+            // so the outer inline's saved FP is back in r14.
+            if (self.inline_depth >= 2) {
+                self.emitter.movRegMem(saved_fp, .rsp, 0) catch return CompileError.OutOfMemory;
+                self.emitter.addRegImm32(.rsp, 16) catch return CompileError.OutOfMemory;
+            }
         } else if (is_aarch64) {
             // Load result from top of stack into x9
             self.emitter.movRegReg(.x10, sp) catch return CompileError.OutOfMemory;
@@ -5191,9 +5205,21 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.r9, .rcx) catch return CompileError.OutOfMemory;
 
             if (is_eq) {
-                // Fast path: raw equality covers same-pointer/same-int/specials
+                // Fast path: raw equality is valid for tagged values (ints, pointers,
+                // specials), but doubles must go through ucomisd so that NaN===NaN
+                // returns false (IEEE 754 requires NaN comparisons to be false).
+                const not_raw_eq = self.newLocalLabel();
                 self.emitter.cmpRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
-                try self.emitJccToLabel(.e, fast_equal);
+                try self.emitJccToLabel(.ne, not_raw_eq);
+                // Values are bit-equal. Only take the fast path for tagged values
+                // (upper 16 bits >= 0xFFFC); raw doubles (including NaN) fall through
+                // to the ucomisd path which handles NaN correctly.
+                self.emitter.movRegReg(.r10, .rax) catch return CompileError.OutOfMemory;
+                self.emitter.shrRegImm(.r10, 48) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegImm32(.r10, 0xFFFC) catch return CompileError.OutOfMemory;
+                try self.emitJccToLabel(.ae, fast_equal);
+                try self.emitJmpToLabel(try_float);
+                try self.markLabel(not_raw_eq);
             }
 
             // Tag guard: both ints (prefix == INT_PREFIX)
@@ -5356,9 +5382,21 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x13, .x10) catch return CompileError.OutOfMemory;
 
             if (is_eq) {
-                // Fast path: raw equality covers same-pointer/same-int/specials
+                // Fast path: raw equality is valid for tagged values (ints, pointers,
+                // specials), but doubles must go through fcmp so that NaN===NaN
+                // returns false (IEEE 754 requires NaN comparisons to be false).
+                const not_raw_eq = self.newLocalLabel();
                 self.emitter.cmpRegReg(.x9, .x10) catch return CompileError.OutOfMemory;
-                try self.emitBcondToLabel(.eq, fast_equal);
+                try self.emitBcondToLabel(.ne, not_raw_eq);
+                // Values are bit-equal. Only take the fast path for tagged values
+                // (upper 16 bits >= 0xFFFC); raw doubles (including NaN) fall through
+                // to the fcmp path which handles NaN correctly.
+                self.emitter.lsrRegImm(.x11, .x9, 48) catch return CompileError.OutOfMemory;
+                self.emitter.movRegImm64(.x14, 0xFFFC) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x11, .x14) catch return CompileError.OutOfMemory;
+                try self.emitBcondToLabel(.hs, fast_equal);
+                try self.emitJmpToLabel(try_float);
+                try self.markLabel(not_raw_eq);
             }
 
             // Tag guard: both ints (prefix == INT_PREFIX)
@@ -5525,9 +5563,20 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.r8, .rax) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.r9, .rcx) catch return CompileError.OutOfMemory;
 
-            // Fast path: raw equality
-            self.emitter.cmpRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.e, fast_equal);
+            // Fast path: raw equality is valid for tagged values only.
+            // Raw doubles (including NaN) must use the strictEquals helper so
+            // NaN === NaN correctly returns false.
+            {
+                const not_raw_eq = self.newLocalLabel();
+                self.emitter.cmpRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
+                try self.emitJccToLabel(.ne, not_raw_eq);
+                self.emitter.movRegReg(.r10, .rax) catch return CompileError.OutOfMemory;
+                self.emitter.shrRegImm(.r10, 48) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegImm32(.r10, 0xFFFC) catch return CompileError.OutOfMemory;
+                try self.emitJccToLabel(.ae, fast_equal);
+                try self.emitJmpToLabel(slow);
+                try self.markLabel(not_raw_eq);
+            }
 
             // Slow path: strictEquals helper (handles floats/strings)
             try self.emitJmpToLabel(slow);
@@ -5566,9 +5615,19 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x12, .x9) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x13, .x10) catch return CompileError.OutOfMemory;
 
-            // Fast path: raw equality
-            self.emitter.cmpRegReg(.x9, .x10) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.eq, fast_equal);
+            // Fast path: raw equality is valid for tagged values only.
+            // Raw doubles (including NaN) must use the strictEquals helper.
+            {
+                const not_raw_eq = self.newLocalLabel();
+                self.emitter.cmpRegReg(.x9, .x10) catch return CompileError.OutOfMemory;
+                try self.emitBcondToLabel(.ne, not_raw_eq);
+                self.emitter.lsrRegImm(.x11, .x9, 48) catch return CompileError.OutOfMemory;
+                self.emitter.movRegImm64(.x14, 0xFFFC) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x11, .x14) catch return CompileError.OutOfMemory;
+                try self.emitBcondToLabel(.hs, fast_equal);
+                try self.emitJmpToLabel(slow);
+                try self.markLabel(not_raw_eq);
+            }
 
             try self.emitJmpToLabel(slow);
 

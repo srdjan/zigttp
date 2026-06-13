@@ -60,14 +60,10 @@ pub fn numberIsFinite(_: *context.Context, _: value.JSValue, args: []const value
 
 /// Number.parseFloat(string) - Parse string as float
 pub fn numberParseFloat(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx; // ctx no longer needed with NaN-boxing
     if (args.len == 0) return value.JSValue.nan_val;
     const val = args[0];
 
-    if (!val.isString()) return value.JSValue.nan_val;
-
-    const str = val.toPtr(string.JSString);
-    const text = str.data();
+    const text = h.getStringDataCtx(val, ctx) orelse return value.JSValue.nan_val;
 
     // Skip leading whitespace
     var i: usize = 0;
@@ -135,18 +131,15 @@ pub fn numberParseFloat(ctx: *context.Context, _: value.JSValue, args: []const v
 
 /// Number.parseInt(string, radix) - Parse string as integer
 pub fn numberParseInt(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx; // ctx no longer needed with NaN-boxing
     if (args.len == 0) return value.JSValue.nan_val;
     const val = args[0];
 
-    if (!val.isString()) return value.JSValue.nan_val;
+    const text = h.getStringDataCtx(val, ctx) orelse return value.JSValue.nan_val;
 
-    const str = val.toPtr(string.JSString);
-    const text = str.data();
-
-    // Get radix (default 10)
+    // Get radix (default 10). Track explicitness to control 0x auto-detection.
     var radix: u8 = 10;
-    if (args.len > 1 and args[1].isInt()) {
+    const radix_explicit = args.len > 1;
+    if (radix_explicit and args[1].isInt()) {
         const r = args[1].getInt();
         if (r < 2 or r > 36) return value.JSValue.nan_val;
         radix = @intCast(r);
@@ -167,10 +160,10 @@ pub fn numberParseInt(ctx: *context.Context, _: value.JSValue, args: []const val
         i += 1;
     }
 
-    // Handle 0x prefix for hex
+    // Handle 0x prefix for hex. Auto-detect only when radix was not explicitly given.
     if (radix == 16 and i + 1 < text.len and text[i] == '0' and (text[i + 1] == 'x' or text[i + 1] == 'X')) {
         i += 2;
-    } else if (radix == 10 and i + 1 < text.len and text[i] == '0' and (text[i + 1] == 'x' or text[i + 1] == 'X')) {
+    } else if (!radix_explicit and radix == 10 and i + 1 < text.len and text[i] == '0' and (text[i + 1] == 'x' or text[i + 1] == 'X')) {
         radix = 16;
         i += 2;
     }
@@ -258,7 +251,9 @@ pub fn numberToString(ctx: *context.Context, this: value.JSValue, args: []const 
         n = this.getInt();
     } else if (this.isFloat()) {
         float_val = this.getFloat();
-        if (@floor(float_val) == float_val and float_val >= @as(f64, @floatFromInt(std.math.minInt(i64))) and float_val <= @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
+        // @floatFromInt(maxInt(i64)) rounds up to 2^63 in f64, so use strict < to
+        // avoid passing a value that overflows i64 on conversion.
+        if (@floor(float_val) == float_val and float_val >= @as(f64, @floatFromInt(std.math.minInt(i64))) and float_val < @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
             n = @intFromFloat(float_val);
         } else {
             is_float = true;
@@ -355,16 +350,16 @@ pub fn globalRange(ctx: *context.Context, _: value.JSValue, args: []const value.
         return value.JSValue.undefined_val;
     } else if (args.len == 1) {
         // range(end) - start defaults to 0
-        end = if (args[0].isInt()) args[0].getInt() else if (args[0].isFloat()) @intFromFloat(args[0].getFloat64()) else 0;
+        end = if (args[0].isInt()) args[0].getInt() else if (args[0].isFloat()) std.math.lossyCast(i32, args[0].getFloat64()) else 0;
     } else if (args.len == 2) {
         // range(start, end)
-        start = if (args[0].isInt()) args[0].getInt() else if (args[0].isFloat()) @intFromFloat(args[0].getFloat64()) else 0;
-        end = if (args[1].isInt()) args[1].getInt() else if (args[1].isFloat()) @intFromFloat(args[1].getFloat64()) else 0;
+        start = if (args[0].isInt()) args[0].getInt() else if (args[0].isFloat()) std.math.lossyCast(i32, args[0].getFloat64()) else 0;
+        end = if (args[1].isInt()) args[1].getInt() else if (args[1].isFloat()) std.math.lossyCast(i32, args[1].getFloat64()) else 0;
     } else {
         // range(start, end, step)
-        start = if (args[0].isInt()) args[0].getInt() else if (args[0].isFloat()) @intFromFloat(args[0].getFloat64()) else 0;
-        end = if (args[1].isInt()) args[1].getInt() else if (args[1].isFloat()) @intFromFloat(args[1].getFloat64()) else 0;
-        step = if (args[2].isInt()) args[2].getInt() else if (args[2].isFloat()) @intFromFloat(args[2].getFloat64()) else 1;
+        start = if (args[0].isInt()) args[0].getInt() else if (args[0].isFloat()) std.math.lossyCast(i32, args[0].getFloat64()) else 0;
+        end = if (args[1].isInt()) args[1].getInt() else if (args[1].isFloat()) std.math.lossyCast(i32, args[1].getFloat64()) else 0;
+        step = if (args[2].isInt()) args[2].getInt() else if (args[2].isFloat()) std.math.lossyCast(i32, args[2].getFloat64()) else 1;
         if (step == 0) step = 1; // Prevent infinite loop
     }
 
@@ -383,9 +378,9 @@ pub fn globalRange(ctx: *context.Context, _: value.JSValue, args: []const value.
 /// Eliminates all JS overhead for the /api/process benchmark endpoint
 pub fn globalProcessRequest(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     // Parse arguments with defaults
-    const total_items: i32 = if (args.len > 0 and args[0].isInt()) args[0].getInt() else if (args.len > 0 and args[0].isFloat()) @intFromFloat(args[0].getFloat64()) else 100;
-    const page_arg: i32 = if (args.len > 1 and args[1].isInt()) args[1].getInt() else if (args.len > 1 and args[1].isFloat()) @intFromFloat(args[1].getFloat64()) else 1;
-    const limit: i32 = if (args.len > 2 and args[2].isInt()) args[2].getInt() else if (args.len > 2 and args[2].isFloat()) @intFromFloat(args[2].getFloat64()) else 10;
+    const total_items: i32 = if (args.len > 0 and args[0].isInt()) args[0].getInt() else if (args.len > 0 and args[0].isFloat()) std.math.lossyCast(i32, args[0].getFloat64()) else 100;
+    const page_arg: i32 = if (args.len > 1 and args[1].isInt()) args[1].getInt() else if (args.len > 1 and args[1].isFloat()) std.math.lossyCast(i32, args[1].getFloat64()) else 1;
+    const limit: i32 = if (args.len > 2 and args[2].isInt()) args[2].getInt() else if (args.len > 2 and args[2].isFloat()) std.math.lossyCast(i32, args[2].getFloat64()) else 10;
 
     // Pagination math
     const total_pages: i32 = if (limit > 0) @divTrunc(total_items + limit - 1, limit) else 1;

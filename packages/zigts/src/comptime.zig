@@ -1138,7 +1138,7 @@ pub const ComptimeEvaluator = struct {
             .string => |s| {
                 const radix: u8 = if (args.len >= 2) blk: {
                     const r = args[1].toNumber() orelse break :blk 10;
-                    break :blk @intFromFloat(@trunc(r));
+                    break :blk std.math.lossyCast(u8, @trunc(r));
                 } else 10;
 
                 const trimmed = std.mem.trim(u8, s, " \t\n\r");
@@ -1259,7 +1259,9 @@ pub const ComptimeEvaluator = struct {
         _ = self;
         const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
         const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
-        return .{ .number = @mod(ln, rn) };
+        // JS % is truncated-toward-zero remainder (same sign as dividend), not floored.
+        // @rem matches this; @mod (floored) gives wrong results for negative operands.
+        return .{ .number = @rem(ln, rn) };
     }
 
     // ========================================================================
@@ -1420,7 +1422,7 @@ pub const ComptimeEvaluator = struct {
             }
             if (std.mem.eql(u8, name, "repeat")) {
                 const count = args[0].toNumber() orelse return ComptimeError.TypeMismatch;
-                if (count < 0 or count > 10000) return ComptimeError.TypeMismatch;
+                if (!std.math.isFinite(count) or count < 0 or count > 10000) return ComptimeError.TypeMismatch;
                 const n: usize = @intFromFloat(@trunc(count));
                 var result: std.ArrayList(u8) = .empty;
                 for (0..n) |_| {
@@ -1437,7 +1439,7 @@ pub const ComptimeEvaluator = struct {
             }
             if (std.mem.eql(u8, name, "charAt")) {
                 const idx_f = args[0].toNumber() orelse return ComptimeError.TypeMismatch;
-                const idx: usize = @intFromFloat(@trunc(idx_f));
+                const idx: usize = std.math.lossyCast(usize, @trunc(idx_f));
                 if (idx >= str.len) {
                     const empty = self.allocator.alloc(u8, 0) catch return ComptimeError.OutOfMemory;
                     return .{ .string = empty };
@@ -1549,7 +1551,7 @@ pub const ComptimeEvaluator = struct {
         if (args.len < 1) return ComptimeError.SyntaxError;
 
         const start_f = args[0].toNumber() orelse return ComptimeError.TypeMismatch;
-        var start: i64 = @intFromFloat(@trunc(start_f));
+        var start: i64 = std.math.lossyCast(i64, @trunc(start_f));
         const len: i64 = @intCast(str.len);
 
         // Handle negative start
@@ -1561,7 +1563,7 @@ pub const ComptimeEvaluator = struct {
         var end: i64 = len;
         if (args.len >= 2) {
             const end_f = args[1].toNumber() orelse return ComptimeError.TypeMismatch;
-            end = @intFromFloat(@trunc(end_f));
+            end = std.math.lossyCast(i64, @trunc(end_f));
             if (end < 0) {
                 end = @max(0, len + end);
             }
@@ -1608,7 +1610,7 @@ pub const ComptimeEvaluator = struct {
         if (args.len < 1) return ComptimeError.SyntaxError;
 
         const target_len_f = args[0].toNumber() orelse return ComptimeError.TypeMismatch;
-        const target_len: usize = @intFromFloat(@max(0, @trunc(target_len_f)));
+        const target_len: usize = std.math.lossyCast(usize, @trunc(target_len_f));
 
         if (target_len <= str.len) {
             return .{ .string = self.allocator.dupe(u8, str) catch return ComptimeError.OutOfMemory };
@@ -1642,7 +1644,7 @@ pub const ComptimeEvaluator = struct {
         if (args.len < 1) return ComptimeError.SyntaxError;
 
         const target_len_f = args[0].toNumber() orelse return ComptimeError.TypeMismatch;
-        const target_len: usize = @intFromFloat(@max(0, @trunc(target_len_f)));
+        const target_len: usize = std.math.lossyCast(usize, @trunc(target_len_f));
 
         if (target_len <= str.len) {
             return .{ .string = self.allocator.dupe(u8, str) catch return ComptimeError.OutOfMemory };
@@ -1926,6 +1928,11 @@ test "comptime arithmetic" {
     var eval3 = ComptimeEvaluator.init(allocator, "2 ** 10", 1, 1);
     const r3 = try eval3.evaluate();
     try std.testing.expectEqual(@as(f64, 1024), r3.number);
+
+    // JS % is truncated-toward-zero (not floored): -5 % 3 = -2, not 1.
+    var eval4 = ComptimeEvaluator.init(allocator, "-5 % 3", 1, 1);
+    const r4 = try eval4.evaluate();
+    try std.testing.expectEqual(@as(f64, -2), r4.number);
 }
 
 test "comptime boolean operations" {

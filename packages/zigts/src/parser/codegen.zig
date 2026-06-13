@@ -1278,7 +1278,16 @@ pub const CodeGen = struct {
         var i: u8 = 0;
         while (i < call.args_count) : (i += 1) {
             const arg_idx = self.ir.getListIndex(call.args_start, i);
-            try self.emitNode(arg_idx);
+            const arg_tag = self.ir.getTag(arg_idx);
+            if (arg_tag != null and arg_tag.? == .spread) {
+                // Spread args are rejected by the canonical profile checker (strict mode).
+                // Emit call_spread (pushes undefined) to keep the stack balanced when
+                // strict checking is disabled and the handler reaches codegen anyway.
+                try self.emit(.call_spread);
+                self.pushStack(1);
+            } else {
+                try self.emitNode(arg_idx);
+            }
         }
     }
 

@@ -533,7 +533,7 @@ pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
     return result;
 }
 
-const RenderError = std.Io.Writer.Error || error{ OutOfMemory, ArenaObjectEscape, NoHiddenClassPool };
+const RenderError = std.Io.Writer.Error || error{ OutOfMemory, ArenaObjectEscape, NoHiddenClassPool, JsonDepthExceeded };
 
 /// Render a single node to the writer
 fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer) RenderError!void {
@@ -908,7 +908,7 @@ fn valueToJsonScratch(ctx: *context.Context, val: value.JSValue) ![]const u8 {
     var aw = &ctx.json_writer;
     aw.clearRetainingCapacity();
     try aw.ensureTotalCapacity(estimated);
-    try writeJson(ctx, val, &aw.writer);
+    try writeJsonDepth(ctx, val, &aw.writer, 0);
     return aw.written();
 }
 
@@ -922,7 +922,14 @@ pub fn valueToJsonString(ctx: *context.Context, val: value.JSValue) !*string.JSS
     return js_str;
 }
 
-fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer) RenderError!void {
+const JSON_MAX_DEPTH: u32 = 512;
+
+fn writeJsonDepth(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer, depth: u32) RenderError!void {
+    if (depth >= JSON_MAX_DEPTH) return error.JsonDepthExceeded;
+    return writeJson(ctx, val, writer, depth);
+}
+
+fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer, depth: u32) RenderError!void {
     if (val.isNull()) {
         try writer.writeAll("null");
     } else if (val.isUndefined()) {
@@ -1006,7 +1013,7 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer) 
                 if (i > 0) try writer.writeByte(',');
                 // Use getIndex for array elements (stored in inline_slots[1..])
                 if (obj.getIndex(@intCast(i))) |elem| {
-                    try writeJson(ctx, elem, writer);
+                    try writeJsonDepth(ctx, elem, writer, depth + 1);
                 } else {
                     try writer.writeAll("null");
                 }
@@ -1050,7 +1057,7 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer) 
                             try writer.writeByte('"');
                             try writer.writeAll(name);
                             try writer.writeAll("\":");
-                            try writeJson(ctx, v, writer);
+                            try writeJsonDepth(ctx, v, writer, depth + 1);
                         }
                     }
                 }

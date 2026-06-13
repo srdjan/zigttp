@@ -1211,17 +1211,12 @@ pub const TypePool = struct {
                 try writer.writeByte('`');
             },
             .t_generic_app => {
-                const data = self.getData(idx) orelse return;
-                try self.writeType(data.a, writer);
+                const info = self.getGenericAppInfo(idx);
+                try self.writeType(info.base, writer);
                 try writer.writeByte('<');
-                const start: u16 = data.b & 0xFF;
-                const count: u16 = data.b >> 8;
-                var i: u16 = 0;
-                while (i < count) : (i += 1) {
+                for (info.args, 0..) |arg, i| {
                     if (i > 0) try writer.writeAll(", ");
-                    if (start + i < self.members.items.len) {
-                        try self.writeType(self.members.items[start + i], writer);
-                    }
+                    try self.writeType(arg, writer);
                 }
                 try writer.writeByte('>');
             },

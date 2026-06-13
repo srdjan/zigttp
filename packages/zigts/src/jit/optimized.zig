@@ -734,6 +734,11 @@ pub const OptimizedCompiler = struct {
             self.emitter.pushReg(.r13) catch return CompileError.OutOfMemory;
             self.emitter.pushReg(.r14) catch return CompileError.OutOfMemory;
             self.emitter.pushReg(.r15) catch return CompileError.OutOfMemory;
+            // 6 pushes (rbp + 5 callee-saved) = 48 bytes.  At JIT-function
+            // entry RSP is 8 below a 16-byte boundary per x86-64 ABI; after
+            // 6 more pushes it is 56 bytes below = still 8-misaligned.
+            // Reserve 8 bytes so every interior callReg sees RSP % 16 == 0.
+            self.emitter.subRegImm32(.rsp, 8) catch return CompileError.OutOfMemory;
 
             // Save context pointer
             self.emitter.movRegReg(.rbx, .rdi) catch return CompileError.OutOfMemory;
@@ -763,6 +768,8 @@ pub const OptimizedCompiler = struct {
     fn emitEpilogue(self: *OptimizedCompiler) CompileError!void {
         if (is_x86_64) {
             // Return value is in rax
+            // Undo the 8-byte alignment reserve from the prologue.
+            self.emitter.addRegImm32(.rsp, 8) catch return CompileError.OutOfMemory;
             self.emitter.popReg(.r15) catch return CompileError.OutOfMemory;
             self.emitter.popReg(.r14) catch return CompileError.OutOfMemory;
             self.emitter.popReg(.r13) catch return CompileError.OutOfMemory;

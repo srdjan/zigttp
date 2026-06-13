@@ -157,6 +157,9 @@ pub fn run(cfg: Config) void {
             .message => |message| message,
             .close => |metadata| {
                 close_metadata = metadata;
+                // RFC 6455 §5.5.1: echo the close frame before terminating.
+                const echo_code: u16 = if (metadata.had_code) metadata.code else 1000;
+                sendCloseSilently(&ws, echo_code);
                 return;
             },
         };

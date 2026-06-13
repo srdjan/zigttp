@@ -565,6 +565,10 @@ test "buildRegistry registers every first-party compiler primitive" {
         "pi_witnesses",
         "pi_remember_fact",
         "pi_recall_facts",
+        "pi_extension_catalog",
+        "zigts_expert_effects",
+        "zigts_expert_narrow",
+        "zigts_expert_ratchet",
     };
 
     for (expected_names) |expected| {

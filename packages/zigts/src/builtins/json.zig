@@ -426,18 +426,33 @@ fn parseJsonKeyWithEscapes(ctx: *context.Context, text: []const u8, pos: *usize,
             if (pos.* >= text.len) return error.InvalidJson;
             const escaped = text[pos.*];
             pos.* += 1;
-            const byte: u8 = switch (escaped) {
-                '"' => '"',
-                '\\' => '\\',
-                '/' => '/',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                'b' => 0x08,
-                'f' => 0x0C,
+            switch (escaped) {
+                '"' => buffer.append(ctx.allocator, '"') catch return error.OutOfMemory,
+                '\\' => buffer.append(ctx.allocator, '\\') catch return error.OutOfMemory,
+                '/' => buffer.append(ctx.allocator, '/') catch return error.OutOfMemory,
+                'n' => buffer.append(ctx.allocator, '\n') catch return error.OutOfMemory,
+                'r' => buffer.append(ctx.allocator, '\r') catch return error.OutOfMemory,
+                't' => buffer.append(ctx.allocator, '\t') catch return error.OutOfMemory,
+                'b' => buffer.append(ctx.allocator, 0x08) catch return error.OutOfMemory,
+                'f' => buffer.append(ctx.allocator, 0x0C) catch return error.OutOfMemory,
+                'u' => {
+                    if (pos.* + 4 > text.len) return error.InvalidJson;
+                    const hex = text[pos.*..][0..4];
+                    pos.* += 4;
+                    const code = std.fmt.parseInt(u16, hex, 16) catch return error.InvalidJson;
+                    if (code < 0x80) {
+                        buffer.append(ctx.allocator, @intCast(code)) catch return error.OutOfMemory;
+                    } else if (code < 0x800) {
+                        buffer.append(ctx.allocator, @intCast(0xC0 | (code >> 6))) catch return error.OutOfMemory;
+                        buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F))) catch return error.OutOfMemory;
+                    } else {
+                        buffer.append(ctx.allocator, @intCast(0xE0 | (code >> 12))) catch return error.OutOfMemory;
+                        buffer.append(ctx.allocator, @intCast(0x80 | ((code >> 6) & 0x3F))) catch return error.OutOfMemory;
+                        buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F))) catch return error.OutOfMemory;
+                    }
+                },
                 else => return error.InvalidJson,
-            };
-            buffer.append(ctx.allocator, byte) catch return error.OutOfMemory;
+            }
         } else {
             buffer.append(ctx.allocator, c) catch return error.OutOfMemory;
             pos.* += 1;

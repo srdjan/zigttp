@@ -47,14 +47,20 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         return error.InvalidArgument;
     }
 
-    var owned_content: ?[]u8 = null;
+    var owned_content: ?[]const u8 = null;
     defer if (owned_content) |c| allocator.free(c);
-    var owned_before: ?[]u8 = null;
+    var owned_before: ?[]const u8 = null;
     defer if (owned_before) |b| allocator.free(b);
+    var owned_file: ?[]const u8 = null;
+    defer if (owned_file) |f| allocator.free(f);
 
-    const input: edit_simulate.EditSimulateInput = if (stdin_json)
-        try edit_simulate.readStdinJson(allocator)
-    else blk: {
+    const input: edit_simulate.EditSimulateInput = if (stdin_json) blk: {
+        const parsed = try edit_simulate.readStdinJson(allocator);
+        owned_file = parsed.file;
+        owned_content = parsed.content;
+        if (parsed.before) |b| owned_before = b;
+        break :blk parsed;
+    } else blk: {
         const path = handler_path orelse {
             const usage = "Usage: zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]\n";
             _ = std.c.write(std.c.STDERR_FILENO, usage.ptr, usage.len);

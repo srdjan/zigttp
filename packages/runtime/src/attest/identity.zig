@@ -141,16 +141,25 @@ fn ensureDirectory(path: []const u8) !void {
 }
 
 fn writeFileStrict(file_path: []const u8, bytes: []const u8) !void {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path_z = try toCStr(&path_buf, file_path);
+    if (file_path.len + 4 >= std.fs.max_path_bytes) return error.NameTooLong;
+
+    // Write-then-rename for atomicity: a crash mid-write leaves the old file
+    // intact rather than a half-written credential.
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try std.fmt.bufPrintZ(&tmp_buf, "{s}.tmp", .{file_path});
 
     const fd = try std.posix.openatZ(
         std.posix.AT.FDCWD,
-        path_z,
+        tmp_path,
         .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
         file_mode,
     );
-    defer std.Io.Threaded.closeFd(fd);
+
+    var write_ok = false;
+    defer {
+        std.Io.Threaded.closeFd(fd);
+        if (!write_ok) _ = std.c.unlink(tmp_path);
+    }
 
     var total: usize = 0;
     while (total < bytes.len) {
@@ -159,10 +168,14 @@ fn writeFileStrict(file_path: []const u8, bytes: []const u8) !void {
         total += @intCast(n);
     }
 
-    // openat honours mode on first creation but the user's umask may have
-    // stripped permissions further. An explicit chmod restores the strict
-    // 0600; on an already-tight file it is a no-op.
-    _ = std.c.chmod(path_z, file_mode);
+    // Tighten permissions before the rename so the final path is never
+    // readable at a looser mode.
+    if (std.c.fchmod(fd, file_mode) != 0) return error.WriteFailed;
+
+    var final_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const final_z = try toCStr(&final_buf, file_path);
+    if (std.c.rename(tmp_path, final_z) != 0) return error.WriteFailed;
+    write_ok = true;
 }
 
 fn toCStr(buf: *[std.fs.max_path_bytes]u8, path: []const u8) ![:0]const u8 {

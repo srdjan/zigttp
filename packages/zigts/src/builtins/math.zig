@@ -53,7 +53,10 @@ pub fn mathRound(ctx: *context.Context, this: value.JSValue, args: []const value
     // Integer fast path: round(int) = int
     if (arg.isInt()) return arg;
     const n = toNumber(arg) orelse return value.JSValue.undefined_val;
-    return allocFloat(ctx, @round(n));
+    // ECMAScript: Math.round(x) = Math.floor(x + 0.5), ties go toward +Infinity.
+    // Zig's @round ties away from zero, so Math.round(-0.5) = @round(-0.5) = -1
+    // but ECMAScript requires 0. Use floor(x + 0.5) to match the spec.
+    return allocFloat(ctx, @floor(n + 0.5));
 }
 
 pub fn mathTrunc(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {

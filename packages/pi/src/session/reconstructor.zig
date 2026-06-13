@@ -146,7 +146,7 @@ fn appendDisplayMessage(
     payload: std.json.Value,
     kind: DisplayKind,
 ) !void {
-    const message = if (payload == .string) blk: {
+    var message = if (payload == .string) blk: {
         break :blk transcript.OwnedDisplayMessage{
             .llm_text = try allocator.dupe(u8, payload.string),
             .ui_payload = null,

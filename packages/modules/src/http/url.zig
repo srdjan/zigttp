@@ -44,11 +44,17 @@ fn parseUrlComponents(input: []const u8) UrlComponents {
         const host_end = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
         const authority = rest[0..host_end];
 
-        if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
-            result.host = authority[0..colon];
-            result.port = authority[colon + 1 ..];
+        // Strip userinfo (user:password@) if present
+        const hostport = if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at|
+            authority[at + 1 ..]
+        else
+            authority;
+
+        if (std.mem.lastIndexOfScalar(u8, hostport, ':')) |colon| {
+            result.host = hostport[0..colon];
+            result.port = hostport[colon + 1 ..];
         } else {
-            result.host = authority;
+            result.host = hostport;
         }
 
         rest = if (host_end < rest.len) rest[host_end..] else "/";

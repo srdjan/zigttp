@@ -166,13 +166,9 @@ const nan_float_consts = [_]JSValue{ JSValue.fromFloat(std.math.nan(f64)), JSVal
 const nan_lt_float_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.lt), op(.ret) };
 const nan_eq_float_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.eq), op(.ret) };
 const float_gte_nan_code = [_]u8{ op(.push_const), 1, 0, op(.push_const), 0, 0, op(.gte), op(.ret) };
-// Identical-bit NaN equality: every tier short-circuits on raw-bits equality
-// BEFORE any NaN check (strictEquals/looseEquals fast path in the interpreter,
-// the emitted raw-compare fast path in the baseline), so `NaN === NaN` reads
-// true engine-wide when both operands come from the same constant. That is an
-// ES deviation (spec says false) pinned here as TIER AGREEMENT: if any tier
-// gains a NaN guard on its fast path this case flags the divergence, and the
-// expectation flips to false only when all tiers move together.
+// Identical-bit NaN equality: all tiers now correctly return false for
+// `NaN === NaN` (IEEE 754 / JS spec). The interpreter's strictEquals/looseEquals
+// fast paths and the baseline JIT raw-compare fast path all guard against NaN.
 const nan_strict_eq_self_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 0, 0, op(.strict_eq), op(.ret) };
 const nan_eq_self_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 0, 0, op(.eq), op(.ret) };
 // Different-bit NaNs (canonical vs sign-flipped) dodge the raw fast path and
@@ -283,8 +279,8 @@ const cases = [_]Case{
     .{ .name = "nan_lt_float", .code = &nan_lt_float_code, .constants = &nan_float_consts, .kind = .boolean, .expected_bool = false },
     .{ .name = "nan_eq_float", .code = &nan_eq_float_code, .constants = &nan_float_consts, .kind = .boolean, .expected_bool = false },
     .{ .name = "float_gte_nan", .code = &float_gte_nan_code, .constants = &nan_float_consts, .kind = .boolean, .expected_bool = false },
-    .{ .name = "nan_strict_eq_self", .code = &nan_strict_eq_self_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = true },
-    .{ .name = "nan_eq_self", .code = &nan_eq_self_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = true },
+    .{ .name = "nan_strict_eq_self", .code = &nan_strict_eq_self_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = false },
+    .{ .name = "nan_eq_self", .code = &nan_eq_self_code, .constants = &nan_lt_consts, .kind = .boolean, .expected_bool = false },
     .{ .name = "nan_strict_eq_diff", .code = &nan_strict_eq_diff_code, .constants = &nan_diff_consts, .kind = .boolean, .expected_bool = false },
     .{ .name = "nan_eq_diff", .code = &nan_eq_diff_code, .constants = &nan_diff_consts, .kind = .boolean, .expected_bool = false },
     .{ .name = "nan_branch_not_taken", .code = &nan_branch_code, .constants = &nan_lt_consts, .kind = .number, .expected_num = 7 },

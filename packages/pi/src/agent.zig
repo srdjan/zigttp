@@ -695,6 +695,7 @@ pub fn fork(
     defer allocator.free(realpath);
 
     const new_sid = try session_id_mod.generate(allocator);
+    errdefer allocator.free(new_sid);
     const new_dir = try session_paths.sessionDir(allocator, new_sid);
     errdefer allocator.free(new_dir);
     try session_paths.writeWorkspacePointer(allocator, new_dir, realpath);

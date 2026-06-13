@@ -664,10 +664,14 @@ pub const TypeEnv = struct {
         var kept_count: usize = 0;
         for (self.pool.getIntersectionMembers(idx)) |member| {
             if (self.isProofMarkerRecord(member)) continue;
+            // Recurse into nested intersections so composed markers like
+            // Proof<Effects<string, "env">, "pure"> are fully stripped.
+            const stripped_member = self.stripProofMarkers(member);
+            if (stripped_member == null_type_idx) continue;
             // Wider intersections than the buffer: keep the declared type
             // unchanged rather than silently dropping members.
             if (kept_count >= kept.len) return idx;
-            kept[kept_count] = member;
+            kept[kept_count] = stripped_member;
             kept_count += 1;
         }
         if (kept_count == 0) return idx;

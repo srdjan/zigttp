@@ -2272,9 +2272,9 @@ pub const Runtime = struct {
                         if (cl_val.isString()) {
                             const str = cl_val.toPtr(zq.JSString);
                             if (borrow_body) {
-                                try response.putHeaderBorrowedRuntime("content-length", str.data());
+                                try response.putHeaderBorrowedRuntime("Content-Length", str.data());
                             } else {
-                                try response.putHeader("content-length", str.data());
+                                try response.putHeader("Content-Length", str.data());
                             }
                         }
 
@@ -2282,9 +2282,9 @@ pub const Runtime = struct {
                         if (cc_val.isString()) {
                             const str = cc_val.toPtr(zq.JSString);
                             if (borrow_body) {
-                                try response.putHeaderBorrowedRuntime("cache-control", str.data());
+                                try response.putHeaderBorrowedRuntime("Cache-Control", str.data());
                             } else {
-                                try response.putHeader("cache-control", str.data());
+                                try response.putHeader("Cache-Control", str.data());
                             }
                         }
                     } else {
@@ -4577,11 +4577,19 @@ fn doFetchWorkerInner(
 
     // Build response headers list
     var resp_headers: std.ArrayList(zq.modules.io.FetchResult.ResponseHeader) = .empty;
+    errdefer {
+        for (resp_headers.items) |h| {
+            allocator.free(h.name);
+            allocator.free(h.value_str);
+        }
+        resp_headers.deinit(allocator);
+    }
     for (owned_head.headers.items) |h| {
-        try resp_headers.append(allocator, .{
-            .name = try allocator.dupe(u8, h.name),
-            .value_str = try allocator.dupe(u8, h.value),
-        });
+        const name = try allocator.dupe(u8, h.name);
+        errdefer allocator.free(name);
+        const value = try allocator.dupe(u8, h.value);
+        errdefer allocator.free(value);
+        try resp_headers.append(allocator, .{ .name = name, .value_str = value });
     }
 
     return zq.modules.io.FetchResult{

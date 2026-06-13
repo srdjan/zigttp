@@ -142,6 +142,7 @@ pub const RateStore = struct {
         }
 
         const owned_key = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(owned_key);
         try self.entries.put(owned_key, .{
             .count = 1,
             .window_start = now,

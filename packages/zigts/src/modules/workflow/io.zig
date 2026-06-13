@@ -12,8 +12,8 @@
 //!
 //!   race(thunks: Array<() => T>) -> T
 //!     Execute an array of zero-arg functions concurrently.
-//!     Returns the result of whichever thunk completes first.
-//!     Remaining in-flight effects are discarded.
+//!     All I/O effects run and are waited on; returns the first successful
+//!     result in declaration order (lowest-latency winner in a future version).
 
 const std = @import("std");
 const context = @import("../../context.zig");
@@ -339,10 +339,9 @@ fn raceNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue
         results[0..desc_count],
     );
 
-    // Phase 3: Find the first successful result (lowest latency wins)
-    // Since threads run concurrently and we join all, we pick the first
-    // completed one. For now, the first in declaration order that succeeded.
-    // A future version could track actual completion timestamps.
+    // Phase 3: Pick the first successful result in declaration order.
+    // All threads have already joined in execute_fetches_fn, so "first"
+    // means first in the caller's array, not first by wall-clock time.
     var winner_idx: ?usize = null;
     for (0..desc_count) |i| {
         if (results[i].ok) {

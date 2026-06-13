@@ -92,6 +92,7 @@ pub fn parseExternalSeverities(
         const method_dupe = try allocator.dupe(u8, method_val.string);
         errdefer allocator.free(method_dupe);
         const reason_dupe = try allocator.dupe(u8, reason_str);
+        errdefer allocator.free(reason_dupe);
 
         try result.append(allocator, .{
             .path = path_dupe,

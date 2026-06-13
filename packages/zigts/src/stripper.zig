@@ -434,6 +434,7 @@ const Stripper = struct {
             ')' => {}, // Keep context
             '[' => self.in_expression = true, // Array literal
             ']' => {}, // Keep context
+            '?' => self.in_expression = true, // Ternary true/false branches are expression context
             else => {},
         }
 
@@ -502,7 +503,16 @@ const Stripper = struct {
 
             if (self.looksLikeTypeStart()) {
                 const ret_type_start = self.pos;
-                try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';', '=' }, true);
+                while (true) {
+                    try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';', '=' }, true);
+                    if (!(self.pos + 1 < self.source.len and self.source[self.pos] == '=' and self.source[self.pos + 1] == '>')) {
+                        break;
+                    }
+                    if (!isFunctionTypePrefix(self.source[ret_type_start..self.pos])) break;
+                    self.pos += 2;
+                    self.col += 2;
+                    self.skipWhitespaceTracked();
+                }
                 const ret_type_end = self.pos;
                 // Skip whitespace after type
                 self.skipWhitespaceTracked();
@@ -1265,20 +1275,26 @@ const Stripper = struct {
 
         // This looks like a type annotation - skip the type
         const type_start = self.pos;
-        try self.skipTypeExpressionUntilDelimiter(
-            &[_]u8{ ',', ')', ';', '=', '{', '}' },
-            false,
-        );
+        while (true) {
+            try self.skipTypeExpressionUntilDelimiter(
+                &[_]u8{ ',', ')', ';', '=', '{', '}' },
+                false,
+            );
+            // The scan stops on the `=` of a function-type's `=>` as well as on
+            // the real assignment `=`. Disambiguate: a top-level `=>` whose
+            // accumulated prefix is `(...)` is the return-type arrow of an inline
+            // function type (`const f: (x: number) => string = g;`), not the
+            // assignment. Consume it and keep scanning the return type.
+            if (!(self.pos + 1 < self.source.len and self.source[self.pos] == '=' and self.source[self.pos + 1] == '>')) {
+                break;
+            }
+            if (!isFunctionTypePrefix(self.source[type_start..self.pos])) break;
+            self.pos += 2;
+            self.col += 2;
+            self.skipWhitespaceTracked();
+        }
         // Trim trailing whitespace from type text
         const type_end = trimTrailingWs(self.source, type_start, self.pos);
-
-        // Check for arrow function
-        self.skipWhitespaceTracked();
-        if (self.pos + 1 < self.source.len and
-            self.source[self.pos] == '=' and self.source[self.pos + 1] == '>')
-        {
-            // Stop before =>
-        }
 
         // Find the identifier name before the colon in original source
         const name_range = self.findIdentifierBefore(colon_pos);
@@ -2547,6 +2563,12 @@ test "function return type stripped" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, "function add(a, b)") != null);
 }
 
+test "function-type return annotation on declaration stripped" {
+    const result = try strip(std.testing.allocator, "function mk(): (x: number) => string { return s; }", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "=> string") == null);
+}
+
 test "function return type with space before colon preserves output length" {
     const src = "function f(x) : string { return x; }";
     const result = try strip(std.testing.allocator, src, .{});
@@ -3314,4 +3336,17 @@ test "block comment inside generic annotation stripped" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, "Array") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "/*") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "= [];") != null);
+}
+
+test "fn-type var annotation stripped without arrow leak" {
+    const cases = [_][]const u8{
+        "const f: (x: number) => string = g;",
+        "let cb: (a: T) => U = h;",
+        "let p: (a: number) => void = cb;",
+    };
+    for (cases) |source| {
+        const result = try strip(std.testing.allocator, source, .{});
+        defer @constCast(&result).deinit();
+        try std.testing.expect(std.mem.indexOf(u8, result.code, "=>") == null);
+    }
 }

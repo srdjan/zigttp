@@ -405,21 +405,37 @@ fn writeProvidersFile(allocator: std.mem.Allocator, bytes: []const u8) !void {
     const file_path = try providersFilePath(allocator);
     defer allocator.free(file_path);
 
-    var file = try std.Io.Dir.createFileAbsolute(io, file_path, .{
+    // Write-then-rename for atomicity: a crash mid-write leaves the old file
+    // intact rather than a half-written credential.
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{file_path});
+    defer allocator.free(tmp_path);
+
+    var tmp_file = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{
         .truncate = true,
         .permissions = std.Io.File.Permissions.fromMode(0o600),
     });
-    defer file.close(io);
+    {
+        // Close the file before rename; on Windows rename requires no open handles.
+        defer tmp_file.close(io);
 
-    var buf: [512]u8 = undefined;
-    var writer = file.writer(io, &buf);
-    try writer.interface.writeAll(bytes);
-    try writer.interface.flush();
+        var buf: [512]u8 = undefined;
+        var writer = tmp_file.writer(io, &buf);
+        try writer.interface.writeAll(bytes);
+        try writer.interface.flush();
 
-    // O_CREAT honours the requested mode only when it actually creates the
-    // file; a pre-existing providers.json with looser bits (e.g. 0644) keeps
-    // them. Re-tighten the open handle so a rewrite always lands at 0600.
-    try file.setPermissions(io, std.Io.File.Permissions.fromMode(0o600));
+        // Tighten permissions before rename so the final path is never
+        // readable at a looser mode.
+        try tmp_file.setPermissions(io, std.Io.File.Permissions.fromMode(0o600));
+    }
+
+    const tmp_z = try allocator.dupeZ(u8, tmp_path);
+    defer allocator.free(tmp_z);
+    const file_z = try allocator.dupeZ(u8, file_path);
+    defer allocator.free(file_z);
+    if (std.c.rename(tmp_z, file_z) != 0) {
+        _ = std.c.unlink(tmp_z);
+        return error.WriteFailed;
+    }
 }
 
 // ---------------------------------------------------------------------------

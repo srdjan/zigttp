@@ -379,6 +379,11 @@ fn writeLiteralAsJson(deps: Deps, idx: NodeIndex, out: *std.ArrayList(u8)) Parse
                     '\n' => try out.appendSlice(deps.allocator, "\\n"),
                     '\r' => try out.appendSlice(deps.allocator, "\\r"),
                     '\t' => try out.appendSlice(deps.allocator, "\\t"),
+                    0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => {
+                        var esc: [6]u8 = undefined;
+                        const written = std.fmt.bufPrint(&esc, "\\u{x:0>4}", .{@as(u16, c)}) catch unreachable;
+                        try out.appendSlice(deps.allocator, written);
+                    },
                     else => try out.append(deps.allocator, c),
                 }
             }

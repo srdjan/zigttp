@@ -151,12 +151,15 @@ pub const CacheStore = struct {
     fn getOrCreateNamespace(self: *CacheStore, ns: []const u8) !*NamespaceCache {
         if (self.namespaces.get(ns)) |existing| return existing;
         const ns_cache = try self.allocator.create(NamespaceCache);
+        errdefer self.allocator.destroy(ns_cache);
         ns_cache.* = .{
             .entries = std.StringHashMap(*CacheEntry).init(self.allocator),
             .hits = 0,
             .misses = 0,
         };
+        errdefer ns_cache.entries.deinit();
         const ns_owned = try self.allocator.dupe(u8, ns);
+        errdefer self.allocator.free(ns_owned);
         try self.namespaces.put(ns_owned, ns_cache);
         return ns_cache;
     }

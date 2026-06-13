@@ -2020,6 +2020,10 @@ pub const ContractBuilder = struct {
                 const float_idx = self.ir_view.getFloatIdx(node_idx) orelse break :blk null;
                 const value = self.ir_view.getFloat(float_idx) orelse break :blk null;
                 if (@floor(value) != value) break :blk null;
+                // @floatFromInt(maxInt(i64)) rounds up to 2^63 in f64; use strict
+                // < on the max side so values that overflow i64 return null.
+                if (value >= @as(f64, @floatFromInt(std.math.maxInt(i64))) or
+                    value < @as(f64, @floatFromInt(std.math.minInt(i64)))) break :blk null;
                 break :blk @intFromFloat(value);
             },
             else => null,

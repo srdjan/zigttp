@@ -380,7 +380,7 @@ pub const HandlerAnalyzer = struct {
 
     fn getMemberAccess(self: *HandlerAnalyzer, node: NodeIndex) ?Node.MemberExpr {
         const tag = self.ir.getTag(node) orelse return null;
-        if (tag != .member_access) return null;
+        if (tag != .member_access and tag != .optional_chain) return null;
         return self.ir.getMember(node);
     }
 

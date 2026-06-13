@@ -117,10 +117,11 @@ pub const SqlStore = struct {
             if (std.mem.eql(u8, existing, statement)) return;
             return error.DuplicateQueryName;
         }
-        try self.queries.put(
-            try self.allocator.dupe(u8, name),
-            try self.allocator.dupe(u8, statement),
-        );
+        const name_owned = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(name_owned);
+        const stmt_owned = try self.allocator.dupe(u8, statement);
+        errdefer self.allocator.free(stmt_owned);
+        try self.queries.put(name_owned, stmt_owned);
     }
 
     fn getQuery(self: *SqlStore, name: []const u8) ?[]const u8 {
@@ -140,7 +141,9 @@ fn getOrCreateStore(handle: *sdk.ModuleHandle) !*SqlStore {
     if (sdk.getModuleState(handle, SqlStore, MODULE_STATE_SLOT)) |store| return store;
     const allocator = sdk.getAllocator(handle);
     const store = try allocator.create(SqlStore);
+    errdefer allocator.destroy(store);
     store.* = try SqlStore.init(allocator, null);
+    errdefer store.deinitSelf();
     try sdk.setModuleState(handle, MODULE_STATE_SLOT, @ptrCast(store), SqlStore.sdkDeinit);
     return store;
 }

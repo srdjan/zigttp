@@ -1200,6 +1200,17 @@ pub const LabelSet = packed struct(u8) {
         return @bitCast(ai | bi);
     }
 
+    /// Merge for conditional branches (ternary/if-else): taint labels use OR
+    /// (either branch can taint), but `validated` uses AND (a value is only
+    /// considered validated when ALL branches that produce it are validated;
+    /// otherwise one unvalidated path launders the flag for the entire ternary).
+    pub fn mergeConditional(a: LabelSet, b: LabelSet) LabelSet {
+        const ai: u8 = @bitCast(a);
+        const bi: u8 = @bitCast(b);
+        const validated_mask: u8 = 1 << @intFromEnum(DataLabel.validated);
+        return @bitCast((ai | bi) & ~validated_mask | (ai & bi) & validated_mask);
+    }
+
     /// Check if a specific label is present.
     pub fn has(self: LabelSet, label: DataLabel) bool {
         const bit: u3 = @intFromEnum(label);

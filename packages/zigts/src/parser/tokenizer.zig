@@ -30,6 +30,12 @@ pub const Tokenizer = struct {
     /// Template literal depth
     template_depth: u8,
 
+    /// Brace nesting depth within each template substitution level.
+    /// subst_brace_depths[d] counts unmatched '{' seen after the '${' that
+    /// opened substitution depth d+1. A '}' only closes the substitution
+    /// (routing to scanTemplateMiddleOrTail) when the depth for that level is 0.
+    subst_brace_depths: [16]u8,
+
     /// Cached token for lookahead
     current: Token,
     has_current: bool,
@@ -44,6 +50,7 @@ pub const Tokenizer = struct {
             .jsx_depth = 0,
             .can_be_regex = true,
             .template_depth = 0,
+            .subst_brace_depths = [_]u8{0} ** 16,
             .current = undefined,
             .has_current = false,
         };
@@ -78,10 +85,26 @@ pub const Tokenizer = struct {
             '~' => self.tok1(start, start_col, start_line, .tilde),
 
             '{' => blk: {
+                // Track nested braces within template substitutions so that a
+                // '}' closing an object literal or block is not mistaken for
+                // the end of the ${...} substitution.
+                if (self.template_depth > 0 and self.template_depth <= 16) {
+                    self.subst_brace_depths[self.template_depth - 1] += 1;
+                }
                 break :blk self.tok1(start, start_col, start_line, .lbrace);
             },
             '}' => blk: {
                 if (self.template_depth > 0) {
+                    const depth_idx = self.template_depth - 1;
+                    if (depth_idx < 16 and self.subst_brace_depths[depth_idx] > 0) {
+                        // This '}' closes a nested brace within the substitution,
+                        // not the substitution itself.
+                        self.subst_brace_depths[depth_idx] -= 1;
+                        break :blk self.tok1(start, start_col, start_line, .rbrace);
+                    }
+                    // The '}' closes the '${' substitution. Reset the depth entry
+                    // and scan the template middle or tail.
+                    if (depth_idx < 16) self.subst_brace_depths[depth_idx] = 0;
                     break :blk self.scanTemplateMiddleOrTail(start, start_col, start_line);
                 }
                 break :blk self.tok1(start, start_col, start_line, .rbrace);
@@ -345,7 +368,7 @@ pub const Tokenizer = struct {
                 return self.tokN(start, col, line, .template_literal);
             } else if (c == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
                 self.pos += 2;
-                self.template_depth += 1;
+                self.template_depth +|= 1;
                 return self.tokN(start, col, line, .template_head);
             } else if (c == '\\' and self.pos + 1 < self.source.len) {
                 self.pos += 2;
@@ -365,7 +388,7 @@ pub const Tokenizer = struct {
             const c = self.source[self.pos];
             if (c == '`') {
                 self.pos += 1;
-                self.template_depth -= 1;
+                self.template_depth -|= 1;
                 return self.tokN(start, col, line, .template_tail);
             } else if (c == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
                 self.pos += 2;

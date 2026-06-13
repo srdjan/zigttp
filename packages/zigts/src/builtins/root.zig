@@ -209,6 +209,12 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setPropertyChecked(number_obj, pos_inf_atom, value.JSValue.fromFloat(std.math.inf(f64)));
     const neg_inf_atom = try ctx.atoms.intern("NEGATIVE_INFINITY");
     try ctx.setPropertyChecked(number_obj, neg_inf_atom, value.JSValue.fromFloat(-std.math.inf(f64)));
+    const max_safe_atom = try ctx.atoms.intern("MAX_SAFE_INTEGER");
+    try ctx.setPropertyChecked(number_obj, max_safe_atom, value.JSValue.fromFloat(9007199254740991.0));
+    const min_safe_atom = try ctx.atoms.intern("MIN_SAFE_INTEGER");
+    try ctx.setPropertyChecked(number_obj, min_safe_atom, value.JSValue.fromFloat(-9007199254740991.0));
+    const epsilon_atom = try ctx.atoms.intern("EPSILON");
+    try ctx.setPropertyChecked(number_obj, epsilon_atom, value.JSValue.fromFloat(2.220446049250313e-16));
     try ctx.setGlobal(.Number, number_obj.toValue());
 
     // Global parseFloat/parseInt

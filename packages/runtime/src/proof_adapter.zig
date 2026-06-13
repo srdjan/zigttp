@@ -258,7 +258,7 @@ pub const ProofCache = struct {
         } else {
             // Evict if at capacity (getOrPut already inserted the slot)
             if (self.entries.count() > self.max_entries and self.insertion_order.items.len > 0) {
-                const oldest_key = self.insertion_order.swapRemove(0);
+                const oldest_key = self.insertion_order.orderedRemove(0);
                 if (self.entries.fetchRemove(oldest_key)) |removed| {
                     _ = self.total_bytes.fetchSub(removed.value.byte_size, .monotonic);
                     var entry = removed.value;

@@ -271,7 +271,13 @@ pub const TypeChecker = struct {
                 const narrow = self.extractNarrowingGuard(if_s.condition);
                 if (narrow.key != 0 and narrow.narrowed_type != null_type_idx) {
                     const saved = self.binding_types.get(narrow.key);
-                    self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch {};
+                    // Only narrow to the non-null type in the then-branch when the
+                    // condition is non-negated (i.e. `if (x)` not `if (!x)`).
+                    // A negated guard means the then-branch runs when x is falsy,
+                    // so we must not install the non-null narrowing there.
+                    if (!narrow.negated) {
+                        self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch {};
+                    }
                     self.walkStmt(if_s.then_branch);
                     if (saved) |s| {
                         self.binding_types.put(self.allocator, narrow.key, s) catch {};

@@ -482,7 +482,8 @@ const ConnectionPool = struct {
             if (request.connection) |conn| {
                 break :blk std.ascii.eqlIgnoreCase(conn, "keep-alive");
             }
-            break :blk true;
+            // HTTP/1.0 defaults to close; HTTP/1.1 defaults to keep-alive.
+            break :blk !request.is_http_10;
         };
         const keep_alive = self.server.config.keep_alive and client_wants_keep_alive;
         const outcome_if_alive: RequestOutcome = if (keep_alive) .keep_alive else .close;
@@ -967,7 +968,8 @@ const ConnectionPool = struct {
                 defer file_info.file.close(self.server.io_backend.io());
 
                 if (findHeaderValue(headers, "if-none-match")) |client_etag| {
-                    if (std.mem.eql(u8, client_etag, file_info.etag)) {
+                    const eff_etag = if (std.mem.startsWith(u8, client_etag, "W/")) client_etag[2..] else client_etag;
+                    if (std.mem.eql(u8, eff_etag, file_info.etag)) {
                         var out_buf: [256]u8 = undefined;
                         const response = formatStaticNotModified(&out_buf, file_info.etag, keep_alive) catch return;
                         try writeAllFd(fd, response);
@@ -1294,12 +1296,16 @@ pub const Server = struct {
     /// Guards ws_pool lazy initialisation against concurrent upgrade attempts.
     ws_pool_mutex: engine.Mutex = .{},
     /// Dev/serve policy backing storage. The contract-derived RuntimePolicy
-    /// handed to the pool borrows these slices, so two generations are
-    /// retained: a live-reload swap rotates `current` into `previous` (still
-    /// readable by in-flight runtimes) and frees the older generation. Both are
-    /// freed in `deinit`. Null on AOT/embedded paths.
+    /// handed to the pool borrows string slices from these structs. Three
+    /// generations are kept so that runtimes that started under policy N can
+    /// still read its slices through up to two subsequent reloads. A proper
+    /// fix would ref-count OwnedDevPolicy and defer its deinit until all
+    /// runtimes that acquired it under that generation have released it; the
+    /// three-generation window is a best-effort mitigation for dev use only.
+    /// All three generations are freed in `deinit`. Null on AOT/embedded paths.
     dev_policy_current: ?OwnedDevPolicy = null,
     dev_policy_previous: ?OwnedDevPolicy = null,
+    dev_policy_prev_prev: ?OwnedDevPolicy = null,
 
     const Self = @This();
     const IoBackend = Io.Threaded;
@@ -1380,6 +1386,7 @@ pub const Server = struct {
         if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
         if (self.security_logger) |logger| logger.deinit();
         if (self.studio) |*studio| studio.deinit();
+        if (self.dev_policy_prev_prev) |*pp| pp.deinit(self.allocator);
         if (self.dev_policy_previous) |*prev| prev.deinit(self.allocator);
         if (self.dev_policy_current) |*cur| cur.deinit(self.allocator);
         engine.deinitSecurityEvents();
@@ -1589,7 +1596,8 @@ pub const Server = struct {
     pub fn stageDevCapabilityPolicy(self: *Self, contract: *const engine.HandlerContract) engine.RuntimePolicy {
         // Rotate generations: free gen N-2, keep gen N-1 alive for in-flight
         // runtimes still referencing it.
-        if (self.dev_policy_previous) |*prev| prev.deinit(self.allocator);
+        if (self.dev_policy_prev_prev) |*pp| pp.deinit(self.allocator);
+        self.dev_policy_prev_prev = self.dev_policy_previous;
         self.dev_policy_previous = self.dev_policy_current;
         self.dev_policy_current = null;
 
@@ -2016,6 +2024,7 @@ pub const Server = struct {
             .connection = fast_slots.connection,
             .content_length = fast_slots.content_length,
             .content_type = fast_slots.content_type,
+            .is_http_10 = parsed_line.is_http_10,
         };
     }
 };
@@ -2052,6 +2061,8 @@ const ParsedRequest = struct {
     connection: ?[]const u8 = null,
     content_length: ?usize = null,
     content_type: ?[]const u8 = null,
+    /// HTTP/1.0 requests default to close; keep-alive requires an explicit header.
+    is_http_10: bool = false,
 
     pub fn deinit(self: *ParsedRequest, allocator: std.mem.Allocator) void {
         if (self.body) |b| allocator.free(b);
