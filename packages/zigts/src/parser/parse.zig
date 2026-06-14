@@ -1931,8 +1931,14 @@ pub const Parser = struct {
                 if (self.match(.lbracket)) {
                     const index = try self.parseExpression(.none);
                     try self.expect(.rbracket, "']'");
+                    // `obj?.[key]` is an optional COMPUTED access. Tag it as
+                    // `computed_access` (which preserves the computed key and the
+                    // is_optional bit) rather than `optional_chain` (whose IR
+                    // packing keeps only `property`, dropping the key, so codegen
+                    // read a nonexistent atom 0 and the result was always
+                    // undefined).
                     return try self.nodes.add(.{
-                        .tag = .optional_chain,
+                        .tag = .computed_access,
                         .loc = loc,
                         .data = .{ .member = .{
                             .object = left,
@@ -3099,6 +3105,10 @@ pub const Parser = struct {
             .true_lit,
             .false_lit,
             .null_lit,
+            // `undefined` is the documented absent-value sentinel and a valid
+            // JS property name (`obj.undefined`, `{ undefined: 1 }`); accept it
+            // as a name like the other literal keywords above.
+            .undefined_lit,
             => true,
             else => false,
         };

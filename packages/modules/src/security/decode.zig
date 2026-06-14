@@ -214,6 +214,10 @@ fn decodeFormMultipartImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []co
     const obj = parseMultipartObject(handle, body, boundary) catch |err| switch (err) {
         error.MalformedMultipart => return sdk.resultErr(handle, "malformed multipart body"),
         error.DuplicateField => return sdk.resultErr(handle, "duplicate field name in multipart body"),
+        // A >70-char boundary is attacker-controllable via Content-Type; it must
+        // surface as a Result.err, not escape as an unhandled engine exception
+        // from this critical Result-returning function.
+        error.BoundaryTooLong => return sdk.resultErr(handle, "boundary too long"),
         else => return err,
     };
     return validate.decodeObject(handle, name, obj, true);
@@ -222,19 +226,14 @@ fn decodeFormMultipartImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []co
 /// Extract the boundary token from a Content-Type header value.
 /// Accepts: "multipart/form-data; boundary=<token>" (with or without quotes).
 fn parseBoundary(content_type: []const u8) ?[]const u8 {
-    const needle = "boundary=";
-    const idx = std.mem.indexOf(u8, content_type, needle) orelse return null;
-    var rest = content_type[idx + needle.len ..];
-    // Strip optional surrounding semicolons/whitespace after value
-    if (rest.len > 0 and rest[0] == '"') {
-        rest = rest[1..];
-        const end = std.mem.indexOfScalar(u8, rest, '"') orelse rest.len;
-        return rest[0..end];
-    }
-    // Unquoted: ends at ';' or whitespace
-    var end: usize = 0;
-    while (end < rest.len and rest[end] != ';' and rest[end] != ' ' and rest[end] != '\t') : (end += 1) {}
-    return rest[0..end];
+    // Walk the ';'-separated parameters with the quote-aware tokenizer rather
+    // than a blind indexOf("boundary="): a literal "boundary=" can appear inside
+    // an earlier quoted parameter value (e.g. `name="boundary=evil"; boundary=real`),
+    // and a substring scan would latch onto that and misparse the real boundary
+    // (a differential-parsing surface vs RFC 7231-compliant intermediaries).
+    // The media-type itself cannot contain ';', so parameters start after the first one.
+    const params_start = (std.mem.indexOfScalar(u8, content_type, ';') orelse return null) + 1;
+    return parseDispositionParam(content_type[params_start..], "boundary");
 }
 
 /// Parse a multipart/form-data body into a JS object.
@@ -278,11 +277,12 @@ fn parseMultipartObject(handle: *sdk.ModuleHandle, body: []const u8, boundary: [
         // Separate headers from body: blank line (CRLF CRLF).
         const header_end = std.mem.indexOf(u8, part, "\r\n\r\n") orelse return error.MalformedMultipart;
         const headers_raw = part[0..header_end];
-        var part_body = part[header_end + 4 ..];
-        // Strip trailing CRLF that precedes the next delimiter.
-        if (std.mem.endsWith(u8, part_body, "\r\n")) {
-            part_body = part_body[0 .. part_body.len - 2];
-        }
+        // The split delimiter is the CRLF-anchored "\r\n--<boundary>", so the
+        // separator CRLF that precedes the next delimiter was already consumed by
+        // splitSequence. Whatever trailing bytes remain belong to the body, so do
+        // NOT strip a trailing CRLF here — that would corrupt payloads ending in
+        // CRLF (Windows text files, binary blobs whose last bytes are 0x0D 0x0A).
+        const part_body = part[header_end + 4 ..];
 
         // Parse Content-Disposition header.
         const disposition = findHeader(headers_raw, "content-disposition") orelse continue;
@@ -399,6 +399,12 @@ test "parseBoundary extracts quoted boundary" {
 test "parseBoundary returns null for missing boundary" {
     try std.testing.expect(parseBoundary("multipart/form-data") == null);
     try std.testing.expect(parseBoundary("application/json") == null);
+}
+
+test "parseBoundary ignores boundary= inside an earlier quoted parameter value" {
+    const boundary = parseBoundary("multipart/form-data; name=\"boundary=evil\"; boundary=real_boundary");
+    try std.testing.expect(boundary != null);
+    try std.testing.expectEqualStrings("real_boundary", boundary.?);
 }
 
 test "parseDispositionParam extracts quoted name" {

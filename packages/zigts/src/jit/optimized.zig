@@ -514,7 +514,24 @@ pub const OptimizedCompiler = struct {
                 // Skip other opcodes
                 .loop, .goto, .if_true, .if_false, .drop_goto => pc += 2,
                 .if_false_goto, .for_of_next => pc += 2,
-                .for_of_next_put_loc => pc += 3,
+                .for_of_next_put_loc => {
+                    // Fused for-of write: stores the freshly-iterated element to
+                    // a local (code[pc]) every iteration. Record the write so a
+                    // hoisted hidden-class guard on that local is correctly
+                    // treated as NOT loop-invariant and discarded; otherwise the
+                    // guard could be retained over a local that changes each
+                    // iteration. Layout: local_idx(1) + end_offset(2).
+                    if (pc < code.len) {
+                        const local_idx = code[pc];
+                        loop_info.markLocalAccessed(local_idx);
+                        if (local_idx < 16) {
+                            writes |= @as(u16, 1) << @intCast(local_idx);
+                        } else {
+                            loop_info.has_side_effects = true;
+                        }
+                    }
+                    pc += 3;
+                },
                 .push_const => pc += 2,
                 .push_i8 => pc += 1,
                 .push_i16 => pc += 2,

@@ -300,7 +300,11 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
                 list.deinit(allocator);
             }
             for (arr.items) |item| switch (item) {
-                .string => |s| try list.append(allocator, try allocator.dupe(u8, s)),
+                .string => |s| {
+                    const dup = try allocator.dupe(u8, s);
+                    errdefer allocator.free(dup);
+                    try list.append(allocator, dup);
+                },
                 else => return error.InvalidSchema,
             };
             schema.required = try list.toOwnedSlice(allocator);
@@ -323,7 +327,12 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
             var it = props_obj.iterator();
             while (it.next()) |entry| {
                 const child = try compileSchemaFromJson(allocator, entry.value_ptr.*);
+                errdefer {
+                    child.deinit(allocator);
+                    allocator.destroy(child);
+                }
                 const key = try allocator.dupe(u8, entry.key_ptr.*);
+                errdefer allocator.free(key);
                 try props.put(key, child);
             }
             schema.properties = props;
@@ -344,6 +353,7 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
             }
             for (arr.items) |item| {
                 const serialized = try jsonValueToString(allocator, item);
+                errdefer allocator.free(serialized);
                 try list.append(allocator, serialized);
             }
             schema.enum_values = try list.toOwnedSlice(allocator);

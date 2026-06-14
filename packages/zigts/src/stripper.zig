@@ -358,24 +358,44 @@ const Stripper = struct {
         // followed by '=', so neither is affected.
         if (c == '!' and self.pos + 1 < self.source.len) {
             const next = self.source[self.pos + 1];
-            if (next == ':' or next == '.') {
-                self.blankSpan(self.pos, self.pos + 1);
-                self.pos += 1;
-                self.col += 1;
-                return;
-            }
-            // Postfix non-null assertion in any other position (`arr[i]!`,
-            // `foo()!`, `x!;`, `x!,`, `x! )`, `x! + y`). Distinguish from a prefix
-            // logical-not by the previous significant output char: a postfix `!`
-            // follows an expression-ending token. `!=`/`!==` are excluded because
-            // their next char is `='.
-            if (next != '=') {
-                if (self.lastSignificantOutputChar()) |prev| {
-                    if (isExpressionEnd(prev)) {
-                        self.blankSpan(self.pos, self.pos + 1);
-                        self.pos += 1;
-                        self.col += 1;
-                        return;
+            // `!=`/`!==` are operators; a `!` after an expression-starting
+            // keyword (`return !x`, `typeof !x`) is a prefix logical-not.
+            // Neither is a TS non-null/definite-assignment operator.
+            if (next != '=' and !self.lastWordIsExpressionPrefixKeyword()) {
+                if (next == ':') {
+                    // `x!:` definite-assignment on a typed binding.
+                    self.blankSpan(self.pos, self.pos + 1);
+                    self.pos += 1;
+                    self.col += 1;
+                    return;
+                }
+                if (next == '.') {
+                    // `obj!.field` postfix non-null member access. Distinguish
+                    // from a prefix `!` on a leading-dot float literal (`!.5`,
+                    // i.e. `!(0.5)`): a real member access has an identifier
+                    // after the dot, a float literal has a digit.
+                    const after_dot: ?u8 = if (self.pos + 2 < self.source.len) self.source[self.pos + 2] else null;
+                    if (after_dot != null and isIdentifierStart(after_dot.?)) {
+                        if (self.lastSignificantOutputChar()) |prev| {
+                            if (isExpressionEnd(prev)) {
+                                self.blankSpan(self.pos, self.pos + 1);
+                                self.pos += 1;
+                                self.col += 1;
+                                return;
+                            }
+                        }
+                    }
+                } else {
+                    // Postfix non-null assertion in any other position
+                    // (`arr[i]!`, `foo()!`, `x!;`, `x!,`, `x! )`, `x! + y`).
+                    // A postfix `!` follows an expression-ending token.
+                    if (self.lastSignificantOutputChar()) |prev| {
+                        if (isExpressionEnd(prev)) {
+                            self.blankSpan(self.pos, self.pos + 1);
+                            self.pos += 1;
+                            self.col += 1;
+                            return;
+                        }
                     }
                 }
             }
@@ -1803,6 +1823,40 @@ const Stripper = struct {
             return ch;
         }
         return null;
+    }
+
+    /// True when the most recently emitted significant token is an
+    /// expression-starting keyword (return, throw, typeof, ...). A `!`
+    /// immediately after such a keyword is a PREFIX logical-not, never a
+    /// postfix TS non-null assertion, so it must not be stripped. Without this
+    /// guard `return !x`, `return !!x`, `throw !valid`, `typeof !x` all lose
+    /// the `!` and silently invert at runtime. A keyword used as a property
+    /// name (`obj.return`) is excluded so `obj.return!` still strips.
+    fn lastWordIsExpressionPrefixKeyword(self: *const Self) bool {
+        var end = self.output.items.len;
+        while (end > 0) {
+            const ch = self.output.items[end - 1];
+            if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') {
+                end -= 1;
+                continue;
+            }
+            break;
+        }
+        var start = end;
+        while (start > 0 and isIdentifierContinue(self.output.items[start - 1])) start -= 1;
+        if (start == end) return false;
+        // A `.`-prefixed word is a member/property name, not a keyword.
+        if (start > 0 and self.output.items[start - 1] == '.') return false;
+        const word = self.output.items[start..end];
+        const keywords = [_][]const u8{
+            "return", "throw",      "typeof", "void", "delete", "await",
+            "yield",  "new",        "in",     "of",   "case",   "do",
+            "else",   "instanceof", "default",
+        };
+        for (keywords) |kw| {
+            if (std.mem.eql(u8, word, kw)) return true;
+        }
+        return false;
     }
 
     fn blankSpan(self: *Self, start: usize, end: usize) void {

@@ -1432,9 +1432,10 @@ pub const IrTranspiler = struct {
 
             // Get key name
             const key_name = self.getPropertyKeyName(prop.key) orelse return null;
-            buf.append(self.allocator, '"') catch return null;
-            buf.appendSlice(self.allocator, key_name) catch return null;
-            buf.appendSlice(self.allocator, "\":") catch return null;
+            if (!self.appendJsonKey(&buf, key_name)) {
+                buf.deinit(self.allocator);
+                return null;
+            }
 
             // Serialize value
             if (!self.serializeStaticValue(&buf, prop.value)) {
@@ -1448,6 +1449,27 @@ pub const IrTranspiler = struct {
         const result = buf.toOwnedSlice(self.allocator) catch return null;
         self.name_allocs.append(self.allocator, result) catch {};
         return result;
+    }
+
+    /// Append a JSON object key (`"name":`) with the same escaping the static
+    /// value path uses. Raw keys would produce malformed JSON for names
+    /// containing `"`, `\`, or control chars (e.g. `{"a"b":1}`), diverging from
+    /// the dynamic path which escapes via jsonStringLiteralAlloc.
+    fn appendJsonKey(self: *IrTranspiler, buf: *std.ArrayList(u8), key_name: []const u8) bool {
+        const a = self.allocator;
+        buf.append(a, '"') catch return false;
+        for (key_name) |c| {
+            switch (c) {
+                '"' => buf.appendSlice(a, "\\\"") catch return false,
+                '\\' => buf.appendSlice(a, "\\\\") catch return false,
+                '\n' => buf.appendSlice(a, "\\n") catch return false,
+                '\r' => buf.appendSlice(a, "\\r") catch return false,
+                '\t' => buf.appendSlice(a, "\\t") catch return false,
+                else => buf.append(a, c) catch return false,
+            }
+        }
+        buf.appendSlice(a, "\":") catch return false;
+        return true;
     }
 
     fn serializeStaticValue(self: *IrTranspiler, buf: *std.ArrayList(u8), idx: NodeIndex) bool {
@@ -1504,9 +1526,7 @@ pub const IrTranspiler = struct {
                     const prop_idx = self.ir.getListIndex(obj.properties_start, i);
                     const prop = self.ir.getProperty(prop_idx) orelse return false;
                     const key_name = self.getPropertyKeyName(prop.key) orelse return false;
-                    buf.append(a, '"') catch return false;
-                    buf.appendSlice(a, key_name) catch return false;
-                    buf.appendSlice(a, "\":") catch return false;
+                    if (!self.appendJsonKey(buf, key_name)) return false;
                     if (!self.serializeStaticValue(buf, prop.value)) return false;
                 }
                 buf.append(a, '}') catch return false;

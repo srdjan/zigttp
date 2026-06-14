@@ -466,6 +466,19 @@ pub const JSValue = packed struct(u64) {
             return a == b;
         }
 
+        // Cross int<->float numeric equality. An integral float (e.g. the `3.0`
+        // produced by `6/2`, since div routes through allocFloat without
+        // canonicalizing the safe-integer back to the int tag) must compare
+        // equal to the int-tagged `3`. Without this path the raw-bit fast path
+        // above fails and `(6/2) === 3` wrongly returns false. Mirrors the
+        // numeric path in cmp.looseEquals.
+        if (self.isNumber() and other.isNumber()) {
+            const a = self.toNumber() orelse return false;
+            const b = other.toNumber() orelse return false;
+            if (std.math.isNan(a) or std.math.isNan(b)) return false;
+            return a == b;
+        }
+
         // String comparison (compare by value, not pointer)
         // Handle flat strings, ropes, and slices
         const self_is_str = self.isString();

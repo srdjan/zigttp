@@ -716,17 +716,15 @@ pub const CodeGen = struct {
         // Check if we have at least 3 operands (otherwise regular add is fine)
         if (count < 3) return false;
 
-        // Check if any operand is a string literal (heuristic for string concat)
-        var has_string = false;
-        for (0..count) |i| {
-            const tag = self.ir.getTag(operands[i]) orelse continue;
-            if (tag == .lit_string) {
-                has_string = true;
-                break;
-            }
-        }
-
-        if (!has_string) return false;
+        // Only fold the chain when the LEFTMOST operand is a string literal.
+        // JS `+` is left-associative, so `a + b + 'x'` evaluates as
+        // `(a + b) + 'x'`: if `a`/`b` are numbers the leading `a + b` is
+        // arithmetic addition, not concatenation (`5 + 3 + 'x'` === '8x', not
+        // '53x'). concat_n stringifies every operand, so it is only equivalent
+        // to the source when string concatenation governs from the very first
+        // operand - which is guaranteed exactly when operands[0] is a string.
+        const left_tag = self.ir.getTag(operands[0]) orelse return false;
+        if (left_tag != .lit_string) return false;
 
         // Emit all operands left-to-right
         for (0..count) |i| {
@@ -1549,8 +1547,10 @@ pub const CodeGen = struct {
             try self.emit(.dup);
             self.pushStack(1);
 
-            // Push index
-            try self.emitSmallInt(@intCast(i));
+            // Push index. emitIntValue handles the full i32 range; emitSmallInt
+            // takes a u8 and panics (@intCast) for array literals with >255
+            // elements - a valid, strict-clean handler must not crash codegen.
+            try self.emitIntValue(@intCast(i));
 
             // Push element value
             if (elem_idx != null_node) {
@@ -1628,8 +1628,11 @@ pub const CodeGen = struct {
             try static_atoms.append(self.allocator, atom);
         }
 
-        // Use optimized path if all keys are static strings and we have at least one property
-        if (all_static and static_atoms.items.len > 0) {
+        // Use optimized path if all keys are static strings and we have at least one
+        // property. The shape slot count and set_slot index are u8-encoded, so an
+        // object literal with >255 static keys must fall back to the dynamic path
+        // rather than @intCast-panic in emitPrecompiledObjectLiteral.
+        if (all_static and static_atoms.items.len > 0 and static_atoms.items.len <= 255) {
             try self.emitPrecompiledObjectLiteral(object, static_atoms.items);
         } else {
             try self.emitDynamicObjectLiteral(object);
@@ -1777,6 +1780,7 @@ pub const CodeGen = struct {
         errdefer self.allocator.free(consts_copy);
 
         const upvalue_copy = try upvalue_info_list.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(upvalue_copy);
 
         func_bc.* = .{
             .header = .{},

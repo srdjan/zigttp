@@ -223,6 +223,17 @@ fn parallelNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
         results[i] = .{};
     }
 
+    // Free every executed fetch result and descriptor on any exit path. Phase 3's
+    // `try` (createArray / arrayPush) can OOM after collection_done disarmed the
+    // defer's descriptor free, which would otherwise leak all bodies + descriptors.
+    var cleaned = false;
+    errdefer if (!cleaned) {
+        for (0..desc_count) |i| {
+            results[i].deinit(ctx.allocator);
+            descriptor_buf[i].deinit(ctx.allocator);
+        }
+    };
+
     if (desc_count > 0) {
         callbacks.execute_fetches_fn(
             callbacks.runtime_ptr,
@@ -245,6 +256,7 @@ fn parallelNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
         results[i].deinit(ctx.allocator);
         descriptor_buf[i].deinit(ctx.allocator);
     }
+    cleaned = true;
 
     return result_arr.toValue();
 }

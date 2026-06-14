@@ -995,8 +995,25 @@ pub const sdk_bridge = struct {
     ) bool {
         const raw_db: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
         var stmt: ?*sqlite_runtime.c.sqlite3_stmt = null;
-        const rc = sqlite_runtime.c.sqlite3_prepare_v2(raw_db, sql_ptr, @intCast(sql_len), &stmt, null);
+        var tail: [*c]const u8 = null;
+        const rc = sqlite_runtime.c.sqlite3_prepare_v2(raw_db, sql_ptr, @intCast(sql_len), &stmt, &tail);
         if (rc != sqlite_runtime.c.SQLITE_OK or stmt == null) return false;
+        // prepare_v2 compiles only the FIRST statement and leaves `tail` pointing
+        // past it. A registered query with a second `;`-separated statement would
+        // otherwise run only the first and silently drop the rest while still
+        // reporting success. Fail closed instead (matches the positional-parameter
+        // rejection one layer up), leaving the DB un-mutated for that call.
+        if (tail != null) {
+            const consumed: usize = @intFromPtr(tail) - @intFromPtr(sql_ptr);
+            if (consumed < sql_len) {
+                for (sql_ptr[consumed..sql_len]) |c| {
+                    if (c != ' ' and c != '\t' and c != '\n' and c != '\r' and c != ';') {
+                        _ = sqlite_runtime.c.sqlite3_finalize(stmt.?);
+                        return false;
+                    }
+                }
+            }
+        }
         out.* = @ptrCast(stmt.?);
         return true;
     }
@@ -1272,7 +1289,7 @@ pub const LabelSet = packed struct(u8) {
         const ai: u8 = @bitCast(a);
         const bi: u8 = @bitCast(b);
         const validated_mask: u8 = 1 << @intFromEnum(DataLabel.validated);
-        return @bitCast((ai | bi) & ~validated_mask | (ai & bi) & validated_mask);
+        return @bitCast(((ai | bi) & ~validated_mask) | ((ai & bi) & validated_mask));
     }
 
     /// Check if a specific label is present.

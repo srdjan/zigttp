@@ -530,6 +530,11 @@ fn capabilityAliasReplacement(
         error.UnsupportedRefactor => return error.UnsupportedRefactor,
         else => return err,
     };
+    // alias.replacement / alias.original_line are heap-owned; free them if the
+    // message dupe below OOMs (they are never appended to result.refactors on
+    // that path, so no later cleanup reclaims them).
+    errdefer allocator.free(alias.replacement);
+    errdefer allocator.free(alias.original_line);
     return .{
         .kind = "canonicalize_capability_key_alias",
         .line = alias.line,

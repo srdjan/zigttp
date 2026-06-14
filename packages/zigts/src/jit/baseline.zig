@@ -1871,6 +1871,25 @@ pub const BaselineCompiler = struct {
         try self.emitReloadStackCache();
     }
 
+    /// Re-increment the cached operand-stack pointer to undo a single
+    /// emitPopReg. The conditional-jump and logical-not opcodes pop the
+    /// condition into a scratch register for their type guard, but on the
+    /// non-bool / non-int deopt path the interpreter resumes at the SAME
+    /// opcode (bytecode_offset = pc - 1) and pops the condition itself. The
+    /// flushed ctx.sp must therefore still point past the condition, otherwise
+    /// the interpreter re-pops the slot below it and runs the rest of the frame
+    /// with a stack pointer one slot too low (wrong branch + corrupted operand
+    /// stack). The condition value is untouched in stack memory between the pop
+    /// and the deopt, so re-incrementing sp makes it visible again.
+    fn emitUndoPop(self: *BaselineCompiler) CompileError!void {
+        const sp = getSpCacheReg();
+        if (is_x86_64) {
+            self.emitter.addRegImm32(sp, 1) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            self.emitter.addRegImm12(sp, sp, 1) catch return CompileError.OutOfMemory;
+        }
+    }
+
     /// Emit a deoptimization exit that resumes in the interpreter and returns.
     fn emitDeoptExit(self: *BaselineCompiler, bytecode_offset: u32, reason: DeoptReason) CompileError!void {
         const fn_ptr: u64 = @intFromPtr(&jitDeoptimize);
@@ -6072,6 +6091,9 @@ pub const BaselineCompiler = struct {
                     }
 
                     try self.markLabel(deopt_label);
+                    // Undo the operand pop so the interpreter (which resumes at
+                    // this same opcode and pops the condition) sees a correct sp.
+                    try self.emitUndoPop();
                     try self.emitDeoptExit(bytecode_offset, .bool_expected);
                 }
             }
@@ -6130,6 +6152,9 @@ pub const BaselineCompiler = struct {
                     }
 
                     try self.markLabel(deopt_label);
+                    // Undo the operand pop so the interpreter (which resumes at
+                    // this same opcode and pops the condition) sees a correct sp.
+                    try self.emitUndoPop();
                     try self.emitDeoptExit(bytecode_offset, .bool_expected);
                 }
             }
@@ -6215,6 +6240,9 @@ pub const BaselineCompiler = struct {
                     try self.emitJmpToLabel(check_done);
 
                     try self.markLabel(deopt_label);
+                    // Undo the operand pop so the interpreter (which resumes at
+                    // this same opcode and pops the condition) sees a correct sp.
+                    try self.emitUndoPop();
                     try self.emitDeoptExit(bytecode_offset, .bool_expected);
                 }
             }
@@ -6276,6 +6304,9 @@ pub const BaselineCompiler = struct {
                     try self.emitJmpToLabel(check_done);
 
                     try self.markLabel(deopt_label);
+                    // Undo the operand pop so the interpreter (which resumes at
+                    // this same opcode and pops the condition) sees a correct sp.
+                    try self.emitUndoPop();
                     try self.emitDeoptExit(bytecode_offset, .bool_expected);
                 }
             }

@@ -2204,19 +2204,46 @@ pub const Runtime = struct {
         return runtime.callFunction(func_obj, args);
     }
 
+    /// Set a response body from any JS string value. A genuine flat JSString can
+    /// be borrowed (pinned via its pointer); a rope/slice is flattened (into the
+    /// request arena) and copied, since there is no JSString handle to borrow.
+    fn setResponseBody(self: *Self, response: *HttpResponse, val: zq.JSValue, borrow_body: bool) !void {
+        if (val.isString()) {
+            const str = val.toPtr(zq.JSString);
+            if (borrow_body) {
+                response.setBodyBorrowed(str.data(), @ptrCast(str));
+            } else {
+                response.setBodyOwned(try self.allocator.dupe(u8, str.data()));
+            }
+        } else if (getStringDataCtx(val, self.ctx)) |bytes| {
+            response.setBodyOwned(try self.allocator.dupe(u8, bytes));
+        }
+    }
+
+    /// Put a response header whose value is any JS string. Flat strings keep the
+    /// borrow fast path; rope/slice values are flattened and copied.
+    fn putResponseHeader(self: *Self, response: *HttpResponse, name: []const u8, val: zq.JSValue, borrow_body: bool) !void {
+        if (val.isString()) {
+            const str = val.toPtr(zq.JSString);
+            if (borrow_body) {
+                try response.putHeaderBorrowedRuntime(name, str.data());
+            } else {
+                try response.putHeader(name, str.data());
+            }
+        } else if (getStringDataCtx(val, self.ctx)) |bytes| {
+            try response.putHeader(name, bytes);
+        }
+    }
+
     fn extractResponseInternal(self: *Self, result: zq.JSValue, borrow_body: bool) !HttpResponse {
         var response = HttpResponse.init(self.allocator);
 
         if (!result.isObject()) {
-            // If result is a string, use it as body (supported return type)
-            if (result.isString()) {
-                const str = result.toPtr(zq.JSString);
-                if (borrow_body) {
-                    response.setBodyBorrowed(str.data(), @ptrCast(str));
-                } else {
-                    const owned = try self.allocator.dupe(u8, str.data());
-                    response.setBodyOwned(owned);
-                }
+            // If result is any string (flat, slice, or concat rope), use it as
+            // the body (supported return type). getStringDataCtx is non-null for
+            // every string kind and null for primitives, which fall through to 500.
+            if (getStringDataCtx(result, self.ctx) != null) {
+                try self.setResponseBody(&response, result, borrow_body);
                 return response;
             }
             // Non-string, non-object: handler returned a primitive (number, bool, undefined).
@@ -2243,64 +2270,23 @@ pub const Runtime = struct {
 
                 // Body - direct slot access
                 const body_val = result_obj.getSlot(shapes.response.body_slot);
-                if (body_val.isString()) {
-                    const str = body_val.toPtr(zq.JSString);
-                    if (borrow_body) {
-                        response.setBodyBorrowed(str.data(), @ptrCast(str));
-                    } else {
-                        const owned = try self.allocator.dupe(u8, str.data());
-                        response.setBodyOwned(owned);
-                    }
-                }
+                try self.setResponseBody(&response, body_val, borrow_body);
 
                 // Headers - still need property iteration for custom headers
                 const headers_val = result_obj.getSlot(shapes.response.headers_slot);
                 if (headers_val.isObject()) {
                     const headers_obj = headers_val.toPtr(zq.JSObject);
                     if (headers_obj.hidden_class_idx == shapes.response_headers.class_idx) {
-                        const ct_val = headers_obj.getSlot(shapes.response_headers.content_type_slot);
-                        if (ct_val.isString()) {
-                            const str = ct_val.toPtr(zq.JSString);
-                            if (borrow_body) {
-                                try response.putHeaderBorrowedRuntime("Content-Type", str.data());
-                            } else {
-                                try response.putHeader("Content-Type", str.data());
-                            }
-                        }
-
-                        const cl_val = headers_obj.getSlot(shapes.response_headers.content_length_slot);
-                        if (cl_val.isString()) {
-                            const str = cl_val.toPtr(zq.JSString);
-                            if (borrow_body) {
-                                try response.putHeaderBorrowedRuntime("Content-Length", str.data());
-                            } else {
-                                try response.putHeader("Content-Length", str.data());
-                            }
-                        }
-
-                        const cc_val = headers_obj.getSlot(shapes.response_headers.cache_control_slot);
-                        if (cc_val.isString()) {
-                            const str = cc_val.toPtr(zq.JSString);
-                            if (borrow_body) {
-                                try response.putHeaderBorrowedRuntime("Cache-Control", str.data());
-                            } else {
-                                try response.putHeader("Cache-Control", str.data());
-                            }
-                        }
+                        try self.putResponseHeader(&response, "Content-Type", headers_obj.getSlot(shapes.response_headers.content_type_slot), borrow_body);
+                        try self.putResponseHeader(&response, "Content-Length", headers_obj.getSlot(shapes.response_headers.content_length_slot), borrow_body);
+                        try self.putResponseHeader(&response, "Cache-Control", headers_obj.getSlot(shapes.response_headers.cache_control_slot), borrow_body);
                     } else {
                         const keys = try headers_obj.getOwnEnumerableKeys(self.allocator, pool);
                         defer self.allocator.free(keys);
                         for (keys) |key_atom| {
                             const key_name = self.ctx.atoms.getName(key_atom) orelse continue;
                             const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
-                            if (header_val.isString()) {
-                                const str = header_val.toPtr(zq.JSString);
-                                if (borrow_body) {
-                                    try response.putHeaderBorrowedRuntime(key_name, str.data());
-                                } else {
-                                    try response.putHeader(key_name, str.data());
-                                }
-                            }
+                            try self.putResponseHeader(&response, key_name, header_val, borrow_body);
                         }
                     }
                 }
@@ -2318,15 +2304,7 @@ pub const Runtime = struct {
         }
 
         if (result_obj.getOwnProperty(pool, zq.Atom.body)) |body_val| {
-            if (body_val.isString()) {
-                const str = body_val.toPtr(zq.JSString);
-                if (borrow_body) {
-                    response.setBodyBorrowed(str.data(), @ptrCast(str));
-                } else {
-                    const owned = try self.allocator.dupe(u8, str.data());
-                    response.setBodyOwned(owned);
-                }
-            }
+            try self.setResponseBody(&response, body_val, borrow_body);
         }
 
         if (result_obj.getOwnProperty(pool, zq.Atom.headers)) |headers_val| {
@@ -2337,14 +2315,7 @@ pub const Runtime = struct {
                 for (keys) |key_atom| {
                     const key_name = self.ctx.atoms.getName(key_atom) orelse continue;
                     const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
-                    if (header_val.isString()) {
-                        const str = header_val.toPtr(zq.JSString);
-                        if (borrow_body) {
-                            try response.putHeaderBorrowedRuntime(key_name, str.data());
-                        } else {
-                            try response.putHeader(key_name, str.data());
-                        }
-                    }
+                    try self.putResponseHeader(&response, key_name, header_val, borrow_body);
                 }
             }
         }
@@ -2408,6 +2379,12 @@ const unixMillis = zq.trace.unixMillis;
 
 const natives = @import("runtime_natives.zig");
 pub const getStringData = natives.getStringData;
+// Context-aware string accessor that flattens concat ropes into the request
+// arena. The local natives.getStringData only handles flat strings, slices, and
+// already-flattened (.leaf) ropes — it returns null for a concat rope, which is
+// what string concatenation (>= 64 bytes) produces. Response extraction must use
+// this flattening variant or it silently drops rope/slice bodies and headers.
+const getStringDataCtx = zq.builtins.helpers.getStringDataCtx;
 const getDynamicProperty = natives.getDynamicProperty;
 const getObjectProperty = natives.getObjectProperty;
 const getHeaderAtom = natives.getHeaderAtom;
@@ -2838,6 +2815,24 @@ fn fetchInitError(
     return .{ .err = try createFetchErrorResponse(rt, code, details) };
 }
 
+/// Resolve a URI host into a fixed buffer without the std panic. `Uri.getHost`
+/// percent-decodes the host into the caller's `[HostName.max_len]u8` buffer and
+/// `catch unreachable`s on overflow (std Uri.zig), so a crafted URL whose
+/// percent-DECODED host exceeds 255 bytes (e.g. `https://%41…×300.com/`) would
+/// crash the worker. The decoded length never exceeds the encoded length, so an
+/// encoded host that fits the buffer is always safe; reject an over-long host up
+/// front (a real DNS name is <= 253 bytes), returning the same UriMissingHost
+/// error the call sites already surface as a clean InvalidUrl.
+fn resolveHostSafe(uri: std.Uri, buf: *[std.Io.net.HostName.max_len]u8) std.Uri.GetHostError!std.Io.net.HostName {
+    if (uri.host) |h| {
+        const encoded = switch (h) {
+            .raw, .percent_encoded => |s| s,
+        };
+        if (encoded.len > buf.len) return error.UriMissingHost;
+    }
+    return uri.getHost(buf);
+}
+
 /// Parse and validate the (url, init?) arguments common to all fetch call sites.
 /// Returns a JS error response (status 599) on validation failure.
 fn parseFetchArgs(rt: *Runtime, pool: *const zq.HiddenClassPool, args: []const zq.JSValue) !FetchArgsResult {
@@ -2886,7 +2881,7 @@ fn parseFetchArgs(rt: *Runtime, pool: *const zq.HiddenClassPool, args: []const z
         return .{ .err = try createFetchErrorResponse(rt, "InvalidUrl", "url parse failed") };
     };
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = uri.getHost(&host_buf) catch {
+    const host = resolveHostSafe(uri, &host_buf) catch {
         rt.allocator.free(final_url);
         return .{ .err = try createFetchErrorResponse(rt, "InvalidUrl", "url host is required") };
     };
@@ -3151,7 +3146,7 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     const init_obj = fetch_args.init_obj;
 
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = uri.getHost(&host_buf) catch {
+    const host = resolveHostSafe(uri, &host_buf) catch {
         return createFetchErrorResponse(rt, "InvalidUrl", "url host is required");
     };
 
@@ -4434,7 +4429,7 @@ fn doFetchWorkerInner(
     };
 
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = try uri.getHost(&host_buf);
+    const host = try resolveHostSafe(uri, &host_buf);
 
     const timeout: std.Io.Timeout = if (config.outbound_timeout_ms == 0) .none else blk: {
         const duration = std.Io.Duration.fromMilliseconds(@intCast(config.outbound_timeout_ms));
@@ -4673,7 +4668,7 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
     };
 
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = uri.getHost(&host_buf) catch {
+    const host = resolveHostSafe(uri, &host_buf) catch {
         return try httpRequestErrorJsonAlloc(a, "InvalidUrl", "url host is required");
     };
     if (outboundHostViolation(rt, host.bytes)) |details| {

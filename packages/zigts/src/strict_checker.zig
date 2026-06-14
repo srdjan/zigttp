@@ -874,8 +874,15 @@ pub const StrictChecker = struct {
         const binding = self.ir_view.getBinding(callee) orelse return false;
         if (self.annotated_function_bindings.contains(bindingKey(binding))) return false;
         if (self.importedFunctionForSlot(binding.slot) != null) return false;
-        if (self.resolveAtomName(binding.slot)) |name| {
-            if (isKnownGlobalFunction(name)) return false;
+        // `slot` is an atom index only for global bindings; for local/argument/
+        // upvalue bindings it is a scope-relative slot number, so resolving it
+        // as an atom can collide with a predefined global-function name and
+        // wrongly suppress the implicit_unknown diagnostic. Only consult it for
+        // globals.
+        if (binding.kind == .global or binding.kind == .undeclared_global) {
+            if (self.resolveAtomName(binding.slot)) |name| {
+                if (isKnownGlobalFunction(name)) return false;
+            }
         }
         return true;
     }

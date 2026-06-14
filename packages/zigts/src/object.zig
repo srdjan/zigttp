@@ -2275,13 +2275,21 @@ pub const JSObject = extern struct {
         return null;
     }
 
-    /// Get array element without bounds check - caller must ensure array type and valid index
+    /// Get array element without bounds check - caller must ensure array type and valid index.
+    /// The array length and the allocated overflow backing are decoupled: `arr.length = N`
+    /// (setArrayLength) can record a length far larger than any element slot ever allocated,
+    /// so a read of an in-length-but-unbacked index (a sparse hole) must fail safe to
+    /// undefined rather than dereference a null/short overflow_slots pointer.
     pub inline fn getIndexUnchecked(self: *const JSObject, index: u32) value.JSValue {
         const slot = index + 1;
         if (slot < INLINE_SLOT_COUNT) {
             return self.inline_slots[slot];
         }
-        return self.overflow_slots.?[slot - INLINE_SLOT_COUNT];
+        const overflow_idx = slot - INLINE_SLOT_COUNT;
+        if (self.overflow_slots) |slots| {
+            if (overflow_idx < self.overflow_capacity) return slots[overflow_idx];
+        }
+        return value.JSValue.undefined_val;
     }
 
     /// Highest index a dense array can store. The overflow backing is addressed

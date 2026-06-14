@@ -257,6 +257,13 @@ fn executeExec(handle: *sdk.ModuleHandle, db: *sdk.SqliteDb, stmt: *sdk.SqliteSt
     const result = try sdk.createObject(handle);
     try sdk.objectSet(handle, result, "rowsAffected", sdk.JSValue.fromInt(sdk.sqliteChanges(db)));
 
+    // last_insert_rowid() returns 0 both for "no INSERT on this connection" and
+    // for the (legal but exotic) case of an explicit `rowid`/INTEGER-PRIMARY-KEY
+    // value of 0; we surface the field only for the non-zero case. Do NOT relax
+    // this to `sqliteChanges(db) > 0`: that would attach a stale-connection rowid
+    // to UPDATE/DELETE writes. Correctly surfacing rowid 0 needs INSERT detection
+    // (statement SQL text), which is not available here; the field is optional
+    // (`lastInsertRowId?`) so its absence stays within the declared shape.
     const insert_id = sdk.sqliteLastInsertRowId(db);
     if (insert_id != 0) {
         try sdk.objectSet(handle, result, "lastInsertRowId", try int64ToJsNumber(insert_id));
@@ -320,9 +327,14 @@ fn bindValue(stmt: *sdk.SqliteStmt, index: u32, v: sdk.JSValue) !void {
         // misses toInt(). Bind it as INTEGER (not REAL) when it is a finite,
         // fractional-free value inside i64 range so integer comparisons and the
         // read-back column type behave as expected.
+        // Upper bound is strict against exactly 2^63: maxInt(i64) (2^63-1) is not
+        // f64-representable and @floatFromInt rounds it UP to 2^63, so an
+        // inclusive `<=` would admit f == 2^63, and @intFromFloat(2^63) is out of
+        // i64 range (panic in safe builds, UB in ReleaseFast). The lower bound is
+        // exact (minInt(i64) == -2^63 is f64-representable) and stays inclusive.
         if (std.math.isFinite(f) and @floor(f) == f and
             f >= @as(f64, @floatFromInt(std.math.minInt(i64))) and
-            f <= @as(f64, @floatFromInt(std.math.maxInt(i64))))
+            f < 9223372036854775808.0)
         {
             return sdk.sqliteBindInt64(stmt, index, @intFromFloat(f));
         }

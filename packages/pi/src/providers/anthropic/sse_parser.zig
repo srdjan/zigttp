@@ -200,7 +200,10 @@ fn decodeRecord(
         const output_tokens: ?u64 = if (root.get("usage")) |usage| blk: {
             if (usage != .object) break :blk null;
             const tok = usage.object.get("output_tokens") orelse break :blk null;
-            if (tok != .integer) break :blk null;
+            // Guard against a negative value from a hostile/corrupted stream:
+            // @intCast(i64 -> u64) panics on a negative input. Every sibling
+            // integer read in both providers' parsers guards this.
+            if (tok != .integer or tok.integer < 0) break :blk null;
             break :blk @intCast(tok.integer);
         } else null;
         return .{ .message_delta = .{

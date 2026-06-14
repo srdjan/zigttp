@@ -1796,11 +1796,15 @@ pub const IrView = struct {
                 // Member packed formats differ by tag.
                 switch (tag) {
                     .computed_access => {
-                        // Pack: a = object, b = computed | is_optional << 24
+                        // Pack: a = object, b = computed(24) | is_optional << 24.
+                        // Mask the computed key to its low 24 bits: NodeIndex is
+                        // u32, so a bare @truncate would fold the is_optional bit
+                        // (bit 24) into the node index and corrupt it for the
+                        // optional case (`obj?.[key]`).
                         break :blk .{
                             .object = d.a,
                             .property = 0,
-                            .computed = @truncate(d.b),
+                            .computed = @as(NodeIndex, @as(u24, @truncate(d.b))),
                             .is_optional = (d.b >> 24) != 0,
                         };
                     },

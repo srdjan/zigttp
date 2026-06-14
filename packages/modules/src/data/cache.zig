@@ -405,7 +405,14 @@ fn cacheStatsImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.J
             if (denyIfNamespaceBlocked(handle, ns)) |exc| return exc;
             if (store_opt) |store| {
                 if (store.namespaces.get(ns)) |ns_cache| {
-                    return makeStatsObject(handle, ns_cache.hits, ns_cache.misses, ns_cache.entries.count(), 0);
+                    // Per-namespace bytes aren't tracked as a running total (only
+                    // store.total_bytes is), so sum the namespace's entries on
+                    // demand rather than reporting a misleading 0 for the
+                    // documented `bytes` field.
+                    var ns_bytes: usize = 0;
+                    var e_it = ns_cache.entries.valueIterator();
+                    while (e_it.next()) |e| ns_bytes += e.*.byte_size;
+                    return makeStatsObject(handle, ns_cache.hits, ns_cache.misses, ns_cache.entries.count(), ns_bytes);
                 }
             }
             return makeStatsObject(handle, 0, 0, 0, 0);

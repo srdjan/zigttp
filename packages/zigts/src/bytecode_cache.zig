@@ -108,6 +108,12 @@ fn serializeConstant(val: value.JSValue, writer: anytype, allocator: std.mem.All
     if (val.isString()) {
         const js_str = val.toPtr(string.JSString);
         const str_data = js_str.data();
+        // The on-wire length is u16. A string literal > 64KB (embedded HTML/SVG,
+        // base64 blob, large inline JSON) would make @intCast panic (Debug/Safe)
+        // or silently truncate (ReleaseFast, corrupting the constants table).
+        // Fail with a catchable error so callers fall back to recompilation
+        // instead of caching, rather than crashing the worker.
+        if (str_data.len > std.math.maxInt(u16)) return error.OutOfMemory;
         try writer.writeByte(@intFromEnum(ConstantTag.string));
         try writer.writeInt(u16, @intCast(str_data.len), .little);
         try writer.writeAll(str_data);

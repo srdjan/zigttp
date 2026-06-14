@@ -885,6 +885,16 @@ pub const HandlerVerifier = struct {
                 if (member.computed != null_node) {
                     self.walkExprForRefs(member.computed);
                 }
+                // Bracket access must satisfy the same soundness proofs as dot
+                // access: `r["value"]` is an unchecked-Result read, and `m["x"]`
+                // on an un-narrowed optional is an unchecked-optional access.
+                // Without this, bracket notation launders both past the verdict.
+                // An optional computed access (`val?.[k]`) safely handles
+                // undefined, so the optional check is skipped for it.
+                self.checkResultValueAccessComputed(member, node);
+                if (!member.is_optional) {
+                    self.checkOptionalObjectAccess(member, node);
+                }
             },
             else => {},
         }
@@ -1062,6 +1072,31 @@ pub const HandlerVerifier = struct {
                 .repair_intent = .insert_guard_before_line,
             });
         }
+    }
+
+    /// A computed member access with a literal string key (`r["value"]`,
+    /// `r["unwrap"]`) is equivalent to the dot access `r.value` for the
+    /// unchecked-Result-value proof. Resolve the literal key to its atom and
+    /// run the same check, so bracket notation cannot launder an unchecked
+    /// Result past the soundness verdict. A dynamic (non-literal) key is left
+    /// alone — it is handled conservatively elsewhere.
+    fn checkResultValueAccessComputed(self: *HandlerVerifier, member: Node.MemberExpr, node: NodeIndex) void {
+        if (member.computed == null_node) return;
+        if ((self.ir_view.getTag(member.computed) orelse return) != .lit_string) return;
+        const key_idx = self.ir_view.getStringIdx(member.computed) orelse return;
+        const key = self.ir_view.getString(key_idx) orelse return;
+        const prop: u16 = if (std.mem.eql(u8, key, "value"))
+            @intFromEnum(object.Atom.value)
+        else if (std.mem.eql(u8, key, "unwrap"))
+            @intFromEnum(object.Atom.unwrap)
+        else
+            return;
+        self.checkResultValueAccess(.{
+            .object = member.object,
+            .property = prop,
+            .computed = null_node,
+            .is_optional = member.is_optional,
+        }, node);
     }
 
     /// Set the ok_checked state for a result binding, keyed by (scope_id, slot).

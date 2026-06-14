@@ -38,10 +38,14 @@ pub const ServiceState = struct {
 
     pub fn register(self: *ServiceState, name: []const u8, base_url: []const u8) !void {
         if (self.services.contains(name)) return error.DuplicateServiceName;
-        try self.services.put(
-            try self.allocator.dupe(u8, name),
-            try self.allocator.dupe(u8, base_url),
-        );
+        // Bind each dupe to a local guarded by errdefer: if the second dupe or
+        // the hashmap grow inside put() OOMs, the first dupe would otherwise leak
+        // (put never takes ownership on failure).
+        const name_owned = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(name_owned);
+        const url_owned = try self.allocator.dupe(u8, base_url);
+        errdefer self.allocator.free(url_owned);
+        try self.services.put(name_owned, url_owned);
     }
 
     pub fn deinitSelf(self: *ServiceState) void {

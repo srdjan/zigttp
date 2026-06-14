@@ -181,8 +181,12 @@ pub const TypePool = struct {
 
     /// Get a name string by (start, len).
     pub fn getName(self: *const TypePool, start: u16, len: u8) []const u8 {
-        if (start + len > self.names.items.len) return "";
-        return self.names.items[start .. start + len];
+        // Widen before adding: `start` (u16) + `len` (u8) peer-resolves to u16
+        // and would overflow-panic for a name stored near the 64KB mark before
+        // the bounds guard could run. The guard must fail closed, not crash.
+        const end: usize = @as(usize, start) + @as(usize, len);
+        if (end > self.names.items.len) return "";
+        return self.names.items[start..end];
     }
 
     /// Get the tag for a type index.
@@ -526,8 +530,9 @@ pub const TypePool = struct {
         if (self.getTag(idx) != .t_record) return &.{};
         const start = data.a;
         const count = data.b;
-        if (start + count > self.fields.items.len) return &.{};
-        return self.fields.items[start .. start + count];
+        const end: usize = @as(usize, start) + @as(usize, count);
+        if (end > self.fields.items.len) return &.{};
+        return self.fields.items[start..end];
     }
 
     /// Get union members.
@@ -536,8 +541,9 @@ pub const TypePool = struct {
         if (self.getTag(idx) != .t_union) return &.{};
         const start = data.a;
         const count = data.b;
-        if (start + count > self.members.items.len) return &.{};
-        return self.members.items[start .. start + count];
+        const end: usize = @as(usize, start) + @as(usize, count);
+        if (end > self.members.items.len) return &.{};
+        return self.members.items[start..end];
     }
 
     /// Get intersection members.
@@ -546,8 +552,9 @@ pub const TypePool = struct {
         if (self.getTag(idx) != .t_intersection) return &.{};
         const start = data.a;
         const count = data.b;
-        if (start + count > self.members.items.len) return &.{};
-        return self.members.items[start .. start + count];
+        const end: usize = @as(usize, start) + @as(usize, count);
+        if (end > self.members.items.len) return &.{};
+        return self.members.items[start..end];
     }
 
     /// Get tuple elements.
@@ -556,8 +563,9 @@ pub const TypePool = struct {
         if (self.getTag(idx) != .t_tuple) return &.{};
         const start = data.a;
         const count = data.b;
-        if (start + count > self.members.items.len) return &.{};
-        return self.members.items[start .. start + count];
+        const end: usize = @as(usize, start) + @as(usize, count);
+        if (end > self.members.items.len) return &.{};
+        return self.members.items[start..end];
     }
 
     /// Look up a record field by name. Returns the field if found.
@@ -719,8 +727,9 @@ pub const TypePool = struct {
         const data = self.getData(idx) orelse return &.{};
         const start = data.a;
         const count = data.b;
-        if (start + count > self.template_parts.items.len) return &.{};
-        return self.template_parts.items[start .. start + count];
+        const end: usize = @as(usize, start) + @as(usize, count);
+        if (end > self.template_parts.items.len) return &.{};
+        return self.template_parts.items[start..end];
     }
 
     /// Check if a literal string matches a template literal type pattern.
@@ -873,8 +882,10 @@ pub const TypePool = struct {
         const start = data.b;
         if (start >= self.members.items.len) return .{ .base = data.a, .args = &.{} };
         const count: u16 = self.members.items[start];
-        if (start + 1 + count > self.members.items.len) return .{ .base = data.a, .args = &.{} };
-        return .{ .base = data.a, .args = self.members.items[start + 1 .. start + 1 + count] };
+        const args_start: usize = @as(usize, start) + 1;
+        const args_end: usize = args_start + @as(usize, count);
+        if (args_end > self.members.items.len) return .{ .base = data.a, .args = &.{} };
+        return .{ .base = data.a, .args = self.members.items[args_start..args_end] };
     }
 
     // -------------------------------------------------------------------
@@ -1041,6 +1052,12 @@ pub const TypePool = struct {
             for (src_fields) |src_f| {
                 const src_name = self.getName(src_f.name_start, src_f.name_len);
                 if (std.mem.eql(u8, src_name, tgt_name)) {
+                    // An optional source field cannot satisfy a required target
+                    // field: the source value may legally omit it, so `{ x?: T }`
+                    // is not assignable to `{ x: T }`. Only the target's
+                    // optionality was checked before, which silently accepted
+                    // this unsound case (e.g. Partial<T> assigned to T).
+                    if (src_f.optional and !tgt_f.optional) return false;
                     if (!self.isAssignableTo(src_f.type_idx, tgt_f.type_idx)) return false;
                     found = true;
                     break;
@@ -1059,7 +1076,7 @@ pub const TypePool = struct {
             const tgt_name = self.getName(tgt_f.name_start, tgt_f.name_len);
             var found = false;
             for (src_members) |member| {
-                if (self.findAssignableFieldInType(member, tgt_name, tgt_f.type_idx)) {
+                if (self.findAssignableFieldInType(member, tgt_name, tgt_f.type_idx, tgt_f.optional)) {
                     found = true;
                     break;
                 }
@@ -1074,11 +1091,12 @@ pub const TypePool = struct {
         source: TypeIndex,
         target_name: []const u8,
         target_type: TypeIndex,
+        target_optional: bool,
     ) bool {
         const tag = self.getTag(source) orelse return false;
         if (tag == .t_intersection) {
             for (self.getIntersectionMembers(source)) |member| {
-                if (self.findAssignableFieldInType(member, target_name, target_type)) return true;
+                if (self.findAssignableFieldInType(member, target_name, target_type, target_optional)) return true;
             }
             return false;
         }
@@ -1086,6 +1104,8 @@ pub const TypePool = struct {
         for (self.getRecordFields(source)) |src_f| {
             const src_name = self.getName(src_f.name_start, src_f.name_len);
             if (std.mem.eql(u8, src_name, target_name)) {
+                // An optional source field does not satisfy a required target field.
+                if (src_f.optional and !target_optional) return false;
                 return self.isAssignableTo(src_f.type_idx, target_type);
             }
         }

@@ -397,6 +397,7 @@ pub const ComptimeEvaluator = struct {
             self.expect(':') catch return ComptimeError.SyntaxError;
             self.skipWhitespace();
             const else_val = try self.parseExpression(.ternary);
+            defer left.deinit(self.allocator); // condition consumed by toBool; free if heap
             if (left.toBool()) {
                 else_val.deinit(self.allocator);
                 return then_val;
@@ -418,6 +419,7 @@ pub const ComptimeEvaluator = struct {
                     right.deinit(self.allocator);
                     return left;
                 }
+                left.deinit(self.allocator); // discarded falsy left may be a heap string ("")
                 return right;
             }
             if (std.mem.eql(u8, two, "&&")) {
@@ -428,36 +430,37 @@ pub const ComptimeEvaluator = struct {
                     right.deinit(self.allocator);
                     return left;
                 }
+                left.deinit(self.allocator); // discarded truthy left may be a heap string
                 return right;
             }
+            // These operators consume both operands and yield a fresh value
+            // (boolean/number), so free any heap-backed operand strings on every
+            // path — including the TypeMismatch error returns — mirroring the
+            // single-char path below. Without this, e.g. `"a" === "b"` leaks both.
             if (std.mem.eql(u8, two, "==")) {
-                if (self.pos + 2 < self.source.len and self.source[self.pos + 2] == '=') {
-                    self.pos += 3; // ===
-                    self.skipWhitespace();
-                    const right = try self.parseExpression(prec);
-                    return .{ .boolean = left.strictEquals(right) };
-                }
-                self.pos += 2;
+                const strict = self.pos + 2 < self.source.len and self.source[self.pos + 2] == '=';
+                self.pos += if (strict) @as(usize, 3) else 2;
                 self.skipWhitespace();
                 const right = try self.parseExpression(prec);
-                return .{ .boolean = left.looseEquals(right) };
+                defer left.deinit(self.allocator);
+                defer right.deinit(self.allocator);
+                return .{ .boolean = if (strict) left.strictEquals(right) else left.looseEquals(right) };
             }
             if (std.mem.eql(u8, two, "!=")) {
-                if (self.pos + 2 < self.source.len and self.source[self.pos + 2] == '=') {
-                    self.pos += 3; // !==
-                    self.skipWhitespace();
-                    const right = try self.parseExpression(prec);
-                    return .{ .boolean = !left.strictEquals(right) };
-                }
-                self.pos += 2;
+                const strict = self.pos + 2 < self.source.len and self.source[self.pos + 2] == '=';
+                self.pos += if (strict) @as(usize, 3) else 2;
                 self.skipWhitespace();
                 const right = try self.parseExpression(prec);
-                return .{ .boolean = !left.looseEquals(right) };
+                defer left.deinit(self.allocator);
+                defer right.deinit(self.allocator);
+                return .{ .boolean = if (strict) !left.strictEquals(right) else !left.looseEquals(right) };
             }
             if (std.mem.eql(u8, two, "<=")) {
                 self.pos += 2;
                 self.skipWhitespace();
                 const right = try self.parseExpression(prec);
+                defer left.deinit(self.allocator);
+                defer right.deinit(self.allocator);
                 const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
                 const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
                 return .{ .boolean = ln <= rn };
@@ -466,6 +469,8 @@ pub const ComptimeEvaluator = struct {
                 self.pos += 2;
                 self.skipWhitespace();
                 const right = try self.parseExpression(prec);
+                defer left.deinit(self.allocator);
+                defer right.deinit(self.allocator);
                 const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
                 const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
                 return .{ .boolean = ln >= rn };
@@ -474,25 +479,26 @@ pub const ComptimeEvaluator = struct {
                 self.pos += 2;
                 self.skipWhitespace();
                 const right = try self.parseExpression(prec);
+                defer left.deinit(self.allocator);
+                defer right.deinit(self.allocator);
                 return self.bitwiseShift(left, right, .left);
             }
             if (std.mem.eql(u8, two, ">>")) {
-                if (self.pos + 2 < self.source.len and self.source[self.pos + 2] == '>') {
-                    self.pos += 3; // >>>
-                    self.skipWhitespace();
-                    const right = try self.parseExpression(prec);
-                    return self.bitwiseShift(left, right, .unsigned_right);
-                }
-                self.pos += 2;
+                const unsigned = self.pos + 2 < self.source.len and self.source[self.pos + 2] == '>';
+                self.pos += if (unsigned) @as(usize, 3) else 2;
                 self.skipWhitespace();
                 const right = try self.parseExpression(prec);
-                return self.bitwiseShift(left, right, .right);
+                defer left.deinit(self.allocator);
+                defer right.deinit(self.allocator);
+                return self.bitwiseShift(left, right, if (unsigned) .unsigned_right else .right);
             }
             if (std.mem.eql(u8, two, "**")) {
                 self.pos += 2;
                 self.skipWhitespace();
                 // Right-associative
                 const right = try self.parseExpression(@enumFromInt(@intFromEnum(prec) - 1));
+                defer left.deinit(self.allocator);
+                defer right.deinit(self.allocator);
                 const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
                 const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
                 return .{ .number = std.math.pow(f64, ln, rn) };

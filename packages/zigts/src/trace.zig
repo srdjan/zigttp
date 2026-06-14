@@ -547,9 +547,60 @@ pub fn parseTraceLine(line: []const u8) !TraceEntry {
 // Minimal JSON Field Extraction (zero-copy)
 // ============================================================================
 
+/// Find an object KEY at the top level (depth 1) of a JSON object, ignoring
+/// occurrences of the key token inside nested structures or string values. `key`
+/// is the quoted token (e.g. `"\"result\""`). Returns the index just past the
+/// matched key, or null. Replaces a naive std.mem.indexOf that matched the first
+/// substring anywhere — which corrupted extraction when an earlier sibling value
+/// (e.g. an io arg equal to "result", or a header literally named "body")
+/// contained the key token, silently feeding wrong values into durable recovery
+/// and replay verification.
+fn findTopLevelKeyEnd(json: []const u8, key: []const u8) ?usize {
+    if (key.len == 0) return null;
+    var depth: u32 = 0;
+    var pos: usize = 0;
+    var in_string = false;
+    while (pos < json.len) {
+        const c = json[pos];
+        if (in_string) {
+            if (c == '\\') {
+                pos += 2;
+                continue;
+            }
+            if (c == '"') in_string = false;
+            pos += 1;
+            continue;
+        }
+        switch (c) {
+            '{', '[' => {
+                depth += 1;
+                pos += 1;
+            },
+            '}', ']' => {
+                if (depth > 0) depth -= 1;
+                pos += 1;
+            },
+            '"' => {
+                // A quoted token at depth 1 followed by ':' is the key we want.
+                if (depth == 1 and pos + key.len <= json.len and
+                    std.mem.eql(u8, json[pos .. pos + key.len], key))
+                {
+                    var after = pos + key.len;
+                    while (after < json.len and (json[after] == ' ' or json[after] == '\t')) : (after += 1) {}
+                    if (after < json.len and json[after] == ':') return pos + key.len;
+                }
+                // Otherwise it is a non-matching key or a string value: skip it.
+                in_string = true;
+                pos += 1;
+            },
+            else => pos += 1,
+        }
+    }
+    return null;
+}
+
 pub fn findJsonStringValue(json: []const u8, key: []const u8) ?[]const u8 {
-    const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
-    var pos = key_pos + key.len;
+    var pos = findTopLevelKeyEnd(json, key) orelse return null;
     while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
     if (pos >= json.len) return null;
     if (pos + 4 <= json.len and std.mem.eql(u8, json[pos .. pos + 4], "null")) return null;
@@ -567,8 +618,7 @@ pub fn findJsonStringValue(json: []const u8, key: []const u8) ?[]const u8 {
 }
 
 pub fn findJsonIntValue(json: []const u8, key: []const u8) ?i64 {
-    const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
-    var pos = key_pos + key.len;
+    var pos = findTopLevelKeyEnd(json, key) orelse return null;
     while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
     if (pos >= json.len) return null;
     const start = pos;
@@ -579,24 +629,21 @@ pub fn findJsonIntValue(json: []const u8, key: []const u8) ?i64 {
 }
 
 pub fn findJsonObjectValue(json: []const u8, key: []const u8) ?[]const u8 {
-    const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
-    var pos = key_pos + key.len;
+    var pos = findTopLevelKeyEnd(json, key) orelse return null;
     while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
     if (pos >= json.len or json[pos] != '{') return null;
     return findMatchingBrace(json, pos, '{', '}');
 }
 
 pub fn findJsonArrayValue(json: []const u8, key: []const u8) ?[]const u8 {
-    const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
-    var pos = key_pos + key.len;
+    var pos = findTopLevelKeyEnd(json, key) orelse return null;
     while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
     if (pos >= json.len or json[pos] != '[') return null;
     return findMatchingBrace(json, pos, '[', ']');
 }
 
 pub fn findJsonAnyValue(json: []const u8, key: []const u8) ?[]const u8 {
-    const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
-    var pos = key_pos + key.len;
+    var pos = findTopLevelKeyEnd(json, key) orelse return null;
     while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
     if (pos >= json.len) return null;
     return switch (json[pos]) {
@@ -820,18 +867,24 @@ const ParseResult = struct {
 /// recorded return values from their JSONL representation.
 pub fn jsonToJSValue(ctx: *context.Context, json: []const u8) value.JSValue {
     if (json.len == 0) return value.JSValue.undefined_val;
-    const result = parseValue(ctx, json, 0);
+    const result = parseValue(ctx, json, 0, 0);
     return result.val;
 }
 
-fn parseValue(ctx: *context.Context, json: []const u8, start: usize) ParseResult {
+// Cap nesting depth so an adversarial/corrupted trace (replay or shared capsule
+// files are third-party input) with deeply nested values cannot overflow the
+// native stack. Mirrors the serializer's MAX_JSON_DEPTH discipline.
+const MAX_PARSE_DEPTH: u32 = 128;
+
+fn parseValue(ctx: *context.Context, json: []const u8, start: usize, depth: u32) ParseResult {
     const pos = skipWhitespace(json, start);
     if (pos >= json.len) return .{ .val = value.JSValue.undefined_val, .end = pos };
+    if (depth >= MAX_PARSE_DEPTH) return .{ .val = value.JSValue.undefined_val, .end = pos };
 
     return switch (json[pos]) {
         '"' => parseString(ctx, json, pos),
-        '{' => parseObject(ctx, json, pos),
-        '[' => parseArray(ctx, json, pos),
+        '{' => parseObject(ctx, json, pos, depth),
+        '[' => parseArray(ctx, json, pos, depth),
         't' => .{ .val = value.JSValue.true_val, .end = @min(pos + 4, json.len) },
         'f' => .{ .val = value.JSValue.false_val, .end = @min(pos + 5, json.len) },
         'n' => .{ .val = value.JSValue.undefined_val, .end = @min(pos + 4, json.len) },
@@ -899,7 +952,7 @@ fn parseNumber(ctx: *context.Context, json: []const u8, start: usize) ParseResul
     return .{ .val = allocFloat(ctx, f), .end = pos };
 }
 
-fn parseArray(ctx: *context.Context, json: []const u8, start: usize) ParseResult {
+fn parseArray(ctx: *context.Context, json: []const u8, start: usize, depth: u32) ParseResult {
     const pool = ctx.hidden_class_pool orelse return .{ .val = value.JSValue.undefined_val, .end = start + 1 };
     const arr = object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool) catch {
         return .{ .val = value.JSValue.undefined_val, .end = start + 1 };
@@ -924,14 +977,14 @@ fn parseArray(ctx: *context.Context, json: []const u8, start: usize) ParseResult
             pos += 1;
             break;
         }
-        const elem = parseValue(ctx, json, pos);
+        const elem = parseValue(ctx, json, pos, depth + 1);
         pos = elem.end;
         arr.arrayPush(ctx.allocator, elem.val) catch {};
     }
     return .{ .val = arr.toValue(), .end = pos };
 }
 
-fn parseObject(ctx: *context.Context, json: []const u8, start: usize) ParseResult {
+fn parseObject(ctx: *context.Context, json: []const u8, start: usize, depth: u32) ParseResult {
     const pool = ctx.hidden_class_pool orelse return .{ .val = value.JSValue.undefined_val, .end = start + 1 };
     const obj = object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool) catch {
         return .{ .val = value.JSValue.undefined_val, .end = start + 1 };
@@ -969,7 +1022,7 @@ fn parseObject(ctx: *context.Context, json: []const u8, start: usize) ParseResul
         if (pos < json.len and json[pos] == ':') pos += 1;
 
         // Parse value
-        const val_result = parseValue(ctx, json, pos);
+        const val_result = parseValue(ctx, json, pos, depth + 1);
         pos = val_result.end;
 
         // Set property on object

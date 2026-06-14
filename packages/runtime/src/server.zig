@@ -384,11 +384,11 @@ const ConnectionPool = struct {
         // errno under test builds.
         _ = std.posix.system.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)), @sizeOf(c_int));
 
-        // Bound how long a slow client can occupy this worker thread. SO_RCVTIMEO
-        // makes a blocking read return error.WouldBlock once an idle gap exceeds
-        // the timeout, so a slowloris / partial-header connection is dropped
-        // (the WouldBlock path closes it) instead of pinning the thread forever.
-        // SO_SNDTIMEO bounds a slow-reading peer on the write side.
+        // SO_RCVTIMEO makes a blocking read return error.WouldBlock once a single
+        // idle gap exceeds the timeout. Note it resets on every byte received, so
+        // it bounds only per-read idle, NOT total request time; a drip-feeding
+        // slowloris is bounded instead by the absolute read deadline in
+        // readRequestData. SO_SNDTIMEO bounds a slow-reading peer on the write side.
         const recv_timeout = std.posix.timeval{
             .sec = @intCast(self.server.config.timeout_ms / 1000),
             .usec = @intCast((self.server.config.timeout_ms % 1000) * 1000),
@@ -492,6 +492,10 @@ const ConnectionPool = struct {
             }
             if (err == error.FileTooBig) {
                 self.sendErrorSync(fd, 413, "Payload Too Large") catch {};
+                return .close;
+            }
+            if (err == error.RequestTimeout) {
+                self.sendErrorSync(fd, 408, "Request Timeout") catch {};
                 return .close;
             }
             return err;
@@ -703,7 +707,18 @@ const ConnectionPool = struct {
         }
 
         var read_buf: [16 * 1024]u8 = undefined;
+        // Absolute read deadline. SO_RCVTIMEO bounds only per-read idle and resets
+        // on any byte received, so a drip-feeding client (one byte just before each
+        // timeout) could otherwise pin a worker indefinitely (slowloris). Cap the
+        // total time spent assembling one request.
+        var read_timer = engine.Timer.start() catch null;
+        const read_budget_ns: u64 = @as(u64, self.server.config.timeout_ms) * std.time.ns_per_ms;
         while (true) {
+            if (read_budget_ns > 0) {
+                if (read_timer) |*t| {
+                    if (t.read() > read_budget_ns) return error.RequestTimeout;
+                }
+            }
             const n = std.posix.read(fd, &read_buf) catch |err| {
                 if (err == error.ConnectionResetByPeer or err == error.WouldBlock) return err;
                 return err;
@@ -774,12 +789,18 @@ const ConnectionPool = struct {
         // static-file responses don't carry handler semantics, so omitting
         // attestation headers there is the correct shape.
         if (response.prebuilt_raw) |prebuilt| {
-            if (keep_alive) {
+            // Only take the zero-construction fast path when attestation is off.
+            // The prebuilt blob omits the Zigttp-Proofs/Zigttp-Attest header lines,
+            // so when attestation is active we must fall through to the normal
+            // builder; otherwise a constant-Response handler would ship attestation
+            // headers on close connections but drop them on keep-alive, making
+            // their presence unpredictable for a third-party `zigttp verify`.
+            if (keep_alive and self.server.attestation_headers == null) {
                 // Prebuilt response already has keep-alive, write directly
                 try writeAllFd(fd, prebuilt);
                 return;
             }
-            // For close, we'd need to modify the prebuilt - fall through to normal path
+            // For close (or when attestation is active) fall through to normal path.
         }
 
         // Increased buffer to 8KB to fit headers + most response bodies in single write

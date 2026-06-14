@@ -344,6 +344,7 @@ pub const JsonParser = struct {
     fn skipObject(self: *JsonParser) void {
         if (!self.consume('{')) return;
         while (self.pos < self.data.len and self.data[self.pos] != '}') {
+            const iter_start = self.pos;
             if (self.data[self.pos] == ',') {
                 self.pos += 1;
                 continue;
@@ -354,6 +355,14 @@ pub const JsonParser = struct {
             _ = self.consume(':');
             self.skipValue(); // value (handles nested objects/arrays)
             self.skipWhitespace();
+            // Zero-progress guard: an unconsumable token (e.g. a bare identifier
+            // where a key/value is expected) leaves pos unchanged and would spin
+            // forever. Fail closed by jumping to EOF so every enclosing skip loop
+            // unwinds and the outer parse surfaces error.InvalidJson.
+            if (self.pos == iter_start) {
+                self.pos = self.data.len;
+                return;
+            }
         }
         if (self.pos < self.data.len) self.pos += 1; // skip }
     }
@@ -362,6 +371,7 @@ pub const JsonParser = struct {
         if (!self.consume('[')) return;
         self.skipWhitespace();
         while (self.pos < self.data.len and self.data[self.pos] != ']') {
+            const iter_start = self.pos;
             if (self.data[self.pos] == ',') {
                 self.pos += 1;
                 self.skipWhitespace();
@@ -369,6 +379,12 @@ pub const JsonParser = struct {
             }
             self.skipValue(); // handles nested objects/arrays
             self.skipWhitespace();
+            // Zero-progress guard (see skipObject): bail to EOF on a token that
+            // skipValue cannot consume rather than spinning forever.
+            if (self.pos == iter_start) {
+                self.pos = self.data.len;
+                return;
+            }
         }
         if (self.pos < self.data.len) self.pos += 1; // skip ]
     }
