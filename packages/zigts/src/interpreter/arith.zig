@@ -244,6 +244,12 @@ pub fn valueToStringArena(interp: *Interpreter, val: value.JSValue, arena: *aren
 /// Calculates total length once, then a single allocation -- avoids the
 /// quadratic cost of chained binary concatenation.
 pub fn concatNValues(interp: *Interpreter, count: u8) !value.JSValue {
+    // The fixed [16] stack buffers below are indexed [0..count). The only
+    // emitter (tryEmitStringConcatChain) caps the chain at 16 operands, so
+    // count > 16 is unreachable from compiled source; assert that invariant so
+    // a future codegen change (or hand-built bytecode) cannot overflow the
+    // buffers in ReleaseFast where bounds checks are elided.
+    std.debug.assert(count <= 16);
     if (count == 0) {
         return value.JSValue.fromPtr(try interp.createString(""));
     }

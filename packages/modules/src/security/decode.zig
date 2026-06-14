@@ -77,7 +77,10 @@ fn decodeFormImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.J
     if (args.len < 2) return sdk.resultErr(handle, "missing arguments");
     const name = sdk.extractString(args[0]) orelse return sdk.resultErr(handle, "name must be a string");
     const body = sdk.extractString(args[1]) orelse return sdk.resultErr(handle, "body must be a string");
-    const obj = try parseFormObject(handle, body);
+    const obj = parseFormObject(handle, body) catch |err| switch (err) {
+        error.DuplicateField => return sdk.resultErr(handle, "duplicate field name in form body"),
+        else => return err,
+    };
     return validate.decodeObject(handle, name, obj, true);
 }
 
@@ -85,7 +88,43 @@ fn decodeQueryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.
     if (args.len < 2) return sdk.resultErr(handle, "missing arguments");
     const name = sdk.extractString(args[0]) orelse return sdk.resultErr(handle, "name must be a string");
     if (!sdk.isObject(args[1])) return sdk.resultErr(handle, "query must be an object");
-    return validate.decodeObject(handle, name, args[1], true);
+    const query_copy = cloneValueForDecode(handle, args[1], 0) catch
+        return sdk.resultErr(handle, "failed to copy query");
+    return validate.decodeObject(handle, name, query_copy, true);
+}
+
+const MAX_DECODE_CLONE_DEPTH = 32;
+
+fn cloneValueForDecode(handle: *sdk.ModuleHandle, val: sdk.JSValue, depth: u32) !sdk.JSValue {
+    if (depth > MAX_DECODE_CLONE_DEPTH) return error.DecodeInputTooDeep;
+
+    if (sdk.isArray(val)) {
+        const out = try sdk.createArray(handle);
+        const len = sdk.arrayLength(val) orelse return error.InvalidArray;
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            if (sdk.arrayGet(handle, val, i)) |elem| {
+                try sdk.arraySet(handle, out, i, try cloneValueForDecode(handle, elem, depth + 1));
+            }
+        }
+        return out;
+    }
+
+    if (sdk.isObject(val)) {
+        const out = try sdk.createObject(handle);
+        const keys = try sdk.objectKeys(handle, val);
+        const len = sdk.arrayLength(keys) orelse return error.InvalidObjectKeys;
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const key_val = sdk.arrayGet(handle, keys, i) orelse continue;
+            const key = sdk.extractString(key_val) orelse continue;
+            const prop = sdk.objectGet(handle, val, key) orelse sdk.JSValue.undefined_val;
+            try sdk.objectSet(handle, out, key, try cloneValueForDecode(handle, prop, depth + 1));
+        }
+        return out;
+    }
+
+    return val;
 }
 
 fn parseFormObject(handle: *sdk.ModuleHandle, raw: []const u8) !sdk.JSValue {
@@ -104,6 +143,12 @@ fn parseFormObject(handle: *sdk.ModuleHandle, raw: []const u8) !sdk.JSValue {
         defer allocator.free(key);
         const val = try decodeFormComponent(allocator, val_raw);
         defer allocator.free(val);
+
+        // Reject duplicate field names rather than silently last-wins. A
+        // last-wins default is differential-prone (HTTP parameter pollution):
+        // an upstream proxy/WAF that takes first-wins would disagree with this
+        // layer. Fail closed instead.
+        if (sdk.objectGet(handle, obj, key) != null) return error.DuplicateField;
 
         const js_val = try sdk.createString(handle, val);
         try sdk.objectSet(handle, obj, key, js_val);
@@ -168,6 +213,7 @@ fn decodeFormMultipartImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []co
 
     const obj = parseMultipartObject(handle, body, boundary) catch |err| switch (err) {
         error.MalformedMultipart => return sdk.resultErr(handle, "malformed multipart body"),
+        error.DuplicateField => return sdk.resultErr(handle, "duplicate field name in multipart body"),
         else => return err,
     };
     return validate.decodeObject(handle, name, obj, true);
@@ -197,21 +243,33 @@ fn parseBoundary(content_type: []const u8) ?[]const u8 {
 fn parseMultipartObject(handle: *sdk.ModuleHandle, body: []const u8, boundary: []const u8) !sdk.JSValue {
     const obj = try sdk.createObject(handle);
 
-    // Build the delimiter: "--<boundary>" (RFC 2046: boundary <= 70 chars)
+    // Build the delimiters (RFC 2046: boundary <= 70 chars). The opening
+    // "dash-boundary" is "--<boundary>"; every subsequent delimiter is anchored
+    // to a line boundary as "CRLF--<boundary>". Splitting on the CRLF-anchored
+    // form (rather than the bare "--<boundary>" substring) prevents a part's
+    // content that happens to contain the boundary token from splitting the
+    // part mid-value.
     if (boundary.len > 70) return error.BoundaryTooLong;
-    var delim_buf: [72]u8 = undefined;
-    delim_buf[0] = '-';
-    delim_buf[1] = '-';
-    @memcpy(delim_buf[2 .. 2 + boundary.len], boundary);
-    const delim = delim_buf[0 .. 2 + boundary.len];
+    var delim_buf: [74]u8 = undefined;
+    delim_buf[0] = '\r';
+    delim_buf[1] = '\n';
+    delim_buf[2] = '-';
+    delim_buf[3] = '-';
+    @memcpy(delim_buf[4 .. 4 + boundary.len], boundary);
+    const crlf_delim = delim_buf[0 .. 4 + boundary.len];
+    const dash_boundary = delim_buf[2 .. 4 + boundary.len];
 
-    var it = std.mem.splitSequence(u8, body, delim);
-    // Skip the preamble (everything before the first delimiter)
-    _ = it.next();
+    // Find the opening dash-boundary, then split the remainder on the
+    // CRLF-anchored delimiter so in-content boundary substrings are ignored.
+    const first = std.mem.indexOf(u8, body, dash_boundary) orelse return error.MalformedMultipart;
+    const after_first = body[first + dash_boundary.len ..];
+
+    var it = std.mem.splitSequence(u8, after_first, crlf_delim);
 
     while (it.next()) |raw_part| {
-        // "--<boundary>--" is the closing delimiter; the remaining slice will
-        // start with "--" after the split drops the delimiter itself.
+        // "--<boundary>--" is the closing delimiter; the part after the opening
+        // dash-boundary (or after a CRLF-anchored delimiter) starts with "--"
+        // for the terminator.
         if (std.mem.startsWith(u8, raw_part, "--")) break;
 
         // Each part starts with CRLF after the delimiter line.
@@ -231,6 +289,10 @@ fn parseMultipartObject(handle: *sdk.ModuleHandle, body: []const u8, boundary: [
         const field_name = parseDispositionParam(disposition, "name") orelse continue;
         const filename = parseDispositionParam(disposition, "filename");
         const part_ct = findHeader(headers_raw, "content-type");
+
+        // Reject duplicate field names rather than silently last-wins; a
+        // last-wins default is differential-prone (parameter pollution).
+        if (sdk.objectGet(handle, obj, field_name) != null) return error.DuplicateField;
 
         if (filename != null) {
             // File part: return an object descriptor.
@@ -312,6 +374,14 @@ test "decodeFormComponent decodes plus and percent escapes" {
     const decoded = try decodeFormComponent(allocator, "display+name=zig%20ttp");
     defer allocator.free(decoded);
     try std.testing.expectEqualStrings("display name=zig ttp", decoded);
+}
+
+test "cloneValueForDecode rejects excessive nesting before touching SDK object APIs" {
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    try std.testing.expectError(
+        error.DecodeInputTooDeep,
+        cloneValueForDecode(fake_handle, sdk.JSValue.undefined_val, MAX_DECODE_CLONE_DEPTH + 1),
+    );
 }
 
 test "parseBoundary extracts unquoted boundary" {

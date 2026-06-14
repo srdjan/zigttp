@@ -172,19 +172,45 @@ pub const IrTranspiler = struct {
         var di: usize = 1;
         for (str) |c| {
             switch (c) {
-                '"'  => { result[di] = '\\'; result[di+1] = '"';  di += 2; },
-                '\\' => { result[di] = '\\'; result[di+1] = '\\'; di += 2; },
-                '\n' => { result[di] = '\\'; result[di+1] = 'n';  di += 2; },
-                '\r' => { result[di] = '\\'; result[di+1] = 'r';  di += 2; },
-                '\t' => { result[di] = '\\'; result[di+1] = 't';  di += 2; },
+                '"' => {
+                    result[di] = '\\';
+                    result[di + 1] = '"';
+                    di += 2;
+                },
+                '\\' => {
+                    result[di] = '\\';
+                    result[di + 1] = '\\';
+                    di += 2;
+                },
+                '\n' => {
+                    result[di] = '\\';
+                    result[di + 1] = 'n';
+                    di += 2;
+                },
+                '\r' => {
+                    result[di] = '\\';
+                    result[di + 1] = 'r';
+                    di += 2;
+                },
+                '\t' => {
+                    result[di] = '\\';
+                    result[di + 1] = 't';
+                    di += 2;
+                },
                 0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => {
                     const hex = "0123456789abcdef";
-                    result[di]   = '\\'; result[di+1] = 'u';
-                    result[di+2] = '0';  result[di+3] = '0';
-                    result[di+4] = hex[c >> 4]; result[di+5] = hex[c & 0x0f];
+                    result[di] = '\\';
+                    result[di + 1] = 'u';
+                    result[di + 2] = '0';
+                    result[di + 3] = '0';
+                    result[di + 4] = hex[c >> 4];
+                    result[di + 5] = hex[c & 0x0f];
                     di += 6;
                 },
-                else => { result[di] = c; di += 1; },
+                else => {
+                    result[di] = c;
+                    di += 1;
+                },
             }
         }
         result[di] = '"';
@@ -2267,7 +2293,7 @@ pub const IrTranspiler = struct {
                         utf16_len += 1;
                         continue;
                     };
-                    const cp = std.unicode.utf8Decode(str[i..i + cp_len]) catch 0xFFFD;
+                    const cp = std.unicode.utf8Decode(str[i .. i + cp_len]) catch 0xFFFD;
                     utf16_len += if (cp >= 0x10000) 2 else 1;
                     i += cp_len;
                 }

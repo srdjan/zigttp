@@ -10,7 +10,7 @@ pub const binding = sdk.ModuleBinding{
     .name = "validate",
     .stateful = true,
     .exports = &.{
-        .{ .name = "schemaCompile", .module_func = schemaCompileImpl, .arg_count = 2, .returns = .boolean, .param_types = &.{ .string, .string }, .traceable = false, .contract_extractions = &.{.{ .category = .schema_compile }} },
+        .{ .name = "schemaCompile", .module_func = schemaCompileImpl, .arg_count = 2, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string }, .traceable = false, .contract_extractions = &.{.{ .category = .schema_compile }} },
         .{
             .name = "validateJson",
             .module_func = validateJsonImpl,
@@ -47,7 +47,7 @@ pub const binding = sdk.ModuleBinding{
             .laws = &.{.pure},
             .replay_pure = true,
         },
-        .{ .name = "schemaDrop", .module_func = schemaDropImpl, .arg_count = 1, .returns = .boolean, .param_types = &.{.string}, .traceable = false },
+        .{ .name = "schemaDrop", .module_func = schemaDropImpl, .arg_count = 1, .effect = .write, .returns = .boolean, .param_types = &.{.string}, .traceable = false },
     },
 };
 
@@ -205,8 +205,8 @@ fn decodeValue(
 ) !sdk.JSValue {
     const reg = getOrCreateRegistry(handle) catch return sdk.resultErr(handle, "internal error");
     const schema = reg.schemas.get(name) orelse return sdk.resultErr(handle, "schema not found");
-    const candidate = if (coerce) coerceValue(handle, schema, input) else input;
-    return validateValueAgainstSchema(handle, schema, candidate, "");
+    const candidate = if (coerce) coerceValue(handle, schema, input) catch return sdk.resultErr(handle, "internal error") else input;
+    return validateValueAgainstSchema(handle, schema, candidate, "") catch return sdk.resultErr(handle, "internal error");
 }
 
 fn validateJsonImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
@@ -254,6 +254,34 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
         .object => |o| o,
         else => return error.InvalidSchema,
     };
+
+    // Fail closed on unsupported keywords. This is an ingress validation
+    // boundary whose results are marked `validated`, so silently ignoring an
+    // unknown constraint keyword (`pattern`, `additionalProperties`, `allOf`,
+    // ...) would mark a value trusted against a constraint that was never
+    // enforced. Reject any key outside the supported constraint set (benign
+    // descriptive metadata keys carry no constraint semantics and are allowed).
+    {
+        var key_it = obj.iterator();
+        while (key_it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const supported = std.mem.eql(u8, key, "type") or
+                std.mem.eql(u8, key, "minLength") or
+                std.mem.eql(u8, key, "maxLength") or
+                std.mem.eql(u8, key, "minimum") or
+                std.mem.eql(u8, key, "maximum") or
+                std.mem.eql(u8, key, "required") or
+                std.mem.eql(u8, key, "properties") or
+                std.mem.eql(u8, key, "items") or
+                std.mem.eql(u8, key, "enum") or
+                std.mem.eql(u8, key, "format") or
+                // Descriptive metadata: no constraint semantics, safe to ignore.
+                std.mem.eql(u8, key, "$schema") or
+                std.mem.eql(u8, key, "title") or
+                std.mem.eql(u8, key, "description");
+            if (!supported) return error.InvalidSchema;
+        }
+    }
 
     if (obj.get("type")) |type_val| switch (type_val) {
         .string => |s| schema.schema_type = parseSchemaType(s) orelse return error.InvalidSchema,
@@ -328,6 +356,21 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
         else => return error.InvalidSchema,
     };
 
+    // Fail closed when a string/number constraint is declared without a matching
+    // `type`. validateRecursive only enforces these inside type-gated blocks, so
+    // a schema like {"format":"email"} or {"minimum":0} with no `type` would
+    // accept any value yet still stamp the result `.validated`. Reject it at
+    // compile time rather than no-op the constraint at validation time.
+    const is_string_type = schema.schema_type != null and schema.schema_type.? == .string;
+    const is_numeric_type = schema.schema_type != null and
+        (schema.schema_type.? == .number or schema.schema_type.? == .integer);
+    if ((schema.min_length != null or schema.max_length != null or schema.format != null) and !is_string_type) {
+        return error.InvalidSchema;
+    }
+    if ((schema.minimum != null or schema.maximum != null) and !is_numeric_type) {
+        return error.InvalidSchema;
+    }
+
     return schema;
 }
 
@@ -379,6 +422,17 @@ const ValidationError = struct {
     message: []const u8,
 };
 
+fn appendValidationError(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList(ValidationError),
+    path: []const u8,
+    message: []const u8,
+) !void {
+    const path_owned = try allocator.dupe(u8, path);
+    errdefer allocator.free(path_owned);
+    try errors.append(allocator, .{ .path = path_owned, .message = message });
+}
+
 fn validateValueAgainstSchema(
     handle: *sdk.ModuleHandle,
     schema: *const CompiledSchema,
@@ -387,9 +441,12 @@ fn validateValueAgainstSchema(
 ) !sdk.JSValue {
     const allocator = sdk.getAllocator(handle);
     var errors: std.ArrayList(ValidationError) = .empty;
-    defer errors.deinit(allocator);
+    defer {
+        for (errors.items) |err| allocator.free(err.path);
+        errors.deinit(allocator);
+    }
 
-    validateRecursive(handle, schema, val, path, &errors);
+    try validateRecursive(handle, schema, val, path, &errors);
 
     if (errors.items.len == 0) return sdk.resultOk(handle, val);
 
@@ -474,7 +531,7 @@ fn validateRecursive(
     val: sdk.JSValue,
     path: []const u8,
     errors: *std.ArrayList(ValidationError),
-) void {
+) !void {
     const allocator = sdk.getAllocator(handle);
 
     if (schema.schema_type) |expected_type| {
@@ -488,7 +545,7 @@ fn validateRecursive(
             .null_type => val.isNull(),
         };
         if (!type_ok) {
-            errors.append(allocator, .{ .path = path, .message = "type mismatch" }) catch {};
+            try appendValidationError(allocator, errors, path, "type mismatch");
             return;
         }
     }
@@ -496,10 +553,10 @@ fn validateRecursive(
     if (schema.schema_type != null and schema.schema_type.? == .string) {
         if (sdk.extractString(val)) |str| {
             if (schema.min_length) |min| {
-                if (str.len < min) errors.append(allocator, .{ .path = path, .message = "string too short" }) catch {};
+                if (str.len < min) try appendValidationError(allocator, errors, path, "string too short");
             }
             if (schema.max_length) |max| {
-                if (str.len > max) errors.append(allocator, .{ .path = path, .message = "string too long" }) catch {};
+                if (str.len > max) try appendValidationError(allocator, errors, path, "string too long");
             }
             if (schema.format) |fmt| {
                 if (!validateFormat(fmt, str)) {
@@ -509,7 +566,7 @@ fn validateRecursive(
                         .iso_date => "invalid iso-date format",
                         .iso_datetime => "invalid iso-datetime format",
                     };
-                    errors.append(allocator, .{ .path = path, .message = msg }) catch {};
+                    try appendValidationError(allocator, errors, path, msg);
                 }
             }
         }
@@ -518,16 +575,19 @@ fn validateRecursive(
     if (schema.schema_type != null and (schema.schema_type.? == .number or schema.schema_type.? == .integer)) {
         if (sdk.extractFloat(val)) |num| {
             if (schema.minimum) |min| {
-                if (num < min) errors.append(allocator, .{ .path = path, .message = "below minimum" }) catch {};
+                if (num < min) try appendValidationError(allocator, errors, path, "below minimum");
             }
             if (schema.maximum) |max| {
-                if (num > max) errors.append(allocator, .{ .path = path, .message = "above maximum" }) catch {};
+                if (num > max) try appendValidationError(allocator, errors, path, "above maximum");
             }
         }
     }
 
     if (schema.enum_values) |enums| {
-        const val_str = jsValueToEnumString(allocator, val) catch null;
+        const val_str = jsValueToEnumString(allocator, val) catch |err| switch (err) {
+            error.UnsupportedEnumValue => null,
+            else => return err,
+        };
         if (val_str) |vs| {
             defer allocator.free(vs);
             var found = false;
@@ -537,9 +597,9 @@ fn validateRecursive(
                     break;
                 }
             }
-            if (!found) errors.append(allocator, .{ .path = path, .message = "value not in enum" }) catch {};
+            if (!found) try appendValidationError(allocator, errors, path, "value not in enum");
         } else {
-            errors.append(allocator, .{ .path = path, .message = "value not in enum" }) catch {};
+            try appendValidationError(allocator, errors, path, "value not in enum");
         }
     }
 
@@ -547,7 +607,7 @@ fn validateRecursive(
         if (schema.required) |req| {
             for (req) |field_name| {
                 if (sdk.objectGet(handle, val, field_name) == null) {
-                    errors.append(allocator, .{ .path = path, .message = "missing required field" }) catch {};
+                    try appendValidationError(allocator, errors, path, "missing required field");
                 }
             }
         }
@@ -555,12 +615,18 @@ fn validateRecursive(
             var it = props.iterator();
             while (it.next()) |entry| {
                 if (sdk.objectGet(handle, val, entry.key_ptr.*)) |prop_val| {
-                    const child_path = buildPath(allocator, path, entry.key_ptr.*) catch path;
-                    defer if (child_path.ptr != path.ptr) allocator.free(child_path);
-                    validateRecursive(handle, entry.value_ptr.*, prop_val, child_path, errors);
+                    const child_path = try buildPath(allocator, path, entry.key_ptr.*);
+                    defer allocator.free(child_path);
+                    try validateRecursive(handle, entry.value_ptr.*, prop_val, child_path, errors);
                 }
             }
         }
+    } else if (schema.required != null or schema.properties != null) {
+        // A schema declaring `required`/`properties` constrains an object. When
+        // no explicit `type` was set, a non-object value would otherwise skip
+        // both the type check (gated on schema_type) and these field checks,
+        // silently passing field-presence validation. Fail closed.
+        try appendValidationError(allocator, errors, path, "type mismatch");
     }
 
     if (sdk.isArray(val) and schema.items != null) {
@@ -568,9 +634,9 @@ fn validateRecursive(
         const items_schema = schema.items.?;
         for (0..len) |i| {
             if (sdk.arrayGet(handle, val, @intCast(i))) |elem| {
-                const child_path = buildIndexPath(allocator, path, i) catch path;
-                defer if (child_path.ptr != path.ptr) allocator.free(child_path);
-                validateRecursive(handle, items_schema, elem, child_path, errors);
+                const child_path = try buildIndexPath(allocator, path, i);
+                defer allocator.free(child_path);
+                try validateRecursive(handle, items_schema, elem, child_path, errors);
             }
         }
     }
@@ -600,10 +666,10 @@ fn jsValueToEnumString(allocator: std.mem.Allocator, val: sdk.JSValue) ![]const 
     if (val.isInt()) return try std.fmt.allocPrint(allocator, "{d}", .{val.getInt()});
     if (sdk.extractFloat(val)) |f| return try std.fmt.allocPrint(allocator, "{d}", .{f});
     if (sdk.extractString(val)) |str| return try std.fmt.allocPrint(allocator, "\"{s}\"", .{str});
-    return error.OutOfMemory;
+    return error.UnsupportedEnumValue;
 }
 
-pub fn coerceValue(handle: *sdk.ModuleHandle, schema: *const CompiledSchema, val: sdk.JSValue) sdk.JSValue {
+pub fn coerceValue(handle: *sdk.ModuleHandle, schema: *const CompiledSchema, val: sdk.JSValue) !sdk.JSValue {
     const expected_type = schema.schema_type orelse return val;
 
     switch (expected_type) {
@@ -620,12 +686,12 @@ pub fn coerceValue(handle: *sdk.ModuleHandle, schema: *const CompiledSchema, val
             if (val.isInt()) {
                 var buf: [32]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return val;
-                return sdk.createString(handle, s) catch val;
+                return try sdk.createString(handle, s);
             }
             if (sdk.extractFloat(val)) |f| {
                 var buf: [32]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return val;
-                return sdk.createString(handle, s) catch val;
+                return try sdk.createString(handle, s);
             }
         },
         .object_type => {
@@ -634,8 +700,8 @@ pub fn coerceValue(handle: *sdk.ModuleHandle, schema: *const CompiledSchema, val
                     var it = props.iterator();
                     while (it.next()) |entry| {
                         if (sdk.objectGet(handle, val, entry.key_ptr.*)) |prop_val| {
-                            const coerced = coerceValue(handle, entry.value_ptr.*, prop_val);
-                            sdk.objectSet(handle, val, entry.key_ptr.*, coerced) catch {};
+                            const coerced = try coerceValue(handle, entry.value_ptr.*, prop_val);
+                            try sdk.objectSet(handle, val, entry.key_ptr.*, coerced);
                         }
                     }
                 }
@@ -648,7 +714,7 @@ pub fn coerceValue(handle: *sdk.ModuleHandle, schema: *const CompiledSchema, val
                 var i: u32 = 0;
                 while (i < len) : (i += 1) {
                     if (sdk.arrayGet(handle, val, i)) |elem| {
-                        sdk.arraySet(handle, val, i, coerceValue(handle, item_schema, elem)) catch {};
+                        try sdk.arraySet(handle, val, i, try coerceValue(handle, item_schema, elem));
                     }
                 }
             }
@@ -785,6 +851,19 @@ test "jsonToU32: large and non-finite values reject instead of panicking" {
     try std.testing.expectEqual(@as(?u32, 7), jsonToU32(.{ .float = 7.0 }));
     try std.testing.expectEqual(@as(?u32, null), jsonToU32(.{ .float = 1e400 }));
     try std.testing.expectEqual(@as(?u32, null), jsonToU32(.{ .float = 5e9 }));
+}
+
+test "appendValidationError fails closed on allocator exhaustion" {
+    var backing: [0]u8 = .{};
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var errors: std.ArrayList(ValidationError) = .empty;
+    defer errors.deinit(fba.allocator());
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        appendValidationError(fba.allocator(), &errors, "field", "type mismatch"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
 }
 
 test "parseSchemaType" {

@@ -3,7 +3,8 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
 #
 # Environment variables:
-#   ZIGTTP_VERSION     - pin to a specific version (e.g. v0.14.0), default: latest
+#   ZIGTTP_VERSION     - pin to a specific version (e.g. v0.1.0-beta)
+#   ZIGTTP_CHANNEL     - beta (default; newest -beta tag), latest, or stable
 #   ZIGTTP_INSTALL_DIR - installation directory, default: $HOME/.zigttp
 
 set -eu
@@ -32,12 +33,19 @@ main() {
     verify_checksum "${TMPDIR}/${TARBALL}" "${TMPDIR}/${CHECKSUM}"
 
     mkdir -p "$BIN_DIR"
-    tar xzf "${TMPDIR}/${TARBALL}" -C "$BIN_DIR" --strip-components=1
+    EXTRACT_DIR="${TMPDIR}/extract"
+    PAYLOAD_DIR="${EXTRACT_DIR}/zigttp-${VERSION}-${OS}-${ARCH}"
+    mkdir -p "$EXTRACT_DIR"
+    tar xzf "${TMPDIR}/${TARBALL}" -C "$EXTRACT_DIR"
 
-    chmod +x "${BIN_DIR}/zigttp" "${BIN_DIR}/zigts"
-    if [ -f "${BIN_DIR}/zigttp-runtime" ]; then
-        chmod +x "${BIN_DIR}/zigttp-runtime"
+    if [ ! -d "$PAYLOAD_DIR" ]; then
+        printf "Error: release archive did not contain %s\n" "$(basename "$PAYLOAD_DIR")" >&2
+        exit 1
     fi
+
+    install_binary "$PAYLOAD_DIR" zigttp
+    install_binary "$PAYLOAD_DIR" zigts
+    install_binary "$PAYLOAD_DIR" zigttp-runtime
 
     printf "\nInstalled zigttp %s to %s\n" "$VERSION" "$BIN_DIR"
     printf "  zigttp: %s/zigttp\n" "$BIN_DIR"
@@ -75,14 +83,48 @@ resolve_version() {
         return
     fi
 
-    printf "Fetching latest version...\n"
-    VERSION=$(download_stdout "https://api.github.com/repos/${REPO}/releases/latest" \
-        | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+    CHANNEL="${ZIGTTP_CHANNEL:-beta}"
+    case "$CHANNEL" in
+        beta)
+            printf "Fetching latest beta version...\n"
+            VERSION=$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=20" \
+                | grep '"tag_name"' | grep -- '-beta' | head -1 | cut -d'"' -f4)
+            ;;
+        latest)
+            printf "Fetching latest version, including prereleases...\n"
+            VERSION=$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=20" \
+                | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+            ;;
+        stable)
+            printf "Fetching latest stable version...\n"
+            VERSION=$(download_stdout "https://api.github.com/repos/${REPO}/releases/latest" \
+                | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+            ;;
+        *)
+            printf "Error: unsupported ZIGTTP_CHANNEL: %s (use beta, latest, or stable)\n" "$CHANNEL" >&2
+            exit 1
+            ;;
+    esac
 
     if [ -z "$VERSION" ]; then
         printf "Error: could not determine latest version\n" >&2
         exit 1
     fi
+}
+
+install_binary() {
+    payload_dir="$1"
+    name="$2"
+    src="${payload_dir}/${name}"
+    dest="${BIN_DIR}/${name}"
+
+    if [ ! -f "$src" ]; then
+        printf "Error: release archive missing %s\n" "$name" >&2
+        exit 1
+    fi
+
+    cp "$src" "$dest"
+    chmod +x "$dest"
 }
 
 check_existing() {
@@ -129,9 +171,13 @@ verify_checksum() {
         (cd "$(dirname "$tarball")" && sha256sum -c "$(basename "$checksum_file")" --quiet)
     elif command -v shasum >/dev/null 2>&1; then
         (cd "$(dirname "$tarball")" && shasum -a 256 -c "$(basename "$checksum_file")" --quiet)
-    else
-        printf "Warning: sha256sum/shasum not found, skipping checksum verification\n" >&2
+    elif [ "${ZIGTTP_SKIP_CHECKSUM:-}" = "1" ]; then
+        printf "Warning: sha256sum/shasum not found; ZIGTTP_SKIP_CHECKSUM=1 set, proceeding without integrity check\n" >&2
         return 0
+    else
+        printf "Error: neither sha256sum nor shasum found; cannot verify download integrity.\n" >&2
+        printf "Install coreutils (Linux) or perl (for shasum), or set ZIGTTP_SKIP_CHECKSUM=1 to bypass at your own risk.\n" >&2
+        return 1
     fi
 }
 

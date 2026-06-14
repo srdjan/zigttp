@@ -1391,9 +1391,15 @@ pub const TypeChecker = struct {
 
         var element_types: [32]TypeIndex = undefined;
         var count: usize = 0;
+        var truncated = false;
 
         for (0..arr.elements_count) |i| {
-            if (count >= element_types.len) return null_type_idx;
+            // For arrays larger than the buffer, infer the element type from the
+            // first 32 elements rather than discarding the whole type as unknown.
+            if (count >= element_types.len) {
+                truncated = true;
+                break;
+            }
             const elem_idx = self.ir_view.getListIndex(arr.elements_start, @intCast(i));
             const elem_type = self.inferType(elem_idx);
             if (elem_type == null_type_idx) return null_type_idx;
@@ -1412,6 +1418,12 @@ pub const TypeChecker = struct {
 
         if (homogeneous) {
             return self.env.pool.addArray(self.allocator, first);
+        }
+        // A truncated array must not be described as a fixed-length tuple of the
+        // first 32 elements (that would understate the real length). Widen to a
+        // homogeneous array over the seen element types instead.
+        if (truncated) {
+            return self.env.pool.addArray(self.allocator, self.env.pool.addUnion(self.allocator, element_types[0..count]));
         }
         return self.env.pool.addTuple(self.allocator, element_types[0..count]);
     }

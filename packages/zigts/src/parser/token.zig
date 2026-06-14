@@ -171,7 +171,7 @@ pub const TokenType = enum(u8) {
 /// Source location for error reporting
 pub const SourceLocation = struct {
     line: u32,
-    column: u16,
+    column: u32,
     offset: u32,
 
     pub fn format(self: SourceLocation, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
@@ -183,9 +183,9 @@ pub const SourceLocation = struct {
 pub const Token = struct {
     type: TokenType,
     start: u32, // Byte offset in source
-    len: u16, // Token length in bytes
+    len: u32, // Token length in bytes
     line: u32, // 1-indexed line number
-    column: u16, // 1-indexed column number
+    column: u32, // 1-indexed column number
 
     /// Get the text of this token from the source
     pub fn text(self: Token, source: []const u8) []const u8 {
@@ -215,8 +215,10 @@ pub const Token = struct {
 
     /// Check if this token is a keyword
     pub fn isKeyword(self: Token) bool {
+        // kw_assert is declared after kw_when, so the upper bound must be
+        // kw_assert (the last keyword) or this would wrongly exclude `assert`.
         return @intFromEnum(self.type) >= @intFromEnum(TokenType.kw_var) and
-            @intFromEnum(self.type) <= @intFromEnum(TokenType.kw_when);
+            @intFromEnum(self.type) <= @intFromEnum(TokenType.kw_assert);
     }
 
     /// Check if this token is an assignment operator
@@ -376,6 +378,6 @@ test "token location" {
     };
     const loc = tok.location();
     try std.testing.expectEqual(@as(u32, 2), loc.line);
-    try std.testing.expectEqual(@as(u16, 3), loc.column);
+    try std.testing.expectEqual(@as(u32, 3), loc.column);
     try std.testing.expectEqual(@as(u32, 10), loc.offset);
 }

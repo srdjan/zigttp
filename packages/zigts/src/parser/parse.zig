@@ -169,13 +169,14 @@ pub const Parser = struct {
         }
 
         // Create program node
+        const stmts_count = try self.checkedU16Count(.{ .line = 1, .column = 1, .offset = 0 }, stmts.items.len, "too many top-level statements; limit is 65535");
         const stmts_start = try self.addStmtList(stmts.items);
         return try self.nodes.add(.{
             .tag = .program,
             .loc = .{ .line = 1, .column = 1, .offset = 0 },
             .data = .{ .block = .{
                 .stmts_start = stmts_start,
-                .stmts_count = @intCast(stmts.items.len),
+                .stmts_count = stmts_count,
                 .scope_id = 0,
             } },
         });
@@ -388,6 +389,7 @@ pub const Parser = struct {
 
         try self.expect(.rbrace, "'}' to close object pattern");
 
+        const elements_count = try self.checkedU16Count(loc, elements.items.len, "too many object pattern elements; limit is 65535");
         const elements_start = try self.addNodeList(elements.items);
 
         return try self.nodes.add(.{
@@ -395,7 +397,7 @@ pub const Parser = struct {
             .loc = loc,
             .data = .{ .array = .{
                 .elements_start = elements_start,
-                .elements_count = @intCast(elements.items.len),
+                .elements_count = elements_count,
                 .has_spread = false,
             } },
         });
@@ -538,6 +540,7 @@ pub const Parser = struct {
 
         try self.expect(.rbracket, "']' to close array pattern");
 
+        const elements_count = try self.checkedU16Count(loc, elements.items.len, "too many array pattern elements; limit is 65535");
         const elements_start = try self.addNodeList(elements.items);
 
         return try self.nodes.add(.{
@@ -545,7 +548,7 @@ pub const Parser = struct {
             .loc = loc,
             .data = .{ .array = .{
                 .elements_start = elements_start,
-                .elements_count = @intCast(elements.items.len),
+                .elements_count = elements_count,
                 .has_spread = false,
             } },
         });
@@ -740,6 +743,11 @@ pub const Parser = struct {
                     param_flags.has_rest_param = true;
                 }
 
+                if (self.check(.lbrace) or self.check(.lbracket)) {
+                    self.errors.addErrorAt(.unsupported_feature, self.current, "destructured parameters are not supported; destructure inside the body instead");
+                    return error.ParseError;
+                }
+
                 const param_name = try self.expectIdentifier("parameter name");
                 const param_atom = try self.addAtom(param_name.text(self.source));
 
@@ -790,6 +798,7 @@ pub const Parser = struct {
         self.scopes.popScope();
 
         // Create function expression node
+        const params_count = try self.checkedU8Count(loc, params.items.len, "too many function parameters; limit is 255");
         const params_start = if (params.items.len > 0)
             try self.addNodeList(params.items)
         else
@@ -802,7 +811,7 @@ pub const Parser = struct {
                 .scope_id = scope_id,
                 .name_atom = name_atom,
                 .params_start = params_start,
-                .params_count = @intCast(params.items.len),
+                .params_count = params_count,
                 .body = body,
                 .flags = param_flags,
             } },
@@ -1078,6 +1087,10 @@ pub const Parser = struct {
                     .body = body,
                 } },
             });
+            if (arms_len >= arms.len) {
+                self.errorAt(arm_loc, "too many match arms; limit is 255");
+                return error.ParseError;
+            }
             arms[arms_len] = arm_node;
             arms_len += 1;
 
@@ -1179,6 +1192,10 @@ pub const Parser = struct {
                     .is_shorthand = false,
                 } },
             });
+            if (props_len >= props.len) {
+                self.errorAt(prop_loc, "too many match-pattern properties; limit is 255");
+                return error.ParseError;
+            }
             props[props_len] = prop_node;
             props_len += 1;
 
@@ -1226,13 +1243,14 @@ pub const Parser = struct {
 
         try self.expect(.rbracket, "']'");
 
+        const elements_count = try self.checkedU16Count(loc, elements.items.len, "too many array pattern elements; limit is 65535");
         const elements_start = try self.addNodeList(elements.items);
         return try self.nodes.add(.{
             .tag = .array_pattern,
             .loc = loc,
             .data = .{ .array = .{
                 .elements_start = elements_start,
-                .elements_count = @intCast(elements.items.len),
+                .elements_count = elements_count,
                 .has_spread = false,
             } },
         });
@@ -1258,6 +1276,7 @@ pub const Parser = struct {
         try self.expect(.rbrace, "'}'");
         self.scopes.popScope();
 
+        const stmts_count = try self.checkedU16Count(loc, stmts.items.len, "too many block statements; limit is 65535");
         const stmts_start = if (stmts.items.len > 0)
             try self.addStmtList(stmts.items)
         else
@@ -1268,7 +1287,7 @@ pub const Parser = struct {
             .loc = loc,
             .data = .{ .block = .{
                 .stmts_start = stmts_start,
-                .stmts_count = @intCast(stmts.items.len),
+                .stmts_count = stmts_count,
                 .scope_id = scope_id,
             } },
         });
@@ -1418,6 +1437,7 @@ pub const Parser = struct {
             }
         }
 
+        const specifiers_count = try self.checkedU8Count(loc, specifiers.items.len, "too many import specifiers; limit is 255");
         const specs_start = if (specifiers.items.len > 0)
             try self.addNodeList(specifiers.items)
         else
@@ -1429,7 +1449,7 @@ pub const Parser = struct {
             .data = .{ .import_decl = .{
                 .module_idx = module_idx,
                 .specifiers_start = specs_start,
-                .specifiers_count = @intCast(specifiers.items.len),
+                .specifiers_count = specifiers_count,
             } },
         });
     }
@@ -1993,6 +2013,7 @@ pub const Parser = struct {
             return self.desugarPipeCall(loc, args.items);
         }
 
+        const args_count = try self.checkedU8Count(loc, args.items.len, "too many call arguments; limit is 255");
         const args_start = if (args.items.len > 0)
             try self.addNodeList(args.items)
         else
@@ -2004,7 +2025,7 @@ pub const Parser = struct {
             .data = .{ .call = .{
                 .callee = callee,
                 .args_start = args_start,
-                .args_count = @intCast(args.items.len),
+                .args_count = args_count,
                 .is_optional = is_optional,
             } },
         });
@@ -2126,13 +2147,14 @@ pub const Parser = struct {
             try parts.append(self.allocator, str_node);
         }
 
+        const parts_count = try self.checkedU8Count(loc, parts.items.len, "too many template literal parts; limit is 255");
         const parts_start = try self.addNodeList(parts.items);
         return try self.nodes.add(.{
             .tag = .template_literal,
             .loc = loc,
             .data = .{ .template = .{
                 .parts_start = parts_start,
-                .parts_count = @intCast(parts.items.len),
+                .parts_count = parts_count,
                 .tag = null_node,
             } },
         });
@@ -2251,6 +2273,7 @@ pub const Parser = struct {
         }
         try self.expect(.rbracket, "']'");
 
+        const elements_count = try self.checkedU16Count(loc, elements.items.len, "too many array elements; limit is 65535");
         const elements_start = if (elements.items.len > 0)
             try self.addNodeList(elements.items)
         else
@@ -2261,7 +2284,7 @@ pub const Parser = struct {
             .loc = loc,
             .data = .{ .array = .{
                 .elements_start = elements_start,
-                .elements_count = @intCast(elements.items.len),
+                .elements_count = elements_count,
                 .has_spread = has_spread,
             } },
         });
@@ -2416,6 +2439,7 @@ pub const Parser = struct {
         }
         try self.expect(.rbrace, "'}'");
 
+        const properties_count = try self.checkedU16Count(loc, properties.items.len, "too many object properties; limit is 65535");
         const props_start = if (properties.items.len > 0)
             try self.addNodeList(properties.items)
         else
@@ -2426,7 +2450,7 @@ pub const Parser = struct {
             .loc = loc,
             .data = .{ .object = .{
                 .properties_start = props_start,
-                .properties_count = @intCast(properties.items.len),
+                .properties_count = properties_count,
             } },
         });
     }
@@ -2517,6 +2541,11 @@ pub const Parser = struct {
                         flags.has_rest_param = true;
                     }
 
+                    if (self.check(.lbrace) or self.check(.lbracket)) {
+                        self.errors.addErrorAt(.unsupported_feature, self.current, "destructured parameters are not supported; destructure inside the body instead");
+                        return error.ParseError;
+                    }
+
                     const param_name = try self.expectIdentifier("parameter name");
                     const param_atom = try self.addAtom(param_name.text(self.source));
                     const param_binding = self.scopes.declareBinding(
@@ -2574,6 +2603,7 @@ pub const Parser = struct {
         self.in_function = was_in_function;
         self.scopes.popScope();
 
+        const params_count = try self.checkedU8Count(loc, params.items.len, "too many arrow function parameters; limit is 255");
         const params_start = if (params.items.len > 0)
             try self.addNodeList(params.items)
         else
@@ -2586,7 +2616,7 @@ pub const Parser = struct {
                 .scope_id = scope_id,
                 .name_atom = 0,
                 .params_start = params_start,
-                .params_count = @intCast(params.items.len),
+                .params_count = params_count,
                 .body = body,
                 .flags = flags,
             } },
@@ -2836,6 +2866,8 @@ pub const Parser = struct {
             }
         }
 
+        const props_count = try self.checkedU8Count(loc, props.items.len, "too many JSX props; limit is 255");
+        const children_count = try self.checkedU8Count(loc, children.items.len, "too many JSX children; limit is 255");
         const props_start = if (props.items.len > 0)
             try self.addNodeList(props.items)
         else
@@ -2853,9 +2885,9 @@ pub const Parser = struct {
                 .tag_atom = tag_atom,
                 .is_component = is_component,
                 .props_start = props_start,
-                .props_count = @intCast(props.items.len),
+                .props_count = props_count,
                 .children_start = children_start,
-                .children_count = @intCast(children.items.len),
+                .children_count = children_count,
                 .self_closing = self_closing,
             } },
         });
@@ -2922,6 +2954,7 @@ pub const Parser = struct {
             }
         }
 
+        const children_count = try self.checkedU8Count(loc, children.items.len, "too many JSX fragment children; limit is 255");
         const children_start = if (children.items.len > 0)
             try self.addNodeList(children.items)
         else
@@ -2936,7 +2969,7 @@ pub const Parser = struct {
                 .props_start = null_node,
                 .props_count = 0,
                 .children_start = children_start,
-                .children_count = @intCast(children.items.len),
+                .children_count = children_count,
                 .self_closing = false,
             } },
         });
@@ -3132,6 +3165,22 @@ pub const Parser = struct {
 
     fn errorAt(self: *Parser, loc: SourceLocation, message: []const u8) void {
         self.errors.addError(.unexpected_token, loc, message);
+    }
+
+    fn checkedU8Count(self: *Parser, loc: SourceLocation, count: usize, message: []const u8) !u8 {
+        if (count > std.math.maxInt(u8)) {
+            self.errorAt(loc, message);
+            return error.ParseError;
+        }
+        return @intCast(count);
+    }
+
+    fn checkedU16Count(self: *Parser, loc: SourceLocation, count: usize, message: []const u8) !u16 {
+        if (count > std.math.maxInt(u16)) {
+            self.errorAt(loc, message);
+            return error.ParseError;
+        }
+        return @intCast(count);
     }
 
     fn synchronize(self: *Parser) void {
@@ -3357,13 +3406,14 @@ pub const Parser = struct {
         const block_scope = try self.scopes.pushScope(.block);
         self.scopes.popScope();
 
+        const stmts_count = try self.checkedU16Count(loc, stmts.items.len, "too many guard-composition statements; limit is 65535");
         const stmts_start = try self.addStmtList(stmts.items);
         const body = try self.nodes.add(.{
             .tag = .block,
             .loc = loc,
             .data = .{ .block = .{
                 .stmts_start = stmts_start,
-                .stmts_count = @intCast(stmts.items.len),
+                .stmts_count = stmts_count,
                 .scope_id = block_scope,
             } },
         });
@@ -3483,19 +3533,29 @@ pub const Parser = struct {
         return try self.constants.addString(str);
     }
 
+    const UnescapedString = struct {
+        bytes: []const u8,
+        allocation: ?[]u8 = null,
+
+        fn deinit(self: UnescapedString, allocator: std.mem.Allocator) void {
+            if (self.allocation) |allocation| allocator.free(allocation);
+        }
+    };
+
     /// Unescape `content` then intern it. Frees the unescape buffer when it was
     /// freshly allocated (i.e. the input contained backslashes), regardless of
     /// whether the string was new or a duplicate in the constant pool.
     fn addUnescapedString(self: *Parser, content: []const u8) !u16 {
         const unescaped = try self.unescapeString(content);
-        defer if (unescaped.ptr != content.ptr) self.allocator.free(unescaped);
-        return self.addString(unescaped);
+        defer unescaped.deinit(self.allocator);
+        return self.addString(unescaped.bytes);
     }
 
     /// Unescape a JavaScript string literal, converting escape sequences to actual characters.
     /// Handles: \n, \r, \t, \\, \', \", \0, \xNN (hex), \uNNNN (unicode)
-    /// Returns a newly allocated string that must be freed by the caller.
-    fn unescapeString(self: *Parser, input: []const u8) ![]const u8 {
+    /// Returns the original input on the fast path, or an owned allocation plus
+    /// the used byte range when escape decoding shortens the string.
+    fn unescapeString(self: *Parser, input: []const u8) !UnescapedString {
         // Quick check: if no backslashes, return as-is (common case)
         var has_escape = false;
         for (input) |c| {
@@ -3505,7 +3565,7 @@ pub const Parser = struct {
             }
         }
         if (!has_escape) {
-            return input;
+            return .{ .bytes = input };
         }
 
         // Allocate buffer for unescaped string (can be at most same length as input)
@@ -3651,7 +3711,7 @@ pub const Parser = struct {
             }
         }
 
-        return result[0..out_pos];
+        return .{ .bytes = result[0..out_pos], .allocation = result };
     }
 
     fn addAtom(self: *Parser, name: []const u8) !u16 {
@@ -3732,6 +3792,24 @@ test "parse variable declaration" {
 
     try std.testing.expect(result != null_node);
     try std.testing.expect(!parser.hasErrors());
+}
+
+test "parse escaped string literal owns the full temporary buffer" {
+    var parser = Parser.init(std.testing.allocator, "const s = \"{\\\"type\\\":\\\"object\\\"}\";");
+    defer parser.deinit();
+
+    const result = try parser.parse();
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+    var found = false;
+    for (parser.constants.strings.items) |value| {
+        if (std.mem.eql(u8, value, "{\"type\":\"object\"}")) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "parse function declaration" {
@@ -3930,6 +4008,60 @@ test "resource limit: deeply nested parentheses yield a diagnostic, not a crash"
         return;
     };
     // Pathological nesting must not parse successfully.
+    try std.testing.expect(false);
+}
+
+test "resource limit: too many call arguments yields a diagnostic, not a crash" {
+    const allocator = std.testing.allocator;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(allocator);
+
+    try source.appendSlice(allocator, "f(");
+    for (0..256) |i| {
+        if (i > 0) try source.append(allocator, ',');
+        try source.append(allocator, '1');
+    }
+    try source.appendSlice(allocator, ");");
+
+    var parser = Parser.init(allocator, source.items);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "too many call arguments") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "resource limit: too many import specifiers yields a diagnostic, not a crash" {
+    const allocator = std.testing.allocator;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(allocator);
+
+    try source.appendSlice(allocator, "import {");
+    for (0..256) |i| {
+        if (i > 0) try source.append(allocator, ',');
+        var name_buf: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "a{d}", .{i});
+        try source.appendSlice(allocator, name);
+    }
+    try source.appendSlice(allocator, "} from \"zigttp:env\";");
+
+    var parser = Parser.init(allocator, source.items);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "too many import specifiers") != null);
+        return;
+    };
+
     try std.testing.expect(false);
 }
 

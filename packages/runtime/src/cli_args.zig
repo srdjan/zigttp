@@ -42,26 +42,25 @@ pub fn containsString(haystack: []const []const u8, needle: []const u8) bool {
 /// Returns the first flag that selects the hosted control-plane deploy, or
 /// null when bare `zigttp deploy` should fall through to the local path.
 /// Cloud-only flags (`--region`, `--confirm`, `--wait`, `--no-wait`) imply
-/// `--cloud` so existing scripts keep working through v1.x. Callers use the
-/// returned literal to label the rejection so the user sees the flag they
-/// actually typed, not a hardcoded `--cloud`.
+/// `--cloud` so existing scripts keep working through v1.x. `--target` is
+/// parsed by the local deploy command so missing, duplicate, and unknown
+/// values get one consistent usage error.
 pub fn deployArgsRequestCloud(argv: []const []const u8) ?[]const u8 {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
         if (std.mem.eql(u8, arg, "--cloud")) return "--cloud";
-        // `--target <value>` (and `--target=<value>`) with any non-local target
-        // means cloud, which is deferred this beta: route it to the same clean
-        // rejection as --cloud rather than a confusing "unknown argument".
-        if (std.mem.eql(u8, arg, "--target")) {
-            if (i + 1 < argv.len and !std.mem.eql(u8, argv[i + 1], "local")) return "--target";
-        }
-        if (std.mem.startsWith(u8, arg, "--target=")) {
-            if (!std.mem.eql(u8, arg["--target=".len..], "local")) return "--target";
-        }
         if (containsString(&cloud_only_deploy_flags, arg)) return arg;
     }
     return null;
+}
+
+test "deployArgsRequestCloud leaves --target validation to deploy parser" {
+    try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{ "--target", "local" }));
+    try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{"--target=local"}));
+    try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{"--target"}));
+    try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{ "--target", "prod" }));
+    try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{"--target=prod"}));
 }
 
 /// Commands that accept an explicit handler path positional (they call

@@ -1039,21 +1039,24 @@ pub const OptimizedCompiler = struct {
                 try self.emitJump(target);
             },
             .if_true => {
-                const offset: i16 = @bitCast(readU16(code, new_pc));
-                new_pc += 2;
-                const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
-                try self.emitConditionalJump(target, true);
+                // emitConditionalJump only treats the bit-exact false_val as
+                // falsy, so integer 0 / undefined / null / NaN / "" would be
+                // mis-taken as truthy. The optimized tier cannot prove the
+                // condition is a comparison-produced boolean here, so bail to
+                // the baseline tier (which has correct bool + integer-zero fast
+                // paths and a deopt for other types).
+                return CompileError.UnsupportedOpcode;
             },
             .if_false => {
-                const offset: i16 = @bitCast(readU16(code, new_pc));
-                new_pc += 2;
-                const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
-                try self.emitConditionalJump(target, false);
+                return CompileError.UnsupportedOpcode;
             },
-            .lt => try self.emitComparison(.lt),
-            .lte => try self.emitComparison(.lte),
-            .gt => try self.emitComparison(.gt),
-            .gte => try self.emitComparison(.gte),
+            // emitComparison sign-extends both operands as i32 with no
+            // NaN-box integer-tag guard, so a float/string/object/undefined
+            // operand yields a silently-wrong boolean. The optimized tier
+            // cannot prove both operands are integers here, so bail to the
+            // baseline tier (which tag-guards both operands and falls back to
+            // a numeric/helper path).
+            .lt, .lte, .gt, .gte => return CompileError.UnsupportedOpcode,
             .ret => try self.emitReturn(),
             .mod => try self.emitMod(),
             .inc => try self.emitInc(),
@@ -1141,16 +1144,10 @@ pub const OptimizedCompiler = struct {
                 new_pc += 1;
                 try self.emitMulConstI8(val);
             },
-            .lt_const_i8 => {
-                const val: i8 = @bitCast(code[new_pc]);
-                new_pc += 1;
-                try self.emitLtConstI8(val);
-            },
-            .le_const_i8 => {
-                const val: i8 = @bitCast(code[new_pc]);
-                new_pc += 1;
-                try self.emitLeConstI8(val);
-            },
+            // emitLtConstI8/emitLeConstI8 sign-extend the LHS with no
+            // integer-tag guard (same flaw as emitComparison), so a
+            // non-integer LHS produces a wrong boolean. Bail to baseline.
+            .lt_const_i8, .le_const_i8 => return CompileError.UnsupportedOpcode,
             // Stack operations
             .dup => try self.emitDup(),
             .drop => try self.emitDrop(),

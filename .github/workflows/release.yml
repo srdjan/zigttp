@@ -30,11 +30,26 @@ jobs:
       - name: Run all tests
         run: zig build test test-zigts test-zruntime test-expert test-expert-app test-capability-audit test-module-governance
 
+      - name: Run docs link gates
+        run: zig build test-docs-drift test-doc-links
+
       - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast
 
       - name: Run v1 user-flow smoke
         run: zig build smoke-v1
+
+      - name: Run Getting Started smoke
+        if: ${{ matrix.os == 'macos-latest' }}
+        run: zig build smoke-getting-started
+
+      - name: Run Proof Passport demo smoke
+        if: ${{ matrix.os == 'macos-latest' }}
+        run: zig build smoke-demo
+
+      - name: Run Studio smoke
+        if: ${{ matrix.os == 'macos-latest' }}
+        run: zig build smoke-studio
 
       - name: Replay proof ledger
         if: ${{ vars.PROOF_LEDGER_PATH != '' }}
@@ -104,7 +119,6 @@ jobs:
           cp zig-out/bin/zigttp "${DIR}/"
           cp zig-out/bin/zigttp-runtime "${DIR}/"
           cp zig-out/bin/zigts "${DIR}/"
-          cp build.zig "${DIR}/"
           tar czf "${DIR}.tar.gz" "${DIR}"
           shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
 
@@ -140,6 +154,12 @@ jobs:
             ```
 
             Or download a tarball below and extract it manually.
+
+            ## Documentation
+
+            - [User Guide](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/user-guide.md)
+            - [CLI Reference](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/cli.md)
+            - [Examples](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/examples/README.md)
           files: |
             zigttp-*.tar.gz
             zigttp-*.tar.gz.sha256

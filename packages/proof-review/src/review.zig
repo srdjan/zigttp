@@ -108,7 +108,7 @@ pub const SpecState = struct {
     /// for ZTS500 when the verifier captured a `PropertyCause`.
     source_line: ?u32 = null,
     /// Source column matching `source_line`.
-    source_column: ?u16 = null,
+    source_column: ?u32 = null,
     /// The construct that demoted the property (e.g. "Date.now()"). Owned
     /// when set.
     source_snippet: ?[]const u8 = null,
@@ -761,7 +761,7 @@ pub const PropertyCauseEntry = struct {
     /// Field name from `property_metas` (e.g. "deterministic"). Borrowed.
     field: []const u8,
     line: u32,
-    column: u16,
+    column: u32,
     snippet: []const u8,
 };
 
@@ -772,7 +772,7 @@ pub const CounterexamplePreview = struct {
     field: []const u8,
     label: []const u8,
     line: u32,
-    column: u16,
+    column: u32,
     snippet: []const u8,
     handler_path: []const u8,
     suggestion: ?[]const u8 = null,
@@ -1164,10 +1164,10 @@ fn parseSpecArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]cons
             if (v.integer < 0 or v.integer > std.math.maxInt(u32)) break :blk null;
             break :blk @intCast(v.integer);
         };
-        const source_column: ?u16 = blk: {
+        const source_column: ?u32 = blk: {
             const v = item.object.get("sourceColumn") orelse break :blk null;
             if (v != .integer) break :blk null;
-            if (v.integer < 0 or v.integer > std.math.maxInt(u16)) break :blk null;
+            if (v.integer < 0 or v.integer > std.math.maxInt(u32)) break :blk null;
             break :blk @intCast(v.integer);
         };
         const snippet: ?[]const u8 = if (json_util.getString(item.object, "sourceSnippet")) |s|

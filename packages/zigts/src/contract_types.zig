@@ -722,7 +722,7 @@ pub const RateLimitInfo = struct {
 /// no extra allocation.
 pub const PropertyCause = struct {
     line: u32,
-    column: u16,
+    column: u32,
     snippet: []const u8, // borrowed; static literal or arena-tied
 };
 

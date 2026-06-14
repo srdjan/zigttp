@@ -13,7 +13,7 @@ const RepairIntent = zigts.repair_intent.RepairIntent;
 pub const Refactor = struct {
     kind: []const u8,
     line: u32,
-    column: u16,
+    column: u32,
     message: []const u8,
     replacement: []const u8,
     original_line: ?[]const u8 = null,
@@ -190,7 +190,9 @@ fn findOutermostArrow(s: []const u8) ?usize {
     while (i < s.len) : (i += 1) {
         switch (s[i]) {
             '(', '[', '<' => depth += 1,
-            ')', ']', '>' => if (depth > 0) { depth -= 1; },
+            ')', ']', '>' => if (depth > 0) {
+                depth -= 1;
+            },
             '=' => if (depth == 0 and i + 1 < s.len and s[i + 1] == '>') return i,
             else => {},
         }
@@ -362,7 +364,7 @@ fn isAtomicRhs(expr: []const u8) bool {
 pub fn redundantBoolCompareReplacement(
     allocator: std.mem.Allocator,
     line: []const u8,
-    column: u16,
+    column: u32,
     positive: bool,
 ) ![]u8 {
     if (column == 0) return error.UnsupportedRefactor;
@@ -538,7 +540,7 @@ fn capabilityAliasReplacement(
     };
 }
 
-fn identifierAtColumn(line: []const u8, column: u16) ?[]const u8 {
+fn identifierAtColumn(line: []const u8, column: u32) ?[]const u8 {
     if (column == 0) return null;
     var start: usize = @as(usize, column) - 1;
     if (start >= line.len) return null;
@@ -811,7 +813,7 @@ pub const StatementRewrite = struct {
 /// TypeScript stripper preserves byte positions by blanking stripped spans
 /// with spaces, so a diagnostic column maps to the same byte offset in the
 /// original source the rewriter scans.
-fn lineColToOffset(source: []const u8, line: u32, column: u16) ?usize {
+fn lineColToOffset(source: []const u8, line: u32, column: u32) ?usize {
     if (line == 0 or column == 0) return null;
     var current: u32 = 1;
     var line_start: usize = 0;
@@ -977,7 +979,7 @@ fn ternaryToMatchRewrite(
     allocator: std.mem.Allocator,
     source: []const u8,
     line: u32,
-    column: u16,
+    column: u32,
 ) !StatementRewrite {
     const q = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
     if (q >= source.len or source[q] != '?') return error.UnsupportedRefactor;
@@ -1292,7 +1294,7 @@ fn templateHoistRewrite(
     allocator: std.mem.Allocator,
     source: []const u8,
     line: u32,
-    column: u16,
+    column: u32,
 ) !StatementRewrite {
     const tmpl_start = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
     if (tmpl_start >= source.len or source[tmpl_start] != '`') return error.UnsupportedRefactor;
@@ -1494,7 +1496,7 @@ fn defaultParamLiftRewrite(
     allocator: std.mem.Allocator,
     source: []const u8,
     line: u32,
-    column: u16,
+    column: u32,
 ) !StatementRewrite {
     const param_pos = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
     const line_start = lineStartOffset(source, param_pos);
@@ -1730,7 +1732,7 @@ fn nestedDestructureRewrite(
     allocator: std.mem.Allocator,
     source: []const u8,
     line: u32,
-    column: u16,
+    column: u32,
 ) !StatementRewrite {
     const pos = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
     const line_start = lineStartOffset(source, pos);
@@ -1789,7 +1791,7 @@ fn unusedIndexAliasRewrite(
     allocator: std.mem.Allocator,
     source: []const u8,
     line: u32,
-    column: u16,
+    column: u32,
 ) !StatementRewrite {
     const pos = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
     const for_start = lineStartOffset(source, pos);
@@ -2201,7 +2203,7 @@ pub const ResidualDiagnostic = struct {
     message: []u8,
     file: []u8,
     line: u32,
-    column: u16,
+    column: u32,
     suggestion: ?[]u8,
     repair_intent: ?[]const u8,
     reason: []const u8,

@@ -50,6 +50,11 @@ pub const connect_timeout_ms: u64 = 15_000;
 /// answer. Bounded via SO_RCVTIMEO so a stalled stream cannot hang forever.
 pub const read_idle_timeout_ms: u64 = 120_000;
 
+/// Send budget for the request body. A half-open / stalled peer that accepts
+/// the connection but never drains its receive window would otherwise block the
+/// body write (writeAll + flush) forever. Bounded via SO_SNDTIMEO.
+pub const write_idle_timeout_ms: u64 = 120_000;
+
 /// The connect/handshake timeout to pass to `connectTcpOptions`.
 pub fn connectTimeout() std.Io.Timeout {
     return .{ .duration = .{ .raw = std.Io.Duration.fromMilliseconds(connect_timeout_ms), .clock = .awake } };
@@ -65,6 +70,17 @@ pub fn setReadTimeout(fd: std.posix.fd_t) void {
         .usec = @intCast((read_idle_timeout_ms % 1000) * 1000),
     };
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+}
+
+/// Best-effort SO_SNDTIMEO on a connection socket, so the body write returns an
+/// error once a stalled peer stops draining its receive window instead of
+/// blocking forever. Mirrors the runtime server's slow-client write guard.
+pub fn setWriteTimeout(fd: std.posix.fd_t) void {
+    const tv = std.posix.timeval{
+        .sec = @intCast(write_idle_timeout_ms / 1000),
+        .usec = @intCast((write_idle_timeout_ms % 1000) * 1000),
+    };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
 }
 
 /// True for the connect/read errors that mean a network stall, so the wire
@@ -96,8 +112,11 @@ pub fn connect(
         if (isTimeout(err)) return error.RequestTimedOut;
         return err;
     };
-    // Bound a stalled stream so a hung response can't freeze the CLI forever.
-    setReadTimeout(connection.stream_reader.stream.socket.handle);
+    // Bound a stalled stream so a hung response can't freeze the CLI forever,
+    // on both the read side (SO_RCVTIMEO) and the body-write side (SO_SNDTIMEO).
+    const sock_handle = connection.stream_reader.stream.socket.handle;
+    setReadTimeout(sock_handle);
+    setWriteTimeout(sock_handle);
     return connection;
 }
 

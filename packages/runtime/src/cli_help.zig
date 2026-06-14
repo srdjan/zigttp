@@ -78,6 +78,7 @@ const help_all_mid =
     \\
     \\Credentials:
     \\  zigttp auth claude                     Store an Anthropic API key for expert
+    \\  zigttp auth openai                     Store an OpenAI API key for expert
     \\  zigttp auth status                     Show which provider keys are configured
     \\  zigttp auth revoke <provider>          Remove a stored key (claude | openai)
     \\

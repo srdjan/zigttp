@@ -17,8 +17,6 @@ const live_reload = @import("live_reload.zig");
 const project_config_mod = @import("project_config");
 const cli_paths = @import("cli_paths.zig");
 const resolveRuntimeBinary = cli_paths.resolveRuntimeBinary;
-const cli_args = @import("cli_args.zig");
-const containsString = cli_args.containsString;
 
 const no_attest_flag: []const u8 = "--no-attest";
 
@@ -42,10 +40,21 @@ const BuildCommandOptions = struct {
     attest_requested: bool,
 };
 
+const LocalDeployCommandOptions = struct {
+    attest_requested: bool,
+};
+
 const CommandArgError = union(enum) {
     missing_output_value,
     missing_handler_path,
     missing_output_flag,
+    unknown_arg: []const u8,
+};
+
+const LocalDeployArgError = union(enum) {
+    missing_target_value,
+    duplicate_target,
+    unknown_target: []const u8,
     unknown_arg: []const u8,
 };
 
@@ -59,6 +68,12 @@ const BuildCommandParse = union(enum) {
     help,
     ok: BuildCommandOptions,
     err: CommandArgError,
+};
+
+const LocalDeployCommandParse = union(enum) {
+    help,
+    ok: LocalDeployCommandOptions,
+    err: LocalDeployArgError,
 };
 
 fn parseCompileCommandArgs(argv: []const []const u8) CompileCommandParse {
@@ -285,25 +300,85 @@ pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
     , .{ artifact.output_path, artifact.output_path });
 }
 
-const local_deploy_accepted_tokens = [_][]const u8{ "--local", "--target", "local", no_attest_flag };
-
-pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+fn parseLocalDeployCommandArgs(argv: []const []const u8) LocalDeployCommandParse {
     var attest_requested = true;
-    for (argv) |arg| {
+    var target_seen = false;
+
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
         if (std.mem.eql(u8, arg, "--help")) {
-            printLocalDeployHelp();
-            return;
+            return .help;
         }
         if (std.mem.eql(u8, arg, no_attest_flag)) {
             attest_requested = false;
             continue;
         }
-        if (containsString(&local_deploy_accepted_tokens, arg)) continue;
-
-        std.debug.print("Unknown argument for `zigttp deploy --local`: {s}\n\n", .{arg});
-        printLocalDeployHelp();
-        return error.UnknownOption;
+        if (std.mem.eql(u8, arg, "--local")) {
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--target")) {
+            if (target_seen) return .{ .err = .duplicate_target };
+            i += 1;
+            if (i >= argv.len or std.mem.startsWith(u8, argv[i], "-")) {
+                return .{ .err = .missing_target_value };
+            }
+            target_seen = true;
+            if (!std.mem.eql(u8, argv[i], "local")) {
+                return .{ .err = .{ .unknown_target = argv[i] } };
+            }
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--target=")) {
+            if (target_seen) return .{ .err = .duplicate_target };
+            const value = arg["--target=".len..];
+            if (value.len == 0) return .{ .err = .missing_target_value };
+            target_seen = true;
+            if (!std.mem.eql(u8, value, "local")) {
+                return .{ .err = .{ .unknown_target = value } };
+            }
+            continue;
+        }
+        return .{ .err = .{ .unknown_arg = arg } };
     }
+
+    return .{ .ok = .{ .attest_requested = attest_requested } };
+}
+
+fn failLocalDeployCommandArgs(err: LocalDeployArgError) !void {
+    switch (err) {
+        .missing_target_value => {
+            std.debug.print("--target requires exactly one value: local.\n\n", .{});
+            printLocalDeployHelp();
+            return error.MissingArgument;
+        },
+        .duplicate_target => {
+            std.debug.print("Pass --target only once.\n\n", .{});
+            printLocalDeployHelp();
+            return error.InvalidArgument;
+        },
+        .unknown_target => |target| {
+            std.debug.print("Unknown deploy target: {s}. Only 'local' is supported.\n\n", .{target});
+            printLocalDeployHelp();
+            return error.InvalidArgument;
+        },
+        .unknown_arg => |arg| {
+            std.debug.print("Unknown argument for `zigttp deploy --local`: {s}\n\n", .{arg});
+            printLocalDeployHelp();
+            return error.UnknownOption;
+        },
+    }
+}
+
+pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    const opts = switch (parseLocalDeployCommandArgs(argv)) {
+        .help => {
+            printLocalDeployHelp();
+            return;
+        },
+        .ok => |opts| opts,
+        .err => |err| return failLocalDeployCommandArgs(err),
+    };
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -321,7 +396,7 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
         .handler_path = artifact.handler_path,
         .output_path = artifact.output_path,
         .ledger_service_name = artifact.project_name,
-        .attest_requested = attest_requested,
+        .attest_requested = opts.attest_requested,
     });
 
     std.debug.print(
@@ -725,6 +800,36 @@ test "buildCommand rejects unknown flags as UnknownOption" {
     // the user knows their flag was not recognised.
     try testing.expectEqualStrings("--unknown-flag", parseBuildCommandArgs(&.{"--unknown-flag"}).err.unknown_arg);
     try testing.expectEqualStrings("unexpected_positional", parseBuildCommandArgs(&.{"unexpected_positional"}).err.unknown_arg);
+}
+
+test "localDeployCommand accepts local target forms and no-attest" {
+    const testing = std.testing;
+
+    const local_space = parseLocalDeployCommandArgs(&.{ "--target", "local" }).ok;
+    try testing.expect(local_space.attest_requested);
+
+    const local_equals = parseLocalDeployCommandArgs(&.{"--target=local"}).ok;
+    try testing.expect(local_equals.attest_requested);
+
+    const no_attest = parseLocalDeployCommandArgs(&.{ "--local", "--target=local", "--no-attest" }).ok;
+    try testing.expect(!no_attest.attest_requested);
+}
+
+test "localDeployCommand rejects missing duplicate and unknown target values" {
+    const testing = std.testing;
+
+    try testing.expectEqual(LocalDeployArgError.missing_target_value, parseLocalDeployCommandArgs(&.{"--target"}).err);
+    try testing.expectEqual(LocalDeployArgError.missing_target_value, parseLocalDeployCommandArgs(&.{"--target="}).err);
+    try testing.expectEqual(LocalDeployArgError.missing_target_value, parseLocalDeployCommandArgs(&.{ "--target", "--no-attest" }).err);
+    try testing.expectEqual(LocalDeployArgError.duplicate_target, parseLocalDeployCommandArgs(&.{ "--target", "local", "--target=local" }).err);
+    try testing.expectEqualStrings("prod", parseLocalDeployCommandArgs(&.{ "--target", "prod" }).err.unknown_target);
+    try testing.expectEqualStrings("prod", parseLocalDeployCommandArgs(&.{"--target=prod"}).err.unknown_target);
+}
+
+test "localDeployCommand rejects stray positional args" {
+    const testing = std.testing;
+    try testing.expectEqualStrings("local", parseLocalDeployCommandArgs(&.{"local"}).err.unknown_arg);
+    try testing.expectEqualStrings("extra", parseLocalDeployCommandArgs(&.{ "--target", "local", "extra" }).err.unknown_arg);
 }
 
 test "compileCommand rejects unknown -prefixed flags symmetrically with buildCommand" {

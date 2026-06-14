@@ -29,7 +29,12 @@ pub fn build(b: *std.Build) void {
     if (!analyzer_only) {
         mod.addCSourceFile(.{
             .file = b.path("deps/sqlite/sqlite3.c"),
-            .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
+            // THREADSAFE=2 (multi-thread): each connection is used by one thread
+            // at a time, which matches the per-runtime SqliteDb model. The HTTP
+            // server runs requests on a worker-thread pool, so THREADSAFE=0
+            // (single-thread, all mutexing compiled out) would corrupt shared
+            // SQLite global state across concurrent requests.
+            .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=2", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
         });
         mod.addIncludePath(b.path("deps/sqlite"));
     }

@@ -789,6 +789,36 @@ pub const FlowChecker = struct {
         }
     }
 
+    /// Propagate argument taint of a mutating array method back onto the
+    /// receiver binding: `arr.push(secret)` taints `arr`, so a later
+    /// `return { arr }` is caught. Mirrors the member-assignment taint
+    /// propagation for `obj.field = secret`.
+    fn propagateMutatingMethodTaint(self: *FlowChecker, expr: NodeIndex) void {
+        const tag = self.ir_view.getTag(expr) orelse return;
+        if (tag != .call and tag != .method_call) return;
+        const call_data = self.ir_view.getCall(expr) orelse return;
+        const callee_tag = self.ir_view.getTag(call_data.callee) orelse return;
+        if (callee_tag != .member_access and callee_tag != .optional_chain) return;
+        const member = self.ir_view.getMember(call_data.callee) orelse return;
+        const method = self.resolveAtomName(member.property) orelse return;
+        const mutating = std.mem.eql(u8, method, "push") or
+            std.mem.eql(u8, method, "unshift") or
+            std.mem.eql(u8, method, "splice");
+        if (!mutating) return;
+        // Receiver must be a plain identifier binding.
+        if (self.ir_view.getTag(member.object) != .identifier) return;
+        const binding = self.ir_view.getBinding(member.object) orelse return;
+        var arg_labels = LabelSet.empty;
+        for (0..call_data.args_count) |i| {
+            const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+            arg_labels = LabelSet.merge(arg_labels, self.inferLabels(arg));
+        }
+        if (arg_labels.isEmpty()) return;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const existing = self.binding_labels.get(key) orelse LabelSet.empty;
+        self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, arg_labels)) catch {};
+    }
+
     /// Record a defining value node for a binding so the response-sink check
     /// can resolve returned identifiers. Every value is kept (not just the
     /// last) so a tainted branch assignment is still found when a later
@@ -906,6 +936,7 @@ pub const FlowChecker = struct {
             .expr_stmt => {
                 if (self.ir_view.getOptValue(node)) |expr| {
                     self.checkExprSinks(expr);
+                    self.propagateMutatingMethodTaint(expr);
                 }
             },
 
@@ -1042,7 +1073,21 @@ pub const FlowChecker = struct {
 
             .computed_access => {
                 const member = self.ir_view.getMember(node) orelse return LabelSet.empty;
-                return self.inferLabels(member.object);
+                const labels = self.inferLabels(member.object);
+                // req.headers["authorization"] is the dominant header-read idiom
+                // and carries the credential label, mirroring the dot-access form.
+                if (self.isReqProperty(member.object, "headers")) {
+                    if (self.ir_view.getTag(member.computed) == .lit_string) {
+                        if (self.ir_view.getStringIdx(member.computed)) |str_idx| {
+                            if (self.ir_view.getString(str_idx)) |key| {
+                                if (std.ascii.eqlIgnoreCase(key, "authorization")) {
+                                    return LabelSet.merge(labels, .{ .credential = true });
+                                }
+                            }
+                        }
+                    }
+                }
+                return labels;
             },
 
             .object_literal => {
@@ -1142,7 +1187,29 @@ pub const FlowChecker = struct {
             return self.userCallLabels(binding, call_data);
         }
 
+        // req.headers.get("authorization") carries the credential label, like
+        // the dot/computed header-read forms.
+        if (callee_tag == .member_access and self.isAuthHeaderGet(call_data)) {
+            return .{ .credential = true };
+        }
+
         return LabelSet.empty;
+    }
+
+    /// True for `req.headers.get("authorization")` (case-insensitive header
+    /// name): callee is `req.headers.get` and the first argument is the literal
+    /// "authorization".
+    fn isAuthHeaderGet(self: *const FlowChecker, call_data: Node.CallExpr) bool {
+        const member = self.ir_view.getMember(call_data.callee) orelse return false;
+        const prop_name = self.resolveAtomName(member.property) orelse return false;
+        if (!std.mem.eql(u8, prop_name, "get")) return false;
+        if (!self.isReqProperty(member.object, "headers")) return false;
+        if (call_data.args_count == 0) return false;
+        const arg = self.ir_view.getListIndex(call_data.args_start, 0);
+        if (self.ir_view.getTag(arg) != .lit_string) return false;
+        const str_idx = self.ir_view.getStringIdx(arg) orelse return false;
+        const key = self.ir_view.getString(str_idx) orelse return false;
+        return std.ascii.eqlIgnoreCase(key, "authorization");
     }
 
     /// Labels for a call to a user-defined function: seed the callee's
@@ -1304,6 +1371,19 @@ pub const FlowChecker = struct {
             return;
         }
 
+        // zigttp:log functions (logDebug/logInfo/logWarn/logError) serialize both
+        // the message string and every value of the context object to stderr, so
+        // they are log sinks just like console.*. Recognize them so a secret or
+        // credential logged via logError(...) is caught.
+        if (tag == .call and self.isLogModuleCall(call_data.callee)) {
+            for (0..call_data.args_count) |i| {
+                const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+                const labels = self.inferLabels(arg);
+                self.checkSinkLabels(labels, node, .console);
+            }
+            return;
+        }
+
         if (tag == .call) {
             // Egress sinks: the bare `fetchSync(url, opts)` global plus the
             // documented module APIs `fetch` (zigttp:fetch) and `serviceCall`
@@ -1324,6 +1404,20 @@ pub const FlowChecker = struct {
     }
 
     const EgressKind = enum { fetch, service_call };
+
+    /// True if the callee is an imported zigttp:log function (logDebug, logInfo,
+    /// logWarn, logError), which writes its arguments to stderr.
+    fn isLogModuleCall(self: *const FlowChecker, callee: NodeIndex) bool {
+        const callee_tag = self.ir_view.getTag(callee) orelse return false;
+        if (callee_tag != .identifier) return false;
+        const binding = self.ir_view.getBinding(callee) orelse return false;
+        const meta = self.module_fn_meta.get(binding.slot) orelse return false;
+        if (!std.mem.eql(u8, meta.module, "log")) return false;
+        return std.mem.eql(u8, meta.func, "logDebug") or
+            std.mem.eql(u8, meta.func, "logInfo") or
+            std.mem.eql(u8, meta.func, "logWarn") or
+            std.mem.eql(u8, meta.func, "logError");
+    }
 
     /// Identify a call whose callee is an imported egress module function
     /// (`fetch` from zigttp:fetch or `serviceCall` from zigttp:service).
@@ -1444,6 +1538,24 @@ pub const FlowChecker = struct {
                         .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_credential_leakage = false;
+                }
+                // Unvalidated user input in the egress URL is an SSRF /
+                // request-forgery sink, mirroring the egress-body check.
+                if (labels.has(.user_input) and !labels.has(.validated)) {
+                    self.addDiagnostic(.{
+                        .severity = .warning,
+                        .kind = .unvalidated_input_in_egress,
+                        .node = node,
+                        .message = "unvalidated user input flows into fetchSync URL",
+                        .help = "validate user input before using it in an egress URL to avoid SSRF / request forgery",
+                        .repair_intent = .insert_guard_before_line,
+                    });
+                    self.properties.input_validated = false;
+                    self.properties.injection_safe = false;
+                }
+                // PII containment: user input flowing to external hosts.
+                if (labels.has(.user_input)) {
+                    self.properties.pii_contained = false;
                 }
             },
             .egress_body => {

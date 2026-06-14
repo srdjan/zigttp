@@ -343,7 +343,7 @@ pub const ContractBuilder = struct {
         }
 
         // Phase 3: Compute handler effect properties.
-        const properties = self.computeProperties(effects.lookup("handler"));
+        const properties = try self.computeProperties(effects.lookup("handler"), handler_fn);
 
         // Phase 3b: Detect rate limiting (guard composition + cacheIncr)
         const rate_limiting = self.detectRateLimiting();
@@ -3320,7 +3320,19 @@ pub const ContractBuilder = struct {
     // -----------------------------------------------------------------
 
     /// Summarize the effect facts that handler property derivation depends on.
-    fn computeEffectSummary(self: *const ContractBuilder) EffectSummary {
+    fn computeEffectSummary(self: *const ContractBuilder, handler_fn: ?NodeIndex) !EffectSummary {
+        if (handler_fn) |hf| {
+            var summary = EffectSummary{};
+            var seen_functions: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
+            defer seen_functions.deinit(self.allocator);
+            try self.includeReachableFunctionEffects(hf, &summary, &seen_functions);
+            return summary;
+        }
+
+        return self.computeGlobalEffectSummary();
+    }
+
+    fn computeGlobalEffectSummary(self: *const ContractBuilder) EffectSummary {
         var summary = EffectSummary{};
 
         for (self.functions_map.items) |entry| {
@@ -3365,6 +3377,201 @@ pub const ContractBuilder = struct {
         return summary;
     }
 
+    fn includeReachableFunctionEffects(
+        self: *const ContractBuilder,
+        node: NodeIndex,
+        summary: *EffectSummary,
+        seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
+    ) std.mem.Allocator.Error!void {
+        const fn_node = self.resolveFunctionNode(node) orelse return;
+        const gop = try seen_functions.getOrPut(self.allocator, fn_node);
+        if (gop.found_existing) return;
+
+        const func = self.ir_view.getFunction(fn_node) orelse return;
+        try self.includeReachableNodeEffects(func.body, summary, seen_functions);
+    }
+
+    fn includeReachableNodeEffects(
+        self: *const ContractBuilder,
+        node: NodeIndex,
+        summary: *EffectSummary,
+        seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
+    ) std.mem.Allocator.Error!void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                for (0..block.stmts_count) |i| {
+                    try self.includeReachableNodeEffects(
+                        self.ir_view.getListIndex(block.stmts_start, @intCast(i)),
+                        summary,
+                        seen_functions,
+                    );
+                }
+            },
+            .if_stmt => {
+                const stmt = self.ir_view.getIfStmt(node) orelse return;
+                try self.includeReachableNodeEffects(stmt.condition, summary, seen_functions);
+                try self.includeReachableNodeEffects(stmt.then_branch, summary, seen_functions);
+                try self.includeReachableNodeEffects(stmt.else_branch, summary, seen_functions);
+            },
+            .for_of_stmt => {
+                const stmt = self.ir_view.getForIter(node) orelse return;
+                try self.includeReachableNodeEffects(stmt.iterable, summary, seen_functions);
+                try self.includeReachableNodeEffects(stmt.body, summary, seen_functions);
+            },
+            .return_stmt, .expr_stmt => {
+                if (self.ir_view.getOptValue(node)) |value| {
+                    try self.includeReachableNodeEffects(value, summary, seen_functions);
+                }
+            },
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                if (decl.init != null_node and !self.isFunctionNode(decl.init)) {
+                    try self.includeReachableNodeEffects(decl.init, summary, seen_functions);
+                }
+            },
+            .function_decl => {},
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return;
+                try self.includeReachableNodeEffects(bin.left, summary, seen_functions);
+                try self.includeReachableNodeEffects(bin.right, summary, seen_functions);
+            },
+            .unary_op, .spread => {
+                const un = self.ir_view.getUnary(node) orelse return;
+                try self.includeReachableNodeEffects(un.operand, summary, seen_functions);
+            },
+            .ternary => {
+                const ternary = self.ir_view.getTernary(node) orelse return;
+                try self.includeReachableNodeEffects(ternary.condition, summary, seen_functions);
+                try self.includeReachableNodeEffects(ternary.then_branch, summary, seen_functions);
+                try self.includeReachableNodeEffects(ternary.else_branch, summary, seen_functions);
+            },
+            .call, .method_call => {
+                try self.includeReachableCallEffects(node, summary, seen_functions);
+                const call = self.ir_view.getCall(node) orelse return;
+                try self.includeReachableNodeEffects(call.callee, summary, seen_functions);
+                for (0..call.args_count) |i| {
+                    try self.includeReachableNodeEffects(
+                        self.ir_view.getListIndex(call.args_start, @intCast(i)),
+                        summary,
+                        seen_functions,
+                    );
+                }
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return;
+                try self.includeReachableNodeEffects(member.object, summary, seen_functions);
+                try self.includeReachableNodeEffects(member.computed, summary, seen_functions);
+            },
+            .assignment => {
+                const assign = self.ir_view.getAssignment(node) orelse return;
+                try self.includeReachableNodeEffects(assign.target, summary, seen_functions);
+                try self.includeReachableNodeEffects(assign.value, summary, seen_functions);
+            },
+            .array_literal => {
+                const arr = self.ir_view.getArray(node) orelse return;
+                for (0..arr.elements_count) |i| {
+                    try self.includeReachableNodeEffects(
+                        self.ir_view.getListIndex(arr.elements_start, @intCast(i)),
+                        summary,
+                        seen_functions,
+                    );
+                }
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(node) orelse return;
+                for (0..obj.properties_count) |i| {
+                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+                    const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                    try self.includeReachableNodeEffects(prop.value, summary, seen_functions);
+                }
+            },
+            .template_literal => {
+                const tmpl = self.ir_view.getTemplate(node) orelse return;
+                for (0..tmpl.parts_count) |i| {
+                    const part = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
+                    if (self.ir_view.getOptValue(part)) |value| {
+                        try self.includeReachableNodeEffects(value, summary, seen_functions);
+                    }
+                }
+            },
+            .match_expr => {
+                const match = self.ir_view.getMatchExpr(node) orelse return;
+                try self.includeReachableNodeEffects(match.discriminant, summary, seen_functions);
+                for (0..match.arms_count) |i| {
+                    const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
+                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+                    try self.includeReachableNodeEffects(arm.body, summary, seen_functions);
+                }
+            },
+            .function_expr, .arrow_function => {
+                const func = self.ir_view.getFunction(node) orelse return;
+                try self.includeReachableNodeEffects(func.body, summary, seen_functions);
+            },
+            else => {},
+        }
+    }
+
+    fn includeReachableCallEffects(
+        self: *const ContractBuilder,
+        node: NodeIndex,
+        summary: *EffectSummary,
+        seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
+    ) std.mem.Allocator.Error!void {
+        const call = self.ir_view.getCall(node) orelse return;
+        if (self.ir_view.getTag(call.callee) != .identifier) return;
+        const binding = self.ir_view.getBinding(call.callee) orelse return;
+
+        if (binding.kind == .undeclared_global) {
+            const name = self.resolveAtomName(binding.slot) orelse return;
+            if (std.mem.eql(u8, name, "fetchSync")) {
+                summary.includeEgress();
+                return;
+            }
+        }
+
+        for (self.generic_bindings.items) |gb| {
+            if (gb.slot != binding.slot) continue;
+            summary.has_any_call = true;
+            if (builtin_modules.fromSpecifier(gb.module_specifier)) |module| {
+                const is_durable = std.mem.eql(u8, module.specifier, "zigttp:durable");
+                for (module.exports) |exp| {
+                    if (std.mem.eql(u8, exp.name, gb.binding_name)) {
+                        summary.includeCall(exp.effect, is_durable);
+                        break;
+                    }
+                }
+            }
+            if (std.mem.eql(u8, gb.module_specifier, "zigttp:cache") and
+                std.mem.eql(u8, gb.binding_name, "cacheGet"))
+            {
+                summary.has_cache_read = true;
+            }
+            return;
+        }
+
+        if (self.manifest_registry) |registry| {
+            for (self.extension_bindings.items) |eb| {
+                if (eb.slot != binding.slot) continue;
+                summary.has_any_call = true;
+                const manifest = registry.fromSpecifier(eb.module_specifier) orelse return;
+                for (manifest.exports.items) |exp| {
+                    if (std.mem.eql(u8, exp.name, eb.binding_name)) {
+                        summary.includeCall(exp.effect, false);
+                        break;
+                    }
+                }
+                return;
+            }
+        }
+
+        if (self.findFunctionNodeByBinding(binding.slot)) |fn_node| {
+            try self.includeReachableFunctionEffects(fn_node, summary, seen_functions);
+        }
+    }
+
     /// Derive handler-level properties from the aggregate effect summary.
     /// `handler_row`, when present, is the handler's call-graph composed
     /// effect row: intersecting with it makes a property the handler claims
@@ -3374,8 +3581,9 @@ pub const ContractBuilder = struct {
     fn computeProperties(
         self: *const ContractBuilder,
         handler_row: ?effect_inference.EffectRow,
-    ) HandlerProperties {
-        const s = self.computeEffectSummary();
+        handler_fn: ?NodeIndex,
+    ) !HandlerProperties {
+        const s = try self.computeEffectSummary(handler_fn);
 
         var read_only = s.io != .write;
         var deterministic = !self.has_nondeterministic_builtin;
@@ -3535,6 +3743,21 @@ fn appendTrackedFunction(
     });
 }
 
+fn expectBuiltinExportEffect(
+    module_name: []const u8,
+    func_name: []const u8,
+    effect: module_binding.EffectClass,
+) !void {
+    const binding = builtin_modules.fromSpecifier(module_name) orelse return error.MissingModule;
+    for (binding.exports) |exp| {
+        if (std.mem.eql(u8, exp.name, func_name)) {
+            try std.testing.expectEqual(effect, exp.effect);
+            return;
+        }
+    }
+    return error.MissingExport;
+}
+
 fn buildTestContract(source: []const u8) !HandlerContract {
     const allocator = std.testing.allocator;
     var atoms = context.AtomTable.init(allocator);
@@ -3549,14 +3772,42 @@ fn buildTestContract(source: []const u8) !HandlerContract {
     var builder = ContractBuilder.init(allocator, view, &atoms, null, null);
     defer builder.deinit();
 
-    return try builder.build("handler.ts", null, null, root, null, false, null);
+    const handler_fn = findTestFunctionNode(view, &atoms, "handler");
+    return try builder.build("handler.ts", null, handler_fn, root, null, false, null);
+}
+
+fn findTestFunctionNode(view: IrView, atoms: *context.AtomTable, name: []const u8) ?NodeIndex {
+    const node_count = view.nodeCount();
+    for (0..node_count) |idx_usize| {
+        const idx: NodeIndex = @intCast(idx_usize);
+        const tag = view.getTag(idx) orelse continue;
+        switch (tag) {
+            .function_decl, .var_decl => {
+                const decl = view.getVarDecl(idx) orelse continue;
+                const binding_name = resolveTestAtomName(atoms, decl.binding.slot) orelse continue;
+                if (!std.mem.eql(u8, binding_name, name)) continue;
+                if (decl.init == null_node) return null;
+                const init_tag = view.getTag(decl.init) orelse return null;
+                if (init_tag == .function_expr or init_tag == .arrow_function) return decl.init;
+                return null;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn resolveTestAtomName(atoms: *context.AtomTable, atom_idx: u16) ?[]const u8 {
+    const atom: object.Atom = @enumFromInt(atom_idx);
+    if (atom.isPredefined()) return atom.toPredefinedName();
+    return atoms.getName(atom);
 }
 
 test "computeProperties pure handler stays pure" {
     var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
     defer builder.deinit();
 
-    const props = builder.computeProperties(null);
+    const props = try builder.computeProperties(null, null);
 
     try std.testing.expect(props.pure);
     try std.testing.expect(props.read_only);
@@ -3573,7 +3824,7 @@ test "computeProperties cache read is read-only but not stateless" {
 
     try appendTrackedFunction(&builder, "zigttp:cache", "cacheGet");
 
-    const props = builder.computeProperties(null);
+    const props = try builder.computeProperties(null, null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(props.read_only);
@@ -3590,7 +3841,7 @@ test "computeProperties bare writes are not retry safe" {
 
     try appendTrackedFunction(&builder, "zigttp:cache", "cacheSet");
 
-    const props = builder.computeProperties(null);
+    const props = try builder.computeProperties(null, null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(!props.read_only);
@@ -3601,6 +3852,59 @@ test "computeProperties bare writes are not retry safe" {
     try std.testing.expect(!props.idempotent);
 }
 
+test "computeProperties registration functions are request-path writes" {
+    var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
+    defer builder.deinit();
+
+    try appendTrackedFunction(&builder, "zigttp:validate", "schemaCompile");
+
+    const props = try builder.computeProperties(null, null);
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.retry_safe);
+}
+
+test "registration module exports declare write effects" {
+    try expectBuiltinExportEffect("zigttp:sql", "sql", .write);
+    try expectBuiltinExportEffect("zigttp:validate", "schemaCompile", .write);
+    try expectBuiltinExportEffect("zigttp:validate", "schemaDrop", .write);
+}
+
+test "top-level registration does not demote handler request properties" {
+    const source =
+        \\import { schemaCompile, validateJson } from "zigttp:validate";
+        \\schemaCompile("todo", "{\"type\":\"object\"}");
+        \\function handler(req) {
+        \\  const parsed = validateJson("todo", req.body);
+        \\  if (!parsed.ok) return Response.json({ error: "invalid" }, { status: 400 });
+        \\  return Response.json(parsed.value);
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(props.read_only);
+    try std.testing.expect(props.retry_safe);
+    try std.testing.expect(props.idempotent);
+}
+
+test "handler-body registration remains a request-path write" {
+    const source =
+        \\import { schemaCompile } from "zigttp:validate";
+        \\function handler(req) {
+        \\  schemaCompile("todo", "{\"type\":\"object\"}");
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.retry_safe);
+    try std.testing.expect(!props.idempotent);
+}
+
 test "computeProperties durable-only writes stay retry safe" {
     var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
     defer builder.deinit();
@@ -3608,7 +3912,7 @@ test "computeProperties durable-only writes stay retry safe" {
     try appendTrackedFunction(&builder, "zigttp:durable", "step");
     builder.durable_used = true;
 
-    const props = builder.computeProperties(null);
+    const props = try builder.computeProperties(null, null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(!props.read_only);
@@ -3626,7 +3930,7 @@ test "computeProperties nondeterministic builtins clear idempotence" {
     try appendTrackedFunction(&builder, "zigttp:cache", "cacheGet");
     builder.has_nondeterministic_builtin = true;
 
-    const props = builder.computeProperties(null);
+    const props = try builder.computeProperties(null, null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(props.read_only);
@@ -3669,7 +3973,7 @@ test "computeProperties egress is conservative write" {
 
     builder.egress_dynamic = true;
 
-    const props = builder.computeProperties(null);
+    const props = try builder.computeProperties(null, null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(!props.read_only);
@@ -3728,7 +4032,7 @@ test "registered partner manifest contributes effect class to handler properties
     try std.testing.expectEqualStrings("zigttp-ext:stripe", builder.functions_map.items[0].module);
     try std.testing.expect(containsString(builder.functions_map.items[0].names.items, "chargeCard"));
 
-    const props = builder.computeProperties(null);
+    const props = try builder.computeProperties(null, null);
     try std.testing.expect(!props.read_only);
     try std.testing.expect(!props.idempotent);
     try std.testing.expect(!props.pure);

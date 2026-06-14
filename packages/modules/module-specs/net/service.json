@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:service",
-  "source": "packages/zigts/src/modules/service.zig",
+  "source": "packages/modules/src/net/service.zig",
   "requiredCapabilities": [
     "network",
     "filesystem",

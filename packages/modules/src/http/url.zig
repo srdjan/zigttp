@@ -50,7 +50,19 @@ fn parseUrlComponents(input: []const u8) UrlComponents {
         else
             authority;
 
-        if (std.mem.lastIndexOfScalar(u8, hostport, ':')) |colon| {
+        // A bracketed IPv6 literal (`[::1]`) contains colons inside the address,
+        // so the port separator is only the colon AFTER the closing bracket.
+        if (hostport.len > 0 and hostport[0] == '[') {
+            if (std.mem.indexOfScalar(u8, hostport, ']')) |close| {
+                result.host = hostport[0 .. close + 1];
+                if (close + 1 < hostport.len and hostport[close + 1] == ':') {
+                    result.port = hostport[close + 2 ..];
+                }
+            } else {
+                // Malformed (no closing bracket): treat the whole thing as host.
+                result.host = hostport;
+            }
+        } else if (std.mem.lastIndexOfScalar(u8, hostport, ':')) |colon| {
             result.host = hostport[0..colon];
             result.port = hostport[colon + 1 ..];
         } else {

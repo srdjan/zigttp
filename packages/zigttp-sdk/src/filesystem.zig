@@ -12,9 +12,10 @@ extern fn zigttpSdkReadFile(
     out_len: *usize,
 ) bool;
 
-/// Read a file through the capability-gated filesystem path. The buffer
-/// is allocated with the runtime allocator (`getAllocator(handle)`);
-/// callers free it via `getAllocator(handle).free(buf)`.
+/// Read a file through the capability-gated filesystem path. The runtime also
+/// requires the canonical path to be preallowed by its SDK filesystem
+/// allowlist. The buffer is allocated with the runtime allocator
+/// (`getAllocator(handle)`); callers free it via `getAllocator(handle).free(buf)`.
 pub fn readFile(handle: *ModuleHandle, path: []const u8, max_size: usize) ![]u8 {
     try capability.requireCapability(handle, .filesystem);
     var ptr: [*]u8 = undefined;

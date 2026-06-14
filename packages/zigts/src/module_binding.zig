@@ -24,6 +24,7 @@ const resolver = @import("modules/internal/resolver.zig");
 const security_events = @import("security_events.zig");
 const gc = @import("gc.zig");
 const handler_policy = @import("handler_policy.zig");
+const module_slots = @import("module_slots.zig");
 
 // Re-export EffectClass from resolver for backward compatibility
 pub const EffectClass = resolver.EffectClass;
@@ -115,6 +116,11 @@ fn activeContextHasCapability(capability: ModuleCapability) bool {
         if (candidate == capability) return true;
     }
     return false;
+}
+
+pub fn activeModuleOwnsStateSlot(slot: usize) bool {
+    const active = active_module_context orelse return false;
+    return module_slots.isOwnedBySpecifier(slot, active.specifier);
 }
 
 pub fn hasCapability(handle: *ModuleHandle, capability: ModuleCapability) bool {
@@ -352,13 +358,60 @@ pub fn getRuntimeCallbackStateChecked(
     return ctx.getModuleState(T, slot);
 }
 
+fn realPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (path.len == 0) return error.InvalidPath;
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    var resolved_buf: [std.c.PATH_MAX + 1]u8 = undefined;
+    const resolved = std.c.realpath(path_z, &resolved_buf) orelse return error.PathNotCanonical;
+    const len = std.mem.len(resolved);
+    return try allocator.dupe(u8, resolved[0..len]);
+}
+
+fn canonicalizeExistingPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return realPathAlloc(allocator, path);
+}
+
+fn canonicalizeCreatablePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (realPathAlloc(allocator, path)) |resolved| return resolved else |err| switch (err) {
+        error.PathNotCanonical => {},
+        else => return err,
+    }
+
+    const dirname = std.fs.path.dirname(path) orelse ".";
+    const basename = std.fs.path.basename(path);
+    if (basename.len == 0 or std.mem.eql(u8, basename, ".") or std.mem.eql(u8, basename, "..")) {
+        return error.InvalidPath;
+    }
+
+    const parent = try realPathAlloc(allocator, dirname);
+    defer allocator.free(parent);
+    return std.fs.path.join(allocator, &.{ parent, basename });
+}
+
+pub fn allowSdkFilePath(ctx: *context.Context, path: []const u8) !void {
+    const canonical = try canonicalizeExistingPath(ctx.allocator, path);
+    defer ctx.allocator.free(canonical);
+    try ctx.allowSdkFilePathCanonical(canonical);
+}
+
+pub fn allowSdkSqlitePath(ctx: *context.Context, path: []const u8) !void {
+    const canonical = try canonicalizeCreatablePath(ctx.allocator, path);
+    defer ctx.allocator.free(canonical);
+    try ctx.allowSdkSqlitePathCanonical(canonical);
+}
+
 pub fn readFileChecked(
-    allocator: std.mem.Allocator,
+    ctx: *context.Context,
     path: []const u8,
     max_size: usize,
 ) ![]u8 {
     requireActiveCapability(.filesystem) catch |err| return panicCapabilityError(err, .filesystem);
-    return file_io.readFile(allocator, path, max_size);
+    const canonical = try canonicalizeExistingPath(ctx.allocator, path);
+    defer ctx.allocator.free(canonical);
+    if (!ctx.allowsSdkFilePathCanonical(canonical)) return error.FilePathNotAllowed;
+    return file_io.readFile(ctx.allocator, path, max_size);
 }
 
 pub fn readEnvForActiveModule(name_z: [:0]const u8) ActiveCapabilityError!?[]const u8 {
@@ -385,11 +438,14 @@ pub fn getSqliteStateChecked(
 }
 
 pub fn openSqliteDbChecked(
-    allocator: std.mem.Allocator,
+    ctx: *context.Context,
     path: []const u8,
 ) !sqlite_runtime.Db {
     try sqliteCapabilityChecked();
-    return sqlite_runtime.Db.openReadWriteCreate(allocator, path);
+    const canonical = try canonicalizeCreatablePath(ctx.allocator, path);
+    defer ctx.allocator.free(canonical);
+    if (!ctx.allowsSdkSqlitePathCanonical(canonical)) return error.SqlitePathNotAllowed;
+    return sqlite_runtime.Db.openReadWriteCreate(ctx.allocator, path);
 }
 
 pub fn hmacSha256ForActiveModule(
@@ -522,7 +578,13 @@ pub const sdk_bridge = struct {
     pub export fn zigttpSdkFillRandom(handle: *ModuleHandle, buf_ptr: [*]u8, len: usize) void {
         _ = handle;
         if (len == 0) return;
-        fillRandomForActiveModule(buf_ptr[0..len]) catch {};
+        // The callers (zigttp:id) pass `undefined`-initialized stack buffers and
+        // emit them as security tokens. If the fill ever fails, zero the buffer
+        // rather than leaving uninitialized stack memory to leak as a "random"
+        // value. (The void return cannot signal failure; zeroing fails closed.)
+        fillRandomForActiveModule(buf_ptr[0..len]) catch {
+            @memset(buf_ptr[0..len], 0);
+        };
     }
 
     pub export fn zigttpSdkWriteStderr(handle: *ModuleHandle, buf_ptr: [*]const u8, len: usize) bool {
@@ -683,6 +745,7 @@ pub const sdk_bridge = struct {
     };
 
     pub export fn zigttpSdkGetModuleState(handle: *ModuleHandle, slot: usize) ?*anyopaque {
+        if (!activeModuleOwnsStateSlot(slot)) return null;
         const ctx = handleToContext(handle);
         return getSdkModuleStatePtr(ctx, slot);
     }
@@ -693,6 +756,7 @@ pub const sdk_bridge = struct {
         user_ptr: *anyopaque,
         sdk_deinit: *const fn (*anyopaque) callconv(.c) void,
     ) bool {
+        if (!activeModuleOwnsStateSlot(slot)) return false;
         const ctx = handleToContext(handle);
         installSdkModuleState(ctx, slot, user_ptr, sdk_deinit) catch return false;
         return true;
@@ -736,7 +800,7 @@ pub const sdk_bridge = struct {
         out_len: *usize,
     ) bool {
         const ctx = handleToContext(handle);
-        const buf = readFileChecked(ctx.allocator, path_ptr[0..path_len], max_size) catch return false;
+        const buf = readFileChecked(ctx, path_ptr[0..path_len], max_size) catch return false;
         out_ptr.* = buf.ptr;
         out_len.* = buf.len;
         return true;
@@ -892,7 +956,7 @@ pub const sdk_bridge = struct {
         out: **SdkSqliteDb,
     ) bool {
         const ctx = handleToContext(handle);
-        const db = openSqliteDbChecked(ctx.allocator, path_ptr[0..path_len]) catch return false;
+        const db = openSqliteDbChecked(ctx, path_ptr[0..path_len]) catch return false;
         out.* = @ptrCast(db.handle);
         return true;
     }
@@ -2126,6 +2190,54 @@ test "allowsEnvForActiveModule fails closed when active module lacks policy_chec
     );
 }
 
+test "SDK module state slots are active-module scoped" {
+    try std.testing.expect(!activeModuleOwnsStateSlot(@intFromEnum(module_slots.Slot.sql)));
+
+    const sql_token = pushActiveModuleContext("zigttp:sql", &.{});
+    defer popActiveModuleContext(sql_token);
+
+    try std.testing.expect(activeModuleOwnsStateSlot(@intFromEnum(module_slots.Slot.sql)));
+    try std.testing.expect(!activeModuleOwnsStateSlot(@intFromEnum(module_slots.Slot.cache)));
+    try std.testing.expect(!activeModuleOwnsStateSlot(15));
+}
+
+test "SDK filesystem reads require canonical allowlist entry" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const token = pushActiveModuleContext("zigttp:service", &.{.filesystem});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expectError(
+        error.FilePathNotAllowed,
+        readFileChecked(ctx, "build.zig", 1024 * 1024),
+    );
+
+    try allowSdkFilePath(ctx, "build.zig");
+    const bytes = try readFileChecked(ctx, "build.zig", 1024 * 1024);
+    defer allocator.free(bytes);
+    try std.testing.expect(bytes.len > 0);
+}
+
+test "SDK sqlite opens require canonical allowlist entry" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const token = pushActiveModuleContext("zigttp:sql", &.{.sqlite});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expectError(
+        error.SqlitePathNotAllowed,
+        openSqliteDbChecked(ctx, "default-deny-test.sqlite"),
+    );
+}
+
 test "allowsCacheNamespaceForActiveModule denies namespaces outside the allowlist" {
     const allocator = std.testing.allocator;
     var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
@@ -2160,12 +2272,9 @@ test "allowsSqlQueryForActiveModule denies queries outside the allowlist" {
 
     try std.testing.expect(try allowsSqlQueryForActiveModule(ctx, "listTodos"));
     try std.testing.expect(!try allowsSqlQueryForActiveModule(ctx, "dropEverything"));
-    // Today `allowsSqlWrite` piggybacks on the same `.sql` allowlist
-    // (see handler_policy.zig — the comment there flags the split as
-    // a future migration). Pin both the current sharing AND the
-    // intent: when `.sql_write` becomes a separate allowlist, this
-    // test should grow a deny case that's denied ONLY by `.sql_write`
-    // to prove the new split actually gates writes independently.
+    // Legacy policy JSON allow_queries entries have no operation metadata, so
+    // they remain explicit read/write overrides. Generated contract query
+    // entries are split in handler_policy.zig.
     try std.testing.expect(try allowsSqlWriteForActiveModule(ctx, "listTodos"));
     try std.testing.expect(!try allowsSqlWriteForActiveModule(ctx, "dropEverything"));
 }

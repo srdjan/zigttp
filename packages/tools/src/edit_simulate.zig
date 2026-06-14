@@ -32,7 +32,7 @@ pub const SimulatedViolation = struct {
     message: []const u8,
     help: ?[]const u8,
     line: u32,
-    column: u16,
+    column: u32,
     introduced_by_patch: bool,
 };
 

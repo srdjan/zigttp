@@ -697,7 +697,11 @@ pub const Arm64Emitter = struct {
     /// B.cond label (PC-relative, +/- 1MB)
     pub fn bcond(self: *Arm64Emitter, cond: Condition, offset_bytes: i32) !void {
         if (@mod(offset_bytes, 4) != 0) return error.UnalignedBranch;
-        const imm19: i19 = @intCast(@divExact(offset_bytes, 4));
+        const word = @divExact(offset_bytes, 4);
+        // Range-check rather than @intCast so an out-of-range branch is a clean
+        // error (caller falls back) instead of a panic / truncated wrong offset.
+        if (word < std.math.minInt(i19) or word > std.math.maxInt(i19)) return error.BranchOutOfRange;
+        const imm19: i19 = @intCast(word);
         const inst: u32 = 0x54000000 |
             (@as(u32, @as(u19, @bitCast(imm19))) << 5) |
             @as(u32, @intFromEnum(cond));

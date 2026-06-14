@@ -1905,13 +1905,18 @@ pub const JSObject = extern struct {
             return self.getSlot(offset);
         }
 
-        // Walk prototype chain
+        // Walk prototype chain. Bound the walk with a depth cap so a
+        // (currently-unreachable) prototype cycle cannot loop forever; real
+        // chains in this subset are at most a couple of hops deep.
         var proto = self.prototype;
+        var depth: u32 = 0;
         while (proto) |p| {
+            if (depth >= 1000) break;
             if (pool.findProperty(p.hidden_class_idx, name)) |offset| {
                 return p.getSlot(offset);
             }
             proto = p.prototype;
+            depth += 1;
         }
 
         return null;
@@ -2215,8 +2220,10 @@ pub const JSObject = extern struct {
         if (index >= len) return null;
         const start = self.inline_slots[Slots.RANGE_START].getInt();
         const step = self.inline_slots[Slots.RANGE_STEP].getInt();
-        const val = start + @as(i32, @intCast(index)) * step;
-        return value.JSValue.fromInt(val);
+        // Compute in i64 so the intermediate product index*step cannot overflow
+        // i32; the clamped range length guarantees the final value fits i32.
+        const val_i64: i64 = @as(i64, start) + @as(i64, @intCast(index)) * @as(i64, step);
+        return value.JSValue.fromInt(@intCast(val_i64));
     }
 
     /// Check if this is an array

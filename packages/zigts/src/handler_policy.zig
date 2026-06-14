@@ -76,13 +76,24 @@ pub const RuntimeSqlAllowList = struct {
     values: []const []const u8 = &.{},
     queries: []const contract_mod.SqlQueryInfo = &.{},
 
-    pub fn allows(self: RuntimeSqlAllowList, candidate: []const u8) bool {
+    pub fn allowsRead(self: RuntimeSqlAllowList, candidate: []const u8) bool {
         if (!self.enabled) return true;
         for (self.values) |value| {
             if (std.mem.eql(u8, value, candidate)) return true;
         }
         for (self.queries) |query| {
-            if (std.mem.eql(u8, query.name, candidate)) return true;
+            if (std.mem.eql(u8, query.name, candidate) and sqlQueryIsReadOnly(query)) return true;
+        }
+        return false;
+    }
+
+    pub fn allowsWrite(self: RuntimeSqlAllowList, candidate: []const u8) bool {
+        if (!self.enabled) return true;
+        for (self.values) |value| {
+            if (std.mem.eql(u8, value, candidate)) return true;
+        }
+        for (self.queries) |query| {
+            if (std.mem.eql(u8, query.name, candidate) and !sqlQueryIsReadOnly(query)) return true;
         }
         return false;
     }
@@ -107,16 +118,32 @@ pub const RuntimePolicy = struct {
     }
 
     pub fn allowsSqlQuery(self: RuntimePolicy, name: []const u8) bool {
-        return self.sql.allows(name);
+        return self.sql.allowsRead(name);
     }
 
-    /// Same backing list as allowsSqlQuery in Phase 1 - the split lets the
-    /// db.read vs db.write policy actions diverge later without a contract
-    /// migration.
     pub fn allowsSqlWrite(self: RuntimePolicy, name: []const u8) bool {
-        return self.sql.allows(name);
+        return self.sql.allowsWrite(name);
     }
 };
+
+fn sqlQueryIsReadOnly(query: contract_mod.SqlQueryInfo) bool {
+    if (query.operation.len > 0) {
+        return std.ascii.eqlIgnoreCase(query.operation, "select");
+    }
+    const first = firstSqlToken(query.statement) orelse return false;
+    return std.ascii.eqlIgnoreCase(first, "select");
+}
+
+fn firstSqlToken(statement: []const u8) ?[]const u8 {
+    var start: usize = 0;
+    while (start < statement.len and std.ascii.isWhitespace(statement[start])) : (start += 1) {}
+    if (start == statement.len) return null;
+
+    var end = start;
+    while (end < statement.len and (std.ascii.isAlphabetic(statement[end]) or statement[end] == '_')) : (end += 1) {}
+    if (end == start) return null;
+    return statement[start..end];
+}
 
 /// Convert a HandlerContract's proven sections into a RuntimePolicy.
 /// When `dynamic: false`, the compiler proved ALL access uses literal strings -
@@ -518,6 +545,31 @@ test "contractToRuntimePolicy restricts static sections" {
 
     try std.testing.expect(policy.allowsCacheNamespace("sessions"));
     try std.testing.expect(!policy.allowsCacheNamespace("other"));
+}
+
+test "runtime SQL policy splits read and write queries by statement operation" {
+    const queries = [_]contract_mod.SqlQueryInfo{
+        .{
+            .name = "listTodos",
+            .statement = "SELECT id, title FROM todos",
+            .operation = "",
+            .tables = .empty,
+        },
+        .{
+            .name = "insertTodo",
+            .statement = "INSERT INTO todos(title) VALUES (:title)",
+            .operation = "",
+            .tables = .empty,
+        },
+    };
+    const policy = RuntimePolicy{
+        .sql = .{ .enabled = true, .queries = &queries },
+    };
+
+    try std.testing.expect(policy.allowsSqlQuery("listTodos"));
+    try std.testing.expect(!policy.allowsSqlWrite("listTodos"));
+    try std.testing.expect(!policy.allowsSqlQuery("insertTodo"));
+    try std.testing.expect(policy.allowsSqlWrite("insertTodo"));
 }
 
 test "contractToRuntimePolicy leaves dynamic sections permissive" {

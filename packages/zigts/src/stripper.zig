@@ -349,6 +349,38 @@ const Stripper = struct {
             return;
         }
 
+        // TypeScript non-null / definite-assignment '!'. Strip it (blank to a
+        // space so source positions are preserved) only in the two positions
+        // that are unambiguously TS-only and never valid JS operators:
+        //   - `x!:` definite-assignment on a typed binding (followed by ':')
+        //   - `obj!.field` postfix non-null member access (followed by '.')
+        // A prefix logical-not is never `!:`/`!.`, and `!=`/`!==` are `!`
+        // followed by '=', so neither is affected.
+        if (c == '!' and self.pos + 1 < self.source.len) {
+            const next = self.source[self.pos + 1];
+            if (next == ':' or next == '.') {
+                self.blankSpan(self.pos, self.pos + 1);
+                self.pos += 1;
+                self.col += 1;
+                return;
+            }
+            // Postfix non-null assertion in any other position (`arr[i]!`,
+            // `foo()!`, `x!;`, `x!,`, `x! )`, `x! + y`). Distinguish from a prefix
+            // logical-not by the previous significant output char: a postfix `!`
+            // follows an expression-ending token. `!=`/`!==` are excluded because
+            // their next char is `='.
+            if (next != '=') {
+                if (self.lastSignificantOutputChar()) |prev| {
+                    if (isExpressionEnd(prev)) {
+                        self.blankSpan(self.pos, self.pos + 1);
+                        self.pos += 1;
+                        self.col += 1;
+                        return;
+                    }
+                }
+            }
+        }
+
         // Check for arrow function: = (...): Type => or = <T>(...): Type =>
         if (c == '=') {
             self.pos += 1;
@@ -537,6 +569,14 @@ const Stripper = struct {
         self.col += 1;
 
         var paren_depth: u16 = 1;
+        // Track brace/bracket nesting so a `:` inside an object-literal or array
+        // default value (or a destructuring pattern) is not mistaken for a param
+        // type annotation.
+        var brace_depth: u16 = 0;
+        var bracket_depth: u16 = 0;
+        // Track whether we've passed the `=` of a default value for the current
+        // parameter; a `:` after that `=` is part of the value, not an annotation.
+        var seen_default_eq = false;
         // Track the last identifier position for param name recording
         var last_ident_start: usize = 0;
         var last_ident_end: usize = 0;
@@ -560,6 +600,40 @@ const Stripper = struct {
                 continue;
             }
 
+            if (c == '{') {
+                brace_depth += 1;
+                self.output.append(self.allocator, c) catch return StripError.OutOfMemory;
+                self.pos += 1;
+                self.col += 1;
+                continue;
+            }
+            if (c == '}') {
+                if (brace_depth > 0) brace_depth -= 1;
+                self.output.append(self.allocator, c) catch return StripError.OutOfMemory;
+                self.pos += 1;
+                self.col += 1;
+                continue;
+            }
+            if (c == '[') {
+                bracket_depth += 1;
+                self.output.append(self.allocator, c) catch return StripError.OutOfMemory;
+                self.pos += 1;
+                self.col += 1;
+                continue;
+            }
+            if (c == ']') {
+                if (bracket_depth > 0) bracket_depth -= 1;
+                self.output.append(self.allocator, c) catch return StripError.OutOfMemory;
+                self.pos += 1;
+                self.col += 1;
+                continue;
+            }
+
+            // A top-level `=` begins a default value for the current parameter.
+            if (c == '=' and paren_depth == 1 and brace_depth == 0 and bracket_depth == 0) {
+                seen_default_eq = true;
+            }
+
             // Track identifiers at depth 1 for param name recording.
             // Only record the FIRST identifier in each parameter (before the colon).
             if (isIdentifierStart(c) and paren_depth == 1 and last_ident_start == 0) {
@@ -573,13 +647,14 @@ const Stripper = struct {
             }
 
             // Reset ident tracking on comma (new param)
-            if (c == ',' and paren_depth == 1) {
+            if (c == ',' and paren_depth == 1 and brace_depth == 0 and bracket_depth == 0) {
                 last_ident_start = 0;
                 last_ident_end = 0;
+                seen_default_eq = false;
             }
 
             // Optional parameter marker in TypeScript: `name?: Type`
-            if (c == '?' and paren_depth == 1) {
+            if (c == '?' and paren_depth == 1 and brace_depth == 0 and bracket_depth == 0 and !seen_default_eq) {
                 const question_pos = self.pos;
                 const question_line = self.line;
                 const question_col = self.col;
@@ -595,8 +670,11 @@ const Stripper = struct {
                 self.col = question_col;
             }
 
-            // Strip type annotations in params
-            if (c == ':' and paren_depth == 1) {
+            // Strip type annotations in params. Only a `:` at the top of the
+            // param list (not inside a `{...}`/`[...]` destructuring pattern or
+            // default value, and before any default `=`) is a real type
+            // annotation position.
+            if (c == ':' and paren_depth == 1 and brace_depth == 0 and bracket_depth == 0 and !seen_default_eq) {
                 const colon_pos = self.pos;
                 self.pos += 1;
                 self.col += 1;
@@ -1338,16 +1416,37 @@ const Stripper = struct {
     }
 
     fn tryStripAsAssertion(self: *Self, _: usize) StripError!bool {
-        // We just scanned 'as' - check if it's an assertion
+        // We just scanned 'as' - check if it's an assertion. `as` is a valid JS
+        // identifier (not reserved), so save the cursor and restore it when this
+        // turns out NOT to be a type assertion; otherwise the skipped whitespace
+        // (and any crossed newline) is lost, drifting every later source offset.
+        const save_pos = self.pos;
+        const save_col = self.col;
+        const save_line = self.line;
         self.skipWhitespaceTracked();
-        if (!self.looksLikeTypeStart()) return false;
+        if (!self.looksLikeTypeStart()) {
+            self.pos = save_pos;
+            self.col = save_col;
+            self.line = save_line;
+            return false;
+        }
         return self.rejectTypeAssertion(.as_assertion, StripError.UnsupportedAsAssertion);
     }
 
     fn tryStripSatisfiesAssertion(self: *Self, _: usize) StripError!bool {
-        // We just scanned 'satisfies'
+        // We just scanned 'satisfies'. Like `as`, it is a valid JS identifier, so
+        // restore the cursor when this is not a type assertion to preserve the
+        // skipped whitespace and source positions.
+        const save_pos = self.pos;
+        const save_col = self.col;
+        const save_line = self.line;
         self.skipWhitespaceTracked();
-        if (!self.looksLikeTypeStart()) return false;
+        if (!self.looksLikeTypeStart()) {
+            self.pos = save_pos;
+            self.col = save_col;
+            self.line = save_line;
+            return false;
+        }
         return self.rejectTypeAssertion(.satisfies_assertion, StripError.UnsupportedSatisfiesAssertion);
     }
 
@@ -1694,6 +1793,18 @@ const Stripper = struct {
         return last == ';' or last == '{' or last == '}' or last == '\n';
     }
 
+    /// Last non-whitespace character already emitted, or null if none.
+    fn lastSignificantOutputChar(self: *const Self) ?u8 {
+        var i = self.output.items.len;
+        while (i > 0) {
+            i -= 1;
+            const ch = self.output.items[i];
+            if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') continue;
+            return ch;
+        }
+        return null;
+    }
+
     fn blankSpan(self: *Self, start: usize, end: usize) void {
         // Replace with spaces, preserving newlines
         for (self.source[start..end]) |c| {
@@ -1827,6 +1938,12 @@ const Stripper = struct {
                 for (delimiters) |d| {
                     if (c == d) {
                         if (c == '{' and self.isObjectTypeBraceStart(self.pos)) break;
+                        // A newline only terminates the type when the expression
+                        // is unambiguously complete: the last significant char is
+                        // not a binary type operator and the next significant char
+                        // on a following line does not begin one. This keeps
+                        // multiline unions/intersections (`| "a"`, `& B`) intact.
+                        if (c == '\n' and self.multilineTypeContinues(self.pos)) break;
                         return;
                     }
                 }
@@ -1863,6 +1980,33 @@ const Stripper = struct {
             }
             self.pos += 1;
         }
+    }
+
+    /// Returns true when a `type X = ...` alias body continues past the newline
+    /// at `nl_pos` (i.e. the type is NOT yet complete), so the newline should not
+    /// be treated as the alias terminator. Used to keep multiline
+    /// unions/intersections that wrap onto the next line outside brackets intact.
+    fn multilineTypeContinues(self: *const Self, nl_pos: usize) bool {
+        // If the last significant char before the newline is a binary type
+        // operator, the type clearly continues onto the next line.
+        if (self.previousSignificantChar(nl_pos)) |prev| {
+            switch (prev) {
+                '|', '&', '=', '<', ',', '(', '[', ':', '?', '>', '.' => return true,
+                else => {},
+            }
+        }
+        // Otherwise look at the first significant char after the newline; a line
+        // beginning with a binary type operator continues the previous type.
+        var i = nl_pos;
+        while (i < self.source.len) : (i += 1) {
+            const ch = self.source[i];
+            if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') continue;
+            return switch (ch) {
+                '|', '&', '?', ':', '>', ')', ']', '.', '=', '<', ',' => true,
+                else => false,
+            };
+        }
+        return false;
     }
 
     fn isObjectTypeBraceStart(self: *const Self, pos: usize) bool {
@@ -2232,6 +2376,15 @@ const Stripper = struct {
 
     fn isIdentifierContinue(c: u8) bool {
         return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
+    }
+
+    /// True if `c` is the last character of an expression, so a following `!` is
+    /// a postfix non-null assertion rather than a prefix logical-not. Identifier
+    /// characters (including digits) and closing brackets, plus a string/template
+    /// terminator, all end an expression.
+    fn isExpressionEnd(c: u8) bool {
+        return isIdentifierContinue(c) or c == ')' or c == ']' or c == '}' or
+            c == '"' or c == '\'' or c == '`';
     }
 };
 

@@ -55,7 +55,7 @@ pub const PropertyViolation = struct {
     /// Source file line number (0 = unknown).
     loc_line: u32,
     /// Source file column (0 = unknown).
-    loc_col: u16,
+    loc_col: u32,
     /// When non-null, identifies a GeneratedTest that demonstrates this violation.
     counterexample_name: ?[]const u8, // does not own
     counterexample_index: ?usize,
@@ -151,7 +151,7 @@ pub fn collectFlowViolations(
         };
 
         var loc_line: u32 = 0;
-        var loc_col: u16 = 0;
+        var loc_col: u32 = 0;
         if (ir_view.getLoc(diag.node)) |loc| {
             loc_line = loc.line;
             loc_col = loc.column;
@@ -205,7 +205,7 @@ pub fn collectVerifierViolations(
         };
 
         var loc_line: u32 = 0;
-        var loc_col: u16 = 0;
+        var loc_col: u32 = 0;
         if (ir_view.getLoc(diag.node)) |loc| {
             loc_line = loc.line;
             loc_col = loc.column;

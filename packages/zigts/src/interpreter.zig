@@ -852,7 +852,9 @@ pub const Interpreter = struct {
                 const a = self.ctx.pop();
                 const cond_bool = a.toConditionBool() orelse {
                     self.ctx.exception = try alloc.createBoolError(self, a);
-                    break :sw value.JSValue.undefined_val;
+                    // Propagate as a Zig error (like if_false_goto) so the fault
+                    // is not clobbered by a caller's popState in a nested frame.
+                    return error.TypeError;
                 };
                 try self.ctx.push(value.JSValue.fromBool(!cond_bool));
                 continue :sw @enumFromInt(self.pc[0]);
@@ -955,7 +957,9 @@ pub const Interpreter = struct {
                 const cond = self.ctx.pop();
                 const cond_bool = cond.toConditionBool() orelse {
                     self.ctx.exception = try alloc.createBoolError(self, cond);
-                    break :sw value.JSValue.undefined_val;
+                    // Propagate as a Zig error (like if_false_goto) so the fault
+                    // is not clobbered by a caller's popState in a nested frame.
+                    return error.TypeError;
                 };
                 const offset = util.readI16(self.pc);
                 self.pc += 2;
@@ -969,7 +973,9 @@ pub const Interpreter = struct {
                 const cond = self.ctx.pop();
                 const cond_bool = cond.toConditionBool() orelse {
                     self.ctx.exception = try alloc.createBoolError(self, cond);
-                    break :sw value.JSValue.undefined_val;
+                    // Propagate as a Zig error (like if_false_goto) so the fault
+                    // is not clobbered by a caller's popState in a nested frame.
+                    return error.TypeError;
                 };
                 const offset = util.readI16(self.pc);
                 self.pc += 2;
@@ -1496,8 +1502,12 @@ pub const Interpreter = struct {
                                 continue :sw @enumFromInt(self.pc[0]);
                             }
                             const src_len: usize = @intCast(src_len_int);
+                            const src_is_range = source.class_id == .range_iterator;
                             for (0..src_len) |i| {
-                                const elem = source.getIndex(@intCast(i)) orelse value.JSValue.undefined_val;
+                                const elem = if (src_is_range)
+                                    source.getRangeIndex(@intCast(i)) orelse value.JSValue.undefined_val
+                                else
+                                    source.getIndex(@intCast(i)) orelse value.JSValue.undefined_val;
                                 if (self.ctx.enforce_arena_escape and self.ctx.hybrid != null and !target.flags.is_arena and self.ctx.isEphemeralValue(elem)) {
                                     return error.ArenaObjectEscape;
                                 }

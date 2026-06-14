@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:cache",
-  "source": "packages/zigts/src/modules/cache.zig",
+  "source": "packages/modules/src/data/cache.zig",
   "requiredCapabilities": [
     "clock",
     "policy_check"

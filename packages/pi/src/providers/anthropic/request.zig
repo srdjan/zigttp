@@ -142,7 +142,12 @@ fn writeBlock(writer: anytype, block: ContentBlock) !void {
             try writer.writeAll("{\"type\":\"tool_result\",\"tool_use_id\":");
             try json_writer.writeString(writer, result.tool_use_id);
             try writer.writeAll(",\"content\":");
-            try json_writer.writeString(writer, result.llm_text);
+            // The Anthropic Messages API rejects a tool_result whose content is
+            // an empty string ("content blocks must be non-empty"). Substitute a
+            // placeholder so an empty tool output cannot fail the whole turn with
+            // an opaque HttpNotOk.
+            const content = if (result.llm_text.len == 0) "(no output)" else result.llm_text;
+            try json_writer.writeString(writer, content);
             try writer.writeAll(",\"is_error\":");
             try writer.writeAll(if (result.ok) "false" else "true");
             try writer.writeByte('}');

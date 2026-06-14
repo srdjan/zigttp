@@ -41,7 +41,7 @@ const TextDiag = struct {
     file: []const u8,
     message: []const u8,
     line: u32,
-    column: u16,
+    column: u32,
 };
 
 const TextEmitter = struct {

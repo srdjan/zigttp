@@ -4,7 +4,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 echo "=== zigttp Setup ==="
 echo
@@ -26,10 +27,10 @@ echo
 echo "=== Setup Complete ==="
 echo
 echo "Run the server with:"
-echo "  ./zig-out/bin/zigttp serve examples/handler/handler.js"
+echo "  ./zig-out/bin/zigttp serve examples/handler/spec-guardrails.ts -p 3000"
 echo
 echo "Or with inline code:"
-echo "  ./zig-out/bin/zigttp serve -e \"function handler(r) { return Response.json({ok:true}) }\""
+echo "  ./zig-out/bin/zigttp serve -e \"function handler(r) { return Response.json({ok:true}) }\" -p 3000"
 echo
 echo "Test with:"
-echo "  curl http://localhost:8080/"
+echo "  curl http://localhost:3000/"

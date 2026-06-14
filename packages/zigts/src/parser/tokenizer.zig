@@ -57,8 +57,8 @@ pub const Tokenizer = struct {
     }
 
     /// Get the current column number (1-indexed)
-    pub fn column(self: *const Tokenizer) u16 {
-        return @intCast(self.pos - self.line_start + 1);
+    pub fn column(self: *const Tokenizer) u32 {
+        return self.pos - self.line_start + 1;
     }
 
     /// Get the next token
@@ -145,33 +145,33 @@ pub const Tokenizer = struct {
 
     // --- Token constructors ---
 
-    fn tok1(self: *const Tokenizer, start: u32, col: u16, line: u32, t: TokenType) Token {
+    fn tok1(self: *const Tokenizer, start: u32, col: u32, line: u32, t: TokenType) Token {
         _ = self;
         return .{ .type = t, .start = start, .len = 1, .line = line, .column = col };
     }
 
-    fn tok2(self: *const Tokenizer, start: u32, col: u16, line: u32, t: TokenType) Token {
+    fn tok2(self: *const Tokenizer, start: u32, col: u32, line: u32, t: TokenType) Token {
         _ = self;
         return .{ .type = t, .start = start, .len = 2, .line = line, .column = col };
     }
 
-    fn tok3(self: *const Tokenizer, start: u32, col: u16, line: u32, t: TokenType) Token {
+    fn tok3(self: *const Tokenizer, start: u32, col: u32, line: u32, t: TokenType) Token {
         _ = self;
         return .{ .type = t, .start = start, .len = 3, .line = line, .column = col };
     }
 
-    fn tok4(self: *const Tokenizer, start: u32, col: u16, line: u32, t: TokenType) Token {
+    fn tok4(self: *const Tokenizer, start: u32, col: u32, line: u32, t: TokenType) Token {
         _ = self;
         return .{ .type = t, .start = start, .len = 4, .line = line, .column = col };
     }
 
-    fn tokN(self: *const Tokenizer, start: u32, col: u16, line: u32, t: TokenType) Token {
-        return .{ .type = t, .start = start, .len = @intCast(self.pos - start), .line = line, .column = col };
+    fn tokN(self: *const Tokenizer, start: u32, col: u32, line: u32, t: TokenType) Token {
+        return .{ .type = t, .start = start, .len = self.pos - start, .line = line, .column = col };
     }
 
     // --- Operator scanning ---
 
-    fn scanQuestion(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanQuestion(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('?')) {
             if (self.match('=')) return self.tok3(start, col, line, .question_question_assign);
             return self.tok2(start, col, line, .question_question);
@@ -186,19 +186,19 @@ pub const Tokenizer = struct {
         return self.tok1(start, col, line, .question);
     }
 
-    fn scanPlus(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanPlus(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('+')) return self.tok2(start, col, line, .plus_plus);
         if (self.match('=')) return self.tok2(start, col, line, .plus_assign);
         return self.tok1(start, col, line, .plus);
     }
 
-    fn scanMinus(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanMinus(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('-')) return self.tok2(start, col, line, .minus_minus);
         if (self.match('=')) return self.tok2(start, col, line, .minus_assign);
         return self.tok1(start, col, line, .minus);
     }
 
-    fn scanStar(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanStar(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('*')) {
             if (self.match('=')) return self.tok3(start, col, line, .star_star_assign);
             return self.tok2(start, col, line, .star_star);
@@ -207,7 +207,7 @@ pub const Tokenizer = struct {
         return self.tok1(start, col, line, .star);
     }
 
-    fn scanSlash(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanSlash(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('=')) return self.tok2(start, col, line, .slash_assign);
         if (self.can_be_regex) {
             if (self.scanRegexLiteral(start, col, line)) |tok| {
@@ -218,12 +218,12 @@ pub const Tokenizer = struct {
         return self.tok1(start, col, line, .slash);
     }
 
-    fn scanPercent(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanPercent(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('=')) return self.tok2(start, col, line, .percent_assign);
         return self.tok1(start, col, line, .percent);
     }
 
-    fn scanEquals(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanEquals(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('=')) {
             if (self.match('=')) return self.tok3(start, col, line, .eq_eq);
             return self.tok2(start, col, line, .eq);
@@ -232,7 +232,7 @@ pub const Tokenizer = struct {
         return self.tok1(start, col, line, .assign);
     }
 
-    fn scanBang(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanBang(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('=')) {
             if (self.match('=')) return self.tok3(start, col, line, .ne_ne);
             return self.tok2(start, col, line, .ne);
@@ -240,7 +240,7 @@ pub const Tokenizer = struct {
         return self.tok1(start, col, line, .bang);
     }
 
-    fn scanLessThan(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanLessThan(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('<')) {
             if (self.match('=')) return self.tok3(start, col, line, .lt_lt_assign);
             return self.tok2(start, col, line, .lt_lt);
@@ -249,7 +249,7 @@ pub const Tokenizer = struct {
         return self.tok1(start, col, line, .lt);
     }
 
-    fn scanGreaterThan(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanGreaterThan(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('>')) {
             if (self.match('>')) {
                 if (self.match('=')) return self.tok4(start, col, line, .gt_gt_gt_assign);
@@ -262,7 +262,7 @@ pub const Tokenizer = struct {
         return self.tok1(start, col, line, .gt);
     }
 
-    fn scanRegexLiteral(self: *Tokenizer, start: u32, col: u16, line: u32) ?Token {
+    fn scanRegexLiteral(self: *Tokenizer, start: u32, col: u32, line: u32) ?Token {
         const saved = self.saveState();
         var in_class = false;
         var escaped = false;
@@ -301,7 +301,7 @@ pub const Tokenizer = struct {
                     }
                     break;
                 }
-                const len: u16 = @intCast(self.pos - start);
+                const len = self.pos - start;
                 return .{ .type = .regex_literal, .start = start, .len = len, .line = line, .column = col };
             }
         }
@@ -310,7 +310,7 @@ pub const Tokenizer = struct {
         return null;
     }
 
-    fn scanAmpersand(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanAmpersand(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('&')) {
             if (self.match('=')) return self.tok3(start, col, line, .ampersand_ampersand_assign);
             return self.tok2(start, col, line, .ampersand_ampersand);
@@ -319,7 +319,7 @@ pub const Tokenizer = struct {
         return self.tok1(start, col, line, .ampersand);
     }
 
-    fn scanPipe(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanPipe(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('|')) {
             if (self.match('=')) return self.tok3(start, col, line, .pipe_pipe_assign);
             return self.tok2(start, col, line, .pipe_pipe);
@@ -329,12 +329,12 @@ pub const Tokenizer = struct {
         return self.tok1(start, col, line, .pipe);
     }
 
-    fn scanCaret(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanCaret(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('=')) return self.tok2(start, col, line, .caret_assign);
         return self.tok1(start, col, line, .caret);
     }
 
-    fn scanDot(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanDot(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         if (self.match('.') and self.match('.')) return self.tok3(start, col, line, .spread);
         if (self.pos < self.source.len and isDigit(self.source[self.pos])) {
             return self.scanNumber(start, col, line);
@@ -344,9 +344,15 @@ pub const Tokenizer = struct {
 
     // --- Literal scanning ---
 
-    fn scanString(self: *Tokenizer, quote: u8, start: u32, col: u16, line: u32) Token {
+    fn scanString(self: *Tokenizer, quote: u8, start: u32, col: u32, line: u32) Token {
         while (self.pos < self.source.len and self.source[self.pos] != quote) {
             if (self.source[self.pos] == '\\' and self.pos + 1 < self.source.len) {
+                // A line continuation (`\` + newline) escapes a newline; count it
+                // so later tokens report the correct line/column.
+                if (self.source[self.pos + 1] == '\n') {
+                    self.line += 1;
+                    self.line_start = self.pos + 2;
+                }
                 self.pos += 2;
             } else {
                 if (self.source[self.pos] == '\n') {
@@ -360,7 +366,7 @@ pub const Tokenizer = struct {
         return self.tokN(start, col, line, .string_literal);
     }
 
-    fn scanTemplateLiteral(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanTemplateLiteral(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         while (self.pos < self.source.len) {
             const c = self.source[self.pos];
             if (c == '`') {
@@ -371,6 +377,10 @@ pub const Tokenizer = struct {
                 self.template_depth +|= 1;
                 return self.tokN(start, col, line, .template_head);
             } else if (c == '\\' and self.pos + 1 < self.source.len) {
+                if (self.source[self.pos + 1] == '\n') {
+                    self.line += 1;
+                    self.line_start = self.pos + 2;
+                }
                 self.pos += 2;
             } else {
                 if (c == '\n') {
@@ -383,7 +393,7 @@ pub const Tokenizer = struct {
         return self.tokN(start, col, line, .template_literal);
     }
 
-    fn scanTemplateMiddleOrTail(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanTemplateMiddleOrTail(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         while (self.pos < self.source.len) {
             const c = self.source[self.pos];
             if (c == '`') {
@@ -394,6 +404,10 @@ pub const Tokenizer = struct {
                 self.pos += 2;
                 return self.tokN(start, col, line, .template_middle);
             } else if (c == '\\' and self.pos + 1 < self.source.len) {
+                if (self.source[self.pos + 1] == '\n') {
+                    self.line += 1;
+                    self.line_start = self.pos + 2;
+                }
                 self.pos += 2;
             } else {
                 if (c == '\n') {
@@ -407,7 +421,7 @@ pub const Tokenizer = struct {
         return self.tokN(start, col, line, .template_tail);
     }
 
-    fn scanNumber(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanNumber(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         // Handle hex, octal, binary
         if (start < self.source.len and self.source[start] == '0' and self.pos < self.source.len) {
             const next_char = self.source[self.pos];
@@ -446,7 +460,7 @@ pub const Tokenizer = struct {
         return self.tokN(start, col, line, .number);
     }
 
-    fn scanIdentifier(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
+    fn scanIdentifier(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         while (self.pos < self.source.len and isIdentifierChar(self.source[self.pos])) self.pos += 1;
         const text = self.source[start..self.pos];
         const token_type = lookupKeyword(text) orelse .identifier;
@@ -468,13 +482,13 @@ pub const Tokenizer = struct {
         return true;
     }
 
-    fn makeToken(self: *const Tokenizer, token_type: TokenType, len: u16) Token {
+    fn makeToken(self: *const Tokenizer, token_type: TokenType, len: u32) Token {
         return .{
             .type = token_type,
             .start = self.pos - len,
             .len = len,
             .line = self.line,
-            .column = @intCast(@max(1, @as(i32, @intCast(self.pos)) - @as(i32, @intCast(self.line_start)) - @as(i32, len) + 1)),
+            .column = if (self.pos >= self.line_start + len) self.pos - self.line_start - len + 1 else 1,
         };
     }
 
@@ -589,6 +603,7 @@ pub const Tokenizer = struct {
             .line_start = self.line_start,
             .can_be_regex = self.can_be_regex,
             .template_depth = self.template_depth,
+            .subst_brace_depths = self.subst_brace_depths,
         };
     }
 
@@ -599,6 +614,7 @@ pub const Tokenizer = struct {
         self.line_start = state.line_start;
         self.can_be_regex = state.can_be_regex;
         self.template_depth = state.template_depth;
+        self.subst_brace_depths = state.subst_brace_depths;
     }
 };
 
@@ -608,6 +624,10 @@ pub const TokenizerState = struct {
     line_start: u32,
     can_be_regex: bool,
     template_depth: u8,
+    // Saved so a single-token lookahead that crosses a '{' or '}' inside a
+    // template substitution does not permanently corrupt the brace-depth
+    // counters when the lookahead is rewound via restoreState.
+    subst_brace_depths: [16]u8,
 };
 
 fn isDigit(c: u8) bool {
@@ -681,10 +701,10 @@ test "column tracking" {
     var tokenizer = Tokenizer.init("let x");
 
     const let_tok = tokenizer.next();
-    try std.testing.expectEqual(@as(u16, 1), let_tok.column);
+    try std.testing.expectEqual(@as(u32, 1), let_tok.column);
 
     const x_tok = tokenizer.next();
-    try std.testing.expectEqual(@as(u16, 5), x_tok.column);
+    try std.testing.expectEqual(@as(u32, 5), x_tok.column);
 }
 
 test "multiline column tracking" {
@@ -692,11 +712,26 @@ test "multiline column tracking" {
 
     const a_tok = tokenizer.next();
     try std.testing.expectEqual(@as(u32, 1), a_tok.line);
-    try std.testing.expectEqual(@as(u16, 1), a_tok.column);
+    try std.testing.expectEqual(@as(u32, 1), a_tok.column);
 
     const b_tok = tokenizer.next();
     try std.testing.expectEqual(@as(u32, 2), b_tok.line);
-    try std.testing.expectEqual(@as(u16, 1), b_tok.column);
+    try std.testing.expectEqual(@as(u32, 1), b_tok.column);
+}
+
+test "long identifier length and column do not truncate" {
+    const allocator = std.testing.allocator;
+
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(allocator);
+    try source.appendNTimes(allocator, ' ', 70_000);
+    try source.appendNTimes(allocator, 'x', 70_000);
+
+    var tokenizer = Tokenizer.init(source.items);
+    const tok = tokenizer.next();
+    try std.testing.expectEqual(TokenType.identifier, tok.type);
+    try std.testing.expectEqual(@as(u32, 70_001), tok.column);
+    try std.testing.expectEqual(@as(u32, 70_000), tok.len);
 }
 
 test "state save and restore" {

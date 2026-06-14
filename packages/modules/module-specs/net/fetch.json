@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:fetch",
-  "source": "packages/zigts/src/modules/fetch.zig",
+  "source": "packages/modules/src/net/fetch.zig",
   "requiredCapabilities": [
     "network",
     "runtime_callback"

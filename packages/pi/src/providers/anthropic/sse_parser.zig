@@ -94,6 +94,10 @@ pub fn parseAll(arena: std.mem.Allocator, input: []const u8) ![]events.Event {
     var out: std.ArrayListUnmanaged(events.Event) = .empty;
     var it: RecordIterator = .{ .input = input };
     while (try it.next(arena)) |record| {
+        // An event-field-only record (e.g. `event: ping` with no data line) is
+        // a legal SSE keep-alive. Skip it as a no-op rather than aborting the
+        // whole stream parse, which would discard an otherwise-complete reply.
+        if (record.data.len == 0) continue;
         const ev = try decodeRecord(arena, record);
         try out.append(arena, ev);
     }

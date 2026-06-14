@@ -17,7 +17,13 @@ pub const AssembleError = error{
     Empty,
     ApiError,
     UnexpectedDeltaOrder,
+    TooManyItems,
 };
+
+/// Upper bound on output_index. A single response has at most a handful of
+/// output items; reject a malformed/hostile index before using it as an
+/// allocation length so it cannot drive a multi-GB resize.
+const MAX_OUTPUT_INDEX: u32 = 1024;
 
 pub const Outcome = struct {
     reply: turn.AssistantReply,
@@ -151,6 +157,7 @@ fn ensureCapacity(
     items: *std.ArrayListUnmanaged(ItemState),
     index: u32,
 ) !void {
+    if (index > MAX_OUTPUT_INDEX) return AssembleError.TooManyItems;
     if (index < items.items.len) return;
     const new_len: usize = index + 1;
     const old_len = items.items.len;

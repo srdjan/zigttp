@@ -14,9 +14,11 @@ gates, and keep release notes user-facing.
 - [ ] `zig build test`
 - [ ] `zig build test-zigts`
 - [ ] `zig build test-zruntime`
-- [ ] `zig build test-docs-drift test-doc-links`
+- [ ] `zig build test-docs-drift test-doc-links` (docs registry and relative links)
 - [ ] `zig build smoke-v1`
-- [ ] `zig build smoke-demo`
+- [ ] `zig build smoke-getting-started` (macOS beta gate)
+- [ ] `zig build smoke-demo` (macOS beta gate)
+- [ ] `zig build smoke-studio` (macOS beta gate; builds `-Dstudio`)
 - [ ] `bash scripts/test-examples.sh`
 - [ ] `zig build -Doptimize=ReleaseFast`
 - [ ] `./zig-out/bin/zigttp doctor --release --json`
@@ -37,6 +39,7 @@ cross-compile without Docker.
 - [ ] `docs/roadmap.md` is the only roadmap.
 - [ ] `docs/virtual-modules/README.md` matches the built-in module registry.
 - [ ] `docs/performance.md` contains the current public benchmark claims.
+- [ ] Release notes link to `docs/user-guide.md`, `docs/cli.md`, and `examples/README.md`.
 - [ ] No maintained docs point to release snapshots or stale transition notes.
 
 ## Tag And Publish

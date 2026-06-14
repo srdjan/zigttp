@@ -585,7 +585,10 @@ pub fn arraySlice(ctx: *context.Context, this: value.JSValue, args: []const valu
     result.prototype = ctx.array_prototype;
     var dst: u32 = 0;
     var src: i32 = start;
-    while (src < end) : ({ src += 1; dst += 1; }) {
+    while (src < end) : ({
+        src += 1;
+        dst += 1;
+    }) {
         const elem = obj.getIndex(@intCast(src)) orelse value.JSValue.undefined_val;
         ctx.setIndexChecked(result, dst, elem) catch return value.JSValue.undefined_val;
     }

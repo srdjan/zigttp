@@ -33,7 +33,7 @@ pub const JsonDiagnostic = struct {
     message: []const u8,
     file: []const u8,
     line: u32,
-    column: u16,
+    column: u32,
     suggestion: ?[]const u8,
     /// True when `message` is a heap copy owned by this diagnostic (duped at
     /// capture time so it outlives the checker allocator that produced it).
@@ -1167,7 +1167,7 @@ test "fromParseError: unsupported feature extracts suggestion" {
     try std.testing.expectEqualStrings("'try/catch' is not supported", diag.message);
     try std.testing.expectEqualStrings("handler.ts", diag.file);
     try std.testing.expectEqual(@as(u32, 23), diag.line);
-    try std.testing.expectEqual(@as(u16, 3), diag.column);
+    try std.testing.expectEqual(@as(u32, 3), diag.column);
     try std.testing.expectEqualStrings("use Result types for error handling", diag.suggestion.?);
 }
 
@@ -1232,7 +1232,7 @@ test "fromStripError maps any-type to ZTS041 with a suggestion" {
     try std.testing.expectEqualStrings("error", jd.severity);
     try std.testing.expectEqualStrings("handler.ts", jd.file);
     try std.testing.expectEqual(@as(u32, 3), jd.line);
-    try std.testing.expectEqual(@as(u16, 12), jd.column);
+    try std.testing.expectEqual(@as(u32, 12), jd.column);
     try std.testing.expect(jd.suggestion != null);
 }
 

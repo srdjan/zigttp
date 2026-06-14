@@ -15,6 +15,7 @@ pub const MODULE_STATE_SLOT: usize = sql_module.MODULE_STATE_SLOT;
 /// preserve the SDK envelope layout so the module's own `getModuleState`
 /// (which expects an `SdkStateEnvelope`) resolves the pointer correctly.
 pub fn installStore(ctx: *context.Context, db_path: ?[]const u8) !void {
+    if (db_path) |path| try module_binding.allowSdkSqlitePath(ctx, path);
     if (module_binding.sdk_bridge.getSdkModuleStatePtr(ctx, MODULE_STATE_SLOT)) |existing_ptr| {
         const existing: *sql_module.SqlStore = @ptrCast(@alignCast(existing_ptr));
         try existing.configure(db_path);

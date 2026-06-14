@@ -16,16 +16,17 @@ pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
     return zigttpSdkGetAllocator(handle).*;
 }
 
-/// Get typed module state from a slot. Returns null if the slot has not
-/// been initialized.
+/// Get typed module state from a slot owned by the current active module.
+/// Returns null if the slot is uninitialized or not owned by that module.
 pub fn getModuleState(handle: *ModuleHandle, comptime T: type, slot: usize) ?*T {
     const ptr = zigttpSdkGetModuleState(handle, slot) orelse return null;
     return @ptrCast(@alignCast(ptr));
 }
 
-/// Install module state into a slot with a cleanup callback. The callback
-/// receives the state pointer on context teardown; modules typically store
-/// their own allocator in the state struct and free through it.
+/// Install module state into a slot owned by the current active module with a
+/// cleanup callback. The callback receives the state pointer on context
+/// teardown; modules typically store their own allocator in the state struct
+/// and free through it.
 pub fn setModuleState(
     handle: *ModuleHandle,
     slot: usize,

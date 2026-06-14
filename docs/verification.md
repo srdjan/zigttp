@@ -46,14 +46,14 @@ verify error: not all code paths return a Response
    |
   2 | function handler(req) {
    |                 ^
-   = help: ensure every branch (if/else) ends with a return statement
+   = help: ensure every branch (if/else, match/default) ends with a return statement
 ```
 
-**Fix:** add `else` clauses, `default` cases, or trailing return statements.
+**Fix:** add `else` clauses, `match` default arms, or trailing return statements.
 
 ### 2. Result Checking
 
-Values from Result-producing virtual module calls (`jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery`) must have `.ok` checked before `.value` or `.unwrap()` is accessed.
+Values from Result-producing virtual module calls (`jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart`) must have `.ok` checked before `.value` or `.unwrap()` is accessed.
 
 The verifier tracks result bindings through the control flow tree:
 
@@ -117,15 +117,15 @@ verify warning: unused variable 'temp'
 
 ### 5. Non-Exhaustive Match
 
-Match expressions without a `default` arm. Severity: warning.
+Match expressions without a `default` or `when _` arm are rejected by strict ZigTS unless the type checker can prove every finite union variant is covered.
 
 ```
-verify warning: match expression has no default arm
+strict error: match expression must be exhaustive in strict ZigTS
   --> handler.ts:5:12
    |
   5 |     return match (req) {
    |            ^
-   = help: add a default arm: default: Response.text("Not Found", { status: 404 })
+   = help: cover every finite union member or add an explicit default when the type is not finite
 ```
 
 ### 6. Exhaustive Optional Handling
@@ -317,9 +317,8 @@ The `FaultCoverageChecker` (`packages/zigts/src/fault_coverage.zig`) analyzes th
 
 | Severity | Functions | Meaning |
 |----------|-----------|---------|
-| `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery` | Auth/validation failures must not produce 2xx |
+| `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` | Auth/validation failures must not produce 2xx |
 | `expected` | `cacheGet`, `env` | Cache misses and missing env vars are normal degradation |
-| `upstream` | `fetchSync` | Upstream failures should be surfaced, not swallowed |
 
 The checker warns when a critical I/O failure path (e.g., `jwtVerify` returning `{ok: false}`) produces a 2xx response. This is a structural pattern overwhelmingly correlated with bugs. Cache misses returning 200 are correctly classified as graceful degradation and do not trigger warnings.
 

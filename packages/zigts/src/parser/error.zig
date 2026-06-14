@@ -92,7 +92,7 @@ pub const ParseError = struct {
             try writer.print("   | ", .{});
 
             // Underline
-            var col: u16 = 1;
+            var col: u32 = 1;
             while (col < self.location.column) : (col += 1) {
                 try writer.writeByte(' ');
             }

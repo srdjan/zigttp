@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:validate",
-  "source": "packages/zigts/src/modules/validate.zig",
+  "source": "packages/modules/src/security/validate.zig",
   "requiredCapabilities": [],
   "exports": [
     {
       "name": "schemaCompile",
-      "effect": "none",
+      "effect": "write",
       "returns": "boolean",
       "contractExtractions": [
         {
@@ -58,7 +58,7 @@
     },
     {
       "name": "schemaDrop",
-      "effect": "none",
+      "effect": "write",
       "returns": "boolean"
     }
   ]

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:sql",
-  "source": "packages/zigts/src/modules/sql.zig",
+  "source": "packages/modules/src/data/sql.zig",
   "requiredCapabilities": [
     "sqlite",
     "policy_check"
@@ -9,7 +9,7 @@
   "exports": [
     {
       "name": "sql",
-      "effect": "none",
+      "effect": "write",
       "returns": "boolean",
       "contractExtractions": [
         {

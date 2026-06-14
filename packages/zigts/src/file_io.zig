@@ -34,28 +34,59 @@ pub fn fileExists(allocator: std.mem.Allocator, path: []const u8) bool {
     return true;
 }
 
-/// Write a file synchronously using POSIX operations. New files are created
-/// 0600: callers include session transcripts and project memory, which carry
-/// tool output that must not be world-readable.
+/// Write a file synchronously and atomically using POSIX operations. New files
+/// are created 0600: callers include session transcripts, project memory, and
+/// edited handler source, which carry tool output that must not be
+/// world-readable.
+///
+/// The write goes to a sibling temp file in the same directory, is fsynced,
+/// then renamed over the destination. A crash or a partial write therefore
+/// leaves either the old file or the complete new file, never a truncated one -
+/// critical for the expert apply_edit path, which would otherwise leave the
+/// user's working handler corrupt and unrecoverable.
 pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
+    // Build a sibling temp path in the same directory so rename(2) is atomic
+    // (same filesystem). PID + address keeps concurrent writers from colliding.
+    const dir = std.fs.path.dirname(path) orelse ".";
+    const base = std.fs.path.basename(path);
+    const tmp_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/.{s}.tmp.{d}.{d}",
+        .{ dir, base, std.c.getpid(), @intFromPtr(data.ptr) },
+    );
+    defer allocator.free(tmp_path);
 
+    const tmp_path_z = try allocator.dupeZ(u8, tmp_path);
+    defer allocator.free(tmp_path_z);
+
+    // O_EXCL: never follow or clobber an existing path at the temp location.
     const fd = try std.posix.openatZ(
         std.posix.AT.FDCWD,
-        path_z,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
+        tmp_path_z,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true },
         0o600,
     );
-    defer std.Io.Threaded.closeFd(fd);
+    // On any failure after creating the temp file, remove the stray sibling so
+    // a partial write never lingers. The fd itself is closed below, before the
+    // rename, so this only unlinks.
+    errdefer _ = std.c.unlink(tmp_path_z);
 
-    var total_written: usize = 0;
-    while (total_written < data.len) {
-        const result = std.c.write(fd, data[total_written..].ptr, data.len - total_written);
-        if (result < 0) return error.WriteFailure;
-        if (result == 0) return error.WriteFailure;
-        total_written += @intCast(result);
+    {
+        defer std.Io.Threaded.closeFd(fd);
+        var total_written: usize = 0;
+        while (total_written < data.len) {
+            const result = std.c.write(fd, data[total_written..].ptr, data.len - total_written);
+            if (result < 0) return error.WriteFailure;
+            if (result == 0) return error.WriteFailure;
+            total_written += @intCast(result);
+        }
+        // Flush to disk before the rename so the renamed file has full content.
+        _ = std.c.fsync(fd);
     }
+
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    if (std.c.rename(tmp_path_z, path_z) != 0) return error.WriteFailure;
 }
 
 pub const FdStat = struct { size: u64, mode: u32 };

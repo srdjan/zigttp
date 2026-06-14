@@ -52,17 +52,13 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
 
     const constants_len: u16 = @intCast(@min(func.constants.len, std.math.maxInt(u16)));
 
-    // Phase 1+2: scan all instructions, validate opcodes, operand sizes, and collect
-    // instruction boundaries for jump target validation
-    var boundaries: [65536]bool = .{false} ** 65536;
-    if (code.len > 65536) {
-        // Bytecode too large for boundary tracking - skip boundary check
-        return verifyWithoutBoundaries(func);
-    }
+    // Phase 1+2: scan all instructions and validate opcodes/operand sizes.
+    // Jump boundary checks later rescan instruction sizes instead of using a
+    // fixed-size side table, so large bytecode gets the same validation as
+    // small bytecode.
 
     var pc: usize = 0;
     while (pc < code.len) {
-        boundaries[pc] = true;
         const raw_op = code[pc];
 
         // Check opcode validity
@@ -230,10 +226,10 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
         const info = bytecode.getOpcodeInfo(op);
 
         switch (op) {
-            .goto, .if_true, .if_false, .loop, .if_false_goto => {
+            .goto, .if_true, .if_false, .if_false_goto, .drop_goto => {
                 const offset = readI16(code, pc + 1);
                 const target = @as(i64, @intCast(pc)) + @as(i64, info.size) + @as(i64, offset);
-                if (target < 0 or target > code.len) {
+                if (target < 0 or target >= code.len) {
                     return .{
                         .valid = false,
                         .err = VerifyError.JumpOutOfBounds,
@@ -242,8 +238,7 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
                     };
                 }
                 const target_usize: usize = @intCast(target);
-                // Target at code.len is valid (jump past end = fall through)
-                if (target_usize < code.len and !boundaries[target_usize]) {
+                if (!isInstructionBoundary(code, target_usize)) {
                     return .{
                         .valid = false,
                         .err = VerifyError.JumpNotOnBoundary,
@@ -252,10 +247,31 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
                     };
                 }
             },
+            .loop => {
+                const offset = readI16(code, pc + 1);
+                const target = @as(i64, @intCast(pc)) + @as(i64, info.size) - @as(i64, offset);
+                if (target < 0 or target >= code.len) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.JumpOutOfBounds,
+                        .offset = pc,
+                        .message = "loop target out of bytecode range",
+                    };
+                }
+                const target_usize: usize = @intCast(target);
+                if (!isInstructionBoundary(code, target_usize)) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.JumpNotOnBoundary,
+                        .offset = pc,
+                        .message = "loop target is not on an instruction boundary",
+                    };
+                }
+            },
             .for_of_next => {
                 const offset = readI16(code, pc + 1);
                 const target = @as(i64, @intCast(pc)) + @as(i64, info.size) + @as(i64, offset);
-                if (target < 0 or target > code.len) {
+                if (target < 0 or target >= code.len) {
                     return .{
                         .valid = false,
                         .err = VerifyError.JumpOutOfBounds,
@@ -263,16 +279,32 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
                         .message = "for_of_next end offset out of range",
                     };
                 }
+                if (!isInstructionBoundary(code, @intCast(target))) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.JumpNotOnBoundary,
+                        .offset = pc,
+                        .message = "for_of_next end target is not on an instruction boundary",
+                    };
+                }
             },
             .for_of_next_put_loc => {
                 const offset = readI16(code, pc + 2);
                 const target = @as(i64, @intCast(pc)) + @as(i64, info.size) + @as(i64, offset);
-                if (target < 0 or target > code.len) {
+                if (target < 0 or target >= code.len) {
                     return .{
                         .valid = false,
                         .err = VerifyError.JumpOutOfBounds,
                         .offset = pc,
                         .message = "for_of_next_put_loc end offset out of range",
+                    };
+                }
+                if (!isInstructionBoundary(code, @intCast(target))) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.JumpNotOnBoundary,
+                        .offset = pc,
+                        .message = "for_of_next_put_loc end target is not on an instruction boundary",
                     };
                 }
             },
@@ -288,7 +320,6 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
     // don't cause underflow. This is conservative (doesn't track all paths through
     // the control flow graph) but catches obvious violations.
     var stack_height: i32 = 0;
-    var min_height: i32 = 0;
     pc = 0;
     while (pc < code.len) {
         const op: Opcode = @enumFromInt(code[pc]);
@@ -314,7 +345,6 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
         const push: i32 = @as(i32, info.n_push);
 
         stack_height -= pop;
-        if (stack_height < min_height) min_height = stack_height;
         if (stack_height < 0) {
             return .{
                 .valid = false,
@@ -340,40 +370,15 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
     return .{ .valid = true };
 }
 
-/// Verify without boundary tracking (for bytecode > 64K)
-fn verifyWithoutBoundaries(func: *const FunctionBytecode) VerifyResult {
-    const code = func.code;
-    const constants_len: u16 = @intCast(@min(func.constants.len, std.math.maxInt(u16)));
-
+fn isInstructionBoundary(code: []const u8, target: usize) bool {
     var pc: usize = 0;
     while (pc < code.len) {
-        const op: Opcode = @enumFromInt(code[pc]);
-        const info = bytecode.getOpcodeInfo(op);
-
-        if (std.mem.eql(u8, info.name, "unknown")) {
-            return .{ .valid = false, .err = VerifyError.InvalidOpcode, .offset = pc, .message = "unrecognized opcode" };
-        }
-        if (pc + info.size > code.len) {
-            return .{ .valid = false, .err = VerifyError.TruncatedOperand, .offset = pc, .message = "instruction extends past end" };
-        }
-
-        // Constant pool checks
-        switch (op) {
-            .push_const, .make_function, .make_async => {
-                if (readU16(code, pc + 1) >= constants_len)
-                    return .{ .valid = false, .err = VerifyError.ConstantIndexOutOfBounds, .offset = pc, .message = "constant index out of bounds" };
-            },
-            .get_field_ic, .put_field_ic => {
-                if (readU16(code, pc + 3) >= ic.IC_CACHE_SIZE)
-                    return .{ .valid = false, .err = VerifyError.CacheIndexOutOfBounds, .offset = pc, .message = "inline-cache index out of bounds" };
-            },
-            else => {},
-        }
-
+        if (pc == target) return true;
+        const info = bytecode.getOpcodeInfo(@enumFromInt(code[pc]));
+        if (std.mem.eql(u8, info.name, "unknown") or pc + info.size > code.len) return false;
         pc += info.size;
     }
-
-    return .{ .valid = true };
+    return false;
 }
 
 // Helpers for reading operands
@@ -587,6 +592,115 @@ test "verify: jump within bounds passes" {
     };
     const result = verify(&func);
     try std.testing.expect(result.valid);
+}
+
+test "verify: jump to end of bytecode is rejected" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.goto),
+            0x00, 0x00, // target = code.len
+        },
+        .constants = &.{},
+        .source_map = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.JumpOutOfBounds, result.err.?);
+}
+
+test "verify: conditional jump to end of bytecode is rejected" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.push_false),
+            @intFromEnum(Opcode.if_false),
+            0x00, 0x00, // target = code.len
+        },
+        .constants = &.{},
+        .source_map = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.JumpOutOfBounds, result.err.?);
+}
+
+test "verify: drop_goto jump to end of bytecode is rejected" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.push_0),
+            @intFromEnum(Opcode.drop_goto),
+            0x00, 0x00, // target = code.len
+        },
+        .constants = &.{},
+        .source_map = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.JumpOutOfBounds, result.err.?);
+}
+
+test "verify: jump target inside an operand is rejected" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.goto),
+            0xff,                               0xff, // target = 2, inside this instruction
+            @intFromEnum(Opcode.ret_undefined),
+        },
+        .constants = &.{},
+        .source_map = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.JumpNotOnBoundary, result.err.?);
+}
+
+test "verify: large bytecode receives full jump validation" {
+    const allocator = std.testing.allocator;
+    const len = 65_537;
+    const code = try allocator.alloc(u8, len);
+    defer allocator.free(code);
+    @memset(code, @intFromEnum(Opcode.nop));
+    code[len - 3] = @intFromEnum(Opcode.goto);
+    code[len - 2] = 0x00;
+    code[len - 1] = 0x00;
+
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = &.{},
+        .source_map = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.JumpOutOfBounds, result.err.?);
 }
 
 test "verify: push_const_call accounts for fused argument" {

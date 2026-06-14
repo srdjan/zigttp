@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:http",
-  "source": "packages/zigts/src/modules/http_mod.zig",
+  "source": "packages/modules/src/http/http_mod.zig",
   "requiredCapabilities": [],
   "exports": [
     {

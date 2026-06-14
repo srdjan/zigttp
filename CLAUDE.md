@@ -131,11 +131,11 @@ Import via `import { fn } from "zigttp:module"`. Most implementations live in `p
 | `zigttp:router` | `routerMatch` |
 | `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` |
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` |
-| `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery` |
+| `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` |
 | `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` |
 | `zigttp:service` | `serviceCall` |
-| `zigttp:fetch` | `fetch` (web-standard `fetch(url, init?) -> Response`) |
+| `zigttp:fetch` | `fetch` (web-standard `fetch(url, init?) -> Response`), `fetchWithRetry` |
 | `zigttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `roomFromPath`, `setAutoResponse` |
 | `zigttp:io` | `parallel`, `race` |
 | `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` |

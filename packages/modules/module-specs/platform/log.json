@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:log",
-  "source": "packages/zigts/src/modules/log.zig",
+  "source": "packages/modules/src/platform/log.zig",
   "requiredCapabilities": [
     "clock",
     "stderr"

@@ -121,8 +121,10 @@ pub const Arena = struct {
             return @ptrFromInt(aligned_ptr);
         }
 
-        // Arena exhausted - use overflow
-        return self.allocOverflow(aligned_size);
+        // Arena exhausted - use overflow, honoring the requested alignment so a
+        // type with alignment > 8 (SIMD, 16/32-byte-aligned structs) is not
+        // handed a misaligned pointer.
+        return self.allocOverflowAligned(aligned_size, alignment);
     }
 
     /// Allocate with type safety
@@ -275,6 +277,36 @@ pub const Arena = struct {
 
         // Return pointer after header
         return mem.ptr + node_size;
+    }
+
+    /// Allocate from overflow heap honoring an arbitrary alignment. The node
+    /// header always sits at the allocation base (so freeOverflow can free the
+    /// whole slice from the node), and the returned data pointer is aligned up
+    /// to `alignment` within an over-allocated slice.
+    fn allocOverflowAligned(self: *Arena, size: usize, alignment: usize) ?*anyopaque {
+        if (alignment <= 8) return self.allocOverflow(size);
+
+        const node_size = @sizeOf(OverflowNode);
+        // Worst-case padding: the base is 8-aligned, so the aligned data slot
+        // can be up to (alignment - 1) bytes past (base + node_size).
+        const total_size = node_size + (alignment - 1) + size;
+
+        const mem = self.backing.alignedAlloc(u8, .@"8", total_size) catch return null;
+
+        const base = @intFromPtr(mem.ptr);
+        const data_ptr = std.mem.alignForward(usize, base + node_size, alignment);
+
+        const node: *OverflowNode = @ptrCast(@alignCast(mem.ptr));
+        node.* = .{
+            .next = self.overflow_head,
+            .size = total_size,
+        };
+        self.overflow_head = node;
+        self.overflow_bytes += total_size;
+        self.overflow_count += 1;
+        self.alloc_count += 1;
+
+        return @ptrFromInt(data_ptr);
     }
 
     /// Free all overflow allocations

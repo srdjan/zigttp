@@ -60,7 +60,7 @@ pub fn installState(
         installed.runtime_ptr = runtime_ptr;
         installed.call_fn = call_fn;
         installed.base = service_module.ServiceState.init(ctx.allocator, @ptrCast(installed), InstalledState.sdkCall);
-        try populateServices(&installed.base, ctx.allocator, system_path);
+        try populateServices(ctx, &installed.base, ctx.allocator, system_path);
         return;
     }
 
@@ -71,16 +71,18 @@ pub fn installState(
         .call_fn = call_fn,
         .base = service_module.ServiceState.init(ctx.allocator, @ptrCast(installed), InstalledState.sdkCall),
     };
-    try populateServices(&installed.base, ctx.allocator, system_path);
+    try populateServices(ctx, &installed.base, ctx.allocator, system_path);
     ctx.setModuleState(MODULE_STATE_SLOT, @ptrCast(&installed.base), &stateDeinitAdapter);
 }
 
 fn populateServices(
+    ctx: *context.Context,
     state: *service_module.ServiceState,
     allocator: std.mem.Allocator,
     system_path: []const u8,
 ) !void {
-    const system_json = try mb.readFileChecked(allocator, system_path, 1024 * 1024);
+    try mb.allowSdkFilePath(ctx, system_path);
+    const system_json = try mb.readFileChecked(ctx, system_path, 1024 * 1024);
     defer allocator.free(system_json);
 
     var config = try system_linker.parseSystemConfig(allocator, system_json);

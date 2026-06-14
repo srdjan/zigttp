@@ -4631,19 +4631,13 @@ pub const BaselineCompiler = struct {
             self.emitter.movzxRegMem16(.rcx, .rax, pic_base + 3 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
             // Fall through to use_slot
 
-            // Step 8: Use slot_offset (in rcx) to store to inline_slots
+            // Step 8: PIC matched, but the inline raw store bypasses the GC write
+            // barrier (and the arena-escape check), which caused UAF under minor GC.
+            // Fall through to the slow path, which routes through jitPutFieldIC and
+            // fires the barrier + arena-escape check. The PIC entry hidden-class
+            // probes above are kept only to preserve the cache-warming structure.
             try self.markLabel(use_slot);
-            // Check if slot < INLINE_SLOT_COUNT (8)
-            self.emitter.cmpRegImm32(.rcx, JSObject.INLINE_SLOT_COUNT) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ae, slow); // slot >= 8, use slow path
-
-            // Step 9: Store to inline_slots: obj + inline_slots_offset + slot * 8
-            self.emitter.shlRegImm(.rcx, 3) catch return CompileError.OutOfMemory; // slot * 8
-            self.emitter.addRegImm32(.rcx, OBJ_INLINE_SLOTS_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.addRegReg(.rcx, .r10) catch return CompileError.OutOfMemory; // obj + offset
-            self.emitter.movMemReg(.rcx, 0, .r8) catch return CompileError.OutOfMemory; // store value
-
-            try self.emitJmpToLabel(done);
+            // Fall through to slow path (barriered store).
 
             // Slow path: call helper
             try self.markLabel(slow);
@@ -4739,19 +4733,13 @@ pub const BaselineCompiler = struct {
                 self.emitter.ldrhImm(.x15, .x14, 3 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
                 // Fall through to use_slot
 
-                // Step 8: Use slot_offset (in x15) to store to inline_slots
+                // Step 8: PIC matched, but the inline raw store bypasses the GC write
+                // barrier (and the arena-escape check), which caused UAF under minor GC.
+                // Fall through to the slow path, which routes through jitPutFieldIC and
+                // fires the barrier + arena-escape check. The PIC entry hidden-class
+                // probes above are kept only to preserve the cache-warming structure.
                 try self.markLabel(use_slot);
-                // Check if slot < INLINE_SLOT_COUNT (8)
-                self.emitter.cmpRegImm12(.x15, JSObject.INLINE_SLOT_COUNT) catch return CompileError.OutOfMemory;
-                try self.emitBcondToLabel(.hs, slow); // slot >= 8, use slow path
-
-                // Step 9: Store to inline_slots: obj + inline_slots_offset + slot * 8
-                self.emitter.lslRegImm(.x15, .x15, 3) catch return CompileError.OutOfMemory; // slot * 8
-                self.emitter.addRegImm12(.x15, .x15, @intCast(@as(u32, @bitCast(OBJ_INLINE_SLOTS_OFF)))) catch return CompileError.OutOfMemory;
-                self.emitter.addRegReg(.x15, .x9, .x15) catch return CompileError.OutOfMemory; // obj + offset
-                self.emitter.strImm(.x12, .x15, 0) catch return CompileError.OutOfMemory; // store value
-
-                try self.emitJmpToLabel(done);
+                // Fall through to slow path (barriered store).
             }
             // else: offset too large, fall through to slow path
 
@@ -4883,49 +4871,30 @@ pub const BaselineCompiler = struct {
 
     /// Emit code for direct slot write (used for pre-compiled object literals)
     /// Stack: [..., obj, val] -> [...]
+    ///
+    /// Both the inline-slot and overflow-slot cases route through
+    /// Context.jitSetSlot, which applies setSlotBarriered. A raw inline store
+    /// bypasses the GC write barrier: a freshly-created literal can be evacuated
+    /// to tenured space by an allocation between create and this store, so a
+    /// nursery value stored without recording the cross-gen edge would be
+    /// reclaimed by minor GC while still referenced (UAF).
     fn emitSetSlot(self: *BaselineCompiler, slot_idx: u8) CompileError!void {
-        if (slot_idx >= JSObject.INLINE_SLOT_COUNT) {
-            const fn_ptr = @intFromPtr(&Context.jitSetSlot);
-            if (is_x86_64) {
-                try self.emitPopReg(.rcx); // val
-                try self.emitPopReg(.rdx); // obj
-                self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory; // ctx
-                self.emitter.movRegReg(.rsi, .rdx) catch return CompileError.OutOfMemory; // obj
-                self.emitter.movRegImm32(.rdx, slot_idx) catch return CompileError.OutOfMemory; // slot_idx
-                self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-                try self.emitCallHelperReg(.rax);
-            } else if (is_aarch64) {
-                try self.emitPopReg(.x3); // val
-                try self.emitPopReg(.x1); // obj
-                self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory; // ctx
-                self.emitter.movRegImm64(.x2, slot_idx) catch return CompileError.OutOfMemory; // slot_idx
-                self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-                try self.emitCallHelperReg(.x9);
-            }
-            return;
-        }
-
-        // Calculate the offset into inline_slots array
-        const slot_offset: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, slot_idx) * 8;
-
+        const fn_ptr = @intFromPtr(&Context.jitSetSlot);
         if (is_x86_64) {
-            // Pop value into scratch register
-            try self.emitPopReg(.rax);
-            // Pop object pointer into another register
-            try self.emitPopReg(.rcx);
-            // Extract pointer: AND with PTR_EXTRACT_MASK to clear prefix (low 3 bits naturally 0)
-            try self.emitExtractPtr(.rcx, .rcx);
-            // Store value to obj->inline_slots[slot_idx]
-            self.emitter.movMemReg(.rcx, slot_offset, .rax) catch return CompileError.OutOfMemory;
+            try self.emitPopReg(.rcx); // val
+            try self.emitPopReg(.rdx); // obj
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory; // ctx
+            self.emitter.movRegReg(.rsi, .rdx) catch return CompileError.OutOfMemory; // obj
+            self.emitter.movRegImm32(.rdx, slot_idx) catch return CompileError.OutOfMemory; // slot_idx
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
         } else if (is_aarch64) {
-            // Pop value into x0
-            try self.emitPopReg(.x0);
-            // Pop object into x1
-            try self.emitPopReg(.x1);
-            // Extract pointer: AND with PTR_EXTRACT_MASK
-            try self.emitExtractPtr(.x1, .x1);
-            // Store value to obj->inline_slots[slot_idx]
-            self.emitter.strImm(.x0, .x1, slot_offset) catch return CompileError.OutOfMemory;
+            try self.emitPopReg(.x3); // val
+            try self.emitPopReg(.x1); // obj
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory; // ctx
+            self.emitter.movRegImm64(.x2, slot_idx) catch return CompileError.OutOfMemory; // slot_idx
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
         }
     }
 
@@ -6348,15 +6317,25 @@ pub const BaselineCompiler = struct {
                 const rel = @as(i32, @intCast(target_native)) - @as(i32, @intCast(jump.native_offset));
                 const existing: u32 = @bitCast(self.emitter.buffer.items[jump.native_offset..][0..4].*);
 
+                const word = @divExact(rel, 4);
                 if (jump.is_conditional) {
-                    // B.cond: patch imm19
-                    const imm19: i19 = @intCast(@divExact(rel, 4));
+                    // B.cond: patch imm19 (+/-1MB). Range-check rather than
+                    // @intCast (which would panic in safe builds or truncate to a
+                    // wrong branch offset in ReleaseFast) so an oversized function
+                    // falls back to the interpreter.
+                    if (word < std.math.minInt(i19) or word > std.math.maxInt(i19)) {
+                        return CompileError.UnsupportedOpcode;
+                    }
+                    const imm19: i19 = @intCast(word);
                     const patched = (existing & 0xFF00001F) | (@as(u32, @as(u19, @bitCast(imm19))) << 5);
                     const bytes: [4]u8 = @bitCast(patched);
                     @memcpy(self.emitter.buffer.items[jump.native_offset..][0..4], &bytes);
                 } else {
-                    // B: patch imm26
-                    const imm26: i26 = @intCast(@divExact(rel, 4));
+                    // B: patch imm26 (+/-128MB).
+                    if (word < std.math.minInt(i26) or word > std.math.maxInt(i26)) {
+                        return CompileError.UnsupportedOpcode;
+                    }
+                    const imm26: i26 = @intCast(word);
                     const patched = (existing & 0xFC000000) | @as(u32, @as(u26, @bitCast(imm26)));
                     const bytes: [4]u8 = @bitCast(patched);
                     @memcpy(self.emitter.buffer.items[jump.native_offset..][0..4], &bytes);

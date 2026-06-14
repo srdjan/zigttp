@@ -154,10 +154,25 @@ fn negotiateImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
 
         var quality: f32 = 1.0;
         var media_type = trimmed;
-        if (std.mem.indexOf(u8, trimmed, ";q=")) |q_pos| {
-            media_type = std.mem.trim(u8, trimmed[0..q_pos], " ");
-            const q_str = trimmed[q_pos + 3 ..];
-            quality = std.fmt.parseFloat(f32, q_str) catch 1.0;
+        // Split on the first ';' and trim OWS so an RFC-valid `text/html; q=0.9`
+        // (whitespace around the parameter separator) parses the q factor, not
+        // just the literal ";q=" form.
+        if (std.mem.indexOfScalar(u8, trimmed, ';')) |semi| {
+            media_type = std.mem.trim(u8, trimmed[0..semi], " \t");
+            var param_iter = std.mem.splitScalar(u8, trimmed[semi + 1 ..], ';');
+            while (param_iter.next()) |param| {
+                const p = std.mem.trim(u8, param, " \t");
+                if (std.mem.indexOfScalar(u8, p, '=')) |eq| {
+                    const k = std.mem.trim(u8, p[0..eq], " \t");
+                    if (std.mem.eql(u8, k, "q")) {
+                        const v = std.mem.trim(u8, p[eq + 1 ..], " \t");
+                        const parsed = std.fmt.parseFloat(f32, v) catch 1.0;
+                        // Clamp to the RFC 7231 [0, 1] range so an out-of-range
+                        // q (e.g. q=5) cannot outrank a legitimate q=1.0 entry.
+                        quality = std.math.clamp(parsed, 0.0, 1.0);
+                    }
+                }
+            }
         }
 
         entries[entry_count] = .{ .media_type = media_type, .quality = quality };

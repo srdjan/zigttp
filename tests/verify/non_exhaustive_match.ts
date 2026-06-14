@@ -1,9 +1,10 @@
-// Should warn: declared variable is never used
+// Should fail: match without default arm
 import type { Spec } from "zigttp:types";
 
 type Guardrails = Spec<"result_safe">;
 
 function handler(req: Request): Response & Guardrails {
-    const unused = "hello";
-    return Response.json({ ok: true });
+    return match (req.method) {
+        when "GET": Response.json({ ok: true })
+    };
 }

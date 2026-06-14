@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:time",
-  "source": "packages/zigts/src/modules/time.zig",
+  "source": "packages/modules/src/platform/time.zig",
   "requiredCapabilities": [],
   "exports": [
     {

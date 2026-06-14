@@ -29,6 +29,7 @@ pub const binding = sdk.ModuleBinding{
             .name = "sql",
             .module_func = sqlRegisterImpl,
             .arg_count = 2,
+            .effect = .write,
             .returns = .boolean,
             .param_types = &.{ .string, .string },
             .traceable = false,
@@ -219,10 +220,14 @@ fn executeQuery(handle: *sdk.ModuleHandle, args: []const sdk.JSValue, mode: Exec
         };
     };
 
-    return switch (mode) {
+    return (switch (mode) {
         .one => executeOne(handle, stmt),
         .many => executeMany(handle, stmt),
         .exec => executeExec(handle, db, stmt),
+    }) catch |err| switch (err) {
+        error.UnsupportedBlobColumn => sdk.throwError(handle, "SqlError", "BLOB columns are not supported"),
+        error.IntegerPrecisionLoss => sdk.throwError(handle, "SqlError", "INTEGER value exceeds the safe range for a JS number (+/-2^53)"),
+        else => err,
     };
 }
 
@@ -254,7 +259,7 @@ fn executeExec(handle: *sdk.ModuleHandle, db: *sdk.SqliteDb, stmt: *sdk.SqliteSt
 
     const insert_id = sdk.sqliteLastInsertRowId(db);
     if (insert_id != 0) {
-        try sdk.objectSet(handle, result, "lastInsertRowId", sdk.numberFromF64(@floatFromInt(insert_id)));
+        try sdk.objectSet(handle, result, "lastInsertRowId", try int64ToJsNumber(insert_id));
     }
     return result;
 }
@@ -310,7 +315,19 @@ fn bindValue(stmt: *sdk.SqliteStmt, index: u32, v: sdk.JSValue) !void {
     if (v.isTrue()) return sdk.sqliteBindInt64(stmt, index, 1);
     if (v.isFalse()) return sdk.sqliteBindInt64(stmt, index, 0);
     if (v.toInt()) |i| return sdk.sqliteBindInt64(stmt, index, i);
-    if (v.toFloat()) |f| return sdk.sqliteBindDouble(stmt, index, f);
+    if (v.toFloat()) |f| {
+        // A whole-number JS value outside +/-2^31 is stored as a raw double and
+        // misses toInt(). Bind it as INTEGER (not REAL) when it is a finite,
+        // fractional-free value inside i64 range so integer comparisons and the
+        // read-back column type behave as expected.
+        if (std.math.isFinite(f) and @floor(f) == f and
+            f >= @as(f64, @floatFromInt(std.math.minInt(i64))) and
+            f <= @as(f64, @floatFromInt(std.math.maxInt(i64))))
+        {
+            return sdk.sqliteBindInt64(stmt, index, @intFromFloat(f));
+        }
+        return sdk.sqliteBindDouble(stmt, index, f);
+    }
     if (sdk.extractString(v)) |s| return sdk.sqliteBindText(stmt, index, s);
     return error.UnsupportedParamType;
 }
@@ -326,9 +343,21 @@ fn buildRowObject(handle: *sdk.ModuleHandle, stmt: *sdk.SqliteStmt) !sdk.JSValue
     return row;
 }
 
+/// Maximum i64 value representable exactly as an f64 (2^53). Beyond this,
+/// @floatFromInt would round silently, corrupting the value seen by JS.
+const F64_SAFE_INTEGER: i64 = 9007199254740992;
+
+/// Convert a SQLite i64 to a JS number, surfacing an explicit error when the
+/// value cannot be represented exactly as an f64 rather than returning a
+/// silently-rounded result.
+fn int64ToJsNumber(v: i64) !sdk.JSValue {
+    if (v > F64_SAFE_INTEGER or v < -F64_SAFE_INTEGER) return error.IntegerPrecisionLoss;
+    return sdk.numberFromF64(@floatFromInt(v));
+}
+
 fn buildColumnValue(handle: *sdk.ModuleHandle, stmt: *sdk.SqliteStmt, index: u32) !sdk.JSValue {
     return switch (sdk.sqliteColumnType(stmt, index)) {
-        sdk.sqlite_integer => sdk.numberFromF64(@floatFromInt(sdk.sqliteColumnInt64(stmt, index))),
+        sdk.sqlite_integer => try int64ToJsNumber(sdk.sqliteColumnInt64(stmt, index)),
         sdk.sqlite_float => sdk.JSValue.fromFloat(sdk.sqliteColumnDouble(stmt, index)),
         sdk.sqlite_text => try sdk.createString(handle, sdk.sqliteColumnText(stmt, index)),
         sdk.sqlite_null => sdk.JSValue.undefined_val,

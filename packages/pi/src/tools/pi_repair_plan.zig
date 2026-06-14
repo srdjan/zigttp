@@ -246,7 +246,7 @@ fn writeVerifierDiagnostic(
     id: []const u8,
     diag: handler_verifier.Diagnostic,
     line: u32,
-    column: u16,
+    column: u32,
 ) !void {
     try writer.writeAll("{\"id\":");
     try json_utils.writeJsonString(writer, id);
@@ -413,6 +413,13 @@ fn identifierName(
     const tag = ir_view.getTag(node) orelse return null;
     if (tag != .identifier) return null;
     const binding = ir_view.getBinding(node) orelse return null;
+    // Only global/undeclared-global bindings encode an atom index in `.slot`.
+    // For .local/.argument/.upvalue the slot is a scope-slot index, so passing
+    // it to atoms.getName would map a small slot (0,1,2,...) onto an unrelated
+    // predefined atom (null/true/false/undefined). Return null so the concrete
+    // repair template falls back to its generic placeholder instead of an
+    // unrelated keyword.
+    if (binding.kind != .global and binding.kind != .undeclared_global) return null;
     return atoms.getName(@enumFromInt(binding.slot));
 }
 

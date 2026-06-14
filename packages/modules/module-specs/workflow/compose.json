@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:compose",
-  "source": "packages/zigts/src/modules/compose.zig",
+  "source": "packages/modules/src/workflow/compose.zig",
   "requiredCapabilities": [],
   "exports": [
     {

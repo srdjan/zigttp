@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:url",
-  "source": "packages/zigts/src/modules/url.zig",
+  "source": "packages/modules/src/http/url.zig",
   "requiredCapabilities": [],
   "exports": [
     {

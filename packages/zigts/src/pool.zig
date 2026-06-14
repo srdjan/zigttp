@@ -359,10 +359,12 @@ pub const LockFreePool = struct {
         const len = self.slots.len;
         const hint = self.free_hint.load(.monotonic);
 
-        // Try to return to pool, starting from hint
+        // Try to return to pool, starting from hint. Use cmpxchgStrong (not
+        // Weak) so a spurious CAS failure on the only free slot cannot make a
+        // single release pass fall through and destroy a still-reusable runtime.
         for (0..len) |offset| {
             const idx = (hint + offset) % len;
-            if (self.slots[idx].cmpxchgWeak(null, runtime, .release, .monotonic) == null) {
+            if (self.slots[idx].cmpxchgStrong(null, runtime, .release, .monotonic) == null) {
                 // Update hint to point to this slot (next acquire will find it)
                 self.free_hint.store(idx, .monotonic);
                 // OPTIMIZATION: Removed atomic increment - available_count computed lazily

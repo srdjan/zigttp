@@ -38,6 +38,9 @@ pub fn parseArgs(argv: []const []const u8) !Options {
             i += 1;
             if (i >= argv.len) return error.MissingArgument;
             trust_key = argv[i];
+        } else if (std.mem.startsWith(u8, arg, "--trust-key=")) {
+            // Accept the `--trust-key=<hex>` form for parity with expert/deploy.
+            trust_key = arg["--trust-key=".len..];
         } else if (std.mem.eql(u8, arg, "--json")) {
             json_output = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -128,7 +131,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     }
 
     if (opts.json_output) {
-        writeClaimsJson(opts.url, &result);
+        try writeClaimsJson(allocator, opts.url, &result);
     } else {
         writeClaimsHuman(opts.url, &result);
     }
@@ -220,26 +223,41 @@ fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void 
     _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
 }
 
-fn writeClaimsJson(url: []const u8, result: *const envelope.VerifyResult) void {
-    var buf: [4096]u8 = undefined;
-    const out = std.fmt.bufPrint(
-        &buf,
-        "{{\"url\":\"{s}\",\"keyFingerprint\":\"{s}\",\"compilerVersion\":\"{s}\",\"signedAt\":{d}," ++
-            "\"contractSha256\":\"{s}\",\"bytecodeSha256\":\"{s}\",\"policySha256\":\"{s}\"," ++
-            "\"capabilityHash\":\"{s}\",\"routesCount\":{d},\"propertySummary\":\"{s}\"}}\n",
-        .{
-            url,
-            &result.fingerprint_hex,
-            result.claims.compiler_version,
-            result.claims.signed_at_unix,
-            result.claims.contract_sha256,
-            result.claims.bytecode_sha256,
-            result.claims.policy_sha256,
-            result.claims.capability_hash,
-            result.claims.routes_count,
-            result.claims.property_summary,
-        },
-    ) catch return;
+fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *const envelope.VerifyResult) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var json: std.json.Stringify = .{ .writer = &aw.writer };
+
+    try json.beginObject();
+    try json.objectField("url");
+    try json.write(url);
+    try json.objectField("keyFingerprint");
+    try json.write(&result.fingerprint_hex);
+    try json.objectField("compilerVersion");
+    try json.write(result.claims.compiler_version);
+    try json.objectField("signedAt");
+    try json.write(result.claims.signed_at_unix);
+    try json.objectField("contractSha256");
+    try json.write(result.claims.contract_sha256);
+    try json.objectField("bytecodeSha256");
+    try json.write(result.claims.bytecode_sha256);
+    try json.objectField("policySha256");
+    try json.write(result.claims.policy_sha256);
+    try json.objectField("capabilityHash");
+    try json.write(result.claims.capability_hash);
+    try json.objectField("routesCount");
+    try json.write(result.claims.routes_count);
+    try json.objectField("propertySummary");
+    try json.write(result.claims.property_summary);
+    try json.endObject();
+    try aw.writer.writeByte('\n');
+
+    return try allocator.dupe(u8, aw.writer.buffered());
+}
+
+fn writeClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *const envelope.VerifyResult) !void {
+    const out = try renderClaimsJson(allocator, url, result);
+    defer allocator.free(out);
     _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
 }
 
@@ -292,4 +310,40 @@ test "parseArgs: --help signals via error" {
 
 test "parseArgs: rejects multiple positional args" {
     try std.testing.expectError(error.TooManyArguments, parseArgs(&.{ "http://a", "http://b" }));
+}
+
+test "renderClaimsJson uses JSON string escaping" {
+    const testing = std.testing;
+
+    var result = envelope.VerifyResult{
+        .claims = .{
+            .contract_sha256 = "a" ** 64,
+            .bytecode_sha256 = "b" ** 64,
+            .policy_sha256 = "c" ** 64,
+            .capability_hash = "d" ** 64,
+            .compiler_version = "zigttp\"dev\\test",
+            .signed_at_unix = 1_700_000_000,
+            .property_summary = "quote\" slash\\ newline\n",
+            .routes_count = 2,
+        },
+        .public_key = [_]u8{0} ** std.crypto.sign.Ed25519.PublicKey.encoded_length,
+        .fingerprint_hex = [_]u8{'f'} ** 64,
+        .arena = std.heap.ArenaAllocator.init(testing.allocator),
+    };
+    defer result.deinit();
+
+    const out = try renderClaimsJson(testing.allocator, "https://example.test/a?x=\"y\"", &result);
+    defer testing.allocator.free(out);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    try testing.expectEqualStrings("https://example.test/a?x=\"y\"", root.get("url").?.string);
+    try testing.expectEqualStrings("zigttp\"dev\\test", root.get("compilerVersion").?.string);
+    try testing.expectEqualStrings("quote\" slash\\ newline\n", root.get("propertySummary").?.string);
+    try testing.expectEqual(@as(i64, 1_700_000_000), root.get("signedAt").?.integer);
+    try testing.expectEqual(@as(i64, 2), root.get("routesCount").?.integer);
+    try testing.expect(std.mem.indexOf(u8, out, "\\\"") != null);
+    try testing.expect(std.mem.endsWith(u8, out, "\n"));
 }

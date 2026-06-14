@@ -37,10 +37,35 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const user_args = args[1..];
     const command = if (user_args.len == 0) "" else user_args[0];
 
-    // Self-extracting binary: serve the appended handler
     if (self_payload) |payload| {
         defer payload.deinit(allocator);
-        try serveAppended(allocator, &payload, user_args);
+        switch (classifyAppendedInvocation(user_args)) {
+            .serve => {
+                serveAppended(allocator, &payload, user_args) catch |err| {
+                    if (err == error.HelpRequested) return;
+                    if (err == error.UnknownArgument or err == error.UnknownOption) std.process.exit(1);
+                    return err;
+                };
+                return;
+            },
+            .attest => {
+                try attestPayload(allocator, &payload);
+                return;
+            },
+            .version => {
+                shared.printVersion();
+                return;
+            },
+            .help => {
+                printAppendedHelp();
+                return;
+            },
+            .unknown_positional => |arg| {
+                std.debug.print("Unknown argument for self-contained binary: {s}\n\n", .{arg});
+                printAppendedHelp();
+                std.process.exit(1);
+            },
+        }
         return;
     }
 
@@ -80,13 +105,29 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 pub fn edgeCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const config_path = parseEdgeConfigPath(argv) catch |err| {
-        if (err == error.HelpRequested) return;
-        return err;
+        switch (err) {
+            // --help printed usage and is not an error.
+            error.HelpRequested => return,
+            // On a default (edge-compiled-out) build, the more useful signal is
+            // that edge is unavailable; let that win over an arg-parse error.
+            error.UnknownOption, error.MissingEdgeConfig => {
+                if (!feature_options.enable_edge) shared.featureCompiledOut("edge", "edge");
+                std.log.err("zigttp edge: invalid arguments", .{});
+                std.process.exit(1);
+            },
+            else => {
+                std.log.err("zigttp edge: {}", .{err});
+                std.process.exit(1);
+            },
+        }
     };
 
     if (!feature_options.enable_edge) shared.featureCompiledOut("edge", "edge");
 
-    var config = try edge_server.loadConfig(allocator, config_path);
+    var config = edge_server.loadConfig(allocator, config_path) catch |err| {
+        std.log.err("zigttp edge: failed to load config '{s}': {}", .{ config_path, err });
+        std.process.exit(1);
+    };
     var edge = edge_server.EdgeServer.init(allocator, config) catch |err| {
         config.deinit(allocator);
         std.log.err("Failed to initialize edge runtime: {}", .{err});
@@ -133,6 +174,10 @@ fn attestCommand(allocator: std.mem.Allocator) !void {
     };
     defer payload.deinit(allocator);
 
+    try attestPayload(allocator, &payload);
+}
+
+fn attestPayload(allocator: std.mem.Allocator, payload: *const self_extract.Payload) !void {
     const contract_json = payload.contract_json orelse {
         shared.writeStdoutLine("{\"error\":\"embedded payload has no contract\"}");
         std.process.exit(1);
@@ -165,12 +210,45 @@ fn attestCommand(allocator: std.mem.Allocator) !void {
     _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
 }
 
+const AppendedInvocation = union(enum) {
+    serve,
+    attest,
+    version,
+    help,
+    unknown_positional: []const u8,
+};
+
+fn classifyAppendedInvocation(argv: []const []const u8) AppendedInvocation {
+    if (argv.len == 0) return .serve;
+    const command = argv[0];
+    if (std.mem.eql(u8, command, "attest")) return appendedCommandNoArgs(argv, .attest);
+    if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version")) return appendedCommandNoArgs(argv, .version);
+    if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) return appendedCommandNoArgs(argv, .help);
+    if (!std.mem.startsWith(u8, command, "-")) return .{ .unknown_positional = command };
+    return .serve;
+}
+
+fn appendedCommandNoArgs(argv: []const []const u8, tag: std.meta.Tag(AppendedInvocation)) AppendedInvocation {
+    if (argv.len > 1) return .{ .unknown_positional = argv[1] };
+    return switch (tag) {
+        .attest => .attest,
+        .version => .version,
+        .help => .help,
+        .serve,
+        .unknown_positional,
+        => unreachable,
+    };
+}
+
 pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const feature_flags = parseServeFeatureFlags(argv);
     if (feature_flags.studio_enabled) {
         if (!feature_options.enable_studio) {
-            std.log.err("--studio is not available in zigttp-runtime; use the zigttp developer CLI", .{});
-            std.process.exit(1);
+            // `zigttp dev/serve --studio` is dispatched through the developer
+            // CLI, so pointing at "the developer CLI" misdirects. The actionable
+            // fix is to rebuild with -Dstudio, matching the dedicated `studio`
+            // command's wording.
+            shared.featureCompiledOut("studio", "studio");
         }
     }
     if (feature_flags.watch_enabled and !feature_options.enable_live_reload) {
@@ -523,17 +601,7 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
         .port = 3000,
     };
 
-    var i: usize = 0;
-    while (i < argv.len) : (i += 1) {
-        const arg = argv[i];
-        if (try parseCommonServeFlag(arg, &i, argv, &config)) continue;
-        if (std.mem.eql(u8, arg, "--help")) {
-            const help = "Usage: <binary> [-p PORT] [-h HOST] [-q] [--no-env-check] [--security-log FILE] [--lifecycle ephemeral|bounded|reuse] [--system FILE]\n";
-            _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
-            return;
-        }
-        // Silently ignore unknown flags for forward compatibility
-    }
+    try parseAppendedServeArgs(argv, &config, true);
 
     var server = Server.init(allocator, config) catch |err| {
         std.log.err("Failed to initialize server: {}", .{err});
@@ -549,6 +617,50 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
         reportServerError(err, config.port);
         std.process.exit(1);
     };
+}
+
+fn parseAppendedServeArgs(argv: []const []const u8, config: *ServerConfig, emit_diagnostics: bool) !void {
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (try parseCommonServeFlag(arg, &i, argv, config)) continue;
+        if (std.mem.eql(u8, arg, "--help")) {
+            if (emit_diagnostics) printAppendedHelp();
+            return error.HelpRequested;
+        }
+        if (!std.mem.startsWith(u8, arg, "-")) {
+            if (emit_diagnostics) {
+                std.debug.print("Unknown argument for self-contained binary: {s}\n\n", .{arg});
+                printAppendedHelp();
+            }
+            return error.UnknownArgument;
+        }
+        if (emit_diagnostics) {
+            std.debug.print("Unknown option for self-contained binary: {s}\n\n", .{arg});
+            printAppendedHelp();
+        }
+        return error.UnknownOption;
+    }
+}
+
+fn printAppendedHelp() void {
+    const help =
+        \\Usage: <binary> [options]
+        \\       <binary> attest
+        \\       <binary> version
+        \\       <binary> help
+        \\
+        \\Options:
+        \\  -p, --port <PORT>     Port to listen on
+        \\  -h, --host <HOST>     Host to bind to
+        \\  -q, --quiet           Disable request logging
+        \\  --no-env-check        Skip required environment checks
+        \\  --security-log <FILE> Write security decisions to FILE
+        \\  --lifecycle <MODE>    ephemeral, bounded, ttl, or reuse
+        \\  --system <FILE>       System registry for zigttp:service
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 
 fn printHelp() void {
@@ -611,6 +723,9 @@ fn printServeHelp() void {
         \\  --test <FILE>         Run declarative handler tests from JSONL file
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
         \\  --system <FILE>       System registry for zigttp:service
+        \\  --no-env-check        Skip startup env var validation
+        \\  --security-log <FILE> Append security events to a JSONL file
+        \\  --lifecycle <MODE>    Runtime lifecycle mode
         \\  --watch               Auto-reload on source change
         \\  --prove               With --watch, gate swaps on upgrade verdict
         \\  --force-swap          With --watch, apply breaking swaps anyway
@@ -663,6 +778,36 @@ test "parseCommonServeFlag: returns false for unrelated flag" {
     var i: usize = 0;
     try std.testing.expect(!try parseCommonServeFlag(argv[0], &i, &argv, &config));
     try std.testing.expectEqual(@as(usize, 0), i);
+}
+
+test "classifyAppendedInvocation dispatches metadata commands before serve" {
+    try std.testing.expectEqual(@as(std.meta.Tag(AppendedInvocation), .attest), std.meta.activeTag(classifyAppendedInvocation(&.{"attest"})));
+    try std.testing.expectEqual(@as(std.meta.Tag(AppendedInvocation), .version), std.meta.activeTag(classifyAppendedInvocation(&.{"version"})));
+    try std.testing.expectEqual(@as(std.meta.Tag(AppendedInvocation), .version), std.meta.activeTag(classifyAppendedInvocation(&.{"--version"})));
+    try std.testing.expectEqual(@as(std.meta.Tag(AppendedInvocation), .help), std.meta.activeTag(classifyAppendedInvocation(&.{"help"})));
+    try std.testing.expectEqual(@as(std.meta.Tag(AppendedInvocation), .help), std.meta.activeTag(classifyAppendedInvocation(&.{"--help"})));
+    try std.testing.expectEqual(@as(std.meta.Tag(AppendedInvocation), .serve), std.meta.activeTag(classifyAppendedInvocation(&.{})));
+    try std.testing.expectEqual(@as(std.meta.Tag(AppendedInvocation), .serve), std.meta.activeTag(classifyAppendedInvocation(&.{ "-p", "3001" })));
+
+    switch (classifyAppendedInvocation(&.{"serve"})) {
+        .unknown_positional => |arg| try std.testing.expectEqualStrings("serve", arg),
+        else => return error.ExpectedUnknownPositional,
+    }
+    switch (classifyAppendedInvocation(&.{ "attest", "extra" })) {
+        .unknown_positional => |arg| try std.testing.expectEqualStrings("extra", arg),
+        else => return error.ExpectedUnknownPositional,
+    }
+}
+
+test "serveAppended argv rejects unknown positional args" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    try std.testing.expectError(error.UnknownArgument, parseAppendedServeArgs(&.{ "-p", "3001", "extra" }, &config, false));
+    try std.testing.expectEqual(@as(u16, 3001), config.port);
+}
+
+test "serveAppended argv rejects unknown options" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    try std.testing.expectError(error.UnknownOption, parseAppendedServeArgs(&.{"--bogus"}, &config, false));
 }
 
 test "parseCommonServeFlag: missing value returns error" {

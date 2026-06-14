@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:id",
-  "source": "packages/zigts/src/modules/id.zig",
+  "source": "packages/modules/src/platform/id.zig",
   "requiredCapabilities": [
     "clock",
     "random"

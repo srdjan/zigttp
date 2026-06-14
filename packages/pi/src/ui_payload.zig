@@ -6,7 +6,7 @@ pub const DiagnosticItem = struct {
     severity: []u8,
     path: []u8,
     line: u32,
-    column: u16,
+    column: u32,
     message: []u8,
     introduced_by_patch: ?bool = null,
 
@@ -16,7 +16,7 @@ pub const DiagnosticItem = struct {
         severity: []const u8,
         path: []const u8,
         line: u32,
-        column: u16,
+        column: u32,
         message: []const u8,
         introduced_by_patch: ?bool,
     ) !DiagnosticItem {
@@ -575,7 +575,7 @@ pub const ViolationDeltaItem = struct {
     severity: []u8,
     message: []u8,
     line: u32,
-    column: u16,
+    column: u32,
     introduced_by_patch: bool,
 
     pub fn init(
@@ -585,7 +585,7 @@ pub const ViolationDeltaItem = struct {
         severity: []const u8,
         message: []const u8,
         line: u32,
-        column: u16,
+        column: u32,
         introduced_by_patch: bool,
     ) !ViolationDeltaItem {
         return .{

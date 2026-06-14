@@ -400,12 +400,14 @@ const ConnectionPool = struct {
         defer arena.deinit();
 
         var requests_on_connection: u32 = 0;
+        var pending_request_bytes: PendingRequestBytes = .{};
+        defer pending_request_bytes.deinit(self.allocator);
 
         while (true) {
-            if (requests_on_connection > 0 and !self.waitForNextRequest(fd)) break;
+            if (requests_on_connection > 0 and pending_request_bytes.bytes.len == 0 and !self.waitForNextRequest(fd)) break;
             _ = arena.reset(.retain_capacity);
             const req_allocator = arena.allocator();
-            const outcome = self.handleSingleRequestSync(fd, requests_on_connection, req_allocator) catch break;
+            const outcome = self.handleSingleRequestSync(fd, requests_on_connection, req_allocator, &pending_request_bytes) catch break;
             requests_on_connection += 1;
 
             if (outcome == .transferred) {
@@ -443,7 +445,34 @@ const ConnectionPool = struct {
     /// WebSocket frame loop) — the caller must not close it.
     const RequestOutcome = enum { keep_alive, close, transferred };
 
-    fn handleSingleRequestSync(self: *ConnectionPool, fd: std.posix.fd_t, request_num: u32, req_allocator: std.mem.Allocator) !RequestOutcome {
+    const PendingRequestBytes = struct {
+        bytes: []u8 = &.{},
+
+        fn deinit(self: *PendingRequestBytes, allocator: std.mem.Allocator) void {
+            if (self.bytes.len > 0) allocator.free(self.bytes);
+            self.bytes = &.{};
+        }
+
+        fn take(self: *PendingRequestBytes) []u8 {
+            const bytes = self.bytes;
+            self.bytes = &.{};
+            return bytes;
+        }
+
+        fn replace(self: *PendingRequestBytes, allocator: std.mem.Allocator, bytes: []const u8) !void {
+            self.deinit(allocator);
+            if (bytes.len == 0) return;
+            self.bytes = try allocator.dupe(u8, bytes);
+        }
+    };
+
+    fn handleSingleRequestSync(
+        self: *ConnectionPool,
+        fd: std.posix.fd_t,
+        request_num: u32,
+        req_allocator: std.mem.Allocator,
+        pending: *PendingRequestBytes,
+    ) !RequestOutcome {
         _ = request_num;
 
         // Hold a shared lock across the request so the live-reload watcher's
@@ -455,7 +484,7 @@ const ConnectionPool = struct {
         if (guard_contract) self.server.contract_lock.lockShared();
         defer if (guard_contract) self.server.contract_lock.unlockShared();
 
-        const request_data = self.readRequestData(fd, req_allocator) catch |err| {
+        const request_data = self.readRequestData(fd, req_allocator, pending) catch |err| {
             if (err == error.EndOfStream or err == error.ConnectionResetByPeer or err == error.WouldBlock) return .close;
             if (err == error.UnsupportedTransferEncoding) {
                 self.sendErrorSync(fd, 501, "Not Implemented") catch {};
@@ -655,118 +684,88 @@ const ConnectionPool = struct {
         return if (keep_alive) .keep_alive else .close;
     }
 
-    fn readRequestData(self: *ConnectionPool, fd: std.posix.fd_t, allocator: std.mem.Allocator) ![]u8 {
-        // OPTIMIZATION: Use stack buffer for common case (small requests)
-        // Most HTTP requests are under 8KB - avoid heap allocation entirely
-        // 16KB stack buffer handles headers + typical small bodies in single read
-        var stack_buf: [16384]u8 = undefined;
-        var stack_len: usize = 0;
+    fn readRequestData(
+        self: *ConnectionPool,
+        fd: std.posix.fd_t,
+        allocator: std.mem.Allocator,
+        pending: *PendingRequestBytes,
+    ) ![]u8 {
+        var data: std.ArrayList(u8) = .empty;
+        defer data.deinit(allocator);
 
-        // For requests larger than stack buffer, fall back to heap
-        var heap_buf: ?[]u8 = null;
-        errdefer if (heap_buf) |h| allocator.free(h);
-
-        const max_header_bytes: usize = 32 * 1024;
-        var header_end: ?usize = null;
-        var content_length: usize = 0;
-        var total_needed: usize = 0;
-        var is_chunked = false;
-
-        while (true) {
-            // Read directly into appropriate buffer
-            const read_buf = if (heap_buf) |h|
-                h[stack_len..]
-            else if (stack_len < stack_buf.len)
-                stack_buf[stack_len..]
-            else {
-                // Need to switch to heap - allocate and copy
-                const new_size = @max(stack_buf.len * 2, total_needed);
-                heap_buf = try allocator.alloc(u8, new_size);
-                @memcpy(heap_buf.?[0..stack_len], stack_buf[0..stack_len]);
-                continue;
-            };
-
-            if (read_buf.len == 0) {
-                // Need more space - grow heap buffer
-                const old = heap_buf.?;
-                const new_size = old.len * 2;
-                heap_buf = try allocator.alloc(u8, new_size);
-                @memcpy(heap_buf.?[0..stack_len], old[0..stack_len]);
-                allocator.free(old);
-                continue;
+        const pending_bytes = pending.take();
+        defer if (pending_bytes.len > 0) self.allocator.free(pending_bytes);
+        if (pending_bytes.len > 0) {
+            try data.appendSlice(allocator, pending_bytes);
+            if (try self.completeRequestLength(data.items)) |request_len| {
+                return try self.splitRequestAndPending(allocator, pending, data.items, request_len);
             }
+        }
 
-            const n = std.posix.read(fd, read_buf) catch |err| {
+        var read_buf: [16 * 1024]u8 = undefined;
+        while (true) {
+            const n = std.posix.read(fd, &read_buf) catch |err| {
                 if (err == error.ConnectionResetByPeer or err == error.WouldBlock) return err;
                 return err;
             };
             if (n == 0) return error.EndOfStream;
-            stack_len += n;
+            try data.appendSlice(allocator, read_buf[0..n]);
 
-            const current_data = if (heap_buf) |h| h[0..stack_len] else stack_buf[0..stack_len];
-
-            if (header_end == null) {
-                if (findHeaderEnd(current_data)) |offset| {
-                    header_end = offset;
-                    const body_start = offset + 4;
-                    const content_length_opt = try parseContentLength(current_data[0..offset]);
-                    is_chunked = http_parser.hasTransferEncodingChunked(current_data[0..offset]);
-                    if (is_chunked and content_length_opt != null) return error.InvalidRequest;
-                    content_length = content_length_opt orelse 0;
-                    if (content_length > self.server.config.max_body_size) {
-                        return error.FileTooBig;
-                    }
-                    if (is_chunked) {
-                        if (try http_parser.chunkedBodyConsumed(
-                            current_data[body_start..],
-                            self.server.config.max_body_size,
-                        )) |encoded_len| {
-                            total_needed = body_start + encoded_len;
-                        }
-                    } else {
-                        total_needed = body_start + content_length;
-                    }
-
-                    // Pre-allocate heap if we know we need it
-                    if (total_needed > stack_buf.len and heap_buf == null) {
-                        heap_buf = try allocator.alloc(u8, total_needed);
-                        @memcpy(heap_buf.?[0..stack_len], stack_buf[0..stack_len]);
-                    }
-
-                    if (total_needed > 0 and stack_len >= total_needed) break;
-                } else if (stack_len > max_header_bytes) {
-                    return error.InvalidRequest;
-                }
-            } else if (is_chunked) {
-                const body_start = header_end.? + 4;
-                if (try http_parser.chunkedBodyConsumed(
-                    current_data[body_start..],
-                    self.server.config.max_body_size,
-                )) |encoded_len| {
-                    total_needed = body_start + encoded_len;
-                    break;
-                }
-            } else if (stack_len >= total_needed) {
-                break;
+            if (try self.completeRequestLength(data.items)) |request_len| {
+                return try self.splitRequestAndPending(allocator, pending, data.items, request_len);
             }
         }
+    }
 
-        // Return data - copy from stack to heap if needed
-        if (heap_buf) |h| {
-            // Shrink to exact size if needed
-            if (stack_len < h.len) {
-                const result = try allocator.alloc(u8, stack_len);
-                @memcpy(result, h[0..stack_len]);
-                allocator.free(h);
-                return result;
-            }
-            return h[0..stack_len];
-        } else {
-            // Copy from stack to heap (caller owns the memory)
-            const result = try allocator.alloc(u8, stack_len);
-            @memcpy(result, stack_buf[0..stack_len]);
-            return result;
+    fn splitRequestAndPending(
+        self: *ConnectionPool,
+        allocator: std.mem.Allocator,
+        pending: *PendingRequestBytes,
+        data: []const u8,
+        request_len: usize,
+    ) ![]u8 {
+        if (request_len > data.len) return error.IncompleteBody;
+        try pending.replace(self.allocator, data[request_len..]);
+        return try allocator.dupe(u8, data[0..request_len]);
+    }
+
+    fn completeRequestLength(self: *ConnectionPool, data: []const u8) !?usize {
+        const max_header_bytes: usize = 32 * 1024;
+        const header_end = findHeaderEnd(data) orelse {
+            if (data.len > max_header_bytes) return error.InvalidRequest;
+            return null;
+        };
+
+        const body_start = header_end + 4;
+        const header_section = data[0..header_end];
+        const content_length_opt = try parseContentLength(header_section);
+        const is_chunked = http_parser.hasTransferEncodingChunked(header_section);
+        if (is_chunked and content_length_opt != null) return error.InvalidRequest;
+
+        if (is_chunked) {
+            const encoded_len = (try http_parser.chunkedBodyConsumed(
+                data[body_start..],
+                self.server.config.max_body_size,
+            )) orelse {
+                const encoded_so_far = if (body_start <= data.len) data.len - body_start else 0;
+                if (encoded_so_far > maxChunkedEncodedBodyBytes(self.server.config.max_body_size)) {
+                    return error.FileTooBig;
+                }
+                return null;
+            };
+            return body_start + encoded_len;
         }
+
+        const content_length = content_length_opt orelse 0;
+        if (content_length > self.server.config.max_body_size) return error.FileTooBig;
+        const total_needed = body_start + content_length;
+        if (data.len < total_needed) return null;
+        return total_needed;
+    }
+
+    fn maxChunkedEncodedBodyBytes(max_body_size: usize) usize {
+        const overhead = @max(max_body_size, 64 * 1024);
+        return std.math.add(usize, max_body_size, overhead) catch std.math.maxInt(usize);
     }
 
     fn sendResponseSync(self: *ConnectionPool, fd: std.posix.fd_t, response: *HttpResponse, keep_alive: bool) !void {
@@ -861,7 +860,16 @@ const ConnectionPool = struct {
 
         switch (upgrade_outcome) {
             .ok => |id| {
-                try writeAllFd(fd, buf.items);
+                // ws_gateway.upgrade registered the connection in the pool
+                // before the 101 handshake bytes hit the real fd. If the write
+                // fails (slow / half-open client with SO_SNDTIMEO), unregister
+                // so the Connection struct, room dup, and map/room entries are
+                // not leaked, mirroring the spawnFrameLoop failure path below.
+                writeAllFd(fd, buf.items) catch |err| {
+                    std.log.warn("ws upgrade handshake write failed: {}", .{err});
+                    pool.unregister(id);
+                    return .close;
+                };
                 self.spawnFrameLoop(pool, fd, id) catch |err| {
                     std.log.warn("ws frame-loop spawn failed: {}", .{err});
                     pool.unregister(id);
@@ -2452,11 +2460,15 @@ test "threaded readRequestData handles partial headers" {
     try writeAllFd(fds[1], "Content-Length: 5\r\n\r\nhello");
     std.Io.Threaded.closeFd(fds[1]);
 
-    const data = try pool.readRequestData(fds[0], allocator);
+    var pending: ConnectionPool.PendingRequestBytes = .{};
+    defer pending.deinit(pool.allocator);
+
+    const data = try pool.readRequestData(fds[0], allocator, &pending);
     var request = try server.parseRequestFromBuffer(allocator, data);
     defer request.deinit(allocator);
     try std.testing.expect(request.body != null);
     try std.testing.expectEqualStrings("hello", request.body.?);
+    try std.testing.expectEqual(@as(usize, 0), pending.bytes.len);
 }
 
 test "threaded readRequestData handles chunked body across reads" {
@@ -2482,11 +2494,58 @@ test "threaded readRequestData handles chunked body across reads" {
     try writeAllFd(fds[1], "lo\r\n6\r\n world\r\n0\r\n\r\n");
     std.Io.Threaded.closeFd(fds[1]);
 
-    const data = try pool.readRequestData(fds[0], allocator);
+    var pending: ConnectionPool.PendingRequestBytes = .{};
+    defer pending.deinit(pool.allocator);
+
+    const data = try pool.readRequestData(fds[0], allocator, &pending);
     var request = try server.parseRequestFromBuffer(allocator, data);
     defer request.deinit(allocator);
     try std.testing.expect(request.body != null);
     try std.testing.expectEqualStrings("hello world", request.body.?);
+    try std.testing.expectEqual(@as(usize, 0), pending.bytes.len);
+}
+
+test "threaded readRequestData preserves pipelined bytes for the next request" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &server,
+        .allocator = std.testing.allocator,
+    };
+
+    const fds = try createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    const first = "GET /first HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    const second = "GET /second HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    var pending: ConnectionPool.PendingRequestBytes = .{};
+    defer pending.deinit(pool.allocator);
+    try pending.replace(pool.allocator, first ++ second);
+
+    const first_data = try pool.readRequestData(fds[0], allocator, &pending);
+    try std.testing.expectEqualStrings(first, first_data);
+    try std.testing.expectEqualStrings(second, pending.bytes);
+    var first_request = try server.parseRequestFromBuffer(allocator, first_data);
+    try std.testing.expectEqualStrings("/first", first_request.path);
+    first_request.deinit(allocator);
+
+    _ = arena.reset(.retain_capacity);
+    allocator = arena.allocator();
+    const second_data = try pool.readRequestData(fds[0], allocator, &pending);
+    try std.testing.expectEqualStrings(second, second_data);
+    try std.testing.expectEqual(@as(usize, 0), pending.bytes.len);
+    var second_request = try server.parseRequestFromBuffer(allocator, second_data);
+    defer second_request.deinit(allocator);
+    try std.testing.expectEqualStrings("/second", second_request.path);
 }
 
 test "threaded handleSingleRequestSync returns 413 for oversized body" {
@@ -2513,7 +2572,10 @@ test "threaded handleSingleRequestSync returns 413 for oversized body" {
     // readRequestData rejects on the header value alone.
     try writeAllFd(fds[1], "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5000\r\n\r\n");
 
-    const outcome = try pool.handleSingleRequestSync(fds[0], 0, allocator);
+    var pending: ConnectionPool.PendingRequestBytes = .{};
+    defer pending.deinit(pool.allocator);
+
+    const outcome = try pool.handleSingleRequestSync(fds[0], 0, allocator, &pending);
     try std.testing.expectEqual(ConnectionPool.RequestOutcome.close, outcome);
 
     // The oversized request gets a real 413 response, not a silent connection drop.

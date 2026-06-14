@@ -84,6 +84,10 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     if (args.len < 2) return sdk.resultErr(handle, "missing arguments");
     const token_str = sdk.extractString(args[0]) orelse return sdk.resultErr(handle, "token must be a string");
     const secret = sdk.extractString(args[1]) orelse return sdk.resultErr(handle, "secret must be a string");
+    if (args.len >= 3) {
+        const alg = sdk.extractString(args[2]) orelse return sdk.resultErr(handle, "unsupported alg");
+        validateCallerAlgorithm(alg) catch return sdk.resultErr(handle, "unsupported alg");
+    }
 
     const first_dot = std.mem.indexOfScalar(u8, token_str, '.') orelse
         return sdk.resultErr(handle, "invalid token format");
@@ -143,7 +147,7 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     if (sdk.objectGet(handle, claims_val, "exp")) |exp_val| {
         const exp_f = sdk.extractFloat(exp_val) orelse return sdk.resultErr(handle, "invalid exp claim");
         if (!std.math.isFinite(exp_f)) return sdk.resultErr(handle, "invalid exp claim");
-        if (now > std.math.lossyCast(i64, exp_f)) return sdk.resultErr(handle, "token expired");
+        if (isExpired(now, std.math.lossyCast(i64, exp_f))) return sdk.resultErr(handle, "token expired");
     }
     if (sdk.objectGet(handle, claims_val, "nbf")) |nbf_val| {
         const nbf_f = sdk.extractFloat(nbf_val) orelse return sdk.resultErr(handle, "invalid nbf claim");
@@ -155,6 +159,14 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
 }
 
 const HEADER_HS256_B64 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+
+fn validateCallerAlgorithm(alg: []const u8) error{UnsupportedAlg}!void {
+    if (!std.mem.eql(u8, alg, "HS256")) return error.UnsupportedAlg;
+}
+
+fn isExpired(now: i64, exp: i64) bool {
+    return now >= exp;
+}
 
 fn jwtSignImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
     if (args.len < 2) return sdk.JSValue.undefined_val;
@@ -367,6 +379,19 @@ test "checkedJoinLen rejects overflow" {
     try testing.expectEqual(@as(?usize, 6), checkedJoinLen(1, 2, 3));
     try testing.expect(checkedJoinLen(std.math.maxInt(usize), 1, 0) == null);
     try testing.expect(checkedJoinLen(std.math.maxInt(usize) - 1, 1, 1) == null);
+}
+
+test "validateCallerAlgorithm accepts only HS256" {
+    try validateCallerAlgorithm("HS256");
+    try testing.expectError(error.UnsupportedAlg, validateCallerAlgorithm("HS512"));
+    try testing.expectError(error.UnsupportedAlg, validateCallerAlgorithm("none"));
+    try testing.expectError(error.UnsupportedAlg, validateCallerAlgorithm("hs256"));
+}
+
+test "isExpired rejects tokens at exp boundary" {
+    try testing.expect(!isExpired(99, 100));
+    try testing.expect(isExpired(100, 100));
+    try testing.expect(isExpired(101, 100));
 }
 
 test "decodeBase64url tolerates trailing `=` padding the encoder never emits" {

@@ -270,6 +270,33 @@ pub const TypePool = struct {
     pub fn addIntersection(self: *TypePool, allocator: std.mem.Allocator, intersection_members: []const TypeIndex) TypeIndex {
         if (intersection_members.len == 0) return null_type_idx;
 
+        // When the input has more distinct members than the dedup buffer can
+        // hold, skip dedup and append the raw (non-null-filtered) members so no
+        // obligation is silently dropped. A dropped target-intersection member is
+        // a dropped constraint -> unsound accept in isAssignableTo.
+        if (intersection_members.len > 16) {
+            var raw_count: usize = 0;
+            const start_raw: u16 = @intCast(self.members.items.len);
+            for (intersection_members) |m| {
+                if (m == null_type_idx) continue;
+                self.members.append(allocator, m) catch return null_type_idx;
+                raw_count += 1;
+            }
+            if (raw_count == 0) {
+                self.members.shrinkRetainingCapacity(start_raw);
+                return null_type_idx;
+            }
+            if (raw_count == 1) {
+                const only = self.members.items[start_raw];
+                self.members.shrinkRetainingCapacity(start_raw);
+                return only;
+            }
+            return self.addNode(allocator, .{
+                .tag = .t_intersection,
+                .data = .{ .a = start_raw, .b = @intCast(raw_count) },
+            });
+        }
+
         var deduped: [16]TypeIndex = undefined;
         var count: usize = 0;
         for (intersection_members) |m| {
@@ -453,6 +480,22 @@ pub const TypePool = struct {
                 const new_inner = self.instantiate(allocator, inner, param_names, param_types, depth + 1);
                 if (new_inner == inner) return idx;
                 return self.addNullable(allocator, new_inner);
+            },
+            .t_generic_app => {
+                // Copy args before the loop (shared members list may realloc on
+                // a nested instantiate -> addGenericApp/addArray).
+                const info = self.getGenericAppInfo(idx);
+                var args: [16]TypeIndex = undefined;
+                const count = @min(info.args.len, 16);
+                @memcpy(args[0..count], info.args[0..count]);
+                var new_args: [16]TypeIndex = undefined;
+                var changed = false;
+                for (args[0..count], 0..) |a, i| {
+                    new_args[i] = self.instantiate(allocator, a, param_names, param_types, depth + 1);
+                    if (new_args[i] != a) changed = true;
+                }
+                if (!changed) return idx;
+                return self.addGenericApp(allocator, info.base, new_args[0..count]);
             },
             else => return idx,
         }
@@ -780,9 +823,20 @@ pub const TypePool = struct {
 
     /// Create a function type with params and return type.
     pub fn addFunctionWithReturn(self: *TypePool, allocator: std.mem.Allocator, func_params: []const FuncParam, ret: TypeIndex) TypeIndex {
-        const param_start: u16 = @intCast(@min(self.params.items.len, 0x0FFF));
-        // Count capped at 15 (4 bits); realistic handlers never exceed this.
-        const count: u16 = @intCast(@min(func_params.len, 15));
+        // param_start (12 bits) and count (4 bits) are packed into data.a. If the
+        // shared params list has grown past 0x0FFF, a clamped param_start would
+        // mis-slice into another function's params, and a count > 15 would be
+        // truncated. In either case record the function with no params rather
+        // than returning a wrong slice; getFunctionInfo then yields an empty,
+        // never-misattributed param list.
+        if (self.params.items.len > 0x0FFF or func_params.len > 15) {
+            return self.addNode(allocator, .{
+                .tag = .t_function,
+                .data = .{ .a = 0, .b = ret },
+            });
+        }
+        const param_start: u16 = @intCast(self.params.items.len);
+        const count: u16 = @intCast(func_params.len);
         self.params.appendSlice(allocator, func_params) catch return null_type_idx;
         return self.addNode(allocator, .{
             .tag = .t_function,
@@ -872,6 +926,20 @@ pub const TypePool = struct {
                     const tgt_elems = self.getTupleElements(target);
                     if (src_elems.len != tgt_elems.len) break :blk false;
                     for (src_elems, tgt_elems) |s, t| {
+                        if (!self.isAssignableTo(s, t)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .t_generic_app => blk: {
+                    // Two unresolved generic applications are assignable when they
+                    // share a base ref name and their type arguments are pairwise
+                    // assignable. Avoids spuriously rejecting `Foo<number>` vs an
+                    // identically-structured `Foo<number>` from another node.
+                    const src_info = self.getGenericAppInfo(source);
+                    const tgt_info = self.getGenericAppInfo(target);
+                    if (!std.mem.eql(u8, self.getRefName(src_info.base), self.getRefName(tgt_info.base))) break :blk false;
+                    if (src_info.args.len != tgt_info.args.len) break :blk false;
+                    for (src_info.args, tgt_info.args) |s, t| {
                         if (!self.isAssignableTo(s, t)) break :blk false;
                     }
                     break :blk true;
@@ -1596,19 +1664,38 @@ const TypeExprParser = struct {
         return self.pool.addTemplateLiteral(self.allocator, parts_buf[0..count]);
     }
 
+    /// Consume any trailing `[]` array suffixes (`number[]`, `T[][]`) and wrap
+    /// `base` in an array type for each one.
+    fn maybeArrayWrap(self: *TypeExprParser, base: TypeIndex) TypeIndex {
+        var result = base;
+        while (true) {
+            self.skipWs();
+            if (self.pos + 1 < self.source.len and self.source[self.pos] == '[' and self.source[self.pos + 1] == ']') {
+                self.pos += 2;
+                result = self.pool.addArray(self.allocator, result);
+            } else {
+                break;
+            }
+        }
+        return result;
+    }
+
     fn resolveIdentType(self: *TypeExprParser, ident: []const u8) TypeIndex {
-        // Check primitives
-        if (std.mem.eql(u8, ident, "boolean") or std.mem.eql(u8, ident, "bool")) return self.pool.idx_boolean;
-        if (std.mem.eql(u8, ident, "number")) return self.pool.idx_number;
-        if (std.mem.eql(u8, ident, "string")) return self.pool.idx_string;
+        // Check primitives. Each resolves to a primitive index; the trailing
+        // `[]` suffix (if any) is applied uniformly via maybeArrayWrap so that
+        // `number[]`, `string[]`, etc. produce an array type rather than dropping
+        // the suffix.
+        if (std.mem.eql(u8, ident, "boolean") or std.mem.eql(u8, ident, "bool")) return self.maybeArrayWrap(self.pool.idx_boolean);
+        if (std.mem.eql(u8, ident, "number")) return self.maybeArrayWrap(self.pool.idx_number);
+        if (std.mem.eql(u8, ident, "string")) return self.maybeArrayWrap(self.pool.idx_string);
         // 'null' type not supported - treat as unknown (parser rejects null literals)
-        if (std.mem.eql(u8, ident, "null")) return self.pool.idx_unknown;
-        if (std.mem.eql(u8, ident, "undefined")) return self.pool.idx_undefined;
-        if (std.mem.eql(u8, ident, "void")) return self.pool.idx_void;
-        if (std.mem.eql(u8, ident, "never")) return self.pool.idx_never;
-        if (std.mem.eql(u8, ident, "unknown")) return self.pool.idx_unknown;
-        if (std.mem.eql(u8, ident, "true")) return self.pool.addLiteralBool(self.allocator, true);
-        if (std.mem.eql(u8, ident, "false")) return self.pool.addLiteralBool(self.allocator, false);
+        if (std.mem.eql(u8, ident, "null")) return self.maybeArrayWrap(self.pool.idx_unknown);
+        if (std.mem.eql(u8, ident, "undefined")) return self.maybeArrayWrap(self.pool.idx_undefined);
+        if (std.mem.eql(u8, ident, "void")) return self.maybeArrayWrap(self.pool.idx_void);
+        if (std.mem.eql(u8, ident, "never")) return self.maybeArrayWrap(self.pool.idx_never);
+        if (std.mem.eql(u8, ident, "unknown")) return self.maybeArrayWrap(self.pool.idx_unknown);
+        if (std.mem.eql(u8, ident, "true")) return self.maybeArrayWrap(self.pool.addLiteralBool(self.allocator, true));
+        if (std.mem.eql(u8, ident, "false")) return self.maybeArrayWrap(self.pool.addLiteralBool(self.allocator, false));
 
         // Check for array suffix: T[]
         self.skipWs();

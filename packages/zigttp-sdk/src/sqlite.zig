@@ -55,14 +55,14 @@ pub fn allowsSqlQuery(handle: *ModuleHandle, name: []const u8) bool {
 }
 
 /// Ask the capability policy whether a write SQL exec for `name` is
-/// permitted (action `db.write`). Phase 1 shares the backing allowlist with
-/// `allowsSqlQuery` but emits a generic `policy_denied` event on deny.
+/// permitted (action `db.write`).
 pub fn allowsSqlWrite(handle: *ModuleHandle, name: []const u8) bool {
     return zigttpSdkAllowsSqlWrite(handle, name.ptr, name.len);
 }
 
-/// Open a SQLite database through the capability-check path. Requires
-/// the `.sqlite` capability to be declared on the module binding.
+/// Open a SQLite database through the capability-check path. Requires the
+/// `.sqlite` capability to be declared on the module binding and the canonical
+/// database path to be preallowed by the runtime's SDK SQLite allowlist.
 pub fn sqliteOpen(handle: *ModuleHandle, path: []const u8) SqliteError!*SqliteDb {
     try capability.requireCapability(handle, .sqlite);
     var out: *SqliteDb = undefined;

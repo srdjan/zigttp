@@ -24,7 +24,7 @@ pub const Diagnostic = struct {
     severity: []u8,
     file: []u8,
     line: u32,
-    column: u16,
+    column: u32,
     message: []u8,
     suggestion: ?[]u8,
 

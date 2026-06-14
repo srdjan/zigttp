@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "specifier": "zigttp:scope",
-  "source": "packages/zigts/src/modules/scope.zig",
+  "source": "packages/zigts/src/modules/workflow/scope.zig",
   "requiredCapabilities": [
     "runtime_callback"
   ],

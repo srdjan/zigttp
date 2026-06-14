@@ -147,14 +147,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
 
-    // Commands that hit a model backend or read handler env get the
-    // stored provider keys injected before dispatch, so users do not
-    // have to `export ANTHROPIC_API_KEY=...` in their shell. Shell
-    // values always win; injection only fills gaps.
-    if (std.mem.eql(u8, command, "dev") or
-        std.mem.eql(u8, command, "serve") or
-        std.mem.eql(u8, command, "expert"))
-    {
+    // Stored provider keys are for the expert agent only. Handler execution
+    // paths (`dev`/`serve`) must see the caller's explicit environment.
+    if (commandInjectsStoredProviders(command)) {
         cli_auth.injectStoredProvidersIntoEnv(allocator);
     }
 
@@ -428,7 +423,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 printNoProjectConfigDiagnostic(command);
                 std.process.exit(1);
             }
-            if (err == error.UnknownOption) {
+            if (err == error.MissingArgument or err == error.InvalidArgument or err == error.UnknownOption) {
                 std.process.exit(1);
             }
             // buildArtifact already printed a remediation line for each
@@ -507,6 +502,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.process.exit(1);
 }
 
+fn commandInjectsStoredProviders(command: []const u8) bool {
+    return std.mem.eql(u8, command, "expert");
+}
+
 test "hasLongHelpFlag preserves -h for host flags" {
     try std.testing.expect(hasLongHelpFlag(&.{"--help"}));
     try std.testing.expect(hasLongHelpFlag(&.{"help"}));
@@ -518,12 +517,22 @@ test "deployArgsRequestCloud requires explicit opt-in and reports the triggering
     try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{}));
     try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{"--local"}));
     try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{ "--target", "local" }));
+    try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{"--target=local"}));
+    try std.testing.expectEqual(@as(?[]const u8, null), deployArgsRequestCloud(&.{ "--target", "prod" }));
 
     try std.testing.expectEqualStrings("--cloud", deployArgsRequestCloud(&.{"--cloud"}).?);
     try std.testing.expectEqualStrings("--region", deployArgsRequestCloud(&.{ "--region", "us-east" }).?);
     try std.testing.expectEqualStrings("--confirm", deployArgsRequestCloud(&.{"--confirm"}).?);
     try std.testing.expectEqualStrings("--wait", deployArgsRequestCloud(&.{"--wait"}).?);
     try std.testing.expectEqualStrings("--no-wait", deployArgsRequestCloud(&.{"--no-wait"}).?);
+}
+
+test "stored provider injection is limited to expert direct dispatch" {
+    try std.testing.expect(commandInjectsStoredProviders("expert"));
+    try std.testing.expect(!commandInjectsStoredProviders("dev"));
+    try std.testing.expect(!commandInjectsStoredProviders("serve"));
+    try std.testing.expect(!commandInjectsStoredProviders("init"));
+    try std.testing.expect(!commandInjectsStoredProviders("doctor"));
 }
 
 test "resolveDeveloperServeBinary re-enters developer CLI for studio and dev" {

@@ -212,6 +212,27 @@ pub const ModuleStateEntry = struct {
     deinit_fn: *const fn (*anyopaque, std.mem.Allocator) void,
 };
 
+pub const SdkPathAllowList = struct {
+    values: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    pub fn deinit(self: *SdkPathAllowList, allocator: std.mem.Allocator) void {
+        for (self.values.items) |item| allocator.free(item);
+        self.values.deinit(allocator);
+    }
+
+    pub fn appendUnique(self: *SdkPathAllowList, allocator: std.mem.Allocator, canonical_path: []const u8) !void {
+        if (self.contains(canonical_path)) return;
+        try self.values.append(allocator, try allocator.dupe(u8, canonical_path));
+    }
+
+    pub fn contains(self: *const SdkPathAllowList, canonical_path: []const u8) bool {
+        for (self.values.items) |item| {
+            if (std.mem.eql(u8, item, canonical_path)) return true;
+        }
+        return false;
+    }
+};
+
 /// JavaScript execution context
 pub const Context = struct {
     /// Allocator for context-owned memory
@@ -307,6 +328,10 @@ pub const Context = struct {
     module_state: [MAX_MODULE_STATE_SLOTS]?ModuleStateEntry,
     /// Embedded capability policy for precompiled handlers.
     capability_policy: handler_policy.RuntimePolicy,
+    /// Canonical filesystem paths that SDK modules may read. Empty means deny.
+    sdk_file_allowlist: SdkPathAllowList,
+    /// Canonical SQLite database paths that SDK modules may open. Empty means deny.
+    sdk_sqlite_allowlist: SdkPathAllowList,
     /// Cooperative per-request interrupt. Self-set by the deadline check at loop
     /// back-edges; may be set by any thread (atomic) for forced aborts.
     interrupt_requested: std.atomic.Value(bool),
@@ -380,6 +405,8 @@ pub const Context = struct {
             .literal_shapes = .empty,
             .module_state = .{null} ** MAX_MODULE_STATE_SLOTS,
             .capability_policy = .{},
+            .sdk_file_allowlist = .{},
+            .sdk_sqlite_allowlist = .{},
             .interrupt_requested = std.atomic.Value(bool).init(false),
             .deadline_ns = 0,
         };
@@ -387,6 +414,8 @@ pub const Context = struct {
             ctx.literal_shapes.deinit(allocator);
             ctx.bytecode_functions.deinit(allocator);
             ctx.builtin_objects.deinit(allocator);
+            ctx.sdk_sqlite_allowlist.deinit(allocator);
+            ctx.sdk_file_allowlist.deinit(allocator);
             ctx.render_writer.deinit();
             ctx.json_writer.deinit();
             ctx.atoms.deinit();
@@ -1032,6 +1061,9 @@ pub const Context = struct {
             self.allocator.destroy(ca);
         }
 
+        self.sdk_sqlite_allowlist.deinit(self.allocator);
+        self.sdk_file_allowlist.deinit(self.allocator);
+
         // Clean up object literal shapes
         self.literal_shapes.deinit(self.allocator);
 
@@ -1054,6 +1086,22 @@ pub const Context = struct {
     pub fn setModuleState(self: *Context, slot: usize, ptr: *anyopaque, deinit_fn: *const fn (*anyopaque, std.mem.Allocator) void) void {
         if (slot >= MAX_MODULE_STATE_SLOTS) return;
         self.module_state[slot] = .{ .ptr = ptr, .deinit_fn = deinit_fn };
+    }
+
+    pub fn allowSdkFilePathCanonical(self: *Context, canonical_path: []const u8) !void {
+        try self.sdk_file_allowlist.appendUnique(self.allocator, canonical_path);
+    }
+
+    pub fn allowSdkSqlitePathCanonical(self: *Context, canonical_path: []const u8) !void {
+        try self.sdk_sqlite_allowlist.appendUnique(self.allocator, canonical_path);
+    }
+
+    pub fn allowsSdkFilePathCanonical(self: *const Context, canonical_path: []const u8) bool {
+        return self.sdk_file_allowlist.contains(canonical_path);
+    }
+
+    pub fn allowsSdkSqlitePathCanonical(self: *const Context, canonical_path: []const u8) bool {
+        return self.sdk_sqlite_allowlist.contains(canonical_path);
     }
 
     // ========================================================================
@@ -1172,7 +1220,8 @@ pub const Context = struct {
     }
 
     /// JIT helper: write a precomputed slot index for object literal initialization.
-    /// Used as the overflow fallback for `set_slot` when the slot is not inline.
+    /// Used for all `set_slot` stores (inline and overflow) so the GC write
+    /// barrier in setSlotBarriered always fires; a raw inline store would bypass it.
     pub fn jitSetSlot(self: *Context, obj_val: value.JSValue, slot_idx: u16, val: value.JSValue) callconv(.c) value.JSValue {
         // See jitPutGlobal: skip the store while a fault is pending.
         if (self.hasException()) return value.JSValue.exception_val;

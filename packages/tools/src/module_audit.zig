@@ -52,7 +52,7 @@ pub const OwnedDiagnostic = struct {
         message: []const u8,
         file: []const u8,
         line: u32,
-        column: u16,
+        column: u32,
         suggestion: ?[]const u8,
     ) !OwnedDiagnostic {
         const owned_message = try allocator.dupe(u8, message);
@@ -464,7 +464,7 @@ fn appendDiagnostic(
     message: []const u8,
     file: []const u8,
     line: u32,
-    column: u16,
+    column: u32,
     suggestion: ?[]const u8,
 ) !void {
     try diagnostics.append(allocator, try OwnedDiagnostic.initOwned(

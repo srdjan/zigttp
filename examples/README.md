@@ -1,6 +1,6 @@
 # Examples
 
-Handler files grouped by what they demonstrate. The compiler treats every example as a complete program: parse, contract, verify, then run. Each `.test.jsonl` file beside a handler is replayable through `zigttp mock` or `zigts check --test-file`.
+Handler files grouped by what they demonstrate. The compiler treats every example as a complete program: parse, contract, verify, then run. Each `.test.jsonl` file beside a handler is replayable through `zigttp mock`; build-time replay uses `zig build -Dhandler=<handler> -Dtest-file=<tests>`.
 
 ## Start here
 
@@ -69,9 +69,9 @@ with an explicit outbound host allow-list.
 ## Running an example
 
 ```bash
-zig build run -- examples/handler/spec-guardrails.ts -p 3000        # serve
-zig build run -- examples/handler/spec-guardrails.ts --watch --prove # proven live reload
-zigts check examples/handler/spec-guardrails.ts                     # verify once
+zig build run -- examples/handler/spec-guardrails.ts -p 3000             # serve
+zig build cli -- serve examples/handler/spec-guardrails.ts -p 3000 --watch --prove
+zigts check examples/handler/spec-guardrails.ts                          # verify once
 ```
 
 ### A note on `zigttp check` and these examples

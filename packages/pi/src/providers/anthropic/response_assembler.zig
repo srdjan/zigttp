@@ -11,7 +11,13 @@ const events = @import("events.zig");
 pub const AssembleError = error{
     Empty,
     ApiError,
+    TooManyBlocks,
 };
+
+/// Upper bound on content-block index. A single assistant message has at most a
+/// handful of content blocks; reject a malformed/hostile `index` before using
+/// it as an allocation length so it cannot drive a multi-GB resize.
+const MAX_BLOCK_INDEX: u32 = 1024;
 
 pub const Outcome = struct {
     reply: turn.AssistantReply,
@@ -140,6 +146,7 @@ fn ensureBlockCapacity(
     blocks: *std.ArrayListUnmanaged(BlockState),
     index: u32,
 ) !void {
+    if (index > MAX_BLOCK_INDEX) return AssembleError.TooManyBlocks;
     if (index < blocks.items.len) return;
     const new_len: usize = index + 1;
     const old_len = blocks.items.len;
