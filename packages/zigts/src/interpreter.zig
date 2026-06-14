@@ -2735,9 +2735,8 @@ test "Interpreter modulo INT_MIN % -1 does not panic" {
     // push_const uses a 2-byte little-endian index into the constants slice.
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_const), 0x00, 0x00, // constants[0] = minInt(i32)
-        @intFromEnum(bytecode.Opcode.push_i8),   0xFF,        // -1 (sign-extended)
-        @intFromEnum(bytecode.Opcode.mod),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.push_i8), 0xFF, // -1 (sign-extended)
+        @intFromEnum(bytecode.Opcode.mod),     @intFromEnum(bytecode.Opcode.ret),
     };
     const consts = [_]value.JSValue{value.JSValue.fromInt(std.math.minInt(i32))};
 

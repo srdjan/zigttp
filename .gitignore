@@ -2,6 +2,8 @@
 zig-out/
 zig-pkg/
 .DS_Store
+*.tmp
+*.o
 
 # Claude Code harness worktrees
 .claude/
@@ -31,6 +33,7 @@ test_mmap
 test_mmap2
 test_mprotect
 test_prot
+test_rand
 test_time
 build_link.log
 

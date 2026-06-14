@@ -686,7 +686,10 @@ pub fn build(b: *std.Build) void {
     const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
     const zruntime_test_step = b.step("test-zruntime", "Run ZRuntime unit tests");
     zruntime_test_step.dependOn(&run_zruntime_tests.step);
-    test_step.dependOn(&run_zruntime_tests.step);
+    // main.zig already imports zruntime.zig in the aggregate runtime test root.
+    // Keep test-zruntime as a focused standalone target, but do not run the same
+    // pool-heavy tests twice inside zig build test; parallel duplicate roots
+    // have produced intermittent libc/JIT/arena teardown TRAPs on macOS.
 
     // test-server: server/runtime facade integration suite (Phase 0b gate).
     // Tests through public entry points (Server.init/deinit, HandlerPool
