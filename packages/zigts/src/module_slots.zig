@@ -34,8 +34,18 @@ pub fn ownerSpecifier(slot: usize) ?[]const u8 {
 }
 
 pub fn isOwnedBySpecifier(slot: usize, specifier: []const u8) bool {
+    const std = @import("std");
     const owner = ownerSpecifier(slot) orelse return false;
-    return @import("std").mem.eql(u8, owner, specifier);
+    if (std.mem.eql(u8, owner, specifier)) return true;
+    // `zigttp:decode` is a thin facade over `zigttp:validate`: decodeJson /
+    // decodeForm / decodeQuery / decodeFormMultipart delegate to the shared
+    // schema registry stored in the validate slot. Grant decode access to that
+    // one slot so a decode call can reach the registry that schemaCompile
+    // (zigttp:validate) populated; without this the module-state ownership guard
+    // makes setModuleState/getModuleState fail and every schema-based decode
+    // returns an "internal error" Result (and schemaCompile silently no-ops).
+    if (slot == @intFromEnum(Slot.validate) and std.mem.eql(u8, specifier, "zigttp:decode")) return true;
+    return false;
 }
 
 test "module state slots are owned by one active module specifier" {
@@ -44,6 +54,10 @@ test "module state slots are owned by one active module specifier" {
     try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.sql), "zigttp:sql"));
     try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.sql), "zigttp:cache"));
     try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.validate), "zigttp:validate"));
+    // zigttp:decode co-owns the validate slot (shared schema registry), but no other.
+    try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.validate), "zigttp:decode"));
+    try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.sql), "zigttp:decode"));
+    try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.cache), "zigttp:decode"));
     try testing.expect(ownerSpecifier(@intFromEnum(Slot.replay)) == null);
     try testing.expect(ownerSpecifier(15) == null);
 }
