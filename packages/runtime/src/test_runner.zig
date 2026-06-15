@@ -334,8 +334,13 @@ fn parseTestFile(allocator: std.mem.Allocator, source: []const u8) ![]TestCase {
                 .body = trace.findJsonStringValue(trimmed, "\"body\""),
             };
         } else if (std.mem.eql(u8, type_str, "io")) {
+            // findJsonIntValue returns ?i64 and accepts negatives; seq is u32.
+            // An unguarded @intCast panics (safe builds) or wraps (ReleaseFast)
+            // on a hostile fixture. Mirror the status field's guarded cast.
+            const seq_i = trace.findJsonIntValue(trimmed, "\"seq\"") orelse 0;
+            const seq = std.math.cast(u32, seq_i) orelse return error.InvalidTestFixture;
             try current_io.append(allocator, .{
-                .seq = @intCast(trace.findJsonIntValue(trimmed, "\"seq\"") orelse 0),
+                .seq = seq,
                 .module = trace.findJsonStringValue(trimmed, "\"module\"") orelse "",
                 .func = trace.findJsonStringValue(trimmed, "\"fn\"") orelse "",
                 .args_json = trace.findJsonArrayValue(trimmed, "\"args\"") orelse "[]",

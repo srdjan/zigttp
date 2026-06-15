@@ -1643,7 +1643,12 @@ const TypeExprParser = struct {
             self.pos += 1;
         }
         const num_str = self.source[start..self.pos];
-        const value = std.fmt.parseInt(i16, num_str, 10) catch 0;
+        // Literal-number types store only 16 bits. A literal outside i16 range
+        // would clamp to literal 0, conflating distinct out-of-range literals
+        // (e.g. `100000` and `200000` both compare equal). Fall back to the base
+        // `number` type instead: it loses literal narrowing for large literals
+        // but never reports two different literals as the same type.
+        const value = std.fmt.parseInt(i16, num_str, 10) catch return self.pool.idx_number;
         return self.pool.addLiteralNumber(self.allocator, value);
     }
 

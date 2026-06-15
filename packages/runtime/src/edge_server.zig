@@ -497,31 +497,44 @@ fn parseHandlers(allocator: std.mem.Allocator, value_opt: ?std.json.Value, root_
     for (arr) |item| {
         if (item != .object) return error.InvalidEdgeConfig;
         const obj = item.object;
-        const entry_raw = try dupStringField(allocator, obj, "entry", "");
-        errdefer allocator.free(entry_raw);
-        if (entry_raw.len == 0) return error.InvalidEdgeConfig;
-        const entry = if (std.fs.path.isAbsolute(entry_raw))
-            try allocator.dupe(u8, entry_raw)
-        else
-            try std.fs.path.resolve(allocator, &.{ root_dir, entry_raw });
-        allocator.free(entry_raw);
+
+        // Resolve entry inside a block so entry_raw is freed exactly once (by
+        // the defer) whether we break out or error. A loop-wide errdefer plus a
+        // later explicit free double-frees entry_raw when a subsequent `try`
+        // fails; each owned value below gets its own errdefer so a mid-iteration
+        // error frees only what this (not-yet-committed) iteration allocated.
+        const entry = blk: {
+            const entry_raw = try dupStringField(allocator, obj, "entry", "");
+            defer allocator.free(entry_raw);
+            if (entry_raw.len == 0) return error.InvalidEdgeConfig;
+            break :blk if (std.fs.path.isAbsolute(entry_raw))
+                try allocator.dupe(u8, entry_raw)
+            else
+                try std.fs.path.resolve(allocator, &.{ root_dir, entry_raw });
+        };
+        errdefer allocator.free(entry);
 
         var runtime_config = RuntimeConfig{};
         runtime_config.outbound_http_enabled = try parseBoolField(obj, "outboundHttp", false);
         runtime_config.outbound_allow_host = try dupOptionalStringField(allocator, obj, "outboundHost");
+        errdefer if (runtime_config.outbound_allow_host) |h| allocator.free(h);
         if (runtime_config.outbound_allow_host != null) runtime_config.outbound_http_enabled = true;
         runtime_config.outbound_timeout_ms = try parseU32Field(obj, "outboundTimeoutMs", 10_000);
         runtime_config.system_config_path = try dupOptionalResolvedPath(allocator, obj, "system", root_dir);
+        errdefer if (runtime_config.system_config_path) |p| allocator.free(p);
+
+        const name = try dupStringField(allocator, obj, "name", "");
+        errdefer allocator.free(name);
+        if (name.len == 0) return error.InvalidEdgeConfig;
 
         handlers[count] = .{
-            .name = try dupStringField(allocator, obj, "name", ""),
+            .name = name,
             .entry = entry,
             .pool_size = try parseUsizeField(obj, "pool", 0),
             .pool_wait_timeout_ms = try parseU32Field(obj, "poolWaitTimeoutMs", 5000),
             .lifecycle = try parseOptionalLifecycle(obj.get("lifecycle")),
             .runtime_config = runtime_config,
         };
-        if (handlers[count].name.len == 0) return error.InvalidEdgeConfig;
         count += 1;
     }
     return handlers;
@@ -715,7 +728,17 @@ fn parseRequest(allocator: std.mem.Allocator, data: []const u8, max_headers: usi
         }
         body_owned = true;
         break :blk decoded;
-    } else if (body_start < data.len) data[body_start..] else null;
+    } else if (slots.content_length) |len| blk: {
+        // Bound the body to Content-Length. The read loop over-reads (it stops
+        // once it has *at least* total_needed bytes, and pipelined/extra client
+        // bytes land in the same buffer), so handing data[body_start..] verbatim
+        // injects trailing bytes into the handler body. Mirror server.zig.
+        if (len > max_body_size) return error.FileTooBig;
+        if (len == 0) break :blk null;
+        const end = body_start + len;
+        if (end > data.len) return error.IncompleteBody;
+        break :blk data[body_start..end];
+    } else null;
     const query = try http_parser.parseQueryString(allocator, parsed_line.query_string, http_parser.DEFAULT_MAX_QUERY_LENGTH);
 
     return .{

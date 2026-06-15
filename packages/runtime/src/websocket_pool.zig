@@ -202,6 +202,24 @@ pub const Pool = struct {
         return conn.*;
     }
 
+    /// Duplicate a connection's fd under the lock, or null if the id is gone.
+    /// Writing to a raw `snapshot().fd` outside the lock is a use-after-close:
+    /// the frame loop unregisters (under the lock) and then closes the fd, so a
+    /// snapshot taken just before teardown yields an fd the OS may have already
+    /// recycled for an unrelated connection - sending bytes to the wrong peer.
+    /// An id present under the lock still has an open fd (close strictly follows
+    /// unregister), and dup() captures a distinct fd number that stays bound to
+    /// THIS socket even after the original is closed. The caller owns the
+    /// returned fd and must close it.
+    pub fn dupFd(self: *Pool, id: ConnectionId) ?std.posix.fd_t {
+        self.lock();
+        defer self.unlock();
+        const conn = self.by_id.get(id) orelse return null;
+        const new_fd = std.c.dup(conn.fd);
+        if (new_fd < 0) return null;
+        return new_fd;
+    }
+
     /// Write the set of connection ids in a room into `out`, which must
     /// have capacity for `countInRoom(room)` entries. Returns the slice
     /// of ids actually written. The ids remain valid for the duration

@@ -244,7 +244,15 @@ fn schemaDropImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.J
 
 fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value) !*CompiledSchema {
     const schema = try allocator.create(CompiledSchema);
-    errdefer allocator.destroy(schema);
+    // deinit frees every sub-allocation already attached to the schema (each
+    // field is guarded by `if (self.X)`, so this is idempotent and covers the
+    // fail-closed early returns below, e.g. the type-consistency check). The
+    // per-field errdefers above only fire before their field is attached, then
+    // cancel on normal block exit, so there is no double free.
+    errdefer {
+        schema.deinit(allocator);
+        allocator.destroy(schema);
+    }
     schema.* = .{};
 
     // Schema root must be an object. Returning a permissive empty schema

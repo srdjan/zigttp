@@ -1411,48 +1411,48 @@ pub const CodeGen = struct {
             }
         }
 
+        // Compound assignment only reaches here with an identifier target
+        // (compound member/computed returned early above). Build the result,
+        // then store it back into the binding.
         if (assign.op) |op| {
-            // Compound assignment: get current value first
             try self.emitNode(assign.target);
             try self.emitNode(assign.value);
             try self.emit(self.binaryOpToOpcode(op));
             self.popStack(1);
-        } else {
-            try self.emitNode(assign.value);
+            const binding = self.ir.getBinding(assign.target).?;
+            try self.emit(.dup);
+            self.pushStack(1);
+            try self.emitSetBinding(binding);
+            return;
         }
 
-        // Store to target
+        // Simple assignment. JS evaluates left-to-right: the target's object
+        // (and computed key) must be emitted BEFORE the RHS value. Emitting the
+        // value first (as a shared pre-step) reverses the side-effect order for
+        // member/computed targets, e.g. getObj().p = getVal() ran val then obj.
         switch (target_tag) {
             .identifier => {
                 const binding = self.ir.getBinding(assign.target).?;
+                try self.emitNode(assign.value);
                 try self.emit(.dup);
                 self.pushStack(1);
                 try self.emitSetBinding(binding);
             },
             .member_access => {
                 const member = self.ir.getMember(assign.target).?;
-                // Stack: value
-                // Need: object, value
-                try self.emitNode(member.object);
-                try self.emit(.swap);
-                try self.emit(.put_field_keep);
+                try self.emitNode(member.object); // [obj]
+                try self.emitNode(assign.value); // [obj, value]
+                try self.emit(.put_field_keep); // pops obj+value, sets -> [value]
                 try self.emitU16(member.property);
                 self.popStack(1);
             },
             .computed_access => {
                 const member = self.ir.getMember(assign.target).?;
-                // An assignment is an expression: it must leave the assigned
-                // value on the stack (the .identifier branch dups, the
-                // .member_access branch uses put_field_keep). `put_elem` leaves
-                // nothing, so dup the value below object/key - one copy is
-                // consumed by the store, the original survives.
-                try self.emit(.dup); // [value, value]
-                self.pushStack(1);
-                try self.emitNode(member.object); // [value, value, object]
-                try self.emitNode(member.computed); // [value, value, object, key]
-                try self.emit(.rot3); // [value, object, key, value]
-                try self.emit(.put_elem); // consumes object,key,value -> [value]
-                self.popStack(3);
+                try self.emitNode(member.object); // [obj]
+                try self.emitNode(member.computed); // [obj, key]
+                try self.emitNode(assign.value); // [obj, key, value]
+                try self.emit(.put_elem_keep); // pops obj,key,value, sets -> [value]
+                self.popStack(2);
             },
             else => {},
         }
@@ -1628,11 +1628,28 @@ pub const CodeGen = struct {
             try static_atoms.append(self.allocator, atom);
         }
 
+        // A duplicate string key must use the dynamic put_field path. The
+        // precompiled shape allocates one slot per property without dedup, so
+        // `{a:1,a:2}` would get two slots: findProperty returns the first, so
+        // obj.a reads the earlier value (JS requires last-wins) and JSON
+        // serialization emits an invalid duplicate key. put_field overwrites.
+        var has_dup_key = false;
+        if (all_static) {
+            outer: for (static_atoms.items, 0..) |a, ai| {
+                for (static_atoms.items[ai + 1 ..]) |b| {
+                    if (a == b) {
+                        has_dup_key = true;
+                        break :outer;
+                    }
+                }
+            }
+        }
+
         // Use optimized path if all keys are static strings and we have at least one
         // property. The shape slot count and set_slot index are u8-encoded, so an
         // object literal with >255 static keys must fall back to the dynamic path
         // rather than @intCast-panic in emitPrecompiledObjectLiteral.
-        if (all_static and static_atoms.items.len > 0 and static_atoms.items.len <= 255) {
+        if (all_static and !has_dup_key and static_atoms.items.len > 0 and static_atoms.items.len <= 255) {
             try self.emitPrecompiledObjectLiteral(object, static_atoms.items);
         } else {
             try self.emitDynamicObjectLiteral(object);
@@ -1968,9 +1985,12 @@ pub const CodeGen = struct {
     }
 
     fn emitArrayPattern(self: *CodeGen, array_data: Node.ArrayExpr) anyerror!void {
-        // For each element in the pattern, extract by index from the source array
+        // For each element in the pattern, extract by index from the source array.
+        // index is u16 (matching elements_count): a u8 wraps past 255 elements
+        // (panic in safe builds / wrong get_elem indices in ReleaseFast) for a
+        // pattern mixing many holes with bindings.
         var i: u16 = 0;
-        var index: u8 = 0;
+        var index: u16 = 0;
         while (i < array_data.elements_count) : (i += 1) {
             const elem_idx = self.ir.getListIndex(array_data.elements_start, i);
             const elem_tag = self.ir.getTag(elem_idx) orelse {
@@ -1990,8 +2010,8 @@ pub const CodeGen = struct {
                     try self.emit(.dup); // Duplicate source for next element
                     self.pushStack(1);
 
-                    // Push array index
-                    try self.emitSmallInt(index);
+                    // Push array index (full i32 range; emitSmallInt panics >255)
+                    try self.emitIntValue(@intCast(index));
 
                     // Get element by index
                     try self.emit(.get_elem);
@@ -2010,8 +2030,8 @@ pub const CodeGen = struct {
                     try self.emit(.dup);
                     self.pushStack(1);
 
-                    // Push array index
-                    try self.emitSmallInt(index);
+                    // Push array index (full i32 range; emitSmallInt panics >255)
+                    try self.emitIntValue(@intCast(index));
 
                     // Get element
                     try self.emit(.get_elem);

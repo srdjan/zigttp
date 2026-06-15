@@ -103,12 +103,14 @@ fn loadPersistentOrEphemeralKey(allocator: std.mem.Allocator) Ed25519.KeyPair {
 
 fn ephemeralKeyPair() Ed25519.KeyPair {
     var seed: [Ed25519.KeyPair.seed_length]u8 = undefined;
-    fillCsprng(&seed) catch {
-        const fallback = @as(u64, @intCast(proof_ledger.defaultNowMs())) ^
-            (@as(u64, @intCast(std.c.getpid())) << 32);
-        var prng = std.Random.DefaultPrng.init(fallback);
-        prng.random().bytes(&seed);
-    };
+    // A signing key must come from a CSPRNG. The old fallback seeded a
+    // non-cryptographic xoshiro PRNG from time^pid - a low-entropy, partially
+    // predictable space an attacker could search to forge attestations. This
+    // Zig version exposes no portable OS-CSPRNG fallback (no std.posix.getrandom;
+    // arc4random_buf is absent on non-glibc Linux), so fail closed rather than
+    // mint a weak key - mirroring zigttp:id, which panics rather than seed its
+    // CSPRNG from anything but /dev/urandom.
+    fillCsprng(&seed) catch @panic("attest: /dev/urandom unavailable; refusing to mint a signing key from a weak seed");
     return envelope.keyPairFromSeed(seed) catch unreachable;
 }
 

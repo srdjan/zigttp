@@ -359,7 +359,17 @@ fn parseDispositionParam(header_value: []const u8, param: []const u8) ?[]const u
         var value = std.mem.trim(u8, segment[eq + 1 ..], " \t");
         if (value.len > 0 and value[0] == '"') {
             value = value[1..];
-            const end = std.mem.indexOfScalar(u8, value, '"') orelse value.len;
+            // Find the closing quote honoring backslash escapes, matching the
+            // segment tokenizer above. A plain indexOfScalar stops at the first
+            // \"-escaped quote and truncates the value (e.g. "a\"b.txt" -> "a\").
+            var end: usize = 0;
+            while (end < value.len) : (end += 1) {
+                if (value[end] == '\\' and end + 1 < value.len) {
+                    end += 1;
+                    continue;
+                }
+                if (value[end] == '"') break;
+            }
             return value[0..end];
         }
         var end: usize = 0;

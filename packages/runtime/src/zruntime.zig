@@ -1974,12 +1974,23 @@ pub const Runtime = struct {
         var response = HttpResponse.init(self.allocator);
         response.status = pattern.status;
 
+        const content_type = switch (pattern.content_type_idx) {
+            0 => "application/json",
+            1 => "text/plain; charset=utf-8",
+            else => "text/html; charset=utf-8",
+        };
+
         // OPTIMIZATION: Use pre-built raw response if available (single write, no header construction)
         if (pattern.prebuilt_response) |prebuilt| {
             response.prebuilt_raw = prebuilt;
             // Still set body for logging/debugging purposes
             response.body = pattern.static_body;
             response.body_owned = false;
+            // Also populate the structured Content-Type header. The slow path
+            // (Connection: close, or attestation active) rebuilds headers from
+            // response.headers and ignores prebuilt_raw's baked-in Content-Type,
+            // so without this such responses would ship with no Content-Type.
+            try response.putHeaderBorrowed("Content-Type", content_type);
             return response;
         }
 
@@ -1993,11 +2004,6 @@ pub const Runtime = struct {
             response.body_owned = true;
         }
 
-        const content_type = switch (pattern.content_type_idx) {
-            0 => "application/json",
-            1 => "text/plain; charset=utf-8",
-            else => "text/html; charset=utf-8",
-        };
         try response.putHeaderBorrowed("Content-Type", content_type);
 
         return response;
@@ -3063,7 +3069,16 @@ fn readResponseBody(response: *std.http.Client.Response, allocator: std.mem.Allo
     var decompress: std.http.Decompress = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
     var reader = response.readerDecompressing(&body_transfer, &decompress, &decompress_buf);
-    return reader.allocRemaining(allocator, std.Io.Limit.limited(max_bytes));
+    // allocRemaining reports StreamTooLong once the limit is *reached*, not just
+    // exceeded, so a body of exactly max_bytes would be wrongly rejected. Read
+    // one extra byte and enforce the real cap here so exactly-max-bytes succeeds
+    // while anything larger still surfaces StreamTooLong (-> 599 ResponseTooLarge).
+    const body = try reader.allocRemaining(allocator, std.Io.Limit.limited(max_bytes +| 1));
+    if (body.len > max_bytes) {
+        allocator.free(body);
+        return error.StreamTooLong;
+    }
+    return body;
 }
 
 /// Wall-clock deadline for one outbound exchange, enforced by a watchdog
@@ -3910,10 +3925,14 @@ fn wsSendCallback(
     const bytes = zq.modules.util.extractString(args[1]) orelse {
         return zq.modules.util.throwError(ctx, "TypeError", "data must be a string (binary frames land in W2)");
     };
-    const snap = pool.snapshot(id) orelse {
+    // dup the fd under the pool lock rather than reading snapshot().fd and
+    // writing outside the lock: the latter races the frame loop's
+    // unregister-then-close and can write into a recycled fd (another peer).
+    const fd = pool.dupFd(id) orelse {
         return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
     };
-    writeWebSocketFrame(snap.fd, 0x1, bytes) catch |err| {
+    defer _ = std.c.close(fd);
+    writeWebSocketFrame(fd, 0x1, bytes) catch |err| {
         std.log.warn("ws send failed (id={d}): {}", .{ id, err });
         return zq.modules.util.throwError(ctx, "Error", "ws send failed");
     };
@@ -3950,9 +3969,12 @@ fn wsCloseCallback(
     else
         "";
 
-    const snap = pool.snapshot(id) orelse {
+    // dup under the lock (see wsSendCallback) so the close frame and shutdown
+    // never land on a recycled fd belonging to another connection.
+    const fd = pool.dupFd(id) orelse {
         return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
     };
+    defer _ = std.c.close(fd);
 
     // RFC 6455 §5.5.1: close payload is [status_u16_be][reason_utf8].
     // Reason length is capped at 123 so total payload fits in a 125-byte
@@ -3964,14 +3986,14 @@ fn wsCloseCallback(
     if (reason_len > 0) {
         @memcpy(payload_buf[2..][0..reason_len], reason[0..reason_len]);
     }
-    writeWebSocketFrame(snap.fd, 0x8, payload_buf[0 .. 2 + reason_len]) catch |err| {
+    writeWebSocketFrame(fd, 0x8, payload_buf[0 .. 2 + reason_len]) catch |err| {
         std.log.warn("ws close write failed (id={d}): {}", .{ id, err });
     };
-    // Shutting down the write half lets the peer's read return EOS
-    // promptly; the frame loop will then exit and clean up. Ignoring
-    // the shutdown error here is intentional — the connection is
-    // already being torn down. SHUT_WR == 1 on every supported platform.
-    _ = std.c.shutdown(snap.fd, 1);
+    // Shutting down the write half (of the shared socket) lets the peer's read
+    // return EOS promptly; the frame loop will then exit and clean up. Ignoring
+    // the shutdown error here is intentional — the connection is already being
+    // torn down. SHUT_WR == 1 on every supported platform.
+    _ = std.c.shutdown(fd, 1);
     return zq.JSValue.undefined_val;
 }
 

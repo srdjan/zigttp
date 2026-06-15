@@ -186,7 +186,7 @@ fn verifyCommand(
         // Mismatch and missing-component are diagnostic failures that
         // already wrote a per-component line; exit non-zero so CI fails.
         switch (err) {
-            error.Sha256Mismatch, error.MissingComponent => {
+            error.Sha256Mismatch, error.MissingComponent, error.NoComponentsVerified => {
                 stdout.flush() catch {};
                 stderr.flush() catch {};
                 std.process.exit(1);

@@ -414,14 +414,26 @@ pub fn readFileChecked(
     return file_io.readFile(ctx.allocator, path, max_size);
 }
 
-pub fn readEnvForActiveModule(name_z: [:0]const u8) ActiveCapabilityError!?[]const u8 {
+pub fn readEnvForActiveModule(ctx: *context.Context, name_z: [:0]const u8) ActiveCapabilityError!?[]const u8 {
     try requireActiveCapability(.env);
+    // Enforce the env allowlist on the read itself, not only in the optional
+    // sdk.allowsEnv pre-check. The built-in zigttp:env module calls allowsEnv
+    // first, but a third-party SDK module that declares .env and never calls it
+    // would otherwise read any process env var (env values are flow-labeled
+    // .secret), bypassing the policy the contract advertises. Mirrors
+    // readFileChecked / openSqliteDbChecked, which gate internally. `allows`
+    // returns true when no allowlist is configured, so this matches the
+    // built-in module's behavior exactly and only closes the bypass.
+    if (!ctx.capability_policy.allowsEnv(name_z)) {
+        emitPolicyDenial(.policy_denied_env, name_z);
+        return null;
+    }
     const result = std.c.getenv(name_z) orelse return null;
     return std.mem.sliceTo(result, 0);
 }
 
-pub fn readEnvChecked(name_z: [:0]const u8) error{CapabilityViolation}!?[]const u8 {
-    return readEnvForActiveModule(name_z) catch |err| return panicCapabilityError(err, .env);
+pub fn readEnvChecked(ctx: *context.Context, name_z: [:0]const u8) error{CapabilityViolation}!?[]const u8 {
+    return readEnvForActiveModule(ctx, name_z) catch |err| return panicCapabilityError(err, .env);
 }
 
 pub fn sqliteCapabilityChecked() error{CapabilityViolation}!void {
@@ -882,12 +894,12 @@ pub const sdk_bridge = struct {
         out_ptr: *[*]const u8,
         out_len: *usize,
     ) bool {
-        _ = handle;
+        const ctx = handleToContext(handle);
         if (name_len >= 256) return false;
         var buf: [256]u8 = undefined;
         @memcpy(buf[0..name_len], name_ptr[0..name_len]);
         buf[name_len] = 0;
-        const result = (readEnvChecked(buf[0..name_len :0]) catch return false) orelse return false;
+        const result = (readEnvChecked(ctx, buf[0..name_len :0]) catch return false) orelse return false;
         out_ptr.* = result.ptr;
         out_len.* = result.len;
         return true;

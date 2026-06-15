@@ -726,6 +726,12 @@ pub const TypeEnv = struct {
                     self.collectMarkedMembers(resolved, out, marker, depth + 1);
                 }
             },
+            .t_nullable => {
+                // A nullable-wrapped marker (`Effects<...> | undefined`) still
+                // carries the obligation; descend into the inner type so the
+                // capability/spec set is recovered.
+                self.collectMarkedMembers(self.pool.getNullableInner(idx), out, marker, depth + 1);
+            },
             .t_record => {
                 for (self.pool.getRecordFields(idx)) |field| {
                     const fname = self.pool.getName(field.name_start, field.name_len);
@@ -749,6 +755,15 @@ pub const TypeEnv = struct {
                 for (self.pool.getUnionMembers(idx)) |member| {
                     self.collectLiteralUnionStrings(member, out);
                 }
+            },
+            .t_ref => {
+                // An aliased capability set (`type Caps = "clock" | "crypto";`
+                // used as `Effects<Response, Caps>`) reaches here as a t_ref.
+                // Resolve through the alias/interface chain and recurse so the
+                // literal names are recovered; without this the budget extracts
+                // zero effects and the capability proof silently fails open.
+                const resolved = self.resolveRef(idx);
+                if (resolved != idx) self.collectLiteralUnionStrings(resolved, out);
             },
             .t_literal_string => {
                 if (self.pool.getLiteralStringValue(idx)) |val| {

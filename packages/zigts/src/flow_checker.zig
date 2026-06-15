@@ -1459,10 +1459,18 @@ pub const FlowChecker = struct {
             // the query would escape every sink check and falsely discharge
             // no_secret_leakage.
             self.checkSinkLabels(self.inferObjectPropLabels(opts_arg, "query"), node, .egress_url);
+
+            // The `headers` init field is transmitted verbatim to the external
+            // host (zruntime serializes it onto the wire). A secret or credential
+            // placed in a header escapes the body and URL sink checks above, so
+            // without this it would falsely discharge no_secret_leakage /
+            // no_credential_leakage - and the URL sink's own help text steers
+            // users to put tokens in headers.
+            self.checkSinkLabels(self.inferObjectPropLabels(opts_arg, "headers"), node, .egress_headers);
         }
     }
 
-    const SinkKind = enum { response, console, egress_url, egress_body };
+    const SinkKind = enum { response, console, egress_url, egress_body, egress_headers };
 
     fn checkSinkLabels(self: *FlowChecker, labels: LabelSet, node: NodeIndex, sink: SinkKind) void {
         if (labels.isEmpty()) return;
@@ -1584,6 +1592,49 @@ pub const FlowChecker = struct {
                     self.properties.injection_safe = false;
                 }
                 // PII containment: user input going to external hosts
+                if (labels.has(.user_input)) {
+                    self.properties.pii_contained = false;
+                }
+            },
+            .egress_headers => {
+                // Headers reach the external host like the URL and body, so a
+                // secret or credential here is a leak. Reuse the egress-URL
+                // diagnostic kinds (no new policy-hash surface) with messages
+                // specific to the headers init field.
+                if (labels.has(.secret)) {
+                    self.addDiagnostic(.{
+                        .severity = .err,
+                        .kind = .secret_in_egress_url,
+                        .node = node,
+                        .message = self.messageWithReason("secret data flows into fetchSync request headers", .secret),
+                        .help = "do not send env secrets to external services, even in headers",
+                        .repair_intent = .insert_guard_before_line,
+                    });
+                    self.properties.no_secret_leakage = false;
+                }
+                if (labels.has(.credential)) {
+                    self.addDiagnostic(.{
+                        .severity = .warning,
+                        .kind = .credential_in_egress_url,
+                        .node = node,
+                        .message = self.messageWithReason("credential data flows into fetchSync request headers", .credential),
+                        .help = "forwarding a caller's auth token to a third party can leak it; scope credentials per service",
+                        .repair_intent = .insert_guard_before_line,
+                    });
+                    self.properties.no_credential_leakage = false;
+                }
+                if (labels.has(.user_input) and !labels.has(.validated)) {
+                    self.addDiagnostic(.{
+                        .severity = .warning,
+                        .kind = .unvalidated_input_in_egress,
+                        .node = node,
+                        .message = "unvalidated user input flows into fetchSync request headers",
+                        .help = "validate user input before placing it in an egress header to avoid header injection / request forgery",
+                        .repair_intent = .insert_guard_before_line,
+                    });
+                    self.properties.input_validated = false;
+                    self.properties.injection_safe = false;
+                }
                 if (labels.has(.user_input)) {
                     self.properties.pii_contained = false;
                 }

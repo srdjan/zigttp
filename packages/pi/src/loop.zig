@@ -534,8 +534,13 @@ fn prepareEdit(
     errdefer allocator.free(target_path);
 
     const before = edit.before orelse blk: {
-        const current = file_io.readFile(allocator, target_path, 1024 * 1024) catch |err| switch (err) {
-            error.FileNotFound => break :blk null,
+        // 16 MiB matches the workspace tools' cap so a normal large handler
+        // still provides before-context. FileTooBig (beyond that) is recoverable
+        // like FileNotFound: treat it as a fresh edit rather than propagating the
+        // error out of runTurnWith, which would crash the whole turn (exit(1) in
+        // --print mode) instead of letting the veto re-prompt.
+        const current = file_io.readFile(allocator, target_path, 16 * 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound, error.FileTooBig => break :blk null,
             else => return err,
         };
         break :blk current;

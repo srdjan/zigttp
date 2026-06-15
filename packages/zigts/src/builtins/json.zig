@@ -168,14 +168,24 @@ inline fn skipJsonWhitespace(text: []const u8, pos: *usize) void {
     }
 }
 
+/// Maximum object/array nesting depth. Each level consumes a native stack
+/// frame (parseJsonValueAt -> parseJsonObject/Array -> parseJsonValueAt), and
+/// JSON.parse / zigttp:decodeJson both run on attacker-controlled request
+/// bodies, so an unbounded recursion is a worker-crash DoS that no `catch` can
+/// recover (it is a SIGSEGV, not a Zig error). Matches contract_json_parser's
+/// max_skip_depth.
+const MAX_JSON_DEPTH: u16 = 512;
+
 /// Parse a JSON value from text
 pub fn parseJsonValue(ctx: *context.Context, text: []const u8) JsonError!value.JSValue {
     var pos: usize = 0;
-    return parseJsonValueAt(ctx, text, &pos);
+    return parseJsonValueAt(ctx, text, &pos, 0);
 }
 
 /// Parse JSON value at position
-fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
+fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize, depth: u16) JsonError!value.JSValue {
+    if (depth > MAX_JSON_DEPTH) return error.InvalidJson;
+
     skipJsonWhitespace(text, pos);
 
     if (pos.* >= text.len) return error.UnexpectedEof;
@@ -184,12 +194,12 @@ fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize) JsonEr
 
     // Object
     if (c == '{') {
-        return parseJsonObject(ctx, text, pos);
+        return parseJsonObject(ctx, text, pos, depth);
     }
 
     // Array
     if (c == '[') {
-        return parseJsonArray(ctx, text, pos);
+        return parseJsonArray(ctx, text, pos, depth);
     }
 
     // String
@@ -225,7 +235,7 @@ fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize) JsonEr
 
 /// Parse JSON object with shape caching
 /// Buffers properties first, then creates object with cached shape to avoid hidden class transitions
-fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
+fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize, depth: u16) JsonError!value.JSValue {
     pos.* += 1; // skip '{'
 
     skipJsonWhitespace(text, pos);
@@ -257,7 +267,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
         pos.* += 1;
 
         // Parse value
-        const val = try parseJsonValueAt(ctx, text, pos);
+        const val = try parseJsonValueAt(ctx, text, pos, depth + 1);
 
         if (prop_count < JSON_SHAPE_MAX_PROPS) {
             atoms[prop_count] = atom;
@@ -289,7 +299,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
                     skipJsonWhitespace(text, pos);
                     if (pos.* >= text.len or text[pos.*] != ':') return error.InvalidJson;
                     pos.* += 1;
-                    const v = try parseJsonValueAt(ctx, text, pos);
+                    const v = try parseJsonValueAt(ctx, text, pos, depth + 1);
                     try ctx.setPropertyChecked(obj, a, v);
                     skipJsonWhitespace(text, pos);
                 } else {
@@ -342,7 +352,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
 }
 
 /// Parse JSON array
-fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
+fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize, depth: u16) JsonError!value.JSValue {
     pos.* += 1; // skip '['
 
     const arr = try ctx.createArray();
@@ -359,7 +369,7 @@ fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) JsonErro
     var index: u32 = 0;
     while (pos.* < text.len) {
         // Parse element
-        const elem = try parseJsonValueAt(ctx, text, pos);
+        const elem = try parseJsonValueAt(ctx, text, pos, depth + 1);
         try ctx.setIndexChecked(arr, index, elem);
         index += 1;
 

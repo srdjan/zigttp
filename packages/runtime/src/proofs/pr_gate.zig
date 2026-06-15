@@ -635,9 +635,14 @@ pub fn run(
             continue;
         }
 
-        const result = analyzeHandler(gpa, arena, path, before.?, after.?, !opts.no_sign) catch {
-            try skipped.append(arena, .{ .path = path, .reason = "no_contract" });
-            continue;
+        const result = analyzeHandler(gpa, arena, path, before.?, after.?, !opts.no_sign) catch |err| {
+            // analyzeHandler returns null (handled below) for genuine
+            // non-handler / no-contract files; reaching here means an analysis
+            // or allocation failure. Swallowing it as `no_contract` drops the
+            // handler from worstVerdict, so a breaking change could pass the
+            // gate. Fail closed with the tooling-failure exit code.
+            try stderr.print("zigttp proofs gate: analysis failed for `{s}`: {s}\n", .{ path, @errorName(err) });
+            return 2;
         };
         const hr = result orelse {
             try skipped.append(arena, .{ .path = path, .reason = "no_contract" });

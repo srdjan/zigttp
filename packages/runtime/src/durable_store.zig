@@ -119,9 +119,19 @@ pub const ConsumedSignal = struct {
     /// Claimed on-disk file backing this signal. The caller deletes it via
     /// `finalizeConsumedSignal` only AFTER the consumption is durably
     /// persisted to the run oplog; unlinking first would lose the signal on
-    /// a crash between unlink and persist. An unfinalized claim is never
-    /// re-delivered (scans skip `.claim-` files), so consume stays
-    /// idempotent across crashes.
+    /// a crash between unlink and persist. A claim left unfinalized is invisible
+    /// to scans (they skip `.claim-` files) and is deliberately never
+    /// re-delivered, which keeps consume from double-delivering a signal.
+    ///
+    /// KNOWN LIMITATION: a crash in the narrow window between the claim-rename
+    /// and the oplog resume-persist strands that one signal - the run replays,
+    /// re-waits, and the payload (locked in the invisible `.claim-` file) is
+    /// unreachable, so it re-suspends until a fresh signal arrives. The sound
+    /// fix is to persist the resume BEFORE claiming (oplog-first), so a crash
+    /// either leaves the signal consumable or the oplog already records it; that
+    /// reorders the consume protocol across the durable runtime and needs
+    /// crash-injection coverage, so it is deferred rather than patched here with
+    /// a `.claim-` recovery that could double-deliver under shared run keys.
     path: []const u8,
     allocator: std.mem.Allocator,
 

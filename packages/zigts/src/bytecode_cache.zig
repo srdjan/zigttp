@@ -133,10 +133,14 @@ fn serializeConstant(val: value.JSValue, writer: anytype, allocator: std.mem.All
         }
     }
 
-    // Unknown pointer type - serialize as undefined
+    // Ropes, string-slices, objects, and symbols are not representable in the
+    // constant stream. Writing `undefined` here silently corrupts the constant
+    // (the stream stays in sync, so deserialize swaps in undefined undetectably).
+    // Fail with a catchable error (like the >64KB string guard) so the caller
+    // falls back to recompilation instead of caching a wrong value. Today
+    // addStringConstant only produces flat strings, so this guards future kinds.
     if (val.isPtr() or val.isExternPtr()) {
-        try writer.writeByte(@intFromEnum(ConstantTag.special));
-        try writer.writeByte(@intFromEnum(SpecialCode.undefined_val));
+        return error.OutOfMemory;
     }
 }
 
@@ -154,11 +158,12 @@ pub fn serializeFunctionBytecode(func: *const bytecode.FunctionBytecode, writer:
     try writer.writeInt(u32, @intCast(func.code.len), .little);
     try writer.writeAll(func.code);
 
-    // Write upvalue info
+    // Write upvalue info. is_local and index are separate bytes: packing the
+    // index into 7 bits truncated parent slots >= 128, so a closure capturing a
+    // high local index would silently capture a different variable on reload.
     for (func.upvalue_info) |info| {
-        // Encode: is_local in bit 7, index in bits 0-6
-        const encoded: u8 = (@as(u8, @intFromBool(info.is_local)) << 7) | (info.index & 0x7F);
-        try writer.writeByte(encoded);
+        try writer.writeByte(@intFromBool(info.is_local));
+        try writer.writeByte(info.index);
     }
 
     // Recursively serialize constants
@@ -316,10 +321,11 @@ pub fn deserializeFunctionBytecode(
     const upvalue_info = try allocator.alloc(bytecode.UpvalueInfo, upvalue_count);
     errdefer allocator.free(upvalue_info);
     for (upvalue_info) |*info| {
-        const encoded = try reader.readByte();
+        const is_local = try reader.readByte();
+        const index = try reader.readByte();
         info.* = .{
-            .is_local = (encoded & 0x80) != 0,
-            .index = encoded & 0x7F,
+            .is_local = is_local != 0,
+            .index = index,
         };
     }
 
@@ -452,7 +458,7 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
 }
 
 /// Bytecode serialization format version
-pub const CACHE_VERSION: u32 = 2;
+pub const CACHE_VERSION: u32 = 3;
 
 /// Cache file magic bytes "ZTSC" (zts cache)
 pub const CACHE_MAGIC: u32 = 0x5A545343;

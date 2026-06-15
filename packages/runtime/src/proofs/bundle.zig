@@ -162,6 +162,14 @@ pub fn verify(allocator: std.mem.Allocator, bundle_dir_path: []const u8, stdout:
     }
     try verifyComponents(allocator, bundle_dir_path, manifest_bytes, &verdicts, stderr);
 
+    // Fail closed: a manifest the component scanner could not parse (e.g. `{}`
+    // or a format it does not recognize) yields zero verdicts, and an empty
+    // loop would otherwise print "verified" and exit 0 having checked nothing.
+    if (verdicts.items.len == 0) {
+        try stderr.print("zigttp proofs verify: no components found in manifest '{s}'\n", .{manifest_path});
+        return error.NoComponentsVerified;
+    }
+
     var any_failed = false;
     for (verdicts.items) |v| {
         const label: []const u8 = if (v.pass) "OK  " else "FAIL";

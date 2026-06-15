@@ -2586,6 +2586,23 @@ pub const OptimizedCompiler = struct {
             self.emitter.movRegMem(getSpCacheReg(), .rbx, CTX_SP_OFF) catch return CompileError.OutOfMemory;
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.e, target);
+
+            // Sync the register-allocated loop local. The helper only updated
+            // the memory slot ctx.stack[fp+local_idx]; if this local is held in
+            // a (callee-saved) loop register, emitGetLocal would otherwise serve
+            // the stale register every iteration. Mirror the aarch64 fast path:
+            // reload the fresh boxed element and unbox it (movsxd of the low 32
+            // bits) into the loop register, exactly as emitPutLocal does. The
+            // frame pointer reg (r15) is callee-saved, so it survived the call.
+            if (self.current_loop_idx) |loop_idx_sync| {
+                const loop_sync = &self.loops[loop_idx_sync];
+                if (loop_sync.getLocalReg(local_idx)) |reg| {
+                    const fp_reg = getFramePointerReg();
+                    const offset = @as(i32, @intCast(local_idx)) * 8;
+                    self.emitter.movRegMem(reg, fp_reg, offset) catch return CompileError.OutOfMemory;
+                    self.emitter.movsxdRegReg(reg, reg) catch return CompileError.OutOfMemory;
+                }
+            }
         }
     }
 };

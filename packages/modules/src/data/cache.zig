@@ -320,6 +320,20 @@ fn addCacheDelta(current: i64, delta: i64) ?i64 {
     return std.math.add(i64, current, delta) catch null;
 }
 
+/// Extract a TTL argument as whole seconds, flooring a fractional value. A
+/// non-number argument yields null (no expiry), matching the absent-arg case.
+/// extractInt rejected both fractional and >i32 TTLs by returning null, which
+/// the call sites then read as "no expiry" - so a TTL of 1.5 or 5e9 silently
+/// cached the entry forever instead of expiring it.
+fn extractTtlSeconds(val: sdk.JSValue) ?i64 {
+    const f = sdk.extractFloat(val) orelse return null;
+    if (!std.math.isFinite(f)) return null;
+    const floored = @floor(f);
+    if (floored < @as(f64, @floatFromInt(std.math.minInt(i64)))) return std.math.minInt(i64);
+    if (floored >= 9223372036854775808.0) return std.math.maxInt(i64);
+    return @intFromFloat(floored);
+}
+
 /// Returns the thrown exception JSValue if the namespace is denied, null
 /// if allowed. Callers propagate the exception by returning it directly.
 fn denyIfNamespaceBlocked(handle: *sdk.ModuleHandle, ns: []const u8) ?sdk.JSValue {
@@ -346,10 +360,7 @@ fn cacheSetImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSV
     const key = sdk.extractString(args[1]) orelse return sdk.JSValue.false_val;
     const val_str = sdk.extractString(args[2]) orelse return sdk.JSValue.false_val;
 
-    const ttl: ?i64 = if (args.len >= 4) blk: {
-        if (sdk.extractInt(args[3])) |t| break :blk @intCast(t);
-        break :blk null;
-    } else null;
+    const ttl: ?i64 = if (args.len >= 4) extractTtlSeconds(args[3]) else null;
 
     const now_s = nowSeconds(handle) catch return sdk.JSValue.false_val;
     const store = getOrCreateStore(handle) catch return sdk.JSValue.false_val;
@@ -378,10 +389,7 @@ fn cacheIncrImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
         break :blk 1;
     } else 1;
 
-    const ttl: ?i64 = if (args.len >= 4) blk: {
-        if (sdk.extractInt(args[3])) |t| break :blk @intCast(t);
-        break :blk null;
-    } else null;
+    const ttl: ?i64 = if (args.len >= 4) extractTtlSeconds(args[3]) else null;
 
     const now_s = nowSeconds(handle) catch return sdk.JSValue.undefined_val;
     const store = getOrCreateStore(handle) catch return sdk.JSValue.undefined_val;

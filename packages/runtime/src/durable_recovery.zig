@@ -19,6 +19,7 @@ const HttpHeader = @import("http_types.zig").HttpHeader;
 const ServerConfig = @import("server.zig").ServerConfig;
 const tryLockOplogFd = @import("runtime_config.zig").tryLockOplogFd;
 const handler_loader = @import("handler_loader.zig");
+const DurableStore = @import("durable_store.zig").DurableStore;
 const runtime_natives = @import("runtime_natives.zig");
 
 const c = @cImport({
@@ -179,6 +180,12 @@ pub fn recoverIncompleteOplogsTracked(
         if (parsed.events.len > 0) {
             switch (parsed.events[parsed.events.len - 1]) {
                 .wait_timer => |w| if (w.until_ms > trace.unixMillis()) continue,
+                // A run blocked on waitSignal would provably re-suspend until a
+                // matching signal arrives. Skip the Runtime spin-up + full oplog
+                // replay (which otherwise repeats every poll with no backoff,
+                // since .pending is neutral to the retry tracker) when no
+                // matching signal is present yet.
+                .wait_signal => |w| if (signalDefinitelyAbsent(allocator, oplog_dir, run_key, w.name)) continue,
                 else => {},
             }
         }
@@ -211,6 +218,29 @@ pub fn recoverIncompleteOplogsTracked(
     }
 
     return recovered;
+}
+
+/// True only when a scan of the durable signal store succeeded and found no
+/// signal matching (run_key, name). Fails safe: any scan error returns false so
+/// the caller still attempts recovery (the prior always-recover behavior). A
+/// scheduled (signalAt) signal whose time has not arrived is correctly treated
+/// as absent - scanSignals filters it - so the run is skipped until it is due.
+fn signalDefinitelyAbsent(
+    allocator: std.mem.Allocator,
+    durable_dir: []const u8,
+    run_key: []const u8,
+    name: []const u8,
+) bool {
+    var store = DurableStore.initFs(allocator, durable_dir);
+    const signals = store.scanSignals(allocator, trace.unixMillis()) catch return false;
+    defer {
+        for (signals) |*s| s.deinit();
+        allocator.free(signals);
+    }
+    for (signals) |s| {
+        if (std.mem.eql(u8, s.key, run_key) and std.mem.eql(u8, s.name, name)) return false;
+    }
+    return true;
 }
 
 /// Exclusive non-blocking claim on a single oplog file, held for the duration

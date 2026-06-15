@@ -243,8 +243,15 @@ pub const ContractDiff = struct {
     /// `.equivalent_modulo_laws` in place of `.equivalent`.
     pub fn classify(self: *const ContractDiff) Classification {
         const structural = self.classifyStructural();
-        if (structural == .equivalent and self.laws_used.items.len > 0) {
-            return .equivalent_modulo_laws;
+        if (structural == .equivalent) {
+            // tryCanonicalEquivalence (run by diffContracts) proved the behaviors
+            // are NOT equivalent - an io_sequence / response change inside a
+            // structurally-identical path (e.g. sha256 -> hmacSha256). The
+            // counterexample was computed but previously discarded, so such a
+            // change passed as equivalent. A counterexample and fired laws are
+            // mutually exclusive, so check it first.
+            if (self.canonical_counterexample != null) return .breaking;
+            if (self.laws_used.items.len > 0) return .equivalent_modulo_laws;
         }
         return structural;
     }
@@ -475,7 +482,7 @@ pub fn diffContracts(
 
     // Route comparison (by pattern + type)
     for (old.routes.items) |old_route| {
-        if (findRoute(new.routes.items, old_route.pattern, old_route.route_type)) |_| {
+        if (findRoute(new.routes.items, &old_route)) |_| {
             try routes.append(allocator, .{
                 .pattern = old_route.pattern,
                 .route_type = old_route.route_type,
@@ -490,7 +497,7 @@ pub fn diffContracts(
         }
     }
     for (new.routes.items) |new_route| {
-        if (findRoute(old.routes.items, new_route.pattern, new_route.route_type) == null) {
+        if (findRoute(old.routes.items, &new_route) == null) {
             try routes.append(allocator, .{
                 .pattern = new_route.pattern,
                 .route_type = new_route.route_type,
@@ -1237,9 +1244,18 @@ pub fn generateRecommendation(
 // Helpers
 // -------------------------------------------------------------------------
 
-fn findRoute(routes: []const RouteInfo, pattern: []const u8, route_type: []const u8) ?*const RouteInfo {
+fn findRoute(routes: []const RouteInfo, target: *const RouteInfo) ?*const RouteInfo {
     for (routes) |*route| {
-        if (std.mem.eql(u8, route.pattern, pattern) and std.mem.eql(u8, route.route_type, route_type)) {
+        // Match on the observable response shape, not just (pattern, route_type):
+        // a route that keeps its pattern but flips status (200 -> 403) or
+        // content-type (json -> html) is a breaking change, but matching by
+        // pattern alone classified it `.unchanged`. Including status/content_type
+        // makes such a route read as old-removed + new-added -> breaking.
+        if (std.mem.eql(u8, route.pattern, target.pattern) and
+            std.mem.eql(u8, route.route_type, target.route_type) and
+            route.status == target.status and
+            std.mem.eql(u8, route.content_type, target.content_type))
+        {
             return route;
         }
     }
@@ -2398,7 +2414,7 @@ test "diffContracts stays equivalent when canonical forms already match" {
     try std.testing.expectEqual(@as(usize, 0), diff.laws_used.items.len);
 }
 
-test "diffContracts does not reclassify when canonical forms differ" {
+test "diffContracts reclassifies to breaking when canonical forms differ" {
     const allocator = std.testing.allocator;
 
     var old = try makeTestContract(allocator);
@@ -2406,7 +2422,10 @@ test "diffContracts does not reclassify when canonical forms differ" {
     var new = try makeTestContract(allocator);
     defer new.deinit(allocator);
 
-    // Different calls - canonicalization cannot make them match.
+    // Different calls - canonicalization cannot make them match. A structurally
+    // identical path whose io_sequence diverges (sha256 of A vs B) is a real
+    // behavioral change, so classify() must report it as breaking rather than
+    // discarding the computed counterexample and passing it as equivalent.
     try old.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/data", 200, &.{
         .{ .module = "crypto", .func = "sha256", .args = "lit:A" },
     }));
@@ -2417,11 +2436,11 @@ test "diffContracts does not reclassify when canonical forms differ" {
     var diff = try diffContracts(allocator, &old, &new);
     defer diff.deinit(allocator);
 
-    try std.testing.expectEqual(Classification.equivalent, diff.classify());
-    try std.testing.expectEqual(@as(usize, 0), diff.laws_used.items.len);
-    // Structurally-matched paths that fail canonical equality record
-    // a counterexample pointing at the divergence.
+    // Structurally-matched paths that fail canonical equality record a
+    // counterexample pointing at the divergence, which classify() reads as breaking.
     try std.testing.expect(diff.canonical_counterexample != null);
+    try std.testing.expectEqual(@as(usize, 0), diff.laws_used.items.len);
+    try std.testing.expectEqual(Classification.breaking, diff.classify());
 }
 
 test "diffContracts reclassifies cacheSet idempotent collapse" {

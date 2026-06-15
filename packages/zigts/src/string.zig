@@ -380,10 +380,13 @@ pub fn concatRopes(allocator: std.mem.Allocator, left: *RopeNode, right: *RopeNo
     if (left.total_len == 0) return right;
     if (right.total_len == 0) return left;
 
+    // Checked add: a wrapped total_len under-allocates flatten()'s buffer and
+    // then flattenInto() memcpys the real leaf bytes past the allocation.
+    const total_len = std.math.add(u32, left.total_len, right.total_len) catch return error.OutOfMemory;
     const node = try allocator.create(RopeNode);
     node.* = .{
         .header = heap.MemBlockHeader.init(.rope, @sizeOf(RopeNode)),
-        .total_len = left.total_len + right.total_len,
+        .total_len = total_len,
         .depth = @max(left.depth, right.depth) + 1,
         .flags = .{ .is_ascii = left.flags.is_ascii and right.flags.is_ascii },
         .kind = .concat,
@@ -410,17 +413,31 @@ pub fn concatRopesWithArena(arena: *arena_mod.Arena, left: *RopeNode, right: *Ro
     if (left.total_len == 0) return right;
     if (right.total_len == 0) return left;
 
+    // Checked add (see concatRopes): a wrapped u32 total_len under-allocates
+    // the flatten buffer and overflows it on memcpy.
+    const total_len = std.math.add(u32, left.total_len, right.total_len) catch return null;
     const node = arena.create(RopeNode) orelse return null;
     node.* = .{
         .header = heap.MemBlockHeader.init(.rope, @sizeOf(RopeNode)),
-        .total_len = left.total_len + right.total_len,
-        .depth = @max(left.depth, right.depth) + 1,
+        .total_len = total_len,
+        // Saturating: the rebalance below caps real depth at 32, but guard the
+        // field against overflow regardless.
+        .depth = @max(left.depth, right.depth) +| 1,
         .flags = .{ .is_ascii = left.flags.is_ascii and right.flags.is_ascii },
         .kind = .concat,
         .payload = .{ .concat = .{ .left = left, .right = right } },
     };
 
-    // For arena allocation, we don't rebalance since memory will be freed in bulk
+    // Bound depth even in the arena path. An unbalanced `acc = acc + part` loop
+    // grows depth by one per concat, and flattenInto / eqlBytesRecursive walk
+    // the tree by native recursion - an unbounded chain overflows the C stack
+    // (and the u16 depth field). Past the threshold, flatten to a leaf; the
+    // arena still reclaims everything in bulk.
+    if (node.depth > 32) {
+        const flat = node.flattenWithArena(arena) orelse return null;
+        return createRopeLeafWithArena(arena, flat);
+    }
+
     return node;
 }
 
