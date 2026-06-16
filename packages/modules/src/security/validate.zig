@@ -388,6 +388,14 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
     if ((schema.minimum != null or schema.maximum != null) and !is_numeric_type) {
         return error.InvalidSchema;
     }
+    // Same fail-closed rule for `items`: validateRecursive only applies the
+    // element sub-schema inside an `isArray(val)` gate, so `{"items":{...}}`
+    // without `"type":"array"` would accept any non-array value yet still stamp
+    // it `.validated`. Reject the under-specified schema at compile time.
+    const is_array_type = schema.schema_type != null and schema.schema_type.? == .array;
+    if (schema.items != null and !is_array_type) {
+        return error.InvalidSchema;
+    }
 
     return schema;
 }
@@ -784,6 +792,16 @@ test "schema compilation rejects non-array required" {
 test "schema compilation rejects unknown format" {
     const allocator = std.testing.allocator;
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"string\",\"format\":\"hostname\"}", .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidSchema, compileSchemaFromJson(allocator, parsed.value));
+}
+
+test "schema compilation rejects items without type:array" {
+    // Regression: `{"items":{...}}` without `"type":"array"` compiled fine, then
+    // accepted any non-array value (the items branch is gated on isArray) and
+    // stamped it `.validated` -- a fail-open at the validation boundary.
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"items\":{\"type\":\"string\",\"minLength\":1}}", .{});
     defer parsed.deinit();
     try std.testing.expectError(error.InvalidSchema, compileSchemaFromJson(allocator, parsed.value));
 }

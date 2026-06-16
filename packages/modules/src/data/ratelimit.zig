@@ -168,6 +168,7 @@ fn getOrCreateStore(handle: *sdk.ModuleHandle) !*RateStore {
     if (sdk.getModuleState(handle, RateStore, MODULE_STATE_SLOT)) |store| return store;
     const allocator = sdk.getAllocator(handle);
     const store = try allocator.create(RateStore);
+    errdefer allocator.destroy(store);
     store.* = RateStore.init(allocator);
     try sdk.setModuleState(handle, MODULE_STATE_SLOT, @ptrCast(store), RateStore.sdkDeinit);
     return store;

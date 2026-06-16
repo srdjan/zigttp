@@ -1624,10 +1624,13 @@ pub const OptimizedCompiler = struct {
                 const rel = @as(i32, @intCast(offset)) - current;
                 self.emitter.jmpRel32(rel) catch return CompileError.OutOfMemory;
             } else if (is_aarch64) {
+                // b() takes a BYTE offset and divides by 4 internally (matching
+                // baseline.zig emitJmpToLabel and patchJumps). Pass the raw byte
+                // delta; pre-dividing here double-divided and produced a back-edge
+                // a quarter of the intended distance.
                 const current: i32 = @intCast(self.emitter.buffer.items.len);
                 const off: i32 = @intCast(offset);
-                const rel = @divExact(off - current, 4);
-                self.emitter.b(rel) catch return CompileError.OutOfMemory;
+                self.emitter.b(off - current) catch return CompileError.OutOfMemory;
             }
         } else {
             // Forward jump - record for patching
@@ -1691,10 +1694,12 @@ pub const OptimizedCompiler = struct {
 
     fn emitBcondToTarget(self: *OptimizedCompiler, cond: arm64.Condition, target: u32) CompileError!void {
         if (self.labels.get(target)) |offset| {
+            // bcond() takes a BYTE offset and divides by 4 internally (matching
+            // baseline.zig emitBcondToLabel). Pass the raw byte delta; do not
+            // pre-divide, which would double-divide the branch distance.
             const current: i32 = @intCast(self.emitter.buffer.items.len);
             const off: i32 = @intCast(offset);
-            const rel = @divExact(off - current, 4);
-            self.emitter.bcond(cond, @intCast(rel)) catch return CompileError.OutOfMemory;
+            self.emitter.bcond(cond, off - current) catch return CompileError.OutOfMemory;
         } else {
             try self.emitBcondToLabel(cond, target);
         }

@@ -29,6 +29,12 @@ pub fn getStringData(val: zq.JSValue) ?[]const u8 {
     return null;
 }
 
+/// Flattening string accessor: like getStringData but materializes a concat
+/// rope (caching it as a leaf). Use at sinks that must accept any JS string,
+/// since a `"a" + b` concatenation of combined length >= 64 is a concat rope
+/// that getStringData reports as null.
+const getStringDataCtx = zq.builtins.helpers.getStringDataCtx;
+
 pub fn getDynamicProperty(ctx: *zq.Context, obj: *zq.JSObject, pool: *const zq.HiddenClassPool, name: []const u8) ?zq.JSValue {
     const atom = ctx.atoms.intern(name) catch return null;
     return obj.getProperty(pool, atom);
@@ -165,7 +171,7 @@ pub fn setHeaderValue(
         .replace => try ctx.createString(value),
         .append => blk: {
             if (getHeaderValueCaseInsensitive(ctx, headers_obj, pool, name)) |existing_val| {
-                if (getStringData(existing_val)) |existing_str| {
+                if (getStringDataCtx(existing_val, ctx)) |existing_str| {
                     const combined = try std.fmt.allocPrint(ctx.allocator, "{s}, {s}", .{ existing_str, value });
                     defer ctx.allocator.free(combined);
                     break :blk try ctx.createString(combined);
@@ -193,7 +199,7 @@ pub fn copyHeadersIntoObject(ctx: *zq.Context, src_val: zq.JSValue, dst_obj: *zq
         const key_name = ctx.atoms.getName(key_atom) orelse continue;
         const value = src_obj.getOwnProperty(pool, key_atom) orelse continue;
         if (value.isUndefined() or value.isNull()) continue;
-        const header_str = getStringData(value) orelse return error.InvalidHeaders;
+        const header_str = getStringDataCtx(value, ctx) orelse return error.InvalidHeaders;
         if (!validateHeaderPair(key_name, header_str)) return error.InvalidHeaders;
         try setHeaderValue(ctx, dst_obj, key_name, header_str, .replace);
     }

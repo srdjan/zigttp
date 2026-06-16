@@ -166,6 +166,11 @@ pub const TypePool = struct {
     // -------------------------------------------------------------------
 
     fn addNode(self: *TypePool, allocator: std.mem.Allocator, node: TypeNode) TypeIndex {
+        // TypeIndex is u16 and null_type_idx == maxInt(u16). Fail closed before
+        // the cast can either truncate (silent wrong-node aliasing in ReleaseFast)
+        // or produce an index that collides with null_type_idx. This guards every
+        // producer below, since they all route through addNode.
+        if (self.nodes.items.len >= std.math.maxInt(u16)) return null_type_idx;
         const idx: TypeIndex = @intCast(self.nodes.items.len);
         self.nodes.append(allocator, node) catch return null_type_idx;
         return idx;
@@ -173,6 +178,10 @@ pub const TypePool = struct {
 
     /// Store a name string and return (start, len).
     pub fn addName(self: *TypePool, allocator: std.mem.Allocator, name: []const u8) struct { start: u16, len: u8 } {
+        // The names arena offset is stored as u16; once it exceeds u16 range a
+        // further @intCast would truncate (mis-identifying a field/param/ref name
+        // -> unsound compares) or panic. Fail closed with an empty (unknown) name.
+        if (self.names.items.len > std.math.maxInt(u16)) return .{ .start = 0, .len = 0 };
         const start: u16 = @intCast(self.names.items.len);
         const len: u8 = @intCast(@min(name.len, 255));
         self.names.appendSlice(allocator, name[0..len]) catch {};
@@ -246,6 +255,7 @@ pub const TypePool = struct {
 
     /// Create a record type with the given fields.
     pub fn addRecord(self: *TypePool, allocator: std.mem.Allocator, record_fields: []const RecordField) TypeIndex {
+        if (self.fields.items.len > std.math.maxInt(u16)) return null_type_idx;
         const start: u16 = @intCast(self.fields.items.len);
         const count: u16 = @intCast(record_fields.len);
         self.fields.appendSlice(allocator, record_fields) catch return null_type_idx;
@@ -259,6 +269,7 @@ pub const TypePool = struct {
     pub fn addUnion(self: *TypePool, allocator: std.mem.Allocator, union_members: []const TypeIndex) TypeIndex {
         // Flatten single-member unions
         if (union_members.len == 1) return union_members[0];
+        if (self.members.items.len > std.math.maxInt(u16)) return null_type_idx;
         const start: u16 = @intCast(self.members.items.len);
         const count: u16 = @intCast(union_members.len);
         self.members.appendSlice(allocator, union_members) catch return null_type_idx;
@@ -279,6 +290,7 @@ pub const TypePool = struct {
         // obligation is silently dropped. A dropped target-intersection member is
         // a dropped constraint -> unsound accept in isAssignableTo.
         if (intersection_members.len > 16) {
+            if (self.members.items.len > std.math.maxInt(u16)) return null_type_idx;
             var raw_count: usize = 0;
             const start_raw: u16 = @intCast(self.members.items.len);
             for (intersection_members) |m| {
@@ -320,6 +332,7 @@ pub const TypePool = struct {
         if (count == 0) return null_type_idx;
         if (count == 1) return deduped[0];
 
+        if (self.members.items.len > std.math.maxInt(u16)) return null_type_idx;
         const start: u16 = @intCast(self.members.items.len);
         self.members.appendSlice(allocator, deduped[0..count]) catch return null_type_idx;
         return self.addNode(allocator, .{
@@ -343,6 +356,7 @@ pub const TypePool = struct {
 
     /// Create a tuple type.
     pub fn addTuple(self: *TypePool, allocator: std.mem.Allocator, elements: []const TypeIndex) TypeIndex {
+        if (self.members.items.len > std.math.maxInt(u16)) return null_type_idx;
         const start: u16 = @intCast(self.members.items.len);
         const count: u16 = @intCast(elements.len);
         self.members.appendSlice(allocator, elements) catch return null_type_idx;
@@ -712,6 +726,7 @@ pub const TypePool = struct {
     /// Create a template literal type from parts.
     /// TypeData: a = parts_start, b = parts_count.
     pub fn addTemplateLiteral(self: *TypePool, allocator: std.mem.Allocator, parts: []const TemplatePart) TypeIndex {
+        if (self.template_parts.items.len > std.math.maxInt(u16)) return null_type_idx;
         const start: u16 = @intCast(self.template_parts.items.len);
         const count: u16 = @intCast(parts.len);
         self.template_parts.appendSlice(allocator, parts) catch return null_type_idx;
@@ -1780,8 +1795,14 @@ const TypeExprParser = struct {
             return self.pool.addArray(self.allocator, args_buf[0]);
         }
 
-        // Readonly<T> -> record with all fields readonly
-        if (std.mem.eql(u8, base_name, "Readonly") and count == 1) {
+        // Readonly<{...}> on an INLINE record -> mark all fields readonly here
+        // (no alias resolution needed). Readonly<NamedAlias> must instead build a
+        // generic-app so TypeEnv.tryInstantiateGenericApp resolves the alias to
+        // its record before applying makeReadonly -- applying makeReadonly to a
+        // bare t_ref here is a no-op that silently drops the readonly markers.
+        if (std.mem.eql(u8, base_name, "Readonly") and count == 1 and
+            self.pool.getTag(args_buf[0]) == .t_record)
+        {
             return self.pool.makeReadonly(self.allocator, args_buf[0]);
         }
 

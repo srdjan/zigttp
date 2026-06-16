@@ -243,16 +243,17 @@ pub const ContractDiff = struct {
     /// `.equivalent_modulo_laws` in place of `.equivalent`.
     pub fn classify(self: *const ContractDiff) Classification {
         const structural = self.classifyStructural();
-        if (structural == .equivalent) {
-            // tryCanonicalEquivalence (run by diffContracts) proved the behaviors
-            // are NOT equivalent - an io_sequence / response change inside a
-            // structurally-identical path (e.g. sha256 -> hmacSha256). The
-            // counterexample was computed but previously discarded, so such a
-            // change passed as equivalent. A counterexample and fired laws are
-            // mutually exclusive, so check it first.
-            if (self.canonical_counterexample != null) return .breaking;
-            if (self.laws_used.items.len > 0) return .equivalent_modulo_laws;
-        }
+        // A canonical counterexample means a surviving path's observable
+        // io_sequence / response changed (e.g. sha256 -> hmacSha256, or sha256 of
+        // A vs B). That is breaking even when the surface is only additive (the
+        // same edit also added a route), so honor it for both verdicts -- gating
+        // it on .equivalent alone let an additive+io-change combination pass as
+        // a safe additive deploy.
+        if ((structural == .equivalent or structural == .additive) and
+            self.canonical_counterexample != null) return .breaking;
+        // Fired laws only upgrade a structurally-equivalent surface; an additive
+        // surface stays additive even when canonicalization fired laws.
+        if (structural == .equivalent and self.laws_used.items.len > 0) return .equivalent_modulo_laws;
         return structural;
     }
 
@@ -319,8 +320,9 @@ pub const ContractDiff = struct {
     /// the canonical forms match. On success, populates `laws_used`. On
     /// mismatch, populates `canonical_counterexample`. Best-effort.
     ///
-    /// No-op when the structural classification is not already
-    /// `.equivalent` - canonicalization cannot rescue a surface change.
+    /// Runs for `.equivalent` and `.additive` surfaces (a surviving path's
+    /// behavior must be preserved even when a route was also added); a no-op for
+    /// `.breaking`, where canonicalization cannot rescue a surface change.
     pub fn tryCanonicalEquivalence(
         self: *ContractDiff,
         allocator: std.mem.Allocator,
@@ -328,9 +330,19 @@ pub const ContractDiff = struct {
         new: *const HandlerContract,
     ) !void {
         if (self.laws_used.items.len > 0) return;
-        if (self.classifyStructural() != .equivalent) return;
+        const structural = self.classifyStructural();
+        // Run for .equivalent (whole-surface match) and .additive (a route was
+        // added, but every surviving path must still be behaviorally preserved).
+        // Gating only on .equivalent let a changed io_sequence on a surviving
+        // path fail open whenever the same edit also added a route.
+        if (structural != .equivalent and structural != .additive) return;
         if (old.behaviors.items.len == 0 and new.behaviors.items.len == 0) return;
-        if (old.behaviors.items.len != new.behaviors.items.len) {
+        // For .equivalent the route surface is identical, so a behavior-path
+        // count mismatch is itself a change. For .additive the new contract
+        // legitimately carries extra paths (the added route); the match loop
+        // below ignores unmatched-new paths while still flagging any old path
+        // that lost its canonical twin.
+        if (structural == .equivalent and old.behaviors.items.len != new.behaviors.items.len) {
             try self.setCounterexample(allocator, "behavior path count differs");
             return;
         }
@@ -2525,9 +2537,42 @@ test "diffContracts does not upgrade when surface differs" {
     var diff = try diffContracts(allocator, &old, &new);
     defer diff.deinit(allocator);
 
-    // Surface is additive, so canonicalization does not try to upgrade.
+    // Surface is additive: canonicalization still runs over the surviving paths
+    // (so a changed io_sequence on a preserved path is caught even when a route
+    // was added) and may record fired laws, but an additive surface is never
+    // upgraded to equivalent_modulo_laws -- the verdict stays additive.
     try std.testing.expectEqual(Classification.additive, diff.classify());
-    try std.testing.expectEqual(@as(usize, 0), diff.laws_used.items.len);
+}
+
+test "diffContracts: additive surface does not hide a changed io_sequence on a surviving path" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+
+    // Additive surface change (a new env var) ...
+    try new.env.literal.append(allocator, try allocator.dupe(u8, "NEW_KEY"));
+
+    // ... combined with a surviving path whose observable io_sequence changed
+    // (sha256 of A -> B). Gating the canonical check on .equivalent alone let
+    // this fail open as a safe additive deploy; it must read as breaking.
+    try old.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/data", 200, &.{
+        .{ .module = "crypto", .func = "sha256", .args = "lit:A" },
+    }));
+    try new.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/data", 200, &.{
+        .{ .module = "crypto", .func = "sha256", .args = "lit:B" },
+    }));
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    // Structurally additive, but the surviving path changed -> breaking.
+    try std.testing.expectEqual(Classification.additive, diff.classifyStructural());
+    try std.testing.expect(diff.canonical_counterexample != null);
+    try std.testing.expectEqual(Classification.breaking, diff.classify());
+    try std.testing.expectEqual(Classification.breaking, diff.behavioralVerdict());
 }
 
 test "behavioralVerdict flags a changed response path as breaking" {

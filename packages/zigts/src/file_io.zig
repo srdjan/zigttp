@@ -25,6 +25,46 @@ pub fn readFile(allocator: std.mem.Allocator, path: []const u8, max_size: usize)
     return buffer.toOwnedSlice(allocator);
 }
 
+/// Read up to `window` bytes from the END of a file. When the window does not
+/// begin at offset 0 the (likely partial) leading line is dropped, so the
+/// result starts at the first complete line. Used as a graceful fallback for
+/// append-only logs that have grown past a read cap. Returns an owned,
+/// exactly-sized slice the caller frees.
+pub fn readFileTail(allocator: std.mem.Allocator, path: []const u8, window: usize) ![]u8 {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(fd);
+
+    const st = try fstatFd(fd);
+    const start: u64 = if (st.size > window) st.size - window else 0;
+
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
+
+    var offset: u64 = start;
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const result = std.c.pread(fd, &chunk, chunk.len, @intCast(offset));
+        if (result < 0) return error.ReadFailed;
+        const n: usize = @intCast(result);
+        if (n == 0) break;
+        try buffer.appendSlice(allocator, chunk[0..n]);
+        offset += n;
+    }
+
+    var data: []const u8 = buffer.items;
+    if (start > 0) {
+        if (std.mem.indexOfScalar(u8, data, '\n')) |nl| {
+            data = data[nl + 1 ..];
+        } else {
+            data = data[0..0];
+        }
+    }
+    return try allocator.dupe(u8, data);
+}
+
 /// Check whether a file exists using POSIX open (no fstat/libc dependency).
 pub fn fileExists(allocator: std.mem.Allocator, path: []const u8) bool {
     const path_z = allocator.dupeZ(u8, path) catch return false;

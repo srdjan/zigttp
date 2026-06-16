@@ -88,7 +88,12 @@ pub fn detect(allocator: std.mem.Allocator) !?Payload {
     const checksum_expected = std.mem.readInt(u32, trailer_buf[20..24], .little);
 
     if (version > FORMAT_VERSION) return null;
-    if (payload_offset + payload_size + TRAILER_SIZE != file_size) return null;
+    // payload_offset/payload_size come straight from the (pre-CRC) trailer, so a
+    // tampered trailer can drive this addition past maxInt(u64): overflow-safe
+    // add avoids a safe-build panic / a wrap that spuriously equals file_size.
+    const body_end = std.math.add(u64, payload_offset, payload_size) catch return null;
+    const total = std.math.add(u64, body_end, @as(u64, TRAILER_SIZE)) catch return null;
+    if (total != file_size) return null;
     if (payload_size > 100 * 1024 * 1024) return null; // 100MB sanity limit
 
     // Read payload
@@ -170,7 +175,10 @@ pub fn getCleanBinarySize(data: []const u8) usize {
     const payload_offset = std.mem.readInt(u64, data[trailer_start..][0..8], .little);
     const payload_size = std.mem.readInt(u64, data[trailer_start + 8 ..][0..8], .little);
 
-    if (payload_offset + payload_size + TRAILER_SIZE == data.len) {
+    // Overflow-safe: payload_offset/payload_size are raw trailer bytes.
+    const body_end = std.math.add(u64, payload_offset, payload_size) catch return data.len;
+    const total = std.math.add(u64, body_end, @as(u64, TRAILER_SIZE)) catch return data.len;
+    if (total == @as(u64, data.len)) {
         return @intCast(payload_offset);
     }
     return data.len;
@@ -236,7 +244,7 @@ fn parsePayload(allocator: std.mem.Allocator, data: []const u8) !?Payload {
     var pos: usize = 0;
     if (data.len < 2) return null;
 
-    const section_count = readU16(data, &pos);
+    const section_count = try readU16(data, &pos);
 
     var bytecode: ?[]const u8 = null;
     var dep_bytecodes: ?[]const []const u8 = null;
@@ -262,7 +270,7 @@ fn parsePayload(allocator: std.mem.Allocator, data: []const u8) !?Payload {
 
         const section_type = data[pos];
         pos += 1;
-        const section_size = readU32(data, &pos);
+        const section_size = try readU32(data, &pos);
         if (pos + section_size > data.len) return null;
         const section_data = data[pos .. pos + section_size];
         pos += section_size;
@@ -303,7 +311,7 @@ fn parseDeps(allocator: std.mem.Allocator, data: []const u8) ![]const []const u8
     var pos: usize = 0;
     if (data.len < 2) return &.{};
 
-    const count = readU16(data, &pos);
+    const count = try readU16(data, &pos);
     var deps = try allocator.alloc([]const u8, count);
     var filled: usize = 0;
     errdefer {
@@ -312,7 +320,7 @@ fn parseDeps(allocator: std.mem.Allocator, data: []const u8) ![]const []const u8
     }
 
     while (filled < count) : (filled += 1) {
-        const dep_size = readU32(data, &pos);
+        const dep_size = try readU32(data, &pos);
         if (pos + dep_size > data.len) return error.InvalidPayload;
         deps[filled] = try allocator.dupe(u8, data[pos .. pos + dep_size]);
         pos += dep_size;
@@ -375,7 +383,7 @@ fn deserializeAllowList(
     const enabled = data[pos.*] != 0;
     pos.* += 1;
 
-    const count = readU16(data, pos);
+    const count = try readU16(data, pos);
     var values = try allocator.alloc([]const u8, count);
     var filled: usize = 0;
     errdefer {
@@ -384,7 +392,8 @@ fn deserializeAllowList(
     }
 
     while (filled < count) : (filled += 1) {
-        const len = readU16(data, pos);
+        const len = try readU16(data, pos);
+        if (pos.* + len > data.len) return error.InvalidPayload;
         const s = try allocator.dupe(u8, data[pos.* .. pos.* + len]);
         try strings.append(allocator, s);
         values[filled] = s;
@@ -465,13 +474,18 @@ fn writeSection(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, section_t
     try buf.appendSlice(allocator, data);
 }
 
-fn readU16(data: []const u8, pos: *usize) u16 {
+fn readU16(data: []const u8, pos: *usize) !u16 {
+    // The payload is attacker-modifiable (CRC-32 is an accidental-corruption
+    // check, not an integrity control), so bounds-check before slicing: an
+    // unchecked read off the buffer tail is a safe-build panic / ReleaseFast OOB.
+    if (pos.* + 2 > data.len) return error.InvalidPayload;
     const val = std.mem.readInt(u16, data[pos.*..][0..2], .little);
     pos.* += 2;
     return val;
 }
 
-fn readU32(data: []const u8, pos: *usize) usize {
+fn readU32(data: []const u8, pos: *usize) !usize {
+    if (pos.* + 4 > data.len) return error.InvalidPayload;
     const val = std.mem.readInt(u32, data[pos.*..][0..4], .little);
     pos.* += 4;
     return @intCast(val);

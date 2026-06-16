@@ -243,8 +243,13 @@ pub fn appendEvent(allocator: std.mem.Allocator, params: AppendParams) !void {
 /// Reads in chronological order (oldest first). A missing ledger file
 /// returns an empty slice. Caller frees with `freeEvents`.
 pub fn readEvents(allocator: std.mem.Allocator) ![]Event {
-    const bytes = zigts.file_io.readFile(allocator, ledgerPath(), 16 * 1024 * 1024) catch |err| switch (err) {
+    const bytes = zigts.file_io.readFile(allocator, ledgerPath(), MAX_LEDGER_BYTES) catch |err| switch (err) {
         error.FileNotFound => return try allocator.alloc(Event, 0),
+        // The ledger is append-only with no rotation, so it grows past the cap
+        // on a long-lived dev/CI runner. Rather than brick the entire proofs
+        // subsystem with a hard error, read the trailing window (recent events
+        // are the useful ones for list/show/diff/watch).
+        error.FileTooBig => try zigts.file_io.readFileTail(allocator, ledgerPath(), MAX_LEDGER_BYTES),
         else => return err,
     };
     defer allocator.free(bytes);
@@ -270,6 +275,8 @@ pub fn freeEvents(allocator: std.mem.Allocator, events: []Event) void {
     for (events) |*ev| ev.deinit(allocator);
     allocator.free(events);
 }
+
+const MAX_LEDGER_BYTES = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Ref resolution

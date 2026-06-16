@@ -266,7 +266,26 @@ pub fn concatNValues(interp: *Interpreter, count: u8) !value.JSValue {
         values[i - 1] = interp.ctx.pop();
     }
 
-    // Convert all values to strings; track which are freshly allocated.
+    // Hybrid (request) mode: stringify every operand into the request arena so
+    // no intermediate needs explicit freeing (mirrors concatToStringRope).
+    // valueToString routes numbers/booleans/null/objects through
+    // interp.createString, which allocates from the arena in hybrid mode, so
+    // freeing those via ctx.allocator would be an invalid free; ropes/slices
+    // flatten into the arena here too. The per-request arena reset reclaims all.
+    if (interp.ctx.hybrid) |h| {
+        var strings: [16]*string.JSString = undefined;
+        for (0..count) |j| {
+            strings[j] = try valueToStringArena(interp, values[j], h.arena);
+        }
+        const result = string.concatManyWithArena(h.arena, strings[0..count]) orelse
+            return error.OutOfMemory;
+        return value.JSValue.fromPtr(result);
+    }
+
+    // Non-hybrid mode: valueToString allocates a new string via ctx.allocator
+    // for every operand except a plain string returned directly (isString) and
+    // cached small ints. Ropes/slices flatten into a fresh ctx.allocator string,
+    // so they must be freed too -- gate on isString (tag 3), not isAnyString.
     var strings: [16]*string.JSString = undefined;
     var fresh: [16]bool = [_]bool{false} ** 16;
     for (0..count) |j| {
@@ -275,19 +294,7 @@ pub fn concatNValues(interp: *Interpreter, count: u8) !value.JSValue {
             for (0..j) |k| if (fresh[k]) string.freeString(interp.ctx.allocator, strings[k]);
             return err;
         };
-        fresh[j] = !v.isAnyString() and !(v.isInt() and interp.ctx.small_int_cache.get(v.getInt()) != null);
-    }
-
-    // Use concatMany for single-allocation concatenation
-    if (interp.ctx.hybrid) |h| {
-        // valueToString always allocates via interp.ctx.allocator, not the arena,
-        // so fresh intermediates must be freed explicitly after concatenation.
-        const result = string.concatManyWithArena(h.arena, strings[0..count]) orelse {
-            for (0..count) |j| if (fresh[j]) string.freeString(interp.ctx.allocator, strings[j]);
-            return error.OutOfMemory;
-        };
-        for (0..count) |j| if (fresh[j]) string.freeString(interp.ctx.allocator, strings[j]);
-        return value.JSValue.fromPtr(result);
+        fresh[j] = !v.isString() and !(v.isInt() and interp.ctx.small_int_cache.get(v.getInt()) != null);
     }
 
     const result = string.concatMany(interp.ctx.allocator, strings[0..count]) catch |err| {

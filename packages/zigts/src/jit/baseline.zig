@@ -1106,6 +1106,50 @@ pub const BaselineCompiler = struct {
         }
     }
 
+    /// Store every DIRTY register-allocated local (aarch64 x23-x28) back to
+    /// ctx.stack[fp+idx]. emitPutLocal defers writes to the callee-saved
+    /// register and only marks the local dirty, so the in-memory slot is stale
+    /// until this runs. It MUST run before any helper that re-enters the
+    /// interpreter (the deopt helper resumes interp.dispatch(), which reads
+    /// locals from memory) and at the epilogue. No-op on x86_64 (no register
+    /// allocation) and when nothing is dirty. Does not clear ra.dirty: the deopt
+    /// site continues compiling the fall-through path, which still needs it.
+    fn emitSpillDirtyLocals(self: *BaselineCompiler) CompileError!void {
+        if (is_aarch64) {
+            if (self.reg_alloc) |ra| {
+                var has_dirty = false;
+                for (0..ra.reg_local_count) |i| {
+                    if (ra.dirty[i]) {
+                        has_dirty = true;
+                        break;
+                    }
+                }
+
+                if (has_dirty) {
+                    // Load ctx->fp into x9, ctx->stack.ptr into x10
+                    self.emitter.ldrImm(.x9, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+                    self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
+
+                    for (0..ra.reg_local_count) |i| {
+                        if (!ra.dirty[i]) continue;
+
+                        const local_idx = ra.reg_to_local[i] orelse continue;
+                        const reg = ra.local_allocs[local_idx].register orelse continue;
+
+                        // Compute address: x11 = x10 + (x9 + local_idx) * 8
+                        if (local_idx > 0) {
+                            self.emitter.addRegImm12(.x11, .x9, local_idx) catch return CompileError.OutOfMemory;
+                            self.emitter.addRegRegShift(.x11, .x10, .x11, 3) catch return CompileError.OutOfMemory;
+                        } else {
+                            self.emitter.addRegRegShift(.x11, .x10, .x9, 3) catch return CompileError.OutOfMemory;
+                        }
+                        self.emitter.strImm(reg, .x11, 0) catch return CompileError.OutOfMemory;
+                    }
+                }
+            }
+        }
+    }
+
     fn emitEpilogue(self: *BaselineCompiler) CompileError!void {
         if (is_x86_64) {
             // x86-64 epilogue: restore callee-saved registers
@@ -1119,44 +1163,10 @@ pub const BaselineCompiler = struct {
         } else if (is_aarch64) {
             // ARM64 epilogue: store register locals back to memory, restore registers and return
 
-            // Store DIRTY allocated locals back from registers to memory
-            // Only locals that were written (put_loc emitted) need to be stored back
-            if (self.reg_alloc) |ra| {
-                // Check if any locals are dirty (written to)
-                var has_dirty = false;
-                for (0..ra.reg_local_count) |i| {
-                    if (ra.dirty[i]) {
-                        has_dirty = true;
-                        break;
-                    }
-                }
-
-                if (has_dirty) {
-                    // Load ctx->fp into x9
-                    self.emitter.ldrImm(.x9, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
-                    // Load ctx->stack.ptr into x10
-                    self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
-
-                    // Store only dirty locals back to memory
-                    for (0..ra.reg_local_count) |i| {
-                        if (!ra.dirty[i]) continue;
-
-                        const local_idx = ra.reg_to_local[i] orelse continue;
-                        const reg = ra.local_allocs[local_idx].register orelse continue;
-
-                        // Compute address: x11 = x10 + (x9 + local_idx) * 8
-                        if (local_idx > 0) {
-                            self.emitter.addRegImm12(.x11, .x9, local_idx) catch return CompileError.OutOfMemory;
-                            self.emitter.addRegRegShift(.x11, .x10, .x11, 3) catch return CompileError.OutOfMemory;
-                        } else {
-                            // local_idx == 0, just x11 = x10 + x9 * 8
-                            self.emitter.addRegRegShift(.x11, .x10, .x9, 3) catch return CompileError.OutOfMemory;
-                        }
-                        // Store value from allocated register
-                        self.emitter.strImm(reg, .x11, 0) catch return CompileError.OutOfMemory;
-                    }
-                }
-            }
+            // Store DIRTY register-allocated locals back to memory before the
+            // frame returns (factored into emitSpillDirtyLocals so the deopt
+            // exit can reuse it before re-entering the interpreter).
+            try self.emitSpillDirtyLocals();
 
             try self.emitFlushStackCache();
 
@@ -1901,6 +1911,12 @@ pub const BaselineCompiler = struct {
             try self.emitCallHelperReg(.rax);
             try self.emitEpilogue();
         } else if (is_aarch64) {
+            // jitDeoptimize resumes interp.dispatch(), which reads locals from
+            // ctx.stack[fp+idx]. Register-allocated locals are still only in
+            // callee-saved registers (emitPutLocal defers the store), so spill
+            // them to memory first or the interpreter computes with stale values.
+            // x9/x10/x11 are scratch here (clobbered before the arg setup below).
+            try self.emitSpillDirtyLocals();
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x1, bytecode_offset) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x2, @intFromEnum(reason)) catch return CompileError.OutOfMemory;

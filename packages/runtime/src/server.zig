@@ -531,7 +531,7 @@ const ConnectionPool = struct {
 
         // Health and readiness probes - before WebSocket, static, and JS handler
         if (std.mem.eql(u8, request.path, "/_health")) {
-            self.sendErrorSync(fd, 200, "OK") catch {};
+            self.sendStatusSync(fd, 200, "OK", keep_alive) catch {};
             return outcome_if_alive;
         }
         if (std.mem.eql(u8, request.path, "/_readiness")) {
@@ -543,7 +543,7 @@ const ConnectionPool = struct {
                 self.sendErrorSync(fd, 503, "Service Unavailable") catch {};
                 return .close;
             }
-            self.sendErrorSync(fd, 200, "OK") catch {};
+            self.sendStatusSync(fd, 200, "OK", keep_alive) catch {};
             return outcome_if_alive;
         }
 
@@ -602,7 +602,7 @@ const ConnectionPool = struct {
         if (self.server.contract) |*contract| {
             if (!contract.matchesRoute(request.method, request.path)) {
                 proof_audit_ring.pushRouteBlocked(request.method, request.path);
-                self.sendErrorSync(fd, 404, "Not Found") catch {};
+                self.sendStatusSync(fd, 404, "Not Found", keep_alive) catch {};
                 return outcome_if_alive;
             }
         }
@@ -851,6 +851,18 @@ const ConnectionPool = struct {
         _ = self;
         var buf: [512]u8 = undefined;
         const response = formatHttpError(&buf, status, message, false, null) catch return;
+        try writeAllFd(fd, response);
+    }
+
+    /// Like sendErrorSync but frames with the connection's actual keep_alive
+    /// flag. The health/readiness/404 fast paths return `outcome_if_alive`
+    /// (keeping the fd open), so they must not advertise `Connection: close`
+    /// (which a spec-compliant client treats as not reusable, defeating
+    /// keep-alive on exactly the highest-frequency probe paths).
+    fn sendStatusSync(self: *ConnectionPool, fd: std.posix.fd_t, status: u16, message: []const u8, keep_alive: bool) !void {
+        _ = self;
+        var buf: [512]u8 = undefined;
+        const response = formatHttpError(&buf, status, message, keep_alive, null) catch return;
         try writeAllFd(fd, response);
     }
 

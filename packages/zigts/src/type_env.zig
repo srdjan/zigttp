@@ -30,13 +30,14 @@ pub const spec_marker_field = "__zigttp_spec__";
 
 /// Built-in object-deriving utility types. Recognized by name in
 /// tryInstantiateGenericApp; the transforms themselves live in TypePool.
-const UtilityKind = enum { pick, omit, partial, required };
+const UtilityKind = enum { pick, omit, partial, required, readonly };
 
 fn utilityKind(name: []const u8) ?UtilityKind {
     if (std.mem.eql(u8, name, "Pick")) return .pick;
     if (std.mem.eql(u8, name, "Omit")) return .omit;
     if (std.mem.eql(u8, name, "Partial")) return .partial;
     if (std.mem.eql(u8, name, "Required")) return .required;
+    if (std.mem.eql(u8, name, "Readonly")) return .readonly;
     return null;
 }
 
@@ -476,7 +477,7 @@ pub const TypeEnv = struct {
                 // maps, which only exist on TypeEnv.
                 if (utilityKind(base_name)) |kind| {
                     const want_args: usize = switch (kind) {
-                        .partial, .required => 1,
+                        .partial, .required, .readonly => 1,
                         .pick, .omit => 2,
                     };
                     if (info.args.len < want_args) return idx;
@@ -500,6 +501,7 @@ pub const TypeEnv = struct {
                     return switch (kind) {
                         .partial => self.pool.makePartial(self.allocator, src),
                         .required => self.pool.makeRequired(self.allocator, src),
+                        .readonly => self.pool.makeReadonly(self.allocator, src),
                         .pick => self.pool.pickFields(self.allocator, src, keys),
                         .omit => self.pool.omitFields(self.allocator, src, keys),
                     };

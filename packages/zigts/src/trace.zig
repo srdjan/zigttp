@@ -977,9 +977,16 @@ fn parseArray(ctx: *context.Context, json: []const u8, start: usize, depth: u32)
             pos += 1;
             break;
         }
+        const elem_start = pos;
         const elem = parseValue(ctx, json, pos, depth + 1);
         pos = elem.end;
         arr.arrayPush(ctx.allocator, elem.val) catch {};
+        // Guarantee forward progress. parseValue returns end == start when the
+        // MAX_PARSE_DEPTH cap is hit (an adversarial/corrupted trace nested past
+        // 128 levels); without this break the loop would re-read the same
+        // character forever (100% CPU + unbounded arrayPush). parseObject is
+        // immune because its non-string-key escape always advances.
+        if (pos <= elem_start) break;
     }
     return .{ .val = arr.toValue(), .end = pos };
 }

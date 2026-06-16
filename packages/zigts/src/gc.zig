@@ -978,6 +978,11 @@ pub const GC = struct {
 
         // Register in tenured heap for tracking
         const idx = self.tenured.registerObject(new_ptr) catch |err| {
+            // The copy was allocated via allocRaw but never registered, so no
+            // sweep or deinit can reach it. Free it here to avoid orphaning the
+            // block; abortMinorGC clears the forwarding map but cannot free an
+            // unregistered tenured allocation.
+            h.freeRaw(new_ptr);
             self.gc_oom = true;
             return err;
         };

@@ -14,6 +14,7 @@ const embedded_handler = @import("embedded_handler");
 const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
 const http_parser = @import("http_parser.zig");
+const server_io = @import("server_io.zig");
 const contract_runtime = @import("contract_runtime.zig");
 const runtime_builtins = @import("runtime_builtins.zig");
 pub const websocket_codec = @import("websocket_codec.zig");
@@ -2542,7 +2543,7 @@ fn headersGetNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSVa
     const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
     if (!this.isObject() or args.len == 0) return zq.JSValue.undefined_val;
 
-    const wanted = getStringData(args[0]) orelse return zq.JSValue.undefined_val;
+    const wanted = getStringDataCtx(args[0], ctx) orelse return zq.JSValue.undefined_val;
     const pool = ctx.hidden_class_pool orelse return zq.JSValue.undefined_val;
     const headers_obj = this.toPtr(zq.JSObject);
     return getHeaderValueCaseInsensitive(ctx, headers_obj, pool, wanted) orelse zq.JSValue.undefined_val;
@@ -2552,7 +2553,7 @@ fn headersHasNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSVa
     const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
     if (!this.isObject() or args.len == 0) return zq.JSValue.false_val;
 
-    const wanted = getStringData(args[0]) orelse return zq.JSValue.false_val;
+    const wanted = getStringDataCtx(args[0], ctx) orelse return zq.JSValue.false_val;
     const pool = ctx.hidden_class_pool orelse return zq.JSValue.false_val;
     const headers_obj = this.toPtr(zq.JSObject);
     return zq.JSValue.fromBool(getHeaderValueCaseInsensitive(ctx, headers_obj, pool, wanted) != null);
@@ -2567,8 +2568,8 @@ fn headersSetLikeNative(
     if (!this.isObject()) return throwTypeError(ctx, "Headers target must be an object");
     if (args.len < 2) return throwTypeError(ctx, "Headers mutation requires name and value");
 
-    const name = getStringData(args[0]) orelse return throwTypeError(ctx, "Header name must be string");
-    const value = getStringData(args[1]) orelse return throwTypeError(ctx, "Header value must be string");
+    const name = getStringDataCtx(args[0], ctx) orelse return throwTypeError(ctx, "Header name must be string");
+    const value = getStringDataCtx(args[1], ctx) orelse return throwTypeError(ctx, "Header value must be string");
     if (!validateHeaderPair(name, value)) {
         return throwTypeError(ctx, "Header name/value is invalid");
     }
@@ -2590,7 +2591,7 @@ fn headersDeleteNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.J
     const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
     if (!this.isObject() or args.len == 0) return zq.JSValue.undefined_val;
 
-    const wanted = getStringData(args[0]) orelse return zq.JSValue.undefined_val;
+    const wanted = getStringDataCtx(args[0], ctx) orelse return zq.JSValue.undefined_val;
     const pool = ctx.hidden_class_pool orelse return zq.JSValue.undefined_val;
     const headers_obj = this.toPtr(zq.JSObject);
     const keys = headers_obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return zq.JSValue.undefined_val;
@@ -3893,8 +3894,24 @@ fn writeWebSocketFrame(fd: std.posix.fd_t, opcode: u4, payload: []const u8) !voi
         header_len = 10;
     }
 
-    try writeAllPosix(fd, header_buf[0..header_len]);
-    if (payload.len > 0) try writeAllPosix(fd, payload);
+    // Gather-write the header and payload in a single writev syscall. Under the
+    // thread-per-connection model two frame-loop threads can call this on the
+    // same peer socket concurrently (broadcast); two separate write() calls
+    // (header, then payload) gave a guaranteed interleave window between them.
+    // One writev delivers a frame to the socket buffer atomically whenever it
+    // fits (the common case under the 64 KiB cap). A short write on a frame
+    // larger than the send buffer can still interleave; the fully-robust fix is
+    // a per-connection send lock, deferred as it requires reworking the pool's
+    // value-copied Connection storage.
+    if (payload.len > 0) {
+        var iovecs: [2]std.posix.iovec_const = .{
+            .{ .base = header_buf[0..header_len].ptr, .len = header_len },
+            .{ .base = payload.ptr, .len = payload.len },
+        };
+        try server_io.writevAllFd(fd, &iovecs);
+    } else {
+        try writeAllPosix(fd, header_buf[0..header_len]);
+    }
 }
 
 fn writeAllPosix(fd: std.posix.fd_t, data: []const u8) !void {
@@ -3922,7 +3939,10 @@ fn wsSendCallback(
     const id = wsConnectionIdFromArg(args[0]) orelse {
         return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
     };
-    const bytes = zq.modules.util.extractString(args[1]) orelse {
+    // getStringDataCtx (not extractString) so a payload built by concatenation
+    // (a concat rope once combined length >= 64, the common `"event: " + ...`
+    // case) is flattened rather than rejected as "not a string".
+    const bytes = getStringDataCtx(args[1], ctx) orelse {
         return zq.modules.util.throwError(ctx, "TypeError", "data must be a string (binary frames land in W2)");
     };
     // dup the fd under the pool lock rather than reading snapshot().fd and
@@ -3965,7 +3985,7 @@ fn wsCloseCallback(
         return zq.modules.util.throwError(ctx, "TypeError", "close code must be a number");
     };
     const reason: []const u8 = if (args.len >= 3)
-        zq.modules.util.extractString(args[2]) orelse ""
+        getStringDataCtx(args[2], ctx) orelse ""
     else
         "";
 
@@ -4015,7 +4035,7 @@ fn wsSerializeAttachmentCallback(
     // pre-serialize (JSON.stringify will arrive with the structured
     // clone work; for now a string payload is the contract). W2-b
     // extends this into a typed-array path for binary attachments.
-    const bytes = zq.modules.util.extractString(args[1]) orelse {
+    const bytes = getStringDataCtx(args[1], ctx) orelse {
         return zq.modules.util.throwError(ctx, "TypeError", "attachment must be a string (W2-a); binary lands in W2-b");
     };
     const ok = pool.setAttachment(id, bytes) catch |err| {

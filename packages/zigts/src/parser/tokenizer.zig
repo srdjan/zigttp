@@ -335,7 +335,14 @@ pub const Tokenizer = struct {
     }
 
     fn scanDot(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
-        if (self.match('.') and self.match('.')) return self.tok3(start, col, line, .spread);
+        // `...` spread. Peek both following dots before consuming: the previous
+        // `match('.') and match('.')` form consumed the first dot via the
+        // short-circuited && even when the second failed, so `..` silently lost
+        // its second dot (token reported len 1 while pos advanced 2).
+        if (self.pos + 1 < self.source.len and self.source[self.pos] == '.' and self.source[self.pos + 1] == '.') {
+            self.pos += 2;
+            return self.tok3(start, col, line, .spread);
+        }
         if (self.pos < self.source.len and isDigit(self.source[self.pos])) {
             return self.scanNumber(start, col, line);
         }

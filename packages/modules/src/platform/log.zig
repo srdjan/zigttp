@@ -106,8 +106,13 @@ fn appendJsonValue(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, val: s
         } else if (std.math.isNan(f) or std.math.isInf(f)) {
             try buf.appendSlice(allocator, "null");
         } else {
-            var tmp: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
+            // `{d}` prints an f64 in full decimal (no scientific notation), so
+            // the largest finite magnitude (~1.8e308) expands to ~309 digits. A
+            // 32-byte buffer overflowed and `catch return` aborted mid-field,
+            // emitting malformed NDJSON (`"key":` with no value). Size for the
+            // worst case and fall back to a valid token if it ever overflows.
+            var tmp: [345]u8 = undefined;
+            const s: []const u8 = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch "null";
             try buf.appendSlice(allocator, s);
         }
     } else if (sdk.extractString(val)) |str| {

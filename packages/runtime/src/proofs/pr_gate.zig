@@ -545,10 +545,12 @@ fn changedHandlers(
     base: []const u8,
     head: ?[]const u8,
 ) ![]const []const u8 {
+    // Include D (deleted): removing a handler file removes all of its routes
+    // and is a breaking change the gate must catch, not silently drop.
     const res = if (head) |h| blk: {
         const range = try std.fmt.allocPrint(arena, "{s}...{s}", .{ base, h });
-        break :blk try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--diff-filter=ACMR", range });
-    } else try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--diff-filter=ACMR", base });
+        break :blk try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--diff-filter=ACMRD", range });
+    } else try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--diff-filter=ACMRD", base });
     defer arena.free(res.stdout);
     if (!res.ok) return error.BadGitRef;
 
@@ -624,7 +626,18 @@ pub fn run(
         const before = try readAtRef(arena, cwd, base, path);
         const after = try readAfter(arena, cwd, opts.head, path);
         if (after == null) {
-            try skipped.append(arena, .{ .path = path, .reason = "unreadable" });
+            // File removed at head. If it was a request handler at base, the
+            // deletion removed all of its routes -> breaking (must land in
+            // results, which worstVerdict ranks). A deleted non-handler is noise.
+            if (before) |before_src| {
+                if (sourceIsHandler(gpa, before_src, path)) {
+                    try results.append(arena, .{ .path = try arena.dupe(u8, path), .verdict = .breaking });
+                } else {
+                    try skipped.append(arena, .{ .path = path, .reason = "deleted_non_handler" });
+                }
+            } else {
+                try skipped.append(arena, .{ .path = path, .reason = "unreadable" });
+            }
             continue;
         }
 
@@ -691,6 +704,16 @@ fn readAfter(arena: std.mem.Allocator, cwd: []const u8, head: ?[]const u8, path:
     };
 }
 
+/// True when `src` compiles to a contract exposing routes/behaviors, i.e. it is
+/// a request handler rather than a library/config module. Used to decide whether
+/// a DELETED file removed real routes (breaking) or was just noise.
+fn sourceIsHandler(gpa: std.mem.Allocator, src: []const u8, path: []const u8) bool {
+    var result = zigts_cli.precompile.runCheckOnlyFromSource(gpa, src, path, null, true, null, false) catch return false;
+    defer result.deinit(gpa);
+    if (result.contract) |*c| return isHandlerContract(c);
+    return false;
+}
+
 /// Compile before/after to contracts, diff them, and project the result into
 /// the arena-owned data model. Returns null when either side has no contract
 /// (not a handler). The ContractDiff and compile results live only for the
@@ -710,22 +733,38 @@ fn analyzeHandler(
     var after_result = try zigts_cli.precompile.runCheckOnlyFromSource(gpa, after_src, path, null, true, null, false);
     defer after_result.deinit(gpa);
 
-    const before_contract = if (before_result.contract) |*c| c else return null;
-    const after_contract = if (after_result.contract) |*c| c else return null;
+    const before_contract: ?*const zigts.HandlerContract = if (before_result.contract) |*c| c else null;
+    const after_contract: ?*const zigts.HandlerContract = if (after_result.contract) |*c| c else null;
 
-    // A changed `.ts`/`.js` file that compiles but exposes no routes and no
-    // behavior paths is a library/config module, not a request handler. It
-    // would only add equivalent-verdict noise to the report, so skip it.
-    if (!isHandlerContract(after_contract)) return null;
+    const before_is_handler = before_contract != null and isHandlerContract(before_contract.?);
+    const after_is_handler = after_contract != null and isHandlerContract(after_contract.?);
 
-    var diff = try contract_diff.diffContracts(gpa, before_contract, after_contract);
+    // A `.ts`/`.js` file that exposes no routes/behaviors on EITHER side is a
+    // library/config module, not a request handler. Skip it (only adds
+    // equivalent-verdict noise to the report).
+    if (!before_is_handler and !after_is_handler) return null;
+
+    // Was a handler, now exposes nothing (all routes removed, or rewritten to a
+    // still-compiling non-handler): every existing caller breaks. This must
+    // land in `results` as .breaking, not in `skipped` -- worstVerdict only
+    // ranks results, so otherwise the removal would pass the gate as safe.
+    if (before_is_handler and !after_is_handler) {
+        return .{ .path = try arena.dupe(u8, path), .verdict = .breaking };
+    }
+
+    // Newly became a handler: no prior routes to break -> additive.
+    if (!before_is_handler and after_is_handler) {
+        return .{ .path = try arena.dupe(u8, path), .verdict = .additive };
+    }
+
+    var diff = try contract_diff.diffContracts(gpa, before_contract.?, after_contract.?);
     defer diff.deinit(gpa);
 
     var signed = false;
     if (sign) {
         // Best-effort: append a signed kind=equivalence row from the contracts
         // already in hand. A failure never changes the verdict.
-        equivalence_probe_lib.recordEquivalenceReceiptFromContracts(gpa, path, before_contract, after_contract, shared.nowUnixMs()) catch {};
+        equivalence_probe_lib.recordEquivalenceReceiptFromContracts(gpa, path, before_contract.?, after_contract.?, shared.nowUnixMs()) catch {};
         signed = true;
     }
 

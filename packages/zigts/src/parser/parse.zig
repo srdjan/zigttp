@@ -1853,9 +1853,14 @@ pub const Parser = struct {
             // Ternary
             .question => {
                 self.advance();
-                const then_expr = try self.parseExpression(.assignment);
+                // ECMAScript ConditionalExpression branches are AssignmentExpression,
+                // so `cond ? a = 1 : b` is valid (`cond ? (a = 1) : b`). Parse at
+                // `.comma` (one below `.assignment`) so `=`/compound assignment can
+                // bind inside a branch while a top-level comma still terminates it;
+                // parsing at `.assignment` left the `=` dangling and errored.
+                const then_expr = try self.parseExpression(.comma);
                 try self.expect(.colon, "':'");
-                const else_expr = try self.parseExpression(.assignment);
+                const else_expr = try self.parseExpression(.comma);
                 return try self.nodes.add(.{
                     .tag = .ternary,
                     .loc = loc,

@@ -301,6 +301,7 @@ fn getOrCreateStore(handle: *sdk.ModuleHandle) !*CacheStore {
     if (sdk.getModuleState(handle, CacheStore, MODULE_STATE_SLOT)) |store| return store;
     const allocator = sdk.getAllocator(handle);
     const store = try allocator.create(CacheStore);
+    errdefer allocator.destroy(store);
     store.* = CacheStore.init(allocator);
     try sdk.setModuleState(handle, MODULE_STATE_SLOT, @ptrCast(store), CacheStore.sdkDeinit);
     return store;

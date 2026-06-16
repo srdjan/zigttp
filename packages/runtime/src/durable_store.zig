@@ -214,7 +214,14 @@ const FsDurableStore = struct {
     fn tryClaimSignal(self: *Self, candidate: *const Signal) !?Signal {
         const claimed_path = try self.allocClaimedPath(candidate.path);
         errdefer self.allocator.free(claimed_path);
-        if (!try renamePath(candidate.path, claimed_path)) return null;
+        if (!try renamePath(candidate.path, claimed_path)) {
+            // errdefer does NOT run on a (successful) `return null`, only on an
+            // error return. A lost claim race (another claimant already renamed
+            // the candidate away -> rename ENOENT -> false) hits this path on
+            // every losing pass, so free claimed_path explicitly or it leaks.
+            self.allocator.free(claimed_path);
+            return null;
+        }
 
         return .{
             .key = try self.allocator.dupe(u8, candidate.key),

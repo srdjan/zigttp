@@ -127,6 +127,7 @@ pub fn strip(allocator: std.mem.Allocator, source: []const u8, options: StripOpt
     errdefer stripper.output.deinit(allocator);
     errdefer stripper.diagnostics.deinit(allocator);
     defer stripper.brace_stack.deinit(allocator);
+    defer stripper.paren_cf_stack.deinit(allocator);
     return stripper.strip();
 }
 
@@ -167,6 +168,13 @@ const Stripper = struct {
     // to false, causing the next sibling property colon to be mis-treated
     // as a type annotation.
     brace_stack: std.ArrayListUnmanaged(bool),
+    // Stack of "is this `(` a control-flow header" flags, pushed on each `(`
+    // and popped on the matching `)`. last_paren_was_cf_header caches the most
+    // recently popped value so a `!` immediately after a header-closing `)`
+    // (`if (cond) !x`) is kept as a prefix logical-not on the braceless body
+    // rather than stripped as a TS postfix non-null assertion.
+    paren_cf_stack: std.ArrayListUnmanaged(bool),
+    last_paren_was_cf_header: bool,
     // True between a `const`/`let`/`var` keyword and the binding it introduces.
     // A `{` seen while this holds opens a destructuring pattern, where property
     // colons are renames (`{ a: localName }`), never type annotations.
@@ -195,6 +203,8 @@ const Stripper = struct {
             .in_expression = false,
             .in_import = false,
             .brace_stack = .empty,
+            .paren_cf_stack = .empty,
+            .last_paren_was_cf_header = false,
             .expect_binding = false,
             .type_map = TypeMap.init(source),
         };
@@ -388,9 +398,15 @@ const Stripper = struct {
                 } else {
                     // Postfix non-null assertion in any other position
                     // (`arr[i]!`, `foo()!`, `x!;`, `x!,`, `x! )`, `x! + y`).
-                    // A postfix `!` follows an expression-ending token.
+                    // A postfix `!` follows an expression-ending token. The one
+                    // exception is a `)` that closes a control-flow header
+                    // (`if (cond) !x`, `for (..) !x`): there the `)` ends a
+                    // statement header, not an operand, and the leading `!` of
+                    // the braceless body is a prefix logical-not -- stripping it
+                    // would silently invert the guard.
                     if (self.lastSignificantOutputChar()) |prev| {
-                        if (isExpressionEnd(prev)) {
+                        const header_close = prev == ')' and self.last_paren_was_cf_header;
+                        if (isExpressionEnd(prev) and !header_close) {
                             self.blankSpan(self.pos, self.pos + 1);
                             self.pos += 1;
                             self.col += 1;
@@ -482,8 +498,15 @@ const Stripper = struct {
                     self.in_expression = false;
                 }
             },
-            '(' => self.in_expression = true, // Contents of parens is expression
-            ')' => {}, // Keep context
+            '(' => {
+                // Record whether this paren group is a control-flow header so
+                // the matching `)` can be told apart from a call/group close.
+                self.paren_cf_stack.append(self.allocator, self.precedingWordIsControlFlowHeaderKeyword()) catch return StripError.OutOfMemory;
+                self.in_expression = true; // Contents of parens is expression
+            },
+            ')' => {
+                self.last_paren_was_cf_header = if (self.paren_cf_stack.pop()) |v| v else false;
+            }, // Keep context
             '[' => self.in_expression = true, // Array literal
             ']' => {}, // Keep context
             '?' => self.in_expression = true, // Ternary true/false branches are expression context
@@ -1859,6 +1882,33 @@ const Stripper = struct {
         return false;
     }
 
+    /// True when the last significant output token is a control-flow keyword
+    /// that introduces a parenthesized header (`if`, `for`, `while`, `switch`,
+    /// `catch`). Used at a `(` to tag the paren group so its closing `)` is not
+    /// mistaken for the end of a value operand.
+    fn precedingWordIsControlFlowHeaderKeyword(self: *const Self) bool {
+        var end = self.output.items.len;
+        while (end > 0) {
+            const ch = self.output.items[end - 1];
+            if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') {
+                end -= 1;
+                continue;
+            }
+            break;
+        }
+        var start = end;
+        while (start > 0 and isIdentifierContinue(self.output.items[start - 1])) start -= 1;
+        if (start == end) return false;
+        // A `.`-prefixed word is a member/property name, not a keyword.
+        if (start > 0 and self.output.items[start - 1] == '.') return false;
+        const word = self.output.items[start..end];
+        const keywords = [_][]const u8{ "if", "for", "while", "switch", "catch" };
+        for (keywords) |kw| {
+            if (std.mem.eql(u8, word, kw)) return true;
+        }
+        return false;
+    }
+
     fn blankSpan(self: *Self, start: usize, end: usize) void {
         // Replace with spaces, preserving newlines
         for (self.source[start..end]) |c| {
@@ -2740,6 +2790,24 @@ test "function params annotation stripped" {
     defer @constCast(&result).deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.code, ": number") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "function add(a") != null);
+}
+
+test "prefix logical-not beginning a braceless if-body is not stripped" {
+    // Regression: after a control-flow header `)`, the leading `!` of a
+    // braceless body is a prefix logical-not, not a TS postfix non-null
+    // assertion. It was being blanked, silently inverting the guard.
+    const result = try strip(std.testing.allocator, "if (ready) !sent && send();", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "!sent") != null);
+}
+
+test "postfix non-null assertion after a call result is still stripped" {
+    // Guards against over-correcting the braceless-body fix: `foo()!` is a
+    // genuine non-null assertion on a call result and must still be removed.
+    const result = try strip(std.testing.allocator, "const x = foo()!;", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "()!") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "foo()") != null);
 }
 
 test "optional function param annotation stripped" {

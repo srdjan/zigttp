@@ -1643,7 +1643,12 @@ fn canonicalParamFromText(allocator: std.mem.Allocator, raw: []const u8) !Canoni
         if (after_name[0] != ':') return error.UnsupportedRefactor;
         const type_text = std.mem.trim(u8, after_name[1..], " \t");
         if (type_text.len == 0) return error.UnsupportedRefactor;
-        if (typeIsAlreadyOptional(type_text)) {
+        // Only widen the annotation to `T | undefined` for a parameter whose
+        // default is actually being lifted (eq != null). A required, no-default
+        // typed param must keep its annotation verbatim -- widening it would let
+        // `f(undefined, ...)` type-check and mark the param nullable to flow
+        // analysis, a strictly weaker contract the author never wrote.
+        if (eq == null or typeIsAlreadyOptional(type_text)) {
             canonical = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ name, type_text });
         } else {
             canonical = try std.fmt.allocPrint(allocator, "{s}: {s} | undefined", .{ name, type_text });
@@ -3818,6 +3823,28 @@ test "normalizeSource preserves default-parameter guard order" {
     try std.testing.expect(first < second);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "function pick(a =") == null);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, ", b =") == null);
+}
+
+test "normalizeSource does not widen a required typed param when lifting a sibling default" {
+    // Regression: the default-lift rewrote EVERY typed param to `T | undefined`,
+    // not just the one with a default, weakening a required param's contract
+    // (`f(undefined, "x")` would then type-check). A no-default typed param must
+    // keep its annotation verbatim.
+    const source =
+        \\function f(a: number, b: string = "x") {
+        \\  return b;
+        \\}
+        \\function handler(req) {
+        \\  return Response.text(f(1, undefined));
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer nr.deinit(std.testing.allocator);
+    // Required, no-default param keeps its exact annotation (not widened).
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "a: number | undefined") == null);
+    // The lifted default param is widened and guarded.
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "b: string | undefined") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "if (b === undefined) { b = \"x\"; }") != null);
 }
 
 test "normalizeSource flattens a simple nested object destructure" {
