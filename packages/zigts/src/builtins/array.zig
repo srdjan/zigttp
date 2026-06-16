@@ -1,5 +1,6 @@
 const std = @import("std");
 const h = @import("helpers.zig");
+const err_builtin = @import("error.zig");
 
 const value = h.value;
 const object = h.object;
@@ -13,6 +14,21 @@ const invokeCallback = h.invokeCallback;
 const createArrayWithPrototype = h.createArrayWithPrototype;
 const getCallbackArg = h.getCallbackArg;
 const valueToStringSimple = h.valueToStringSimple;
+
+fn throwTypeError(ctx: *context.Context, message: []const u8) value.JSValue {
+    const message_val = ctx.createString(message) catch {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+    const args = [_]value.JSValue{message_val};
+    const err_obj = err_builtin.typeErrorConstructor(ctx, value.JSValue.undefined_val, &args);
+    if (err_obj.isUndefined()) {
+        ctx.throwException(value.JSValue.exception_val);
+    } else {
+        ctx.throwException(err_obj);
+    }
+    return value.JSValue.exception_val;
+}
 
 // ============================================================================
 // Array methods
@@ -677,23 +693,26 @@ pub fn arrayFilter(ctx: *context.Context, this: value.JSValue, args: []const val
 pub fn arrayReduce(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
-    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
+    const len_u32: u32 = if (len > 0) @intCast(len) else 0;
 
     var accumulator: value.JSValue = value.JSValue.undefined_val;
     var start_idx: u32 = 0;
 
     if (args.len > 1) {
         accumulator = args[1];
-    } else if (len > 0) {
+    } else if (len_u32 > 0) {
         accumulator = obj.getIndex(0) orelse value.JSValue.undefined_val;
         start_idx = 1;
     } else {
-        return value.JSValue.undefined_val;
+        return throwTypeError(ctx, "Reduce of empty array with no initial value");
     }
 
+    if (start_idx >= len_u32) return accumulator;
+    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+
     var i: u32 = start_idx;
-    while (i < @as(u32, @intCast(len))) : (i += 1) {
+    while (i < len_u32) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ accumulator, elem, value.JSValue.fromInt(@intCast(i)), this };
         accumulator = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.undefined_val;
@@ -904,6 +923,39 @@ test "arrayToSorted sorts non-string elements without an allocator mismatch" {
     try std.testing.expectEqual(@as(i32, 1), (sorted_obj.getIndex(0) orelse value.JSValue.undefined_val).getInt());
     try std.testing.expectEqual(@as(i32, 2), (sorted_obj.getIndex(1) orelse value.JSValue.undefined_val).getInt());
     try std.testing.expectEqual(@as(i32, 3), (sorted_obj.getIndex(2) orelse value.JSValue.undefined_val).getInt());
+}
+
+test "arrayReduce throws on empty array without initial value" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const callback = try ctx.createObject(null);
+    callback.flags.is_callable = true;
+
+    const arr = try ctx.createArray();
+    arr.prototype = ctx.array_prototype;
+    arr.setArrayLength(0);
+
+    const with_initial = arrayReduce(ctx, arr.toValue(), &.{ callback.toValue(), value.JSValue.fromInt(42) });
+    try std.testing.expect(!ctx.hasException());
+    try std.testing.expectEqual(@as(i32, 42), with_initial.getInt());
+
+    const without_initial = arrayReduce(ctx, arr.toValue(), &.{callback.toValue()});
+    try std.testing.expect(without_initial.isException());
+    try std.testing.expect(ctx.hasException());
 }
 
 test "arrayToSorted ascending numeric comparator ENG5" {

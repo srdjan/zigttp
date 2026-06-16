@@ -11,6 +11,28 @@ const getJSString = h.getJSString;
 const getStringParent = h.getStringParent;
 const allocFloat = h.allocFloat;
 
+fn utf16CodeUnitAt(data: []const u8, target_idx: u32) ?u16 {
+    var byte_idx: usize = 0;
+    var unit_idx: u32 = 0;
+    while (byte_idx < data.len) {
+        const decoded = string.decodeCodepoint(data[byte_idx..]) orelse return null;
+        if (decoded.codepoint <= 0xFFFF) {
+            if (unit_idx == target_idx) return @intCast(decoded.codepoint);
+            unit_idx += 1;
+        } else {
+            const scalar = decoded.codepoint - 0x10000;
+            const high: u16 = 0xD800 + @as(u16, @intCast(scalar >> 10));
+            const low: u16 = 0xDC00 + @as(u16, @intCast(scalar & 0x3FF));
+            if (unit_idx == target_idx) return high;
+            unit_idx += 1;
+            if (unit_idx == target_idx) return low;
+            unit_idx += 1;
+        }
+        byte_idx += decoded.len;
+    }
+    return null;
+}
+
 /// String.prototype.length - Get string length
 pub fn stringLength(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;
@@ -60,8 +82,8 @@ pub fn stringCharCodeAt(ctx: *context.Context, this: value.JSValue, args: []cons
         if (i < 0) return allocFloat(ctx, std.math.nan(f64));
         idx = @intCast(i);
     }
-    if (idx < data.len) {
-        return value.JSValue.fromInt(@intCast(data[idx]));
+    if (utf16CodeUnitAt(data, idx)) |unit| {
+        return value.JSValue.fromInt(@intCast(unit));
     }
     return allocFloat(ctx, std.math.nan(f64));
 }
@@ -732,6 +754,41 @@ pub fn stringFromCharCode(ctx: *context.Context, this: value.JSValue, args: []co
     }
     const result = string.createString(ctx.allocator, buf[0..out_len]) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
+}
+
+test "stringCharCodeAt returns UTF-16 code units" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const input = try ctx.createString("Aé😀");
+
+    const a = stringCharCodeAt(ctx, input, &.{value.JSValue.fromInt(0)});
+    try std.testing.expectEqual(@as(i32, 0x41), a.getInt());
+
+    const e_acute = stringCharCodeAt(ctx, input, &.{value.JSValue.fromInt(1)});
+    try std.testing.expectEqual(@as(i32, 0x00E9), e_acute.getInt());
+
+    const high = stringCharCodeAt(ctx, input, &.{value.JSValue.fromInt(2)});
+    try std.testing.expectEqual(@as(i32, 0xD83D), high.getInt());
+
+    const low = stringCharCodeAt(ctx, input, &.{value.JSValue.fromInt(3)});
+    try std.testing.expectEqual(@as(i32, 0xDE00), low.getInt());
+
+    const out_of_range = stringCharCodeAt(ctx, input, &.{value.JSValue.fromInt(4)});
+    try std.testing.expect(out_of_range.isFloat64());
+    try std.testing.expect(std.math.isNan(out_of_range.getFloat64()));
 }
 
 test "stringConstructor converts scalars to strings ENG-String" {
