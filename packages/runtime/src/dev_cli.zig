@@ -132,7 +132,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (user_args.len == 0) {
         if (embedded_handler.bytecode.len > 0) {
-            try runtime_cli.serveCommand(allocator, &.{});
+            try runtime_cli.serveCommandWithEnviron(allocator, &.{}, init.environ);
             return;
         }
         cli_help.printHelp();
@@ -265,7 +265,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // Convenience: dev CLI can also serve a handler locally for quick testing.
         // Map parse/usage failures to a clean nonzero exit with a hint instead of
         // propagating a raw Zig error (which prints a stack trace).
-        runtime_cli.serveCommand(allocator, user_args[1..]) catch |err| {
+        runtime_cli.serveCommandWithEnviron(allocator, user_args[1..], init.environ) catch |err| {
             std.debug.print("serve: {s}. Run `zigttp serve --help` for usage.\n", .{@errorName(err)});
             std.process.exit(1);
         };

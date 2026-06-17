@@ -6,7 +6,7 @@ Read this end-to-end before adding a new virtual module.
 
 ## The capability enum
 
-`ModuleCapability` is declared in [`packages/zigts/src/module_binding.zig`](../../packages/zigts/src/module_binding.zig) (around line 501). Ten variants exist today:
+`ModuleCapability` is declared in [`packages/zigts/src/module_binding.zig`](../../packages/zigts/src/module_binding.zig). Eleven variants exist today:
 
 | Capability | Gates |
 |---|---|
@@ -20,6 +20,7 @@ Read this end-to-end before adding a new virtual module.
 | `filesystem` | Reading files from disk outside the sandbox root (service contracts, request fixtures). |
 | `network` | Making outbound network calls. |
 | `policy_check` | Consulting the handler's derived `RuntimePolicy` to authorize a resource access before it happens. |
+| `websocket` | Touching WebSocket gateway state and hibernated attachment state. |
 
 These are governance metadata for the module internals. They do not affect handler-level effect classification (`deterministic`, `read_only`, etc.) or `RuntimePolicy` derivation; those are separate analyses driven by the `effect` annotation on each exported function.
 
@@ -61,6 +62,7 @@ This pattern is visible in `id.zig`, `env.zig`, `sql.zig`, `service.zig`, `cache
 | `zigttp:crypto` | `crypto` | SHA256, HMAC, base64. |
 | `zigttp:durable` | `runtime_callback` | Replay and live execution dispatch back into the runtime for oplog replay and signal wake-ups. |
 | `zigttp:env` | `env`, `policy_check` | Reads `getenv` and then checks the key against the handler's env allowlist. |
+| `zigttp:fetch` | `network`, `runtime_callback` | Dispatches outbound HTTP through the runtime callback path after host-policy checks. |
 | `zigttp:id` | `clock`, `random` | UUID v7 and ULID mix clock; nanoid is pure random. |
 | `zigttp:io` | `runtime_callback` | `parallel()` and `race()` schedule outbound fetches through the runtime's I/O collector. |
 | `zigttp:log` | `clock`, `stderr` | Timestamped log emission. |
@@ -68,6 +70,7 @@ This pattern is visible in `id.zig`, `env.zig`, `sql.zig`, `service.zig`, `cache
 | `zigttp:scope` | `runtime_callback` | Request-scoped lifecycle hooks call back into the runtime at request end. |
 | `zigttp:service` | `filesystem`, `runtime_callback` | Reads cross-handler service contracts from disk and dispatches via the runtime. |
 | `zigttp:sql` | `sqlite`, `policy_check` | SQLite connection plus query-name allowlist check. |
+| `zigttp:websocket` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` | Sends frames, manages rooms, and serializes hibernated attachment state through the gateway. |
 
 ### Modules that declare no capabilities
 

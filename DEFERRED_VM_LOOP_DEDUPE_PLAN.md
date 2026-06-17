@@ -4,11 +4,13 @@
 
 The semantic-dedupe refactor is **deferred**. Step 0 below (extending the opcode
 parity harness) was the one test-only exception cleared to start ahead of the
-gates; it has **landed** (2026-06-07, uncommitted) - see the note under Step 0,
-including a fault-representation divergence it surfaced.
+gates; it has **landed**. This plan was rechecked during the 2026-06-17
+fresh-eyes audit; do not start source edits from this document until the
+precondition gates are green and any residual JIT fault concern has a current
+failing parity case.
 
 Do not start Steps 1-4 until every precondition gate is green on `main`. Status
-as of this refresh (2026-06-07), verified against source - re-check at execution
+as of this refresh (2026-06-17), verified against source - re-check at execution
 time:
 
 - [x] Phase 0: GC correctness fixes + `test-zigts`/`test-server`/bench gates
@@ -17,10 +19,12 @@ time:
       is the only runtime entry into the engine, `packages/zigts/src/runtime_contract.zig`
       exposes stable public types, and the direct reaches into engine internals
       from `zruntime.zig` are gone. (Today only `engine_adapter.zig` exists.)
-- [ ] Track B1: production table stakes land and their tests go green - the
-      `error.SkipZigTest` placeholders in `packages/runtime/src/server_test.zig`
-      for per-request deadline, graceful shutdown, `/_health`, `/_readiness`,
-      panic isolation, and the memory cap are replaced by passing tests.
+- [ ] Track B1: runtime lifecycle verification gaps close - stale
+      `packages/runtime/src/server_test.zig` header text is removed,
+      shutdown/readiness/panic tests exercise the public accept path, the panic
+      isolation script is represented by build/CI, request-timeout semantics are
+      explicit, access logging is either implemented or no longer advertised,
+      and the shutdown thread-safety contract is true or narrowed.
 - [ ] Track B2 + measurement gates: binary-size CI gate (fail on >2% drift) and
       perf receipts that actually measure req/s, cold-start, and RSS (not just
       the latency corpus), with `bench-check` CI-blocking.
@@ -115,36 +119,26 @@ non-callable -> `NotCallable`), each across interpreter, baseline JIT, and
 optimized-when-reached. `zig build test-zigts` green (1218 pass, 1 skip).
 Test-only; no engine source changed.
 
-**Finding (the standalone bug — boundary half now fixed).** The tiers represent
-runtime faults differently. The interpreter returns an `error` from `run()` and
-aborts; the JIT signals a fault by setting `ctx.exception` and returning the
-`exception_val` sentinel (`jitCall` at `interpreter/jit_intrinsics.zig:32-35`,
-the `jitAdd/jitSub/...` family in `context.zig`), and it does **not** poll
-`ctx.exception` in straight-line code, so it pushes the sentinel and keeps
-executing subsequent opcodes.
+**Finding (fault representation - boundary half fixed, residual narrowed).**
+The tiers used to represent runtime faults differently. The interpreter returned
+an `error` from `run()` and aborted; the JIT signaled a fault by setting
+`ctx.exception` and returning the `exception_val` sentinel.
 
-*Boundary fix (landed).* Both `cc.execute` boundaries in `interpreter/frame.zig`
-(`run` and `callBytecodeFunction`) now reconcile the two representations: after
-the compiled call they check `ctx.hasException()` and return
-`error.NativeFunctionError` — the same Zig error the interpreter fallback
-returns — instead of handing back a post-fault value. This makes the
-cross-frame path converge: `doCall`'s `try` now aborts the enclosing frame on a
-JIT-callee fault exactly as it does for an interpreted callee, and top-level JIT
-faults route through the same `error.HandlerError` → 500 path the interpreter
-already uses (verified no regression: `test-zruntime` green). Guarded by
-`opcode_parity.zig` → "a fault makes run() return an error on every tier, not a
-post-fault value" (a `fault-op; push_i8 99; ret` body: pre-fix the JIT returned
-`99`).
+*Boundary fix (landed).* Both `cc.execute` boundaries in
+`interpreter/frame.zig` (`run` and `callBytecodeFunction`) now check
+`ctx.hasException()` after compiled execution and return
+`error.NativeFunctionError` instead of handing back a post-fault value. This
+makes the cross-frame path converge with interpreted callees and routes top-level
+JIT faults through the same handler-error path. Guarded by opcode parity coverage
+for "a fault makes run() return an error on every tier, not a post-fault value."
 
-*Residual (still for this refactor).* The boundary fix does not stop the
-**single innermost compiled function** from running its own opcodes between the
-fault point and its `ret` — the compiled native code has already executed them
-before returning. Side-effecting tail opcodes (a `cacheSet`/`fetch`/`log` with
-operands independent of the poisoned stack) can still fire on the JIT tier and
-not the interpreter. Eliminating that needs a per-fallible-call exception check
-emitted inside `jit/baseline.zig` and `jit/optimized.zig` (x86 + arm64) that
-bails to a shared sentinel-returning epilogue — perf-sensitive, and exactly the
-N-way emitter duplication this dedupe exists to collapse, so it belongs here.
+*Residual status (reproduce before emitter work).* The old version of this plan
+said tail `cacheSet`/`fetch`/`log` operations could still fire after a JIT fault.
+That claim is now too broad: current boundaries reconcile pending JIT
+exceptions, call/store intrinsics refuse work while faulted, and parity coverage
+exists for post-fault stores/calls. Before adding per-fallible-call checks inside
+`jit/baseline.zig` or `jit/optimized.zig`, first add a focused parity case that
+reproduces a remaining single-frame side effect on the current source.
 
 ### Step 1 - Collapse the logic-duplicated JIT helpers (deferred)
 

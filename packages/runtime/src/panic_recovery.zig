@@ -19,25 +19,21 @@ const builtin = @import("builtin");
 
 pub const c = @cImport(@cInclude("setjmp.h"));
 
-// OS-agnostic setjmp/longjmp wrappers.
+const linux = struct {
+    extern fn _setjmp(e: *c.jmp_buf) c_int;
+    extern fn _longjmp(e: *c.jmp_buf, v: c_int) noreturn;
+};
+
+// OS-agnostic setjmp/longjmp entry points.
 // On macOS setjmp/longjmp are real libc functions; on glibc they are macros
-// that @cImport may not expose as callable symbols. Use _setjmp/_longjmp
-// (no signal mask) on Linux to avoid the macro issue.
-pub fn setjmpFn(env: *c.jmp_buf) c_int {
-    return if (comptime builtin.os.tag == .linux) blk: {
-        const S = struct {
-            extern fn _setjmp(e: *c.jmp_buf) c_int;
-        };
-        break :blk S._setjmp(env);
-    } else c.setjmp(env);
-}
+// that @cImport may not expose as callable symbols. `setjmpFn` must be a
+// direct alias, not a Zig wrapper: longjmp must resume in callHandlerGuarded's
+// frame, not in a helper frame that returned before the panic.
+pub const setjmpFn = if (builtin.os.tag == .linux) linux._setjmp else c.setjmp;
 
 pub fn longjmpFn(env: *c.jmp_buf, val: c_int) noreturn {
     if (comptime builtin.os.tag == .linux) {
-        const S = struct {
-            extern fn _longjmp(e: *c.jmp_buf, v: c_int) noreturn;
-        };
-        S._longjmp(env, val);
+        linux._longjmp(env, val);
     } else {
         c.longjmp(env, val);
     }

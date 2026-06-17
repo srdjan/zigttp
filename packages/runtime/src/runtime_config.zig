@@ -38,6 +38,9 @@ pub const RuntimeConfig = struct {
     /// Per-request handler execution deadline in ms. 0 = disabled.
     /// Checked cooperatively at interpreter loop back-edges and call entries.
     request_timeout_ms: u32 = 0,
+    /// Test-only path that triggers a real panic at the guarded handler
+    /// boundary for panic-isolation E2E coverage. Null in normal operation.
+    debug_panic_path: ?[]const u8 = null,
 };
 
 pub fn openTraceFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {

@@ -1756,6 +1756,9 @@ pub const Server = struct {
             self.embedded_bytecode,
             self.runtime_dep_bytecodes,
         );
+        if (pool_rt_config.debug_panic_path) |path| {
+            self.pool.?.debug_panic_path = path;
+        }
         if (pool_timer) |*t| {
             const elapsed_ms = t.read() / std.time.ns_per_ms;
             const prewarm_count = @min(@as(usize, 2), self.config.pool_size);

@@ -756,6 +756,12 @@ pub fn build(b: *std.Build) void {
     const smoke_v1_step = b.step("smoke-v1", "Run the v1 user-flow smoke test in a temp dir");
     smoke_v1_step.dependOn(&smoke_v1_cmd.step);
 
+    const panic_isolation_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/test-panic-isolation.sh", "--skip-build", "--zigttp" });
+    panic_isolation_cmd.addFileArg(cli_exe.getEmittedBin());
+    panic_isolation_cmd.has_side_effects = true;
+    const panic_isolation_step = b.step("test-panic-isolation", "Run handler panic isolation E2E test");
+    panic_isolation_step.dependOn(&panic_isolation_cmd.step);
+
     const smoke_studio_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/smoke-studio.sh" });
     smoke_studio_cmd.has_side_effects = true;
     const smoke_studio_step = b.step("smoke-studio", "Run the opt-in studio smoke test (-Dstudio) in a temp dir");

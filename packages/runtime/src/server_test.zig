@@ -14,11 +14,10 @@
 //! and be re-expressed against `RuntimeConfig` + a future public perf-stats
 //! accessor on `Runtime`.
 //!
-//! Track-B1 features (per-request timeout, graceful-shutdown drain, /_health,
-//! /_readiness on pool exhaustion, panic isolation -> 500) do not exist yet.
-//! They appear below as `error.SkipZigTest` placeholders so the suite compiles
-//! and runs green today, and the tests can be filled in as each B1 slice lands.
-//! Each placeholder names the exact public seam B1 must add.
+//! Track-B1 runtime features have landed in pieces. The tests below keep the
+//! public coverage honest: timeout handling is exercised through HandlerPool,
+//! while shutdown, probe routing, keep-alive, and panic isolation still need
+//! accept-path or E2E coverage where noted.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -262,7 +261,7 @@ test "keep-alive: two sequential requests reuse one connection" {
 }
 
 // ===========================================================================
-// Track-B1 placeholders. Each names the public seam B1 must add.
+// Track-B1 coverage and remaining accept-path gaps.
 // ===========================================================================
 
 test "B2: per-request timeout aborts a slow handler and returns RequestTimeout" {
@@ -341,10 +340,10 @@ test "B1: panic isolation: HandlerPanicked leaves pool reusable (needs test-root
     // Full panic isolation requires the binary root to declare:
     //   pub const panic = std.debug.FullPanic(panic_recovery.handlePanic);
     // which is in main.zig and cli_main.zig but NOT in the test runner root.
-    // The setjmp path in callHandlerGuarded is structurally wired; the E2E
-    // verification is in scripts/test-panic-isolation.sh (Debug build with
-    // ZIGTTP_DEBUG_PANIC_PATH env var). This test confirms the pool stays alive
-    // after a non-panicking request, which is necessary for isolation to matter.
+    // The E2E verification is in scripts/test-panic-isolation.sh, which uses
+    // the internal --_debug-panic-path serve flag to trigger a real panic under
+    // callHandlerGuarded. This test confirms the pool stays alive after a
+    // non-panicking request, which is necessary for isolation to matter.
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,

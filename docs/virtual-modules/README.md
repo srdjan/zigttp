@@ -14,10 +14,10 @@ Use `zigttp modules --json` for the live export list from the built binary.
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | `clock`, `policy_check` |
 | `zigttp:compose` | `guard`, `pipe` | none |
 | `zigttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | `crypto` |
-| `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery` | none |
+| `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` | none |
 | `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | `runtime_callback` |
 | `zigttp:env` | `env` | `env`, `policy_check` |
-| `zigttp:fetch` | `fetch` | `network`, `runtime_callback` |
+| `zigttp:fetch` | `fetch`, `fetchWithRetry` | `network`, `runtime_callback` |
 | `zigttp:http` | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` | none |
 | `zigttp:id` | `uuid`, `ulid`, `nanoid` | `clock`, `random` |
 | `zigttp:io` | `parallel`, `race` | `runtime_callback` |

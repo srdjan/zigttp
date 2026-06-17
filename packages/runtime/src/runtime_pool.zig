@@ -77,8 +77,9 @@ pub const HandlerPool = struct {
     trace_file: ?std.c.fd_t,
     /// Mutex protecting concurrent trace file writes
     trace_mutex: ?*zq.trace.TraceMutex,
-    /// E2E panic-injection path for testing longjmp recovery. Set from
-    /// ZIGTTP_DEBUG_PANIC_PATH env var at init; null in production.
+    /// E2E panic-injection path for testing real panic recovery and slot
+    /// quarantine. Set from RuntimeConfig or the ZIGTTP_DEBUG_PANIC_PATH env
+    /// var at init; null in production.
     debug_panic_path: ?[]const u8 = null,
 
     const Self = @This();
@@ -181,7 +182,7 @@ pub const HandlerPool = struct {
             .runtime_dep_bytecodes = runtime_dep_bytecodes,
             .trace_file = null,
             .trace_mutex = null,
-            .debug_panic_path = if (std.c.getenv("ZIGTTP_DEBUG_PANIC_PATH")) |raw| std.mem.span(raw) else null,
+            .debug_panic_path = config.debug_panic_path orelse if (std.c.getenv("ZIGTTP_DEBUG_PANIC_PATH")) |raw| std.mem.span(raw) else null,
         };
         errdefer self.deinit();
 
@@ -801,7 +802,10 @@ pub const HandlerPool = struct {
         defer panic_recovery.disarm();
 
         if (self.debug_panic_path) |pp| {
-            if (std.mem.eql(u8, request.path, pp)) @panic("zigttp_debug_injection");
+            const effective_path = if (request.path.len > 0) request.path else request.url;
+            if (std.mem.eql(u8, effective_path, pp)) {
+                @panic("zigttp_debug_panic_path");
+            }
         }
 
         rt.armRequestDeadline();

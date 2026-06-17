@@ -51,6 +51,9 @@ jobs:
       - name: Run v1 user-flow smoke
         run: zig build smoke-v1
 
+      - name: Run panic isolation smoke
+        run: zig build test-panic-isolation
+
       - name: Run example handler tests
         run: bash scripts/test-examples.sh
 

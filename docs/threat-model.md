@@ -20,7 +20,7 @@ repository is in scope.
 
 - HTTP input is untrusted. The server enforces request body limits, header
   parsing limits, duplicate `Content-Length` rejection, chunked-transfer
-  rejection, and static-file path checks before handler execution.
+  decoding checks, and static-file path checks before handler execution.
 - Handler code is untrusted application code. Each request acquires an isolated
   runtime from the pool; request-local arena state is reset before reuse, and
   debug/runtime-safety builds audit arena escapes.
@@ -61,8 +61,7 @@ repository is in scope.
 
 ## Known Footguns
 
-- `multipart/form-data` request bodies are passed to the handler unparsed.
-  The runtime enforces `Content-Length` and total body size (default 1 MiB)
-  but does not parse multipart boundaries. Handlers must validate boundaries
-  and quoted-string handling themselves; treat multipart parsing as
-  untrusted-input handling.
+- `multipart/form-data` request bodies cross the HTTP boundary as raw bytes.
+  The runtime enforces `Content-Length` and total body size (default 1 MiB).
+  Use `decodeFormMultipart` from `zigttp:decode` or handler-owned parsing, and
+  treat multipart boundaries and quoted-string handling as untrusted input.

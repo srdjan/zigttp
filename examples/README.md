@@ -47,7 +47,7 @@ Branch on `req.method` and `req.path`. No external router needed.
 Calling into the virtual modules (the in-binary stdlib that replaces npm).
 
 - [modules.ts](modules/modules.ts) - imports a handful of modules and uses them in one handler.
-- [modules_all.ts](modules/modules_all.ts) - touches every shipped virtual module so the contract extractor exercises each binding.
+- [modules_all.ts](modules/modules_all.ts) - touches several representative virtual modules so the contract extractor exercises auth, validation, cache, and crypto bindings.
 
 ### fetch/
 

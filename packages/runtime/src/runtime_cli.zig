@@ -71,7 +71,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (user_args.len == 0) {
         if (embedded_handler.bytecode.len > 0) {
-            try serveCommand(allocator, &.{});
+            try serveCommandWithEnviron(allocator, &.{}, init.environ);
             return;
         }
         printHelp();
@@ -79,7 +79,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     if (std.mem.eql(u8, command, "serve")) {
-        try serveCommand(allocator, user_args[1..]);
+        try serveCommandWithEnviron(allocator, user_args[1..], init.environ);
         return;
     }
     if (std.mem.eql(u8, command, "edge")) {
@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     // Backward-compatible default: treat bare `zigttp <handler>` usage as `serve`.
-    try serveCommand(allocator, user_args);
+    try serveCommandWithEnviron(allocator, user_args, init.environ);
 }
 
 pub fn edgeCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -241,6 +241,30 @@ fn appendedCommandNoArgs(argv: []const []const u8, tag: std.meta.Tag(AppendedInv
 }
 
 pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    return serveCommandWithDebugPanicPath(allocator, argv, null);
+}
+
+pub fn serveCommandWithEnviron(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    environ: std.process.Environ,
+) !void {
+    return serveCommandWithDebugPanicPath(allocator, argv, environ.getPosix("ZIGTTP_DEBUG_PANIC_PATH"));
+}
+
+fn applyDebugPanicPathDefault(config: *ServerConfig, debug_panic_path: ?[]const u8) void {
+    if (debug_panic_path) |path| {
+        if (config.runtime_config.debug_panic_path == null) {
+            config.runtime_config.debug_panic_path = path;
+        }
+    }
+}
+
+fn serveCommandWithDebugPanicPath(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    debug_panic_path: ?[]const u8,
+) !void {
     const feature_flags = parseServeFeatureFlags(argv);
     if (feature_flags.studio_enabled) {
         if (!feature_options.enable_studio) {
@@ -260,6 +284,7 @@ pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         if (err == error.HelpRequested) return;
         return err;
     };
+    applyDebugPanicPathDefault(&config, debug_panic_path);
     if (feature_flags.studio_enabled) config.studio = true;
     if (feature_flags.demo_enabled) {
         config.studio = true;
@@ -542,6 +567,8 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             config.runtime_config.sqlite_path = try shared.takeArg(&i, argv, error.MissingSqlitePath);
         } else if (std.mem.eql(u8, arg, "--trace")) {
             config.runtime_config.trace_file_path = try shared.takeArg(&i, argv, error.MissingTraceFile);
+        } else if (std.mem.eql(u8, arg, "--_debug-panic-path")) {
+            config.runtime_config.debug_panic_path = try shared.takeArg(&i, argv, error.MissingDebugPanicPath);
         } else if (std.mem.eql(u8, arg, "--replay")) {
             config.runtime_config.replay_file_path = try shared.takeArg(&i, argv, error.MissingReplayFile);
         } else if (std.mem.eql(u8, arg, "--test")) {
@@ -770,6 +797,28 @@ test "parseServeFeatureFlags: studio and demo imply proof watch loop" {
     try std.testing.expect(demo.studio_enabled);
     try std.testing.expect(demo.watch_enabled);
     try std.testing.expect(demo.prove_enabled);
+}
+
+test "debug panic env default does not override explicit serve flag" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+
+    applyDebugPanicPathDefault(&config, "/env");
+    try std.testing.expectEqualStrings("/env", config.runtime_config.debug_panic_path.?);
+
+    config.runtime_config.debug_panic_path = "/flag";
+    applyDebugPanicPathDefault(&config, "/env");
+    try std.testing.expectEqualStrings("/flag", config.runtime_config.debug_panic_path.?);
+
+    applyDebugPanicPathDefault(&config, null);
+    try std.testing.expectEqualStrings("/flag", config.runtime_config.debug_panic_path.?);
+}
+
+test "parseServeArgs parses internal debug panic path flag" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const config = try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--_debug-panic-path", "/flag" });
+    try std.testing.expectEqualStrings("/flag", config.runtime_config.debug_panic_path.?);
 }
 
 test "parseCommonServeFlag: returns false for unrelated flag" {

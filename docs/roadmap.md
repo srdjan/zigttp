@@ -28,8 +28,9 @@ behavior lives in [User Guide](user-guide.md).
   are not documented as supported user workflows.
 - The runtime uses the threaded HTTP server path. The evented `std.Io`
   networking path is not a supported request backend.
-- Handlers receive raw `multipart/form-data` bodies. Parse multipart bodies in
-  handler code or behind a virtual module once one exists.
+- Handlers receive raw `multipart/form-data` bodies from the HTTP server. Use
+  `decodeFormMultipart` from `zigttp:decode` or handler-owned parsing when a
+  handler accepts multipart input.
 - Native JIT code has a per-runtime-context soft cap; when the cap is exceeded
   at a JIT compile safe point, compiled function pointers are cleared and the
   context's native code pages are released.
@@ -37,14 +38,17 @@ behavior lives in [User Guide](user-guide.md).
 
 ## Planned Work
 
-- Land production FaaS table stakes before hosted deploy claims: per-request
-  deadlines, graceful shutdown, health/readiness probes, structured JSON logs,
-  panic isolation, and per-handler memory caps.
+- Close the remaining runtime lifecycle verification gaps before hosted deploy
+  claims: accept-path tests for deadlines, graceful shutdown, probes, and panic
+  isolation; an explicit request-timeout contract; structured access logs or
+  corrected logging docs; and a true or narrowed shutdown thread-safety
+  contract.
 - Finish the engine<->runtime boundary refactor by routing runtime calls through
   a strict facade, exposing stable runtime-facing engine types, and splitting
   `zruntime.zig` by concern without changing ownership semantics.
-- Keep near-term module work limited to table-stakes gaps: multipart decoding and
-  fetch resilience. Cloud-adapter modules stay in a separate evaluated track.
+- Keep near-term module work limited to table-stakes gaps: fetch resilience,
+  capability surfacing, and build-feature diagnostics. Cloud-adapter modules
+  stay in a separate evaluated track.
 - Keep `zigttp help --all`, `packages/zigts/src/builtin_modules.zig`, and
   `packages/modules/module-specs/` as the sources of truth for CLI and module
   docs.
