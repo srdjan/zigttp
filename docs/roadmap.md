@@ -39,10 +39,9 @@ behavior lives in [User Guide](user-guide.md).
 ## Planned Work
 
 - Close the remaining runtime lifecycle verification gaps before hosted deploy
-  claims: accept-path tests for deadlines, graceful shutdown, probes, and panic
-  isolation; an explicit request-timeout contract; structured access logs or
-  corrected logging docs; and a true or narrowed shutdown thread-safety
-  contract.
+  claims: broader accept-path coverage for deadlines, graceful shutdown, probes,
+  and panic isolation; hosted request-timeout policy; and shutdown
+  thread-safety semantics.
 - Finish the engine<->runtime boundary refactor by routing runtime calls through
   a strict facade, exposing stable runtime-facing engine types, and splitting
   `zruntime.zig` by concern without changing ownership semantics.

@@ -10,7 +10,7 @@ pub const binding = sdk.ModuleBinding{
         .{ .name = "parseCookies", .module_func = parseCookiesImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true, .credential = true } },
         .{ .name = "setCookie", .module_func = setCookieImpl, .arg_count = 3, .returns = .string, .param_types = &.{ .string, .string, .object }, .effect = .none, .return_labels = .{ .internal = true }, .contract_extractions = &.{.{ .arg_position = 0, .category = .cookie_name }} },
         .{ .name = "negotiate", .module_func = negotiateImpl, .arg_count = 2, .returns = .optional_string, .param_types = &.{ .string, .string }, .effect = .none, .failure_severity = .expected },
-        .{ .name = "parseContentType", .module_func = parseContentTypeImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string} },
+        .{ .name = "parseContentType", .module_func = parseContentTypeImpl, .arg_count = 1, .effect = .none, .returns = .object, .param_types = &.{.string} },
         .{ .name = "cors", .module_func = corsImpl, .arg_count = 2, .returns = .object, .param_types = &.{ .string, .object }, .effect = .none, .contract_extractions = &.{.{ .arg_position = 0, .category = .cors_origin }} },
     },
 };

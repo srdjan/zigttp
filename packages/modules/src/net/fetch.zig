@@ -69,6 +69,9 @@ const DEFAULT_RETRY_STATUSES = [_]i32{ 429, 500, 502, 503, 504 };
 const DEFAULT_MAX_RETRIES: i32 = 3;
 const DEFAULT_BASE_DELAY_MS: i64 = 100;
 const DEFAULT_MAX_DELAY_MS: i64 = 5000;
+const MAX_ALLOWED_RETRIES: i32 = 10;
+const MAX_ALLOWED_BASE_DELAY_MS: i64 = 5000;
+const MAX_ALLOWED_DELAY_MS: i64 = 30000;
 
 /// fetchWithRetry(url, init?, retryOptions?)
 ///
@@ -77,6 +80,9 @@ const DEFAULT_MAX_DELAY_MS: i64 = 5000;
 ///   baseDelayMs   - base delay in ms for exponential backoff (default 100)
 ///   maxDelayMs    - cap on computed delay (default 5000)
 ///   retryOn       - array of status codes to retry on (default [429,500,502,503,504])
+///
+/// Safety limits: maxRetries <= 10, baseDelayMs <= 5000, maxDelayMs <= 30000.
+/// Negative retry/delay values are normalized to 0.
 ///
 /// Backoff formula: delay = min(baseDelayMs * 2^attempt, maxDelayMs)
 /// Delays are implemented with std.time.sleep; this is safe because the JS
@@ -114,7 +120,9 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
         }
     }
 
-    if (max_retries < 0) max_retries = 0;
+    if (normalizeRetryOptions(&max_retries, &base_delay_ms, &max_delay_ms)) |message| {
+        return util.throwTypeError(handle, message);
+    }
 
     var last_response: sdk.JSValue = undefined;
     var attempt: i32 = 0;
@@ -176,4 +184,45 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
         }
         attempt += 1;
     }
+}
+
+fn normalizeRetryOptions(max_retries: *i32, base_delay_ms: *i64, max_delay_ms: *i64) ?[]const u8 {
+    if (max_retries.* < 0) max_retries.* = 0;
+    if (base_delay_ms.* < 0) base_delay_ms.* = 0;
+    if (max_delay_ms.* < 0) max_delay_ms.* = 0;
+
+    if (max_retries.* > MAX_ALLOWED_RETRIES) return "fetchWithRetry() maxRetries must be <= 10";
+    if (base_delay_ms.* > MAX_ALLOWED_BASE_DELAY_MS) return "fetchWithRetry() baseDelayMs must be <= 5000";
+    if (max_delay_ms.* > MAX_ALLOWED_DELAY_MS) return "fetchWithRetry() maxDelayMs must be <= 30000";
+    return null;
+}
+
+const testing = std.testing;
+
+test "fetchWithRetry retry options reject unbounded sleeps" {
+    var retries: i32 = 11;
+    var base_delay_ms: i64 = DEFAULT_BASE_DELAY_MS;
+    var max_delay_ms: i64 = DEFAULT_MAX_DELAY_MS;
+    try testing.expectEqualStrings("fetchWithRetry() maxRetries must be <= 10", normalizeRetryOptions(&retries, &base_delay_ms, &max_delay_ms).?);
+
+    retries = DEFAULT_MAX_RETRIES;
+    base_delay_ms = 5001;
+    max_delay_ms = DEFAULT_MAX_DELAY_MS;
+    try testing.expectEqualStrings("fetchWithRetry() baseDelayMs must be <= 5000", normalizeRetryOptions(&retries, &base_delay_ms, &max_delay_ms).?);
+
+    retries = DEFAULT_MAX_RETRIES;
+    base_delay_ms = DEFAULT_BASE_DELAY_MS;
+    max_delay_ms = 30001;
+    try testing.expectEqualStrings("fetchWithRetry() maxDelayMs must be <= 30000", normalizeRetryOptions(&retries, &base_delay_ms, &max_delay_ms).?);
+}
+
+test "fetchWithRetry retry options normalize negative values" {
+    var retries: i32 = -1;
+    var base_delay_ms: i64 = -10;
+    var max_delay_ms: i64 = -20;
+
+    try testing.expect(normalizeRetryOptions(&retries, &base_delay_ms, &max_delay_ms) == null);
+    try testing.expectEqual(@as(i32, 0), retries);
+    try testing.expectEqual(@as(i64, 0), base_delay_ms);
+    try testing.expectEqual(@as(i64, 0), max_delay_ms);
 }

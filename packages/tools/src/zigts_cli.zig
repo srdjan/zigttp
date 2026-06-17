@@ -57,7 +57,7 @@ pub const commands = [_]Command{
     .{ .name = "mock", .run = mock.runWithArgs, .category = .analyze, .args = "<tests.jsonl>", .blurb = "Mock server from test fixtures", .usage = "mock <tests.jsonl> [--port PORT]" },
     .{ .name = "link", .run = system_build.runWithArgs, .category = .analyze, .args = "<system.json>", .blurb = "Cross-handler system linking", .usage = "link <system.json> [--output-dir <dir>]" },
     .{ .name = "gen-tests", .run = runGenTestsCommand, .category = .analyze, .args = "[handler.ts]", .blurb = "Generate a starter test fixture", .usage = "gen-tests [handler.ts] [-o output.jsonl]" },
-    .{ .name = "prove-behavior", .run = prove_behavior.runWithArgs, .category = .analyze, .args = "<before> <after>", .blurb = "Behavioral-equivalence verdict between two handler versions", .usage = "prove-behavior <before.ts> <after.ts> [--json]" },
+    .{ .name = "prove-behavior", .run = prove_behavior.runWithArgs, .category = .analyze, .args = "<before> <after>", .blurb = "Behavioral-equivalence verdict between two handler versions", .usage = "prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]" },
     .{ .name = "edit-simulate", .run = edit_simulate.runWithArgs, .category = .analyze, .args = "[handler.ts]", .blurb = "Simulate an edit and report violations", .usage = "edit-simulate [handler.ts] [--before old.ts] [--stdin-json]" },
     .{ .name = "review-patch", .run = review_patch.runWithArgs, .category = .analyze, .args = "<file>", .blurb = "Review a patch for new violations", .usage = "review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]" },
     .{ .name = "rollout", .run = system_rollout.runWithArgs, .category = .analyze, .args = "<old-system> <new>", .blurb = "System-level deployment manifest", .usage = "rollout <old-system.json> <new-system.json> [--output-dir <dir>]" },
@@ -224,10 +224,10 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         .json_mode = json_mode,
         .system_path = system_path,
     }) catch |err| switch (err) {
-        // The analyzer already printed the actionable "zigttp:sql queries
-        // require --sql-schema <...>" line; surface it as a clean non-zero exit
-        // instead of dumping an error-return trace at the user.
-        error.MissingSqlSchema => std.process.exit(1),
+        error.MissingSqlSchema => {
+            if (json_mode) try writeMissingSqlSchemaJson(allocator, target);
+            std.process.exit(1);
+        },
         else => return err,
     };
     defer result.deinit(allocator);
@@ -329,6 +329,32 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     if (result.totalErrors() > 0) std.process.exit(1);
     if (result.totalWarnings() > 0) std.process.exit(2);
+}
+
+fn writeMissingSqlSchemaJson(allocator: std.mem.Allocator, target: []const u8) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    try writeMissingSqlSchemaJsonToWriter(&aw.writer, target);
+
+    buf = aw.toArrayList();
+    if (buf.items.len > 0) {
+        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+    }
+}
+
+fn writeMissingSqlSchemaJsonToWriter(writer: anytype, target: []const u8) !void {
+    const diagnostics = [_]json_diag.JsonDiagnostic{.{
+        .code = "ZTS700",
+        .severity = "error",
+        .message = "zigttp:sql queries require --sql-schema <schema.sql|schema.sqlite>",
+        .file = target,
+        .line = 1,
+        .column = 1,
+        .suggestion = "pass --sql-schema <schema.sql|schema.sqlite> or configure sqlite in zigttp.json",
+    }};
+    try json_diag.writeErrorJson(writer, null, diagnostics[0..], null, null);
 }
 
 fn runFeaturesCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
@@ -600,4 +626,17 @@ fn printGenTestsHelp() void {
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+test "missing sql schema json uses diagnostic envelope" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+
+    try writeMissingSqlSchemaJsonToWriter(&aw.writer, "handler.ts");
+
+    buf = aw.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"success\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"code\":\"ZTS700\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "--sql-schema") != null);
 }

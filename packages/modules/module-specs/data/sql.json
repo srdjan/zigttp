@@ -19,13 +19,13 @@
     },
     {
       "name": "sqlOne",
-      "effect": "none",
+      "effect": "read",
       "returns": "optional_object",
       "failureSeverity": "expected"
     },
     {
       "name": "sqlMany",
-      "effect": "none",
+      "effect": "read",
       "returns": "object"
     },
     {

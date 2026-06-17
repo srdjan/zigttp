@@ -19,12 +19,12 @@ pub fn main() !void {
     const config = ServerConfig{
         // Pool configuration
         .pool_size = 16,                        // Handler pool size (default: auto)
-        .pool_wait_timeout_ms = 5,              // Max wait for available handler (ms)
+        .pool_wait_timeout_ms = 5000,           // Max wait for available handler (ms)
         .pool_metrics_every = 1000,             // Log metrics every N requests (0 = disabled)
 
         // Static file cache configuration
-        .static_cache_max_bytes = 2 * 1024 * 1024,    // Max total cache size (default: 2MB)
-        .static_cache_max_file_size = 128 * 1024,      // Max individual file size (default: 128KB)
+        .static_cache_max_bytes = 1024 * 1024,         // Max total cache size (default: 1MB)
+        .static_cache_max_file_size = 64 * 1024,       // Max individual file size (default: 64KB)
 
         // Network configuration
         .port = 8080,
@@ -58,7 +58,7 @@ pub fn main() !void {
 
 **`pool_size`** (default: auto = 2 * cpu_count, min 8) - Number of pre-allocated handler contexts. Memory scales linearly with pool size.
 
-**`pool_wait_timeout_ms`** (default: 5) - Maximum time to wait for available handler (milliseconds). Returns 503 if timeout exceeded.
+**`pool_wait_timeout_ms`** (default: 5000) - Maximum time to wait for available handler (milliseconds). Returns 503 if timeout exceeded.
 
 **`pool_metrics_every`** (default: 0 = disabled) - Log pool metrics every N requests. Output: `Pool metrics: in_use=2/8 exhausted=0 avg_wait_us=3 max_wait_us=20 avg_exec_us=120 max_exec_us=500`
 
@@ -68,9 +68,9 @@ pub fn main() !void {
 
 #### Static File Cache
 
-**`static_cache_max_bytes`** (default: 2MB) - Maximum total cache size. LRU eviction when exceeded.
+**`static_cache_max_bytes`** (default: 1MB) - Maximum total cache size. LRU eviction when exceeded.
 
-**`static_cache_max_file_size`** (default: 128KB) - Files larger than this are served directly from disk.
+**`static_cache_max_file_size`** (default: 64KB) - Files larger than this are served directly from disk.
 
 ## Extending with Native Functions
 

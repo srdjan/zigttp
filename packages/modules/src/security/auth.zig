@@ -22,6 +22,7 @@ pub const binding = sdk.ModuleBinding{
             .name = "parseBearer",
             .module_func = parseBearerImpl,
             .arg_count = 1,
+            .effect = .none,
             .returns = .optional_string,
             .param_types = &.{.string},
             .failure_severity = .expected,
@@ -34,6 +35,7 @@ pub const binding = sdk.ModuleBinding{
             .module_func = jwtVerifyImpl,
             .arg_count = 3,
             .required_arg_count = 2,
+            .effect = .read,
             .returns = .result,
             // (token, secret, alg?) - the optional third algorithm argument is
             // documented (`jwtVerify(token, secret, "HS256")`), but callers may
@@ -50,11 +52,12 @@ pub const binding = sdk.ModuleBinding{
                 } },
             },
         },
-        .{ .name = "jwtSign", .module_func = jwtSignImpl, .arg_count = 2, .returns = .string, .param_types = &.{ .string, .string }, .return_labels = .{ .credential = true } },
+        .{ .name = "jwtSign", .module_func = jwtSignImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .string }, .return_labels = .{ .credential = true } },
         .{
             .name = "verifyWebhookSignature",
             .module_func = verifyWebhookSignatureImpl,
             .arg_count = 3,
+            .effect = .none,
             .returns = .boolean,
             .param_types = &.{ .string, .string, .string },
             .laws = &.{.pure},
@@ -63,6 +66,7 @@ pub const binding = sdk.ModuleBinding{
             .name = "timingSafeEqual",
             .module_func = timingSafeEqualImpl,
             .arg_count = 2,
+            .effect = .none,
             .returns = .boolean,
             .param_types = &.{ .string, .string },
             .laws = &.{.pure},

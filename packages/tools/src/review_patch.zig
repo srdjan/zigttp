@@ -54,7 +54,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var owned_file: ?[]const u8 = null;
     defer if (owned_file) |f| allocator.free(f);
 
-    const input: edit_simulate.EditSimulateInput = if (stdin_json) blk: {
+    var input: edit_simulate.EditSimulateInput = if (stdin_json) blk: {
         const parsed = try edit_simulate.readStdinJson(allocator);
         owned_file = parsed.file;
         owned_content = parsed.content;
@@ -76,6 +76,10 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
             .before = owned_before,
         };
     };
+
+    const discovered_schema = edit_simulate.discoverProjectSqlSchemaPath(allocator, input.file);
+    defer if (discovered_schema) |p| allocator.free(p);
+    input.sql_schema_path = discovered_schema;
 
     var result = try edit_simulate.simulate(allocator, input);
     defer result.deinit(allocator);

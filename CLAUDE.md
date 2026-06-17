@@ -222,7 +222,7 @@ zigttp edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
 zigttp describe-rule [rule-name|code] [--json] [--hash]
 zigttp search <keyword> [--json]
 zigttp review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
-zigttp prove-behavior <before.ts> <after.ts> [--json]
+zigttp prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]
 zigttp canonicalize <file> --json [--simulate]
 zigttp normalize <file> [--write] [--check] [--json]
 zigttp expert
@@ -230,7 +230,7 @@ zigttp expert
 
 `--json` emits structured diagnostics to stdout with error codes (ZTS0xx-ZTS3xx), source locations, and suggestion fields. `zigttp features` and `zigttp modules` list language rules and virtual module exports. `zigttp restrictions` projects every blocked feature into the failure class it eliminates and the proof it unlocks (see [docs/restrictions-to-proofs.md](docs/restrictions-to-proofs.md) for the table). `zigttp expert` is the canonical interactive compiler-in-the-loop workflow.
 
-`zigttp edit-simulate` runs the analysis pipeline on a handler file and reports violations as JSON. With `--before`, it marks violations introduced by the edit vs pre-existing. `zigttp describe-rule` lists all diagnostic rules; `--hash` outputs the policy hash for CI assertions. `zigttp search` finds rules by keyword. `zigttp review-patch` combines edit-simulate with `--diff-only` filtering to show only new violations. `zigttp prove-behavior <before.ts> <after.ts>` compiles both handler versions and reports the behavioral-equivalence verdict (equivalent / equivalent_modulo_laws / additive / breaking) with the per-path behavior delta; a changed or removed response path reads as breaking even when the route surface is unchanged. Exit 0 = safe, 1 = breaking, 2 = error. It differs from `zigttp prove`, which diffs two pre-extracted contract.json files. The expert loop emits the same verdict as a signed `kind=equivalence` proof receipt after each applied edit (opt out with `--no-equivalence-receipt`).
+`zigttp edit-simulate` runs the analysis pipeline on a handler file and reports violations as JSON. With `--before`, it marks violations introduced by the edit vs pre-existing. `zigttp describe-rule` lists all diagnostic rules; `--hash` outputs the policy hash for CI assertions. `zigttp search` finds rules by keyword. `zigttp review-patch` combines edit-simulate with `--diff-only` filtering to show only new violations. `zigttp prove-behavior <before.ts> <after.ts> [--sql-schema path]` compiles both handler versions and reports the behavioral-equivalence verdict (equivalent / equivalent_modulo_laws / additive / breaking) with the per-path behavior delta; a changed or removed response path reads as breaking even when the route surface is unchanged. Exit 0 = safe, 1 = breaking, 2 = error. It differs from `zigttp prove`, which diffs two pre-extracted contract.json files. The expert loop emits the same verdict as a signed `kind=equivalence` proof receipt after each applied edit (opt out with `--no-equivalence-receipt`).
 
 `zigttp meta`, `zigttp verify-paths`, and `zigttp verify-modules` are the machine-facing verification surface. `zigttp expert` is the interactive agent that uses the same underlying analyzers in-process.
 

@@ -8,6 +8,8 @@ reported.
 | Limit | Default / Value | Notes |
 |---|---:|---|
 | Request body size | 1 MB | Set with `--max-body-size`. Oversized requests return `413 Payload Too Large`. |
+| Request read timeout | 30 seconds | Set with `ServerConfig.timeout_ms` or edge `timeoutMs`. Slow client reads return `408 Request Timeout`. |
+| Handler execution timeout | 30 seconds | Set with `ServerConfig.timeout_ms` or edge `timeoutMs`. Slow handlers return `504 Gateway Timeout` and invalidate the pool slot. |
 | JavaScript memory | no explicit limit | Set per runtime with `-m` / `--memory`. |
 | Runtime pool size | `cpu_count * 2`, clamped 8-128 | Set with `-n` / `--pool`. |
 | Value stack | 1 MB | 131,072 JSValue slots. |
@@ -32,10 +34,27 @@ key, user, or route.
 - Stack overflow and call-depth overflow return typed engine errors that fold
   into `500`.
 - Request bodies above the fixed limit return `413` before the body is buffered.
+- Slow request reads return `408`.
+- Handler execution deadlines return `504` and the runtime slot is replaced
+  before it is reused.
+- Exhausted runtime pools return `503`.
 - A handler panic is caught by a setjmp/longjmp boundary around each handler
   invocation, returns `500`, and quarantines the pool slot. The server and other
   workers keep running. A panic in server infrastructure outside that boundary
   still aborts the process.
+
+## Access Logs
+
+Request logging is enabled by default and can be disabled with `-q` /
+`--quiet` in `serve` and `dev`. Each completed request writes one structured
+line to the Zig logger:
+
+```text
+access method=GET path=/api status=200 duration_ms=4 request_id=abc-123
+```
+
+`request_id` comes from the `X-Request-Id` request header when present;
+otherwise it is `-`.
 
 ## Health And Readiness Probes
 

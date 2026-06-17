@@ -118,6 +118,13 @@ pub fn parseConfig(allocator: std.mem.Allocator, bytes: []const u8, root_dir: []
         };
         tmp.deinit(allocator);
     }
+    const timeout_ms = try parseU32Field(obj, "timeoutMs", 30_000);
+    for (handlers) |*handler| {
+        if (handler.runtime_config.request_timeout_ms == 0) {
+            handler.runtime_config.request_timeout_ms = timeout_ms;
+        }
+    }
+
     const routes = try parseRoutes(allocator, obj.get("routes"));
     errdefer {
         for (routes) |*route| {
@@ -136,7 +143,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, bytes: []const u8, root_dir: []
         .routes = routes,
         .max_body_size = try parseUsizeField(obj, "maxBodySize", 1024 * 1024),
         .max_headers = try parseUsizeField(obj, "maxHeaders", 64),
-        .timeout_ms = try parseU32Field(obj, "timeoutMs", 30_000),
+        .timeout_ms = timeout_ms,
     };
 }
 
@@ -245,8 +252,9 @@ pub const EdgeServer = struct {
         defer arena.deinit();
         const allocator = arena.allocator();
 
-        const request_data = readRequestData(fd, allocator, self.config.max_body_size) catch |err| {
+        const request_data = readRequestData(fd, allocator, self.config.max_body_size, self.config.timeout_ms) catch |err| {
             if (err == error.FileTooBig) sendError(fd, 413, "Payload Too Large") catch {};
+            if (err == error.RequestTimeout or err == error.WouldBlock) sendError(fd, 408, "Request Timeout") catch {};
             return;
         };
         var parsed = parseRequest(allocator, request_data, self.config.max_headers, self.config.max_body_size) catch {
@@ -270,8 +278,8 @@ pub const EdgeServer = struct {
         };
         const target = route.selectTarget();
         var handle = target.pool.executeHandlerBorrowed(parsed.request) catch |err| {
-            const status: u16 = if (err == error.PoolExhausted) 503 else 500;
-            const message = if (err == error.PoolExhausted) "Service Unavailable" else "Internal Server Error";
+            const status = statusForHandlerError(err);
+            const message = messageForHandlerError(status);
             sendError(fd, status, message) catch {};
             return;
         };
@@ -286,6 +294,23 @@ pub const EdgeServer = struct {
         return selectRoute(self.routes, method, host, path);
     }
 };
+
+fn statusForHandlerError(err: anyerror) u16 {
+    return if (err == error.PoolExhausted)
+        503
+    else if (err == error.RequestTimeout)
+        504
+    else
+        500;
+}
+
+fn messageForHandlerError(status: u16) []const u8 {
+    return switch (status) {
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        else => "Internal Server Error",
+    };
+}
 
 const TargetRuntime = struct {
     name: []const u8,
@@ -756,15 +781,22 @@ fn parseRequest(allocator: std.mem.Allocator, data: []const u8, max_headers: usi
     };
 }
 
-fn readRequestData(fd: std.posix.fd_t, allocator: std.mem.Allocator, max_body_size: usize) ![]u8 {
+fn readRequestData(fd: std.posix.fd_t, allocator: std.mem.Allocator, max_body_size: usize, timeout_ms: u32) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     var header_end: ?usize = null;
     var total_needed: ?usize = null;
     var is_chunked = false;
     var tmp: [8192]u8 = undefined;
+    var read_timer = compat.Timer.start() catch null;
+    const read_budget_ns: u64 = @as(u64, timeout_ms) * std.time.ns_per_ms;
 
     while (true) {
+        if (read_budget_ns > 0) {
+            if (read_timer) |*timer| {
+                if (timer.read() > read_budget_ns) return error.RequestTimeout;
+            }
+        }
         const n = try std.posix.read(fd, &tmp);
         if (n == 0) return error.EndOfStream;
         try buf.appendSlice(allocator, tmp[0..n]);
@@ -856,9 +888,11 @@ fn statusText(status: u16) []const u8 {
         200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
+        408 => "Request Timeout",
         413 => "Payload Too Large",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         else => "OK",
     };
 }
@@ -872,6 +906,7 @@ test "edge config parses routes and targets" {
     const json =
         \\{
         \\  "listener": {"host":"127.0.0.1","port":9443,"protocol":"http"},
+        \\  "timeoutMs": 1234,
         \\  "handlers": [
         \\    {"name":"api","entry":"src/api.ts","pool":2},
         \\    {"name":"web","entry":"src/web.ts"}
@@ -887,8 +922,18 @@ test "edge config parses routes and targets" {
     try std.testing.expectEqual(@as(u16, 9443), config.listener.port);
     try std.testing.expectEqual(@as(usize, 2), config.handlers.len);
     try std.testing.expectEqualStrings("/tmp/app/src/api.ts", config.handlers[0].entry);
+    try std.testing.expectEqual(@as(u32, 1234), config.timeout_ms);
+    try std.testing.expectEqual(@as(u32, 1234), config.handlers[0].runtime_config.request_timeout_ms);
     try std.testing.expectEqual(@as(usize, 2), config.routes.len);
     try std.testing.expectEqualStrings("api", config.routes[0].targets[0].handler);
+}
+
+test "edge handler timeout maps to gateway timeout" {
+    try std.testing.expectEqual(@as(u16, 503), statusForHandlerError(error.PoolExhausted));
+    try std.testing.expectEqual(@as(u16, 504), statusForHandlerError(error.RequestTimeout));
+    try std.testing.expectEqual(@as(u16, 500), statusForHandlerError(error.HandlerPanic));
+    try std.testing.expectEqualStrings("Gateway Timeout", messageForHandlerError(504));
+    try std.testing.expectEqualStrings("Gateway Timeout", statusText(504));
 }
 
 test "route selection prefers specific host and longest prefix" {

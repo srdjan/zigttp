@@ -11,6 +11,7 @@ pub const binding = sdk.ModuleBinding{
             .name = "routerMatch",
             .module_func = routerMatchImpl,
             .arg_count = 2,
+            .effect = .none,
             .returns = .optional_object,
             .param_types = &.{ .object, .object },
             .traceable = false,

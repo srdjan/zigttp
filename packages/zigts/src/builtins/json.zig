@@ -179,7 +179,10 @@ const MAX_JSON_DEPTH: u16 = 512;
 /// Parse a JSON value from text
 pub fn parseJsonValue(ctx: *context.Context, text: []const u8) JsonError!value.JSValue {
     var pos: usize = 0;
-    return parseJsonValueAt(ctx, text, &pos, 0);
+    const result = try parseJsonValueAt(ctx, text, &pos, 0);
+    skipJsonWhitespace(text, &pos);
+    if (pos != text.len) return error.InvalidJson;
+    return result;
 }
 
 /// Parse JSON value at position
@@ -411,6 +414,7 @@ fn parseJsonKey(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!
             // Has escapes - use slow path with temporary buffer
             return parseJsonKeyWithEscapes(ctx, text, pos, start);
         }
+        if (c < 0x20) return error.InvalidJson;
         pos.* += 1;
     }
 
@@ -464,6 +468,7 @@ fn parseJsonKeyWithEscapes(ctx: *context.Context, text: []const u8, pos: *usize,
                 else => return error.InvalidJson,
             }
         } else {
+            if (c < 0x20) return error.InvalidJson;
             buffer.append(ctx.allocator, c) catch return error.OutOfMemory;
             pos.* += 1;
         }
@@ -490,6 +495,7 @@ fn parseJsonString(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
             // Has escapes - use slow path
             return parseJsonStringWithEscapes(ctx, text, pos, start);
         }
+        if (c < 0x20) return error.InvalidJson;
         pos.* += 1;
     }
 
@@ -542,9 +548,10 @@ fn parseJsonStringWithEscapes(ctx: *context.Context, text: []const u8, pos: *usi
                         try buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F)));
                     }
                 },
-                else => try buffer.append(ctx.allocator, escaped),
+                else => return error.InvalidJson,
             }
         } else {
+            if (c < 0x20) return error.InvalidJson;
             try buffer.append(ctx.allocator, c);
             pos.* += 1;
         }
@@ -558,17 +565,22 @@ fn parseJsonNumber(text: []const u8, pos: *usize) JsonError!value.JSValue {
     const start = pos.*;
 
     // Optional minus
+    const is_negative = pos.* < text.len and text[pos.*] == '-';
     if (pos.* < text.len and text[pos.*] == '-') {
         pos.* += 1;
     }
 
     // Integer part
+    if (pos.* >= text.len) return error.InvalidJson;
     if (pos.* < text.len and text[pos.*] == '0') {
         pos.* += 1;
+        if (pos.* < text.len and text[pos.*] >= '0' and text[pos.*] <= '9') return error.InvalidJson;
     } else {
+        const digits_start = pos.*;
         while (pos.* < text.len and text[pos.*] >= '0' and text[pos.*] <= '9') {
             pos.* += 1;
         }
+        if (pos.* == digits_start) return error.InvalidJson;
     }
 
     // Fractional part
@@ -576,9 +588,11 @@ fn parseJsonNumber(text: []const u8, pos: *usize) JsonError!value.JSValue {
     if (pos.* < text.len and text[pos.*] == '.') {
         is_float = true;
         pos.* += 1;
+        const frac_start = pos.*;
         while (pos.* < text.len and text[pos.*] >= '0' and text[pos.*] <= '9') {
             pos.* += 1;
         }
+        if (pos.* == frac_start) return error.InvalidJson;
     }
 
     // Exponent part
@@ -588,9 +602,11 @@ fn parseJsonNumber(text: []const u8, pos: *usize) JsonError!value.JSValue {
         if (pos.* < text.len and (text[pos.*] == '+' or text[pos.*] == '-')) {
             pos.* += 1;
         }
+        const exp_start = pos.*;
         while (pos.* < text.len and text[pos.*] >= '0' and text[pos.*] <= '9') {
             pos.* += 1;
         }
+        if (pos.* == exp_start) return error.InvalidJson;
     }
 
     const num_str = text[start..pos.*];
@@ -599,11 +615,13 @@ fn parseJsonNumber(text: []const u8, pos: *usize) JsonError!value.JSValue {
         const f = std.fmt.parseFloat(f64, num_str) catch return error.InvalidJson;
         // JS numbers are all f64; fromFloat is NaN-boxed inline (no allocation)
         // and preserves full precision for fractions and large/exponent values.
+        if (f == 0.0 and is_negative) return value.JSValue.fromFloat(-0.0);
         if (f == @trunc(f) and f >= -2147483648 and f <= 2147483647) {
             return value.JSValue.fromInt(@intFromFloat(f));
         }
         return value.JSValue.fromFloat(f);
     } else {
+        if (std.mem.eql(u8, num_str, "-0")) return value.JSValue.fromFloat(-0.0);
         const i = std.fmt.parseInt(i32, num_str, 10) catch {
             // Integer overflowed i32; represent as full-precision f64.
             const f = std.fmt.parseFloat(f64, num_str) catch return error.InvalidJson;
@@ -650,4 +668,33 @@ test "JSON.parse number full precision: decimals, large ints, and exponents" {
         const v = try parseJsonNumber("1.7e12", &pos);
         try expectEqual(@as(?f64, 1.7e12), v.toNumber());
     }
+}
+
+test "JSON.parse is strict and preserves negative zero" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "true false"));
+    try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "1."));
+    try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "1e"));
+    try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "01"));
+    try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "\"bad\\v\""));
+    try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "\"bad\x01\""));
+
+    const neg_zero = try parseJsonValue(ctx, "-0");
+    try std.testing.expectEqual(value.JSValue.fromFloat(-0.0).raw, neg_zero.raw);
+
+    const neg_zero_exp = try parseJsonValue(ctx, "-0e0");
+    try std.testing.expectEqual(value.JSValue.fromFloat(-0.0).raw, neg_zero_exp.raw);
 }

@@ -74,9 +74,14 @@ properties and runtime policy.
 
 | Effect | Meaning | Examples |
 |---|---|---|
-| `none` | Pure or analysis-only operation. | `sha256`, `routerMatch`, `parseCookies`, `sql` |
+| `none` | Pure or analysis-only operation. | `sha256`, `routerMatch`, `parseCookies`, `decodeJson` |
 | `read` | Reads runtime state without mutating it. | `env`, `cacheGet`, `cacheStats`, `deserializeAttachment` |
 | `write` | Mutates state, performs I/O, or schedules runtime callbacks. | `fetch`, `serviceCall`, `sqlExec`, `cacheSet`, `parallel`, `run`, `send`, `logInfo` |
+
+`fetchWithRetry(url, init?, retryOptions?)` accepts `maxRetries`,
+`baseDelayMs`, `maxDelayMs`, and `retryOn`. To keep synchronous retry sleeps
+bounded, `maxRetries` must be at most 10, `baseDelayMs` at most 5000, and
+`maxDelayMs` at most 30000. Negative retry or delay values are treated as 0.
 
 For capability governance internals, see
 [Module Capabilities](../internals/capabilities.md).

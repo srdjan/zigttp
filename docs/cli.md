@@ -53,6 +53,7 @@ Common `dev` and `serve` flags:
 | `-m`, `--memory <size>` | Per-runtime JS memory ceiling. |
 | `--max-body-size <size>` | Request body limit (default 1m); oversize returns 413. |
 | `-n`, `--pool <count>` | Runtime pool size. |
+| `-q`, `--quiet` | Disable request access logging. |
 | `--watch` | Watch handler files. |
 | `--prove` | Diff contracts before hot-swap when watching. |
 | `--trace <file>` | Record request/response traces. |
@@ -100,7 +101,7 @@ command registry:
 ```bash
 zigttp check [handler.ts] [--json] [--contract] [--types]
 zigttp prove <old-contract.json> <new-contract.json>
-zigttp prove-behavior <before.ts> <after.ts> [--json]
+zigttp prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]
 zigttp mock <tests.jsonl> [--port <port>]
 zigttp link <system.json>
 zigttp rollout <old-system.json> <new-system.json>

@@ -98,7 +98,14 @@ picks the target with the fewest in-flight requests.
 |----------------|---------|--------------------|-------------------------------------------------|
 | `maxBodySize`  | integer | `1048576` (1 MiB)  | Reject larger bodies with 413                   |
 | `maxHeaders`   | integer | `64`               | Reject larger header counts with 400            |
-| `timeoutMs`    | integer | `30000`            | Per-request timeout including handler execution |
+| `timeoutMs`    | integer | `30000`            | Request read/write timeout and default handler execution timeout |
+
+Timeout responses are split by where the request stalls:
+
+- Slow client reads or partial bodies return `408 Request Timeout`.
+- A handler that exceeds its execution deadline returns `504 Gateway Timeout`.
+- Waiting longer than `poolWaitTimeoutMs` for an available handler pool slot
+  returns `503 Service Unavailable`.
 
 ## Per-handler verification
 

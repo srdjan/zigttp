@@ -9,8 +9,8 @@ pub const binding = sdk.ModuleBinding{
     .exports = &.{
         .{ .name = "urlParse", .module_func = urlParseImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true }, .laws = &.{.pure} },
         .{ .name = "urlSearchParams", .module_func = urlSearchParamsImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true }, .laws = &.{.pure} },
-        .{ .name = "urlEncode", .module_func = urlEncodeImpl, .arg_count = 1, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
-        .{ .name = "urlDecode", .module_func = urlDecodeImpl, .arg_count = 1, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
+        .{ .name = "urlEncode", .module_func = urlEncodeImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
+        .{ .name = "urlDecode", .module_func = urlDecodeImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
     },
 };
 

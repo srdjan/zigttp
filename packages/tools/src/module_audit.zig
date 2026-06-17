@@ -116,7 +116,8 @@ const capability_rules = [_]CapabilityRule{
     .{ .capability = "runtime_callback", .helpers = &.{ "runtimeCallbackCapabilityChecked", "getRuntimeCallbackStateChecked" } },
     .{ .capability = "sqlite", .helpers = &.{ "sqliteCapabilityChecked", "getSqliteStateChecked", "openSqliteDbChecked" } },
     .{ .capability = "filesystem", .helpers = &.{"readFileChecked"} },
-    .{ .capability = "policy_check", .helpers = &.{ "allowsEnvChecked", "allowsEnvForActiveModule", "allowsCacheNamespaceChecked", "allowsCacheNamespaceForActiveModule", "allowsSqlQueryChecked", "allowsSqlQueryForActiveModule" } },
+    .{ .capability = "policy_check", .helpers = &.{ "allowsEnvChecked", "allowsEnvForActiveModule", "allowsCacheNamespaceChecked", "allowsCacheNamespaceForActiveModule", "allowsSqlQueryChecked", "allowsSqlQueryForActiveModule", "allowsSqlWriteChecked", "allowsSqlWriteForActiveModule" } },
+    .{ .capability = "websocket", .helpers = &.{"WebSocketCallbacks"} },
 };
 
 const forbidden_patterns = [_]ForbiddenPattern{
@@ -370,7 +371,132 @@ fn auditModuleContentWithSpecPath(
                 "update the module spec and binding so they declare the same capability set",
             );
         }
+
+        const binding = builtin_modules.fromSpecifier(manifest.specifier) orelse {
+            try appendDiagnostic(
+                allocator,
+                diagnostics,
+                "ZVM007",
+                "error",
+                "module spec has no matching built-in binding",
+                path,
+                1,
+                1,
+                "register the binding in packages/zigts/src/builtin_modules.zig or remove the stale spec",
+            );
+            return;
+        };
+        try checkBindingExportDrift(allocator, path, binding, &manifest, diagnostics);
     }
+}
+
+fn checkBindingExportDrift(
+    allocator: std.mem.Allocator,
+    spec_path: []const u8,
+    binding: *const zigts.module_binding.ModuleBinding,
+    manifest: *const module_manifest.Manifest,
+    diagnostics: *std.ArrayList(OwnedDiagnostic),
+) !void {
+    for (binding.exports) |binding_export| {
+        const manifest_export = findManifestExport(manifest.exports.items, binding_export.name) orelse {
+            const message = try std.fmt.allocPrint(
+                allocator,
+                "module spec is missing export `{s}` from the Zig binding",
+                .{binding_export.name},
+            );
+            defer allocator.free(message);
+            try appendDiagnostic(
+                allocator,
+                diagnostics,
+                "ZVM007",
+                "error",
+                message,
+                spec_path,
+                1,
+                1,
+                "add the export to the module spec or remove it from the binding",
+            );
+            continue;
+        };
+
+        if (binding_export.effect != manifest_export.effect) {
+            const message = try std.fmt.allocPrint(
+                allocator,
+                "module spec export `{s}` effect `{s}` differs from Zig binding effect `{s}`",
+                .{ binding_export.name, @tagName(manifest_export.effect), @tagName(binding_export.effect) },
+            );
+            defer allocator.free(message);
+            try appendDiagnostic(
+                allocator,
+                diagnostics,
+                "ZVM008",
+                "error",
+                message,
+                spec_path,
+                1,
+                1,
+                "keep export effect metadata identical in the Zig binding and module spec",
+            );
+        }
+
+        if (binding_export.returns != manifest_export.returns) {
+            const message = try std.fmt.allocPrint(
+                allocator,
+                "module spec export `{s}` returns `{s}` differs from Zig binding returns `{s}`",
+                .{ binding_export.name, @tagName(manifest_export.returns), @tagName(binding_export.returns) },
+            );
+            defer allocator.free(message);
+            try appendDiagnostic(
+                allocator,
+                diagnostics,
+                "ZVM009",
+                "error",
+                message,
+                spec_path,
+                1,
+                1,
+                "keep export return metadata identical in the Zig binding and module spec",
+            );
+        }
+    }
+
+    for (manifest.exports.items) |manifest_export| {
+        if (findBindingExport(binding.exports, manifest_export.name) != null) continue;
+        const message = try std.fmt.allocPrint(
+            allocator,
+            "module spec declares export `{s}` that is not present in the Zig binding",
+            .{manifest_export.name},
+        );
+        defer allocator.free(message);
+        try appendDiagnostic(
+            allocator,
+            diagnostics,
+            "ZVM007",
+            "error",
+            message,
+            spec_path,
+            1,
+            1,
+            "remove the stale export from the module spec or add it to the binding",
+        );
+    }
+}
+
+fn findManifestExport(exports: []const module_manifest.Export, name: []const u8) ?*const module_manifest.Export {
+    for (exports) |*export_item| {
+        if (std.mem.eql(u8, export_item.name, name)) return export_item;
+    }
+    return null;
+}
+
+fn findBindingExport(
+    exports: []const zigts.module_binding.FunctionBinding,
+    name: []const u8,
+) ?*const zigts.module_binding.FunctionBinding {
+    for (exports) |*export_item| {
+        if (std.mem.eql(u8, export_item.name, name)) return export_item;
+    }
+    return null;
 }
 
 fn appendManifestDiagnostic(
@@ -694,6 +820,7 @@ test "verifyBuiltins reports the authoritative public module and spec set" {
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(builtin_modules.governanceEntries().len * 2, result.checked_files.items.len);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
     try std.testing.expect(containsString(result.checked_files.items, "packages/modules/src/platform/env.zig"));
     try std.testing.expect(containsString(result.checked_files.items, "packages/modules/module-specs/platform/env.json"));
 }

@@ -8,15 +8,15 @@
 //! Unlike `prove`, which diffs two pre-extracted contract.json files, this
 //! takes two TypeScript sources directly so it is usable as a one-shot CI
 //! gate ("did this edit change what the handler does?"). It emits the
-//! verdict unsigned; the runtime `zigttp prove-behavior` delegation signs
-//! the same verdict with the operator's persistent attest identity and
-//! appends a `kind=equivalence` row to `.zigttp/proofs.jsonl`.
+//! verdict unsigned. It does not append to the proof ledger; callers that need
+//! a durable signed receipt should wrap this verdict explicitly.
 //!
 //! Exit codes mirror `prove`: 0 = equivalent / equivalent_modulo_laws /
 //! additive (safe), 1 = breaking, 2 = usage or compile error.
 
 const std = @import("std");
 const zigts = @import("zigts");
+const edit_simulate = @import("edit_simulate.zig");
 const precompile = @import("precompile.zig");
 
 const contract_diff = zigts.contract_diff;
@@ -37,6 +37,7 @@ pub const Verdict = struct {
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
+    var explicit_sql_schema_path: ?[]const u8 = null;
     var before_path: ?[]const u8 = null;
     var after_path: ?[]const u8 = null;
 
@@ -45,6 +46,12 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         const arg = argv[i];
         if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--sql-schema")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgument;
+            explicit_sql_schema_path = argv[i];
             continue;
         }
         if (std.mem.eql(u8, arg, "--help")) {
@@ -76,6 +83,14 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         std.process.exit(2);
     };
 
+    const discovered_schema = if (explicit_sql_schema_path == null)
+        edit_simulate.discoverProjectSqlSchemaPath(allocator, after) orelse
+            edit_simulate.discoverProjectSqlSchemaPath(allocator, before)
+    else
+        null;
+    defer if (discovered_schema) |path| allocator.free(path);
+    const sql_schema_path = explicit_sql_schema_path orelse discovered_schema;
+
     const before_src = file_io.readFile(allocator, before, max_source_bytes) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ before, err });
         std.process.exit(2);
@@ -88,9 +103,9 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     };
     defer allocator.free(after_src);
 
-    var before_result = try precompile.runCheckOnlyFromSource(allocator, before_src, before, null, true, null, false);
+    var before_result = try precompile.runCheckOnlyFromSource(allocator, before_src, before, sql_schema_path, true, null, false);
     defer before_result.deinit(allocator);
-    var after_result = try precompile.runCheckOnlyFromSource(allocator, after_src, after, null, true, null, false);
+    var after_result = try precompile.runCheckOnlyFromSource(allocator, after_src, after, sql_schema_path, true, null, false);
     defer after_result.deinit(allocator);
 
     const before_contract = if (before_result.contract) |*c| c else {
@@ -191,14 +206,15 @@ fn writeJson(
 
 fn printHelp() void {
     const help =
-        \\zigts prove-behavior - signed behavioral-equivalence verdict between two handler versions
+        \\zigts prove-behavior - behavioral-equivalence verdict between two handler versions
         \\
-        \\Usage: zigts prove-behavior <before.ts> <after.ts> [--json]
+        \\Usage: zigts prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]
         \\
         \\Compiles both versions, runs the contract diff, and reports whether the
         \\edit is behaviorally equivalent / equivalent-modulo-laws / additive /
         \\breaking, with the per-path behavior delta and the laws the equivalence
-        \\proof relied on.
+        \\proof relied on. The verdict is unsigned and is not appended to the
+        \\proof ledger.
         \\
         \\Exit codes: 0 = safe (equivalent / additive), 1 = breaking, 2 = error.
         \\

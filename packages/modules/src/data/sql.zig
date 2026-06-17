@@ -39,6 +39,7 @@ pub const binding = sdk.ModuleBinding{
             .name = "sqlOne",
             .module_func = sqlOneImpl,
             .arg_count = 2,
+            .effect = .read,
             .returns = .optional_object,
             // sqlOne(name, params?): the params object is optional (impl uses it
             // only when args.len >= 2), so `sqlOne("listTodos")` is valid. Without
@@ -53,6 +54,7 @@ pub const binding = sdk.ModuleBinding{
             .name = "sqlMany",
             .module_func = sqlManyImpl,
             .arg_count = 2,
+            .effect = .read,
             .returns = .object,
             .param_types = &.{ .string, .object },
             .required_arg_count = 1,

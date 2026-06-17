@@ -40,6 +40,7 @@ pub const Provider = enum {
 
 pub const CassetteError = error{
     InvalidCassette,
+    InvalidSidecarPath,
     MissingProvider,
     MissingBody,
     UnsupportedProvider,
@@ -127,6 +128,7 @@ pub fn loadCassetteFromBytes(
     const header = try parseHeader(arena, header_line);
 
     if (header.sse_path) |rel| {
+        try validateSidecarPath(rel);
         if (cassette_dir == null) return CassetteError.SidecarNotFound;
         const joined = try std.fs.path.join(arena, &.{ cassette_dir.?, rel });
         const body = file_io.readFile(arena, joined, max_sse_sidecar_bytes) catch
@@ -194,6 +196,21 @@ fn parseHeader(arena: std.mem.Allocator, line: []const u8) !Header {
         .scenario = scenario,
         .sse_path = sse_path,
     };
+}
+
+fn validateSidecarPath(path: []const u8) CassetteError!void {
+    if (!isSafeSidecarPath(path)) return CassetteError.InvalidSidecarPath;
+}
+
+fn isSafeSidecarPath(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (std.fs.path.isAbsolute(path)) return false;
+    if (std.mem.eql(u8, path, ".") or std.mem.eql(u8, path, "..")) return false;
+
+    for (path) |c| {
+        if (c == 0 or c == '/' or c == '\\') return false;
+    }
+    return true;
 }
 
 // -----------------------------------------------------------------------
@@ -280,6 +297,40 @@ test "loadCassetteFromBytes rejects an empty cassette" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     try testing.expectError(CassetteError.InvalidCassette, loadCassetteFromBytes(arena.allocator(), "   \n\n", null));
+}
+
+test "loadCassetteFromBytes rejects path-like sidecars" {
+    const cases = [_][]const u8{
+        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":"../escape.sse.txt"}
+        ,
+        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":"/tmp/escape.sse.txt"}
+        ,
+        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":"nested/escape.sse.txt"}
+        ,
+        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":"nested\\escape.sse.txt"}
+        ,
+        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":""}
+        ,
+        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":"."}
+        ,
+        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":".."}
+        ,
+    };
+
+    for (cases) |header_line| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        const raw = try std.fmt.allocPrint(
+            arena.allocator(),
+            "{s}\n",
+            .{header_line},
+        );
+        try testing.expectError(
+            CassetteError.InvalidSidecarPath,
+            loadCassetteFromBytes(arena.allocator(), raw, "."),
+        );
+    }
 }
 
 test "loadCassetteFromBytes rejects an unknown provider" {

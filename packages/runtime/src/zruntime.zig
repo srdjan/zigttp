@@ -119,6 +119,7 @@ pub const Runtime = struct {
     active_request: ?HttpRequestView,
     active_durable_run: ?ActiveDurableRun,
     pending_durable_recovery: ?PendingDurableRecovery,
+    request_deadline_jit_inhibited_prev: ?bool = null,
     // Hybrid allocation support
     arena_state: ?*zq.arena.Arena,
     hybrid_state: ?*zq.arena.HybridAllocator,
@@ -272,6 +273,7 @@ pub const Runtime = struct {
             .active_request = null,
             .active_durable_run = null,
             .pending_durable_recovery = null,
+            .request_deadline_jit_inhibited_prev = null,
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
             .ws_pool_ref = null,
@@ -337,6 +339,7 @@ pub const Runtime = struct {
             .active_request = null,
             .active_durable_run = null,
             .pending_durable_recovery = null,
+            .request_deadline_jit_inhibited_prev = null,
             // Pool runtimes manage their own hybrid allocation
             .arena_state = null,
             .hybrid_state = null,
@@ -1142,12 +1145,20 @@ pub const Runtime = struct {
         if (ms == 0) return;
         const now = compat.monotonicNowNs() catch return;
         self.ctx.deadline_ns = now + @as(u64, ms) * std.time.ns_per_ms;
+        if (self.request_deadline_jit_inhibited_prev == null) {
+            self.request_deadline_jit_inhibited_prev = self.ctx.jit_inhibited;
+            self.ctx.jit_inhibited = true;
+        }
     }
 
     /// Clear the per-request execution deadline and interrupt flag.
     pub fn clearRequestDeadline(self: *Self) void {
         self.ctx.deadline_ns = 0;
         self.ctx.interrupt_requested.store(false, .monotonic);
+        if (self.request_deadline_jit_inhibited_prev) |prev| {
+            self.ctx.jit_inhibited = prev;
+            self.request_deadline_jit_inhibited_prev = null;
+        }
     }
 
     /// Execute the handler function with a request
@@ -7270,6 +7281,29 @@ test "Runtime rejects malformed cached bytecode before execution" {
         error.BytecodeVerificationFailed,
         rt.loadFromCachedBytecodeNoHandler(writer.getWritten()),
     );
+}
+
+test "request deadline temporarily inhibits JIT" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var rt = try Runtime.init(allocator, .{ .request_timeout_ms = 50 });
+    defer rt.deinit();
+
+    try std.testing.expect(!rt.ctx.jit_inhibited);
+    rt.armRequestDeadline();
+    try std.testing.expect(rt.ctx.deadline_ns != 0);
+    try std.testing.expect(rt.ctx.jit_inhibited);
+    rt.clearRequestDeadline();
+    try std.testing.expectEqual(@as(u64, 0), rt.ctx.deadline_ns);
+    try std.testing.expect(!rt.ctx.jit_inhibited);
+
+    rt.ctx.jit_inhibited = true;
+    rt.armRequestDeadline();
+    try std.testing.expect(rt.ctx.jit_inhibited);
+    rt.clearRequestDeadline();
+    try std.testing.expect(rt.ctx.jit_inhibited);
 }
 
 test "Runtime rejects malformed nested cached bytecode before execution" {

@@ -15,6 +15,8 @@ const file_io = zigts.file_io;
 const writeJsonString = zigts.handler_contract.writeJsonString;
 const HandlerProperties = zigts.handler_contract.HandlerProperties;
 
+const max_stdin_json_bytes: usize = 20 * 1024 * 1024;
+
 pub const EditSimulateInput = struct {
     file: []const u8,
     content: []const u8,
@@ -70,8 +72,8 @@ pub fn simulate(
     var new_check = try precompile.runCheckOnly(allocator, tmp_path, input.sql_schema_path, true, null);
     defer new_check.deinit(allocator);
 
-    var baseline_keys: ?std.AutoHashMapUnmanaged(ViolationKey, void) = null;
-    defer if (baseline_keys) |*bk| bk.deinit(allocator);
+    var baseline_counts: ?std.AutoHashMapUnmanaged(ViolationKey, u32) = null;
+    defer if (baseline_counts) |*bk| bk.deinit(allocator);
 
     if (input.before) |before_content| {
         const before_path = try writeTempFile(allocator, input.file, before_content);
@@ -83,9 +85,9 @@ pub fn simulate(
         var old_check = try precompile.runCheckOnly(allocator, before_path, input.sql_schema_path, true, null);
         defer old_check.deinit(allocator);
 
-        baseline_keys = .empty;
+        baseline_counts = .empty;
         for (old_check.json_diagnostics.items) |diag| {
-            try baseline_keys.?.put(allocator, violationKey(&diag), {});
+            try addViolationKeyCount(allocator, &baseline_counts.?, violationKey(&diag));
         }
     }
 
@@ -95,8 +97,8 @@ pub fn simulate(
     errdefer result.deinit(allocator);
 
     for (new_check.json_diagnostics.items) |diag| {
-        const is_new = if (baseline_keys) |bk|
-            !bk.contains(violationKey(&diag))
+        const is_new = if (baseline_counts) |*bk|
+            !consumeViolationKeyCount(bk, violationKey(&diag))
         else
             true;
 
@@ -132,7 +134,10 @@ pub fn simulate(
 
 /// Read EditSimulateInput from stdin JSON.
 pub fn readStdinJson(allocator: std.mem.Allocator) !EditSimulateInput {
-    const stdin_data = readAllStdin(allocator) catch return error.StdinReadFailed;
+    const stdin_data = readAllStdin(allocator) catch |err| switch (err) {
+        error.StdinTooLarge => return error.StdinTooLarge,
+        else => return error.StdinReadFailed,
+    };
     defer allocator.free(stdin_data);
 
     if (stdin_data.len == 0) return error.StdinReadFailed;
@@ -323,11 +328,9 @@ pub fn discoverProjectSqlSchemaPath(allocator: std.mem.Allocator, start_path: ?[
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Value-type composite key for comparing violations.
-/// Uses Wyhash for fast non-cryptographic hashing. Line numbers are excluded
-/// because edits shift them.
-/// TODO(v0.1): This is a heuristic. Identical messages at different locations
-/// will be treated as the same violation.
+/// Value-type composite key for comparing violations. Line numbers are excluded
+/// because edits shift them; duplicate occurrences are handled by multiset
+/// counts instead of a plain set.
 const ViolationKey = struct {
     code_hash: u64,
     msg_hash: u64,
@@ -338,6 +341,29 @@ fn violationKey(diag: *const json_diag.JsonDiagnostic) ViolationKey {
         .code_hash = std.hash.Wyhash.hash(0, diag.code),
         .msg_hash = std.hash.Wyhash.hash(0, diag.message),
     };
+}
+
+fn addViolationKeyCount(
+    allocator: std.mem.Allocator,
+    counts: *std.AutoHashMapUnmanaged(ViolationKey, u32),
+    key: ViolationKey,
+) !void {
+    const entry = try counts.getOrPut(allocator, key);
+    if (entry.found_existing) {
+        entry.value_ptr.* += 1;
+    } else {
+        entry.value_ptr.* = 1;
+    }
+}
+
+fn consumeViolationKeyCount(
+    counts: *std.AutoHashMapUnmanaged(ViolationKey, u32),
+    key: ViolationKey,
+) bool {
+    const value = counts.getPtr(key) orelse return false;
+    if (value.* == 0) return false;
+    value.* -= 1;
+    return true;
 }
 
 fn deleteTempFile(allocator: std.mem.Allocator, path: []const u8) void {
@@ -378,6 +404,7 @@ fn readAllStdin(allocator: std.mem.Allocator) ![]u8 {
             else => return err,
         };
         if (n == 0) break;
+        if (buf.items.len + n > max_stdin_json_bytes) return error.StdinTooLarge;
         try buf.appendSlice(allocator, read_buf[0..n]);
     }
     return buf.toOwnedSlice(allocator);
@@ -493,6 +520,19 @@ test "violationKey excludes line numbers" {
 
     try std.testing.expectEqual(key1.code_hash, key2.code_hash);
     try std.testing.expectEqual(key1.msg_hash, key2.msg_hash);
+}
+
+test "violation key counts preserve duplicate diagnostics" {
+    var counts: std.AutoHashMapUnmanaged(ViolationKey, u32) = .empty;
+    defer counts.deinit(std.testing.allocator);
+
+    const key = ViolationKey{ .code_hash = 1, .msg_hash = 2 };
+    try addViolationKeyCount(std.testing.allocator, &counts, key);
+    try addViolationKeyCount(std.testing.allocator, &counts, key);
+
+    try std.testing.expect(consumeViolationKeyCount(&counts, key));
+    try std.testing.expect(consumeViolationKeyCount(&counts, key));
+    try std.testing.expect(!consumeViolationKeyCount(&counts, key));
 }
 
 test "runWithArgs accepts redundant --json flag" {

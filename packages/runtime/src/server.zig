@@ -320,6 +320,22 @@ const ConnectionPool = struct {
         fn wakeWorkers(self: *BoundedQueue, n: usize) void {
             for (0..n) |_| self.ready.post(std.Options.debug_io);
         }
+
+        fn drainAndClose(self: *BoundedQueue) usize {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            var drained: usize = 0;
+            while (self.count.load(.acquire) > 0) {
+                const item = self.items[self.head];
+                self.head = (self.head + 1) % QUEUE_SIZE;
+                _ = self.count.fetchSub(1, .release);
+                std.Io.Threaded.closeFd(item.stream_fd);
+                drained += 1;
+            }
+            self.tail = self.head;
+            return drained;
+        }
     };
 
     fn init(allocator: std.mem.Allocator, server: *Server, worker_count: usize) !*ConnectionPool {
@@ -357,6 +373,7 @@ const ConnectionPool = struct {
         // Wake blocked workers so they can observe running=false and exit.
         self.queue.wakeWorkers(self.workers.len);
         for (self.workers) |w| w.join();
+        _ = self.queue.drainAndClose();
         self.allocator.free(self.workers);
         self.allocator.destroy(self);
     }
@@ -510,6 +527,10 @@ const ConnectionPool = struct {
         };
         defer request.deinit(req_allocator);
 
+        var access_status: u16 = 500;
+        const access_started_ms = unixMillisNow();
+        defer self.logAccess(request.method, request.path, request.headers.items, access_status, access_started_ms);
+
         // Check keep-alive using fast header slot
         const client_wants_keep_alive = blk: {
             if (request.connection) |conn| {
@@ -522,8 +543,9 @@ const ConnectionPool = struct {
         const outcome_if_alive: RequestOutcome = if (keep_alive) .keep_alive else .close;
 
         if (self.server.config.studio and studio_mod.isStudioPath(request.path)) {
-            return self.handleStudioRequestSync(fd, request.method, request.path, request.body, keep_alive, req_allocator) catch |err| {
+            return self.handleStudioRequestSync(fd, request.method, request.path, request.body, keep_alive, req_allocator, &access_status) catch |err| {
                 std.log.warn("studio request failed for {s}: {}", .{ request.path, err });
+                access_status = 500;
                 self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
                 return .close;
             };
@@ -531,6 +553,7 @@ const ConnectionPool = struct {
 
         // Health and readiness probes - before WebSocket, static, and JS handler
         if (std.mem.eql(u8, request.path, "/_health")) {
+            access_status = 200;
             self.sendStatusSync(fd, 200, "OK", keep_alive) catch {};
             return outcome_if_alive;
         }
@@ -540,9 +563,11 @@ const ConnectionPool = struct {
             else
                 false;
             if (pool_full) {
+                access_status = 503;
                 self.sendErrorSync(fd, 503, "Service Unavailable") catch {};
                 return .close;
             }
+            access_status = 200;
             self.sendStatusSync(fd, 200, "OK", keep_alive) catch {};
             return outcome_if_alive;
         }
@@ -562,8 +587,9 @@ const ConnectionPool = struct {
                     .headers = request.headers,
                     .body = request.body,
                 };
-                return self.handleWebSocketUpgradeSync(fd, &request_view, req_allocator) catch |err| ret: {
+                return self.handleWebSocketUpgradeSync(fd, &request_view, req_allocator, &access_status) catch |err| ret: {
                     std.log.warn("websocket upgrade failed: {}", .{err});
+                    access_status = 500;
                     break :ret .close;
                 };
             }
@@ -575,9 +601,11 @@ const ConnectionPool = struct {
                 // Strip the full "/static/" prefix (8 chars) off request.path,
                 // not request.url[7..]: the old slice kept a leading slash (so the
                 // file resolved as absolute -> 403) and carried the query string.
-                self.serveStaticFileSync(fd, static_dir, request.path["/static/".len..], keep_alive, request.headers.items) catch |err| {
+                access_status = self.serveStaticFileSync(fd, static_dir, request.path["/static/".len..], keep_alive, request.headers.items) catch |err| {
                     std.log.warn("static file error for {s}: {}", .{ request.url, err });
+                    access_status = 500;
                     self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
+                    return outcome_if_alive;
                 };
                 return outcome_if_alive;
             }
@@ -592,6 +620,7 @@ const ConnectionPool = struct {
                 const cached = etagMatchesIfNoneMatch(inm, &doc.etag_hex);
                 var header_buf: [512]u8 = undefined;
                 const header_len = formatWellKnownHeaders(doc, cached, keep_alive, &header_buf) catch return .close;
+                access_status = if (cached) 304 else 200;
                 writeAllFd(fd, header_buf[0..header_len]) catch return .close;
                 if (!cached) writeAllFd(fd, doc.body) catch return .close;
                 return outcome_if_alive;
@@ -602,6 +631,7 @@ const ConnectionPool = struct {
         if (self.server.contract) |*contract| {
             if (!contract.matchesRoute(request.method, request.path)) {
                 proof_audit_ring.pushRouteBlocked(request.method, request.path);
+                access_status = 404;
                 self.sendStatusSync(fd, 404, "Not Found", keep_alive) catch {};
                 return outcome_if_alive;
             }
@@ -616,6 +646,7 @@ const ConnectionPool = struct {
                 if (cached_opt != null) {
                     defer cached_opt.?.deinit();
                     proof_audit_ring.pushCacheHit(request.method, request.path);
+                    access_status = cached_opt.?.status;
                     self.sendResponseSync(fd, &cached_opt.?, keep_alive) catch return .close;
                     return outcome_if_alive;
                 }
@@ -635,6 +666,7 @@ const ConnectionPool = struct {
             }) catch |err| {
                 const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else 500;
                 const message = if (err == error.PoolExhausted) "Service Unavailable" else if (err == error.RequestTimeout) "Gateway Timeout" else "Internal Server Error";
+                access_status = status;
                 self.sendErrorSync(fd, status, message) catch |send_err| {
                     std.log.warn("failed to send error response: {}", .{send_err});
                 };
@@ -650,10 +682,33 @@ const ConnectionPool = struct {
             }
 
             // Send response
+            access_status = handle.response.status;
             self.sendResponseSync(fd, &handle.response, keep_alive) catch return .close;
         }
 
         return outcome_if_alive;
+    }
+
+    fn logAccess(
+        self: *ConnectionPool,
+        method: []const u8,
+        path: []const u8,
+        headers: []const HttpHeader,
+        status: u16,
+        started_ms: i64,
+    ) void {
+        if (!self.server.config.log_requests) return;
+
+        const now_ms = unixMillisNow();
+        const duration_ms: i64 = if (now_ms >= started_ms) now_ms - started_ms else 0;
+        const request_id = findHeaderValue(headers, "X-Request-Id") orelse "-";
+        std.log.info("access method={s} path={s} status={d} duration_ms={d} request_id={s}", .{
+            method,
+            path,
+            status,
+            duration_ms,
+            request_id,
+        });
     }
 
     fn handleStudioRequestSync(
@@ -664,18 +719,22 @@ const ConnectionPool = struct {
         body: ?[]const u8,
         keep_alive: bool,
         allocator: std.mem.Allocator,
+        status_out: *u16,
     ) !RequestOutcome {
         const studio_opt: ?*studio_mod.State = if (self.server.studio) |*s| s else null;
 
         if (std.mem.eql(u8, path, studio_mod.sse_path)) {
             const studio = studio_opt orelse {
+                status_out.* = 404;
                 self.sendErrorSync(fd, 404, "Studio disabled") catch {};
                 return .close;
             };
             studio_mod.upgradeToSse(studio, fd, allocator) catch |err| {
                 std.log.warn("studio SSE upgrade failed: {}", .{err});
+                status_out.* = 500;
                 return .close;
             };
+            status_out.* = 200;
             return .transferred;
         }
 
@@ -683,6 +742,7 @@ const ConnectionPool = struct {
         defer response.deinit();
 
         if (try populateStudioResponse(studio_opt, method, path, body, &response, allocator)) {
+            status_out.* = response.status;
             self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
         }
         return if (keep_alive) .keep_alive else .close;
@@ -881,6 +941,7 @@ const ConnectionPool = struct {
         fd: std.posix.fd_t,
         request: *const HttpRequestView,
         req_allocator: std.mem.Allocator,
+        status_out: *u16,
     ) !RequestOutcome {
         const pool = try self.ensureWebSocketPool();
 
@@ -903,6 +964,7 @@ const ConnectionPool = struct {
                     pool.unregister(id);
                     return .close;
                 };
+                status_out.* = 101;
                 self.spawnFrameLoop(pool, fd, id) catch |err| {
                     std.log.warn("ws frame-loop spawn failed: {}", .{err});
                     pool.unregister(id);
@@ -911,6 +973,7 @@ const ConnectionPool = struct {
                 return .transferred;
             },
             .reject => |reason| {
+                status_out.* = reason.status;
                 if (reason.wants_version_header) {
                     var out_buf: [256]u8 = undefined;
                     const response = std.fmt.bufPrint(
@@ -988,22 +1051,22 @@ const ConnectionPool = struct {
         path: []const u8,
         keep_alive: bool,
         headers: []const HttpHeader,
-    ) !void {
+    ) !u16 {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         var etag_buf: [34]u8 = undefined;
         var resolved = try resolveStaticFile(self.server.allocator, self.server.io_backend.io(), static_dir, path, &path_buf, &etag_buf);
         switch (resolved) {
             .forbidden => {
                 var out_buf: [256]u8 = undefined;
-                const response = formatStaticError(&out_buf, 403, "Forbidden", keep_alive) catch return;
+                const response = formatStaticError(&out_buf, 403, "Forbidden", keep_alive) catch return error.BufferOverflow;
                 try writeAllFd(fd, response);
-                return;
+                return 403;
             },
             .not_found => {
                 var out_buf: [256]u8 = undefined;
-                const response = formatStaticError(&out_buf, 404, "Not Found", keep_alive) catch return;
+                const response = formatStaticError(&out_buf, 404, "Not Found", keep_alive) catch return error.BufferOverflow;
                 try writeAllFd(fd, response);
-                return;
+                return 404;
             },
             .ok => |*file_info| {
                 defer file_info.file.close(self.server.io_backend.io());
@@ -1012,9 +1075,9 @@ const ConnectionPool = struct {
                     const eff_etag = if (std.mem.startsWith(u8, client_etag, "W/")) client_etag[2..] else client_etag;
                     if (std.mem.eql(u8, eff_etag, file_info.etag)) {
                         var out_buf: [256]u8 = undefined;
-                        const response = formatStaticNotModified(&out_buf, file_info.etag, keep_alive) catch return;
+                        const response = formatStaticNotModified(&out_buf, file_info.etag, keep_alive) catch return error.BufferOverflow;
                         try writeAllFd(fd, response);
-                        return;
+                        return 304;
                     }
                 }
 
@@ -1028,7 +1091,7 @@ const ConnectionPool = struct {
                 ) catch return error.BufferOverflow;
                 try writeAllFd(fd, header);
 
-                if (file_info.size == 0) return;
+                if (file_info.size == 0) return 200;
 
                 var file_reader = file_info.file.reader(self.server.io_backend.io(), &.{});
                 var file_buf: [16 * 1024]u8 = undefined;
@@ -1039,6 +1102,7 @@ const ConnectionPool = struct {
                     if (n == 0) break;
                     try writeAllFd(fd, file_buf[0..n]);
                 }
+                return 200;
             },
         }
     }
@@ -1971,10 +2035,11 @@ pub const Server = struct {
         }
     }
 
-    /// Graceful shutdown: stop accepting new connections, then drain in-flight
-    /// JS executions. Returns once all in-flight requests complete or the grace
-    /// period expires. Safe to call from any thread (sets `running = false` and
-    /// closes the listener so the accept loop exits on its next iteration).
+    /// Cooperative graceful shutdown: stop accepting new connections, then
+    /// drain in-flight JS executions. Returns once all in-flight requests
+    /// complete or the grace period expires. Call from the server's control
+    /// thread/signal path; this method does not make `running` or listener
+    /// ownership thread-safe for arbitrary cross-thread callers.
     pub fn shutdown(self: *Self, grace_ms: u32) void {
         self.running = false;
         // Close listener so a blocked accept() wakes immediately.
@@ -2582,6 +2647,20 @@ test "threaded readRequestData preserves pipelined bytes for the next request" {
     var second_request = try server.parseRequestFromBuffer(allocator, second_data);
     defer second_request.deinit(allocator);
     try std.testing.expectEqualStrings("/second", second_request.path);
+}
+
+test "connection queue drain closes queued file descriptors" {
+    var queue = ConnectionPool.BoundedQueue.init();
+    const fds = try createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    try std.testing.expect(queue.push(.{ .stream_fd = fds[0] }));
+    try std.testing.expectEqual(@as(usize, 1), queue.drainAndClose());
+    try std.testing.expectEqual(@as(usize, 0), queue.count.load(.acquire));
+
+    var buf: [1]u8 = undefined;
+    const n = try std.posix.read(fds[1], &buf);
+    try std.testing.expectEqual(@as(usize, 0), n);
 }
 
 test "threaded handleSingleRequestSync returns 413 for oversized body" {

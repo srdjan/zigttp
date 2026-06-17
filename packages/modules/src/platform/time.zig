@@ -9,10 +9,10 @@ pub const binding = sdk.ModuleBinding{
     .specifier = "zigttp:time",
     .name = "time",
     .exports = &.{
-        .{ .name = "formatIso", .module_func = formatIsoImpl, .arg_count = 1, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
-        .{ .name = "formatHttp", .module_func = formatHttpImpl, .arg_count = 1, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
-        .{ .name = "parseIso", .module_func = parseIsoImpl, .arg_count = 1, .returns = .number, .param_types = &.{.string}, .failure_severity = .expected, .laws = &.{.pure} },
-        .{ .name = "addSeconds", .module_func = addSecondsImpl, .arg_count = 2, .returns = .number, .param_types = &.{ .number, .number }, .laws = &.{.pure} },
+        .{ .name = "formatIso", .module_func = formatIsoImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
+        .{ .name = "formatHttp", .module_func = formatHttpImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
+        .{ .name = "parseIso", .module_func = parseIsoImpl, .arg_count = 1, .effect = .none, .returns = .number, .param_types = &.{.string}, .failure_severity = .expected, .laws = &.{.pure} },
+        .{ .name = "addSeconds", .module_func = addSecondsImpl, .arg_count = 2, .effect = .none, .returns = .number, .param_types = &.{ .number, .number }, .laws = &.{.pure} },
     },
 };
 

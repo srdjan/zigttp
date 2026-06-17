@@ -21,6 +21,24 @@ const testing = std.testing;
 /// Lowercase hex SHA-256 of the workspace realpath. 64 chars.
 pub const CwdHash = [64]u8;
 
+pub const SessionPathError = error{InvalidSessionId};
+
+pub fn isSafeSessionId(session_id: []const u8) bool {
+    if (session_id.len == 0) return false;
+    for (session_id) |c| {
+        if (c == 0 or c == '/' or c == '\\') return false;
+        const is_digit = c >= '0' and c <= '9';
+        const is_lower = c >= 'a' and c <= 'z';
+        const is_upper = c >= 'A' and c <= 'Z';
+        if (!(is_digit or is_lower or is_upper or c == '-' or c == '_')) return false;
+    }
+    return true;
+}
+
+pub fn validateSessionId(session_id: []const u8) SessionPathError!void {
+    if (!isSafeSessionId(session_id)) return error.InvalidSessionId;
+}
+
 /// Absolute path to `$HOME/.zigttp/sessions`. Honors `$ZIGTTP_SESSIONS_DIR`
 /// when set (used by tests to redirect under /tmp). Caller owns the slice.
 /// Does not create the directory.
@@ -76,6 +94,8 @@ pub fn sessionDir(
     allocator: std.mem.Allocator,
     session_id: []const u8,
 ) ![]u8 {
+    try validateSessionId(session_id);
+
     const root = try sessionRoot(allocator);
     defer allocator.free(root);
 
@@ -90,6 +110,8 @@ pub fn sessionDirForWorkspace(
     workspace_path: []const u8,
     session_id: []const u8,
 ) ![]u8 {
+    try validateSessionId(session_id);
+
     const root = try sessionRoot(allocator);
     defer allocator.free(root);
 
@@ -167,6 +189,7 @@ pub fn listSessions(
     var it = cwd_dir.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .directory) continue;
+        if (!isSafeSessionId(entry.name)) continue;
 
         const session_dir_path = try std.fs.path.join(allocator, &.{ cwd_dir_path, entry.name });
         errdefer allocator.free(session_dir_path);
@@ -271,6 +294,21 @@ test "sessionDir concatenates root, cwd_hash, and session_id" {
     const expected = try std.fs.path.join(allocator, &.{ tmp.abs_path, hash[0..], "sess-42" });
     defer allocator.free(expected);
     try testing.expectEqualStrings(expected, dir);
+}
+
+test "sessionDir rejects path-like session ids" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    var override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", tmp.abs_path);
+    defer override.restore(allocator);
+
+    try testing.expectError(error.InvalidSessionId, sessionDir(allocator, ""));
+    try testing.expectError(error.InvalidSessionId, sessionDir(allocator, "../escape"));
+    try testing.expectError(error.InvalidSessionId, sessionDir(allocator, "nested/id"));
+    try testing.expectError(error.InvalidSessionId, sessionDir(allocator, "nested\\id"));
+    try testing.expectError(error.InvalidSessionId, sessionDir(allocator, "bad.id"));
 }
 
 test "sessionDirForWorkspace matches sessionDir after chdir" {

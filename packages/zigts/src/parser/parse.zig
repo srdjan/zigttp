@@ -2263,8 +2263,8 @@ pub const Parser = struct {
         if (!self.check(.rbracket)) {
             while (true) {
                 if (self.check(.comma)) {
-                    // Elision (hole in array)
-                    try elements.append(self.allocator, null_node);
+                    self.errors.addErrorAt(.unsupported_feature, self.current, "array elisions are not supported; use explicit undefined values instead");
+                    return error.ParseError;
                 } else if (self.match(.spread)) {
                     has_spread = true;
                     const spread_expr = try self.parseExpression(.assignment);
@@ -4483,6 +4483,20 @@ test "array spread parses" {
     };
     try std.testing.expect(result != null_node);
     try std.testing.expect(!parser.hasErrors());
+}
+
+test "array literal elisions are rejected" {
+    var parser = Parser.init(std.testing.allocator, "const xs = [1,,2];");
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
+        return;
+    };
+    try std.testing.expect(false);
 }
 
 test "call spread parses before canonical-profile rejection" {

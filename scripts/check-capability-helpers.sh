@@ -14,7 +14,7 @@ check_pattern() {
     local pattern="$2"
     local matches
 
-    matches="$(git ls-files -z 'packages/modules/src/*.zig' 'packages/zigts/src/modules/*.zig' | xargs -0 rg -n -H --color never "$pattern" || true)"
+    matches="$(git ls-files -z -- 'packages/modules/src' 'packages/zigts/src/modules' | xargs -0 rg -n -H --color never -g '*.zig' "$pattern" || true)"
     if [ -n "$matches" ]; then
         echo ""
         echo "FAIL: $description"
@@ -31,7 +31,7 @@ check_pattern "direct clock access in virtual modules" 'compat\.realtimeNow(Ms|N
 check_pattern "direct stderr writes in virtual modules" 'std\.c\.write\('
 check_pattern "direct HMAC creation in virtual modules" 'HmacSha256\.create'
 check_pattern "direct SHA-256 hashing in virtual modules" 'Sha256\.init'
-check_pattern "direct callback/sql store state access in virtual modules" 'ctx\.getModuleState\((IoCallbacks|DurableCallbacks|SqlStore)'
+check_pattern "direct callback/sql/websocket state access in virtual modules" 'ctx\.getModuleState\((IoCallbacks|DurableCallbacks|SqlStore|WebSocketCallbacks)'
 
 if [ "$fail" -ne 0 ]; then
     echo ""
