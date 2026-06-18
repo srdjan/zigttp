@@ -291,7 +291,14 @@ pub const ContractDiff = struct {
             switch (route.response) {
                 .breaking => return .breaking,
                 .additive => has_added = true,
-                .unchanged, .dynamic => {},
+                .unchanged => {},
+                // A response that became (or stayed) unprovable cannot be
+                // certified equivalent. The Classification enum has no "review"
+                // state and prove-behavior / pr_gate / the equivalence receipt
+                // all treat anything != .breaking as auto-safe, so fail closed:
+                // an unprovable response must not auto-approve. The human diff
+                // already renders this case as `~ REVIEW`.
+                .dynamic => return .breaking,
             }
         }
         inline for (.{ self.env_changes.items, self.egress_changes.items, self.cache_changes.items, self.sql_changes.items }) |items| {
@@ -2037,6 +2044,51 @@ test "diffContracts api response removal is breaking" {
 
     try std.testing.expectEqual(ApiResponseChange.breaking, diff.api_route_changes.items[0].response);
     try std.testing.expectEqual(Classification.breaking, diff.classify());
+}
+
+test "diffContracts api response going dynamic is breaking" {
+    // Regression: a route whose response was a provable literal schema but
+    // becomes computed/unprovable (response_schema_dynamic) must not classify
+    // as equivalent. compareResponses returns .dynamic; classifyStructural used
+    // to drop it into the .unchanged no-op arm, so prove-behavior/pr_gate
+    // auto-approved a change that turned a provable response into an arbitrary
+    // one (fail-open). It must fail closed to .breaking.
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    try old.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+    });
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    try new.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_dynamic = true,
+    });
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(ApiResponseChange.dynamic, diff.api_route_changes.items[0].response);
+    try std.testing.expectEqual(Classification.breaking, diff.classify());
+    try std.testing.expectEqual(Classification.breaking, diff.behavioralVerdict());
 }
 
 test "classifyWithReplay diverged traces are breaking" {

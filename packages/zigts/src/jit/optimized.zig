@@ -2561,16 +2561,6 @@ pub const OptimizedCompiler = struct {
             self.emitter.addRegRegShift(.x15, stack_ptr, .x15, 3) catch return CompileError.OutOfMemory;
             self.emitter.strImm(.x14, .x15, 0) catch return CompileError.OutOfMemory;
 
-            // Sync register-allocated local: the memory slot is now updated; if this
-            // local is also held in a callee-saved register for the SMI-optimized loop,
-            // unbox the new element into that register so emitGetLocal serves the fresh value.
-            if (self.current_loop_idx) |loop_idx_sync| {
-                const loop_sync = &self.loops[loop_idx_sync];
-                if (loop_sync.getLocalReg(local_idx)) |reg| {
-                    self.emitter.sxtwRegReg(reg, .x14) catch return CompileError.OutOfMemory;
-                }
-            }
-
             // Update idx on stack
             self.emitter.addRegImm12(.x13, .x13, 1) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x15, INT_TAG) catch return CompileError.OutOfMemory;
@@ -2592,6 +2582,28 @@ pub const OptimizedCompiler = struct {
             try self.emitBcondToLabel(.eq, target);
 
             try self.markLabel(done);
+
+            // Sync the register-allocated loop local for BOTH the fast and slow
+            // paths, which merge here. The memory slot stack[fp+local_idx] now
+            // holds the fresh element (the fast path stored it above; the
+            // slow-path helper jitForOfNextPutLoc setLocal-wrote it). If this
+            // local is also held in a callee-saved loop register, reload and
+            // unbox it so emitGetLocal serves the current element. Without this
+            // the aarch64 slow path (arrays / any non-range iterable) left the
+            // register holding the previous iteration's value -> silently wrong
+            // loop bodies. Mirrors the x86_64 post-helper sync below.
+            if (self.current_loop_idx) |loop_idx_sync| {
+                const loop_sync = &self.loops[loop_idx_sync];
+                if (loop_sync.getLocalReg(local_idx)) |reg| {
+                    self.emitter.ldrImm(.x15, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+                    if (local_idx > 0) {
+                        self.emitter.addRegImm12(.x15, .x15, local_idx) catch return CompileError.OutOfMemory;
+                    }
+                    self.emitter.addRegRegShift(.x15, stack_ptr, .x15, 3) catch return CompileError.OutOfMemory;
+                    self.emitter.ldrImm(reg, .x15, 0) catch return CompileError.OutOfMemory;
+                    self.emitter.sxtwRegReg(reg, reg) catch return CompileError.OutOfMemory;
+                }
+            }
         } else if (is_x86_64) {
             const fn_ptr = @intFromPtr(&Context.jitForOfNextPutLoc);
             self.emitter.movMemReg(.rbx, CTX_SP_OFF, getSpCacheReg()) catch return CompileError.OutOfMemory;

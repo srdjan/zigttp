@@ -602,6 +602,14 @@ const ConnectionPool = struct {
                 // not request.url[7..]: the old slice kept a leading slash (so the
                 // file resolved as absolute -> 403) and carried the query string.
                 access_status = self.serveStaticFileSync(fd, static_dir, request.path["/static/".len..], keep_alive, request.headers.items) catch |err| {
+                    if (err == error.StaticFileTruncated) {
+                        // Headers + a partial body already went out; the file
+                        // shrank under us, so the only safe action is to close
+                        // rather than leave a keep-alive client awaiting bytes
+                        // that no longer exist. No 500 - the status line is sent.
+                        access_status = 200;
+                        return .close;
+                    }
                     std.log.warn("static file error for {s}: {}", .{ request.url, err });
                     access_status = 500;
                     self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
@@ -637,6 +645,10 @@ const ConnectionPool = struct {
             }
         }
 
+        // A HEAD request runs the handler / serves the cache exactly like GET to
+        // get the right headers, but its response must omit the body (RFC 7231).
+        const is_head = std.mem.eql(u8, request.method, "HEAD");
+
         // Proof-driven response memoization: serve cached response without entering JS
         var proof_cache_key: ?u64 = null;
         if (self.server.proof_cache) |*cache| {
@@ -647,7 +659,7 @@ const ConnectionPool = struct {
                     defer cached_opt.?.deinit();
                     proof_audit_ring.pushCacheHit(request.method, request.path);
                     access_status = cached_opt.?.status;
-                    self.sendResponseSync(fd, &cached_opt.?, keep_alive) catch return .close;
+                    self.sendResponseSync(fd, &cached_opt.?, keep_alive, is_head) catch return .close;
                     return outcome_if_alive;
                 }
                 proof_cache_key = key;
@@ -683,7 +695,7 @@ const ConnectionPool = struct {
 
             // Send response
             access_status = handle.response.status;
-            self.sendResponseSync(fd, &handle.response, keep_alive) catch return .close;
+            self.sendResponseSync(fd, &handle.response, keep_alive, is_head) catch return .close;
         }
 
         return outcome_if_alive;
@@ -743,7 +755,7 @@ const ConnectionPool = struct {
 
         if (try populateStudioResponse(studio_opt, method, path, body, &response, allocator)) {
             status_out.* = response.status;
-            self.sendResponseSync(fd, &response, keep_alive) catch return error.WriteFailed;
+            self.sendResponseSync(fd, &response, keep_alive, std.mem.eql(u8, method, "HEAD")) catch return error.WriteFailed;
         }
         return if (keep_alive) .keep_alive else .close;
     }
@@ -843,24 +855,30 @@ const ConnectionPool = struct {
         return std.math.add(usize, max_body_size, overhead) catch std.math.maxInt(usize);
     }
 
-    fn sendResponseSync(self: *ConnectionPool, fd: std.posix.fd_t, response: *HttpResponse, keep_alive: bool) !void {
+    fn sendResponseSync(self: *ConnectionPool, fd: std.posix.fd_t, response: *HttpResponse, keep_alive: bool, is_head: bool) !void {
         // FAST PATH: If prebuilt_raw is available, write it directly (zero header construction).
         // Slice 1 of proof receipts intentionally skips this path: cached
         // static-file responses don't carry handler semantics, so omitting
         // attestation headers there is the correct shape.
-        if (response.prebuilt_raw) |prebuilt| {
-            // Only take the zero-construction fast path when attestation is off.
-            // The prebuilt blob omits the Zigttp-Proofs/Zigttp-Attest header lines,
-            // so when attestation is active we must fall through to the normal
-            // builder; otherwise a constant-Response handler would ship attestation
-            // headers on close connections but drop them on keep-alive, making
-            // their presence unpredictable for a third-party `zigttp verify`.
-            if (keep_alive and self.server.attestation_headers == null) {
-                // Prebuilt response already has keep-alive, write directly
-                try writeAllFd(fd, prebuilt);
-                return;
+        //
+        // A HEAD response must NOT take this path: prebuilt_raw embeds the body,
+        // and RFC 7231 forbids a body on a HEAD response (a client reading it
+        // would mis-frame the next response on a keep-alive connection).
+        if (!is_head) {
+            if (response.prebuilt_raw) |prebuilt| {
+                // Only take the zero-construction fast path when attestation is off.
+                // The prebuilt blob omits the Zigttp-Proofs/Zigttp-Attest header lines,
+                // so when attestation is active we must fall through to the normal
+                // builder; otherwise a constant-Response handler would ship attestation
+                // headers on close connections but drop them on keep-alive, making
+                // their presence unpredictable for a third-party `zigttp verify`.
+                if (keep_alive and self.server.attestation_headers == null) {
+                    // Prebuilt response already has keep-alive, write directly
+                    try writeAllFd(fd, prebuilt);
+                    return;
+                }
+                // For close (or when attestation is active) fall through to normal path.
             }
-            // For close (or when attestation is active) fall through to normal path.
         }
 
         // Increased buffer to 8KB to fit headers + most response bodies in single write
@@ -872,6 +890,14 @@ const ConnectionPool = struct {
             self.server.attestation_headers,
             .sync,
         );
+
+        if (is_head) {
+            // RFC 7231: a HEAD response carries the same headers GET would
+            // produce - including the Content-Length built above from
+            // response.body.len - but never the message body.
+            try writeAllFd(fd, header_buf[0..pos]);
+            return;
+        }
 
         // OPTIMIZATION: Combine headers + body in single syscall
         if (response.body.len > 0 and pos + response.body.len <= header_buf.len) {
@@ -1095,12 +1121,27 @@ const ConnectionPool = struct {
 
                 var file_reader = file_info.file.reader(self.server.io_backend.io(), &.{});
                 var file_buf: [16 * 1024]u8 = undefined;
-                while (true) {
-                    const n = file_reader.interface.readSliceShort(file_buf[0..]) catch |err| switch (err) {
+                // Write exactly file_info.size bytes - the value already emitted
+                // as Content-Length. Reading to EOF instead diverges from
+                // Content-Length if the file changed after the stat that
+                // captured the size (server_static.zig opens then stats): a file
+                // that grew would over-deliver (surplus bytes mis-framed as the
+                // next response on a keep-alive connection); one that shrank
+                // would under-deliver (client hangs awaiting the missing bytes).
+                var remaining: usize = @intCast(file_info.size);
+                while (remaining > 0) {
+                    const want = @min(file_buf.len, remaining);
+                    const n = file_reader.interface.readSliceShort(file_buf[0..want]) catch |err| switch (err) {
                         error.ReadFailed => return file_reader.err.?,
                     };
-                    if (n == 0) break;
+                    if (n == 0) break; // file shrank below the stat size after we sent Content-Length
                     try writeAllFd(fd, file_buf[0..n]);
+                    remaining -= n;
+                }
+                if (remaining > 0) {
+                    // Under-delivered the declared Content-Length; the framing is
+                    // unrecoverable on a keep-alive connection. Signal a close.
+                    return error.StaticFileTruncated;
                 }
                 return 200;
             },

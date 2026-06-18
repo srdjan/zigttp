@@ -2095,7 +2095,21 @@ const Stripper = struct {
         // operator, the type clearly continues onto the next line.
         if (self.previousSignificantChar(nl_pos)) |prev| {
             switch (prev) {
-                '|', '&', '=', '<', ',', '(', '[', ':', '?', '>', '.' => return true,
+                '|', '&', '=', '<', ',', '(', '[', ':', '?', '.' => return true,
+                '>' => {
+                    // A trailing `>` continues the type ONLY when it is the `>`
+                    // of `=>` (a function-type alias wrapped onto the next
+                    // line). A bare generic-closing `>` (e.g. `type Pair =
+                    // Foo<Bar>`) completes the type; treating it as a
+                    // continuation would scan the following statement into the
+                    // alias span and blank it. If it is not `=>`, fall through
+                    // to the next-significant-char check below.
+                    if (self.previousSignificantCharIndex(nl_pos)) |gt_idx| {
+                        if (self.previousSignificantChar(gt_idx)) |before| {
+                            if (before == '=') return true;
+                        }
+                    }
+                },
                 else => {},
             }
         }
@@ -2154,6 +2168,22 @@ const Stripper = struct {
                 ' ', '\t', '\n', '\r' => continue,
                 else => self.source[i],
             };
+        }
+        return null;
+    }
+
+    /// Index of the last significant (non-whitespace) char before `pos`, or
+    /// null if there is none. Companion to `previousSignificantChar` for cases
+    /// that must inspect the char preceding it (e.g. distinguishing the `>` of
+    /// `=>` from a generic-closing `>`).
+    fn previousSignificantCharIndex(self: *const Self, pos: usize) ?usize {
+        var i = pos;
+        while (i > 0) {
+            i -= 1;
+            switch (self.source[i]) {
+                ' ', '\t', '\n', '\r' => continue,
+                else => return i,
+            }
         }
         return null;
     }
@@ -2564,6 +2594,29 @@ test "interface stripped" {
     defer @constCast(&result).deinit();
     const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+test "semicolon-less generic type alias does not swallow next statement" {
+    // `type Pair = Foo<Bar>` (no trailing `;`) ends in a generic-closing `>`.
+    // multilineTypeContinues must NOT treat that `>` as a `=>`-style line
+    // continuation, otherwise the following statement is scanned into the
+    // alias span and silently blanked (a miscompile with data loss).
+    const result = try strip(std.testing.allocator, "type Pair = Foo<Bar>\nconst y = doWork();\n", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "const y") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "doWork") != null);
+    // The alias itself is still stripped.
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "Pair") == null);
+}
+
+test "multiline function-type alias continuation still preserved" {
+    // The `>` of `=>` at end-of-line is a genuine continuation; the alias body
+    // wraps to the next line and the following statement must survive.
+    const result = try strip(std.testing.allocator, "type F = () =>\n  string\nconst z = 1;\n", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "const z") != null);
+    // The whole alias, including the wrapped `string`, is stripped.
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "string") == null);
 }
 
 test "import type stripped" {

@@ -1472,6 +1472,18 @@ pub const FlowChecker = struct {
             // no_credential_leakage - and the URL sink's own help text steers
             // users to put tokens in headers.
             self.checkSinkLabels(self.inferObjectPropLabels(opts_arg, "headers"), node, .egress_headers);
+
+            // A spread inside the options object (`{ body: ..., ...x }`) can
+            // populate body, query, or headers with fields the per-field
+            // extractors above cannot see (and the `body:` early return in
+            // inferObjectBodyLabels short-circuits the whole-object fallback).
+            // Conservatively route any spread-carried labels to every egress
+            // sink so a secret cannot escape via
+            // `fetch(url, { body: "ok", ...{ query: { k: secret } } })`.
+            const spread_labels = self.inferObjectSpreadLabels(opts_arg);
+            self.checkSinkLabels(spread_labels, node, .egress_url);
+            self.checkSinkLabels(spread_labels, node, .egress_body);
+            self.checkSinkLabels(spread_labels, node, .egress_headers);
         }
     }
 
@@ -1784,6 +1796,28 @@ pub const FlowChecker = struct {
             if (std.mem.eql(u8, key_name, key)) return self.inferLabels(prop.value);
         }
         return LabelSet.empty;
+    }
+
+    /// Union of labels carried by every `.object_spread` element of an options
+    /// object literal (`{ ...x }`). A spread can populate `body`, `query`, or
+    /// `headers` with fields the per-field extractors cannot see, so its labels
+    /// must be checked against every egress sink. Mirrors the spread branch of
+    /// `inferLabels`'s object_literal case. Returns empty when the node is not
+    /// an object literal or carries no spread.
+    fn inferObjectSpreadLabels(self: *FlowChecker, node: NodeIndex) LabelSet {
+        const tag = self.ir_view.getTag(node) orelse return LabelSet.empty;
+        if (tag != .object_literal) return LabelSet.empty;
+        const obj = self.ir_view.getObject(node) orelse return LabelSet.empty;
+        var labels = LabelSet.empty;
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            if ((self.ir_view.getTag(prop_idx) orelse continue) != .object_spread) continue;
+            if (self.ir_view.getOptValue(prop_idx)) |val| {
+                labels = LabelSet.merge(labels, self.inferLabels(val));
+            }
+        }
+        return labels;
     }
 
     /// Get the name of an object property key (identifier or string literal).
@@ -2622,6 +2656,41 @@ test "FlowChecker flags a secret reaching a module fetch query field" {
         \\function handler(req) {
         \\  const secret = env("UPSTREAM_KEY");
         \\  fetch("https://api.example.com/v1", { method: "POST", body: "hello", query: { key: secret } });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    try std.testing.expect(!checker.getProperties().no_secret_leakage);
+}
+
+test "FlowChecker flags a secret reaching egress via an options spread" {
+    // Regression: a secret carried into the options object through an object
+    // spread (`...{ query: { key: secret } }`) was invisible to the per-field
+    // body/query/headers extractors, so it escaped every egress sink and
+    // no_secret_leakage was falsely proven. The `body:` early return made it
+    // worse by short-circuiting the whole-object fallback.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { fetch } from "zigttp:fetch";
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("UPSTREAM_KEY");
+        \\  fetch("https://api.example.com/v1", { body: "hello", ...{ query: { key: secret } } });
         \\  return Response.json({ ok: true });
         \\}
     ;

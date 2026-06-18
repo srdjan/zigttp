@@ -359,6 +359,18 @@ pub const BaselineCompiler = struct {
 
     /// Check if a call site should be inlined and return the callee
     fn getInlineCandidate(self: *BaselineCompiler, bytecode_offset: u32) ?*const bytecode.FunctionBytecode {
+        // Inlining and per-local register allocation are mutually exclusive.
+        // reg_alloc maps the CALLER's locals to callee-saved registers, keyed by
+        // raw local index, and stays active while the inlined callee's bytecode
+        // is compiled (emitInlinedCall saves/swaps func/tf/labels/jumps but NOT
+        // reg_alloc). An inlined callee local whose index collides with a caller
+        // register-allocated index would then read/write the caller's register
+        // instead of the callee's frame slot stack[callee_fp+idx] -> silent
+        // miscompile / caller-local corruption on aarch64. reg_alloc is non-null
+        // only on aarch64 for looping functions; suppress inlining whenever it
+        // is active rather than reconcile register state across the inline frame.
+        if (self.reg_alloc != null) return null;
+
         const cs = self.getCallSiteFeedback(bytecode_offset) orelse return null;
 
         // Must be monomorphic

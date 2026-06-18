@@ -41,6 +41,7 @@ pub const Error = error{
     PolicyMismatch,
     HandlerNotFound,
     ReplayRegression,
+    EmptyCapsule,
 };
 
 /// True for errors whose message the command already explained on stderr, so
@@ -54,6 +55,7 @@ pub fn isExpectedUserError(err: anyerror) bool {
         Error.PolicyMismatch,
         Error.HandlerNotFound,
         Error.ReplayRegression,
+        Error.EmptyCapsule,
         => true,
         else => false,
     };
@@ -85,7 +87,10 @@ pub const ReplayReport = struct {
     regressed: u32 = 0,
 
     pub fn clean(self: ReplayReport) bool {
-        return self.regressed == 0;
+        // A capsule that reproduced zero requests verifies nothing; treating
+        // `regressed == 0` as clean would let a breaking edit pass the replay
+        // gate with exit 0. Fail closed unless at least one request actually ran.
+        return self.total > 0 and self.regressed == 0;
     }
 };
 
@@ -114,6 +119,17 @@ fn runReplay(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     const report = try replayCapsule(allocator, capsule_name, allow_version_mismatch);
+
+    if (report.total == 0) {
+        // A capsule that captured no requests verifies nothing. Fail closed
+        // rather than printing a vacuous "0/0 clean" pass, which would let a
+        // breaking edit slip through the replay gate with exit 0.
+        std.debug.print(
+            "capsule '{s}': recorded no requests; nothing to verify (re-record with traffic).\n",
+            .{capsule_name},
+        );
+        return Error.EmptyCapsule;
+    }
 
     std.debug.print(
         "capsule '{s}': {d}/{d} requests reproduced\n",
@@ -531,6 +547,18 @@ test "replayTraceFiles flags a regression when the response changed" {
     try testing.expectEqual(@as(u32, 0), report.matched);
     try testing.expectEqual(@as(u32, 1), report.regressed);
     try testing.expect(!report.clean());
+}
+
+test "ReplayReport with zero recorded requests is not clean" {
+    // Regression: a capsule that captured no traffic (empty trace file) yields
+    // total=0, regressed=0. clean() must NOT treat that as a pass, or `zigttp
+    // proof replay` would print "0/0 reproduced ... clean" and exit 0 after a
+    // breaking edit, defeating the fail-closed replay gate.
+    const empty = ReplayReport{ .total = 0, .matched = 0, .regressed = 0 };
+    try testing.expect(!empty.clean());
+    // A real reproduction with no regressions is still clean.
+    const ok = ReplayReport{ .total = 3, .matched = 3, .regressed = 0 };
+    try testing.expect(ok.clean());
 }
 
 test "replayCapsule fails closed on a policy mismatch" {
