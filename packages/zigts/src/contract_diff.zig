@@ -1395,8 +1395,15 @@ fn compareRequestBodies(
     old: *const ApiRouteInfo,
     new: *const ApiRouteInfo,
 ) !ApiResponseChange {
-    if (old.request_bodies_dynamic or new.request_bodies_dynamic or old.request_schema_dynamic or new.request_schema_dynamic) {
-        return .dynamic;
+    {
+        // Same lost-provability rule as compareResponses: only a request body
+        // that went from provable to unprovable is breaking; one that was always
+        // dynamic (unchanged) is not a new regression.
+        const old_dyn = old.request_bodies_dynamic or old.request_schema_dynamic;
+        const new_dyn = new.request_bodies_dynamic or new.request_schema_dynamic;
+        if (old_dyn or new_dyn) {
+            return if (new_dyn and !old_dyn) .dynamic else .unchanged;
+        }
     }
 
     if (old.request_bodies.items.len == 0 and new.request_bodies.items.len == 0) {
@@ -1444,7 +1451,20 @@ fn compareResponses(
         );
     }
 
-    if (old.responses_dynamic or new.responses_dynamic or old.response_schema_dynamic or new.response_schema_dynamic) return .dynamic;
+    {
+        const old_dyn = old.responses_dynamic or old.response_schema_dynamic;
+        const new_dyn = new.responses_dynamic or new.response_schema_dynamic;
+        if (old_dyn or new_dyn) {
+            // `.dynamic` means LOST provability (was provable, now unprovable) -
+            // that cannot be certified equivalent and is breaking. A response
+            // that was ALREADY unprovable and stays so is not a NEW regression,
+            // so an unchanged computed-response handler must not classify as
+            // breaking on an unrelated edit (that broke `dev --prove` hot-swap,
+            // `prove`, prove-behavior, and the expert receipt for every dynamic
+            // handler). Gaining provability (old dynamic, new not) is also safe.
+            return if (new_dyn and !old_dyn) .dynamic else .unchanged;
+        }
+    }
     if (old.responses.items.len != new.responses.items.len) return .breaking;
 
     var has_addition = false;
@@ -1494,7 +1514,12 @@ fn compareSchemaSpecs(
     new_schema: handler_contract.SchemaSpec,
 ) !ApiResponseChange {
     return switch (old_schema) {
-        .dynamic => .dynamic,
+        // Old schema was already unprovable: comparing against it can never
+        // certify equivalence, but it is not a NEW lost-provability regression
+        // regardless of the new side, so it must not read as breaking.
+        // (Lost provability is caught by the `old .ref/.inline_json -> new
+        // .dynamic` arms below, which still return `.dynamic`.)
+        .dynamic => .unchanged,
         .none => switch (new_schema) {
             .none => .unchanged,
             .ref, .inline_json => .dynamic,
@@ -2089,6 +2114,50 @@ test "diffContracts api response going dynamic is breaking" {
     try std.testing.expectEqual(ApiResponseChange.dynamic, diff.api_route_changes.items[0].response);
     try std.testing.expectEqual(Classification.breaking, diff.classify());
     try std.testing.expectEqual(Classification.breaking, diff.behavioralVerdict());
+}
+
+test "diffContracts unchanged already-dynamic response is NOT breaking" {
+    // Counterpart to the test above: a response that was ALREADY unprovable on
+    // both sides (the common computed-response handler shape) must classify as
+    // equivalent on a no-op edit - `.dynamic` is reserved for LOST provability,
+    // not "either side is dynamic". Otherwise dev --prove / prove / prove-behavior
+    // / the expert receipt flag every edit on a dynamic-response handler.
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    try old.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_dynamic = true,
+    });
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    try new.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_dynamic = true,
+    });
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(ApiResponseChange.unchanged, diff.api_route_changes.items[0].response);
+    try std.testing.expectEqual(Classification.equivalent, diff.classify());
+    try std.testing.expectEqual(Classification.equivalent, diff.behavioralVerdict());
 }
 
 test "classifyWithReplay diverged traces are breaking" {

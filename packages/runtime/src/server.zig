@@ -542,6 +542,12 @@ const ConnectionPool = struct {
         const keep_alive = self.server.config.keep_alive and client_wants_keep_alive;
         const outcome_if_alive: RequestOutcome = if (keep_alive) .keep_alive else .close;
 
+        // A HEAD request is routed exactly like GET to produce the right headers,
+        // but every response path must omit the body (RFC 7231); a body on HEAD
+        // mis-frames the next response on a keep-alive connection. Computed here
+        // so the static-file and well-known paths below can honor it too.
+        const is_head = std.mem.eql(u8, request.method, "HEAD");
+
         if (self.server.config.studio and studio_mod.isStudioPath(request.path)) {
             return self.handleStudioRequestSync(fd, request.method, request.path, request.body, keep_alive, req_allocator, &access_status) catch |err| {
                 std.log.warn("studio request failed for {s}: {}", .{ request.path, err });
@@ -601,7 +607,7 @@ const ConnectionPool = struct {
                 // Strip the full "/static/" prefix (8 chars) off request.path,
                 // not request.url[7..]: the old slice kept a leading slash (so the
                 // file resolved as absolute -> 403) and carried the query string.
-                access_status = self.serveStaticFileSync(fd, static_dir, request.path["/static/".len..], keep_alive, request.headers.items) catch |err| {
+                access_status = self.serveStaticFileSync(fd, static_dir, request.path["/static/".len..], keep_alive, request.headers.items, is_head) catch |err| {
                     if (err == error.StaticFileTruncated) {
                         // Headers + a partial body already went out; the file
                         // shrank under us, so the only safe action is to close
@@ -630,7 +636,8 @@ const ConnectionPool = struct {
                 const header_len = formatWellKnownHeaders(doc, cached, keep_alive, &header_buf) catch return .close;
                 access_status = if (cached) 304 else 200;
                 writeAllFd(fd, header_buf[0..header_len]) catch return .close;
-                if (!cached) writeAllFd(fd, doc.body) catch return .close;
+                // HEAD: headers only (Content-Length already in the header block).
+                if (!cached and !is_head) writeAllFd(fd, doc.body) catch return .close;
                 return outcome_if_alive;
             }
         }
@@ -644,10 +651,6 @@ const ConnectionPool = struct {
                 return outcome_if_alive;
             }
         }
-
-        // A HEAD request runs the handler / serves the cache exactly like GET to
-        // get the right headers, but its response must omit the body (RFC 7231).
-        const is_head = std.mem.eql(u8, request.method, "HEAD");
 
         // Proof-driven response memoization: serve cached response without entering JS
         var proof_cache_key: ?u64 = null;
@@ -1077,6 +1080,7 @@ const ConnectionPool = struct {
         path: []const u8,
         keep_alive: bool,
         headers: []const HttpHeader,
+        is_head: bool,
     ) !u16 {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         var etag_buf: [34]u8 = undefined;
@@ -1116,6 +1120,10 @@ const ConnectionPool = struct {
                     keep_alive,
                 ) catch return error.BufferOverflow;
                 try writeAllFd(fd, header);
+
+                // HEAD: the header block already carries Content-Length =
+                // file_info.size (what GET would return); emit no body (RFC 7231).
+                if (is_head) return 200;
 
                 if (file_info.size == 0) return 200;
 

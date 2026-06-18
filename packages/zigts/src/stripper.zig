@@ -2093,8 +2093,8 @@ const Stripper = struct {
     fn multilineTypeContinues(self: *const Self, nl_pos: usize) bool {
         // If the last significant char before the newline is a binary type
         // operator, the type clearly continues onto the next line.
-        if (self.previousSignificantChar(nl_pos)) |prev| {
-            switch (prev) {
+        if (self.previousSignificantCharIndex(nl_pos)) |prev_idx| {
+            switch (self.source[prev_idx]) {
                 '|', '&', '=', '<', ',', '(', '[', ':', '?', '.' => return true,
                 '>' => {
                     // A trailing `>` continues the type ONLY when it is the `>`
@@ -2104,10 +2104,8 @@ const Stripper = struct {
                     // continuation would scan the following statement into the
                     // alias span and blank it. If it is not `=>`, fall through
                     // to the next-significant-char check below.
-                    if (self.previousSignificantCharIndex(nl_pos)) |gt_idx| {
-                        if (self.previousSignificantChar(gt_idx)) |before| {
-                            if (before == '=') return true;
-                        }
+                    if (self.previousSignificantChar(prev_idx)) |before| {
+                        if (before == '=') return true;
                     }
                 },
                 else => {},
@@ -2120,7 +2118,11 @@ const Stripper = struct {
             const ch = self.source[i];
             if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') continue;
             return switch (ch) {
-                '|', '&', '?', ':', '>', ')', ']', '.', '=', '<', ',' => true,
+                // `[` continues an indexed-access type that wrapped onto the next
+                // line after a closing generic `>` (e.g. `type T = Foo<Bar>\n
+                // ['key']`). Before the `>`-vs-`=>` narrowing above, the trailing
+                // `>` itself forced continuation; keep that case working.
+                '|', '&', '?', ':', '>', ')', ']', '[', '.', '=', '<', ',' => true,
                 else => false,
             };
         }
@@ -2161,15 +2163,7 @@ const Stripper = struct {
     }
 
     fn previousSignificantChar(self: *const Self, pos: usize) ?u8 {
-        var i = pos;
-        while (i > 0) {
-            i -= 1;
-            return switch (self.source[i]) {
-                ' ', '\t', '\n', '\r' => continue,
-                else => self.source[i],
-            };
-        }
-        return null;
+        return self.source[self.previousSignificantCharIndex(pos) orelse return null];
     }
 
     /// Index of the last significant (non-whitespace) char before `pos`, or
@@ -2617,6 +2611,17 @@ test "multiline function-type alias continuation still preserved" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, "const z") != null);
     // The whole alias, including the wrapped `string`, is stripped.
     try std.testing.expect(std.mem.indexOf(u8, result.code, "string") == null);
+}
+
+test "indexed-access type wrapping after a closing generic is not truncated" {
+    // `type T = Foo<Bar>` wrapping onto a `[`-leading line (indexed access) must
+    // still read as ONE alias. Narrowing the trailing-`>` continuation to only
+    // `=>` must not split it; the next-line `[` carries the continuation.
+    const result = try strip(std.testing.allocator, "type T = Foo<Bar>\n  ['key']\nconst y = doWork();\n", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "const y") != null);
+    // The whole alias, including the wrapped index, is stripped.
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "key") == null);
 }
 
 test "import type stripped" {
