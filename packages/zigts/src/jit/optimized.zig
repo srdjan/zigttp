@@ -2344,15 +2344,26 @@ pub const OptimizedCompiler = struct {
                 const rel = @divExact(target - current, 4);
 
                 if (jump.is_conditional) {
-                    // Patch b.cond instruction (19-bit immediate)
+                    // Patch b.cond instruction (19-bit immediate). Range-check
+                    // the word displacement rather than masking, so an oversized
+                    // function falls back to the interpreter instead of emitting
+                    // a branch to the wrong native address (matches baseline.zig
+                    // patchJumps).
+                    if (rel < std.math.minInt(i19) or rel > std.math.maxInt(i19)) {
+                        return CompileError.UnsupportedOpcode;
+                    }
                     const existing = std.mem.readInt(u32, self.emitter.buffer.items[jump.native_offset..][0..4], .little);
-                    const imm19: u32 = @bitCast(@as(i32, rel) & 0x7FFFF);
+                    const imm19: u32 = @as(u19, @bitCast(@as(i19, @intCast(rel))));
                     const patched = (existing & 0xFF00001F) | (imm19 << 5);
                     std.mem.writeInt(u32, self.emitter.buffer.items[jump.native_offset..][0..4], patched, .little);
                 } else {
-                    // Patch b instruction (26-bit immediate)
+                    // Patch b instruction (26-bit immediate). Same range-check
+                    // fallback as the conditional case above.
+                    if (rel < std.math.minInt(i26) or rel > std.math.maxInt(i26)) {
+                        return CompileError.UnsupportedOpcode;
+                    }
                     const existing = std.mem.readInt(u32, self.emitter.buffer.items[jump.native_offset..][0..4], .little);
-                    const imm26: u32 = @bitCast(@as(i32, rel) & 0x3FFFFFF);
+                    const imm26: u32 = @as(u26, @bitCast(@as(i26, @intCast(rel))));
                     const patched = (existing & 0xFC000000) | imm26;
                     std.mem.writeInt(u32, self.emitter.buffer.items[jump.native_offset..][0..4], patched, .little);
                 }
