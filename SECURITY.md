@@ -39,7 +39,7 @@ The high-level boundaries enforced by zigttp:
 
 5. **Attestation trust model.** The JWS protected header carries the full Ed25519 public key. `zigttp verify <url>` validates the signature against that embedded key and prints the key fingerprint. This proves "the holder of this key signed these claims" - not "this key belongs to a specific publisher." The well-known attestation document exposes the same claims for inspection; it does not establish publisher identity by itself. Third-party verifiers that care about identity should pin keys with `--trust-key <hex>` or apply an explicit trusted-origin policy.
 
-6. **Self-extracting binary integrity.** The 32-byte trailer's CRC-32 is a corruption check, not a security check. The actual integrity boundary is the JWS attestation over `(bytecode_sha256, contract_sha256, policy_sha256)`. See [docs/internals/architecture.md - Self-Extracting Binary Trailer](docs/internals/architecture.md#self-extracting-binary-trailer).
+6. **Self-extracting binary integrity.** The 32-byte trailer's CRC-32 is a corruption check, not a security check. The actual integrity boundary is the JWS attestation over `(bytecode_sha256, contract_sha256, policy_sha256)`. See [docs/internals/architecture.md - Deploy Artifact](docs/internals/architecture.md#deploy-artifact).
 
 7. **Bytecode integrity.** Only bytecode that passes `packages/zigts/src/bytecode_verifier.zig` is dispatched into the VM. The verifier validates opcodes, operand bounds, the constant pool, stack discipline, and jump targets before the first instruction executes. Untrusted bytecode (e.g. a tampered self-extracting payload) is rejected before bytecode execution.
 

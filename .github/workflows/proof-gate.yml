@@ -1,9 +1,10 @@
 name: Proof Gate
 
 # Posts a behavioral-proof verdict for every changed handler as a sticky PR
-# comment and fails the check when a change is `breaking`. The verdict
-# (equivalent / additive / breaking) is the compiler's answer to "is this safe
-# to merge?", computed by `zigttp proofs gate`. See docs/proof-gate.md.
+# comment and fails the check when a change is `breaking` or the proof gate
+# itself errors. The verdict (equivalent / additive / breaking) is the
+# compiler's answer to "is this safe to merge?", computed by
+# `zigttp proofs gate`. See docs/proof-gate.md.
 
 on:
   pull_request:
@@ -49,8 +50,14 @@ jobs:
           header: zigttp-proof
           path: proof-gate.md
 
+      - name: Enforce proof gate execution
+        if: ${{ steps.gate.outputs.verdict == 'error' || steps.gate.outputs.verdict == '' }}
+        run: |
+          echo "::error::The proof gate could not produce a safe/breaking verdict. Review the proof comment and workflow logs."
+          exit 1
+
       - name: Enforce verdict
-        if: steps.gate.outputs.verdict == 'breaking' && !contains(github.event.pull_request.labels.*.name, 'proof-override')
+        if: ${{ steps.gate.outputs.verdict == 'breaking' && !contains(github.event.pull_request.labels.*.name, 'proof-override') }}
         run: |
           echo "::error::A handler change is breaking. Review the proof comment, or add the 'proof-override' label to merge anyway."
           exit 1

@@ -41,7 +41,8 @@ import { routerMatch } from "zigttp:router";
 import { sha256 } from "zigttp:crypto";
 
 function handler(req: Request): Response {
-    const match = routerMatch("GET /users/:id", req.method, req.path);
+    const routes = { "GET /users/:id": true };
+    const match = routerMatch(routes, req);
     if (match) {
         return Response.json({
             id: match.params.id,

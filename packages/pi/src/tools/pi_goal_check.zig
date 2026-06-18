@@ -5,9 +5,8 @@
 //! diagnostic whose property tag appears in the requested `goals` set,
 //! synthesises a witness using `zigts.counterexample.solve`. Each witness
 //! carries a concrete Request plus the virtual-module stub sequence needed
-//! to drive the handler into the violating state - the agent can replay it
-//! through `zigttp mock --replay` to confirm the leak before proposing a
-//! repair.
+//! to drive the handler into the violating state. The same shape feeds the
+//! runtime witness-replay path used by the expert loop.
 //!
 //! The input schema accepts:
 //!   { "path": "handler.ts", "goals": ["no_secret_leakage", ...] }
@@ -54,8 +53,8 @@ pub const tool: registry_mod.ToolDef = .{
     \\                          sensitive sinks)
     \\
     \\Each witness carries a concrete Request and the virtual-module stub
-    \\sequence that drives the handler into the violating path. Replay
-    \\witnesses through `zigttp mock --replay` to verify before repair.
+    \\sequence that drives the handler into the violating path. Use the
+    \\returned witness data to close the concrete path before repair.
     \\Repairs should *close the concrete path*, not merely mute the rule.
     ,
     .input_schema =

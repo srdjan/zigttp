@@ -1,7 +1,7 @@
 # Proof Gate
 
 `zigttp proofs gate` carries the proof to where review happens: the pull
-request. The [Proof Passport demo](user-guide.md#proof-passport-demo)
+request. The [compile-time proof flow](user-guide.md#compile-time-proofs)
 shows the proof story for one scripted edit; the gate runs the same analysis
 across every handler a real branch changed and turns the result into a
 merge-decision signal.

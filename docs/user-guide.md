@@ -109,7 +109,8 @@ Use `zigttp:router` when you need path parameters:
 import { routerMatch } from "zigttp:router";
 
 function handler(req: Request): Response {
-    const match = routerMatch("GET /users/:id", req.method, req.path);
+    const routes = { "GET /users/:id": true };
+    const match = routerMatch(routes, req);
     if (match) {
         return Response.json({ id: match.params.id });
     }
@@ -156,6 +157,8 @@ Use:
 - `if`/`else` and `match` for branching.
 - Explicit Result and optional checks.
 - Type-only imports from `zigttp:types` for proof annotations.
+
+### Author-Declared Specs
 
 ```ts
 import type { Spec } from "zigttp:types";

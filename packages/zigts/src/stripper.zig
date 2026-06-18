@@ -1872,8 +1872,8 @@ const Stripper = struct {
         if (start > 0 and self.output.items[start - 1] == '.') return false;
         const word = self.output.items[start..end];
         const keywords = [_][]const u8{
-            "return", "throw",      "typeof", "void", "delete", "await",
-            "yield",  "new",        "in",     "of",   "case",   "do",
+            "return", "throw",      "typeof",  "void", "delete", "await",
+            "yield",  "new",        "in",      "of",   "case",   "do",
             "else",   "instanceof", "default",
         };
         for (keywords) |kw| {

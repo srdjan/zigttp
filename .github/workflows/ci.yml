@@ -42,8 +42,14 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Run all tests
-        run: zig build test test-zigts test-zruntime test-expert test-expert-app test-capability-audit test-docs-drift test-doc-links test-module-governance
+      - name: Run aggregate tests
+        run: zig build test
+
+      - name: Run focused runtime tests
+        run: zig build test-zruntime
+
+      - name: Run docs link gate
+        run: zig build test-doc-links
 
       - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast

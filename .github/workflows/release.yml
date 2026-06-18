@@ -27,17 +27,38 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-      - name: Run all tests
-        run: zig build test test-zigts test-zruntime test-expert test-expert-app test-capability-audit test-module-governance
 
-      - name: Run docs link gates
-        run: zig build test-docs-drift test-doc-links
+      - name: Verify release tag matches version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(awk -F'"' '/^[[:space:]]*\.version =/ { print $2; exit }' build.zig.zon)"
+          BINARY_VERSION="$(awk -F'"' '/^[[:space:]]*pub const string = "/ { print $2; exit }' packages/zigts/src/root.zig)"
+          if [ "$TAG_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "::error::release tag v${TAG_VERSION} does not match build.zig.zon version ${PACKAGE_VERSION}"
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$BINARY_VERSION" ]; then
+            echo "::error::release tag v${TAG_VERSION} does not match binary version ${BINARY_VERSION}"
+            exit 1
+          fi
+
+      - name: Run aggregate tests
+        run: zig build test
+
+      - name: Run focused runtime tests
+        run: zig build test-zruntime
+
+      - name: Run docs link gate
+        run: zig build test-doc-links
 
       - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast
 
       - name: Run v1 user-flow smoke
         run: zig build smoke-v1
+
+      - name: Run panic isolation smoke
+        run: zig build test-panic-isolation
 
       - name: Run Getting Started smoke
         if: ${{ matrix.os == 'macos-latest' }}

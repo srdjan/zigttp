@@ -12,10 +12,10 @@ gates, and keep release notes user-facing.
 ## Validation
 
 - [ ] `zig build test`
-- [ ] `zig build test-zigts`
 - [ ] `zig build test-zruntime`
 - [ ] `zig build test-docs-drift test-doc-links` (docs registry and relative links)
 - [ ] `zig build smoke-v1`
+- [ ] `zig build test-panic-isolation`
 - [ ] `zig build smoke-getting-started` (macOS beta gate)
 - [ ] `zig build smoke-demo` (macOS beta gate)
 - [ ] `zig build smoke-studio` (macOS beta gate; builds `-Dstudio`)
@@ -45,6 +45,7 @@ cross-compile without Docker.
 ## Tag And Publish
 
 - [ ] Confirm `build.zig.zon` `.version` matches the intended release.
+- [ ] Confirm `packages/zigts/src/root.zig` `version.string` matches the intended release.
 - [ ] Draft release notes from `CHANGELOG.md` and `.github/RELEASE_NOTES_TEMPLATE.md`.
 - [ ] `git tag -a vX.Y.Z -m "zigttp vX.Y.Z"`
 - [ ] `git push origin vX.Y.Z`

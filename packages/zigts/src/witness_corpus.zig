@@ -27,7 +27,7 @@
 //! time the file is reformatted.
 //!
 //! Witness files reuse `counterexample.writeJsonl()` exactly so a persisted
-//! witness can be replayed via `zigttp mock --replay` without translation.
+//! witness can feed the runtime witness-replay path without translation.
 //!
 //! `index.jsonl` records one `created` event per witness on first persist.
 //! Re-persisting a known witness is a no-op: no event is appended, so the

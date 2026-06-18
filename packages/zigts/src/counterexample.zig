@@ -6,9 +6,9 @@
 //! needed to drive the handler down the witnessing path.
 //!
 //! The emitted JSONL mirrors `trace.zig`'s recorder output, so a witness
-//! produced by the compiler can be fed to `zigttp mock --replay` against
-//! the very same handler and the runtime will re-execute the exact path
-//! that verification flagged.
+//! produced by the compiler can be fed to the runtime witness-replay path
+//! against the very same handler and the runtime will re-execute the exact
+//! path that verification flagged.
 //!
 //! Why this exists: until now the verifier returned a verdict and a source
 //! span. The symbolic execution engine underneath it (path_generator.zig)
@@ -66,7 +66,7 @@ pub fn negate(c: WitnessConstraint) ?WitnessConstraint {
 
 /// An individual virtual-module call visited along the witness path, in
 /// execution order. `result_json` is the stub value the runtime should
-/// return when replaying this call under `zigttp mock --replay`.
+/// return when replaying this call under the runtime witness-replay path.
 pub const IoStubEntry = struct {
     seq: u32,
     module: []const u8,

@@ -32,9 +32,10 @@ line shifts caused by edits above the witnessing site, so the same
 logical leak is not re-persisted as a new entry every time the file is
 reformatted.
 
-Witness files use `counterexample.writeJsonl` exactly. A persisted
-witness can be replayed via `zigttp mock --replay` against the same
-handler without schema translation.
+Witness files use `counterexample.writeJsonl` exactly. They use the
+same request and virtual-module stub shape consumed by the runtime
+witness-replay path. `zigttp mock` is for `.test.jsonl` fixtures and
+does not accept `--replay`.
 
 ## How the corpus grows
 
