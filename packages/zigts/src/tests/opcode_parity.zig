@@ -60,6 +60,13 @@ fn op(comptime o: O) u8 {
 const add_code = [_]u8{ op(.push_i8), 5, op(.push_i8), 3, op(.add), op(.ret) };
 const sub_code = [_]u8{ op(.push_i8), 10, op(.push_i8), 4, op(.sub), op(.ret) };
 const mul_code = [_]u8{ op(.push_i8), 6, op(.push_i8), 7, op(.mul), op(.ret) };
+// 2 ** 3 = 8 (basic pow); guards jitPow against tier divergence in any future
+// VM-loop dedupe that points the JIT helper at a shared numeric core.
+const pow_code = [_]u8{ op(.push_i8), 2, op(.push_i8), 3, op(.pow), op(.ret) };
+// 2 ** 31 = 2_147_483_648: a large-magnitude pow whose float result exceeds i32.
+// pow has no integer fast path on any tier (toNumber -> std.math.pow -> fromFloat),
+// so this just checks all tiers agree on a big float-boxed result.
+const pow_overflow_code = [_]u8{ op(.push_i8), 2, op(.push_i8), 31, op(.pow), op(.ret) };
 const lt_true_code = [_]u8{ op(.push_i8), 3, op(.push_i8), 5, op(.lt), op(.ret) };
 const lt_false_code = [_]u8{ op(.push_i8), 5, op(.push_i8), 3, op(.lt), op(.ret) };
 const eq_true_code = [_]u8{ op(.push_i8), 7, op(.push_i8), 7, op(.eq), op(.ret) };
@@ -245,6 +252,8 @@ const cases = [_]Case{
     .{ .name = "add", .code = &add_code, .kind = .number, .expected_num = 8 },
     .{ .name = "sub", .code = &sub_code, .kind = .number, .expected_num = 6 },
     .{ .name = "mul", .code = &mul_code, .kind = .number, .expected_num = 42 },
+    .{ .name = "pow", .code = &pow_code, .kind = .number, .expected_num = 8 },
+    .{ .name = "pow_overflow", .code = &pow_overflow_code, .kind = .number, .expected_num = 2_147_483_648 },
     .{ .name = "lt_true", .code = &lt_true_code, .kind = .boolean, .expected_bool = true },
     .{ .name = "lt_false", .code = &lt_false_code, .kind = .boolean, .expected_bool = false },
     .{ .name = "eq_true", .code = &eq_true_code, .kind = .boolean, .expected_bool = true },

@@ -19,6 +19,7 @@ const HttpHeader = @import("http_types.zig").HttpHeader;
 const ServerConfig = @import("server.zig").ServerConfig;
 const tryLockOplogFd = @import("runtime_config.zig").tryLockOplogFd;
 const handler_loader = @import("handler_loader.zig");
+const durable_executor = @import("durable_executor.zig");
 const DurableStore = @import("durable_store.zig").DurableStore;
 const runtime_natives = @import("runtime_natives.zig");
 
@@ -308,7 +309,8 @@ fn recoverOne(
     defer allocator.free(handler_code);
 
     try rt.loadCode(handler_code, handler_filename);
-    rt.setPendingDurableRecovery(
+    durable_executor.setPendingDurableRecovery(
+        rt,
         parsed.run_key orelse return error.MissingRunKey,
         oplog_path,
         parsed.events,

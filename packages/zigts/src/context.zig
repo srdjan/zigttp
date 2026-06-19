@@ -1444,13 +1444,11 @@ pub const Context = struct {
     /// JIT helper: add two values with full JS semantics.
     /// On error, sets exception and returns exception_val.
     pub fn jitAdd(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
-        if (a.isInt() and b.isInt()) {
-            const sum, const overflow = @addWithOverflow(a.getInt(), b.getInt());
-            if (overflow == 0) {
-                return value.JSValue.fromInt(sum);
-            }
-            return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) + @as(f64, @floatFromInt(b.getInt())));
-        }
+        // String concat stays here (needs the arena/allocator and the rope
+        // helpers); the numeric semantics delegate to the shared core. Checking
+        // strings first is equivalent to the old int-first order: an int+int
+        // pair is never a string, so it still takes the integer fast path inside
+        // addNumeric.
         if (a.isString() or b.isString()) {
             const str_a = self.jitValueToString(a) catch return self.jitThrow();
             const str_b = self.jitValueToString(b) catch return self.jitThrow();
@@ -1465,59 +1463,27 @@ pub const Context = struct {
             const result = string.concatStrings(self.allocator, str_a, str_b) catch return self.jitThrow();
             return value.JSValue.fromPtr(result);
         }
-        const an = a.toNumber() orelse return self.jitThrow();
-        const bn = b.toNumber() orelse return self.jitThrow();
-        return self.jitAllocFloat(an + bn);
+        return interp_util.addNumeric(a, b) catch self.jitThrow();
     }
 
-    /// JIT helper: subtract two values.
+    /// JIT helper: subtract two values. Delegates to the shared numeric core.
     pub fn jitSub(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
-        if (a.isInt() and b.isInt()) {
-            const diff, const overflow = @subWithOverflow(a.getInt(), b.getInt());
-            if (overflow == 0) {
-                return value.JSValue.fromInt(diff);
-            }
-            return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) - @as(f64, @floatFromInt(b.getInt())));
-        }
-        const an = a.toNumber() orelse return self.jitThrow();
-        const bn = b.toNumber() orelse return self.jitThrow();
-        return self.jitAllocFloat(an - bn);
+        return interp_util.subValues(a, b) catch self.jitThrow();
     }
 
-    /// JIT helper: multiply two values.
+    /// JIT helper: multiply two values. Delegates to the shared numeric core.
     pub fn jitMul(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
-        if (a.isInt() and b.isInt()) {
-            const product, const overflow = @mulWithOverflow(a.getInt(), b.getInt());
-            if (overflow == 0) {
-                return value.JSValue.fromInt(product);
-            }
-            return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) * @as(f64, @floatFromInt(b.getInt())));
-        }
-        const an = a.toNumber() orelse return self.jitThrow();
-        const bn = b.toNumber() orelse return self.jitThrow();
-        return self.jitAllocFloat(an * bn);
+        return interp_util.mulValues(a, b) catch self.jitThrow();
     }
 
-    /// JIT helper: negate a value.
+    /// JIT helper: negate a value. Delegates to the shared numeric core.
     pub fn jitNeg(self: *Context, a: value.JSValue) callconv(.c) value.JSValue {
-        if (a.isInt()) {
-            const v = a.getInt();
-            if (v == std.math.minInt(i32)) {
-                return self.jitAllocFloat(-@as(f64, @floatFromInt(v)));
-            }
-            return value.JSValue.fromInt(-v);
-        }
-        if (a.isFloat64()) {
-            return self.jitAllocFloat(-a.getFloat64());
-        }
-        return self.jitThrow();
+        return interp_util.negValue(a) catch self.jitThrow();
     }
 
-    /// JIT helper: divide two values (always produces float)
+    /// JIT helper: divide two values (always produces float). Shared core.
     pub fn jitDiv(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
-        const an = a.toNumber() orelse return self.jitThrow();
-        const bn = b.toNumber() orelse return self.jitThrow();
-        return self.jitAllocFloat(an / bn);
+        return interp_util.divValues(a, b) catch self.jitThrow();
     }
 
     /// JIT helper: modulo two values. Delegates to the single source of truth in
@@ -1527,41 +1493,19 @@ pub const Context = struct {
         return interp_util.modValues(a, b) catch self.jitThrow();
     }
 
-    /// JIT helper: exponentiation
+    /// JIT helper: exponentiation. Delegates to the shared numeric core.
     pub fn jitPow(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
-        const an = a.toNumber() orelse return self.jitThrow();
-        const bn = b.toNumber() orelse return self.jitThrow();
-        return self.jitAllocFloat(std.math.pow(f64, an, bn));
+        return interp_util.powValues(a, b) catch self.jitThrow();
     }
 
-    /// JIT helper: increment
+    /// JIT helper: increment. Delegates to the shared numeric core.
     pub fn jitInc(self: *Context, a: value.JSValue) callconv(.c) value.JSValue {
-        if (a.isInt()) {
-            const sum, const overflow = @addWithOverflow(a.getInt(), 1);
-            if (overflow == 0) {
-                return value.JSValue.fromInt(sum);
-            }
-            return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) + 1.0);
-        }
-        if (a.isFloat64()) {
-            return self.jitAllocFloat(a.getFloat64() + 1.0);
-        }
-        return self.jitThrow();
+        return interp_util.incValue(a) catch self.jitThrow();
     }
 
-    /// JIT helper: decrement
+    /// JIT helper: decrement. Delegates to the shared numeric core.
     pub fn jitDec(self: *Context, a: value.JSValue) callconv(.c) value.JSValue {
-        if (a.isInt()) {
-            const diff, const overflow = @subWithOverflow(a.getInt(), 1);
-            if (overflow == 0) {
-                return value.JSValue.fromInt(diff);
-            }
-            return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) - 1.0);
-        }
-        if (a.isFloat64()) {
-            return self.jitAllocFloat(a.getFloat64() - 1.0);
-        }
-        return self.jitThrow();
+        return interp_util.decValue(a) catch self.jitThrow();
     }
 
     fn jitToInt32(val: value.JSValue) i32 {
@@ -1676,13 +1620,6 @@ pub const Context = struct {
             .gt => self.greaterThanCtx(a, b),
             .gte => self.greaterEqualCtx(a, b),
         });
-    }
-
-    fn jitAllocFloat(self: *Context, v: f64) value.JSValue {
-        // NaN-boxing: ALL f64 values are stored inline - no heap allocation!
-        // This eliminates the 41.6x performance gap in mathOps benchmark.
-        _ = self;
-        return value.JSValue.fromFloat(v);
     }
 
     fn jitValueToString(self: *Context, val: value.JSValue) !*string.JSString {

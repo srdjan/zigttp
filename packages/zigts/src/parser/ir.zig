@@ -1644,6 +1644,56 @@ pub const IrView = struct {
         };
     }
 
+    /// Invoke `visit(ctx, child)` for each structural child node-index of `node`,
+    /// in source order. This centralizes the plain statement-level descent that
+    /// the strict-checker pre-order walkers (`collectStaticLiterals`,
+    /// `collectAnnotatedFunctions`) each open-coded; callers keep their own
+    /// per-tag leaf actions and use this only for the recursion. Comptime
+    /// `visit` is monomorphized per call site, so there is no indirect-call cost.
+    ///
+    /// This is a pure structural descent with no analysis state and no ordering
+    /// policy beyond source order. Flow-sensitive or expression-walking analyses
+    /// (`collectCallCounts`, `collectAssignments`, `bool_checker`, `flow_checker`)
+    /// must keep their own arms; do not route them through here.
+    pub fn forEachChild(
+        self: IrView,
+        node: NodeIndex,
+        ctx: anytype,
+        comptime visit: fn (@TypeOf(ctx), NodeIndex) void,
+    ) void {
+        if (node == null_node) return;
+        const tag = self.getTag(node) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.getBlock(node) orelse return;
+                for (0..block.stmts_count) |i| {
+                    visit(ctx, self.getListIndex(block.stmts_start, @intCast(i)));
+                }
+            },
+            .export_decl => {
+                const export_decl = self.getExportDecl(node) orelse return;
+                visit(ctx, export_decl.declaration);
+            },
+            .var_decl, .function_decl => {
+                const decl = self.getVarDecl(node) orelse return;
+                visit(ctx, decl.init);
+            },
+            .function_expr, .arrow_function => {
+                if (self.getFunction(node)) |func| visit(ctx, func.body);
+            },
+            .if_stmt => {
+                const if_stmt = self.getIfStmt(node) orelse return;
+                visit(ctx, if_stmt.then_branch);
+                visit(ctx, if_stmt.else_branch);
+            },
+            .for_of_stmt => {
+                const for_iter = self.getForIter(node) orelse return;
+                visit(ctx, for_iter.body);
+            },
+            else => {},
+        }
+    }
+
     /// Get node source location
     pub fn getLoc(self: IrView, idx: NodeIndex) ?SourceLocation {
         return switch (self.impl) {

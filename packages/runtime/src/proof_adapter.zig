@@ -49,6 +49,11 @@ pub const ProofCache = struct {
     allocator: std.mem.Allocator,
     entries: std.AutoHashMapUnmanaged(u64, CacheEntry),
     insertion_order: std.ArrayListUnmanaged(u64),
+    // Index of the oldest live key in `insertion_order`. Eviction advances this
+    // cursor instead of shifting the whole array (O(1) instead of O(n)); the
+    // dead prefix [0..order_head] is reclaimed by compaction in `put` so the
+    // backing array stays bounded by the live entry count.
+    order_head: usize,
     rw_lock: compat.RwLock,
     max_entries: u32,
     ttl_ns: u64,
@@ -83,6 +88,7 @@ pub const ProofCache = struct {
             .allocator = allocator,
             .entries = .{},
             .insertion_order = .empty,
+            .order_head = 0,
             .rw_lock = .{},
             .max_entries = config.max_entries,
             .ttl_ns = @as(u64, config.ttl_seconds) * std.time.ns_per_s,
@@ -256,13 +262,25 @@ pub const ProofCache = struct {
             _ = self.total_bytes.fetchSub(gop.value_ptr.byte_size, .monotonic);
             self.freeEntry(gop.value_ptr);
         } else {
-            // Evict if at capacity (getOrPut already inserted the slot)
-            if (self.entries.count() > self.max_entries and self.insertion_order.items.len > 0) {
-                const oldest_key = self.insertion_order.orderedRemove(0);
+            // Evict if at capacity (getOrPut already inserted the slot).
+            // Pop the oldest key in O(1) by advancing the head cursor.
+            if (self.entries.count() > self.max_entries and
+                self.insertion_order.items.len > self.order_head)
+            {
+                const oldest_key = self.insertion_order.items[self.order_head];
+                self.order_head += 1;
                 if (self.entries.fetchRemove(oldest_key)) |removed| {
                     _ = self.total_bytes.fetchSub(removed.value.byte_size, .monotonic);
                     var entry = removed.value;
                     self.freeEntry(&entry);
+                }
+                // Reclaim the dead prefix once it dominates the array so the
+                // backing store stays bounded by the live entry count.
+                if (self.order_head > 16 and self.order_head * 2 > self.insertion_order.items.len) {
+                    const live = self.insertion_order.items[self.order_head..];
+                    std.mem.copyForwards(u64, self.insertion_order.items[0..live.len], live);
+                    self.insertion_order.shrinkRetainingCapacity(live.len);
+                    self.order_head = 0;
                 }
             }
             // Track insertion order for eviction. On append failure, roll the
@@ -515,6 +533,43 @@ test "capacity eviction" {
     var c3 = cache.get(key3, allocator) orelse return error.TestUnexpectedResult;
     defer c3.deinit();
     try std.testing.expectEqual(@as(u16, 202), c3.status);
+}
+
+test "capacity eviction stays correct and bounded across compaction" {
+    const allocator = std.testing.allocator;
+    var cache = ProofCache.init(allocator, .{ .pure = true }, .{ .max_entries = 4 });
+    defer cache.deinit();
+
+    var resp = HttpResponse.init(allocator);
+    defer resp.deinit();
+
+    var buf: [32]u8 = undefined;
+    const total: usize = 60;
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        const path = std.fmt.bufPrint(&buf, "/k{d}", .{i}) catch unreachable;
+        const key = ProofCache.computeKey("GET", path);
+        resp.status = @intCast(200 + (i % 100));
+        cache.put(key, &resp);
+    }
+
+    // Only the last max_entries keys survive; everything older is evicted.
+    i = 0;
+    while (i < total) : (i += 1) {
+        const path = std.fmt.bufPrint(&buf, "/k{d}", .{i}) catch unreachable;
+        const key = ProofCache.computeKey("GET", path);
+        const got = cache.get(key, allocator);
+        if (i >= total - 4) {
+            var c = got orelse return error.TestUnexpectedResult;
+            c.deinit();
+        } else {
+            try std.testing.expect(got == null);
+        }
+    }
+
+    // Compaction reclaimed the dead prefix: the backing array tracks the live
+    // entry count, not the total number of inserts.
+    try std.testing.expect(cache.insertion_order.items.len <= 32);
 }
 
 test "max_body_size enforcement" {

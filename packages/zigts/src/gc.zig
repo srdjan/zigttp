@@ -1732,6 +1732,72 @@ test "TenuredHeap grows mark bitvector" {
     try std.testing.expect(tenured.mark_bitvector.len >= (last_idx / 64 + 1));
 }
 
+test "TenuredHeap registration is OOM-safe under FailingAllocator" {
+    const DummyObj = struct {
+        header: heap.MemBlockHeader,
+        value: u64,
+    };
+
+    // Drive the tenured heap (mark-bitvector growth, objects list, object_index)
+    // with a failing allocator while the objects themselves live in a separate
+    // leak-checked allocator, so an injected OOM exercises only the heap's
+    // internal allocations and we assert the error propagates without leaking.
+    const Probe = struct {
+        fn run(fail_at: usize) !bool {
+            var leak_detector: std.heap.DebugAllocator(.{ .stack_trace_frames = 0 }) = .init;
+            const child = leak_detector.allocator();
+            var failing = std.testing.FailingAllocator.init(child, .{ .fail_index = fail_at });
+
+            var ok = true;
+            {
+                var objects: std.ArrayList(*DummyObj) = .empty;
+                defer {
+                    for (objects.items) |obj| child.destroy(obj);
+                    objects.deinit(child);
+                }
+
+                if (TenuredHeap.init(failing.allocator(), 64)) |heap_val| {
+                    var tenured = heap_val;
+                    var i: usize = 0;
+                    while (i < 70) : (i += 1) {
+                        const obj = try child.create(DummyObj);
+                        errdefer child.destroy(obj);
+                        obj.* = .{
+                            .header = heap.MemBlockHeader.init(.object, @sizeOf(DummyObj)),
+                            .value = @intCast(i),
+                        };
+                        try objects.append(child, obj);
+                        _ = tenured.registerObject(obj) catch {
+                            ok = false;
+                            break;
+                        };
+                    }
+                    tenured.deinit();
+                } else |err| {
+                    try std.testing.expectEqual(error.OutOfMemory, err);
+                    ok = false;
+                }
+            }
+
+            const leak_check = leak_detector.deinit();
+            if (leak_check == .leak) std.debug.print("TenuredHeap leaked on fail_at={d}\n", .{fail_at});
+            try std.testing.expectEqual(std.heap.Check.ok, leak_check);
+            return ok;
+        }
+    };
+
+    // Success path (no injected failure) must not leak.
+    try std.testing.expect(try Probe.run(std.math.maxInt(usize)));
+
+    // Bounded sweep over every internal allocation, gated to keep default CI fast.
+    if (std.c.getenv("ZTS_RUN_OOM_SWEEP") != null) {
+        var fail_at: usize = 0;
+        while (fail_at < 512) : (fail_at += 1) {
+            _ = try Probe.run(fail_at);
+        }
+    }
+}
+
 test "TenuredHeap accounts slot size" {
     const allocator = std.testing.allocator;
     var tenured = try TenuredHeap.init(allocator, 4096);

@@ -1097,6 +1097,90 @@ test "fromHandlerContract converts properties and env vars" {
     try std.testing.expect(!rc.properties.pure);
 }
 
+// Drift guard: parseContractJson is a second, hand-rolled reader of the contract
+// wire format, separate from the canonical writer/parser pair in the engine. It
+// stays decoupled (it reads only the subset of fields the runtime needs) on the
+// condition that the wire keys it hardcodes match what the writer emits. This
+// test pins that link: it emits a contract through the canonical writer and
+// reads it back here, so any future writer-side key rename (env/literal,
+// api/routes/method/path, properties.*, modules) fails loudly instead of
+// silently disabling a runtime check.
+test "contract wire format round-trips between writer and runtime parser" {
+    const allocator = std.testing.allocator;
+
+    var hc = HandlerContract{
+        .handler = .{ .path = try allocator.dupe(u8, "handler.ts"), .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .urls = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+            .timers = false,
+            .signals = .{ .literal = .empty, .dynamic = false },
+            .producer_keys = .{ .literal = .empty, .dynamic = false },
+        },
+        .scope = .{ .used = false, .names = .empty, .dynamic = false, .max_depth = 0 },
+        .api = .{
+            .schemas = .empty,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = .empty,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+        .properties = .{
+            .pure = false,
+            .read_only = true,
+            .stateless = false,
+            .retry_safe = true,
+            .deterministic = true,
+            .has_egress = false,
+        },
+    };
+    defer hc.deinit(allocator);
+
+    try hc.env.literal.append(allocator, try allocator.dupe(u8, "API_KEY"));
+    try hc.modules.append(allocator, try allocator.dupe(u8, "zigttp:crypto"));
+    try hc.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+    });
+
+    // Emit through the canonical wire-format writer.
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try zq.writeContractJson(&hc, &aw.writer);
+
+    // Read it back through the runtime's hand-rolled parser.
+    var raw = try parseContractJson(allocator, aw.writer.buffered());
+    defer raw.deinit();
+    const rc = &raw.inner;
+
+    try std.testing.expectEqual(@as(usize, 1), rc.env_vars.len);
+    try std.testing.expectEqualStrings("API_KEY", rc.env_vars[0]);
+    try std.testing.expectEqual(@as(usize, 1), rc.modules.len);
+    try std.testing.expectEqualStrings("zigttp:crypto", rc.modules[0]);
+    try std.testing.expectEqual(@as(usize, 1), rc.routes.len);
+    try std.testing.expectEqualStrings("GET", rc.routes[0].method);
+    try std.testing.expectEqualStrings("/users", rc.routes[0].path);
+    try std.testing.expect(rc.properties.read_only);
+    try std.testing.expect(rc.properties.retry_safe);
+    try std.testing.expect(rc.properties.deterministic);
+    try std.testing.expect(!rc.properties.pure);
+}
+
 test "parseContractJson reads sandbox block" {
     const allocator = std.testing.allocator;
     const source =

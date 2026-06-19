@@ -13,6 +13,8 @@ const zq = @import("zigts");
 const embedded_handler = @import("embedded_handler");
 const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
+const durable_executor = @import("durable_executor.zig");
+const trace_request_recorder = @import("trace_request_recorder.zig");
 const http_parser = @import("http_parser.zig");
 const server_io = @import("server_io.zig");
 const contract_runtime = @import("contract_runtime.zig");
@@ -25,6 +27,7 @@ const bytecode_cache = zq.bytecode_cache;
 // HTTP protocol types (shared with server layer)
 const http_types = @import("http_types.zig");
 const websocket_pool = @import("websocket_pool.zig");
+const ws_callbacks = @import("ws_runtime_callbacks.zig");
 pub const QueryParam = http_types.QueryParam;
 pub const HttpRequestView = http_types.HttpRequestView;
 pub const HttpRequestOwned = http_types.HttpRequestOwned;
@@ -135,11 +138,11 @@ pub const Runtime = struct {
 
     const Self = @This();
 
-    const PendingDurableWait = union(enum) {
+    pub const PendingDurableWait = union(enum) {
         timer: i64,
         signal: []const u8,
 
-        fn deinit(self: *PendingDurableWait, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *PendingDurableWait, allocator: std.mem.Allocator) void {
             switch (self.*) {
                 .signal => |name| allocator.free(name),
                 .timer => {},
@@ -147,7 +150,7 @@ pub const Runtime = struct {
         }
     };
 
-    const ActiveDurableRun = struct {
+    pub const ActiveDurableRun = struct {
         key: []const u8,
         oplog_path: []const u8,
         oplog_fd: std.c.fd_t,
@@ -157,21 +160,21 @@ pub const Runtime = struct {
         step_depth: u32 = 0,
         pending_wait: ?PendingDurableWait = null,
 
-        fn setPendingTimer(self: *ActiveDurableRun, allocator: std.mem.Allocator, until_ms: i64) !void {
+        pub fn setPendingTimer(self: *ActiveDurableRun, allocator: std.mem.Allocator, until_ms: i64) !void {
             if (self.pending_wait) |*wait| {
                 wait.deinit(allocator);
             }
             self.pending_wait = .{ .timer = until_ms };
         }
 
-        fn setPendingSignal(self: *ActiveDurableRun, allocator: std.mem.Allocator, name: []const u8) !void {
+        pub fn setPendingSignal(self: *ActiveDurableRun, allocator: std.mem.Allocator, name: []const u8) !void {
             if (self.pending_wait) |*wait| {
                 wait.deinit(allocator);
             }
             self.pending_wait = .{ .signal = try allocator.dupe(u8, name) };
         }
 
-        fn deinit(self: *ActiveDurableRun, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *ActiveDurableRun, allocator: std.mem.Allocator) void {
             allocator.free(self.key);
             allocator.free(self.oplog_path);
             if (self.owned_events) |events| allocator.free(events);
@@ -183,7 +186,7 @@ pub const Runtime = struct {
         }
     };
 
-    const PendingDurableRecovery = struct {
+    pub const PendingDurableRecovery = struct {
         key: []const u8,
         oplog_path: []const u8,
         events: []const zq.trace.DurableEvent,
@@ -769,13 +772,13 @@ pub const Runtime = struct {
     fn installDurableModuleState(self: *Self) !void {
         const durable_state = try self.allocator.create(zq.modules.durable.DurableCallbacks);
         durable_state.* = .{
-            .run_fn = durableRunCallback,
-            .step_fn = durableStepCallback,
-            .step_with_timeout_fn = durableStepWithTimeoutCallback,
-            .sleep_until_fn = durableSleepUntilCallback,
-            .wait_signal_fn = durableWaitSignalCallback,
-            .signal_fn = durableSignalCallback,
-            .signal_at_fn = durableSignalAtCallback,
+            .run_fn = durable_executor.durableRunCallback,
+            .step_fn = durable_executor.durableStepCallback,
+            .step_with_timeout_fn = durable_executor.durableStepWithTimeoutCallback,
+            .sleep_until_fn = durable_executor.durableSleepUntilCallback,
+            .wait_signal_fn = durable_executor.durableWaitSignalCallback,
+            .signal_fn = durable_executor.durableSignalCallback,
+            .signal_at_fn = durable_executor.durableSignalAtCallback,
             .runtime_ptr = self,
         };
         self.ctx.setModuleState(
@@ -808,13 +811,13 @@ pub const Runtime = struct {
         self.ws_pool_ref = pool;
         try zq.modules.websocket.installState(self.ctx, .{
             .runtime_ptr = self,
-            .send_fn = wsSendCallback,
-            .close_fn = wsCloseCallback,
-            .serialize_attachment_fn = wsSerializeAttachmentCallback,
-            .deserialize_attachment_fn = wsDeserializeAttachmentCallback,
-            .get_web_sockets_fn = wsGetWebSocketsCallback,
-            .room_from_path_fn = wsRoomFromPathCallback,
-            .set_auto_response_fn = wsSetAutoResponseCallback,
+            .send_fn = ws_callbacks.wsSendCallback,
+            .close_fn = ws_callbacks.wsCloseCallback,
+            .serialize_attachment_fn = ws_callbacks.wsSerializeAttachmentCallback,
+            .deserialize_attachment_fn = ws_callbacks.wsDeserializeAttachmentCallback,
+            .get_web_sockets_fn = ws_callbacks.wsGetWebSocketsCallback,
+            .room_from_path_fn = ws_callbacks.wsRoomFromPathCallback,
+            .set_auto_response_fn = ws_callbacks.wsSetAutoResponseCallback,
         });
     }
 
@@ -1212,48 +1215,8 @@ pub const Runtime = struct {
         defer if (reset_after) self.resetForNextRequest();
 
         // === TRACE RECORDING: Set up per-request recorder ===
-        var trace_timer: ?compat.Timer = null;
-        if (self.trace_file != null and self.trace_mutex != null) {
-            if (self.trace_recorder == null) {
-                self.trace_recorder = self.allocator.create(zq.TraceRecorder) catch null;
-                if (self.trace_recorder) |rec| {
-                    rec.* = zq.TraceRecorder.init(
-                        self.allocator,
-                        self.trace_file.?,
-                        self.trace_mutex.?,
-                    );
-                }
-            }
-            if (self.trace_recorder) |rec| {
-                rec.reset();
-                self.ctx.setModuleState(
-                    zq.TRACE_STATE_SLOT,
-                    @ptrCast(rec),
-                    &zq.TraceRecorder.deinitOpaque,
-                );
-
-                // Record request
-                var h_names: [64][]const u8 = undefined;
-                var h_values: [64][]const u8 = undefined;
-                const hcount = splitHeaderKV(request.headers.items, &h_names, &h_values);
-                rec.recordRequestRaw(
-                    request.method,
-                    request.url,
-                    h_names[0..hcount],
-                    h_values[0..hcount],
-                    request.body,
-                );
-                trace_timer = compat.Timer.start() catch null;
-            }
-        }
-        defer if (self.trace_recorder) |rec| {
-            // Record meta and flush after handler completes
-            const duration_us: u64 = if (trace_timer) |*t| t.read() / 1000 else 0;
-            rec.recordMeta(duration_us, self.config.trace_file_path orelse "unknown", 0);
-            rec.flush();
-            // Remove from module_state so next request gets a fresh one
-            self.ctx.module_state[zq.TRACE_STATE_SLOT] = null;
-        };
+        const trace_timer = trace_request_recorder.setupRequestRecorder(self, request);
+        defer trace_request_recorder.finishRequestRecorder(self, trace_timer);
 
         // === FAST PATH: Native dispatch for static routes ===
         if (self.cached_dispatch) |dispatch| {
@@ -1295,7 +1258,7 @@ pub const Runtime = struct {
                     if (borrow_body and response.requires_runtime) {
                         reset_after = false;
                     }
-                    self.traceRecordResponse(&response);
+                    trace_request_recorder.recordResponse(self, &response);
                     return response;
                 }
             }
@@ -1311,7 +1274,7 @@ pub const Runtime = struct {
             if (borrow_body and response.requires_runtime) {
                 reset_after = false;
             }
-            self.traceRecordResponse(&response);
+            trace_request_recorder.recordResponse(self, &response);
             return response;
         }
 
@@ -1351,7 +1314,7 @@ pub const Runtime = struct {
             const body_owned = try self.allocator.dupe(u8, exc_msg);
             err_response.setBodyOwned(body_owned);
             try err_response.putHeader("Content-Type", "text/plain; charset=utf-8");
-            self.traceRecordResponse(&err_response);
+            trace_request_recorder.recordResponse(self, &err_response);
             return err_response;
         }
 
@@ -1361,520 +1324,10 @@ pub const Runtime = struct {
             reset_after = false;
         }
 
-        self.traceRecordResponse(&response);
+        trace_request_recorder.recordResponse(self, &response);
         return response;
     }
 
-    /// Record response to trace or durable oplog if active.
-    fn traceRecordResponse(self: *Self, response: *const HttpResponse) void {
-        // Trace mode: record to trace buffer
-        const rec = self.trace_recorder orelse return;
-        if (!rec.active) return;
-
-        var h_names: [64][]const u8 = undefined;
-        var h_values: [64][]const u8 = undefined;
-        const hcount = splitHeaderKV(response.headers.items, &h_names, &h_values);
-        rec.recordResponse(
-            response.status,
-            h_names[0..hcount],
-            h_values[0..hcount],
-            response.body,
-        );
-    }
-
-    pub fn setPendingDurableRecovery(
-        self: *Self,
-        key: []const u8,
-        oplog_path: []const u8,
-        events: []const zq.trace.DurableEvent,
-    ) void {
-        self.pending_durable_recovery = .{
-            .key = key,
-            .oplog_path = oplog_path,
-            .events = events,
-        };
-    }
-
-    fn durableRun(self: *Self, ctx: *zq.Context, key: []const u8, run_val: zq.JSValue) anyerror!zq.JSValue {
-        if (self.active_durable_run != null) {
-            return zq.modules.util.throwError(ctx, "Error", "nested run() is not supported");
-        }
-        if (!run_val.isObject()) {
-            return zq.modules.util.throwError(ctx, "TypeError", "run() expects a callable function");
-        }
-        _ = self.active_request orelse {
-            return zq.modules.util.throwError(ctx, "Error", "run() is only valid during request handling");
-        };
-
-        if (try self.tryLoadCompletedDurableResponse(key)) |cached| {
-            return cached;
-        }
-
-        const active = self.openActiveDurableRun(key) catch |err| switch (err) {
-            error.DurableRecoveryKeyMismatch => return zq.modules.util.throwError(ctx, "Error", "durable recovery key did not match run() key"),
-            error.DurableKeyCollision => return zq.modules.util.throwError(ctx, "Error", "durable key collision detected for oplog path"),
-            error.DurableRunBusy => return zq.modules.util.throwError(ctx, "Error", "durable run is busy: another process holds this run's oplog"),
-            else => return err,
-        };
-
-        self.active_durable_run = active;
-        self.ctx.setModuleState(
-            zq.trace.DURABLE_STATE_SLOT,
-            @ptrCast(self.active_durable_run.?.state),
-            &zq.trace.DurableState.deinitOpaque,
-        );
-        defer {
-            self.ctx.module_state[zq.trace.DURABLE_STATE_SLOT] = null;
-            if (self.active_durable_run) |*run| {
-                run.deinit(self.allocator);
-            }
-            self.active_durable_run = null;
-        }
-
-        const func_obj = run_val.toPtr(zq.JSObject);
-        const result = self.callFunction(func_obj, &.{}) catch |err| switch (err) {
-            error.DurableSuspended => return try self.buildPendingDurableResponseValue(),
-            else => return err,
-        };
-        const upgraded = try upgradeResponseValue(self.ctx, result);
-        if (!self.isResponseLike(upgraded)) {
-            return zq.modules.util.throwError(ctx, "TypeError", "run() callback must return a Response");
-        }
-
-        var response = try self.extractResponseInternal(upgraded, false);
-        defer response.deinit();
-        self.persistActiveDurableResponse(&response);
-        return upgraded;
-    }
-
-    fn durableStep(self: *Self, ctx: *zq.Context, name: []const u8, step_val: zq.JSValue) anyerror!zq.JSValue {
-        const active = self.active_durable_run orelse {
-            return zq.modules.util.throwError(ctx, "Error", "step() must be called inside run()");
-        };
-        if (!step_val.isObject()) {
-            return zq.modules.util.throwError(ctx, "TypeError", "step() expects a callable function");
-        }
-        if (active.step_depth > 0) {
-            return zq.modules.util.throwError(ctx, "Error", "nested step() is not supported");
-        }
-
-        switch (active.state.beginStep(name)) {
-            .cached => |result_json| {
-                return zq.trace.jsonToJSValue(ctx, result_json);
-            },
-            .execute => {},
-            .live => {
-                active.state.persistStepStart(name);
-            },
-        }
-
-        self.active_durable_run.?.step_depth += 1;
-        defer self.active_durable_run.?.step_depth -= 1;
-
-        const func_obj = step_val.toPtr(zq.JSObject);
-        const result = try self.callFunction(func_obj, &.{});
-        self.active_durable_run.?.state.persistStepResult(name, ctx, result);
-        return result;
-    }
-
-    fn durableStepWithTimeout(self: *Self, ctx: *zq.Context, name: []const u8, timeout_ms: i64, step_val: zq.JSValue) anyerror!zq.JSValue {
-        const active = self.active_durable_run orelse {
-            return zq.modules.util.throwError(ctx, "Error", "stepWithTimeout() must be called inside run()");
-        };
-        if (!step_val.isObject()) {
-            return zq.modules.util.throwError(ctx, "TypeError", "stepWithTimeout() expects a callable function");
-        }
-        if (active.step_depth > 0) {
-            return zq.modules.util.throwError(ctx, "Error", "nested stepWithTimeout() is not supported");
-        }
-
-        switch (active.state.beginStep(name)) {
-            .cached => |result_json| {
-                return zq.trace.jsonToJSValue(ctx, result_json);
-            },
-            .execute => {},
-            .live => {
-                active.state.persistStepStart(name);
-            },
-        }
-
-        self.active_durable_run.?.step_depth += 1;
-        defer self.active_durable_run.?.step_depth -= 1;
-
-        const deadline_ms = std.math.add(i64, unixMillis(), timeout_ms) catch std.math.maxInt(i64);
-        const func_obj = step_val.toPtr(zq.JSObject);
-        const result = self.callFunction(func_obj, &.{}) catch |err| {
-            if (err == error.DurableSuspended) return err;
-            // On execution error, check if we exceeded the deadline
-            if (unixMillis() >= deadline_ms) {
-                const timeout_result = try zq.modules.util.createPlainResultErr(ctx, "timeout");
-                self.active_durable_run.?.state.persistStepResult(name, ctx, timeout_result);
-                return timeout_result;
-            }
-            return err;
-        };
-
-        // Check if execution exceeded the deadline
-        if (unixMillis() >= deadline_ms) {
-            const timeout_result = try zq.modules.util.createPlainResultErr(ctx, "timeout");
-            self.active_durable_run.?.state.persistStepResult(name, ctx, timeout_result);
-            return timeout_result;
-        }
-
-        const ok_result = try zq.modules.util.createPlainResultOk(ctx, result);
-        self.active_durable_run.?.state.persistStepResult(name, ctx, ok_result);
-        return ok_result;
-    }
-
-    fn durableSleepUntil(self: *Self, ctx: *zq.Context, until_ms: i64) anyerror!zq.JSValue {
-        if (self.active_durable_run == null) {
-            return zq.modules.util.throwError(ctx, "Error", "sleepUntil() must be called inside run()");
-        }
-        const active = &self.active_durable_run.?;
-        if (active.step_depth > 0) {
-            return zq.modules.util.throwError(ctx, "Error", "sleepUntil() is not supported inside step()");
-        }
-
-        const now_ms = unixMillis();
-        switch (active.state.beginTimerWait()) {
-            .ready => return zq.JSValue.undefined_val,
-            .pending => |wait| {
-                if (wait.until_ms <= now_ms) {
-                    active.state.persistResumeTimer(now_ms);
-                    return zq.JSValue.undefined_val;
-                }
-                try active.setPendingTimer(self.allocator, wait.until_ms);
-                return error.DurableSuspended;
-            },
-            .live => {
-                active.state.persistWaitTimer(until_ms);
-                if (until_ms <= now_ms) {
-                    active.state.persistResumeTimer(now_ms);
-                    return zq.JSValue.undefined_val;
-                }
-                try active.setPendingTimer(self.allocator, until_ms);
-                return error.DurableSuspended;
-            },
-        }
-    }
-
-    fn durableWaitSignal(self: *Self, ctx: *zq.Context, name: []const u8) anyerror!zq.JSValue {
-        if (self.active_durable_run == null) {
-            return zq.modules.util.throwError(ctx, "Error", "waitSignal() must be called inside run()");
-        }
-        const active = &self.active_durable_run.?;
-        if (active.step_depth > 0) {
-            return zq.modules.util.throwError(ctx, "Error", "waitSignal() is not supported inside step()");
-        }
-
-        var store = try self.initDurableStore();
-        const now_ms = unixMillis();
-
-        switch (active.state.beginSignalWait(name)) {
-            .delivered => |payload_json| return zq.trace.jsonToJSValue(ctx, payload_json),
-            .live => active.state.persistWaitSignal(name),
-            .pending => {},
-        }
-
-        if (try store.tryConsumeSignal(active.key, name, now_ms)) |payload| {
-            var consumed = payload;
-            defer consumed.deinit();
-            active.state.persistResumeSignal(name, consumed.payload_json);
-            // Unlink only after the consumption is durably in the oplog; the
-            // reverse order loses the signal on a crash in between.
-            store.finalizeConsumedSignal(&consumed);
-            return zq.trace.jsonToJSValue(ctx, consumed.payload_json);
-        }
-        try active.setPendingSignal(self.allocator, name);
-        return error.DurableSuspended;
-    }
-
-    fn durableSignal(self: *Self, ctx: *zq.Context, key: []const u8, name: []const u8, payload: zq.JSValue) anyerror!zq.JSValue {
-        const exists = self.durableSignalTargetExists(key) catch |err| switch (err) {
-            error.DurableKeyCollision => return zq.modules.util.throwError(ctx, "Error", "durable key collision detected for oplog path"),
-            else => return err,
-        };
-        if (!exists) return zq.JSValue.false_val;
-
-        const payload_json = self.serializeDurablePayload(ctx, payload) catch |err| switch (err) {
-            error.InvalidDurablePayload => return zq.modules.util.throwError(ctx, "TypeError", "signal() payload must be JSON-serializable"),
-            else => return err,
-        };
-        defer self.allocator.free(payload_json);
-
-        var store = try self.initDurableStore();
-        try store.enqueueSignal(key, name, payload_json);
-        return zq.JSValue.true_val;
-    }
-
-    fn durableSignalAt(
-        self: *Self,
-        ctx: *zq.Context,
-        key: []const u8,
-        name: []const u8,
-        at_ms: i64,
-        payload: zq.JSValue,
-    ) anyerror!zq.JSValue {
-        const exists = self.durableSignalTargetExists(key) catch |err| switch (err) {
-            error.DurableKeyCollision => return zq.modules.util.throwError(ctx, "Error", "durable key collision detected for oplog path"),
-            else => return err,
-        };
-        if (!exists) return zq.JSValue.false_val;
-
-        const payload_json = self.serializeDurablePayload(ctx, payload) catch |err| switch (err) {
-            error.InvalidDurablePayload => return zq.modules.util.throwError(ctx, "TypeError", "signalAt() payload must be JSON-serializable"),
-            else => return err,
-        };
-        defer self.allocator.free(payload_json);
-
-        var store = try self.initDurableStore();
-        try store.enqueueSignalAt(key, name, at_ms, payload_json);
-        return zq.JSValue.true_val;
-    }
-
-    fn initDurableStore(self: *Self) !durable_store_mod.DurableStore {
-        const dir = self.config.durable_oplog_dir orelse return error.DurableDisabled;
-        return durable_store_mod.DurableStore.initFs(self.allocator, dir);
-    }
-
-    fn durableSignalTargetExists(self: *Self, key: []const u8) !bool {
-        const path = try self.buildDurableOplogPath(key);
-        defer self.allocator.free(path);
-
-        const source = try self.readDurableLogIfExists(path) orelse return false;
-        defer self.allocator.free(source);
-
-        var parsed = try zq.trace.parseDurableOplog(self.allocator, source);
-        defer parsed.deinit();
-
-        if (parsed.run_key) |existing_key| {
-            if (!std.mem.eql(u8, existing_key, key)) return error.DurableKeyCollision;
-        }
-
-        return !parsed.complete;
-    }
-
-    fn serializeDurablePayload(self: *Self, ctx: *zq.Context, payload: zq.JSValue) ![]u8 {
-        if (payload.isUndefined()) {
-            return self.allocator.dupe(u8, "null");
-        }
-
-        const json_val = zq.builtins.jsonStringify(ctx, zq.JSValue.undefined_val, &.{payload});
-        if (ctx.hasException()) {
-            ctx.clearException();
-            return error.InvalidDurablePayload;
-        }
-
-        const json = getStringData(json_val) orelse return error.InvalidDurablePayload;
-        return self.allocator.dupe(u8, json);
-    }
-
-    fn buildPendingDurableResponseValue(self: *Self) !zq.JSValue {
-        const active = self.active_durable_run orelse return error.NoActiveDurableRun;
-        const wait = active.pending_wait orelse return error.MissingDurableWait;
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
-
-        try body.appendSlice(self.allocator, "{\"pending\":true,\"durableKey\":\"");
-        try appendEscapedJson(&body, self.allocator, active.key);
-        try body.appendSlice(self.allocator, "\",\"wait\":{");
-
-        switch (wait) {
-            .timer => |until_ms| {
-                try body.appendSlice(self.allocator, "\"type\":\"timer\",\"until\":");
-                var tmp: [32]u8 = undefined;
-                const printed = try std.fmt.bufPrint(&tmp, "{d}", .{until_ms});
-                try body.appendSlice(self.allocator, printed);
-            },
-            .signal => |name| {
-                try body.appendSlice(self.allocator, "\"type\":\"signal\",\"name\":\"");
-                try appendEscapedJson(&body, self.allocator, name);
-                try body.appendSlice(self.allocator, "\"");
-            },
-        }
-
-        try body.appendSlice(self.allocator, "}}");
-        const created = try createFetchResponse(self, 202, "Accepted", body.items, "application/json");
-        return created.value;
-    }
-
-    fn tryLoadCompletedDurableResponse(self: *Self, key: []const u8) !?zq.JSValue {
-        if (self.pending_durable_recovery != null) return null;
-
-        const path = try self.buildDurableOplogPath(key);
-        defer self.allocator.free(path);
-
-        const source = try self.readDurableLogIfExists(path) orelse return null;
-        defer self.allocator.free(source);
-
-        var parsed = try zq.trace.parseDurableOplog(self.allocator, source);
-        defer parsed.deinit();
-
-        if (!parsed.complete) return null;
-        if (parsed.run_key) |existing_key| {
-            if (!std.mem.eql(u8, existing_key, key)) return error.DurableKeyCollision;
-        }
-
-        const response = parsed.response orelse return error.DurableMissingResponse;
-        return try self.buildStoredResponseValue(response);
-    }
-
-    fn openActiveDurableRun(self: *Self, key: []const u8) !ActiveDurableRun {
-        if (self.pending_durable_recovery) |pending| {
-            if (!std.mem.eql(u8, pending.key, key)) return error.DurableRecoveryKeyMismatch;
-
-            // No lock here: the recovery pass (durable_recovery.OplogClaim)
-            // already holds the oplog lock on its own fd for the duration of
-            // this re-execution; taking it again on a second fd would
-            // self-deadlock.
-            const fd = try openOplogAppendFile(self.allocator, pending.oplog_path);
-            const state = try self.allocator.create(zq.trace.DurableState);
-            state.* = zq.trace.DurableState.init(self.allocator, pending.events, fd);
-            return .{
-                .key = try self.allocator.dupe(u8, key),
-                .oplog_path = try self.allocator.dupe(u8, pending.oplog_path),
-                .oplog_fd = fd,
-                .state = state,
-            };
-        }
-
-        const path = try self.buildDurableOplogPath(key);
-        errdefer self.allocator.free(path);
-
-        if (zq.file_io.fileExists(self.allocator, path)) {
-            // Lock before reading the snapshot: a concurrent recovery pass
-            // (or a second live request on the same key) appending between
-            // the read and our first write would double-apply effects.
-            const fd = try openOplogAppendFile(self.allocator, path);
-            errdefer std.Io.Threaded.closeFd(fd);
-            try tryLockOplogFd(fd);
-
-            const source = (try self.readDurableLogIfExists(path)) orelse
-                return error.FileOpenFailed;
-            errdefer self.allocator.free(source);
-
-            var parsed = try zq.trace.parseDurableOplog(self.allocator, source);
-            defer parsed.deinit();
-
-            if (parsed.run_key) |existing_key| {
-                if (!std.mem.eql(u8, existing_key, key)) return error.DurableKeyCollision;
-            }
-            if (parsed.complete) return error.DurableAlreadyComplete;
-
-            const events = parsed.events;
-            parsed.events = &.{};
-
-            const state = try self.allocator.create(zq.trace.DurableState);
-            state.* = zq.trace.DurableState.init(self.allocator, events, fd);
-            return .{
-                .key = try self.allocator.dupe(u8, key),
-                .oplog_path = path,
-                .oplog_fd = fd,
-                .state = state,
-                .owned_events = events,
-                .source_snapshot = source,
-            };
-        }
-
-        const request = self.active_request orelse return error.NoActiveRequest;
-        const fd = try openLockedFreshOplog(self.allocator, path);
-        errdefer std.Io.Threaded.closeFd(fd);
-
-        const state = try self.allocator.create(zq.trace.DurableState);
-        errdefer self.allocator.destroy(state);
-        state.* = zq.trace.DurableState.init(self.allocator, &.{}, fd);
-        state.persistRunKey(key);
-
-        var h_names: [64][]const u8 = undefined;
-        var h_values: [64][]const u8 = undefined;
-        const hcount = splitHeaderKV(request.headers.items, &h_names, &h_values);
-        state.persistRequest(
-            request.method,
-            request.url,
-            h_names[0..hcount],
-            h_values[0..hcount],
-            request.body,
-        );
-
-        return .{
-            .key = try self.allocator.dupe(u8, key),
-            .oplog_path = path,
-            .oplog_fd = fd,
-            .state = state,
-        };
-    }
-
-    fn buildDurableOplogPath(self: *Self, key: []const u8) ![]u8 {
-        const dir = self.config.durable_oplog_dir orelse return error.DurableDisabled;
-        return std.fmt.allocPrint(
-            self.allocator,
-            "{s}/durable-{x}.jsonl",
-            .{ dir, std.hash.Fnv1a_64.hash(key) },
-        );
-    }
-
-    fn readDurableLogIfExists(self: *Self, path: []const u8) !?[]u8 {
-        return zq.file_io.readFile(self.allocator, path, 100 * 1024 * 1024) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => err,
-        };
-    }
-
-    fn buildStoredResponseValue(self: *Self, response: zq.trace.ResponseTrace) !zq.JSValue {
-        var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
-        defer headers.deinit(self.allocator);
-        try parseHeadersFromJson(self.allocator, response.headers_json, &headers);
-        const body = try zq.trace.unescapeJson(self.allocator, response.body);
-        defer self.allocator.free(body);
-
-        var content_type: ?[]const u8 = null;
-        for (headers.items) |header| {
-            if (ascii.eqlIgnoreCase(header.key, "content-type")) {
-                content_type = header.value;
-                break;
-            }
-        }
-
-        const created = try createFetchResponse(
-            self,
-            response.status,
-            statusTextFor(response.status),
-            body,
-            content_type,
-        );
-
-        for (headers.items) |header| {
-            const key_atom = try getHeaderAtom(self.ctx, header.key);
-            const value_str = try self.ctx.createString(header.value);
-            try self.ctx.setPropertyChecked(created.headers, key_atom, value_str);
-        }
-
-        return created.value;
-    }
-
-    fn isResponseLike(self: *Self, value: zq.JSValue) bool {
-        if (!value.isObject()) return false;
-        const pool = self.ctx.hidden_class_pool orelse return false;
-        const obj = value.toPtr(zq.JSObject);
-        return obj.getProperty(pool, zq.Atom.status) != null and
-            obj.getProperty(pool, zq.Atom.body) != null and
-            obj.getProperty(pool, zq.Atom.headers) != null;
-    }
-
-    fn persistActiveDurableResponse(self: *Self, response: *const HttpResponse) void {
-        if (self.active_durable_run) |*active| {
-            var h_names: [64][]const u8 = undefined;
-            var h_values: [64][]const u8 = undefined;
-            const hcount = splitHeaderKV(response.headers.items, &h_names, &h_values);
-            active.state.persistResponse(
-                response.status,
-                h_names[0..hcount],
-                h_values[0..hcount],
-                response.body,
-            );
-            active.state.markComplete();
-        }
-    }
 
     /// Try to dispatch request via native fast path.
     /// Returns response if a static pattern matches, null otherwise.
@@ -2189,7 +1642,7 @@ pub const Runtime = struct {
         return self.ctx.createString(str);
     }
 
-    fn callFunction(self: *Self, func_obj: *zq.JSObject, args: []const zq.JSValue) !zq.JSValue {
+    pub fn callFunction(self: *Self, func_obj: *zq.JSObject, args: []const zq.JSValue) !zq.JSValue {
         if (func_obj.getClosureData()) |closure_data| {
             const prev_closure = self.interpreter.current_closure;
             self.interpreter.current_closure = closure_data;
@@ -2253,7 +1706,7 @@ pub const Runtime = struct {
         }
     }
 
-    fn extractResponseInternal(self: *Self, result: zq.JSValue, borrow_body: bool) !HttpResponse {
+    pub fn extractResponseInternal(self: *Self, result: zq.JSValue, borrow_body: bool) !HttpResponse {
         var response = HttpResponse.init(self.allocator);
 
         if (!result.isObject()) {
@@ -2492,7 +1945,7 @@ fn createResponseHeadersObject(rt: *Runtime) !*zq.JSObject {
     return rt.ctx.createObject(rt.headers_prototype);
 }
 
-fn createFetchResponse(rt: *Runtime, status: u16, status_text: []const u8, body: []const u8, content_type: ?[]const u8) !FetchResponseObjects {
+pub fn createFetchResponse(rt: *Runtime, status: u16, status_text: []const u8, body: []const u8, content_type: ?[]const u8) !FetchResponseObjects {
     const body_val = try rt.ctx.createString(body);
     const body_str = body_val.toPtr(zq.JSString);
     const response_val = try zq.http.createResponseFromString(
@@ -2749,7 +2202,7 @@ fn responseRedirectStaticNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []c
 
 /// Split a slice of headers (any struct with .key/.value) into parallel
 /// name/value arrays for trace recording. Returns the count written.
-fn splitHeaderKV(headers: anytype, names: *[64][]const u8, values: *[64][]const u8) usize {
+pub fn splitHeaderKV(headers: anytype, names: *[64][]const u8, values: *[64][]const u8) usize {
     const count = @min(headers.len, 64);
     for (headers[0..count], 0..) |hdr, i| {
         names[i] = hdr.key;
@@ -3356,77 +2809,6 @@ fn scopeCall1(
     return callJsThunk(runtime_ptr, thunk_val, &args);
 }
 
-fn durableRunCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    key: []const u8,
-    run_val: zq.JSValue,
-) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
-    return rt.durableRun(ctx, key, run_val);
-}
-
-fn durableStepCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    name: []const u8,
-    step_val: zq.JSValue,
-) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
-    return rt.durableStep(ctx, name, step_val);
-}
-
-fn durableStepWithTimeoutCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    name: []const u8,
-    timeout_ms: i64,
-    step_val: zq.JSValue,
-) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
-    return rt.durableStepWithTimeout(ctx, name, timeout_ms, step_val);
-}
-
-fn durableSleepUntilCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    until_ms: i64,
-) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
-    return rt.durableSleepUntil(ctx, until_ms);
-}
-
-fn durableWaitSignalCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    name: []const u8,
-) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
-    return rt.durableWaitSignal(ctx, name);
-}
-
-fn durableSignalCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    key: []const u8,
-    name: []const u8,
-    payload: zq.JSValue,
-) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
-    return rt.durableSignal(ctx, key, name, payload);
-}
-
-fn durableSignalAtCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    key: []const u8,
-    name: []const u8,
-    at_ms: i64,
-    payload: zq.JSValue,
-) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
-    return rt.durableSignalAt(ctx, key, name, at_ms, payload);
-}
 
 const ServiceRoute = struct {
     method_text: []const u8,
@@ -3871,289 +3253,6 @@ fn persistResponseToCache(
 /// Thread-local: each ws frame-loop thread runs independent dispatches,
 /// so per-thread storage keeps connections cleanly separated.
 pub threadlocal var active_ws_connection: ?u64 = null;
-
-fn wsConnectionIdFromArg(arg: zq.JSValue) ?u64 {
-    if (arg.isInt()) {
-        const raw = arg.getInt();
-        if (raw <= 0) return null;
-        return @as(u64, @intCast(raw));
-    }
-    return null;
-}
-
-fn wsPoolFromRuntime(runtime_ptr: *anyopaque) ?*websocket_pool.Pool {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
-    return rt.ws_pool_ref;
-}
-
-/// Raw RFC 6455 frame write for server→client messages (unmasked).
-/// Used by the `send` callback; symmetric with what the frame loop
-/// reads. Payload size is capped at 64 KiB to match the inbound cap.
-fn writeWebSocketFrame(fd: std.posix.fd_t, opcode: u4, payload: []const u8) !void {
-    var header_buf: [10]u8 = undefined;
-    header_buf[0] = 0x80 | @as(u8, opcode); // FIN = 1
-    var header_len: usize = 2;
-    if (payload.len < 126) {
-        header_buf[1] = @as(u8, @intCast(payload.len));
-    } else if (payload.len <= 0xFFFF) {
-        header_buf[1] = 126;
-        std.mem.writeInt(u16, header_buf[2..4], @as(u16, @intCast(payload.len)), .big);
-        header_len = 4;
-    } else {
-        header_buf[1] = 127;
-        std.mem.writeInt(u64, header_buf[2..10], payload.len, .big);
-        header_len = 10;
-    }
-
-    // Gather-write the header and payload in a single writev syscall. Under the
-    // thread-per-connection model two frame-loop threads can call this on the
-    // same peer socket concurrently (broadcast); two separate write() calls
-    // (header, then payload) gave a guaranteed interleave window between them.
-    // One writev delivers a frame to the socket buffer atomically whenever it
-    // fits (the common case under the 64 KiB cap). A short write on a frame
-    // larger than the send buffer can still interleave; the fully-robust fix is
-    // a per-connection send lock, deferred as it requires reworking the pool's
-    // value-copied Connection storage.
-    if (payload.len > 0) {
-        var iovecs: [2]std.posix.iovec_const = .{
-            .{ .base = header_buf[0..header_len].ptr, .len = header_len },
-            .{ .base = payload.ptr, .len = payload.len },
-        };
-        try server_io.writevAllFd(fd, &iovecs);
-    } else {
-        try writeAllPosix(fd, header_buf[0..header_len]);
-    }
-}
-
-fn writeAllPosix(fd: std.posix.fd_t, data: []const u8) !void {
-    var remaining = data;
-    while (remaining.len > 0) {
-        const result = std.c.write(fd, remaining.ptr, remaining.len);
-        if (result < 0) return error.WriteFailed;
-        const n: usize = @intCast(result);
-        if (n == 0) return error.WriteFailed;
-        remaining = remaining[n..];
-    }
-}
-
-fn wsSendCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    args: []const zq.JSValue,
-) anyerror!zq.JSValue {
-    if (args.len < 2) {
-        return zq.modules.util.throwError(ctx, "TypeError", "send(ws, data) requires 2 arguments");
-    }
-    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
-    };
-    const id = wsConnectionIdFromArg(args[0]) orelse {
-        return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
-    };
-    // getStringDataCtx (not extractString) so a payload built by concatenation
-    // (a concat rope once combined length >= 64, the common `"event: " + ...`
-    // case) is flattened rather than rejected as "not a string".
-    const bytes = getStringDataCtx(args[1], ctx) orelse {
-        return zq.modules.util.throwError(ctx, "TypeError", "data must be a string (binary frames land in W2)");
-    };
-    // dup the fd under the pool lock rather than reading snapshot().fd and
-    // writing outside the lock: the latter races the frame loop's
-    // unregister-then-close and can write into a recycled fd (another peer).
-    const fd = pool.dupFd(id) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
-    };
-    defer _ = std.c.close(fd);
-    writeWebSocketFrame(fd, 0x1, bytes) catch |err| {
-        std.log.warn("ws send failed (id={d}): {}", .{ id, err });
-        return zq.modules.util.throwError(ctx, "Error", "ws send failed");
-    };
-    return zq.JSValue.undefined_val;
-}
-
-fn wsCloseCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    args: []const zq.JSValue,
-) anyerror!zq.JSValue {
-    if (args.len < 1) {
-        return zq.modules.util.throwError(ctx, "TypeError", "close(ws, code?, reason?) requires at least 1 argument");
-    }
-    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
-    };
-    const id = wsConnectionIdFromArg(args[0]) orelse {
-        return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
-    };
-    const code: u16 = blk: {
-        if (args.len < 2) break :blk 1000;
-        if (args[1].isInt()) {
-            const raw = args[1].getInt();
-            if (raw < 1000 or raw > 4999) {
-                return zq.modules.util.throwError(ctx, "RangeError", "close code must be in [1000, 4999]");
-            }
-            break :blk @as(u16, @intCast(raw));
-        }
-        return zq.modules.util.throwError(ctx, "TypeError", "close code must be a number");
-    };
-    const reason: []const u8 = if (args.len >= 3)
-        getStringDataCtx(args[2], ctx) orelse ""
-    else
-        "";
-
-    // dup under the lock (see wsSendCallback) so the close frame and shutdown
-    // never land on a recycled fd belonging to another connection.
-    const fd = pool.dupFd(id) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
-    };
-    defer _ = std.c.close(fd);
-
-    // RFC 6455 §5.5.1: close payload is [status_u16_be][reason_utf8].
-    // Reason length is capped at 123 so total payload fits in a 125-byte
-    // short frame (126+ would force extended-length headers the peer
-    // has to honour).
-    var payload_buf: [125]u8 = undefined;
-    std.mem.writeInt(u16, payload_buf[0..2], code, .big);
-    const reason_len = @min(reason.len, 123);
-    if (reason_len > 0) {
-        @memcpy(payload_buf[2..][0..reason_len], reason[0..reason_len]);
-    }
-    writeWebSocketFrame(fd, 0x8, payload_buf[0 .. 2 + reason_len]) catch |err| {
-        std.log.warn("ws close write failed (id={d}): {}", .{ id, err });
-    };
-    // Shutting down the write half (of the shared socket) lets the peer's read
-    // return EOS promptly; the frame loop will then exit and clean up. Ignoring
-    // the shutdown error here is intentional — the connection is already being
-    // torn down. SHUT_WR == 1 on every supported platform.
-    _ = std.c.shutdown(fd, 1);
-    return zq.JSValue.undefined_val;
-}
-
-fn wsSerializeAttachmentCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    args: []const zq.JSValue,
-) anyerror!zq.JSValue {
-    if (args.len < 2) {
-        return zq.modules.util.throwError(ctx, "TypeError", "serializeAttachment(ws, value) requires 2 arguments");
-    }
-    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
-    };
-    const id = wsConnectionIdFromArg(args[0]) orelse {
-        return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
-    };
-    // W2-a accepts raw strings only. Handlers with structured state
-    // pre-serialize (JSON.stringify will arrive with the structured
-    // clone work; for now a string payload is the contract). W2-b
-    // extends this into a typed-array path for binary attachments.
-    const bytes = getStringDataCtx(args[1], ctx) orelse {
-        return zq.modules.util.throwError(ctx, "TypeError", "attachment must be a string (W2-a); binary lands in W2-b");
-    };
-    const ok = pool.setAttachment(id, bytes) catch |err| {
-        std.log.warn("ws setAttachment failed (id={d}): {}", .{ id, err });
-        return zq.modules.util.throwError(ctx, "Error", "attachment write failed");
-    };
-    if (!ok) {
-        return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
-    }
-    return zq.JSValue.undefined_val;
-}
-
-fn wsDeserializeAttachmentCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    args: []const zq.JSValue,
-) anyerror!zq.JSValue {
-    if (args.len < 1) {
-        return zq.modules.util.throwError(ctx, "TypeError", "deserializeAttachment(ws) requires 1 argument");
-    }
-    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
-    };
-    const id = wsConnectionIdFromArg(args[0]) orelse {
-        return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
-    };
-    // The pool hands us a freshly-duped slice; ctx.createString copies
-    // into a JSString, so the interim allocation is short-lived and we
-    // free it before returning.
-    const bytes = pool.copyAttachment(id, ctx.allocator) catch |err| {
-        std.log.warn("ws copyAttachment failed (id={d}): {}", .{ id, err });
-        return zq.modules.util.throwError(ctx, "Error", "attachment read failed");
-    } orelse return zq.JSValue.undefined_val;
-    defer ctx.allocator.free(bytes);
-    return try ctx.createString(bytes);
-}
-
-fn wsGetWebSocketsCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    args: []const zq.JSValue,
-) anyerror!zq.JSValue {
-    if (args.len < 1) {
-        return zq.modules.util.throwError(ctx, "TypeError", "getWebSockets(roomKey) requires 1 argument");
-    }
-    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
-    };
-    const room_key = zq.modules.util.extractString(args[0]) orelse {
-        return zq.modules.util.throwError(ctx, "TypeError", "roomKey must be a string");
-    };
-
-    // Room membership snapshot: 256 peers is the W1 ceiling (see
-    // max_room_peers in ws_frame_loop). Overflow returns the first N,
-    // which W2 replaces with an iterator that doesn't cap.
-    var ids_buf: [256]websocket_pool.ConnectionId = undefined;
-    const ids = pool.collectRoom(room_key, &ids_buf);
-
-    const arr = try ctx.createArray();
-    arr.prototype = ctx.array_prototype;
-    for (ids, 0..) |id, i| {
-        const id_i32: i32 = std.math.cast(i32, id) orelse continue;
-        try ctx.setIndexChecked(arr, @as(u32, @intCast(i)), zq.JSValue.fromInt(id_i32));
-    }
-    arr.setArrayLength(@as(u32, @intCast(ids.len)));
-    return arr.toValue();
-}
-
-fn wsRoomFromPathCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    args: []const zq.JSValue,
-) anyerror!zq.JSValue {
-    _ = runtime_ptr;
-    _ = args;
-    return zq.modules.util.throwError(ctx, "Error", "roomFromPath lands in W2");
-}
-
-fn wsSetAutoResponseCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    args: []const zq.JSValue,
-) anyerror!zq.JSValue {
-    if (args.len < 3) {
-        return zq.modules.util.throwError(ctx, "TypeError", "setAutoResponse(ws, request, response) requires 3 arguments");
-    }
-    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
-    };
-    const id = wsConnectionIdFromArg(args[0]) orelse {
-        return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
-    };
-    const request_bytes = zq.modules.util.extractString(args[1]) orelse {
-        return zq.modules.util.throwError(ctx, "TypeError", "setAutoResponse request must be a string");
-    };
-    const response_bytes = zq.modules.util.extractString(args[2]) orelse {
-        return zq.modules.util.throwError(ctx, "TypeError", "setAutoResponse response must be a string");
-    };
-    const ok = pool.setAutoResponse(id, request_bytes, response_bytes) catch |err| {
-        std.log.warn("ws setAutoResponse failed (id={d}): {}", .{ id, err });
-        return zq.modules.util.throwError(ctx, "Error", "auto-response registration failed");
-    };
-    if (!ok) {
-        return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
-    }
-    return zq.JSValue.undefined_val;
-}
 
 fn serviceCallCallback(
     runtime_ptr: *anyopaque,
@@ -5383,7 +4482,7 @@ fn seedIncompleteDurableRandomStep(
     const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
     defer rt.deinit();
 
-    const path = try rt.buildDurableOplogPath(key);
+    const path = try durable_executor.buildDurableOplogPath(rt, key);
     defer allocator.free(path);
 
     const fd = try openOplogFile(allocator, path);
@@ -5560,7 +4659,7 @@ test "durable run reuses completed response for duplicate key" {
 
     try std.testing.expectEqualStrings(first_body, second_response.body);
 
-    const path = try rt.buildDurableOplogPath("order:123");
+    const path = try durable_executor.buildDurableOplogPath(rt, "order:123");
     defer allocator.free(path);
 
     const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
@@ -5619,7 +4718,7 @@ test "durable run resumes from completed step state" {
     try std.testing.expectEqual(@as(f64, 0.25), obj.get("seed").?.float);
     try std.testing.expect(obj.get("stamp") != null);
 
-    const path = try rt.buildDurableOplogPath("resume:123");
+    const path = try durable_executor.buildDurableOplogPath(rt, "resume:123");
     defer allocator.free(path);
 
     const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
@@ -5670,7 +4769,7 @@ test "durable sleepUntil returns pending response without duplicating wait" {
     try std.testing.expectEqual(@as(u16, 202), second_response.status);
     try std.testing.expect(std.mem.indexOf(u8, second_response.body, "\"pending\":true") != null);
 
-    const path = try rt.buildDurableOplogPath("timer:123");
+    const path = try durable_executor.buildDurableOplogPath(rt, "timer:123");
     defer allocator.free(path);
 
     const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
@@ -5795,7 +4894,7 @@ test "durable waitSignal resumes from queued signal" {
     defer parsed_payload.deinit();
     try std.testing.expect(parsed_payload.value.object.get("ok").?.bool);
 
-    const path = try rt.buildDurableOplogPath("job:123");
+    const path = try durable_executor.buildDurableOplogPath(rt, "job:123");
     defer allocator.free(path);
 
     const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
@@ -8418,7 +7517,7 @@ test "durable run refuses the oplog while a recovery claim holds it" {
     ;
     try rt.loadHandler(handler_code, "<durable-busy>");
 
-    const path = try rt.buildDurableOplogPath("order:busy");
+    const path = try durable_executor.buildDurableOplogPath(rt, "order:busy");
     defer allocator.free(path);
 
     // Hold the recovery-style advisory lock, as durable_recovery.OplogClaim

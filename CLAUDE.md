@@ -148,7 +148,7 @@ HTTP: `server.zig`, runtime management: `zruntime.zig`, live reload: `live_reloa
 
 Request flow: accept connection, check proven route table (contract-aware pre-filter), check proof cache for deterministic+read_only handlers (`proof_adapter.zig`), acquire isolated runtime from HandlerPool (LockFreePool-backed), convert to JS Request, invoke handler, extract Response, release runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, proof cache activation, and property logging (`contract_runtime.zig`).
 
-Key patterns: `Result(T)` for error handling (ok/err variants), hidden classes for inline caching, request-scoped arena allocation, guard composition via pipe operator (`packages/modules/src/workflow/compose.zig`).
+Key patterns: native Zig error unions (`!T`) for error handling throughout the implementation (the `Result<T>` seen in handlers is a user-facing JS/verification construct, not a Zig engine pattern), hidden classes for inline caching, request-scoped arena allocation, guard composition via pipe operator (`packages/modules/src/workflow/compose.zig`).
 
 For detailed architecture: [docs/internals/architecture.md](docs/internals/architecture.md). For performance internals: [docs/performance.md](docs/performance.md).
 

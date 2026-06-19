@@ -910,24 +910,16 @@ pub const StrictChecker = struct {
     fn collectAnnotatedFunctions(self: *StrictChecker, node: NodeIndex) void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
+        // Leaf action: record bindings whose initializer is an annotated
+        // function. Structural descent (including into function bodies) is
+        // handled by forEachChild below: for a .function_decl it descends into
+        // decl.init (the function node), whose .function_expr arm then reaches
+        // func.body - the same node the open-coded walk reached directly.
         switch (tag) {
-            .program, .block => {
-                const block = self.ir_view.getBlock(node) orelse return;
-                for (0..block.stmts_count) |i| {
-                    self.collectAnnotatedFunctions(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
-                }
-            },
-            .export_decl => {
-                const export_decl = self.ir_view.getExportDecl(node) orelse return;
-                self.collectAnnotatedFunctions(export_decl.declaration);
-            },
             .function_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 if (self.functionHasAnnotation(decl.init)) {
                     self.annotated_function_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch {};
-                }
-                if (self.ir_view.getFunction(decl.init)) |func| {
-                    self.collectAnnotatedFunctions(func.body);
                 }
             },
             .var_decl => {
@@ -935,22 +927,10 @@ pub const StrictChecker = struct {
                 if (decl.init != null_node and self.isFunctionNode(decl.init) and self.functionHasAnnotation(decl.init)) {
                     self.annotated_function_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch {};
                 }
-                self.collectAnnotatedFunctions(decl.init);
-            },
-            .function_expr, .arrow_function => {
-                if (self.ir_view.getFunction(node)) |func| self.collectAnnotatedFunctions(func.body);
-            },
-            .if_stmt => {
-                const if_stmt = self.ir_view.getIfStmt(node) orelse return;
-                self.collectAnnotatedFunctions(if_stmt.then_branch);
-                self.collectAnnotatedFunctions(if_stmt.else_branch);
-            },
-            .for_of_stmt => {
-                const for_iter = self.ir_view.getForIter(node) orelse return;
-                self.collectAnnotatedFunctions(for_iter.body);
             },
             else => {},
         }
+        self.ir_view.forEachChild(node, self, collectAnnotatedFunctions);
     }
 
     fn functionHasAnnotation(self: *const StrictChecker, node: NodeIndex) bool {
@@ -1014,42 +994,16 @@ pub const StrictChecker = struct {
     fn collectStaticLiterals(self: *StrictChecker, node: NodeIndex) void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
-        switch (tag) {
-            .program, .block => {
-                const block = self.ir_view.getBlock(node) orelse return;
-                for (0..block.stmts_count) |i| {
-                    self.collectStaticLiterals(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
-                }
-            },
-            .export_decl => {
-                const export_decl = self.ir_view.getExportDecl(node) orelse return;
-                self.collectStaticLiterals(export_decl.declaration);
-            },
-            .var_decl => {
-                const decl = self.ir_view.getVarDecl(node) orelse return;
-                if (decl.kind == .@"const" and self.isLiteralOrStaticTemplate(decl.init)) {
-                    self.static_literal_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch {};
-                }
-                self.collectStaticLiterals(decl.init);
-            },
-            .function_decl => {
-                const decl = self.ir_view.getVarDecl(node) orelse return;
-                self.collectStaticLiterals(decl.init);
-            },
-            .function_expr, .arrow_function => {
-                if (self.ir_view.getFunction(node)) |func| self.collectStaticLiterals(func.body);
-            },
-            .if_stmt => {
-                const if_stmt = self.ir_view.getIfStmt(node) orelse return;
-                self.collectStaticLiterals(if_stmt.then_branch);
-                self.collectStaticLiterals(if_stmt.else_branch);
-            },
-            .for_of_stmt => {
-                const for_iter = self.ir_view.getForIter(node) orelse return;
-                self.collectStaticLiterals(for_iter.body);
-            },
-            else => {},
+        // Leaf action: record `const` bindings initialized to a literal or
+        // static template; structural descent is handled by forEachChild, whose
+        // child set matches this walk's open-coded recursion exactly.
+        if (tag == .var_decl) {
+            const decl = self.ir_view.getVarDecl(node) orelse return;
+            if (decl.kind == .@"const" and self.isLiteralOrStaticTemplate(decl.init)) {
+                self.static_literal_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch {};
+            }
         }
+        self.ir_view.forEachChild(node, self, collectStaticLiterals);
     }
 
     fn collectExprAssignments(self: *StrictChecker, node: NodeIndex) void {

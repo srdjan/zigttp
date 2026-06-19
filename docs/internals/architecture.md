@@ -58,6 +58,25 @@ Unsupported language features fail before runtime. See
 [Feature Detection](../feature-detection.md) and
 [Verification](../verification.md).
 
+### Analysis passes
+
+Step 4 is implemented as four independent IR walkers, each traversing the same
+IR tree with its own `switch` over node tags rather than through a shared
+visitor framework:
+
+- `handler_verifier.zig` - Response-return and Result-status propagation.
+- `bool_checker.zig` - state isolation via flow-sensitive boolean/typeof
+  narrowing.
+- `flow_checker.zig` - data-label (secret/credential/user_input) taint flow.
+- `strict_checker.zig` - additional restriction rules plus literal and
+  annotation collection.
+
+They run across two pipeline phases (`bool` and `strict` during resolve,
+`verifier` and `flow` after type checking). Three of the four are flow-sensitive
+and thread analysis state through descent, so adding a new IR node type requires
+updating each relevant walker. A full single-pass visitor unification is
+intentionally not attempted: the traversals are not the same traversal.
+
 ## Virtual Modules
 
 The native module registry is the source of truth:

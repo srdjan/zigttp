@@ -518,6 +518,28 @@ test "Arena overflow handling" {
     try std.testing.expectEqual(@as(usize, 0), after.overflow_bytes);
 }
 
+test "Arena overflow returns null and stays consistent when backing OOMs" {
+    var leak_detector: std.heap.DebugAllocator(.{ .stack_trace_frames = 0 }) = .init;
+    const child = leak_detector.allocator();
+    // init does one backing alloc (the bump buffer, index 0); fail the next one
+    // so the overflow path's backing.alignedAlloc (index 1) returns OOM.
+    var failing = std.testing.FailingAllocator.init(child, .{ .fail_index = 1 });
+
+    var arena = try Arena.init(failing.allocator(), .{ .size = 256 });
+
+    // Fits in the bump region.
+    try std.testing.expect(arena.alloc(200) != null);
+
+    // Needs overflow; backing OOMs -> null, no crash, no corruption.
+    try std.testing.expect(arena.alloc(100) == null);
+    try std.testing.expectEqual(@as(u64, 0), arena.getStats().overflow_count);
+
+    // Arena remains usable and frees cleanly with no leaked overflow node.
+    arena.reset();
+    arena.deinit();
+    try std.testing.expectEqual(std.heap.Check.ok, leak_detector.deinit());
+}
+
 test "Arena typed allocation" {
     var arena = try Arena.init(std.testing.allocator, .{ .size = 4096 });
     defer arena.deinit();
