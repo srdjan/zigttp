@@ -47,7 +47,7 @@ Status values below: TODO | IN PROGRESS | DONE | BLOCKED (<reason>) | REJECTED (
 | --- | --- |
 | 001 | DONE (formatting-only fix committed; `zig fmt --check` + test-zruntime/test-server green) |
 | 002 | DONE (removed the retry-count circuit breaker so a nonzero acquire_timeout_ms is the sole wait bound; timeout 0 still fails fast; retry_count saturates; +2 tests, one proven to fail on the old breaker; test-zruntime/test-server + zig build test green) |
-| 003 | TODO |
+| 003 | DONE (factsFromContract now calls setIntentSummary via intentSummaryFromContract helper, so HUD+ledger render intent assertion/dynamic + behavior/failure path counts; +1 regression test proven to fail without the wiring. NOTE: live_reload.zig tests run under test-cli, not test-zruntime as the plan's run line said; test-cli + test-proof-review + zig build test green) |
 | 004 | TODO |
 | 005 | TODO |
 | 006 | DONE (validateIsoDate/Datetime now range-check month/day (leap-aware via pub time.daysInMonth), clock fields, and bound the trailing fractional+tz grammar; +9 regression cases; test-modules + zig build test green, fmt clean) |

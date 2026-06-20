@@ -805,6 +805,22 @@ pub const LiveReloadState = struct {
 // Output formatting
 // ---------------------------------------------------------------------------
 
+/// Derive the flattened intent + behavior summary the contract already
+/// carries. Counts only - intent assertions are author examples, never proof
+/// obligations, so this does not influence any verdict.
+fn intentSummaryFromContract(contract: *const HandlerContract) review_facts_mod.ReviewFacts.IntentSummary {
+    var failure_paths: usize = 0;
+    for (contract.behaviors.items) |b| {
+        if (b.is_failure_path) failure_paths += 1;
+    }
+    return .{
+        .assertion_count = if (contract.intent) |i| i.assertions.items.len else 0,
+        .dynamic = if (contract.intent) |i| i.dynamic else false,
+        .behavior_paths = contract.behaviors.items.len,
+        .failure_paths = failure_paths,
+    };
+}
+
 /// Project a HandlerContract into the persisted-and-rendered ReviewFacts
 /// shape. Used by both the HUD render path and the proof-ledger append path
 /// so dev mode and the ledger never disagree on the proven surface.
@@ -827,13 +843,17 @@ pub fn factsFromContract(
     const spec_states = try buildSpecStates(allocator, contract);
     defer allocator.free(spec_states);
 
-    return review_facts_mod.ReviewFacts.fromProvenFacts(
+    var facts = try review_facts_mod.ReviewFacts.fromProvenFacts(
         allocator,
         &extract.facts,
         cap_names,
         contract_sha,
         spec_states,
     );
+    // Denormalise the intent + behavior summary the contract already carries so
+    // the HUD and ledger can render counts without re-walking the contract.
+    facts.setIntentSummary(intentSummaryFromContract(contract));
+    return facts;
 }
 
 fn buildSpecStates(
@@ -1163,4 +1183,49 @@ test "firstFailingStage names the earliest failing analyzer stage" {
 
     check = .{};
     try std.testing.expectEqualStrings("analysis", LiveReloadState.firstFailingStage(&check));
+}
+
+test "factsFromContract projects intent and behavior summary" {
+    const allocator = std.testing.allocator;
+    const hc = zigts.handler_contract;
+
+    var contract = hc.emptyContract(try allocator.dupe(u8, "h.ts"));
+    defer contract.deinit(allocator);
+
+    // One intent assertion, not dynamic.
+    var intent = hc.IntentInfo{};
+    try intent.assertions.append(allocator, .{
+        .name = try allocator.dupe(u8, "smoke"),
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/"),
+    });
+    contract.intent = intent;
+
+    // Two behavior paths, one a failure path.
+    try contract.behaviors.append(allocator, .{
+        .route_method = try allocator.dupe(u8, "GET"),
+        .route_pattern = try allocator.dupe(u8, "/"),
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 0,
+        .is_failure_path = false,
+    });
+    try contract.behaviors.append(allocator, .{
+        .route_method = try allocator.dupe(u8, "GET"),
+        .route_pattern = try allocator.dupe(u8, "/"),
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 500,
+        .io_depth = 0,
+        .is_failure_path = true,
+    });
+
+    var facts = try factsFromContract(allocator, &contract, "deadbeefdeadbeef");
+    defer facts.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), facts.intent_assertion_count);
+    try std.testing.expectEqual(false, facts.intent_dynamic);
+    try std.testing.expectEqual(@as(usize, 2), facts.behavior_path_count);
+    try std.testing.expectEqual(@as(usize, 1), facts.failure_path_count);
 }
