@@ -123,7 +123,8 @@ zig build cli -- --help                        # Run zigttp
 zig build wasm                     # Build zigts analyzer as a wasm module (web playground)
 bash scripts/build-wasm-playground.sh  # Build wasm + publish to zigttp-website/static
 
-zig build test                     # All tests (runtime + CLI + engine + zruntime)
+zig build test                     # Bulk unit suite (excludes zruntime root, smoke, panic-isolation, examples)
+bash scripts/verify.sh             # Full local gate mirroring CI (run zig fmt --check separately)
 zig build test-zigts               # Engine tests only
 zig build test-zruntime            # Runtime tests only
 zig build test-cli                 # Developer CLI tests only

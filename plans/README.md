@@ -51,7 +51,7 @@ Status values below: TODO | IN PROGRESS | DONE | BLOCKED (<reason>) | REJECTED (
 | 004 | TODO |
 | 005 | TODO |
 | 006 | TODO |
-| 007 | TODO |
+| 007 | DONE (scripts/verify.sh mirrors ci.yml test job — 9 steps + format note; CLAUDE.md test claim corrected; full `bash scripts/verify.sh` green, exit 0) |
 | 008 | TODO |
 | 009 | TODO |
 
