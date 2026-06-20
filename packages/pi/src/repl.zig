@@ -963,9 +963,12 @@ fn approveEdit(preview: loop.ApprovalPreview) !bool {
     _ = std.c.write(std.c.STDOUT_FILENO, header.ptr, header.len);
     if (preview.properties) |props| writeProvenProperties(props);
     if (preview.rewrite_trace.len > 0) writeRewriteTrace(preview.rewrite_trace);
+    // Show what changed inline so review+approve is one keystroke; `d` still
+    // dumps the full proposed file for cases the compact diff cannot convey.
+    writeEditDiff(preview.before, preview.after);
 
     while (true) {
-        const prompt = "Apply this edit? [y/N, d=show proposed file] ";
+        const prompt = "Apply this edit? [y/N, d=show file] ";
         _ = std.c.write(std.c.STDOUT_FILENO, prompt.ptr, prompt.len);
 
         var line_buf: [256]u8 = undefined;
@@ -1043,6 +1046,192 @@ fn writeMaybeTruncated(content: []const u8) void {
             _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
         }
     }
+}
+
+/// Lines of unchanged context shown around each change in the approval diff.
+const diff_context_lines: usize = 3;
+
+/// Byte offset just past the line that starts at `i` (the index after its '\n',
+/// or `s.len` for a final line that has no terminator).
+fn lineEndIncl(s: []const u8, i: usize) usize {
+    const nl = std.mem.indexOfScalarPos(u8, s, i, '\n') orelse return s.len;
+    return nl + 1;
+}
+
+/// Byte offset where the line ending at `end` (exclusive) begins.
+fn lineStart(s: []const u8, end: usize) usize {
+    if (end == 0) return 0;
+    var k = end - 1;
+    while (k > 0 and s[k - 1] != '\n') k -= 1;
+    return k;
+}
+
+/// Byte offset in `s` just past its first `k` lines (or `s.len` if fewer).
+fn offsetAfterLines(s: []const u8, k: usize) usize {
+    var i: usize = 0;
+    var c: usize = 0;
+    while (c < k and i < s.len) : (c += 1) i = lineEndIncl(s, i);
+    return i;
+}
+
+/// Split `s` into line slices, each including its trailing '\n' (except a final
+/// unterminated line). Returns the count; never writes past `out`.
+fn splitLines(s: []const u8, out: [][]const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len and n < out.len) {
+        const e = lineEndIncl(s, i);
+        out[n] = s[i..e];
+        n += 1;
+        i = e;
+    }
+    return n;
+}
+
+/// Write one diff row: `marker` ("- ", "+ ", "  ") then the line with its EOL
+/// stripped (so CRLF does not leak a '\r' that would garble the marker), then a
+/// newline. A source line with no trailing newline (the file's last line) gets a
+/// git-style "no newline" note so a trailing-newline-only change is legible.
+fn writeDiffRow(w: *std.Io.Writer, marker: []const u8, line_incl_term: []const u8) !void {
+    var content = line_incl_term;
+    var terminated = false;
+    if (content.len > 0 and content[content.len - 1] == '\n') {
+        content = content[0 .. content.len - 1];
+        terminated = true;
+    }
+    if (content.len > 0 and content[content.len - 1] == '\r') content = content[0 .. content.len - 1];
+    try w.writeAll(marker);
+    try w.writeAll(content);
+    try w.writeByte('\n');
+    if (!terminated) try w.writeAll("  \\ No newline at end of file\n");
+}
+
+/// Write each line of `region` (a run of unchanged lines) as context rows.
+fn writeContextLines(w: *std.Io.Writer, region: []const u8) !void {
+    var i: usize = 0;
+    while (i < region.len) {
+        const e = lineEndIncl(region, i);
+        try writeDiffRow(w, "  ", region[i..e]);
+        i = e;
+    }
+}
+
+/// Emit the LCS-aligned diff of two line arrays: shared lines as context, lines
+/// only in `bl` as removed, lines only in `al` as added. Both arrays are bounded
+/// by the caller to at most `diff_truncate_lines` lines.
+fn writeLcsDiff(w: *std.Io.Writer, bl: []const []const u8, al: []const []const u8) !void {
+    // dp[i][j] = LCS length of bl[i..] and al[j..], filled from the bottom-right.
+    var dp: [diff_truncate_lines + 2][diff_truncate_lines + 2]u16 = undefined;
+    var i: usize = bl.len + 1;
+    while (i > 0) {
+        i -= 1;
+        var j: usize = al.len + 1;
+        while (j > 0) {
+            j -= 1;
+            if (i == bl.len or j == al.len) {
+                dp[i][j] = 0;
+            } else if (std.mem.eql(u8, bl[i], al[j])) {
+                dp[i][j] = dp[i + 1][j + 1] + 1;
+            } else {
+                dp[i][j] = @max(dp[i + 1][j], dp[i][j + 1]);
+            }
+        }
+    }
+    var x: usize = 0;
+    var y: usize = 0;
+    while (x < bl.len and y < al.len) {
+        if (std.mem.eql(u8, bl[x], al[y])) {
+            try writeDiffRow(w, "  ", bl[x]);
+            x += 1;
+            y += 1;
+        } else if (dp[x + 1][y] >= dp[x][y + 1]) {
+            try writeDiffRow(w, "- ", bl[x]);
+            x += 1;
+        } else {
+            try writeDiffRow(w, "+ ", al[y]);
+            y += 1;
+        }
+    }
+    while (x < bl.len) : (x += 1) try writeDiffRow(w, "- ", bl[x]);
+    while (y < al.len) : (y += 1) try writeDiffRow(w, "+ ", al[y]);
+}
+
+/// Render a compact line diff of `before` -> `after` for the approval preview.
+/// Trims the common leading/trailing lines, then runs an LCS over the changed
+/// middle so multiple edits in one file render as separate hunks (unchanged lines
+/// between them stay context, not removed+added). A middle larger than
+/// `diff_truncate_lines` falls back to a one-line "press d" summary; `before == null`
+/// (a new file) diffs against empty so the whole file shows as additions.
+fn renderEditDiff(w: *std.Io.Writer, before: ?[]const u8, after: []const u8) !void {
+    const b = before orelse "";
+    if (std.mem.eql(u8, b, after)) {
+        try w.writeAll("  (no changes)\n");
+        return;
+    }
+
+    // Trim common leading lines.
+    var lb: usize = 0;
+    var la: usize = 0;
+    while (lb < b.len and la < after.len) {
+        const eb = lineEndIncl(b, lb);
+        const ea = lineEndIncl(after, la);
+        if (!std.mem.eql(u8, b[lb..eb], after[la..ea])) break;
+        lb = eb;
+        la = ea;
+    }
+    // Trim common trailing lines without crossing the leading region.
+    var tb: usize = b.len;
+    var ta: usize = after.len;
+    while (tb > lb and ta > la) {
+        const sb = lineStart(b, tb);
+        const sa = lineStart(after, ta);
+        if (sb < lb or sa < la) break;
+        if (!std.mem.eql(u8, b[sb..tb], after[sa..ta])) break;
+        tb = sb;
+        ta = sa;
+    }
+
+    const mid_b = b[lb..tb];
+    const mid_a = after[la..ta];
+
+    // Bound the LCS table: a change spanning more lines than the cap defers to the
+    // full proposed file behind `d` (counted on the changed span, not the file).
+    if (lineCount(mid_b) > diff_truncate_lines or lineCount(mid_a) > diff_truncate_lines) {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "  large change spanning {d}/{d} lines. Press d to show the proposed file.\n",
+            .{ lineCount(mid_b), lineCount(mid_a) },
+        ) catch "  large change. Press d to show the proposed file.\n";
+        try w.writeAll(msg);
+        return;
+    }
+
+    // Leading context: the last `diff_context_lines` shared lines before the change.
+    const lead = b[0..lb];
+    const lead_skip = if (lineCount(lead) > diff_context_lines) lineCount(lead) - diff_context_lines else 0;
+    try writeContextLines(w, lead[offsetAfterLines(lead, lead_skip)..]);
+
+    var b_lines: [diff_truncate_lines + 2][]const u8 = undefined;
+    var a_lines: [diff_truncate_lines + 2][]const u8 = undefined;
+    const nb = splitLines(mid_b, &b_lines);
+    const na = splitLines(mid_a, &a_lines);
+    try writeLcsDiff(w, b_lines[0..nb], a_lines[0..na]);
+
+    // Trailing context: the first `diff_context_lines` shared lines after the change.
+    const trail = b[tb..];
+    try writeContextLines(w, trail[0..offsetAfterLines(trail, diff_context_lines)]);
+}
+
+/// Render the inline approval diff to stdout. Buffers into a fixed scratch so a
+/// pathological case (very long lines overflowing the buffer) cleanly falls back
+/// to the full proposed file, which `d` also serves.
+fn writeEditDiff(before: ?[]const u8, after: []const u8) void {
+    var buf: [16 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    renderEditDiff(&w, before, after) catch return writeMaybeTruncated(after);
+    const out = w.buffered();
+    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
 }
 
 /// Rough logical line count for the approval change-size hint.
@@ -1602,4 +1791,67 @@ test "renderStudio returns workbench command and URL" {
     try testing.expect(result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "zigttp studio examples/handler/handler.ts") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "http://localhost:8080/_zigttp/studio") != null);
+}
+
+fn renderDiffToBuf(buf: []u8, before: ?[]const u8, after: []const u8) []const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    renderEditDiff(&w, before, after) catch unreachable;
+    return w.buffered();
+}
+
+test "renderEditDiff: middle insertion shows the added line with context" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("  a\n+ b\n  c\n", renderDiffToBuf(&buf, "a\nc\n", "a\nb\nc\n"));
+}
+
+test "renderEditDiff: pure deletion shows the removed line with context" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("  a\n- b\n  c\n", renderDiffToBuf(&buf, "a\nb\nc\n", "a\nc\n"));
+}
+
+test "renderEditDiff: two separate edits keep the unchanged middle as context (not removed+added)" {
+    var buf: [256]u8 = undefined;
+    // Only lines 2 and 5 change; c and d must render as context, never as -/+.
+    try testing.expectEqualStrings(
+        "  a\n- b\n+ X\n  c\n  d\n- e\n+ Y\n",
+        renderDiffToBuf(&buf, "a\nb\nc\nd\ne\n", "a\nX\nc\nd\nY\n"),
+    );
+}
+
+test "renderEditDiff: CRLF line endings do not leak a carriage return" {
+    var buf: [256]u8 = undefined;
+    const out = renderDiffToBuf(&buf, "x\r\ny\r\n", "x\r\nz\r\n");
+    try testing.expectEqualStrings("  x\n- y\n+ z\n", out);
+    try testing.expect(std.mem.indexOfScalar(u8, out, '\r') == null);
+}
+
+test "renderEditDiff: a trailing-newline-only change is legible via the no-newline note" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "  a\n  b\n- c\n  \\ No newline at end of file\n+ c\n",
+        renderDiffToBuf(&buf, "a\nb\nc", "a\nb\nc\n"),
+    );
+}
+
+test "renderEditDiff: identical content reports no changes" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("  (no changes)\n", renderDiffToBuf(&buf, "a\nb\n", "a\nb\n"));
+}
+
+test "renderEditDiff: a change spanning more than the cap falls back to the file view" {
+    var bbuf: [1024]u8 = undefined;
+    var abuf: [1024]u8 = undefined;
+    var bw = std.Io.Writer.fixed(&bbuf);
+    var aw = std.Io.Writer.fixed(&abuf);
+    // 105 lines, first and last differ -> no common prefix/suffix, middle > cap.
+    aw.writeAll("b\n") catch unreachable;
+    var n: usize = 0;
+    while (n < 105) : (n += 1) {
+        bw.writeAll("a\n") catch unreachable;
+        if (n > 0 and n < 104) aw.writeAll("a\n") catch unreachable;
+    }
+    aw.writeAll("b\n") catch unreachable;
+    var obuf: [8192]u8 = undefined;
+    const out = renderDiffToBuf(&obuf, bw.buffered(), aw.buffered());
+    try testing.expect(std.mem.indexOf(u8, out, "large change") != null);
 }

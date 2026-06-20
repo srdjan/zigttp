@@ -60,6 +60,28 @@ test {
     _ = @import("verify_cli.zig");
 }
 
+/// Print the model-backend setup message and exit when no provider key is
+/// configured. Shared by `dispatchExpert` and the `init --expert` pre-check so
+/// the message lives in one place and can fire before any side effects (for
+/// `init --expert`, before scaffolding).
+fn ensureModelBackendOrExit() void {
+    if (pi_app.envHasModelBackend()) return;
+    std.debug.print(
+        \\zigttp expert needs a model backend.
+        \\
+        \\Quickest path:
+        \\  zigttp auth claude   # paste your key once, stored at ~/.zigttp/providers.json
+        \\
+        \\Or set one of these environment variables and run `zigttp expert` again:
+        \\  ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
+        \\  OPENAI_API_KEY
+        \\
+        \\See `zigttp expert --help` for details.
+        \\
+    , .{});
+    std.process.exit(1);
+}
+
 /// Validate, configure, and launch the expert agent. Shared by the `expert`
 /// command and by `init --expert` (which scaffolds, chdir's into the project,
 /// then calls this with no extra args).
@@ -86,22 +108,7 @@ fn dispatchExpert(allocator: std.mem.Allocator, expert_args: []const []const u8)
         std.debug.print("{s}", .{pi_app.flagErrorMessage(err)});
         std.process.exit(2);
     };
-    if (!pi_app.envHasModelBackend()) {
-        std.debug.print(
-            \\zigttp expert needs a model backend.
-            \\
-            \\Quickest path:
-            \\  zigttp auth claude   # paste your key once, stored at ~/.zigttp/providers.json
-            \\
-            \\Or set one of these environment variables and run `zigttp expert` again:
-            \\  ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
-            \\  OPENAI_API_KEY
-            \\
-            \\See `zigttp expert --help` for details.
-            \\
-        , .{});
-        std.process.exit(1);
-    }
+    ensureModelBackendOrExit();
     const witness_replay_lib = @import("witness_replay_lib.zig");
     const perf_probe_lib = @import("perf_probe_lib.zig");
     const equivalence_probe_lib = @import("equivalence_probe_lib.zig");
@@ -154,6 +161,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     if (std.mem.eql(u8, command, "init")) {
+        // `init --expert` hands off to the agent after scaffolding. If the agent
+        // cannot launch (no provider key), say so before creating any files so
+        // the user is not scaffolded into a dead end. Gate on the authoritative
+        // parse so this never fires for `--help`, `--extension`, or an `--expert`
+        // that was actually consumed as another flag's value.
+        if (init_command.willEnterExpert(user_args[1..])) {
+            cli_auth.injectStoredProvidersIntoEnv(allocator);
+            ensureModelBackendOrExit();
+        }
         const outcome = init_command.initCommand(allocator, user_args[1..]) catch |err| {
             if (err == error.HelpRequested) {
                 init_command.printInitHelp();
@@ -193,9 +209,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
         if (outcome.enter_expert) {
             if (outcome.project_name) |proj| {
-                // Stored provider keys are injected for the `expert` command;
-                // do the same before handing off from `init --expert`.
-                cli_auth.injectStoredProvidersIntoEnv(allocator);
+                // Stored provider keys were already injected by the pre-scaffold
+                // backend check above (willEnterExpert was true), so no re-inject
+                // is needed here before the handoff.
                 std.Io.Threaded.chdir(proj) catch |e| {
                     std.debug.print("init --expert: could not enter '{s}': {s}\n", .{ proj, @errorName(e) });
                     std.process.exit(1);

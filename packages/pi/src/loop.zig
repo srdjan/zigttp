@@ -115,6 +115,14 @@ pub const budget_exhausted_next_step =
     "Next: re-run the request, narrow it to one change at a time, or run " ++
     "`zigttp check <handler>` to see the remaining diagnostics directly.";
 
+/// Appended to the veto-exhaustion diagnostic box so a turn that burns every
+/// verification attempt ends with a recoverable next step rather than a silent
+/// dead end. Mirrors `budget_exhausted_next_step`.
+pub const veto_exhausted_next_step =
+    "Next: narrow the ask to one change, fix it directly " ++
+    "(`zigttp check <handler>` shows the full diagnostic), or rephrase the goal. " ++
+    "The attempts are saved in your session ledger (/ledger).";
+
 /// One-line, actionable remediation for a model-backend error, or null for
 /// errors that are not provider failures (local I/O, parse, etc.). The wire
 /// layer maps HTTP status and in-stream errors to these typed errors; the
@@ -461,7 +469,19 @@ pub fn runTurnWith(
                 next_event = .tool_batch_completed;
             },
             .render => |msg| {
-                try transcript.append(allocator, msg);
+                // A diagnostic_box in the render arm always means veto exhaustion
+                // (the turn machine emits it only after the final failed attempt).
+                // Append a concrete next step so the user is not left at a dead end,
+                // mirroring the budget-exhausted path. ui_payload is preserved so the
+                // structured diagnostic surface is unchanged.
+                const entry: turn.Message = switch (msg) {
+                    .diagnostic_box => |box| .{ .diagnostic_box = .{
+                        .llm_text = try std.fmt.allocPrint(ta, "{s}\n\n{s}", .{ box.llm_text, veto_exhausted_next_step }),
+                        .ui_payload = box.ui_payload,
+                    } },
+                    else => msg,
+                };
+                try transcript.append(allocator, entry);
                 const end_reason: session_events.TurnEndReason = switch (msg) {
                     .diagnostic_box => .veto_exhausted,
                     else => .approved,
@@ -979,8 +999,15 @@ test "broken edit path: veto fails with diagnostic box" {
     );
 
     try testing.expectEqual(turn.TurnState.done, result.final_state);
+    try testing.expectEqual(session_events.TurnEndReason.veto_exhausted, result.end_reason);
     switch (tr.at(tr.len() - 1).*) {
-        .diagnostic_box => |body| try testing.expect(std.mem.indexOf(u8, body.llm_text, "\"ZTS001\"") != null),
+        .diagnostic_box => |body| {
+            // The recurring diagnostic is still present...
+            try testing.expect(std.mem.indexOf(u8, body.llm_text, "\"ZTS001\"") != null);
+            // ...and the box now ends with a concrete next step rather than a
+            // silent dead end (Set C: veto-exhaustion off-ramp).
+            try testing.expect(std.mem.indexOf(u8, body.llm_text, veto_exhausted_next_step) != null);
+        },
         else => return error.TestFailed,
     }
 }

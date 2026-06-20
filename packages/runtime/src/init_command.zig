@@ -22,14 +22,20 @@ pub const InitOutcome = struct {
     project_name: ?[]const u8 = null,
 };
 
-pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !InitOutcome {
+/// Parsed `zigttp init` arguments, before any scaffolding side effect. Shared by
+/// `initCommand` (which scaffolds) and `willEnterExpert` (which only inspects the
+/// decision) so the two can never diverge on what `--expert` means.
+const ParsedInitArgs = struct {
+    template_name: []const u8 = "basic",
+    project_name: ?[]const u8 = null,
+    extension_name: ?[]const u8 = null,
+    enter_expert: bool = false,
+};
+
+fn parseInitArgs(argv: []const []const u8) !ParsedInitArgs {
     if (argv.len == 0) return error.MissingProjectName;
 
-    var template_name: []const u8 = "basic";
-    var project_name: ?[]const u8 = null;
-    var extension_name: ?[]const u8 = null;
-    var enter_expert = false;
-
+    var parsed: ParsedInitArgs = .{};
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
@@ -37,40 +43,55 @@ pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !Init
             return error.HelpRequested;
         }
         if (std.mem.eql(u8, arg, "--template")) {
-            template_name = try shared.takeArg(&i, argv, error.MissingTemplate);
+            parsed.template_name = try shared.takeArg(&i, argv, error.MissingTemplate);
             continue;
         }
         if (std.mem.eql(u8, arg, "--extension")) {
-            extension_name = try shared.takeArg(&i, argv, error.MissingExtensionName);
+            parsed.extension_name = try shared.takeArg(&i, argv, error.MissingExtensionName);
             continue;
         }
         if (std.mem.eql(u8, arg, "--expert")) {
-            enter_expert = true;
+            parsed.enter_expert = true;
             continue;
         }
         if (std.mem.startsWith(u8, arg, "-")) {
             return error.UnknownOption;
         }
-        if (project_name == null) {
-            project_name = arg;
+        if (parsed.project_name == null) {
+            parsed.project_name = arg;
             continue;
         }
         return error.InvalidArgument;
     }
+    return parsed;
+}
 
-    if (extension_name) |name| {
+/// Whether `zigttp init <argv>` would launch the expert agent after scaffolding.
+/// The dispatcher uses this to run the model-backend check before scaffolding,
+/// without re-deriving `--expert` from a raw token scan: this honors `--help`
+/// (returns false), ignores `--expert` when `--extension` wins or when
+/// `--template` consumes `--expert` as its value, exactly as the real flow does.
+pub fn willEnterExpert(argv: []const []const u8) bool {
+    const parsed = parseInitArgs(argv) catch return false;
+    return parsed.enter_expert and parsed.extension_name == null;
+}
+
+pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !InitOutcome {
+    const parsed = try parseInitArgs(argv);
+
+    if (parsed.extension_name) |name| {
         try validateProjectName(name);
         try scaffoldExtension(allocator, name);
         printInitExtensionNextSteps(name);
         return .{};
     }
 
-    const name = project_name orelse return error.MissingProjectName;
+    const name = parsed.project_name orelse return error.MissingProjectName;
     try validateProjectName(name);
-    const template = parseTemplate(template_name) orelse return error.InvalidTemplate;
+    const template = parseTemplate(parsed.template_name) orelse return error.InvalidTemplate;
 
     try scaffoldProject(allocator, name, template);
-    if (enter_expert) {
+    if (parsed.enter_expert) {
         printInitExpertHandoff(name);
         return .{ .enter_expert = true, .project_name = name };
     }
