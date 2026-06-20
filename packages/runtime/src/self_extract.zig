@@ -575,6 +575,35 @@ test "older payload (no attestation section) parses with null attestation" {
     try std.testing.expectEqualStrings(contract, parsed.contract_json.?);
 }
 
+test "roundtrip: payload policy with populated allow lists" {
+    const allocator = std.testing.allocator;
+
+    // The deployed binary enforces this policy section, so the allow lists must
+    // survive serialize -> parse intact (and stay enabled, i.e. fail-closed).
+    const policy = handler_policy.RuntimePolicy{
+        .env = .{ .enabled = true, .values = &[_][]const u8{ "API_KEY", "DB_URL" } },
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"api.stripe.com"} },
+        .cache = .{ .enabled = true, .values = &[_][]const u8{"sessions"} },
+        .sql = .{ .enabled = true, .values = &[_][]const u8{"listTodos"} },
+    };
+
+    const serialized = try serializePayload(allocator, "bc", &.{}, null, &policy, null);
+    defer allocator.free(serialized);
+
+    const parsed = (try parsePayload(allocator, serialized)).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expect(parsed.policy.allowsEnv("API_KEY"));
+    try std.testing.expect(parsed.policy.allowsEnv("DB_URL"));
+    try std.testing.expect(!parsed.policy.allowsEnv("OTHER"));
+    try std.testing.expect(parsed.policy.allowsEgressHost("api.stripe.com"));
+    try std.testing.expect(!parsed.policy.allowsEgressHost("evil.example"));
+    try std.testing.expect(parsed.policy.allowsCacheNamespace("sessions"));
+    try std.testing.expect(!parsed.policy.allowsCacheNamespace("other"));
+    try std.testing.expect(parsed.policy.allowsSqlQuery("listTodos"));
+    try std.testing.expect(!parsed.policy.allowsSqlQuery("dropTodos"));
+}
+
 test "getCleanBinarySize: no trailer returns full size" {
     const data = "just some binary data without a trailer";
     try std.testing.expectEqual(data.len, getCleanBinarySize(data));
