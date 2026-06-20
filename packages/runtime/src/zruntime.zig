@@ -1328,7 +1328,6 @@ pub const Runtime = struct {
         return response;
     }
 
-
     /// Try to dispatch request via native fast path.
     /// Returns response if a static pattern matches, null otherwise.
     fn tryFastPathDispatch(
@@ -2808,7 +2807,6 @@ fn scopeCall1(
     const args = [_]zq.JSValue{arg};
     return callJsThunk(runtime_ptr, thunk_val, &args);
 }
-
 
 const ServiceRoute = struct {
     method_text: []const u8,

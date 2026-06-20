@@ -45,7 +45,7 @@ Status values below: TODO | IN PROGRESS | DONE | BLOCKED (<reason>) | REJECTED (
 
 | Plan | Status |
 | --- | --- |
-| 001 | TODO (fix present uncommitted in working tree) |
+| 001 | DONE (formatting-only fix committed; `zig fmt --check` + test-zruntime/test-server green) |
 | 002 | TODO |
 | 003 | TODO |
 | 004 | TODO |
