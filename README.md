@@ -90,12 +90,30 @@ workflows, WebSocket, and proof examples.
 - Local deploy: self-contained binary output under
   `.zigttp/deploy/<project-name>` with default-on attestation.
 
+## Security model
+
+Read the [Threat Model](docs/threat-model.md) before running untrusted code or
+exposing a binary publicly. Two boundaries are easy to miss:
+
+- `dev` and `serve` from source are not a sandbox. They run handler code with
+  your user's permissions for fast iteration. The enforced surfaces are the
+  precompiled (`-Dhandler=`) and `deploy` binaries, which carry and enforce the
+  contract-derived capability allowlist (egress, env, cache, SQL).
+- No TLS. The runtime serves plain HTTP and binds `127.0.0.1` by default.
+  Terminate TLS at a reverse proxy and set the host explicitly before exposing a
+  deployed binary to public traffic.
+- `expert` sends your handler source to the configured model provider
+  (Anthropic or OpenAI). Attestation is on by default and publishes a stable
+  per-user public-key fingerprint at `/.well-known/zigttp-attest`.
+
 ## Numbers
 
 Benchmark claims are kept in [Performance](docs/performance.md). The measured
 baseline is roughly a 3.5 ms cold-start floor, 7-15 ms typical cold start
 depending on host load, about 13 MB RSS after first response, and about 112k
-req/s on the documented HTTP benchmark.
+req/s on the documented HTTP benchmark. Cold-start and RSS are reproducible with
+`zig build bench`; the throughput figure comes from the separate `zigttp-bench`
+harness and varies with hardware.
 
 ## Documentation
 
