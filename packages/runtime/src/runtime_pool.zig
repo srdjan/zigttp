@@ -516,9 +516,12 @@ pub const HandlerPool = struct {
         // Adaptive backoff parameters:
         // Phase 1: Spin without sleep (10 iterations)
         // Phase 2: Sleep starting at 10us, cap at 1ms (faster than 50us-5ms)
-        // Phase 3: Fail fast after 100 retries (circuit breaker)
+        // The configured acquire_timeout_ms is the sole wait bound: a nonzero
+        // timeout fails only once elapsed time reaches it, a zero timeout fails
+        // fast below. There is deliberately no separate retry-count circuit
+        // breaker - it previously cut waits short of the configured timeout
+        // under contention.
         const spin_iterations: u32 = 10;
-        const max_retries: u32 = 100;
         const initial_backoff_ns: u64 = 10 * std.time.ns_per_us;
         const max_backoff_ns: u64 = 1 * std.time.ns_per_ms;
 
@@ -543,8 +546,10 @@ pub const HandlerPool = struct {
                 }
                 if (acquired) break;
 
-                // At capacity - proceed to retry/backoff logic
-                retry_count += 1;
+                // At capacity - proceed to retry/backoff logic. Saturate so a
+                // long but legitimate wait cannot overflow the counter; past the
+                // spin phase its only roles are the phase gate and the jitter seed.
+                retry_count +|= 1;
 
                 // Check timeout first
                 if (self.acquire_timeout_ms == 0) {
@@ -567,15 +572,6 @@ pub const HandlerPool = struct {
                         }
                         return error.PoolExhausted;
                     }
-                }
-
-                // Circuit breaker: fail fast after max retries
-                if (retry_count > max_retries) {
-                    _ = self.exhausted_count.fetchAdd(1, .monotonic);
-                    if (collect_pool_metrics) {
-                        if (wait_timer) |*t| self.recordWait(t.read());
-                    }
-                    return error.PoolExhausted;
                 }
 
                 // Phase 1: Spin without sleep for brief contention
@@ -995,4 +991,68 @@ test "WorkerRuntimeLease deinit is a no-op after quarantine" {
     const metrics = pool.getMetrics();
     try testing.expectEqual(@as(u64, 1), metrics.panics);
     try testing.expect(metrics.recycles >= 1);
+}
+
+test "acquireForRequest waits out contention up to the timeout, not a retry cap" {
+    if (builtin.os.tag == .linux) return error.SkipZigTest;
+
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled },
+        "function handler(req) { return Response.text('ok'); }",
+        "<runtime-pool-test>",
+        1, // single slot: the second acquire must wait for a release
+        10_000, // 10s acquire timeout: far longer than the release delay below
+    );
+    defer pool.deinit();
+
+    // Occupy the only slot.
+    const rt1 = try pool.acquireForRequest();
+    try testing.expectEqual(@as(usize, 1), pool.getInUse());
+
+    // Release rt1 after ~250ms - well past the old ~100-retry circuit-breaker
+    // window (~80ms of 1ms backoffs) yet far below the 10s timeout. The
+    // planned-at code returned error.PoolExhausted at the retry cap before this
+    // release; the fix keeps waiting until the slot frees.
+    const Releaser = struct {
+        pool: *HandlerPool,
+        rt: *zq.LockFreePool.Runtime,
+        fn run(ctx: *@This()) void {
+            const ts = std.c.timespec{ .sec = 0, .nsec = @intCast(250 * std.time.ns_per_ms) };
+            _ = std.c.nanosleep(&ts, null);
+            ctx.pool.releaseForRequest(ctx.rt);
+        }
+    };
+    var ctx = Releaser{ .pool = &pool, .rt = rt1 };
+    const releaser = try std.Thread.spawn(.{}, Releaser.run, .{&ctx});
+    defer releaser.join();
+
+    // Must succeed (the contended wait outlasts the retry cap) rather than
+    // returning error.PoolExhausted.
+    const rt2 = try pool.acquireForRequest();
+    defer pool.releaseForRequest(rt2);
+    try testing.expectEqual(@as(usize, 1), pool.getInUse());
+}
+
+test "acquireForRequest with timeout 0 fails fast and records exhaustion" {
+    if (builtin.os.tag == .linux) return error.SkipZigTest;
+
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled },
+        "function handler(req) { return Response.text('ok'); }",
+        "<runtime-pool-test>",
+        1, // single slot
+        0, // timeout 0: must fail immediately when at capacity, no waiting
+    );
+    defer pool.deinit();
+
+    const rt1 = try pool.acquireForRequest();
+    defer pool.releaseForRequest(rt1);
+    try testing.expectEqual(@as(usize, 1), pool.getInUse());
+
+    try testing.expectError(error.PoolExhausted, pool.acquireForRequest());
+    try testing.expectEqual(@as(u64, 1), pool.getMetrics().exhausted);
 }

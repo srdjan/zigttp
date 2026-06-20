@@ -46,7 +46,7 @@ Status values below: TODO | IN PROGRESS | DONE | BLOCKED (<reason>) | REJECTED (
 | Plan | Status |
 | --- | --- |
 | 001 | DONE (formatting-only fix committed; `zig fmt --check` + test-zruntime/test-server green) |
-| 002 | TODO |
+| 002 | DONE (removed the retry-count circuit breaker so a nonzero acquire_timeout_ms is the sole wait bound; timeout 0 still fails fast; retry_count saturates; +2 tests, one proven to fail on the old breaker; test-zruntime/test-server + zig build test green) |
 | 003 | TODO |
 | 004 | TODO |
 | 005 | TODO |
