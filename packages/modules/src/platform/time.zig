@@ -201,7 +201,8 @@ fn isLeapYear(year: u16) bool {
 }
 
 /// Number of days in `month` (1-12) of `year`, accounting for leap February.
-fn daysInMonth(year: u16, month: u8) u8 {
+/// Source of truth for date range validation; also used by `zigttp:validate`.
+pub fn daysInMonth(year: u16, month: u8) u8 {
     return switch (month) {
         1, 3, 5, 7, 8, 10, 12 => 31,
         4, 6, 9, 11 => 30,

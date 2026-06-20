@@ -2,6 +2,8 @@
 
 const std = @import("std");
 const sdk = @import("zigttp-sdk");
+// Single source of truth for the leap-aware days-in-month rule; do not copy it.
+const time = @import("../platform/time.zig");
 
 pub const MODULE_STATE_SLOT: usize = 4;
 
@@ -527,11 +529,20 @@ fn validateUuid(str: []const u8) bool {
 
 fn validateIsoDate(str: []const u8) bool {
     if (str.len != 10) return false;
-    return isDigit(str[0]) and isDigit(str[1]) and isDigit(str[2]) and isDigit(str[3]) and
+    if (!(isDigit(str[0]) and isDigit(str[1]) and isDigit(str[2]) and isDigit(str[3]) and
         str[4] == '-' and
         isDigit(str[5]) and isDigit(str[6]) and
         str[7] == '-' and
-        isDigit(str[8]) and isDigit(str[9]);
+        isDigit(str[8]) and isDigit(str[9]))) return false;
+    // Shape alone is not enough: a value that passes here is stamped `.validated`
+    // and trusted downstream, so range-check month/day (leap-aware) too. The digit
+    // shape guarantees these parse; the `catch` is defensive (fail closed).
+    const year = std.fmt.parseInt(u16, str[0..4], 10) catch return false;
+    const month = std.fmt.parseInt(u8, str[5..7], 10) catch return false;
+    const day = std.fmt.parseInt(u8, str[8..10], 10) catch return false;
+    if (month < 1 or month > 12 or day < 1) return false;
+    if (day > time.daysInMonth(year, month)) return false;
+    return true;
 }
 
 fn validateIsoDatetime(str: []const u8) bool {
@@ -543,7 +554,40 @@ fn validateIsoDatetime(str: []const u8) bool {
     if (!isDigit(str[14]) or !isDigit(str[15])) return false;
     if (str[16] != ':') return false;
     if (!isDigit(str[17]) or !isDigit(str[18])) return false;
-    return true;
+    // Range-check the clock fields (digit shape guarantees they parse).
+    const hour = std.fmt.parseInt(u8, str[11..13], 10) catch return false;
+    const minute = std.fmt.parseInt(u8, str[14..16], 10) catch return false;
+    const second = std.fmt.parseInt(u8, str[17..19], 10) catch return false;
+    if (hour > 23 or minute > 59 or second > 59) return false;
+    // Bound the trailing bytes to the fractional+timezone grammar rather than
+    // accepting arbitrary junk after the seconds field.
+    return validateIsoTimeSuffix(str[19..]);
+}
+
+/// Validates the optional fractional-seconds and timezone-offset suffix of an
+/// ISO datetime: an optional `.` + digits, then optionally `Z`/`z` or
+/// `(+|-)HH:MM` / `(+|-)HHMM`, then end-of-string. Grammar-only by design (the
+/// offset is accepted/rejected by shape, not normalized); see plan 006 scope.
+fn validateIsoTimeSuffix(suffix: []const u8) bool {
+    var rest = suffix;
+    if (rest.len > 0 and rest[0] == '.') {
+        var i: usize = 1;
+        while (i < rest.len and isDigit(rest[i])) : (i += 1) {}
+        if (i == 1) return false; // '.' with no digits
+        rest = rest[i..];
+    }
+    if (rest.len == 0) return true; // no timezone -> local time, accepted
+    if (rest[0] == 'Z' or rest[0] == 'z') return rest.len == 1;
+    if (rest[0] != '+' and rest[0] != '-') return false;
+    if (rest.len == 6) { // (+|-)HH:MM
+        return isDigit(rest[1]) and isDigit(rest[2]) and rest[3] == ':' and
+            isDigit(rest[4]) and isDigit(rest[5]);
+    }
+    if (rest.len == 5) { // (+|-)HHMM
+        return isDigit(rest[1]) and isDigit(rest[2]) and
+            isDigit(rest[3]) and isDigit(rest[4]);
+    }
+    return false;
 }
 
 fn isDigit(c: u8) bool {
@@ -951,6 +995,16 @@ test "validateIsoDate" {
     try std.testing.expect(!validateIsoDate("2024/01/15"));
 }
 
+test "validateIsoDate rejects out-of-range month/day" {
+    try std.testing.expect(!validateIsoDate("2024-13-01")); // month 13
+    try std.testing.expect(!validateIsoDate("2024-00-10")); // month 0
+    try std.testing.expect(!validateIsoDate("2024-01-00")); // day 0
+    try std.testing.expect(!validateIsoDate("2024-02-30")); // Feb 30
+    try std.testing.expect(!validateIsoDate("2024-04-31")); // Apr 31
+    try std.testing.expect(!validateIsoDate("2023-02-29")); // non-leap Feb 29
+    try std.testing.expect(validateIsoDate("2024-02-29")); // leap Feb 29
+}
+
 test "validateIsoDatetime" {
     try std.testing.expect(validateIsoDatetime("2024-01-15T10:30:00"));
     try std.testing.expect(validateIsoDatetime("2024-01-15T10:30:00Z"));
@@ -959,4 +1013,20 @@ test "validateIsoDatetime" {
     try std.testing.expect(!validateIsoDatetime("2024-01-15"));
     try std.testing.expect(!validateIsoDatetime("2024-01-15 10:30:00"));
     try std.testing.expect(!validateIsoDatetime("2024-01-15T10:30"));
+}
+
+test "validateIsoDatetime range-checks clock fields and bounds the suffix" {
+    // Fractional seconds and the full offset grammar are accepted.
+    try std.testing.expect(validateIsoDatetime("2024-01-15T10:30:00.123Z"));
+    try std.testing.expect(validateIsoDatetime("2024-01-15T10:30:00-0800"));
+    // Out-of-range clock fields are rejected.
+    try std.testing.expect(!validateIsoDatetime("2024-01-01T24:00:00")); // hour 24
+    try std.testing.expect(!validateIsoDatetime("2024-01-01T10:60:00")); // minute 60
+    try std.testing.expect(!validateIsoDatetime("2024-01-01T10:30:99")); // second 99
+    // Out-of-range date inside a datetime is rejected via validateIsoDate.
+    try std.testing.expect(!validateIsoDatetime("2024-13-01T10:30:00"));
+    // Trailing junk after the seconds field is rejected.
+    try std.testing.expect(!validateIsoDatetime("2024-01-15T10:30:00ZZZZ"));
+    try std.testing.expect(!validateIsoDatetime("2024-01-15T10:30:00 garbage"));
+    try std.testing.expect(!validateIsoDatetime("2024-01-15T10:30:00.")); // dot, no digits
 }

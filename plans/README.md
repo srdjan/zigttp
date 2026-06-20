@@ -50,7 +50,7 @@ Status values below: TODO | IN PROGRESS | DONE | BLOCKED (<reason>) | REJECTED (
 | 003 | TODO |
 | 004 | TODO |
 | 005 | TODO |
-| 006 | TODO |
+| 006 | DONE (validateIsoDate/Datetime now range-check month/day (leap-aware via pub time.daysInMonth), clock fields, and bound the trailing fractional+tz grammar; +9 regression cases; test-modules + zig build test green, fmt clean) |
 | 007 | DONE (scripts/verify.sh mirrors ci.yml test job — 9 steps + format note; CLAUDE.md test claim corrected; full `bash scripts/verify.sh` green, exit 0) |
 | 008 | TODO |
 | 009 | TODO |
