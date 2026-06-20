@@ -541,16 +541,13 @@ fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void 
         }
         break :blk p;
     };
-    self_extract.create(
-        allocator,
-        runtime_binary,
-        output_path,
-        compiled.bytecode,
-        dep_bytecodes,
-        contract_json,
-        &policy,
-        attestation_jws,
-    ) catch |err| {
+    self_extract.create(allocator, runtime_binary, output_path, .{
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = dep_bytecodes,
+        .contract_json = contract_json,
+        .policy = &policy,
+        .attestation = attestation_jws,
+    }) catch |err| {
         if (err == error.FileNotFound) {
             // self_extract opens both the runtime template and the output
             // path; the output parent was created by prepareProjectArtifact,
