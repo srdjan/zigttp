@@ -616,9 +616,15 @@ fn parseLifecycle(str: []const u8) ?contract_runtime.PoolingPolicy {
     return null;
 }
 
-fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payload, argv: []const []const u8) !void {
+/// Build the base ServerConfig for a self-contained (deployed) binary from its
+/// appended payload. The embedded section-4 capability policy is wired as the
+/// enforcement source (`dev_capability_policy`) so the deployed binary restricts
+/// egress/env/cache/sql to the proven allowlist, matching dev/serve and the
+/// AOT-embedded path. Without this wiring a deployed handler fell back to the
+/// allow-all stub policy and ran effectively unsandboxed.
+fn appendedServerConfig(payload: *const self_extract.Payload) ServerConfig {
     // Matches the curl hint printed by `zigttp deploy`; -p PORT still overrides.
-    var config = ServerConfig{
+    return .{
         .handler = .{ .appended_payload = .{
             .bytecode = payload.bytecode,
             .dep_bytecodes = payload.dep_bytecodes,
@@ -626,7 +632,16 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
         .contract_json = payload.contract_json,
         .attestation_jws = payload.attestation_jws,
         .port = 3000,
+        // The deployed binary runs the interpreter against the appended bytecode,
+        // so (like dev/serve) it needs the contract-derived allowlist supplied as
+        // `dev_capability_policy`; otherwise applyEmbeddedCapabilityPolicy keeps
+        // the allow-all stub and egress/env/cache/sql go unenforced.
+        .runtime_config = .{ .dev_capability_policy = payload.policy },
     };
+}
+
+fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payload, argv: []const []const u8) !void {
+    var config = appendedServerConfig(payload);
 
     try parseAppendedServeArgs(argv, &config, true);
 
@@ -761,6 +776,25 @@ fn printServeHelp() void {
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+test "appendedServerConfig wires the embedded capability policy for enforcement" {
+    // Regression for the deploy fail-open: a self-contained binary must enforce
+    // the proven egress/env/cache/sql allowlist embedded in its payload (section
+    // 4), not fall back to the allow-all stub. The egress allowlist proves a
+    // single host; the deployed config must restrict to exactly that host.
+    const payload = self_extract.Payload{
+        .bytecode = &.{},
+        .dep_bytecodes = &.{},
+        .contract_json = null,
+        .policy = .{ .egress = .{ .enabled = true, .values = &[_][]const u8{"api.allowed.example"} } },
+        .policy_strings = &.{},
+        .attestation_jws = null,
+    };
+    const config = appendedServerConfig(&payload);
+    const policy = config.runtime_config.dev_capability_policy orelse return error.EmbeddedPolicyNotWired;
+    try std.testing.expect(policy.allowsEgressHost("api.allowed.example"));
+    try std.testing.expect(!policy.allowsEgressHost("evil.example"));
 }
 
 test "parseCommonServeFlag: -p consumes next arg as port" {
