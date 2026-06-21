@@ -130,9 +130,10 @@ emits proof headers and serves `/.well-known/zigttp-attest`; `zigttp verify
 
 ## Testing And Governance
 
-Important gates:
+Important gates (`bash scripts/verify.sh` runs the CI `test`-job set in one command; the individual steps below are for focused runs):
 
 ```bash
+bash scripts/verify.sh             # full local gate, mirrors CI
 zig build test
 zig build test-zigts
 zig build test-zruntime
