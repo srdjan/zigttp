@@ -562,6 +562,15 @@ pub const HandlerPool = struct {
 
                 if (wait_timer == null) {
                     wait_timer = compat.Timer.start() catch null;
+                    // Without a monotonic clock we cannot enforce
+                    // acquire_timeout_ms. Fail closed rather than spin forever:
+                    // the elapsed-time check below is now the only loop bound
+                    // (the retry-count circuit breaker was removed), so a null
+                    // timer would otherwise never terminate the wait.
+                    if (wait_timer == null) {
+                        _ = self.exhausted_count.fetchAdd(1, .monotonic);
+                        return error.PoolExhausted;
+                    }
                 }
                 if (wait_timer) |*t| {
                     const elapsed = t.read();
