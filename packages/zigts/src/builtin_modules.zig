@@ -209,6 +209,20 @@ test "findExport finds known module export" {
     try std.testing.expectEqual(mb.ReturnKind.string, result.?.func.returns);
 }
 
+test "zigttp:io parallel/race return objects, not strings" {
+    // parallel always returns a JS array -> .object. race can return undefined
+    // (no-winner / response-build-failure path) -> .optional_object, so callers
+    // must narrow before use. Pins both copies (binding + io.json) against drift
+    // back to .string (and race against drift to non-optional .object).
+    const parallel = findExport("zigttp:io", "parallel");
+    try std.testing.expect(parallel != null);
+    try std.testing.expectEqual(mb.ReturnKind.object, parallel.?.func.returns);
+
+    const race = findExport("zigttp:io", "race");
+    try std.testing.expect(race != null);
+    try std.testing.expectEqual(mb.ReturnKind.optional_object, race.?.func.returns);
+}
+
 test "findFunction finds result-producing functions" {
     const result = findFunction("jwtVerify");
     try std.testing.expect(result != null);

@@ -7,7 +7,7 @@ This directory contains source-backed remediation plans from read-only advisor p
 
 ## Reconciliation note (pass at `560239d`)
 
-Plans 001-005 were planned at `f2c637d`. The only commit since (`560239d`) touched `packages/pi/src/{loop,repl}.zig` and `packages/runtime/src/{dev_cli,init_command}.zig` — none of which any of 001-005 cite — so **all five remain valid at `560239d`** (their drift checks against `f2c637d` are still empty for their in-scope files).
+Plans 001-005 were planned at `f2c637d`. The only commit since (`560239d`) touched `packages/pi/src/{loop,repl}.zig` and `packages/runtime/src/{dev_cli,init_command}.zig` - none of which any of 001-005 cite - so **all five remain valid at `560239d`** (their drift checks against `f2c637d` are still empty for their in-scope files).
 
 - **001 (format baseline)**: the fix already exists in the working tree, uncommitted. The `M packages/runtime/src/zruntime.zig` change is exactly the formatting-only edit this plan prescribes (collapsing two double-blank-lines), and `zig fmt --check build.zig packages/` passes on the working tree. A clean checkout of `560239d` still fails the gate because the fix is not committed. Local toolchain is Zig 0.16.0 stable (matches the project baseline), so the failure was a real format issue, not nightly drift. Closing 001 = commit that formatting-only change.
 
@@ -51,8 +51,8 @@ Status values below: TODO | IN PROGRESS | DONE | BLOCKED (<reason>) | REJECTED (
 | 004 | TODO |
 | 005 | TODO |
 | 006 | DONE (validateIsoDate/Datetime now range-check month/day (leap-aware via pub time.daysInMonth), clock fields, and bound the trailing fractional+tz grammar; +9 regression cases; test-modules + zig build test green, fmt clean) |
-| 007 | DONE (scripts/verify.sh mirrors ci.yml test job — 9 steps + format note; CLAUDE.md test claim corrected; full `bash scripts/verify.sh` green, exit 0) |
-| 008 | TODO |
+| 007 | DONE (scripts/verify.sh mirrors ci.yml test job - 9 steps + format note; CLAUDE.md test claim corrected; full `bash scripts/verify.sh` green, exit 0) |
+| 008 | DONE (zigttp:io parallel/race return kind string->object in both io.zig binding and io.json spec; +registry assertion test in builtin_modules.zig; modules --json now reports object. Also regenerated meta.golden.json: module_registry_hash legitimately changed (it digests return kinds) - only that line. test-zigts/governance/modules + examples (27/27) + zig build test green) |
 | 009 | TODO |
 
 ## Dependency notes
@@ -63,7 +63,7 @@ Status values below: TODO | IN PROGRESS | DONE | BLOCKED (<reason>) | REJECTED (
 ## Findings Considered And Not Planned In This Batch
 
 - **Durable WAL write primitive swallows write errors (N5)**: `packages/zigts/src/trace.zig:1744-1754` `writeAll` returns `void` and `break`s on write error, used by the fsync'd durable persist path. The oplog *does* fsync every step, but a failed write (ENOSPC/EIO) is invisible. Real robustness gap, MED confidence, small fix (an error-returning `writeAllChecked` for the durable call sites). Not planned this batch because it requires a disk-full/IO-error to manifest and is lower stakes than the trust-boundary and gate issues above.
-- **JIT tier duplication (strategic)**: `optimized.zig` and `baseline.zig` reimplement 25+ `emit*` helpers (e.g. `emitForOfNext`, `emitComparison`, `emitConditionalJump`), the root cause of recurring "fix the JIT bug in both tiers" work. Already tracked by `DEFERRED_VM_LOOP_DEDUPE_PLAN.md` and gated; do not open a competing plan — extend that one when the gates are met. L effort, HIGH risk.
+- **JIT tier duplication (strategic)**: `optimized.zig` and `baseline.zig` reimplement 25+ `emit*` helpers (e.g. `emitForOfNext`, `emitComparison`, `emitConditionalJump`), the root cause of recurring "fix the JIT bug in both tiers" work. Already tracked by `DEFERRED_VM_LOOP_DEDUPE_PLAN.md` and gated; do not open a competing plan - extend that one when the gates are met. L effort, HIGH risk.
 - **Two JSON-reading strategies (strategic)**: robust `contract_json_parser.zig` (`JsonParser`) vs substring `trace.findJson*` scanners wired into the replay/mock/test path; they have drifted and produced the same bug class fixed twice. M effort, MED risk. Consolidation candidate, deferred.
 - **`zruntime.zig` god-module (strategic)**: 7.5 KLOC, largest file in the repo, on the request hot path; continue the established alias-in-place sibling-extraction pattern (fetch/response construction, header KV). M-L effort, MED risk; ongoing.
 - **`type_pool.zig` truncation risks**: fixed parser buffers and `u16` casts. Needs a design decision (fail-closed on oversize types vs dynamic backing) before a plan. (Carried over from the `f2c637d` pass.)

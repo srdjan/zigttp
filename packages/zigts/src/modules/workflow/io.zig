@@ -34,8 +34,12 @@ pub const binding = mb.ModuleBinding{
     .required_capabilities = &.{.runtime_callback},
     .stateful = true,
     .exports = &.{
-        .{ .name = "parallel", .func = parallelNative, .arg_count = 1, .effect = .write, .returns = .string, .param_types = &.{}, .return_labels = .{ .external = true } },
-        .{ .name = "race", .func = raceNative, .arg_count = 1, .effect = .write, .returns = .string, .param_types = &.{}, .return_labels = .{ .external = true } },
+        // parallel always returns a JS array (never undefined) -> .object.
+        // race can return undefined on a no-winner / response-build-failure path
+        // (see raceNative), so it is .optional_object: callers must narrow before
+        // use, never .object. io.json must mirror both (ZVM009).
+        .{ .name = "parallel", .func = parallelNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{}, .return_labels = .{ .external = true } },
+        .{ .name = "race", .func = raceNative, .arg_count = 1, .effect = .write, .returns = .optional_object, .param_types = &.{}, .return_labels = .{ .external = true } },
     },
 };
 

@@ -9,12 +9,12 @@
     {
       "name": "parallel",
       "effect": "write",
-      "returns": "string"
+      "returns": "object"
     },
     {
       "name": "race",
       "effect": "write",
-      "returns": "string"
+      "returns": "optional_object"
     }
   ]
 }
