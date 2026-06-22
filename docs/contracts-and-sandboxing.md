@@ -198,7 +198,9 @@ won't boot" and "individual requests get rejected".
   the `zigttp:io` parallel/race fetch paths. This is a runtime-
   initiated check on the URL host, not an SDK module call, so it
   does not go through the `*ForActiveModule` wrappers and does not
-  require any binding to declare `.policy_check`.
+  require any binding to declare `.policy_check`. The allowlist
+  matches on host only: it does not restrict the port, so an allowed
+  host permits any port on that host.
 
 **Hot swap** (`--watch --prove`):
 - Re-runs the build-time contract diff against the running version

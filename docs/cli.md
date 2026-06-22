@@ -62,9 +62,14 @@ Common `dev` and `serve` flags:
 | `--sqlite <file>` | SQLite database for `zigttp:sql`. |
 | `--durable <dir>` | Durable workflow oplog directory. |
 | `--system <file>` | Internal service registry. |
-| `--outbound-http` / `--outbound-host <host>` | Enable outbound HTTP. |
+| `--outbound-http` / `--outbound-host <host>` | Enable outbound HTTP. The host allowlist matches on host only, not port. |
 | `--static <dir>` | Serve static files. |
 | `--no-env-check` | Skip startup env validation. |
+
+Observability: per-request access logging is on by default (method, path,
+status, duration, request id; disable with `-q`), and pool/latency metrics are
+logged. There is no scrape-able `/metrics` endpoint yet; that is planned for a
+later release.
 
 ## Deploy And Proof Receipts
 
