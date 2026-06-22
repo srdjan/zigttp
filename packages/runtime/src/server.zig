@@ -1310,13 +1310,18 @@ const OwnedDevPolicy = struct {
     env_values: ?[]const []const u8 = null,
     egress_values: ?[]const []const u8 = null,
     cache_values: ?[]const []const u8 = null,
-    sql_values: ?[]const []const u8 = null,
+    // Normalized per-query allowlist (name owned, operation static, no
+    // statement). Freed by hand below, never via SqlQueryInfo.deinit.
+    sql_queries: ?[]engine.SqlQueryInfo = null,
 
     fn deinit(self: *OwnedDevPolicy, allocator: std.mem.Allocator) void {
         if (self.env_values) |values| freeStringList(allocator, values);
         if (self.egress_values) |values| freeStringList(allocator, values);
         if (self.cache_values) |values| freeStringList(allocator, values);
-        if (self.sql_values) |values| freeStringList(allocator, values);
+        if (self.sql_queries) |queries| {
+            for (queries) |query| allocator.free(query.name);
+            allocator.free(queries);
+        }
         self.* = .{ .policy = .{} };
     }
 };
@@ -1339,16 +1344,21 @@ fn ownDevPolicy(allocator: std.mem.Allocator, contract: *const engine.HandlerCon
         owned.policy.cache.values = owned.cache_values.?;
     }
     if (borrowed.sql.queries.len > 0) {
-        const values = try allocator.alloc([]const u8, borrowed.sql.queries.len);
-        errdefer allocator.free(values);
+        // Keep the per-query operation (read/write) instead of flattening to a
+        // name list, so a dev/serve generation enforces the same db.read/db.write
+        // split the deployed binary does. Names are duped; operation is encoded
+        // statically via normalizedSqlQuery.
+        const queries = try allocator.alloc(engine.SqlQueryInfo, borrowed.sql.queries.len);
+        errdefer allocator.free(queries);
         var filled: usize = 0;
-        errdefer for (values[0..filled]) |value| allocator.free(value);
+        errdefer for (queries[0..filled]) |query| allocator.free(query.name);
         for (borrowed.sql.queries, 0..) |query, i| {
-            values[i] = try allocator.dupe(u8, query.name);
+            const name = try allocator.dupe(u8, query.name);
+            queries[i] = engine.normalizedSqlQuery(name, engine.sqlQueryIsReadOnly(query));
             filled = i + 1;
         }
-        owned.sql_values = values;
-        owned.policy.sql = .{ .enabled = borrowed.sql.enabled, .values = values, .queries = &.{} };
+        owned.sql_queries = queries;
+        owned.policy.sql = .{ .enabled = borrowed.sql.enabled, .queries = queries };
     }
 
     return owned;

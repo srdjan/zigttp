@@ -526,20 +526,11 @@ fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void 
     // Embed the proven capability allowlist so the deployed binary enforces the
     // same egress/env/cache/sql restrictions as dev/serve. Previously this was
     // the empty (allow-all) stub, so a deployed handler ran unsandboxed. The
-    // payload policy section serializes SQL via the name allow list, so flatten
-    // the proven query names (contractToRuntimePolicy populates `.queries`).
-    var sql_names: []const []const u8 = &.{};
-    defer if (sql_names.len > 0) allocator.free(sql_names);
+    // policy borrows from the contract, which outlives serialization here; the
+    // payload serializer carries the per-query SQL operation (read/write).
     const policy = blk: {
         const contract_ptr = if (compiled.contract) |*c| c else break :blk zigts.handler_policy.RuntimePolicy{};
-        var p = zigts.handler_policy.contractToRuntimePolicy(contract_ptr);
-        if (!contract_ptr.sql.dynamic and contract_ptr.sql.queries.items.len > 0) {
-            const names = try allocator.alloc([]const u8, contract_ptr.sql.queries.items.len);
-            for (contract_ptr.sql.queries.items, 0..) |q, i| names[i] = q.name;
-            sql_names = names;
-            p.sql = .{ .enabled = true, .values = names, .queries = &.{} };
-        }
-        break :blk p;
+        break :blk zigts.handler_policy.contractToRuntimePolicy(contract_ptr);
     };
     self_extract.create(allocator, runtime_binary, output_path, .{
         .bytecode = compiled.bytecode,

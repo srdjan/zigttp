@@ -3342,18 +3342,22 @@ fn writeContractDerivedSection(writer: anytype, field_name: []const u8, literals
 }
 
 fn writeSqlContractDerivedSection(writer: anytype, contract: *const HandlerContract) !void {
+    // Emit the per-query allowlist with each query's operation so the
+    // precompiled binary enforces the db.read/db.write split (not a flat,
+    // operation-agnostic name list).
     try writer.writeAll("    .sql = ");
     if (!contract.sql.dynamic) {
         try writer.writeAll(".{\n");
         try writer.writeAll("        .enabled = true,\n");
         if (contract.sql.queries.items.len == 0) {
-            try writer.writeAll("        .values = &[_][]const u8{},\n");
+            try writer.writeAll("        .queries = &[_]@import(\"zigts\").handler_policy.SqlQueryInfo{},\n");
         } else {
-            try writer.writeAll("        .values = &[_][]const u8{\n");
+            try writer.writeAll("        .queries = &[_]@import(\"zigts\").handler_policy.SqlQueryInfo{\n");
             for (contract.sql.queries.items) |query| {
-                try writer.writeAll("            ");
+                const op = if (handler_policy.sqlQueryIsReadOnly(query)) "select" else "write";
+                try writer.writeAll("            .{ .name = ");
                 try writeZigStringLiteral(writer, query.name);
-                try writer.writeAll(",\n");
+                try writer.print(", .operation = \"{s}\", .statement = \"\" }},\n", .{op});
             }
             try writer.writeAll("        },\n");
         }

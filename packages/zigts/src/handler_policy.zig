@@ -9,6 +9,10 @@ const contract_mod = @import("handler_contract.zig");
 const HandlerContract = contract_mod.HandlerContract;
 const ascii = std.ascii;
 
+/// Re-export so runtime-side serializers (self_extract) can name the per-query
+/// allowlist element type without reaching into handler_contract directly.
+pub const SqlQueryInfo = contract_mod.SqlQueryInfo;
+
 pub const AllowList = struct {
     values: std.ArrayListUnmanaged([]const u8) = .empty,
 
@@ -73,7 +77,16 @@ pub const RuntimeAllowList = struct {
 
 pub const RuntimeSqlAllowList = struct {
     enabled: bool = false,
+    /// Operation-agnostic name allowlist: a name here is allowed for BOTH read
+    /// and write. Only the name-only JSON policy-checker skeleton (policy.zig),
+    /// which has no per-query operation data, populates this. Every production
+    /// policy path (engine adapter, dev/serve, deploy, precompile) leaves it
+    /// empty and uses `queries` so the read/write split is actually enforced.
     values: []const []const u8 = &.{},
+    /// Per-query allowlist carrying each query's operation, so a query proven
+    /// read-only cannot satisfy a db.write check (and vice-versa). This is what
+    /// the production paths populate, matching the contract's per-query
+    /// db.read/db.write capabilities in all run modes.
     queries: []const contract_mod.SqlQueryInfo = &.{},
 
     pub fn allowsRead(self: RuntimeSqlAllowList, candidate: []const u8) bool {
@@ -126,12 +139,26 @@ pub const RuntimePolicy = struct {
     }
 };
 
-fn sqlQueryIsReadOnly(query: contract_mod.SqlQueryInfo) bool {
+/// True when the query is a read-only SELECT. Prefers the explicit `operation`
+/// (set by normalizedSqlQuery for serialized/dev policies), falling back to the
+/// first token of the statement for contract-borrowed queries whose operation
+/// is still "".
+pub fn sqlQueryIsReadOnly(query: contract_mod.SqlQueryInfo) bool {
     if (query.operation.len > 0) {
         return std.ascii.eqlIgnoreCase(query.operation, "select");
     }
     const first = firstSqlToken(query.statement) orelse return false;
     return std.ascii.eqlIgnoreCase(first, "select");
+}
+
+/// Build a statement-free query view whose read/write nature is encoded in
+/// `operation` alone, for policies that are serialized into a deployed binary,
+/// duplicated for a dev/serve generation, or emitted as generated-code
+/// constants. `name` is borrowed from the caller; `statement`/`tables` stay
+/// empty, so the result MUST NOT be released via SqlQueryInfo.deinit (free only
+/// the caller-owned `name`).
+pub fn normalizedSqlQuery(name: []const u8, read_only: bool) contract_mod.SqlQueryInfo {
+    return .{ .name = name, .operation = if (read_only) "select" else "write", .statement = "" };
 }
 
 fn firstSqlToken(statement: []const u8) ?[]const u8 {

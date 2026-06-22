@@ -48,7 +48,8 @@ pub const Payload = struct {
         if (self.policy.env.values.len > 0) allocator.free(self.policy.env.values);
         if (self.policy.egress.values.len > 0) allocator.free(self.policy.egress.values);
         if (self.policy.cache.values.len > 0) allocator.free(self.policy.cache.values);
-        if (self.policy.sql.values.len > 0) allocator.free(self.policy.sql.values);
+        // SQL is carried as `queries` (name strings freed via policy_strings).
+        if (self.policy.sql.queries.len > 0) allocator.free(self.policy.sql.queries);
         // Free individual string contents
         for (self.policy_strings) |s| allocator.free(s);
         allocator.free(self.policy_strings);
@@ -340,7 +341,10 @@ fn serializePolicy(allocator: std.mem.Allocator, policy: *const handler_policy.R
     try serializeAllowList(&buf, allocator, policy.env);
     try serializeAllowList(&buf, allocator, policy.egress);
     try serializeAllowList(&buf, allocator, policy.cache);
-    try serializeAllowList(&buf, allocator, .{ .enabled = policy.sql.enabled, .values = policy.sql.values });
+    // SQL carries a per-query read-only flag so the deployed binary enforces the
+    // db.read/db.write split the contract proved (not a flat, operation-agnostic
+    // name list).
+    try serializeSqlAllowList(&buf, allocator, policy.sql);
 
     return buf.toOwnedSlice(allocator);
 }
@@ -354,6 +358,18 @@ fn serializeAllowList(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, lis
     }
 }
 
+// SQL section format: [1 byte enabled] [2 bytes count]
+//   [for each query: 1 byte read_only, 2 bytes name len, name bytes]
+fn serializeSqlAllowList(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, list: handler_policy.RuntimeSqlAllowList) !void {
+    try buf.append(allocator, if (list.enabled) 1 else 0);
+    try writeU16(buf, allocator, @intCast(list.queries.len));
+    for (list.queries) |query| {
+        try buf.append(allocator, if (handler_policy.sqlQueryIsReadOnly(query)) 1 else 0);
+        try writeU16(buf, allocator, @intCast(query.name.len));
+        try buf.appendSlice(allocator, query.name);
+    }
+}
+
 fn deserializePolicy(
     allocator: std.mem.Allocator,
     data: []const u8,
@@ -363,14 +379,45 @@ fn deserializePolicy(
     const env = try deserializeAllowList(allocator, data, &pos, strings);
     const egress = try deserializeAllowList(allocator, data, &pos, strings);
     const cache = try deserializeAllowList(allocator, data, &pos, strings);
-    const sql_base = try deserializeAllowList(allocator, data, &pos, strings);
+    const sql = try deserializeSqlAllowList(allocator, data, &pos, strings);
 
     return .{
         .env = env,
         .egress = egress,
         .cache = cache,
-        .sql = .{ .enabled = sql_base.enabled, .values = sql_base.values },
+        .sql = sql,
     };
+}
+
+fn deserializeSqlAllowList(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    pos: *usize,
+    strings: *std.ArrayList([]const u8),
+) !handler_policy.RuntimeSqlAllowList {
+    if (pos.* >= data.len) return .{};
+    const enabled = data[pos.*] != 0;
+    pos.* += 1;
+
+    const count = try readU16(data, pos);
+    var queries = try allocator.alloc(handler_policy.SqlQueryInfo, count);
+    var filled: usize = 0;
+    errdefer allocator.free(queries);
+
+    while (filled < count) : (filled += 1) {
+        if (pos.* >= data.len) return error.InvalidPayload;
+        const read_only = data[pos.*] != 0;
+        pos.* += 1;
+        const len = try readU16(data, pos);
+        if (pos.* + len > data.len) return error.InvalidPayload;
+        const name = try allocator.dupe(u8, data[pos.* .. pos.* + len]);
+        try strings.append(allocator, name); // freed via policy_strings
+        // statement/tables stay empty; read-only-ness is encoded in `operation`.
+        queries[filled] = handler_policy.normalizedSqlQuery(name, read_only);
+        pos.* += len;
+    }
+
+    return .{ .enabled = enabled, .queries = queries };
 }
 
 fn deserializeAllowList(
@@ -577,11 +624,15 @@ test "roundtrip: payload policy with populated allow lists" {
 
     // The deployed binary enforces this policy section, so the allow lists must
     // survive serialize -> parse intact (and stay enabled, i.e. fail-closed).
+    const sql_queries = [_]handler_policy.SqlQueryInfo{
+        .{ .name = "listTodos", .operation = "select", .statement = "" },
+        .{ .name = "insertTodo", .operation = "insert", .statement = "" },
+    };
     const policy = handler_policy.RuntimePolicy{
         .env = .{ .enabled = true, .values = &[_][]const u8{ "API_KEY", "DB_URL" } },
         .egress = .{ .enabled = true, .values = &[_][]const u8{"api.stripe.com"} },
         .cache = .{ .enabled = true, .values = &[_][]const u8{"sessions"} },
-        .sql = .{ .enabled = true, .values = &[_][]const u8{"listTodos"} },
+        .sql = .{ .enabled = true, .queries = &sql_queries },
     };
 
     const serialized = try serializePayload(allocator, .{ .bytecode = "bc", .policy = &policy });
@@ -597,7 +648,12 @@ test "roundtrip: payload policy with populated allow lists" {
     try std.testing.expect(!parsed.policy.allowsEgressHost("evil.example"));
     try std.testing.expect(parsed.policy.allowsCacheNamespace("sessions"));
     try std.testing.expect(!parsed.policy.allowsCacheNamespace("other"));
+    // The read/write split must survive serialization: a read-only query is
+    // allowed for read but NOT write, and vice-versa.
     try std.testing.expect(parsed.policy.allowsSqlQuery("listTodos"));
+    try std.testing.expect(!parsed.policy.allowsSqlWrite("listTodos"));
+    try std.testing.expect(parsed.policy.allowsSqlWrite("insertTodo"));
+    try std.testing.expect(!parsed.policy.allowsSqlQuery("insertTodo"));
     try std.testing.expect(!parsed.policy.allowsSqlQuery("dropTodos"));
 }
 
