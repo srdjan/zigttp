@@ -658,6 +658,117 @@ pub fn decodeCodepoint(s: []const u8) ?struct { codepoint: u21, len: u3 } {
 }
 
 // ============================================================================
+// UTF-16 Code-Unit Indexing
+// ============================================================================
+//
+// JavaScript string `.length`, indexing, and slicing are defined over UTF-16
+// code units, while this engine stores strings as UTF-8. These helpers map
+// between the two without materializing UTF-16. They are the single source of
+// truth shared by the string builtins (runtime) and the comptime evaluator so
+// the two engines agree on non-ASCII lengths and slice boundaries.
+
+/// A position in a UTF-8 buffer paired with its UTF-16 code-unit index.
+pub const Utf16Cursor = struct { byte: usize, unit: u32 };
+
+/// Advance from `cursor` to the byte offset of UTF-16 code-unit `target`
+/// (`target` must be >= `cursor.unit`), clamped to `data.len`. The returned
+/// byte always lands on a UTF-8 codepoint boundary; when `target` falls between
+/// the two units of a surrogate pair (an astral codepoint) it rounds down to
+/// the boundary before that codepoint, since UTF-8 cannot hold a lone
+/// surrogate. Passing a non-zero starting cursor lets callers map several
+/// ascending indices in a single forward walk instead of re-scanning the
+/// prefix each time.
+pub fn utf16AdvanceToUnit(data: []const u8, cursor: Utf16Cursor, target: u32) Utf16Cursor {
+    var unit = cursor.unit;
+    var i = cursor.byte;
+    while (i < data.len) {
+        if (unit >= target) return .{ .byte = i, .unit = unit };
+        const b = data[i];
+        if (b < 0x80) {
+            unit += 1;
+            i += 1;
+            continue;
+        }
+        const decoded = decodeCodepoint(data[i..]) orelse {
+            unit += 1;
+            i += 1;
+            continue;
+        };
+        const w: u32 = if (decoded.codepoint > 0xFFFF) 2 else 1;
+        if (unit + w > target) return .{ .byte = i, .unit = unit }; // target splits this codepoint: round down
+        unit += w;
+        i += decoded.len;
+    }
+    return .{ .byte = data.len, .unit = unit };
+}
+
+/// Count UTF-16 code units in UTF-8 `data`. Astral codepoints (> U+FFFF) count
+/// as 2 (a surrogate pair); every BMP scalar counts as 1. Invalid bytes count
+/// as one unit and advance one byte (lenient). ASCII takes a single-compare
+/// fast path.
+pub fn utf16Length(data: []const u8) u32 {
+    var units: u32 = 0;
+    var i: usize = 0;
+    while (i < data.len) {
+        const b = data[i];
+        if (b < 0x80) {
+            units += 1;
+            i += 1;
+            continue;
+        }
+        const decoded = decodeCodepoint(data[i..]) orelse {
+            units += 1;
+            i += 1;
+            continue;
+        };
+        units += if (decoded.codepoint > 0xFFFF) @as(u32, 2) else 1;
+        i += decoded.len;
+    }
+    return units;
+}
+
+/// Byte offset of UTF-16 code-unit index `target`, clamped to `data.len`.
+pub fn utf16IndexToByteOffset(data: []const u8, target: u32) usize {
+    return utf16AdvanceToUnit(data, .{ .byte = 0, .unit = 0 }, target).byte;
+}
+
+/// UTF-16 code-unit index of byte offset `byte_off` (i.e. the number of code
+/// units in `data[0..byte_off]`). Used to translate a byte position found by a
+/// byte-level search (indexOf/lastIndexOf) back into the JS code-unit space.
+pub fn byteOffsetToUtf16Index(data: []const u8, byte_off: usize) u32 {
+    return utf16Length(data[0..@min(byte_off, data.len)]);
+}
+
+/// UTF-8 byte slice of the codepoint whose UTF-16 code-unit range covers
+/// `target`, or null when `target` is past the end. An astral codepoint spans
+/// two units; both map to the whole codepoint, since a lone surrogate cannot be
+/// represented in UTF-8 (documented charAt limitation).
+pub fn charCodepointSliceAt(data: []const u8, target: u32) ?[]const u8 {
+    var units: u32 = 0;
+    var i: usize = 0;
+    while (i < data.len) {
+        const b = data[i];
+        if (b < 0x80) {
+            if (units == target) return data[i .. i + 1];
+            units += 1;
+            i += 1;
+            continue;
+        }
+        const decoded = decodeCodepoint(data[i..]) orelse {
+            if (units == target) return data[i .. i + 1];
+            units += 1;
+            i += 1;
+            continue;
+        };
+        const w: u32 = if (decoded.codepoint > 0xFFFF) 2 else 1;
+        if (target >= units and target < units + w) return data[i .. i + decoded.len];
+        units += w;
+        i += decoded.len;
+    }
+    return null;
+}
+
+// ============================================================================
 // SIMD String Search
 // ============================================================================
 

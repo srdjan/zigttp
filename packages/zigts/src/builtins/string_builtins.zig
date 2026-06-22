@@ -44,89 +44,21 @@ fn stringIsAscii(this: value.JSValue) bool {
     return false;
 }
 
-/// Count UTF-16 code units in UTF-8 `data`. Astral codepoints (> U+FFFF) count
-/// as 2 (a surrogate pair); every BMP scalar counts as 1. Invalid bytes count
-/// as one unit and advance one byte, matching the lenient decoding used by
-/// `utf16CodeUnitAt`. ASCII bytes take a single-compare fast path.
-fn utf16Length(data: []const u8) u32 {
-    var units: u32 = 0;
-    var i: usize = 0;
-    while (i < data.len) {
-        const b = data[i];
-        if (b < 0x80) {
-            units += 1;
-            i += 1;
-            continue;
-        }
-        const decoded = string.decodeCodepoint(data[i..]) orelse {
-            units += 1;
-            i += 1;
-            continue;
-        };
-        units += if (decoded.codepoint > 0xFFFF) @as(u32, 2) else 1;
-        i += decoded.len;
-    }
-    return units;
-}
+// UTF-16 code-unit indexing primitives live in string.zig (utf16Length,
+// utf16IndexToByteOffset, utf16AdvanceToUnit, byteOffsetToUtf16Index,
+// charCodepointSliceAt) so the runtime builtins and the comptime evaluator
+// share one source of truth.
 
-/// Map a UTF-16 code-unit index to a byte offset into UTF-8 `data`, clamped to
-/// `data.len`. The returned offset always lands on a UTF-8 codepoint boundary,
-/// so slicing with it can never split a multi-byte sequence. When `target`
-/// falls between the two units of a surrogate pair (an astral codepoint), the
-/// offset rounds down to the boundary before that codepoint: this engine's
-/// UTF-8 string model cannot represent a lone surrogate, so an astral codepoint
-/// is treated atomically rather than producing invalid UTF-8.
-fn utf16IndexToByteOffset(data: []const u8, target: u32) usize {
-    var units: u32 = 0;
-    var i: usize = 0;
-    while (i < data.len) {
-        if (units >= target) return i;
-        const b = data[i];
-        if (b < 0x80) {
-            units += 1;
-            i += 1;
-            continue;
-        }
-        const decoded = string.decodeCodepoint(data[i..]) orelse {
-            units += 1;
-            i += 1;
-            continue;
-        };
-        const w: u32 = if (decoded.codepoint > 0xFFFF) 2 else 1;
-        if (units + w > target) return i; // target splits this codepoint: round down
-        units += w;
-        i += decoded.len;
-    }
-    return data.len;
-}
-
-/// Return the UTF-8 byte slice of the codepoint whose UTF-16 code-unit range
-/// covers `target`, or null when `target` is past the end. An astral codepoint
-/// spans two units; both map to the whole codepoint here, since a lone
-/// surrogate cannot be represented in UTF-8 (documented charAt limitation).
-fn charCodepointSliceAt(data: []const u8, target: u32) ?[]const u8 {
-    var units: u32 = 0;
-    var i: usize = 0;
-    while (i < data.len) {
-        const b = data[i];
-        if (b < 0x80) {
-            if (units == target) return data[i .. i + 1];
-            units += 1;
-            i += 1;
-            continue;
-        }
-        const decoded = string.decodeCodepoint(data[i..]) orelse {
-            if (units == target) return data[i .. i + 1];
-            units += 1;
-            i += 1;
-            continue;
-        };
-        const w: u32 = if (decoded.codepoint > 0xFFFF) 2 else 1;
-        if (target >= units and target < units + w) return data[i .. i + decoded.len];
-        units += w;
-        i += decoded.len;
-    }
-    return null;
+/// Map a `[start_units, end_units]` UTF-16 code-unit range (start <= end) to
+/// byte offsets in a single forward pass. For ASCII the offsets equal the
+/// indices; otherwise the end map continues from the start cursor instead of
+/// re-scanning the prefix, so a non-ASCII slice walks the data at most twice
+/// (once for the length, once here) rather than three times.
+fn utf16SliceByteOffsets(data: []const u8, is_ascii: bool, start_units: u32, end_units: u32) struct { start: u32, end: u32 } {
+    if (is_ascii) return .{ .start = start_units, .end = end_units };
+    const c_start = string.utf16AdvanceToUnit(data, .{ .byte = 0, .unit = 0 }, start_units);
+    const c_end = string.utf16AdvanceToUnit(data, c_start, end_units);
+    return .{ .start = @intCast(c_start.byte), .end = @intCast(c_end.byte) };
 }
 
 /// String.prototype.length - Get string length
@@ -145,7 +77,7 @@ pub fn stringLength(ctx: *context.Context, this: value.JSValue, args: []const va
     }
     // Non-ASCII: JS .length counts UTF-16 code units, not UTF-8 bytes.
     if (getStringDataCtx(this, ctx)) |data| {
-        return value.JSValue.fromInt(@intCast(utf16Length(data)));
+        return value.JSValue.fromInt(@intCast(string.utf16Length(data)));
     }
     return value.JSValue.fromInt(0);
 }
@@ -175,7 +107,7 @@ pub fn stringCharAt(ctx: *context.Context, this: value.JSValue, args: []const va
     // Non-ASCII: index by UTF-16 code unit. JS returns a lone surrogate for an
     // astral half; this UTF-8 model cannot, so an astral codepoint is returned
     // whole for either of its two unit indices (documented limitation).
-    if (charCodepointSliceAt(data, idx)) |slice| {
+    if (string.charCodepointSliceAt(data, idx)) |slice| {
         const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
         return value.JSValue.fromPtr(result);
     }
@@ -203,76 +135,88 @@ pub fn stringCharCodeAt(ctx: *context.Context, this: value.JSValue, args: []cons
 }
 
 /// String.prototype.indexOf(searchString, position?) - Find substring
+/// Position and the returned index are UTF-16 code-unit offsets (matching
+/// length/slice); the byte-level search is bridged through the string.zig
+/// code-unit <-> byte-offset helpers so non-ASCII results agree with slice().
 pub fn stringIndexOf(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.fromInt(-1);
 
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.fromInt(-1);
     const needle_data = getStringDataCtx(args[0], ctx) orelse return value.JSValue.fromInt(-1);
+    const is_ascii = stringIsAscii(this);
 
-    // Get start position (default 0)
-    var start: usize = 0;
+    // Start position is a UTF-16 code-unit index (default 0).
+    var start_units: usize = 0;
     if (args.len > 1) {
         if (args[1].isInt()) {
             const pos = args[1].getInt();
-            if (pos >= 0) {
-                start = @intCast(pos);
-            }
+            if (pos >= 0) start_units = @intCast(pos);
         } else if (args[1].toNumber()) |n| {
-            if (n >= 0) {
-                start = std.math.lossyCast(usize, @floor(n));
-            }
+            if (n >= 0) start_units = std.math.lossyCast(usize, @floor(n));
         }
     }
 
-    // Empty needle: return start clamped to [0, data.len].
-    if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(@min(start, data.len)));
+    const total_units: usize = if (is_ascii) data.len else string.utf16Length(data);
 
-    // Clamp start to string length
-    if (start >= data.len) return value.JSValue.fromInt(-1);
-    if (needle_data.len > data.len - start) return value.JSValue.fromInt(-1);
+    // Empty needle: return start clamped to [0, length] (code units).
+    if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(@min(start_units, total_units)));
 
-    // Search manually from start position
-    const search_area = data[start..];
-    if (std.mem.indexOf(u8, search_area, needle_data)) |rel_idx| {
-        return value.JSValue.fromInt(@intCast(start + rel_idx));
+    if (start_units >= total_units) return value.JSValue.fromInt(-1);
+
+    // Map the code-unit start to a byte offset for the byte-level search.
+    const byte_start: usize = if (is_ascii) start_units else string.utf16IndexToByteOffset(data, @intCast(start_units));
+    if (needle_data.len > data.len - byte_start) return value.JSValue.fromInt(-1);
+
+    if (std.mem.indexOf(u8, data[byte_start..], needle_data)) |rel_idx| {
+        const byte_match = byte_start + rel_idx;
+        const unit_idx: usize = if (is_ascii) byte_match else string.byteOffsetToUtf16Index(data, byte_match);
+        return value.JSValue.fromInt(@intCast(unit_idx));
     }
     return value.JSValue.fromInt(-1);
 }
 
 /// String.prototype.lastIndexOf(searchString, position?) - Find substring from end
+/// Position and the returned index are UTF-16 code-unit offsets (matching
+/// length/slice). The position is mapped to a byte offset, then the byte-level
+/// search window is bounded so the last match starts at or before it.
 pub fn stringLastIndexOf(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.fromInt(-1);
 
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.fromInt(-1);
     const needle_data = getStringDataCtx(args[0], ctx) orelse return value.JSValue.fromInt(-1);
+    const is_ascii = stringIsAscii(this);
+    const total_units: usize = if (is_ascii) data.len else string.utf16Length(data);
 
-    // Compute search end bound from optional position argument (default = data.len)
-    var end: usize = data.len;
+    // Start position is a UTF-16 code-unit index; default (and NaN) = search
+    // from the very end of the string.
+    var pos_units: usize = total_units;
     if (args.len > 1) {
         if (args[1].isInt()) {
             const pos = args[1].getInt();
-            if (pos >= 0) {
-                end = @min(@as(usize, @intCast(pos)) + needle_data.len, data.len);
-            } else {
-                end = 0;
-            }
+            pos_units = if (pos >= 0) @intCast(pos) else 0;
         } else if (args[1].toNumber()) |n| {
             if (std.math.isNan(n)) {
-                // ECMAScript spec: NaN position → +Infinity → search from end; leave end = data.len.
+                // NaN → +Infinity → search from end; pos_units stays total_units.
             } else if (n >= 0) {
-                const floored = std.math.lossyCast(usize, @floor(n));
-                end = @min(floored +| needle_data.len, data.len);
+                pos_units = std.math.lossyCast(usize, @floor(n));
             } else {
-                end = 0;
+                pos_units = 0;
             }
         }
     }
 
-    if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(@min(end, data.len)));
+    if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(@min(pos_units, total_units)));
+
+    // Map the (clamped) code-unit position to a byte offset, then bound the
+    // search window so a match starting at that byte is still included.
+    const clamped_units = @min(pos_units, total_units);
+    const byte_pos: usize = if (is_ascii) clamped_units else string.utf16IndexToByteOffset(data, @intCast(clamped_units));
+    const end = @min(byte_pos +| needle_data.len, data.len);
     if (needle_data.len > end) return value.JSValue.fromInt(-1);
 
     if (std.mem.lastIndexOf(u8, data[0..end], needle_data)) |idx| {
-        return value.JSValue.fromInt(@intCast(idx));
+        const unit_idx: usize = if (is_ascii) idx else string.byteOffsetToUtf16Index(data, idx);
+        return value.JSValue.fromInt(@intCast(unit_idx));
     }
     return value.JSValue.fromInt(-1);
 }
@@ -338,7 +282,7 @@ pub fn stringSlice(ctx: *context.Context, this: value.JSValue, args: []const val
     // Indices are UTF-16 code units. For ASCII the count equals the byte length
     // and unit index equals byte offset, so the conversions below are no-ops.
     const is_ascii = stringIsAscii(this);
-    const len_units: u32 = if (is_ascii) @intCast(data.len) else utf16Length(data);
+    const len_units: u32 = if (is_ascii) @intCast(data.len) else string.utf16Length(data);
 
     var start: i32 = 0;
     var end: i32 = @intCast(len_units);
@@ -376,9 +320,12 @@ pub fn stringSlice(ctx: *context.Context, this: value.JSValue, args: []const val
     if (end > @as(i32, @intCast(len_units))) end = @intCast(len_units);
     if (end < start) end = start;
 
-    // Map UTF-16 code-unit indices to UTF-8 byte offsets at codepoint boundaries.
-    const byte_start: u32 = if (is_ascii) @intCast(start) else @intCast(utf16IndexToByteOffset(data, @intCast(start)));
-    const byte_end: u32 = if (is_ascii) @intCast(end) else @intCast(utf16IndexToByteOffset(data, @intCast(end)));
+    // Map UTF-16 code-unit indices to UTF-8 byte offsets at codepoint
+    // boundaries. start <= end here, so the end map continues from the start
+    // cursor rather than re-walking the prefix.
+    const offsets = utf16SliceByteOffsets(data, is_ascii, @intCast(start), @intCast(end));
+    const byte_start = offsets.start;
+    const byte_end = offsets.end;
     const slice_len = byte_end - byte_start;
 
     // Fast path: copy if slice < 16 bytes (SliceString overhead exceeds copy cost)
@@ -418,7 +365,7 @@ pub fn stringSubstring(ctx: *context.Context, this: value.JSValue, args: []const
     // Indices are UTF-16 code units. For ASCII the count equals the byte length
     // and unit index equals byte offset, so the conversions below are no-ops.
     const is_ascii = stringIsAscii(this);
-    const len_units: u32 = if (is_ascii) @intCast(data.len) else utf16Length(data);
+    const len_units: u32 = if (is_ascii) @intCast(data.len) else string.utf16Length(data);
 
     var start: i32 = 0;
     var end: i32 = @intCast(len_units);
@@ -458,9 +405,11 @@ pub fn stringSubstring(ctx: *context.Context, this: value.JSValue, args: []const
         end = tmp;
     }
 
-    // Map UTF-16 code-unit indices to UTF-8 byte offsets at codepoint boundaries.
-    const byte_start: u32 = if (is_ascii) @intCast(start) else @intCast(utf16IndexToByteOffset(data, @intCast(start)));
-    const byte_end: u32 = if (is_ascii) @intCast(end) else @intCast(utf16IndexToByteOffset(data, @intCast(end)));
+    // Map UTF-16 code-unit indices to UTF-8 byte offsets at codepoint
+    // boundaries (start <= end here, so the end map continues from start).
+    const offsets = utf16SliceByteOffsets(data, is_ascii, @intCast(start), @intCast(end));
+    const byte_start = offsets.start;
+    const byte_end = offsets.end;
     const slice_len = byte_end - byte_start;
 
     // Fast path: copy if slice < 16 bytes (SliceString overhead exceeds copy cost)
@@ -978,6 +927,23 @@ test "string length/charAt/slice index by UTF-16 code units ENG-utf16" {
     try std.testing.expectEqual(@as(i32, 21), stringLength(ctx, long, &noargs).getInt());
     try std.testing.expectEqualStrings(long_input, getStringData(stringSlice(ctx, long, &.{ value.JSValue.fromInt(0), value.JSValue.fromInt(21) })) orelse return error.TestUnexpectedResult);
     try std.testing.expectEqualStrings("a" ** 20, getStringData(stringSlice(ctx, long, &.{value.JSValue.fromInt(1)})) orelse return error.TestUnexpectedResult);
+
+    // indexOf/lastIndexOf return UTF-16 code-unit indices that agree with slice
+    // (the bug: they used to return byte offsets, so slice(indexOf(...)) cut at
+    // the wrong place for non-ASCII). "café-x": c,a,f,é,-,x -> 'x' is unit 5.
+    const cafe = try ctx.createString("café-x");
+    const x_needle = try ctx.createString("x");
+    try std.testing.expectEqual(@as(i32, 5), stringIndexOf(ctx, cafe, &.{x_needle}).getInt());
+    try std.testing.expectEqual(@as(i32, 5), stringLastIndexOf(ctx, cafe, &.{x_needle}).getInt());
+    // The slice(indexOf(t)) idiom now lands on the match for non-ASCII input.
+    const x_at = stringIndexOf(ctx, cafe, &.{x_needle});
+    try std.testing.expectEqualStrings("x", getStringData(stringSlice(ctx, cafe, &.{x_at})) orelse return error.TestUnexpectedResult);
+    // 'l' in "héllo" is units 2 and 3 (é is one code unit, two bytes).
+    const l_needle = try ctx.createString("l");
+    try std.testing.expectEqual(@as(i32, 2), stringIndexOf(ctx, hello, &.{l_needle}).getInt());
+    try std.testing.expectEqual(@as(i32, 3), stringLastIndexOf(ctx, hello, &.{l_needle}).getInt());
+    // position arg is a code-unit index: searching from unit 3 skips the first 'l'.
+    try std.testing.expectEqual(@as(i32, 3), stringIndexOf(ctx, hello, &.{ l_needle, value.JSValue.fromInt(3) }).getInt());
 }
 
 test "stringConstructor converts scalars to strings ENG-String" {

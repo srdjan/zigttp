@@ -22,6 +22,10 @@ const std = @import("std");
 // Shared ECMAScript ToInt32 so compile-time bitwise folding matches the
 // interpreter and never hits the `@intFromFloat` out-of-range panic.
 const floatToInt32 = @import("interpreter/util.zig").floatToInt32;
+// Shared UTF-16 code-unit indexing so compile-time string length/index/slice
+// match the runtime builtins on non-ASCII strings (string stores UTF-8 but JS
+// indexes by UTF-16 code units).
+const string = @import("string.zig");
 
 // ============================================================================
 // Error Types
@@ -1337,7 +1341,8 @@ pub const ComptimeEvaluator = struct {
 
             // Properties
             if (std.mem.eql(u8, name, "length")) {
-                const len = str.len; // Save before freeing
+                // JS .length is UTF-16 code units, not UTF-8 bytes.
+                const len = string.utf16Length(str); // Save before freeing
                 // Free the original string since we're consuming it
                 left.deinit(self.allocator);
                 return .{ .number = @floatFromInt(len) };
@@ -1422,7 +1427,8 @@ pub const ComptimeEvaluator = struct {
                     else => return ComptimeError.TypeMismatch,
                 };
                 if (std.mem.indexOf(u8, str, search)) |idx| {
-                    return .{ .number = @floatFromInt(idx) };
+                    // Return a UTF-16 code-unit index (matches .length/slice).
+                    return .{ .number = @floatFromInt(string.byteOffsetToUtf16Index(str, idx)) };
                 }
                 return .{ .number = -1 };
             }
@@ -1445,14 +1451,19 @@ pub const ComptimeEvaluator = struct {
             }
             if (std.mem.eql(u8, name, "charAt")) {
                 const idx_f = args[0].toNumber() orelse return ComptimeError.TypeMismatch;
-                const idx: usize = std.math.lossyCast(usize, @trunc(idx_f));
-                if (idx >= str.len) {
-                    const empty = self.allocator.alloc(u8, 0) catch return ComptimeError.OutOfMemory;
-                    return .{ .string = empty };
+                // Index by UTF-16 code unit (matches runtime charAt); an astral
+                // codepoint is returned whole for either of its two unit indices.
+                const idx_usize: usize = std.math.lossyCast(usize, @trunc(idx_f));
+                const slice: ?[]const u8 = if (idx_usize <= std.math.maxInt(u32))
+                    string.charCodepointSliceAt(str, @intCast(idx_usize))
+                else
+                    null;
+                if (slice) |cp| {
+                    const result = self.allocator.dupe(u8, cp) catch return ComptimeError.OutOfMemory;
+                    return .{ .string = result };
                 }
-                const result = self.allocator.alloc(u8, 1) catch return ComptimeError.OutOfMemory;
-                result[0] = str[idx];
-                return .{ .string = result };
+                const empty = self.allocator.alloc(u8, 0) catch return ComptimeError.OutOfMemory;
+                return .{ .string = empty };
             }
         }
 
@@ -1558,7 +1569,8 @@ pub const ComptimeEvaluator = struct {
 
         const start_f = args[0].toNumber() orelse return ComptimeError.TypeMismatch;
         var start: i64 = std.math.lossyCast(i64, @trunc(start_f));
-        const len: i64 = @intCast(str.len);
+        // Indices are UTF-16 code units (matches .length and runtime slice).
+        const len: i64 = @intCast(string.utf16Length(str));
 
         // Handle negative start
         if (start < 0) {
@@ -1581,9 +1593,10 @@ pub const ComptimeEvaluator = struct {
             return .{ .string = empty };
         }
 
-        const start_u: usize = @intCast(start);
-        const end_u: usize = @intCast(end);
-        const result = self.allocator.dupe(u8, str[start_u..end_u]) catch return ComptimeError.OutOfMemory;
+        // Map the code-unit range to byte offsets at codepoint boundaries.
+        const byte_start = string.utf16IndexToByteOffset(str, @intCast(start));
+        const byte_end = string.utf16IndexToByteOffset(str, @intCast(end));
+        const result = self.allocator.dupe(u8, str[byte_start..byte_end]) catch return ComptimeError.OutOfMemory;
         return .{ .string = result };
     }
 
@@ -2025,6 +2038,33 @@ test "comptime string" {
     const r1 = try eval1.evaluate();
     defer r1.deinit(allocator);
     try std.testing.expectEqualStrings("hello", r1.string);
+}
+
+test "comptime string indexes by UTF-16 code units ENG-utf16" {
+    const allocator = std.testing.allocator;
+
+    // .length counts UTF-16 code units, matching the runtime (not UTF-8 bytes).
+    var e_len = ComptimeEvaluator.init(allocator, "\"é\".length", 1, 1);
+    const r_len = try e_len.evaluate();
+    defer r_len.deinit(allocator);
+    try std.testing.expectEqual(@as(f64, 1), r_len.number);
+
+    var e_astral = ComptimeEvaluator.init(allocator, "\"😀\".length", 1, 1);
+    const r_astral = try e_astral.evaluate();
+    defer r_astral.deinit(allocator);
+    try std.testing.expectEqual(@as(f64, 2), r_astral.number);
+
+    // slice clamps by code units and cuts on codepoint boundaries.
+    var e_slice = ComptimeEvaluator.init(allocator, "\"héllo\".slice(0, 2)", 1, 1);
+    const r_slice = try e_slice.evaluate();
+    defer r_slice.deinit(allocator);
+    try std.testing.expectEqualStrings("hé", r_slice.string);
+
+    // indexOf returns a code-unit index (was a byte offset).
+    var e_idx = ComptimeEvaluator.init(allocator, "\"café-x\".indexOf(\"x\")", 1, 1);
+    const r_idx = try e_idx.evaluate();
+    defer r_idx.deinit(allocator);
+    try std.testing.expectEqual(@as(f64, 5), r_idx.number);
 }
 
 test "comptime array" {
