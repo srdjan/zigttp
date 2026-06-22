@@ -33,3 +33,32 @@ test "extractInt accepts int tag and whole-number floats" {
     try std.testing.expectEqual(@as(?i32, null), sdk.extractInt(sdk.JSValue.fromFloat(7.5)));
     try std.testing.expectEqual(@as(?i32, null), sdk.extractInt(sdk.JSValue.undefined_val));
 }
+
+// Lives here, not in test_shim.zig: test_shim is imported as a separate module,
+// so refAllDecls references its decls but does NOT register its `test` blocks -
+// a test placed there never runs. test_root.zig is the actual test root.
+test "fillRandom surfaces a clean error when the bridge cannot fill the buffer" {
+    test_shim.allowAllCapabilities();
+    defer test_shim.allowAllCapabilities();
+    defer test_shim.allowRandom();
+
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    var buf: [16]u8 = .{0xAA} ** 16;
+
+    // Happy path: capability allowed and the bridge succeeds -> no error.
+    try sdk.fillRandom(fake_handle, &buf);
+
+    // Bridge cannot fill (OS entropy unavailable): must return a typed error,
+    // NOT silently succeed with the zeroed buffer (which would be a predictable
+    // token). This is the regression the void->bool bridge change closes.
+    test_shim.failRandom();
+    try std.testing.expectError(error.RandomUnavailable, sdk.fillRandom(fake_handle, &buf));
+    // The buffer is zeroed on failure so no uninitialized bytes leak; the caller
+    // discards it because the error propagates.
+    for (buf) |b| try std.testing.expectEqual(@as(u8, 0), b);
+
+    // Capability denial still takes precedence and reports its own error.
+    test_shim.allowRandom();
+    test_shim.denyCapability(.random);
+    try std.testing.expectError(error.MissingModuleCapability, sdk.fillRandom(fake_handle, &buf));
+}

@@ -54,6 +54,7 @@ pub const ModuleCapabilityError = error{
     MissingModuleCapability,
     ClockUnavailable,
     StderrWriteFailed,
+    RandomUnavailable,
 };
 
 pub const DataLabel = enum(u3) {

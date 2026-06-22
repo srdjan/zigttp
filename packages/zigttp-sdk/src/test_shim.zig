@@ -45,8 +45,22 @@ pub export fn zigttpSdkNowMs(_: *sdk.ModuleHandle, out_ms: *i64) bool {
     return true;
 }
 
-pub export fn zigttpSdkFillRandom(_: *sdk.ModuleHandle, buf_ptr: [*]u8, len: usize) void {
+// When true, the random fill reports failure (mirrors the runtime bridge when
+// OS entropy is unavailable) so tests can exercise the error path. Default
+// false; reset with `allowRandom` (process-global, like the capability mask).
+var random_should_fail: bool = false;
+
+pub fn failRandom() void {
+    random_should_fail = true;
+}
+
+pub fn allowRandom() void {
+    random_should_fail = false;
+}
+
+pub export fn zigttpSdkFillRandom(_: *sdk.ModuleHandle, buf_ptr: [*]u8, len: usize) bool {
     @memset(buf_ptr[0..len], 0);
+    return !random_should_fail;
 }
 
 pub export fn zigttpSdkWriteStderr(_: *sdk.ModuleHandle, _: [*]const u8, _: usize) bool {

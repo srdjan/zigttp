@@ -233,6 +233,7 @@ pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
 pub const ActiveCapabilityError = ModuleCapabilityError || error{
     ClockUnavailable,
     StderrWriteFailed,
+    EntropyUnavailable,
 };
 
 fn currentActiveModuleSpecifier() []const u8 {
@@ -257,6 +258,10 @@ fn panicCapabilityError(err: ActiveCapabilityError, capability: ModuleCapability
         ),
         error.StderrWriteFailed => std.log.err(
             "module '{s}' failed to write to stderr capability",
+            .{spec},
+        ),
+        error.EntropyUnavailable => std.log.err(
+            "module '{s}' could not read OS entropy (/dev/urandom)",
             .{spec},
         ),
     }
@@ -309,7 +314,11 @@ pub fn fillRandomForActiveModule(buf: []u8) ActiveCapabilityError!void {
     // low-entropy and state-recoverable from a single observed id.
     if (sdk_csprng == null) {
         var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
-        fillOsEntropy(&seed) catch @panic("zigttp:id: cannot seed CSPRNG from /dev/urandom");
+        // Fail closed but cleanly: a blocked /dev/urandom (e.g. a hardened
+        // container) surfaces as a typed error the SDK bridge turns into a
+        // caller-visible failure, instead of a process panic. Never fall back
+        // to a weaker source - an unseeded CSPRNG must not mint tokens.
+        fillOsEntropy(&seed) catch return error.EntropyUnavailable;
         sdk_csprng = std.Random.DefaultCsprng.init(seed);
     }
     sdk_csprng.?.random().bytes(buf);
@@ -587,16 +596,20 @@ pub const sdk_bridge = struct {
         return true;
     }
 
-    pub export fn zigttpSdkFillRandom(handle: *ModuleHandle, buf_ptr: [*]u8, len: usize) void {
+    pub export fn zigttpSdkFillRandom(handle: *ModuleHandle, buf_ptr: [*]u8, len: usize) bool {
         _ = handle;
-        if (len == 0) return;
+        if (len == 0) return true;
         // The callers (zigttp:id) pass `undefined`-initialized stack buffers and
-        // emit them as security tokens. If the fill ever fails, zero the buffer
-        // rather than leaving uninitialized stack memory to leak as a "random"
-        // value. (The void return cannot signal failure; zeroing fails closed.)
+        // emit them as security tokens. If the fill fails (missing capability or
+        // OS entropy unavailable), zero the buffer so no uninitialized stack
+        // memory leaks as a "random" value, AND return false so the caller
+        // surfaces a clean error rather than emitting an all-zero, predictable
+        // token. Fails closed without a process panic.
         fillRandomForActiveModule(buf_ptr[0..len]) catch {
             @memset(buf_ptr[0..len], 0);
+            return false;
         };
+        return true;
     }
 
     pub export fn zigttpSdkWriteStderr(handle: *ModuleHandle, buf_ptr: [*]const u8, len: usize) bool {
