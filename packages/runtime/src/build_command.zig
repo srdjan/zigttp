@@ -448,6 +448,12 @@ fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void 
     const ledger_service_name = input.ledger_service_name;
     const attest_requested = input.attest_requested;
 
+    // --no-attest skips proof-receipt signing; warn once so a scripted build
+    // does not silently ship an unsigned artifact. Gated out of tests.
+    if (!attest_requested and !builtin.is_test) {
+        std.log.warn("--no-attest: this artifact will be built without a signed proof receipt", .{});
+    }
+
     const source = zigts.file_io.readFile(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
         std.log.err("Failed to read handler '{s}': {}", .{ handler_path, err });
         return err;

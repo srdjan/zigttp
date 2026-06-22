@@ -285,6 +285,7 @@ fn serveCommandWithDebugPanicPath(
         return err;
     };
     applyDebugPanicPathDefault(&config, debug_panic_path);
+    warnDangerousServeFlags(feature_flags.force_swap, config.skip_env_check);
     if (feature_flags.studio_enabled) config.studio = true;
     if (feature_flags.demo_enabled) {
         config.studio = true;
@@ -385,6 +386,22 @@ fn reportServerError(err: anyerror, port: u16) void {
         return;
     }
     std.log.err("Server error: {}", .{err});
+}
+
+/// Emit one warning line per active safety-disabling flag. These flags are
+/// opt-in and legitimate, but a user (often in a script) should get a visible
+/// signal rather than silently bypassing a guard. Gated out of tests to match
+/// `reportServerError`; the spawning path is exercised by the CLI E2E smokes.
+fn warnDangerousServeFlags(force_swap: bool, skip_env_check: bool) void {
+    if (builtin.is_test) return;
+    if (force_swap) std.log.warn(
+        "--force-swap: breaking contract changes will be applied on reload without confirmation",
+        .{},
+    );
+    if (skip_env_check) std.log.warn(
+        "--no-env-check: startup environment validation is disabled",
+        .{},
+    );
 }
 
 /// Render the actionable port-in-use line into `buf`. Split out from
@@ -756,7 +773,7 @@ fn printServeHelp() void {
         \\  -q, --quiet           Disable request logging
         \\  --static <DIR>        Serve static files from directory
         \\  --outbound-http       Enable native outbound HTTP bridge
-        \\  --outbound-host <H>   Restrict outbound bridge to exact host H
+        \\  --outbound-host <H>   Restrict outbound bridge to exact host H (host only, not port)
         \\  --outbound-timeout-ms Connect timeout for outbound bridge in ms
         \\  --outbound-max-response <SIZE>
         \\  --sqlite <FILE>       SQLite database path for zigttp:sql
