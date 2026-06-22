@@ -664,3 +664,12 @@ test "missing sql schema json uses diagnostic envelope" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"code\":\"ZTS700\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "--sql-schema") != null);
 }
+
+test {
+    // Collect the command modules reached only through this dispatcher. A plain
+    // `@import` (above) does not pull a file's `test {}` blocks into the test
+    // binary; this explicit reference does. Mirrors dev_cli.zig's anchor block
+    // (see MEMORY.md "CLI test-collection closure").
+    _ = describe_rule;
+    _ = search_rules;
+}

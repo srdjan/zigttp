@@ -259,6 +259,25 @@ pub fn build(b: *std.Build) void {
     const expert_test_step = b.step("test-expert", "Run zigts expert v1 contract tripwires");
     expert_test_step.dependOn(&run_expert_tests.step);
 
+    // Analyzer dispatch + machine-command modules. zigts_cli.zig and the
+    // command files it imports (describe_rule.zig, search_rules.zig, ...) are
+    // only reached through the `zigts_cli` named module, which is never an
+    // addTest root, so their `test {}` blocks were collected by no suite. This
+    // step roots at the dispatcher directly. Same rationale as canonicalize_tests.
+    const zigts_cli_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = tools_dep.path("src/zigts_cli.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    zigts_cli_tests.root_module.addImport("zigts", zigts_host_mod);
+    zigts_cli_tests.root_module.addImport("project_config", project_config_mod);
+    const run_zigts_cli_tests = b.addRunArtifact(zigts_cli_tests);
+    const zigts_cli_test_step = b.step("test-zigts-cli", "Run analyzer dispatch + machine-command module tests");
+    zigts_cli_test_step.dependOn(&run_zigts_cli_tests.step);
+
     const deploy_manifest_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = tools_dep.path("src/deploy_manifest.zig"),
@@ -678,6 +697,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_prop_expect_tests.step);
     test_step.dependOn(&run_rollout_tests.step);
     test_step.dependOn(&run_expert_tests.step);
+    test_step.dependOn(&run_zigts_cli_tests.step);
     test_step.dependOn(&run_pi_tests.step);
     test_step.dependOn(&run_deploy_manifest_tests.step);
     test_step.dependOn(&capability_audit.step);

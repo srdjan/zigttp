@@ -234,10 +234,10 @@ test "findTypeCheckerRule resolves ZTS203 by code and name" {
 }
 
 test "writeUnknownRuleJson emits a JSON error object for an unknown rule" {
-    var buf: [256]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writeUnknownRuleJson(fbs.writer(), "BOGUS");
-    const out = fbs.getWritten();
+    var aw = std.Io.Writer.Allocating.init(testing.allocator);
+    defer aw.deinit();
+    try writeUnknownRuleJson(&aw.writer, "BOGUS");
+    const out = aw.writer.buffered();
     try testing.expect(std.mem.indexOf(u8, out, "\"error\":\"unknown_rule\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"query\":\"BOGUS\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "Unknown rule") == null);
@@ -250,10 +250,10 @@ test "writeUnknownRuleJson emits a JSON error object for an unknown rule" {
 
 test "writeTypeCheckerJson emits the rule-json shape with a real description" {
     const rule = findTypeCheckerRule("ZTS203") orelse return error.TestExpectedRule;
-    var buf: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writeTypeCheckerJson(fbs.writer(), rule);
-    const out = fbs.getWritten();
+    var aw = std.Io.Writer.Allocating.init(testing.allocator);
+    defer aw.deinit();
+    try writeTypeCheckerJson(&aw.writer, rule);
+    const out = aw.writer.buffered();
     try testing.expect(std.mem.indexOf(u8, out, "\"code\":\"ZTS203\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"name\":\"arg_type_mismatch\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"description\":") != null);
