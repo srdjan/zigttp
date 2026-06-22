@@ -212,4 +212,12 @@ if grep -n "threaded and evented I/O paths" docs/performance.md >/dev/null; then
   fail "performance docs still claim evented request path support"
 fi
 
+mock_replay_refs="$(
+  grep -R "zigttp mock --replay" docs README.md CHANGELOG.md SECURITY.md RELEASE_CHECKLIST.md 2>/dev/null |
+    grep -v '^docs/witnesses.md:' || true
+)"
+if [[ -n "$mock_replay_refs" ]]; then
+  fail "docs advertise unsupported zigttp mock --replay"
+fi
+
 printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"

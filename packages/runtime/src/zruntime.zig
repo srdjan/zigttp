@@ -4493,11 +4493,11 @@ fn seedIncompleteDurableRandomStep(
     const header_values = [_][]const u8{key};
     const result = zq.trace.jsonToJSValue(rt.ctx, result_json);
 
-    state.persistRunKey(key);
-    state.persistRequest("GET", "/", &header_names, &header_values, null);
-    state.persistStepStart(step_name);
-    state.persistIO("builtin", "Math.random", rt.ctx, &.{}, result);
-    state.persistStepResult(step_name, rt.ctx, result);
+    try state.persistRunKey(key);
+    try state.persistRequest("GET", "/", &header_names, &header_values, null);
+    try state.persistStepStart(step_name);
+    try state.persistIO("builtin", "Math.random", rt.ctx, &.{}, result);
+    try state.persistStepResult(step_name, rt.ctx, result);
 }
 
 // Pull tests from sibling files that are not otherwise reachable from this

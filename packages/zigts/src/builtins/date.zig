@@ -23,7 +23,9 @@ pub fn dateNow(ctx: *context.Context, this: value.JSValue, args: []const value.J
         // Live phase: get real time, persist, return
         const ms = compat.realtimeNowMs() catch return value.JSValue.undefined_val;
         const result = allocFloat(ctx, @floatFromInt(ms));
-        durable.persistIO("builtin", "Date.now", ctx, &.{}, result);
+        durable.persistIO("builtin", "Date.now", ctx, &.{}, result) catch |err| {
+            return trace_mod.throwDurablePersistenceError(ctx, err);
+        };
         return result;
     }
 

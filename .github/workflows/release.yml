@@ -140,7 +140,21 @@ jobs:
           cp zig-out/bin/zigttp "${DIR}/"
           cp zig-out/bin/zigttp-runtime "${DIR}/"
           cp zig-out/bin/zigts "${DIR}/"
+          cp LICENSE README.md CHANGELOG.md "${DIR}/"
+          cat > "${DIR}/VERSION" <<EOF
+          version=${VERSION}
+          target=${{ matrix.target }}
+          os=${{ matrix.os }}
+          arch=${{ matrix.arch }}
+          EOF
           tar czf "${DIR}.tar.gz" "${DIR}"
+          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/zigttp"
+          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/zigttp-runtime"
+          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/zigts"
+          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/LICENSE"
+          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/README.md"
+          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/CHANGELOG.md"
+          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/VERSION"
           shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
 
       - uses: actions/upload-artifact@v4

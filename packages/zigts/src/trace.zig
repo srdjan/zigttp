@@ -1134,6 +1134,13 @@ fn allocFloat(_: *context.Context, f: f64) value.JSValue {
 
 pub const DURABLE_STATE_SLOT = @intFromEnum(module_slots.Slot.durable);
 
+pub const DurablePersistenceError = error{
+    DurableSerializeFailed,
+    DurableWriteFailed,
+    DurableWriteZero,
+    DurableFsyncFailed,
+};
+
 pub const DurableStepReplay = union(enum) {
     live: void,
     execute: void,
@@ -1353,51 +1360,48 @@ pub const DurableState = struct {
         ctx: *context.Context,
         args: []const value.JSValue,
         result: value.JSValue,
-    ) void {
+    ) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
 
         // Build JSONL line in write_buf using same format as TraceRecorder.recordIO
         const seq = self.cursor + self.live_io_count;
-        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"io\",\"seq\":") orelse return;
-        appendInt(&self.write_buf, self.allocator, seq) orelse return;
-        appendSlice(&self.write_buf, self.allocator, ",\"module\":\"") orelse return;
-        appendEscapedSlice(&self.write_buf, self.allocator, module_name) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "\",\"fn\":\"") orelse return;
-        appendEscapedSlice(&self.write_buf, self.allocator, fn_name) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "\",\"args\":[") orelse return;
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"io\",\"seq\":"));
+        try requireAppend(appendInt(&self.write_buf, self.allocator, seq));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, ",\"module\":\""));
+        try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, module_name));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\",\"fn\":\""));
+        try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, fn_name));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\",\"args\":["));
 
         for (args, 0..) |arg, i| {
-            if (i > 0) appendByte(&self.write_buf, self.allocator, ',') orelse return;
-            appendJSValueBuf(&self.write_buf, self.allocator, ctx, arg, 0) orelse return;
+            if (i > 0) try requireAppend(appendByte(&self.write_buf, self.allocator, ','));
+            try requireAppend(appendJSValueBuf(&self.write_buf, self.allocator, ctx, arg, 0));
         }
 
-        appendSlice(&self.write_buf, self.allocator, "],\"result\":") orelse return;
-        appendJSValueBuf(&self.write_buf, self.allocator, ctx, result, 0) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "],\"result\":"));
+        try requireAppend(appendJSValueBuf(&self.write_buf, self.allocator, ctx, result, 0));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "}\n"));
 
         // Write-ahead: write + fsync before returning to handler
-        writeAll(self.oplog_fd, self.write_buf.items);
-        fsyncFd(self.oplog_fd);
+        try self.persistBuffer();
 
         self.live_io_count += 1;
     }
 
-    pub fn persistRunKey(self: *DurableState, key: []const u8) void {
+    pub fn persistRunKey(self: *DurableState, key: []const u8) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
-        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"durable_run\",\"key\":\"") orelse return;
-        appendEscapedSlice(&self.write_buf, self.allocator, key) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "\"}\n") orelse return;
-        writeAll(self.oplog_fd, self.write_buf.items);
-        fsyncFd(self.oplog_fd);
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"durable_run\",\"key\":\""));
+        try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, key));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\"}\n"));
+        try self.persistBuffer();
     }
 
-    pub fn persistStepStart(self: *DurableState, name: []const u8) void {
+    pub fn persistStepStart(self: *DurableState, name: []const u8) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
-        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"step_start\",\"name\":\"") orelse return;
-        appendEscapedSlice(&self.write_buf, self.allocator, name) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "\"}\n") orelse return;
-        writeAll(self.oplog_fd, self.write_buf.items);
-        fsyncFd(self.oplog_fd);
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"step_start\",\"name\":\""));
+        try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, name));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\"}\n"));
+        try self.persistBuffer();
     }
 
     pub fn persistStepResult(
@@ -1405,53 +1409,48 @@ pub const DurableState = struct {
         name: []const u8,
         ctx: *context.Context,
         result: value.JSValue,
-    ) void {
+    ) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
-        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"step_result\",\"name\":\"") orelse return;
-        appendEscapedSlice(&self.write_buf, self.allocator, name) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "\",\"result\":") orelse return;
-        appendJSValueBuf(&self.write_buf, self.allocator, ctx, result, 0) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
-        writeAll(self.oplog_fd, self.write_buf.items);
-        fsyncFd(self.oplog_fd);
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"step_result\",\"name\":\""));
+        try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, name));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\",\"result\":"));
+        try requireAppend(appendJSValueBuf(&self.write_buf, self.allocator, ctx, result, 0));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "}\n"));
+        try self.persistBuffer();
     }
 
-    pub fn persistWaitTimer(self: *DurableState, until_ms: i64) void {
+    pub fn persistWaitTimer(self: *DurableState, until_ms: i64) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
-        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"wait_timer\",\"until_ms\":") orelse return;
-        appendInt(&self.write_buf, self.allocator, until_ms) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
-        writeAll(self.oplog_fd, self.write_buf.items);
-        fsyncFd(self.oplog_fd);
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"wait_timer\",\"until_ms\":"));
+        try requireAppend(appendInt(&self.write_buf, self.allocator, until_ms));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "}\n"));
+        try self.persistBuffer();
     }
 
-    pub fn persistResumeTimer(self: *DurableState, fired_at_ms: i64) void {
+    pub fn persistResumeTimer(self: *DurableState, fired_at_ms: i64) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
-        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"resume_timer\",\"fired_at_ms\":") orelse return;
-        appendInt(&self.write_buf, self.allocator, fired_at_ms) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
-        writeAll(self.oplog_fd, self.write_buf.items);
-        fsyncFd(self.oplog_fd);
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"resume_timer\",\"fired_at_ms\":"));
+        try requireAppend(appendInt(&self.write_buf, self.allocator, fired_at_ms));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "}\n"));
+        try self.persistBuffer();
     }
 
-    pub fn persistWaitSignal(self: *DurableState, name: []const u8) void {
+    pub fn persistWaitSignal(self: *DurableState, name: []const u8) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
-        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"wait_signal\",\"name\":\"") orelse return;
-        appendEscapedSlice(&self.write_buf, self.allocator, name) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "\"}\n") orelse return;
-        writeAll(self.oplog_fd, self.write_buf.items);
-        fsyncFd(self.oplog_fd);
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"wait_signal\",\"name\":\""));
+        try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, name));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\"}\n"));
+        try self.persistBuffer();
     }
 
-    pub fn persistResumeSignal(self: *DurableState, name: []const u8, payload_json: []const u8) void {
+    pub fn persistResumeSignal(self: *DurableState, name: []const u8, payload_json: []const u8) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
-        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"resume_signal\",\"name\":\"") orelse return;
-        appendEscapedSlice(&self.write_buf, self.allocator, name) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "\",\"payload\":") orelse return;
-        appendSlice(&self.write_buf, self.allocator, payload_json) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
-        writeAll(self.oplog_fd, self.write_buf.items);
-        fsyncFd(self.oplog_fd);
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"resume_signal\",\"name\":\""));
+        try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, name));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\",\"payload\":"));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, payload_json));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "}\n"));
+        try self.persistBuffer();
     }
 
     /// Persist the response line to the oplog and fsync.
@@ -1461,29 +1460,28 @@ pub const DurableState = struct {
         header_names: []const []const u8,
         header_values: []const []const u8,
         body: []const u8,
-    ) void {
+    ) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
 
-        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"response\",\"status\":") orelse return;
-        appendInt(&self.write_buf, self.allocator, status) orelse return;
-        appendSlice(&self.write_buf, self.allocator, ",\"headers\":{") orelse return;
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"response\",\"status\":"));
+        try requireAppend(appendInt(&self.write_buf, self.allocator, status));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, ",\"headers\":{"));
 
         const count = @min(header_names.len, header_values.len);
         for (0..count) |i| {
-            if (i > 0) appendByte(&self.write_buf, self.allocator, ',') orelse return;
-            appendByte(&self.write_buf, self.allocator, '"') orelse return;
-            appendEscapedSlice(&self.write_buf, self.allocator, header_names[i]) orelse return;
-            appendSlice(&self.write_buf, self.allocator, "\":\"") orelse return;
-            appendEscapedSlice(&self.write_buf, self.allocator, header_values[i]) orelse return;
-            appendByte(&self.write_buf, self.allocator, '"') orelse return;
+            if (i > 0) try requireAppend(appendByte(&self.write_buf, self.allocator, ','));
+            try requireAppend(appendByte(&self.write_buf, self.allocator, '"'));
+            try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, header_names[i]));
+            try requireAppend(appendSlice(&self.write_buf, self.allocator, "\":\""));
+            try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, header_values[i]));
+            try requireAppend(appendByte(&self.write_buf, self.allocator, '"'));
         }
 
-        appendSlice(&self.write_buf, self.allocator, "},\"body\":\"") orelse return;
-        appendEscapedSlice(&self.write_buf, self.allocator, body) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "\"}\n") orelse return;
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "},\"body\":\""));
+        try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, body));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\"}\n"));
 
-        writeAll(self.oplog_fd, self.write_buf.items);
-        fsyncFd(self.oplog_fd);
+        try self.persistBuffer();
     }
 
     /// Persist the request line to the oplog (written at start of request).
@@ -1494,45 +1492,48 @@ pub const DurableState = struct {
         header_names: []const []const u8,
         header_values: []const []const u8,
         body: ?[]const u8,
-    ) void {
+    ) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
 
-        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"request\",\"method\":\"") orelse return;
-        appendEscapedSlice(&self.write_buf, self.allocator, method) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "\",\"url\":\"") orelse return;
-        appendEscapedSlice(&self.write_buf, self.allocator, url) orelse return;
-        appendSlice(&self.write_buf, self.allocator, "\",\"headers\":{") orelse return;
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"request\",\"method\":\""));
+        try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, method));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\",\"url\":\""));
+        try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, url));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\",\"headers\":{"));
 
         const count = @min(header_names.len, header_values.len);
         for (0..count) |i| {
-            if (i > 0) appendByte(&self.write_buf, self.allocator, ',') orelse return;
-            appendByte(&self.write_buf, self.allocator, '"') orelse return;
-            appendEscapedSlice(&self.write_buf, self.allocator, header_names[i]) orelse return;
-            appendSlice(&self.write_buf, self.allocator, "\":\"") orelse return;
-            appendEscapedSlice(&self.write_buf, self.allocator, header_values[i]) orelse return;
-            appendByte(&self.write_buf, self.allocator, '"') orelse return;
+            if (i > 0) try requireAppend(appendByte(&self.write_buf, self.allocator, ','));
+            try requireAppend(appendByte(&self.write_buf, self.allocator, '"'));
+            try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, header_names[i]));
+            try requireAppend(appendSlice(&self.write_buf, self.allocator, "\":\""));
+            try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, header_values[i]));
+            try requireAppend(appendByte(&self.write_buf, self.allocator, '"'));
         }
 
-        appendSlice(&self.write_buf, self.allocator, "},\"body\":") orelse return;
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "},\"body\":"));
         if (body) |b| {
-            appendByte(&self.write_buf, self.allocator, '"') orelse return;
-            appendEscapedSlice(&self.write_buf, self.allocator, b) orelse return;
-            appendByte(&self.write_buf, self.allocator, '"') orelse return;
+            try requireAppend(appendByte(&self.write_buf, self.allocator, '"'));
+            try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, b));
+            try requireAppend(appendByte(&self.write_buf, self.allocator, '"'));
         } else {
-            appendSlice(&self.write_buf, self.allocator, "null") orelse return;
+            try requireAppend(appendSlice(&self.write_buf, self.allocator, "null"));
         }
-        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "}\n"));
 
-        writeAll(self.oplog_fd, self.write_buf.items);
-        fsyncFd(self.oplog_fd);
+        try self.persistBuffer();
     }
 
     /// Mark the oplog as complete by writing a completion marker and fsyncing.
-    pub fn markComplete(self: *DurableState) void {
+    pub fn markComplete(self: *DurableState) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
-        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"complete\"}\n") orelse return;
-        writeAll(self.oplog_fd, self.write_buf.items);
-        fsyncFd(self.oplog_fd);
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"complete\"}\n"));
+        try self.persistBuffer();
+    }
+
+    fn persistBuffer(self: *DurableState) DurablePersistenceError!void {
+        try writeAllChecked(self.oplog_fd, self.write_buf.items);
+        try fsyncFdChecked(self.oplog_fd);
     }
 };
 
@@ -1560,13 +1561,21 @@ pub fn makeDurableWrapper(
 
             // Phase 2: Live execution with write-ahead persistence
             const result = try original_fn(ctx_ptr, this, args);
-            state.persistIO(module_name, fn_name, ctx, args, result);
+            try state.persistIO(module_name, fn_name, ctx, args, result);
             return result;
         }
     }.call;
 }
 
 // -- DurableState buffer helpers (standalone, not methods on TraceRecorder) --
+
+fn requireAppend(result: ?void) DurablePersistenceError!void {
+    if (result == null) return error.DurableSerializeFailed;
+}
+
+pub fn throwDurablePersistenceError(ctx: *context.Context, _: anyerror) value.JSValue {
+    return util.throwError(ctx, "DurablePersistenceError", "failed to persist durable oplog entry");
+}
 
 fn appendSlice(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) ?void {
     buf.appendSlice(allocator, data) catch return null;
@@ -1753,9 +1762,28 @@ pub fn writeAll(fd: std.c.fd_t, data: []const u8) void {
     }
 }
 
+/// Write all bytes to fd, failing closed on I/O errors.
+pub fn writeAllChecked(fd: std.c.fd_t, data: []const u8) DurablePersistenceError!void {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const result = std.c.write(fd, remaining.ptr, remaining.len);
+        if (result < 0) {
+            if (std.posix.errno(result) == .INTR) continue;
+            return error.DurableWriteFailed;
+        }
+        if (result == 0) return error.DurableWriteZero;
+        remaining = remaining[@intCast(result)..];
+    }
+}
+
 /// fsync a file descriptor. Best-effort - failure is not fatal.
 fn fsyncFd(fd: std.c.fd_t) void {
     _ = std.c.fsync(fd);
+}
+
+fn fsyncFdChecked(fd: std.c.fd_t) DurablePersistenceError!void {
+    const result = std.c.fsync(fd);
+    if (result < 0) return error.DurableFsyncFailed;
 }
 
 /// Check if a trace file represents an incomplete (recoverable) oplog.
@@ -2276,6 +2304,39 @@ test "DurableState empty oplog starts in live mode" {
     try std.testing.expect(state.is_live);
     const entry = state.replayNext("env", "env");
     try std.testing.expect(entry == null);
+}
+
+test "writeAllChecked reports invalid durable fd" {
+    try std.testing.expectError(error.DurableWriteFailed, writeAllChecked(@as(std.c.fd_t, -1), "x"));
+}
+
+test "DurableState persistence methods report invalid durable fd" {
+    const gc_mod = @import("gc.zig");
+    const heap_mod = @import("heap.zig");
+
+    var gc_state = try gc_mod.GC.init(std.testing.allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(std.testing.allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(std.testing.allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var state = DurableState.init(
+        std.testing.allocator,
+        &.{},
+        -1,
+    );
+    defer state.deinit();
+
+    try std.testing.expectError(error.DurableWriteFailed, state.persistRunKey("order:bad-fd"));
+    try std.testing.expectError(
+        error.DurableWriteFailed,
+        state.persistIO("builtin", "Math.random", ctx, &.{}, value.JSValue.fromInt(1)),
+    );
+    try std.testing.expectError(error.DurableWriteFailed, state.markComplete());
 }
 
 test "DurableState beginStep returns cached result" {

@@ -176,6 +176,18 @@ pub const TypePool = struct {
         return idx;
     }
 
+    fn fitsU16(value: usize) bool {
+        return value <= std.math.maxInt(u16);
+    }
+
+    fn fitsU16Range(start: usize, count: usize) bool {
+        return fitsU16(start) and fitsU16(count) and count <= std.math.maxInt(usize) - start;
+    }
+
+    fn fitsPackedFunction(start: usize, count: usize) bool {
+        return start <= 0x0FFF and count <= 15;
+    }
+
     /// Store a name string and return (start, len).
     pub fn addName(self: *TypePool, allocator: std.mem.Allocator, name: []const u8) struct { start: u16, len: u8 } {
         // The names arena offset is stored as u16; once it exceeds u16 range a
@@ -255,13 +267,12 @@ pub const TypePool = struct {
 
     /// Create a record type with the given fields.
     pub fn addRecord(self: *TypePool, allocator: std.mem.Allocator, record_fields: []const RecordField) TypeIndex {
-        if (self.fields.items.len > std.math.maxInt(u16)) return null_type_idx;
-        const start: u16 = @intCast(self.fields.items.len);
-        const count: u16 = @intCast(record_fields.len);
+        const start = self.fields.items.len;
+        if (!fitsU16Range(start, record_fields.len)) return null_type_idx;
         self.fields.appendSlice(allocator, record_fields) catch return null_type_idx;
         return self.addNode(allocator, .{
             .tag = .t_record,
-            .data = .{ .a = start, .b = count },
+            .data = .{ .a = @intCast(start), .b = @intCast(record_fields.len) },
         });
     }
 
@@ -269,13 +280,12 @@ pub const TypePool = struct {
     pub fn addUnion(self: *TypePool, allocator: std.mem.Allocator, union_members: []const TypeIndex) TypeIndex {
         // Flatten single-member unions
         if (union_members.len == 1) return union_members[0];
-        if (self.members.items.len > std.math.maxInt(u16)) return null_type_idx;
-        const start: u16 = @intCast(self.members.items.len);
-        const count: u16 = @intCast(union_members.len);
+        const start = self.members.items.len;
+        if (!fitsU16Range(start, union_members.len)) return null_type_idx;
         self.members.appendSlice(allocator, union_members) catch return null_type_idx;
         return self.addNode(allocator, .{
             .tag = .t_union,
-            .data = .{ .a = start, .b = count },
+            .data = .{ .a = @intCast(start), .b = @intCast(union_members.len) },
         });
     }
 
@@ -286,30 +296,32 @@ pub const TypePool = struct {
         if (intersection_members.len == 0) return null_type_idx;
 
         // When the input has more distinct members than the dedup buffer can
-        // hold, skip dedup and append the raw (non-null-filtered) members so no
-        // obligation is silently dropped. A dropped target-intersection member is
-        // a dropped constraint -> unsound accept in isAssignableTo.
+        // hold, skip dedup and append the raw non-null members so no obligation
+        // is silently dropped. A dropped target-intersection member is a dropped
+        // constraint -> unsound accept in isAssignableTo.
         if (intersection_members.len > 16) {
-            if (self.members.items.len > std.math.maxInt(u16)) return null_type_idx;
             var raw_count: usize = 0;
-            const start_raw: u16 = @intCast(self.members.items.len);
+            for (intersection_members) |m| {
+                if (m == null_type_idx) continue;
+                raw_count += 1;
+            }
+            if (raw_count == 0) return null_type_idx;
+            if (raw_count == 1) {
+                for (intersection_members) |m| {
+                    if (m != null_type_idx) return m;
+                }
+                return null_type_idx;
+            }
+
+            const start_raw = self.members.items.len;
+            if (!fitsU16Range(start_raw, raw_count)) return null_type_idx;
             for (intersection_members) |m| {
                 if (m == null_type_idx) continue;
                 self.members.append(allocator, m) catch return null_type_idx;
-                raw_count += 1;
-            }
-            if (raw_count == 0) {
-                self.members.shrinkRetainingCapacity(start_raw);
-                return null_type_idx;
-            }
-            if (raw_count == 1) {
-                const only = self.members.items[start_raw];
-                self.members.shrinkRetainingCapacity(start_raw);
-                return only;
             }
             return self.addNode(allocator, .{
                 .tag = .t_intersection,
-                .data = .{ .a = start_raw, .b = @intCast(raw_count) },
+                .data = .{ .a = @intCast(start_raw), .b = @intCast(raw_count) },
             });
         }
 
@@ -332,12 +344,12 @@ pub const TypePool = struct {
         if (count == 0) return null_type_idx;
         if (count == 1) return deduped[0];
 
-        if (self.members.items.len > std.math.maxInt(u16)) return null_type_idx;
-        const start: u16 = @intCast(self.members.items.len);
+        const start = self.members.items.len;
+        if (!fitsU16Range(start, count)) return null_type_idx;
         self.members.appendSlice(allocator, deduped[0..count]) catch return null_type_idx;
         return self.addNode(allocator, .{
             .tag = .t_intersection,
-            .data = .{ .a = start, .b = @intCast(count) },
+            .data = .{ .a = @intCast(start), .b = @intCast(count) },
         });
     }
 
@@ -356,13 +368,12 @@ pub const TypePool = struct {
 
     /// Create a tuple type.
     pub fn addTuple(self: *TypePool, allocator: std.mem.Allocator, elements: []const TypeIndex) TypeIndex {
-        if (self.members.items.len > std.math.maxInt(u16)) return null_type_idx;
-        const start: u16 = @intCast(self.members.items.len);
-        const count: u16 = @intCast(elements.len);
+        const start = self.members.items.len;
+        if (!fitsU16Range(start, elements.len)) return null_type_idx;
         self.members.appendSlice(allocator, elements) catch return null_type_idx;
         return self.addNode(allocator, .{
             .tag = .t_tuple,
-            .data = .{ .a = start, .b = count },
+            .data = .{ .a = @intCast(start), .b = @intCast(elements.len) },
         });
     }
 
@@ -449,13 +460,13 @@ pub const TypePool = struct {
                 // (addRecord -> appendSlice) may reallocate, dangling the slice
                 // mid-loop (UAF / garbage TypeIndex).
                 const live = self.getRecordFields(idx);
-                var new_fields: [32]RecordField = undefined;
-                const count = @min(live.len, 32);
-                @memcpy(new_fields[0..count], live[0..count]);
-                for (0..count) |i| {
+                const new_fields = allocator.alloc(RecordField, live.len) catch return null_type_idx;
+                defer allocator.free(new_fields);
+                @memcpy(new_fields, live);
+                for (0..new_fields.len) |i| {
                     new_fields[i].type_idx = self.instantiate(allocator, new_fields[i].type_idx, param_names, param_types, depth + 1);
                 }
-                return self.addRecord(allocator, new_fields[0..count]);
+                return self.addRecord(allocator, new_fields);
             },
             .t_array => {
                 const elem = self.getArrayElement(idx);
@@ -466,32 +477,32 @@ pub const TypePool = struct {
             .t_union => {
                 // Copy members before the loop (shared members list may realloc).
                 const live = self.getUnionMembers(idx);
-                var members: [32]TypeIndex = undefined;
-                const count = @min(live.len, 32);
-                @memcpy(members[0..count], live[0..count]);
-                var new_members: [32]TypeIndex = undefined;
+                const new_members = allocator.alloc(TypeIndex, live.len) catch return null_type_idx;
+                defer allocator.free(new_members);
+                @memcpy(new_members, live);
                 var changed = false;
-                for (members[0..count], 0..) |m, i| {
-                    new_members[i] = self.instantiate(allocator, m, param_names, param_types, depth + 1);
-                    if (new_members[i] != m) changed = true;
+                for (new_members) |*m| {
+                    const old = m.*;
+                    m.* = self.instantiate(allocator, old, param_names, param_types, depth + 1);
+                    if (m.* != old) changed = true;
                 }
                 if (!changed) return idx;
-                return self.addUnion(allocator, new_members[0..count]);
+                return self.addUnion(allocator, new_members);
             },
             .t_intersection => {
                 // Copy members before the loop (shared members list may realloc).
                 const live = self.getIntersectionMembers(idx);
-                var members: [16]TypeIndex = undefined;
-                const count = @min(live.len, 16);
-                @memcpy(members[0..count], live[0..count]);
-                var new_members: [16]TypeIndex = undefined;
+                const new_members = allocator.alloc(TypeIndex, live.len) catch return null_type_idx;
+                defer allocator.free(new_members);
+                @memcpy(new_members, live);
                 var changed = false;
-                for (members[0..count], 0..) |m, i| {
-                    new_members[i] = self.instantiate(allocator, m, param_names, param_types, depth + 1);
-                    if (new_members[i] != m) changed = true;
+                for (new_members) |*m| {
+                    const old = m.*;
+                    m.* = self.instantiate(allocator, old, param_names, param_types, depth + 1);
+                    if (m.* != old) changed = true;
                 }
                 if (!changed) return idx;
-                return self.addIntersection(allocator, new_members[0..count]);
+                return self.addIntersection(allocator, new_members);
             },
             .t_nullable => {
                 const inner = self.getNullableInner(idx);
@@ -503,17 +514,17 @@ pub const TypePool = struct {
                 // Copy args before the loop (shared members list may realloc on
                 // a nested instantiate -> addGenericApp/addArray).
                 const info = self.getGenericAppInfo(idx);
-                var args: [16]TypeIndex = undefined;
-                const count = @min(info.args.len, 16);
-                @memcpy(args[0..count], info.args[0..count]);
-                var new_args: [16]TypeIndex = undefined;
+                const new_args = allocator.alloc(TypeIndex, info.args.len) catch return null_type_idx;
+                defer allocator.free(new_args);
+                @memcpy(new_args, info.args);
                 var changed = false;
-                for (args[0..count], 0..) |a, i| {
-                    new_args[i] = self.instantiate(allocator, a, param_names, param_types, depth + 1);
-                    if (new_args[i] != a) changed = true;
+                for (new_args) |*arg| {
+                    const old = arg.*;
+                    arg.* = self.instantiate(allocator, old, param_names, param_types, depth + 1);
+                    if (arg.* != old) changed = true;
                 }
                 if (!changed) return idx;
-                return self.addGenericApp(allocator, info.base, new_args[0..count]);
+                return self.addGenericApp(allocator, info.base, new_args);
             },
             else => return idx,
         }
@@ -523,14 +534,13 @@ pub const TypePool = struct {
     pub fn addGenericApp(self: *TypePool, allocator: std.mem.Allocator, base: TypeIndex, type_args: []const TypeIndex) TypeIndex {
         // Layout: members[start] = count, members[start+1..start+1+count] = type args.
         // Storing count inline avoids the 8-bit truncation of the previous (start&0xFF)|(count<<8) scheme.
-        if (self.members.items.len > std.math.maxInt(u16)) return null_type_idx;
-        const start: u16 = @intCast(self.members.items.len);
-        const count: u16 = @intCast(type_args.len);
-        self.members.append(allocator, count) catch return null_type_idx;
+        const start = self.members.items.len;
+        if (!fitsU16(start) or !fitsU16(type_args.len)) return null_type_idx;
+        self.members.append(allocator, @intCast(type_args.len)) catch return null_type_idx;
         self.members.appendSlice(allocator, type_args) catch return null_type_idx;
         return self.addNode(allocator, .{
             .tag = .t_generic_app,
-            .data = .{ .a = base, .b = start },
+            .data = .{ .a = base, .b = @intCast(start) },
         });
     }
 
@@ -597,39 +607,39 @@ pub const TypePool = struct {
     pub fn makeReadonly(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex) TypeIndex {
         const fields = self.getRecordFields(idx);
         if (fields.len == 0) return idx;
-        var ro_fields: [32]RecordField = undefined;
-        const count = @min(fields.len, 32);
-        for (fields[0..count], 0..) |field, i| {
-            ro_fields[i] = field;
-            ro_fields[i].readonly = true;
+        const ro_fields = allocator.alloc(RecordField, fields.len) catch return null_type_idx;
+        defer allocator.free(ro_fields);
+        @memcpy(ro_fields, fields);
+        for (ro_fields) |*field| {
+            field.readonly = true;
         }
-        return self.addRecord(allocator, ro_fields[0..count]);
+        return self.addRecord(allocator, ro_fields);
     }
 
     /// Create a new record type with all fields optional (Partial<T> utility).
     pub fn makePartial(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex) TypeIndex {
         const fields = self.getRecordFields(idx);
         if (fields.len == 0) return idx;
-        var out: [32]RecordField = undefined;
-        const count = @min(fields.len, 32);
-        for (fields[0..count], 0..) |field, i| {
-            out[i] = field;
-            out[i].optional = true;
+        const out = allocator.alloc(RecordField, fields.len) catch return null_type_idx;
+        defer allocator.free(out);
+        @memcpy(out, fields);
+        for (out) |*field| {
+            field.optional = true;
         }
-        return self.addRecord(allocator, out[0..count]);
+        return self.addRecord(allocator, out);
     }
 
     /// Create a new record type with all fields required (Required<T> utility).
     pub fn makeRequired(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex) TypeIndex {
         const fields = self.getRecordFields(idx);
         if (fields.len == 0) return idx;
-        var out: [32]RecordField = undefined;
-        const count = @min(fields.len, 32);
-        for (fields[0..count], 0..) |field, i| {
-            out[i] = field;
-            out[i].optional = false;
+        const out = allocator.alloc(RecordField, fields.len) catch return null_type_idx;
+        defer allocator.free(out);
+        @memcpy(out, fields);
+        for (out) |*field| {
+            field.optional = false;
         }
-        return self.addRecord(allocator, out[0..count]);
+        return self.addRecord(allocator, out);
     }
 
     /// Create a new record type with only the named fields (Pick<T, Keys>).
@@ -639,23 +649,20 @@ pub const TypePool = struct {
     pub fn pickFields(self: *TypePool, allocator: std.mem.Allocator, record_idx: TypeIndex, keys_idx: TypeIndex) TypeIndex {
         const fields = self.getRecordFields(record_idx);
         if (fields.len == 0) return record_idx;
-        var keys_buf: [32][]const u8 = undefined;
-        const key_count = self.collectStringKeys(keys_idx, &keys_buf);
-        if (key_count == 0) return record_idx;
-        var out: [32]RecordField = undefined;
-        var n: usize = 0;
+
+        var out: std.ArrayListUnmanaged(RecordField) = .empty;
+        defer out.deinit(allocator);
+
+        var saw_literal_key = false;
         for (fields) |field| {
-            if (n >= out.len) break;
             const name = self.getName(field.name_start, field.name_len);
-            for (keys_buf[0..key_count]) |k| {
-                if (std.mem.eql(u8, name, k)) {
-                    out[n] = field;
-                    n += 1;
-                    break;
-                }
+            if (self.stringKeySetContains(keys_idx, name, &saw_literal_key)) {
+                out.append(allocator, field) catch return null_type_idx;
             }
         }
-        return self.addRecord(allocator, out[0..n]);
+
+        if (!saw_literal_key) return record_idx;
+        return self.addRecord(allocator, out.items);
     }
 
     /// Create a new record type without the named fields (Omit<T, Keys>).
@@ -665,55 +672,40 @@ pub const TypePool = struct {
     pub fn omitFields(self: *TypePool, allocator: std.mem.Allocator, record_idx: TypeIndex, keys_idx: TypeIndex) TypeIndex {
         const fields = self.getRecordFields(record_idx);
         if (fields.len == 0) return record_idx;
-        var keys_buf: [32][]const u8 = undefined;
-        const key_count = self.collectStringKeys(keys_idx, &keys_buf);
-        if (key_count == 0) return record_idx;
-        var out: [32]RecordField = undefined;
-        var n: usize = 0;
+
+        var out: std.ArrayListUnmanaged(RecordField) = .empty;
+        defer out.deinit(allocator);
+
+        var saw_literal_key = false;
         for (fields) |field| {
-            if (n >= out.len) break;
             const name = self.getName(field.name_start, field.name_len);
-            var omit = false;
-            for (keys_buf[0..key_count]) |k| {
-                if (std.mem.eql(u8, name, k)) {
-                    omit = true;
-                    break;
-                }
-            }
-            if (!omit) {
-                out[n] = field;
-                n += 1;
+            if (!self.stringKeySetContains(keys_idx, name, &saw_literal_key)) {
+                out.append(allocator, field) catch return null_type_idx;
             }
         }
-        return self.addRecord(allocator, out[0..n]);
+
+        if (!saw_literal_key) return record_idx;
+        return self.addRecord(allocator, out.items);
     }
 
-    /// Collect the literal-string names from a Pick/Omit key argument,
-    /// which is a single string literal ("id") or a union of them
-    /// ("id" | "name"). Non-literal members are skipped. Returns the count
-    /// written into `buf`.
-    fn collectStringKeys(self: *const TypePool, keys_idx: TypeIndex, buf: [][]const u8) usize {
-        const tag = self.getTag(keys_idx) orelse return 0;
-        var n: usize = 0;
+    /// Check whether a Pick/Omit key argument contains a field name. Literal
+    /// keys may be provided as one string literal or a union of string literals.
+    /// Non-literal members are ignored but do not cap the number of literal keys.
+    fn stringKeySetContains(self: *const TypePool, keys_idx: TypeIndex, field_name: []const u8, saw_literal_key: *bool) bool {
+        const tag = self.getTag(keys_idx) orelse return false;
         if (tag == .t_literal_string) {
             if (self.getLiteralStringValue(keys_idx)) |v| {
-                if (n < buf.len) {
-                    buf[n] = v;
-                    n += 1;
-                }
+                saw_literal_key.* = true;
+                return std.mem.eql(u8, field_name, v);
             }
-            return n;
+            return false;
         }
         if (tag == .t_union) {
             for (self.getUnionMembers(keys_idx)) |m| {
-                if (n >= buf.len) break;
-                if (self.getLiteralStringValue(m)) |v| {
-                    buf[n] = v;
-                    n += 1;
-                }
+                if (self.stringKeySetContains(m, field_name, saw_literal_key)) return true;
             }
         }
-        return n;
+        return false;
     }
 
     /// Get the string value of a literal string type.
@@ -726,13 +718,12 @@ pub const TypePool = struct {
     /// Create a template literal type from parts.
     /// TypeData: a = parts_start, b = parts_count.
     pub fn addTemplateLiteral(self: *TypePool, allocator: std.mem.Allocator, parts: []const TemplatePart) TypeIndex {
-        if (self.template_parts.items.len > std.math.maxInt(u16)) return null_type_idx;
-        const start: u16 = @intCast(self.template_parts.items.len);
-        const count: u16 = @intCast(parts.len);
+        const start = self.template_parts.items.len;
+        if (!fitsU16Range(start, parts.len)) return null_type_idx;
         self.template_parts.appendSlice(allocator, parts) catch return null_type_idx;
         return self.addNode(allocator, .{
             .tag = .t_template_literal,
-            .data = .{ .a = start, .b = count },
+            .data = .{ .a = @intCast(start), .b = @intCast(parts.len) },
         });
     }
 
@@ -817,10 +808,11 @@ pub const TypePool = struct {
     ) TypeIndex {
         const members = self.getUnionMembers(union_idx);
         if (members.len == 0) return union_idx;
-        var remaining: [16]TypeIndex = undefined;
+        const remaining = allocator.alloc(TypeIndex, members.len) catch return null_type_idx;
+        defer allocator.free(remaining);
         var count: usize = 0;
         for (members) |member| {
-            if (member != exclude and count < 16) {
+            if (member != exclude) {
                 remaining[count] = member;
                 count += 1;
             }
@@ -849,22 +841,18 @@ pub const TypePool = struct {
     pub fn addFunctionWithReturn(self: *TypePool, allocator: std.mem.Allocator, func_params: []const FuncParam, ret: TypeIndex) TypeIndex {
         // param_start (12 bits) and count (4 bits) are packed into data.a. If the
         // shared params list has grown past 0x0FFF, a clamped param_start would
-        // mis-slice into another function's params, and a count > 15 would be
-        // truncated. In either case record the function with no params rather
-        // than returning a wrong slice; getFunctionInfo then yields an empty,
-        // never-misattributed param list.
-        if (self.params.items.len > 0x0FFF or func_params.len > 15) {
-            return self.addNode(allocator, .{
-                .tag = .t_function,
-                .data = .{ .a = 0, .b = ret },
-            });
-        }
-        const param_start: u16 = @intCast(self.params.items.len);
-        const count: u16 = @intCast(func_params.len);
+        // mis-slice into another function's params, and count > 15 cannot be
+        // represented. Fail closed rather than creating a callable-looking
+        // function with silently dropped parameters.
+        const param_start = self.params.items.len;
+        if (!fitsPackedFunction(param_start, func_params.len)) return null_type_idx;
         self.params.appendSlice(allocator, func_params) catch return null_type_idx;
         return self.addNode(allocator, .{
             .tag = .t_function,
-            .data = .{ .a = param_start | (count << 12), .b = ret },
+            .data = .{
+                .a = @as(u16, @intCast(param_start)) | (@as(u16, @intCast(func_params.len)) << 12),
+                .b = ret,
+            },
         });
     }
 
@@ -1364,36 +1352,32 @@ const TypeExprParser = struct {
         self.skipWs();
         if (!self.match('|')) return first;
 
-        // Collect union members
-        var members_buf: [32]TypeIndex = undefined;
-        members_buf[0] = first;
-        var count: usize = 1;
+        var members: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer members.deinit(self.allocator);
+        members.append(self.allocator, first) catch return null_type_idx;
 
         while (true) {
             self.skipWs();
             const member = self.parseIntersection();
             if (member == null_type_idx) break;
-            if (count < members_buf.len) {
-                members_buf[count] = member;
-                count += 1;
-            }
+            members.append(self.allocator, member) catch return null_type_idx;
             self.skipWs();
             if (!self.match('|')) break;
         }
 
         // Check for optional shorthand: T | undefined
-        if (count == 2) {
-            const tag0 = self.pool.getTag(members_buf[0]);
-            const tag1 = self.pool.getTag(members_buf[1]);
+        if (members.items.len == 2) {
+            const tag0 = self.pool.getTag(members.items[0]);
+            const tag1 = self.pool.getTag(members.items[1]);
             if (tag1 == .t_undefined) {
-                return self.pool.addNullable(self.allocator, members_buf[0]);
+                return self.pool.addNullable(self.allocator, members.items[0]);
             }
             if (tag0 == .t_undefined) {
-                return self.pool.addNullable(self.allocator, members_buf[1]);
+                return self.pool.addNullable(self.allocator, members.items[1]);
             }
         }
 
-        return self.pool.addUnion(self.allocator, members_buf[0..count]);
+        return self.pool.addUnion(self.allocator, members.items);
     }
 
     /// Parse a TypeScript intersection: `A & B & C`. Binds tighter than `|`,
@@ -1415,23 +1399,20 @@ const TypeExprParser = struct {
         self.skipWs();
         if (!self.match('&')) return first;
 
-        var members_buf: [16]TypeIndex = undefined;
-        members_buf[0] = first;
-        var count: usize = 1;
+        var members: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer members.deinit(self.allocator);
+        members.append(self.allocator, first) catch return null_type_idx;
 
         while (true) {
             self.skipWs();
             const member = self.parsePrimary();
             if (member == null_type_idx) break;
-            if (count < members_buf.len) {
-                members_buf[count] = member;
-                count += 1;
-            }
+            members.append(self.allocator, member) catch return null_type_idx;
             self.skipWs();
             if (!self.match('&')) break;
         }
 
-        return self.pool.addIntersection(self.allocator, members_buf[0..count]);
+        return self.pool.addIntersection(self.allocator, members.items);
     }
 
     fn parsePrimary(self: *TypeExprParser) TypeIndex {
@@ -1473,8 +1454,8 @@ const TypeExprParser = struct {
         if (!self.match('{')) return null_type_idx;
         self.skipWs();
 
-        var fields_buf: [32]RecordField = undefined;
-        var count: usize = 0;
+        var fields: std.ArrayListUnmanaged(RecordField) = .empty;
+        defer fields.deinit(self.allocator);
 
         while (self.pos < self.source.len and self.source[self.pos] != '}') {
             self.skipWs();
@@ -1516,17 +1497,14 @@ const TypeExprParser = struct {
             // Parse field type (stop at ; or } or ,)
             const field_type = self.parseUnion();
 
-            if (count < fields_buf.len) {
-                const n = self.pool.addName(self.allocator, name_str);
-                fields_buf[count] = .{
-                    .name_start = n.start,
-                    .name_len = n.len,
-                    .type_idx = field_type,
-                    .optional = optional,
-                    .readonly = is_readonly,
-                };
-                count += 1;
-            }
+            const n = self.pool.addName(self.allocator, name_str);
+            fields.append(self.allocator, .{
+                .name_start = n.start,
+                .name_len = n.len,
+                .type_idx = field_type,
+                .optional = optional,
+                .readonly = is_readonly,
+            }) catch return null_type_idx;
 
             self.skipWs();
             // Skip separator (; or ,)
@@ -1535,29 +1513,26 @@ const TypeExprParser = struct {
             }
         }
         _ = self.match('}');
-        return self.pool.addRecord(self.allocator, fields_buf[0..count]);
+        return self.pool.addRecord(self.allocator, fields.items);
     }
 
     fn parseTuple(self: *TypeExprParser) TypeIndex {
         if (!self.match('[')) return null_type_idx;
         self.skipWs();
 
-        var elements_buf: [16]TypeIndex = undefined;
-        var count: usize = 0;
+        var elements: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer elements.deinit(self.allocator);
 
         while (self.pos < self.source.len and self.source[self.pos] != ']') {
             self.skipWs();
             const elem = self.parseUnion();
             if (elem == null_type_idx) break;
-            if (count < elements_buf.len) {
-                elements_buf[count] = elem;
-                count += 1;
-            }
+            elements.append(self.allocator, elem) catch return null_type_idx;
             self.skipWs();
             _ = self.match(',');
         }
         _ = self.match(']');
-        return self.pool.addTuple(self.allocator, elements_buf[0..count]);
+        return self.pool.addTuple(self.allocator, elements.items);
     }
 
     fn parseFunctionOrParen(self: *TypeExprParser) TypeIndex {
@@ -1567,8 +1542,8 @@ const TypeExprParser = struct {
         self.skipWs();
 
         // Try to parse as function params
-        var params_buf: [16]FuncParam = undefined;
-        var param_count: usize = 0;
+        var params: std.ArrayListUnmanaged(FuncParam) = .empty;
+        defer params.deinit(self.allocator);
         var is_function = false;
 
         while (self.pos < self.source.len and self.source[self.pos] != ')') {
@@ -1595,23 +1570,20 @@ const TypeExprParser = struct {
             is_function = true;
 
             const param_type = self.parseUnion();
-            if (param_count < params_buf.len) {
-                const n = self.pool.addName(self.allocator, param_name);
-                params_buf[param_count] = .{
-                    .name_start = n.start,
-                    .name_len = n.len,
-                    .type_idx = param_type,
-                    .optional = optional,
-                };
-                param_count += 1;
-            }
+            const n = self.pool.addName(self.allocator, param_name);
+            params.append(self.allocator, .{
+                .name_start = n.start,
+                .name_len = n.len,
+                .type_idx = param_type,
+                .optional = optional,
+            }) catch return null_type_idx;
             self.skipWs();
             _ = self.match(',');
         }
         _ = self.match(')');
         self.skipWs();
 
-        if (!is_function and param_count == 0) {
+        if (!is_function and params.items.len == 0) {
             // Empty parens: () => ... is a zero-param function
             // Check for =>
             if (self.matchStr("=>")) {
@@ -1627,12 +1599,12 @@ const TypeExprParser = struct {
         if (self.matchStr("=>")) {
             self.skipWs();
             const ret = self.parseUnion();
-            return self.pool.addFunctionWithReturn(self.allocator, params_buf[0..param_count], ret);
+            return self.pool.addFunctionWithReturn(self.allocator, params.items, ret);
         }
 
         // No arrow - this was function params without return type
         if (is_function) {
-            return self.pool.addFunction(self.allocator, params_buf[0..param_count], null_type_idx);
+            return self.pool.addFunction(self.allocator, params.items, null_type_idx);
         }
 
         return null_type_idx;
@@ -1670,12 +1642,10 @@ const TypeExprParser = struct {
     fn parseTemplateLiteralType(self: *TypeExprParser) TypeIndex {
         if (!self.match('`')) return null_type_idx;
 
-        var parts_buf: [16]TemplatePart = undefined;
-        var count: usize = 0;
+        var parts: std.ArrayListUnmanaged(TemplatePart) = .empty;
+        defer parts.deinit(self.allocator);
 
         while (self.pos < self.source.len and self.source[self.pos] != '`') {
-            if (count >= parts_buf.len) break;
-
             if (self.source[self.pos] == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
                 // Type slot: ${T}
                 self.pos += 2; // skip ${
@@ -1683,8 +1653,7 @@ const TypeExprParser = struct {
                 const slot_type = self.parseUnion();
                 self.skipWs();
                 _ = self.match('}');
-                parts_buf[count] = .{ .kind = .type_slot, .type_idx = slot_type };
-                count += 1;
+                parts.append(self.allocator, .{ .kind = .type_slot, .type_idx = slot_type }) catch return null_type_idx;
             } else {
                 // Literal segment: read until ` or ${
                 const seg_start = self.pos;
@@ -1694,14 +1663,13 @@ const TypeExprParser = struct {
                 }
                 if (self.pos > seg_start) {
                     const n = self.pool.addName(self.allocator, self.source[seg_start..self.pos]);
-                    parts_buf[count] = .{ .kind = .literal, .name_start = n.start, .name_len = n.len };
-                    count += 1;
+                    parts.append(self.allocator, .{ .kind = .literal, .name_start = n.start, .name_len = n.len }) catch return null_type_idx;
                 }
             }
         }
         _ = self.match('`');
-        if (count == 0) return null_type_idx;
-        return self.pool.addTemplateLiteral(self.allocator, parts_buf[0..count]);
+        if (parts.items.len == 0) return null_type_idx;
+        return self.pool.addTemplateLiteral(self.allocator, parts.items);
     }
 
     /// Consume any trailing `[]` array suffixes (`number[]`, `T[][]`) and wrap
@@ -1774,25 +1742,22 @@ const TypeExprParser = struct {
         // Check if base is a known generic: Array<T> -> T[]
         const is_array = std.mem.eql(u8, base_name, "Array");
 
-        var args_buf: [8]TypeIndex = undefined;
-        var count: usize = 0;
+        var args: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer args.deinit(self.allocator);
 
         while (self.pos < self.source.len and self.source[self.pos] != '>') {
             self.skipWs();
             const arg = self.parseUnion();
             if (arg == null_type_idx) break;
-            if (count < args_buf.len) {
-                args_buf[count] = arg;
-                count += 1;
-            }
+            args.append(self.allocator, arg) catch return null_type_idx;
             self.skipWs();
             _ = self.match(',');
         }
         _ = self.match('>');
 
         // Array<T> -> T[]
-        if (is_array and count == 1) {
-            return self.pool.addArray(self.allocator, args_buf[0]);
+        if (is_array and args.items.len == 1) {
+            return self.pool.addArray(self.allocator, args.items[0]);
         }
 
         // Readonly<{...}> on an INLINE record -> mark all fields readonly here
@@ -1800,14 +1765,14 @@ const TypeExprParser = struct {
         // generic-app so TypeEnv.tryInstantiateGenericApp resolves the alias to
         // its record before applying makeReadonly -- applying makeReadonly to a
         // bare t_ref here is a no-op that silently drops the readonly markers.
-        if (std.mem.eql(u8, base_name, "Readonly") and count == 1 and
-            self.pool.getTag(args_buf[0]) == .t_record)
+        if (std.mem.eql(u8, base_name, "Readonly") and args.items.len == 1 and
+            self.pool.getTag(args.items[0]) == .t_record)
         {
-            return self.pool.makeReadonly(self.allocator, args_buf[0]);
+            return self.pool.makeReadonly(self.allocator, args.items[0]);
         }
 
         const base = self.pool.addRef(self.allocator, base_name);
-        return self.pool.addGenericApp(self.allocator, base, args_buf[0..count]);
+        return self.pool.addGenericApp(self.allocator, base, args.items);
     }
 
     // Helpers
@@ -2538,4 +2503,160 @@ test "isAssignableTo defers on unresolved generic param targets" {
     try std.testing.expect(pool.isAssignableTo(ref, pool.idx_number));
     // Concrete mismatches still reject
     try std.testing.expect(!pool.isAssignableTo(pool.idx_number, pool.idx_string));
+}
+
+test "addRecord fails closed when field start cannot fit" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    try pool.fields.resize(allocator, @as(usize, std.math.maxInt(u16)) + 1);
+
+    const idx = pool.addRecord(allocator, &.{.{
+        .name_start = 0,
+        .name_len = 0,
+        .type_idx = pool.idx_string,
+        .optional = false,
+    }});
+    try std.testing.expectEqual(null_type_idx, idx);
+}
+
+test "addFunctionWithReturn fails closed when params cannot be packed" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var params: [16]FuncParam = undefined;
+    for (&params, 0..) |*param, i| {
+        var name_buf: [8]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "p{d}", .{i});
+        const n = pool.addName(allocator, name);
+        param.* = .{
+            .name_start = n.start,
+            .name_len = n.len,
+            .type_idx = pool.idx_string,
+            .optional = false,
+        };
+    }
+
+    const idx = pool.addFunctionWithReturn(allocator, params[0..], pool.idx_void);
+    try std.testing.expectEqual(null_type_idx, idx);
+}
+
+test "instantiate preserves records wider than old stack buffers" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const t_param = pool.addGenericParam(allocator, "T");
+    var fields: [33]RecordField = undefined;
+    for (&fields, 0..) |*field, i| {
+        var name_buf: [8]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "f{d}", .{i});
+        const n = pool.addName(allocator, name);
+        field.* = .{
+            .name_start = n.start,
+            .name_len = n.len,
+            .type_idx = t_param,
+            .optional = false,
+        };
+    }
+
+    const record = pool.addRecord(allocator, fields[0..]);
+    const instantiated = pool.instantiate(allocator, record, &.{"T"}, &.{pool.idx_string}, 0);
+    const out = pool.getRecordFields(instantiated);
+    try std.testing.expectEqual(@as(usize, fields.len), out.len);
+    for (out) |field| {
+        try std.testing.expectEqual(pool.idx_string, field.type_idx);
+    }
+}
+
+test "instantiate preserves generic app args wider than old stack buffers" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const t_param = pool.addGenericParam(allocator, "T");
+    const base = pool.addRef(allocator, "Box");
+    var args: [17]TypeIndex = [_]TypeIndex{t_param} ** 17;
+
+    const app = pool.addGenericApp(allocator, base, args[0..]);
+    const instantiated = pool.instantiate(allocator, app, &.{"T"}, &.{pool.idx_string}, 0);
+    const info = pool.getGenericAppInfo(instantiated);
+    try std.testing.expectEqual(@as(usize, args.len), info.args.len);
+    for (info.args) |arg| {
+        try std.testing.expectEqual(pool.idx_string, arg);
+    }
+}
+
+test "parseTypeExpr keeps unions wider than thirty two members" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var source_buf: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&source_buf);
+    for (0..40) |i| {
+        if (i > 0) try writer.writeAll(" | ");
+        try writer.print("\"k{d}\"", .{i});
+    }
+
+    const idx = parseTypeExpr(&pool, allocator, writer.buffer[0..writer.end]);
+    try std.testing.expectEqual(TypeTag.t_union, pool.getTag(idx).?);
+    try std.testing.expectEqual(@as(usize, 40), pool.getUnionMembers(idx).len);
+}
+
+test "parseTypeExpr keeps record fields wider than thirty two fields" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var source_buf: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&source_buf);
+    try writer.writeByte('{');
+    for (0..40) |i| {
+        try writer.print(" f{d}: string;", .{i});
+    }
+    try writer.writeAll(" }");
+
+    const idx = parseTypeExpr(&pool, allocator, writer.buffer[0..writer.end]);
+    try std.testing.expectEqual(TypeTag.t_record, pool.getTag(idx).?);
+    try std.testing.expectEqual(@as(usize, 40), pool.getRecordFields(idx).len);
+}
+
+test "parseTypeExpr keeps generic app args wider than eight args" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var source_buf: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&source_buf);
+    try writer.writeAll("Box<");
+    for (0..12) |i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.writeAll("string");
+    }
+    try writer.writeByte('>');
+
+    const idx = parseTypeExpr(&pool, allocator, writer.buffer[0..writer.end]);
+    try std.testing.expectEqual(TypeTag.t_generic_app, pool.getTag(idx).?);
+    try std.testing.expectEqual(@as(usize, 12), pool.getGenericAppInfo(idx).args.len);
+}
+
+test "parseTypeExpr keeps template literal parts wider than sixteen parts" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var source_buf: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&source_buf);
+    try writer.writeByte('`');
+    for (0..18) |i| {
+        try writer.print("p{d}${{string}}", .{i});
+    }
+    try writer.writeByte('`');
+
+    const idx = parseTypeExpr(&pool, allocator, writer.buffer[0..writer.end]);
+    try std.testing.expectEqual(TypeTag.t_template_literal, pool.getTag(idx).?);
+    try std.testing.expectEqual(@as(usize, 36), pool.getTemplateParts(idx).len);
 }

@@ -108,7 +108,7 @@ pub fn durableRun(rt: *Runtime, ctx: *zq.Context, key: []const u8, run_val: zq.J
 
     var response = try rt.extractResponseInternal(upgraded, false);
     defer response.deinit();
-    persistActiveDurableResponse(rt, &response);
+    try persistActiveDurableResponse(rt, &response);
     return upgraded;
 }
 
@@ -129,7 +129,7 @@ pub fn durableStep(rt: *Runtime, ctx: *zq.Context, name: []const u8, step_val: z
         },
         .execute => {},
         .live => {
-            active.state.persistStepStart(name);
+            try active.state.persistStepStart(name);
         },
     }
 
@@ -138,7 +138,7 @@ pub fn durableStep(rt: *Runtime, ctx: *zq.Context, name: []const u8, step_val: z
 
     const func_obj = step_val.toPtr(zq.JSObject);
     const result = try rt.callFunction(func_obj, &.{});
-    rt.active_durable_run.?.state.persistStepResult(name, ctx, result);
+    try rt.active_durable_run.?.state.persistStepResult(name, ctx, result);
     return result;
 }
 
@@ -159,7 +159,7 @@ pub fn durableStepWithTimeout(rt: *Runtime, ctx: *zq.Context, name: []const u8, 
         },
         .execute => {},
         .live => {
-            active.state.persistStepStart(name);
+            try active.state.persistStepStart(name);
         },
     }
 
@@ -173,7 +173,7 @@ pub fn durableStepWithTimeout(rt: *Runtime, ctx: *zq.Context, name: []const u8, 
         // On execution error, check if we exceeded the deadline
         if (unixMillis() >= deadline_ms) {
             const timeout_result = try zq.modules.util.createPlainResultErr(ctx, "timeout");
-            rt.active_durable_run.?.state.persistStepResult(name, ctx, timeout_result);
+            try rt.active_durable_run.?.state.persistStepResult(name, ctx, timeout_result);
             return timeout_result;
         }
         return err;
@@ -182,12 +182,12 @@ pub fn durableStepWithTimeout(rt: *Runtime, ctx: *zq.Context, name: []const u8, 
     // Check if execution exceeded the deadline
     if (unixMillis() >= deadline_ms) {
         const timeout_result = try zq.modules.util.createPlainResultErr(ctx, "timeout");
-        rt.active_durable_run.?.state.persistStepResult(name, ctx, timeout_result);
+        try rt.active_durable_run.?.state.persistStepResult(name, ctx, timeout_result);
         return timeout_result;
     }
 
     const ok_result = try zq.modules.util.createPlainResultOk(ctx, result);
-    rt.active_durable_run.?.state.persistStepResult(name, ctx, ok_result);
+    try rt.active_durable_run.?.state.persistStepResult(name, ctx, ok_result);
     return ok_result;
 }
 
@@ -205,16 +205,16 @@ pub fn durableSleepUntil(rt: *Runtime, ctx: *zq.Context, until_ms: i64) anyerror
         .ready => return zq.JSValue.undefined_val,
         .pending => |wait| {
             if (wait.until_ms <= now_ms) {
-                active.state.persistResumeTimer(now_ms);
+                try active.state.persistResumeTimer(now_ms);
                 return zq.JSValue.undefined_val;
             }
             try active.setPendingTimer(rt.allocator, wait.until_ms);
             return error.DurableSuspended;
         },
         .live => {
-            active.state.persistWaitTimer(until_ms);
+            try active.state.persistWaitTimer(until_ms);
             if (until_ms <= now_ms) {
-                active.state.persistResumeTimer(now_ms);
+                try active.state.persistResumeTimer(now_ms);
                 return zq.JSValue.undefined_val;
             }
             try active.setPendingTimer(rt.allocator, until_ms);
@@ -237,14 +237,14 @@ pub fn durableWaitSignal(rt: *Runtime, ctx: *zq.Context, name: []const u8) anyer
 
     switch (active.state.beginSignalWait(name)) {
         .delivered => |payload_json| return zq.trace.jsonToJSValue(ctx, payload_json),
-        .live => active.state.persistWaitSignal(name),
+        .live => try active.state.persistWaitSignal(name),
         .pending => {},
     }
 
     if (try store.tryConsumeSignal(active.key, name, now_ms)) |payload| {
         var consumed = payload;
         defer consumed.deinit();
-        active.state.persistResumeSignal(name, consumed.payload_json);
+        try active.state.persistResumeSignal(name, consumed.payload_json);
         // Unlink only after the consumption is durably in the oplog; the
         // reverse order loses the signal on a crash in between.
         store.finalizeConsumedSignal(&consumed);
@@ -448,12 +448,12 @@ pub fn openActiveDurableRun(rt: *Runtime, key: []const u8) !ActiveDurableRun {
     const state = try rt.allocator.create(zq.trace.DurableState);
     errdefer rt.allocator.destroy(state);
     state.* = zq.trace.DurableState.init(rt.allocator, &.{}, fd);
-    state.persistRunKey(key);
+    try state.persistRunKey(key);
 
     var h_names: [64][]const u8 = undefined;
     var h_values: [64][]const u8 = undefined;
     const hcount = splitHeaderKV(request.headers.items, &h_names, &h_values);
-    state.persistRequest(
+    try state.persistRequest(
         request.method,
         request.url,
         h_names[0..hcount],
@@ -526,18 +526,18 @@ pub fn isResponseLike(rt: *Runtime, value: zq.JSValue) bool {
         obj.getProperty(pool, zq.Atom.headers) != null;
 }
 
-pub fn persistActiveDurableResponse(rt: *Runtime, response: *const HttpResponse) void {
+pub fn persistActiveDurableResponse(rt: *Runtime, response: *const HttpResponse) !void {
     if (rt.active_durable_run) |*active| {
         var h_names: [64][]const u8 = undefined;
         var h_values: [64][]const u8 = undefined;
         const hcount = splitHeaderKV(response.headers.items, &h_names, &h_values);
-        active.state.persistResponse(
+        try active.state.persistResponse(
             response.status,
             h_names[0..hcount],
             h_values[0..hcount],
             response.body,
         );
-        active.state.markComplete();
+        try active.state.markComplete();
     }
 }
 

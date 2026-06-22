@@ -187,7 +187,9 @@ pub fn mathRandom(ctx: *context.Context, this: value.JSValue, args: []const valu
         // Live phase: generate real random, persist, return
         const r = getRandomFloat();
         const result = allocFloat(ctx, r);
-        durable.persistIO("builtin", "Math.random", ctx, &.{}, result);
+        durable.persistIO("builtin", "Math.random", ctx, &.{}, result) catch |err| {
+            return trace_mod.throwDurablePersistenceError(ctx, err);
+        };
         return result;
     }
 
