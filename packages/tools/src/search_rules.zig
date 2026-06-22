@@ -14,10 +14,13 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
-        } else if (std.mem.eql(u8, arg, "--help")) {
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp();
             return;
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            // Unknown flag (e.g. a typo): reject loudly rather than ignoring it.
+            return error.InvalidArgument;
+        } else {
             keyword = arg;
         }
     }

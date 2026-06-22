@@ -22,13 +22,6 @@ fn hasHelpFlag(argv: []const []const u8) bool {
     return false;
 }
 
-fn hasFlag(argv: []const []const u8, flag: []const u8) bool {
-    for (argv) |a| {
-        if (std.mem.eql(u8, a, flag)) return true;
-    }
-    return false;
-}
-
 fn writeOwnedToStdout(bytes: []const u8) void {
     _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
 }
@@ -64,7 +57,16 @@ pub fn runMeta(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         printMetaHelp();
         return;
     }
-    const json_mode = hasFlag(argv, "--json");
+    // Help flags are handled above; reject any other unrecognized flag rather
+    // than silently ignoring it (a wrong-output failure for tools and CI).
+    var json_mode = false;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            json_mode = true;
+        } else {
+            return error.InvalidArgument;
+        }
+    }
 
     const info = expert_meta.compute();
 

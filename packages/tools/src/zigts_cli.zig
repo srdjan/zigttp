@@ -357,10 +357,27 @@ fn writeMissingSqlSchemaJsonToWriter(writer: anytype, target: []const u8) !void 
     try json_diag.writeErrorJson(writer, null, diagnostics[0..], null, null);
 }
 
+/// A standard help token (`--help`, `-h`, or bare `help`), accepted by the
+/// machine commands whose arg loops otherwise reject unknown flags.
+fn isHelpToken(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--help") or
+        std.mem.eql(u8, arg, "-h") or
+        std.mem.eql(u8, arg, "help");
+}
+
 fn runFeaturesCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
     for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--json")) json_mode = true;
+        if (std.mem.eql(u8, arg, "--json")) {
+            json_mode = true;
+        } else if (isHelpToken(arg)) {
+            // Recognized so it is not rejected; this machine command has no
+            // separate help screen, so it falls through to the normal catalog.
+        } else {
+            // Match restrictions/check: an unknown flag is a loud error, not a
+            // silently-ignored arg that yields wrong output for tools and CI.
+            return error.InvalidArgument;
+        }
     }
 
     var buf: std.ArrayList(u8) = .empty;
@@ -441,7 +458,14 @@ fn runRestrictionsCommand(_: std.mem.Allocator, argv: []const []const u8) !void 
 fn runModulesCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
     for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--json")) json_mode = true;
+        if (std.mem.eql(u8, arg, "--json")) {
+            json_mode = true;
+        } else if (isHelpToken(arg)) {
+            // Recognized so it is not rejected; this machine command has no
+            // separate help screen, so it falls through to the normal catalog.
+        } else {
+            return error.InvalidArgument;
+        }
     }
 
     var buf: std.ArrayList(u8) = .empty;

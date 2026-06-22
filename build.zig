@@ -602,6 +602,23 @@ pub fn build(b: *std.Build) void {
     addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "ledger", "--help" }, 0);
     addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{"verify-paths"}, 1);
 
+    // Machine-command unknown-flag contract (plan 009): a typo'd flag is a loud
+    // non-zero exit via the clean dev-CLI mapping, not a silently-ignored arg
+    // that yields wrong output for tool/CI callers; valid invocations stay
+    // exit 0. These run the developer `zigttp` binary (cli_exe), which owns the
+    // invalid-arguments message; the analyzer `zigts` binary shares the same
+    // dispatch. Stdout is intentionally not pinned.
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "features", "--josn" }, 1);
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "features", "--json" }, 0);
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "modules", "--josn" }, 1);
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "modules", "--json" }, 0);
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "meta", "--josn" }, 1);
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "meta", "--json" }, 0);
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "describe-rule", "--josn" }, 1);
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "describe-rule", "ZTS303" }, 0);
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "search", "--josn" }, 1);
+    addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "search", "guard" }, 0);
+
     // Run command: runs the runtime binary directly, without triggering the
     // full install step (which would also link the dev CLI and bench binaries).
     const run_cmd = b.addRunArtifact(runtime_exe);
