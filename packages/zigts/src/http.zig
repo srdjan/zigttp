@@ -1070,6 +1070,322 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer, 
 }
 
 // ============================================================================
+// Hypermedia Resource (zigttp:hypermedia)
+// ============================================================================
+
+/// A GET/HEAD affordance becomes a HAL `_links` entry; any other method
+/// becomes a HAL-FORMS `_templates` entry. This single predicate is the one
+/// branch point shared by the HAL and HTMX renderings.
+fn affordanceIsLink(method: ?[]const u8) bool {
+    const m = method orelse return true;
+    return std.ascii.eqlIgnoreCase(m, "GET") or std.ascii.eqlIgnoreCase(m, "HEAD");
+}
+
+/// Read a property as a JSValue, or null when absent.
+fn readObjProp(ctx: *context.Context, obj: *object.JSObject, name: []const u8) ?value.JSValue {
+    const pool = ctx.hidden_class_pool orelse return null;
+    const atom = ctx.atoms.intern(name) catch return null;
+    return obj.getProperty(pool, atom);
+}
+
+/// Read a string property's bytes, or null when absent / not a string.
+fn readObjStrProp(ctx: *context.Context, obj: *object.JSObject, name: []const u8) !?[]const u8 {
+    const v = readObjProp(ctx, obj, name) orelse return null;
+    if (!v.isAnyString()) return null;
+    return try getStringArgWithCtx(v, ctx);
+}
+
+/// Copy `src`'s own (non-reserved, defined) properties onto `dst`, preserving
+/// insertion order. Values are shared by reference; serialization deep-copies.
+fn appendOwnProps(ctx: *context.Context, src: *object.JSObject, dst: *object.JSObject) !void {
+    const pool = ctx.hidden_class_pool orelse return;
+    const class_idx = src.hidden_class_idx;
+    if (class_idx.isNone()) return;
+    const idx = class_idx.toInt();
+    if (idx >= pool.count) return;
+
+    const prop_count = pool.property_counts.items[idx];
+    if (prop_count == 0) return;
+    const start = pool.properties_starts.items[idx];
+    const names = pool.property_names.items[start..][0..prop_count];
+    const offsets = pool.property_offsets.items[start..][0..prop_count];
+
+    for (names, offsets) |name_atom, offset| {
+        if (@intFromEnum(name_atom) >= 0xFFFE) continue;
+        const v = src.getSlot(offset);
+        if (v.isUndefined()) continue;
+        try ctx.setPropertyChecked(dst, name_atom, v);
+    }
+}
+
+/// Build the HAL-JSON serialization of a hypermedia resource: `data`'s own
+/// properties merged with `_links` (GET/HEAD affordances) and `_templates`
+/// (write affordances) derived from `affordances`. One walk over the
+/// affordance set; see also buildHtmlFragment for the HTMX rendering.
+pub fn buildHalJson(
+    ctx: *context.Context,
+    data: value.JSValue,
+    affordances: value.JSValue,
+) !*string.JSString {
+    const result = try ctx.createObject(null);
+
+    // 1. Copy the resource data as the body of the HAL document.
+    if (data.isObject()) {
+        try appendOwnProps(ctx, object.JSObject.fromValue(data), result);
+    }
+
+    // 2. Walk affordances once, splitting into _links (GET) and _templates (write).
+    var links: ?*object.JSObject = null;
+    var templates: ?*object.JSObject = null;
+
+    if (affordances.isObject()) {
+        const aff_obj = object.JSObject.fromValue(affordances);
+        const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+        const class_idx = aff_obj.hidden_class_idx;
+        if (!class_idx.isNone()) {
+            const idx = class_idx.toInt();
+            if (idx < pool.count) {
+                const prop_count = pool.property_counts.items[idx];
+                const start = pool.properties_starts.items[idx];
+                const names = pool.property_names.items[start..][0..prop_count];
+                const offsets = pool.property_offsets.items[start..][0..prop_count];
+
+                for (names, offsets) |rel_atom, rel_offset| {
+                    if (@intFromEnum(rel_atom) >= 0xFFFE) continue;
+                    const aff_val = aff_obj.getSlot(rel_offset);
+                    if (!aff_val.isObject()) continue;
+                    const a = object.JSObject.fromValue(aff_val);
+
+                    const method = try readObjStrProp(ctx, a, "method");
+                    const href_val = readObjProp(ctx, a, "href") orelse value.JSValue.undefined_val;
+                    const title_val = readObjProp(ctx, a, "title");
+
+                    if (affordanceIsLink(method)) {
+                        if (links == null) links = try ctx.createObject(null);
+                        const l = try ctx.createObject(null);
+                        try ctx.setPropertyChecked(l, try ctx.atoms.intern("href"), href_val);
+                        if (title_val) |tv| try ctx.setPropertyChecked(l, try ctx.atoms.intern("title"), tv);
+                        try ctx.setPropertyChecked(links.?, rel_atom, l.toValue());
+                    } else {
+                        if (templates == null) templates = try ctx.createObject(null);
+                        const t = try ctx.createObject(null);
+                        if (readObjProp(ctx, a, "method")) |mv| try ctx.setPropertyChecked(t, try ctx.atoms.intern("method"), mv);
+                        try ctx.setPropertyChecked(t, try ctx.atoms.intern("target"), href_val);
+                        if (title_val) |tv| try ctx.setPropertyChecked(t, try ctx.atoms.intern("title"), tv);
+                        if (readObjProp(ctx, a, "fields")) |fv| try ctx.setPropertyChecked(t, try ctx.atoms.intern("properties"), fv);
+                        try ctx.setPropertyChecked(templates.?, rel_atom, t.toValue());
+                    }
+                }
+            }
+        }
+    }
+
+    if (links) |l| try ctx.setPropertyChecked(result, try ctx.atoms.intern("_links"), l.toValue());
+    if (templates) |t| try ctx.setPropertyChecked(result, try ctx.atoms.intern("_templates"), t.toValue());
+
+    return valueToJsonString(ctx, result.toValue());
+}
+
+/// Build the HTMX/HTML fragment for a hypermedia resource: scalar `data`
+/// fields as a <dl>, then the affordance controls (GET -> <a>, write ->
+/// <button hx-{method}>). Same affordance set as buildHalJson.
+pub fn buildHtmlFragment(
+    ctx: *context.Context,
+    data: value.JSValue,
+    affordances: value.JSValue,
+) !*string.JSString {
+    var aw = &ctx.render_writer;
+    aw.clearRetainingCapacity();
+    const w = &aw.writer;
+
+    try w.writeAll("<div class=\"resource\">");
+
+    // Scalar data fields as a definition list (nested objects are _embedded, omitted here).
+    if (data.isObject()) {
+        const d = object.JSObject.fromValue(data);
+        const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+        const class_idx = d.hidden_class_idx;
+        if (!class_idx.isNone()) {
+            const idx = class_idx.toInt();
+            if (idx < pool.count) {
+                const prop_count = pool.property_counts.items[idx];
+                if (prop_count > 0) {
+                    const start = pool.properties_starts.items[idx];
+                    const names = pool.property_names.items[start..][0..prop_count];
+                    const offsets = pool.property_offsets.items[start..][0..prop_count];
+
+                    var opened = false;
+                    for (names, offsets) |name_atom, offset| {
+                        if (@intFromEnum(name_atom) >= 0xFFFE) continue;
+                        const v = d.getSlot(offset);
+                        if (v.isUndefined() or v.isNull() or v.isObject()) continue;
+                        const key = ctx.atoms.getName(name_atom) orelse continue;
+                        if (!opened) {
+                            try w.writeAll("<dl>");
+                            opened = true;
+                        }
+                        try w.writeAll("<dt>");
+                        try escapeHtml(key, w);
+                        try w.writeAll("</dt><dd>");
+                        if (v.isInt()) {
+                            try w.print("{d}", .{v.getInt()});
+                        } else if (v.isFloat64()) {
+                            try w.print("{d}", .{v.getFloat64()});
+                        } else if (v.isTrue()) {
+                            try w.writeAll("true");
+                        } else if (v.isFalse()) {
+                            try w.writeAll("false");
+                        } else if (v.isAnyString()) {
+                            try escapeHtml(try getStringArgWithCtx(v, ctx), w);
+                        }
+                        try w.writeAll("</dd>");
+                    }
+                    if (opened) try w.writeAll("</dl>");
+                }
+            }
+        }
+    }
+
+    // Affordance controls.
+    if (affordances.isObject()) {
+        const aff_obj = object.JSObject.fromValue(affordances);
+        const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+        const class_idx = aff_obj.hidden_class_idx;
+        if (!class_idx.isNone()) {
+            const idx = class_idx.toInt();
+            if (idx < pool.count) {
+                const prop_count = pool.property_counts.items[idx];
+                const start = pool.properties_starts.items[idx];
+                const names = pool.property_names.items[start..][0..prop_count];
+                const offsets = pool.property_offsets.items[start..][0..prop_count];
+
+                for (names, offsets) |rel_atom, rel_offset| {
+                    if (@intFromEnum(rel_atom) >= 0xFFFE) continue;
+                    const aff_val = aff_obj.getSlot(rel_offset);
+                    if (!aff_val.isObject()) continue;
+                    const a = object.JSObject.fromValue(aff_val);
+
+                    const rel = ctx.atoms.getName(rel_atom) orelse "";
+                    const href = (try readObjStrProp(ctx, a, "href")) orelse "";
+                    const method = try readObjStrProp(ctx, a, "method");
+                    const title = (try readObjStrProp(ctx, a, "title")) orelse rel;
+                    const target = try readObjStrProp(ctx, a, "target");
+                    const swap = try readObjStrProp(ctx, a, "swap");
+
+                    if (affordanceIsLink(method)) {
+                        try w.writeAll("<a href=\"");
+                        try escapeAttr(href, w);
+                        try w.writeAll("\">");
+                        try escapeHtml(title, w);
+                        try w.writeAll("</a>");
+                    } else {
+                        try w.writeAll("<button hx-");
+                        for (method.?) |c| try w.writeByte(std.ascii.toLower(c));
+                        try w.writeAll("=\"");
+                        try escapeAttr(href, w);
+                        try w.writeByte('"');
+                        if (target) |t| {
+                            try w.writeAll(" hx-target=\"");
+                            try escapeAttr(t, w);
+                            try w.writeByte('"');
+                        }
+                        if (swap) |s| {
+                            try w.writeAll(" hx-swap=\"");
+                            try escapeAttr(s, w);
+                            try w.writeByte('"');
+                        }
+                        try w.writeByte('>');
+                        try escapeHtml(title, w);
+                        try w.writeAll("</button>");
+                    }
+                }
+            }
+        }
+    }
+
+    try w.writeAll("</div>");
+    return ctx.createStringPtr(aw.written());
+}
+
+/// Reserved property names used to brand and carry a hypermedia resource.
+/// Invisible to JSON serialization because the branded object is never
+/// serialized directly - renderResource extracts data/affordances and builds
+/// a fresh HAL document or HTML fragment.
+const resource_brand = "__zigttp_resource";
+const resource_data = "__hm_data";
+const resource_aff = "__hm_aff";
+
+/// resource(data, affordances) - build a branded hypermedia resource. The
+/// runtime detects the brand at the response boundary and renders it as HAL
+/// or HTMX per content negotiation (see renderResource).
+pub fn resource(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx = util.castContext(ctx_ptr);
+    const data = if (args.len > 0) args[0] else value.JSValue.undefined_val;
+    const affordances = if (args.len > 1) args[1] else value.JSValue.undefined_val;
+
+    const obj = try ctx.createObject(null);
+    try ctx.setPropertyChecked(obj, try ctx.atoms.intern(resource_brand), value.JSValue.true_val);
+    try ctx.setPropertyChecked(obj, try ctx.atoms.intern(resource_data), data);
+    try ctx.setPropertyChecked(obj, try ctx.atoms.intern(resource_aff), affordances);
+    return obj.toValue();
+}
+
+/// True when `val` is a branded hypermedia resource produced by resource().
+pub fn isResource(ctx: *context.Context, val: value.JSValue) bool {
+    if (!val.isObject()) return false;
+    const obj = object.JSObject.fromValue(val);
+    const brand = readObjProp(ctx, obj, resource_brand) orelse return false;
+    return brand.isTrue();
+}
+
+/// A service consumer wants HAL when it accepts hal+json or generic JSON;
+/// everything else (browsers, */*) gets HTML. Minimal substring negotiation;
+/// the runtime boundary may pre-negotiate with zigttp:http.negotiate.
+fn wantsHal(accept: []const u8) bool {
+    return std.mem.indexOf(u8, accept, "hal+json") != null or
+        std.mem.indexOf(u8, accept, "application/json") != null;
+}
+
+/// Wrap an HTMX fragment in a full-page shell that loads htmx (used for
+/// non-HX navigations / direct browser loads).
+fn wrapHtmlShell(ctx: *context.Context, fragment: []const u8) !*string.JSString {
+    var aw = &ctx.render_writer;
+    aw.clearRetainingCapacity();
+    const w = &aw.writer;
+    try w.writeAll("<!doctype html><html><head><meta charset=\"utf-8\">");
+    try w.writeAll("<script src=\"https://unpkg.com/htmx.org@2\"></script></head><body>");
+    try w.writeAll(fragment);
+    try w.writeAll("</body></html>");
+    return ctx.createStringPtr(aw.written());
+}
+
+/// Render a branded hypermedia resource to a Response per content negotiation:
+/// HAL-JSON for services, an HTMX fragment for HX requests, a full HTML page
+/// otherwise.
+pub fn renderResource(
+    ctx: *context.Context,
+    branded: value.JSValue,
+    accept: []const u8,
+    hx_request: bool,
+) !value.JSValue {
+    const obj = object.JSObject.fromValue(branded);
+    const data = readObjProp(ctx, obj, resource_data) orelse value.JSValue.undefined_val;
+    const aff = readObjProp(ctx, obj, resource_aff) orelse value.JSValue.undefined_val;
+
+    if (wantsHal(accept)) {
+        const json = try buildHalJson(ctx, data, aff);
+        return createResponseFromString(ctx, json, 200, "application/hal+json");
+    }
+
+    const frag = try buildHtmlFragment(ctx, data, aff);
+    if (hx_request) {
+        return createResponseFromString(ctx, frag, 200, "text/html; charset=utf-8");
+    }
+    const page = try wrapHtmlShell(ctx, frag.data());
+    return createResponseFromString(ctx, page, 200, "text/html; charset=utf-8");
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1230,6 +1546,157 @@ test "valueToJson object with properties" {
     try std.testing.expect(json.len >= 2);
     try std.testing.expectEqual(@as(u8, '{'), json[0]);
     try std.testing.expectEqual(@as(u8, '}'), json[json.len - 1]);
+}
+
+test "buildHalJson merges data and _links for GET affordances" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // data = { id: 42 }
+    const data = try ctx.createObject(null);
+    try ctx.setPropertyChecked(data, try ctx.atoms.intern("id"), value.JSValue.fromInt(42));
+
+    // affordances = { self: { href: "/orders/42" } }
+    const self_aff = try ctx.createObject(null);
+    try ctx.setPropertyChecked(self_aff, try ctx.atoms.intern("href"), try ctx.createString("/orders/42"));
+    const affordances = try ctx.createObject(null);
+    try ctx.setPropertyChecked(affordances, try ctx.atoms.intern("self"), self_aff.toValue());
+
+    const json_str = try buildHalJson(ctx, data.toValue(), affordances.toValue());
+    const json = json_str.data();
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"_links\":{\"self\":{\"href\":\"/orders/42\"}}") != null);
+}
+
+test "buildHtmlFragment renders data dl and hx controls" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // data = { id: 42 }
+    const data = try ctx.createObject(null);
+    try ctx.setPropertyChecked(data, try ctx.atoms.intern("id"), value.JSValue.fromInt(42));
+
+    // self: GET link
+    const self_aff = try ctx.createObject(null);
+    try ctx.setPropertyChecked(self_aff, try ctx.atoms.intern("href"), try ctx.createString("/orders/42"));
+
+    // pay: POST action with target/swap
+    const pay_aff = try ctx.createObject(null);
+    try ctx.setPropertyChecked(pay_aff, try ctx.atoms.intern("href"), try ctx.createString("/orders/42/pay"));
+    try ctx.setPropertyChecked(pay_aff, try ctx.atoms.intern("method"), try ctx.createString("POST"));
+    try ctx.setPropertyChecked(pay_aff, try ctx.atoms.intern("title"), try ctx.createString("Pay now"));
+    try ctx.setPropertyChecked(pay_aff, try ctx.atoms.intern("target"), try ctx.createString("#order"));
+    try ctx.setPropertyChecked(pay_aff, try ctx.atoms.intern("swap"), try ctx.createString("outerHTML"));
+
+    const affordances = try ctx.createObject(null);
+    try ctx.setPropertyChecked(affordances, try ctx.atoms.intern("self"), self_aff.toValue());
+    try ctx.setPropertyChecked(affordances, try ctx.atoms.intern("pay"), pay_aff.toValue());
+
+    const frag = try buildHtmlFragment(ctx, data.toValue(), affordances.toValue());
+
+    try std.testing.expectEqualStrings(
+        "<div class=\"resource\"><dl><dt>id</dt><dd>42</dd></dl>" ++
+            "<a href=\"/orders/42\">self</a>" ++
+            "<button hx-post=\"/orders/42/pay\" hx-target=\"#order\" hx-swap=\"outerHTML\">Pay now</button></div>",
+        frag.data(),
+    );
+}
+
+fn respBodyForTest(ctx: *context.Context, resp: value.JSValue) []const u8 {
+    const obj = object.JSObject.fromValue(resp);
+    if (ctx.http_shapes) |shapes| {
+        const b = obj.getSlot(shapes.response.body_slot);
+        if (b.isString()) return b.toPtr(string.JSString).data();
+    }
+    const pool = ctx.hidden_class_pool orelse return "";
+    if (obj.getProperty(pool, object.Atom.body)) |b| {
+        if (b.isString()) return b.toPtr(string.JSString).data();
+    }
+    return "";
+}
+
+test "renderResource negotiates HAL JSON, HTMX fragment, and full page" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+
+    const data = try ctx.createObject(null);
+    try ctx.setPropertyChecked(data, try ctx.atoms.intern("id"), value.JSValue.fromInt(9));
+    const self_aff = try ctx.createObject(null);
+    try ctx.setPropertyChecked(self_aff, try ctx.atoms.intern("href"), try ctx.createString("/x/9"));
+    const aff = try ctx.createObject(null);
+    try ctx.setPropertyChecked(aff, try ctx.atoms.intern("self"), self_aff.toValue());
+
+    const res = try resource(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{ data.toValue(), aff.toValue() });
+
+    // Service -> HAL JSON
+    const hal = try renderResource(ctx, res, "application/hal+json", false);
+    const hb = respBodyForTest(ctx, hal);
+    try std.testing.expect(std.mem.indexOf(u8, hb, "\"id\":9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hb, "\"_links\"") != null);
+
+    // HX request -> bare fragment, no shell
+    const frag = try renderResource(ctx, res, "text/html", true);
+    const fb = respBodyForTest(ctx, frag);
+    try std.testing.expect(std.mem.startsWith(u8, fb, "<div class=\"resource\">"));
+    try std.testing.expect(std.mem.indexOf(u8, fb, "<!doctype") == null);
+
+    // Direct browser load -> full page shell wrapping the fragment
+    const page = try renderResource(ctx, res, "text/html", false);
+    const pb = respBodyForTest(ctx, page);
+    try std.testing.expect(std.mem.indexOf(u8, pb, "<!doctype html") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pb, "<div class=\"resource\">") != null);
+}
+
+test "resource builds branded object detected by isResource" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+
+    const data = try ctx.createObject(null);
+    try ctx.setPropertyChecked(data, try ctx.atoms.intern("id"), value.JSValue.fromInt(7));
+    const aff = try ctx.createObject(null);
+
+    const res = try resource(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{ data.toValue(), aff.toValue() });
+    try std.testing.expect(isResource(ctx, res));
+
+    // A plain object (and undefined) is not a resource.
+    const plain = try ctx.createObject(null);
+    try std.testing.expect(!isResource(ctx, plain.toValue()));
+    try std.testing.expect(!isResource(ctx, value.JSValue.undefined_val));
 }
 
 test "renderToString with attributes and nested elements" {

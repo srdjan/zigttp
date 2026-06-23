@@ -1241,6 +1241,7 @@ fn isKnownGlobalFunction(name: []const u8) bool {
         "race",
         "range",
         "renderToString",
+        "resource",
     };
     for (names) |candidate| {
         if (std.mem.eql(u8, name, candidate)) return true;

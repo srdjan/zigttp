@@ -1706,6 +1706,26 @@ pub const Runtime = struct {
     }
 
     pub fn extractResponseInternal(self: *Self, result: zq.JSValue, borrow_body: bool) !HttpResponse {
+        // Hypermedia resource: content-negotiate to HAL-JSON or HTMX using the
+        // request's Accept / HX-Request headers, then extract the rendered
+        // Response normally. The rendered value is a plain Response (not branded),
+        // so the recursive call takes the standard path.
+        if (result.isObject() and zq.http.isResource(self.ctx, result)) {
+            var accept: []const u8 = "";
+            var hx_request = false;
+            if (self.active_request) |req| {
+                for (req.headers.items) |hdr| {
+                    if (std.ascii.eqlIgnoreCase(hdr.key, "accept")) {
+                        accept = hdr.value;
+                    } else if (std.ascii.eqlIgnoreCase(hdr.key, "hx-request")) {
+                        hx_request = std.ascii.eqlIgnoreCase(hdr.value, "true");
+                    }
+                }
+            }
+            const rendered = try zq.http.renderResource(self.ctx, result, accept, hx_request);
+            return self.extractResponseInternal(rendered, borrow_body);
+        }
+
         var response = HttpResponse.init(self.allocator);
 
         if (!result.isObject()) {

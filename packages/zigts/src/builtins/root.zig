@@ -274,6 +274,12 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const fragment_atom: object.Atom = .Fragment;
     try ctx.setGlobal(fragment_atom, value.JSValue.undefined_val);
 
+    // Hypermedia: resource() builds a branded resource the runtime renders as
+    // HAL-JSON or HTMX per content negotiation (see http.renderResource).
+    const resource_atom = try ctx.atoms.intern("resource");
+    const resource_fn = try createBuiltinNativeFunction(ctx, pool, root_class_idx, http.resource, resource_atom, 2);
+    try ctx.setGlobal(resource_atom, resource_fn.toValue());
+
     // Date and performance
     const date_obj = try createBuiltinObject(ctx, pool, root_class_idx);
     try addMethodDynamic(ctx, date_obj, "now", wrap(date.dateNow), 0);
