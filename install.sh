@@ -31,6 +31,7 @@ main() {
     download "${BASE_URL}/${CHECKSUM}" "${TMPDIR}/${CHECKSUM}"
 
     verify_checksum "${TMPDIR}/${TARBALL}" "${TMPDIR}/${CHECKSUM}"
+    validate_archive_paths "${TMPDIR}/${TARBALL}" "zigttp-${VERSION}-${OS}-${ARCH}"
 
     mkdir -p "$BIN_DIR"
     EXTRACT_DIR="${TMPDIR}/extract"
@@ -181,6 +182,82 @@ verify_checksum() {
     fi
 }
 
+validate_archive_entry() {
+    expected_root="$1"
+    entry="$2"
+
+    case "$entry" in
+        ""|/*|".."|"../"*|*"/.."|*"/../"*)
+            return 1
+            ;;
+    esac
+
+    case "$entry" in
+        "$expected_root"|"$expected_root/"|"$expected_root"/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+validate_archive_member_types() {
+    tarball="$1"
+
+    # `tar tzf` lists names only, so a member name can pass the path check
+    # while being a symlink/hardlink whose target escapes the extract dir
+    # (the GNU-tar "../" symlink-traversal class). `tar tvf` prints a mode
+    # string per entry whose first character is the member type: '-' regular,
+    # 'd' directory, 'l' symlink, 'h' hardlink, 'b'/'c'/'p'/'s' special. A
+    # release archive only contains regular files and directories, so reject
+    # anything else outright.
+    listing=$(tar tvf "$tarball") || {
+        printf "Error: cannot inspect release archive %s\n" "$tarball" >&2
+        return 1
+    }
+
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        type_char=$(printf '%s' "$line" | cut -c1)
+        case "$type_char" in
+            -|d) ;;
+            *)
+                printf "Error: unsafe release archive member type '%s': %s\n" "$type_char" "$line" >&2
+                return 1
+                ;;
+        esac
+    done <<EOF
+$listing
+EOF
+}
+
+validate_archive_paths() {
+    tarball="$1"
+    expected_root="$2"
+
+    entries=$(tar tzf "$tarball") || {
+        printf "Error: cannot list release archive %s\n" "$tarball" >&2
+        return 1
+    }
+
+    if [ -z "$entries" ]; then
+        printf "Error: release archive is empty\n" >&2
+        return 1
+    fi
+
+    while IFS= read -r entry; do
+        if ! validate_archive_entry "$expected_root" "$entry"; then
+            printf "Error: unsafe release archive path: %s\n" "$entry" >&2
+            return 1
+        fi
+    done <<EOF
+$entries
+EOF
+
+    validate_archive_member_types "$tarball"
+}
+
 check_path() {
     case ":${PATH}:" in
         *":${BIN_DIR}:"*) ;;
@@ -193,4 +270,6 @@ check_path() {
     esac
 }
 
-main
+if [ "${ZIGTTP_INSTALLER_SOURCE_ONLY:-}" != "1" ]; then
+    main
+fi
