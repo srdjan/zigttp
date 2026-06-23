@@ -42,6 +42,16 @@ pub const HttpResponse = http_types.HttpResponse;
 const runtime_config_mod = @import("runtime_config.zig");
 
 pub const RuntimeConfig = runtime_config_mod.RuntimeConfig;
+
+/// In-process registry of co-located sub-handlers, used by zigttp:workflow to
+/// dispatch from an orchestrator handler without HTTP.
+pub const SystemRuntime = @import("in_process_dispatch.zig").SystemRuntime;
+
+test {
+    // Force collection of in_process_dispatch.zig tests under test-zruntime.
+    _ = @import("in_process_dispatch.zig");
+}
+
 const openTraceFile = runtime_config_mod.openTraceFile;
 const openOplogFile = runtime_config_mod.openOplogFile;
 const openLockedFreshOplog = runtime_config_mod.openLockedFreshOplog;
