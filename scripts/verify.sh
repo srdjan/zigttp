@@ -46,6 +46,9 @@ zig build test-panic-isolation
 step "bash scripts/test-examples.sh  (example handler tests)"
 bash scripts/test-examples.sh
 
+step "bash scripts/test-install-archive-safety.sh  (installer archive path safety)"
+bash scripts/test-install-archive-safety.sh
+
 step "policy hash unchanged  (ci.yml: Assert policy hash unchanged)"
 if [ ! -f policy-hash.txt ]; then
   echo "error: policy-hash.txt is missing - the policy hash baseline must be committed" >&2

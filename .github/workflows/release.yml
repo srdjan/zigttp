@@ -81,6 +81,9 @@ jobs:
       - name: Run example handler tests
         run: bash scripts/test-examples.sh
 
+      - name: Run installer archive safety tests
+        run: bash scripts/test-install-archive-safety.sh
+
       - name: Assert policy hash unchanged
         run: |
           if [ ! -f policy-hash.txt ]; then
@@ -164,8 +167,47 @@ jobs:
             zigttp-*.tar.gz
             zigttp-*.tar.gz.sha256
 
-  release:
+  smoke-linux:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zigttp-linux-x86_64
+
+      - name: Smoke-test the cross-compiled linux x86_64 binary
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          DIR="zigttp-${VERSION}-linux-x86_64"
+          tar xzf "${DIR}.tar.gz"
+          BIN="${DIR}/zigttp"
+          chmod +x "${BIN}" "${DIR}/zigts" "${DIR}/zigttp-runtime"
+
+          # version: proves the cross-compiled binary loads and runs natively
+          VERSION_OUT="$("${BIN}" version)"
+          echo "version: ${VERSION_OUT}"
+          echo "${VERSION_OUT}" | grep -q "${VERSION#v}" \
+            || { echo "::error::linux binary version '${VERSION_OUT}' does not contain ${VERSION#v}"; exit 1; }
+
+          # help: proves argument parsing
+          "${BIN}" --help >/dev/null
+
+          # serve + curl: exercises the engine/VM and socket stack under native linux
+          PORT=8137
+          "${BIN}" serve -e 'function handler(req) { return Response.json({ ok: true }); }' -p "${PORT}" &
+          SERVER_PID=$!
+          trap 'kill "${SERVER_PID}" 2>/dev/null || true' EXIT
+          BODY=""
+          for _ in $(seq 1 50); do
+            if BODY=$(curl -sf "http://127.0.0.1:${PORT}/" 2>/dev/null); then break; fi
+            sleep 0.2
+          done
+          echo "body: ${BODY}"
+          echo "${BODY}" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' \
+            || { echo "::error::linux serve smoke did not return ok:true (got: ${BODY})"; exit 1; }
+
+  release:
+    needs: [build, smoke-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

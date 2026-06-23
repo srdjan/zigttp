@@ -6,6 +6,8 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+## [0.1.0-beta] - 2026-06-23
+
 ### Added
 
 - v0.1.0-beta polish slice: capability-denial unit tests in `packages/zigts/src/module_binding.zig` pin both halves of policy gating (the `ctx.capability_policy.allowsXxx` check and the active-module `.policy_check` declaration) across env, cache, sql, sql-write, and egress; deterministic HTTP-parser fuzz harness in `packages/runtime/src/http_parser.zig` covers parseRequestLine, parseQueryString, parseContentLengthValue, parseContentLength, and findHeaderEnd across 16k+ seeded iterations and pins regression behavior for CR/LF preservation and `..` path traversal preservation; studio JSON/ndjson responses are bounded at 1 MiB via the new `finishStudioOwnedResponse` helper, returning 413 on overflow instead of unbounded `setBodyOwned`.
@@ -108,6 +110,7 @@ See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-i
 - Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
 - HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.16.0-rc2...HEAD
+[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.1.0-beta...HEAD
+[0.1.0-beta]: https://github.com/srdjan/zigttp/compare/v0.16.0-rc2...v0.1.0-beta
 [0.16.0-rc2]: https://github.com/srdjan/zigttp/compare/v0.16.0-rc1...v0.16.0-rc2
 [0.16.0-rc1]: https://github.com/srdjan/zigttp/compare/v0.15.0...v0.16.0-rc1

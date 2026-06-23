@@ -20,6 +20,7 @@ gates, and keep release notes user-facing.
 - [ ] `zig build smoke-demo` (macOS beta gate)
 - [ ] `zig build smoke-studio` (macOS beta gate; builds `-Dstudio`)
 - [ ] `bash scripts/test-examples.sh`
+- [ ] `bash scripts/test-install-archive-safety.sh`
 - [ ] `zig build -Doptimize=ReleaseFast`
 - [ ] `./zig-out/bin/zigttp doctor --release --json`
 
@@ -46,6 +47,7 @@ cross-compile without Docker.
 
 - [ ] Confirm `build.zig.zon` `.version` matches the intended release.
 - [ ] Confirm `packages/zigts/src/root.zig` `version.string` matches the intended release.
+- [ ] Promote `CHANGELOG.md` `[Unreleased]` to `[X.Y.Z] - <date>`, open a fresh `[Unreleased]` section, and update the bottom compare-link anchors (`[Unreleased]` base + a new `[X.Y.Z]` link).
 - [ ] Draft release notes from `CHANGELOG.md` and `.github/RELEASE_NOTES_TEMPLATE.md`.
 - [ ] `git tag -a vX.Y.Z -m "zigttp vX.Y.Z"`
 - [ ] `git push origin vX.Y.Z`
