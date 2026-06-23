@@ -744,6 +744,8 @@ fn printEdgeHelp() void {
     const help =
         \\zigttp edge [options]
         \\
+        \\Requires a binary built with: zig build -Dedge
+        \\
         \\Options:
         \\  -c, --config <FILE>  Edge config JSON (default: zigttp.edge.json)
         \\

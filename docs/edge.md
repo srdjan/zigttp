@@ -1,10 +1,10 @@
 # Edge runtime
 
-`zigttp edge` runs an in-process edge that loads multiple handler pools
-behind a single listener and routes incoming requests to a named target
-based on host, method, and path prefix. Useful when several handlers share one
-bind address: multitenant routing, internal request fan-out, or route-level
-experiments.
+`zigttp edge` is an opt-in in-process edge runtime, available in binaries built
+with `zig build -Dedge`. It loads multiple handler pools behind a single
+listener and routes incoming requests to a named target based on host, method,
+and path prefix. Useful when several handlers share one bind address:
+multitenant routing, internal request fan-out, or route-level experiments.
 
 ```bash
 zigttp edge --config zigttp.edge.json    # explicit path
@@ -49,8 +49,9 @@ Caddy, a load balancer) that terminates TLS upstream.
 
 ### `handlers`
 
-An array of named handler pools. Each entry verifies its handler at
-load time using the same pipeline as `zigttp build`.
+An array of named handler pools. Edge startup reads, compiles, and prewarms
+every handler before binding the listener. Run `zigttp check` or `zigttp build`
+for the full contract/proof verification pipeline before running edge.
 
 | Field                  | Type   | Default | Notes                                          |
 |------------------------|--------|---------|------------------------------------------------|
@@ -58,8 +59,11 @@ load time using the same pipeline as `zigttp build`.
 | `entry`                | string | required| Path to handler `.ts`/`.tsx`/`.js`             |
 | `pool`                 | integer| auto    | Runtime pool size for this handler             |
 | `poolWaitTimeoutMs`    | integer| `5000`  | Max wait for a pool slot before 503            |
-| `lifecycle`            | string | inferred| `ephemeral` \| `bounded` \| `reuse`            |
-| `runtimeConfig`        | object | `{}`    | Per-handler runtime overrides (sqlite, durable, outbound) |
+| `lifecycle`            | string | pool default | Optional override: `ephemeral` \| `bounded` \| `ttl` \| `reuse` |
+| `outboundHttp`         | boolean| `false` | Enable outbound HTTP for this handler          |
+| `outboundHost`         | string | unset   | Single allowed outbound host; also enables outbound HTTP |
+| `outboundTimeoutMs`    | integer| `10000` | Per-handler outbound HTTP timeout in milliseconds |
+| `system`               | string | unset   | Path to a `zigttp:service` registry JSON file  |
 
 ### `routes`
 
@@ -109,10 +113,9 @@ Timeout responses are split by where the request stalls:
 
 ## Per-handler verification
 
-Each `handlers[].entry` is verified before the listener binds. A failure
-in any handler aborts edge startup with a non-zero exit code; no partial
-loads. The edge only listens after every handler in the config is
-provably safe.
+Each `handlers[].entry` is loaded before the listener binds. Parse, compile,
+prewarm, or config failures abort edge startup with a non-zero exit code; no
+partial loads. The edge only listens after every handler pool has initialized.
 
 ## Response headers
 

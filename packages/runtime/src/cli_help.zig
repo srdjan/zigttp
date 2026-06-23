@@ -64,7 +64,7 @@ const help_all_mid =
     \\  zigttp doctor --release                Print the release proof passport
     \\  zigttp studio [handler.ts]             Optional browser proof workbench
     \\  zigttp demo                            Guided local proof theater
-    \\  zigttp edge [--config FILE]            Run the in-process edge runtime
+    \\  zigttp edge [--config FILE]            Optional in-process edge runtime (-Dedge)
     \\
     \\Package:
     \\  zigttp build [-o <bin>]                Emit a self-contained binary
