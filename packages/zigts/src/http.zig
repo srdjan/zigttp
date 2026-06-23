@@ -1088,6 +1088,33 @@ fn readObjProp(ctx: *context.Context, obj: *object.JSObject, name: []const u8) ?
     return obj.getProperty(pool, atom);
 }
 
+/// An own (atom, slot-offset) pair, snapshotted out of the shared hidden-class
+/// pool so a caller can safely create objects / set properties (which mutate
+/// the pool's backing arrays) while iterating an object's own properties.
+const OwnProp = struct { atom: object.Atom, offset: u16 };
+
+/// Copy `obj`'s own non-reserved (atom, offset) pairs into an owned slice.
+/// Mirrors getOwnEnumerableKeys' copy-first safety: holding a raw slice into
+/// pool.property_names/property_offsets across a setPropertyChecked call is a
+/// use-after-free, because addProperty appends to those very arrays and can
+/// reallocate them. Caller frees the returned slice.
+fn snapshotOwnProps(ctx: *context.Context, obj: *object.JSObject) ![]OwnProp {
+    const pool = ctx.hidden_class_pool orelse return ctx.allocator.alloc(OwnProp, 0);
+    const class_idx = obj.hidden_class_idx;
+    if (class_idx.isNone()) return ctx.allocator.alloc(OwnProp, 0);
+    const idx = class_idx.toInt();
+    if (idx >= pool.count) return ctx.allocator.alloc(OwnProp, 0);
+
+    const prop_count = pool.property_counts.items[idx];
+    const start = pool.properties_starts.items[idx];
+    const names = pool.property_names.items[start..][0..prop_count];
+    const offsets = pool.property_offsets.items[start..][0..prop_count];
+
+    const out = try ctx.allocator.alloc(OwnProp, prop_count);
+    for (names, offsets, 0..) |atom, off, i| out[i] = .{ .atom = atom, .offset = off };
+    return out;
+}
+
 /// Read a string property's bytes, or null when absent / not a string.
 fn readObjStrProp(ctx: *context.Context, obj: *object.JSObject, name: []const u8) !?[]const u8 {
     const v = readObjProp(ctx, obj, name) orelse return null;
@@ -1096,25 +1123,20 @@ fn readObjStrProp(ctx: *context.Context, obj: *object.JSObject, name: []const u8
 }
 
 /// Copy `src`'s own (non-reserved, defined) properties onto `dst`, preserving
-/// insertion order. Values are shared by reference; serialization deep-copies.
+/// insertion order. Data fields named `_links`/`_templates` are skipped so the
+/// generated HAL affordances are not silently clobbered (and vice versa).
+/// Values are shared by reference; serialization deep-copies.
 fn appendOwnProps(ctx: *context.Context, src: *object.JSObject, dst: *object.JSObject) !void {
-    const pool = ctx.hidden_class_pool orelse return;
-    const class_idx = src.hidden_class_idx;
-    if (class_idx.isNone()) return;
-    const idx = class_idx.toInt();
-    if (idx >= pool.count) return;
+    const props = try snapshotOwnProps(ctx, src);
+    defer ctx.allocator.free(props);
 
-    const prop_count = pool.property_counts.items[idx];
-    if (prop_count == 0) return;
-    const start = pool.properties_starts.items[idx];
-    const names = pool.property_names.items[start..][0..prop_count];
-    const offsets = pool.property_offsets.items[start..][0..prop_count];
-
-    for (names, offsets) |name_atom, offset| {
-        if (@intFromEnum(name_atom) >= 0xFFFE) continue;
-        const v = src.getSlot(offset);
+    for (props) |p| {
+        if (@intFromEnum(p.atom) >= 0xFFFE) continue;
+        const name = ctx.atoms.getName(p.atom) orelse continue;
+        if (std.mem.eql(u8, name, "_links") or std.mem.eql(u8, name, "_templates")) continue;
+        const v = src.getSlot(p.offset);
         if (v.isUndefined()) continue;
-        try ctx.setPropertyChecked(dst, name_atom, v);
+        try ctx.setPropertyChecked(dst, p.atom, v);
     }
 }
 
@@ -1140,42 +1162,35 @@ pub fn buildHalJson(
 
     if (affordances.isObject()) {
         const aff_obj = object.JSObject.fromValue(affordances);
-        const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
-        const class_idx = aff_obj.hidden_class_idx;
-        if (!class_idx.isNone()) {
-            const idx = class_idx.toInt();
-            if (idx < pool.count) {
-                const prop_count = pool.property_counts.items[idx];
-                const start = pool.properties_starts.items[idx];
-                const names = pool.property_names.items[start..][0..prop_count];
-                const offsets = pool.property_offsets.items[start..][0..prop_count];
+        // Snapshot first: the loop creates link/template objects, which mutate
+        // the shared hidden-class pool and would dangle a raw slice into it.
+        const props = try snapshotOwnProps(ctx, aff_obj);
+        defer ctx.allocator.free(props);
 
-                for (names, offsets) |rel_atom, rel_offset| {
-                    if (@intFromEnum(rel_atom) >= 0xFFFE) continue;
-                    const aff_val = aff_obj.getSlot(rel_offset);
-                    if (!aff_val.isObject()) continue;
-                    const a = object.JSObject.fromValue(aff_val);
+        for (props) |p| {
+            if (@intFromEnum(p.atom) >= 0xFFFE) continue;
+            const aff_val = aff_obj.getSlot(p.offset);
+            if (!aff_val.isObject()) continue;
+            const a = object.JSObject.fromValue(aff_val);
 
-                    const method = try readObjStrProp(ctx, a, "method");
-                    const href_val = readObjProp(ctx, a, "href") orelse value.JSValue.undefined_val;
-                    const title_val = readObjProp(ctx, a, "title");
+            const method = try readObjStrProp(ctx, a, "method");
+            const href_val = readObjProp(ctx, a, "href") orelse value.JSValue.undefined_val;
+            const title_val = readObjProp(ctx, a, "title");
 
-                    if (affordanceIsLink(method)) {
-                        if (links == null) links = try ctx.createObject(null);
-                        const l = try ctx.createObject(null);
-                        try ctx.setPropertyChecked(l, try ctx.atoms.intern("href"), href_val);
-                        if (title_val) |tv| try ctx.setPropertyChecked(l, try ctx.atoms.intern("title"), tv);
-                        try ctx.setPropertyChecked(links.?, rel_atom, l.toValue());
-                    } else {
-                        if (templates == null) templates = try ctx.createObject(null);
-                        const t = try ctx.createObject(null);
-                        if (readObjProp(ctx, a, "method")) |mv| try ctx.setPropertyChecked(t, try ctx.atoms.intern("method"), mv);
-                        try ctx.setPropertyChecked(t, try ctx.atoms.intern("target"), href_val);
-                        if (title_val) |tv| try ctx.setPropertyChecked(t, try ctx.atoms.intern("title"), tv);
-                        if (readObjProp(ctx, a, "fields")) |fv| try ctx.setPropertyChecked(t, try ctx.atoms.intern("properties"), fv);
-                        try ctx.setPropertyChecked(templates.?, rel_atom, t.toValue());
-                    }
-                }
+            if (affordanceIsLink(method)) {
+                if (links == null) links = try ctx.createObject(null);
+                const l = try ctx.createObject(null);
+                try ctx.setPropertyChecked(l, try ctx.atoms.intern("href"), href_val);
+                if (title_val) |tv| try ctx.setPropertyChecked(l, try ctx.atoms.intern("title"), tv);
+                try ctx.setPropertyChecked(links.?, p.atom, l.toValue());
+            } else {
+                if (templates == null) templates = try ctx.createObject(null);
+                const t = try ctx.createObject(null);
+                if (readObjProp(ctx, a, "method")) |mv| try ctx.setPropertyChecked(t, try ctx.atoms.intern("method"), mv);
+                try ctx.setPropertyChecked(t, try ctx.atoms.intern("target"), href_val);
+                if (title_val) |tv| try ctx.setPropertyChecked(t, try ctx.atoms.intern("title"), tv);
+                if (readObjProp(ctx, a, "fields")) |fv| try ctx.setPropertyChecked(t, try ctx.atoms.intern("properties"), fv);
+                try ctx.setPropertyChecked(templates.?, p.atom, t.toValue());
             }
         }
     }
@@ -1280,7 +1295,12 @@ pub fn buildHtmlFragment(
                         try w.writeAll("</a>");
                     } else {
                         try w.writeAll("<button hx-");
-                        for (method.?) |c| try w.writeByte(std.ascii.toLower(c));
+                        // The method forms the attribute NAME, which escapeAttr
+                        // cannot protect; restrict to ASCII letters so a method
+                        // derived from untrusted input cannot inject attributes.
+                        for (method.?) |c| {
+                            if (std.ascii.isAlphabetic(c)) try w.writeByte(std.ascii.toLower(c));
+                        }
                         try w.writeAll("=\"");
                         try escapeAttr(href, w);
                         try w.writeByte('"');
@@ -1334,7 +1354,11 @@ pub fn resource(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSVal
 pub fn isResource(ctx: *context.Context, val: value.JSValue) bool {
     if (!val.isObject()) return false;
     const obj = object.JSObject.fromValue(val);
-    const brand = readObjProp(ctx, obj, resource_brand) orelse return false;
+    const pool = ctx.hidden_class_pool orelse return false;
+    const atom = ctx.atoms.intern(resource_brand) catch return false;
+    // Own property only - the normal Response path uses getOwnProperty too, so
+    // an object that merely inherits the brand is not misclassified.
+    const brand = obj.getOwnProperty(pool, atom) orelse return false;
     return brand.isTrue();
 }
 
@@ -1575,6 +1599,112 @@ test "buildHalJson merges data and _links for GET affordances" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":42") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"_links\":{\"self\":{\"href\":\"/orders/42\"}}") != null);
+}
+
+test "buildHalJson stays correct across many affordances (no pool-realloc UAF)" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // data with several fields, like the shipped example.
+    const data = try ctx.createObject(null);
+    try ctx.setPropertyChecked(data, try ctx.atoms.intern("id"), value.JSValue.fromInt(42));
+    try ctx.setPropertyChecked(data, try ctx.atoms.intern("total"), value.JSValue.fromInt(1999));
+    try ctx.setPropertyChecked(data, try ctx.atoms.intern("status"), try ctx.createString("pending"));
+
+    // Build N distinct affordances so the loop iterates many times while
+    // creating link/template child objects (which mutate the hidden-class pool).
+    const affordances = try ctx.createObject(null);
+    const rels = [_][]const u8{ "self", "next", "prev", "pay", "cancel", "ship", "refund", "audit" };
+    for (rels) |rel| {
+        const a = try ctx.createObject(null);
+        try ctx.setPropertyChecked(a, try ctx.atoms.intern("href"), try ctx.createString("/x"));
+        // Make half of them write actions (templates), half links.
+        if (rel.len % 2 == 0) {
+            try ctx.setPropertyChecked(a, try ctx.atoms.intern("method"), try ctx.createString("POST"));
+        }
+        try ctx.setPropertyChecked(affordances, try ctx.atoms.intern(rel), a.toValue());
+    }
+
+    const json_str = try buildHalJson(ctx, data.toValue(), affordances.toValue());
+    const json = json_str.data();
+
+    // Every data field and every rel must appear exactly once and intact -
+    // a pool-realloc UAF would corrupt rel keys / drop entries / crash.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"pending\"") != null);
+    for (rels) |rel| {
+        try std.testing.expect(std.mem.indexOf(u8, json, rel) != null);
+    }
+}
+
+test "buildHtmlFragment neutralizes a method that would inject attributes" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const data = try ctx.createObject(null);
+    // A hostile method value: spaces/quotes/equals that would break out of the
+    // attribute name if written raw.
+    const evil = try ctx.createObject(null);
+    try ctx.setPropertyChecked(evil, try ctx.atoms.intern("href"), try ctx.createString("/x"));
+    try ctx.setPropertyChecked(evil, try ctx.atoms.intern("method"), try ctx.createString("post onclick=alert(1) x"));
+    const affordances = try ctx.createObject(null);
+    try ctx.setPropertyChecked(affordances, try ctx.atoms.intern("go"), evil.toValue());
+
+    const frag = try buildHtmlFragment(ctx, data.toValue(), affordances.toValue());
+    const html = frag.data();
+
+    // Attribute-breaking characters (space, '=', '(') from the method are
+    // stripped, so it cannot become an event handler or a second attribute.
+    // Only ASCII letters survive, collapsed into one harmless attribute name.
+    try std.testing.expect(std.mem.indexOf(u8, html, "onclick=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "alert(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "hx-postonclickalertx=\"/x\"") != null);
+}
+
+test "buildHalJson does not let a data _links field clobber generated affordances" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // data carries a field literally named _links - it must not survive into
+    // the HAL document and overwrite the generated _links.
+    const data = try ctx.createObject(null);
+    try ctx.setPropertyChecked(data, try ctx.atoms.intern("id"), value.JSValue.fromInt(1));
+    try ctx.setPropertyChecked(data, try ctx.atoms.intern("_links"), try ctx.createString("BOGUS"));
+
+    const self_aff = try ctx.createObject(null);
+    try ctx.setPropertyChecked(self_aff, try ctx.atoms.intern("href"), try ctx.createString("/y"));
+    const affordances = try ctx.createObject(null);
+    try ctx.setPropertyChecked(affordances, try ctx.atoms.intern("self"), self_aff.toValue());
+
+    const json_str = try buildHalJson(ctx, data.toValue(), affordances.toValue());
+    const json = json_str.data();
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "BOGUS") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"_links\":{\"self\":{\"href\":\"/y\"}}") != null);
 }
 
 test "buildHtmlFragment renders data dl and hx controls" {
