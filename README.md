@@ -78,7 +78,8 @@ workflows, WebSocket, and proof examples.
 - Five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Advanced
   commands are listed by `zigttp help --all`.
 - Handler API: `function handler(req): Response`, plus `Response.text`,
-  `Response.json`, and `Response.html`.
+  `Response.json`, and `Response.html`, and `resource(data, affordances)` for
+  content-negotiated HAL-JSON and HTMX from one declaration.
 - Language profile: a restricted JS/TS/TSX subset with no `var`, `while`,
   `class`, or `try/catch`; unsupported constructs fail at compile time.
 - Proofs: response-path verification, Result/optional checks, state-isolation

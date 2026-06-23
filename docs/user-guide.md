@@ -206,6 +206,46 @@ zigttp dev
 
 See `examples/jsx/` and `examples/handler/handler-full.tsx`.
 
+## Hypermedia Resources
+
+`resource(data, affordances)` is a global that returns one value the runtime
+renders two ways, chosen by the request's `Accept` header. Services that ask for
+`application/hal+json` (or `application/json`) receive a HAL document; browsers
+that ask for `text/html` receive HTML. One affordance declaration drives both.
+
+```ts
+function handler(req: Request): Response {
+    const order = { id: 42, total: 1999, status: "pending" };
+    return resource(order, {
+        self: { href: "/orders/42" },
+        pay: { href: "/orders/42/pay", method: "POST", title: "Pay now",
+               target: "#order", swap: "outerHTML" },
+        cancel: { href: "/orders/42", method: "DELETE", title: "Cancel" },
+    });
+}
+```
+
+Each affordance is keyed by its link relation. `href` is required; `method`,
+`title`, `target`, `swap`, and `fields` are optional. An affordance with no
+`method` (or `GET`/`HEAD`) is a navigation link; any other method is a write
+action.
+
+The rendering follows from the affordance shape:
+
+| Accept | Output |
+|---|---|
+| `application/hal+json` or `application/json` | HAL: data plus `_links` (navigation) and `_templates` (write actions, with `fields` as `properties`). |
+| `text/html` with `HX-Request: true` | An HTMX fragment: a `<dl>` of the scalar data, then `<a>` links and `<button hx-post>`/`hx-delete` controls carrying `hx-target`/`hx-swap`. |
+| `text/html` without `HX-Request` | The same fragment wrapped in a full page that loads htmx. |
+
+```bash
+zigttp serve examples/hypermedia/order.ts -p 3000
+curl -H 'Accept: application/hal+json' http://127.0.0.1:3000/orders/42
+curl -H 'Accept: text/html' -H 'HX-Request: true' http://127.0.0.1:3000/orders/42
+```
+
+See `examples/hypermedia/order.ts`.
+
 ## Virtual Modules
 
 Virtual modules are native Zig APIs exposed through `import { ... } from
