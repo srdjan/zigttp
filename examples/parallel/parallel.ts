@@ -1,10 +1,16 @@
 import { parallel } from "zigttp:io";
 import { jwtVerify } from "zigttp:auth";
+import { env } from "zigttp:env";
 import { fetch } from "zigttp:fetch";
 
 function handler(req: Request): Response {
   const token = req.headers.get("authorization");
-  const auth = jwtVerify(token, "secret");
+  const secret = env("JWT_SECRET");
+  if (secret === undefined) {
+    return Response.json({ error: "server misconfigured" }, { status: 500 });
+  }
+
+  const auth = jwtVerify(token, secret);
   if (!auth.ok) return Response.json({ error: "unauthorized" }, { status: 401 });
   const subject = auth.value.sub;
 

@@ -2,6 +2,7 @@
 // Tests that zigttp:auth, zigttp:validate, and zigttp:cache resolve correctly
 
 import { parseBearer, jwtVerify, jwtSign } from "zigttp:auth";
+import { env } from "zigttp:env";
 import { schemaCompile, validateJson, coerceJson } from "zigttp:validate";
 import { cacheGet, cacheSet, cacheStats } from "zigttp:cache";
 import { sha256 } from "zigttp:crypto";
@@ -27,7 +28,11 @@ function handler(req: Request): Response {
     if (auth_header !== undefined) {
         const token = parseBearer(auth_header);
         if (token !== undefined) {
-            const secret = "my-secret-key";
+            const secret = env("JWT_SECRET");
+            if (secret === undefined) {
+                return Response.json({ error: "server misconfigured" }, { status: 500 });
+            }
+
             const result = jwtVerify(token, secret);
             if (result.ok) {
                 // Cache the verified user
@@ -43,8 +48,13 @@ function handler(req: Request): Response {
             return Response.json({ errors: validation.errors }, { status: 400 });
         }
 
+        const secret = env("JWT_SECRET");
+        if (secret === undefined) {
+            return Response.json({ error: "server misconfigured" }, { status: 500 });
+        }
+
         // Sign a response token
-        const jwt = jwtSign(JSON.stringify({ sub: "user-123", iat: 1700000000 }), "my-secret-key");
+        const jwt = jwtSign(JSON.stringify({ sub: "user-123", iat: 1700000000 }), secret);
 
         return Response.json({
             user: validation.value,

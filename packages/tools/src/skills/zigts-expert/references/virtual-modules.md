@@ -180,7 +180,9 @@ function cors(req: Request): Response | undefined {
 function requireAuth(req: Request): Response | undefined {
     const token = parseBearer(req.headers["authorization"]);
     if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
-    const result = jwtVerify(token, env("JWT_SECRET") ?? "secret");
+    const secret = env("JWT_SECRET");
+    if (secret === undefined) return Response.json({ error: "server misconfigured" }, { status: 500 });
+    const result = jwtVerify(token, secret);
     if (!result.ok) return Response.json({ error: result.error }, { status: 403 });
 }
 

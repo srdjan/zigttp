@@ -5,7 +5,8 @@
 {"type":"test","name":"POST with valid body returns 201 with user and token"}
 {"type":"request","method":"POST","url":"/","headers":{},"body":"{\"name\":\"Alice\",\"age\":30}"}
 {"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["user","{\"name\":\"Alice\",\"age\":30}"],"result":{"ok":true,"value":{"name":"Alice","age":30}}}
-{"type":"io","seq":1,"module":"auth","fn":"jwtSign","args":["{\"sub\":\"user-123\",\"iat\":1700000000}","my-secret-key"],"result":"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.test"}
+{"type":"io","seq":1,"module":"env","fn":"env","args":["JWT_SECRET"],"result":"test-jwt-secret"}
+{"type":"io","seq":2,"module":"auth","fn":"jwtSign","args":["{\"sub\":\"user-123\",\"iat\":1700000000}","test-jwt-secret"],"result":"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.test"}
 {"type":"expect","status":201,"bodyContains":"Alice"}
 
 {"type":"test","name":"POST with invalid body returns 400"}

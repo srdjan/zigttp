@@ -10,7 +10,11 @@ function handler(req: Request): Response {
     return Response.json({ error: "missing token" }, { status: 401 });
   }
 
-  const secret = env("JWT_SECRET") ?? "default-secret";
+  const secret = env("JWT_SECRET");
+  if (secret === undefined) {
+    return Response.json({ error: "server misconfigured" }, { status: 500 });
+  }
+
   const auth = jwtVerify(token, secret);
   if (!auth.ok) {
     return Response.json({ error: auth.error }, { status: 401 });
