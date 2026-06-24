@@ -99,6 +99,8 @@ pub const ContractBuilder = struct {
     egress_urls: std.ArrayList([]const u8),
     egress_dynamic: bool,
     service_calls: std.ArrayList(ServiceCallInfo),
+    affordances: std.ArrayList(contract_types.EmittedAffordance),
+    affordances_dynamic: bool,
     cache_namespaces: std.ArrayList([]const u8),
     cache_dynamic: bool,
     sql_queries: std.ArrayList(SqlQueryInfo),
@@ -212,6 +214,8 @@ pub const ContractBuilder = struct {
             .egress_urls = .empty,
             .egress_dynamic = false,
             .service_calls = .empty,
+            .affordances = .empty,
+            .affordances_dynamic = false,
             .cache_namespaces = .empty,
             .cache_dynamic = false,
             .sql_queries = .empty,
@@ -254,6 +258,8 @@ pub const ContractBuilder = struct {
         self.egress_urls.deinit(self.allocator);
         for (self.service_calls.items) |*call| call.deinit(self.allocator);
         self.service_calls.deinit(self.allocator);
+        for (self.affordances.items) |*aff| aff.deinit(self.allocator);
+        self.affordances.deinit(self.allocator);
         for (self.cache_namespaces.items) |s| self.allocator.free(s);
         self.cache_namespaces.deinit(self.allocator);
         for (self.sql_queries.items) |*query| query.deinit(self.allocator);
@@ -422,6 +428,8 @@ pub const ContractBuilder = struct {
                 .dynamic = self.egress_dynamic,
             },
             .service_calls = self.service_calls,
+            .affordances = self.affordances,
+            .affordances_dynamic = self.affordances_dynamic,
             .cache = .{
                 .namespaces = self.cache_namespaces,
                 .dynamic = self.cache_dynamic,
@@ -507,6 +515,7 @@ pub const ContractBuilder = struct {
         self.egress_hosts = .empty;
         self.egress_urls = .empty;
         self.service_calls = .empty;
+        self.affordances = .empty;
         self.cache_namespaces = .empty;
         self.sql_queries = .empty;
         self.scope_names = .empty;
@@ -1128,6 +1137,20 @@ pub const ContractBuilder = struct {
                         try self.extractLiteralArg(call, .{ .list = &self.egress_hosts, .dynamic = &self.egress_dynamic }, &extractHost);
                         try self.extractLiteralArg(call, .{ .list = &self.egress_urls, .dynamic = &self.egress_dynamic }, null);
                         continue;
+                    }
+                }
+
+                // resource(data, affordances) is a bare global (builtins/root.zig),
+                // not a module import, so it is hooked here by name rather than via
+                // the generic binding registry. Extract the affordance set for the
+                // system linker's hypermedia resolution (fail-closed: a non-literal
+                // affordances arg marks the contract affordances_dynamic).
+                if (binding.kind == .global or binding.kind == .undeclared_global) {
+                    if (self.resolveAtomName(binding.slot)) |name| {
+                        if (std.mem.eql(u8, name, "resource")) {
+                            try self.extractAffordances(call);
+                            continue;
+                        }
                     }
                 }
 
@@ -2329,6 +2352,79 @@ pub const ContractBuilder = struct {
         };
 
         try self.extractApiRoutesFromObject(routes_obj);
+    }
+
+    /// Extract the affordance set from a `resource(data, affordances)` call.
+    /// Strict-literal and fail-closed: a computed affordances argument sets
+    /// `affordances_dynamic`; an affordance whose `href`/`method` is non-literal
+    /// (or whose value is not an object literal) is recorded with `dynamic=true`
+    /// so the system linker counts it but never claims it resolved.
+    fn extractAffordances(self: *ContractBuilder, call: Node.CallExpr) !void {
+        if (call.args_count < 2) return;
+
+        const aff_arg_idx = self.ir_view.getListIndex(call.args_start, 1);
+        const aff_obj_node = self.resolveObjectLiteralNode(aff_arg_idx) orelse {
+            self.affordances_dynamic = true;
+            return;
+        };
+        const aff_obj = self.ir_view.getObject(aff_obj_node) orelse {
+            self.affordances_dynamic = true;
+            return;
+        };
+
+        var i: u16 = 0;
+        while (i < aff_obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(aff_obj.properties_start, i);
+            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+            const rel = self.getObjectPropertyKey(prop.key) orelse continue;
+            try self.extractOneAffordance(rel, prop.value);
+        }
+    }
+
+    fn extractOneAffordance(self: *ContractBuilder, rel: []const u8, value_idx: NodeIndex) !void {
+        var href: []const u8 = "";
+        var method: []const u8 = "GET";
+        var dynamic = false;
+
+        if (self.resolveObjectLiteralNode(value_idx)) |obj_node| {
+            if (self.ir_view.getObject(obj_node)) |obj| {
+                var j: u16 = 0;
+                while (j < obj.properties_count) : (j += 1) {
+                    const p_idx = self.ir_view.getListIndex(obj.properties_start, j);
+                    const p = self.ir_view.getProperty(p_idx) orelse continue;
+                    const key = self.getObjectPropertyKey(p.key) orelse continue;
+                    if (std.mem.eql(u8, key, "href")) {
+                        if (self.getLiteralString(p.value)) |h| href = h else dynamic = true;
+                    } else if (std.mem.eql(u8, key, "method")) {
+                        if (self.getLiteralString(p.value)) |m| method = m else dynamic = true;
+                    }
+                }
+                // An affordance object literal with no statically-known href
+                // cannot be resolved to a route.
+                if (href.len == 0) dynamic = true;
+            } else {
+                dynamic = true;
+            }
+        } else {
+            dynamic = true;
+        }
+
+        const templated = std.mem.indexOfScalar(u8, href, '{') != null;
+
+        const rel_owned = try self.allocator.dupe(u8, rel);
+        errdefer self.allocator.free(rel_owned);
+        const method_owned = try self.allocator.dupe(u8, method);
+        errdefer self.allocator.free(method_owned);
+        const href_owned = try self.allocator.dupe(u8, href);
+        errdefer self.allocator.free(href_owned);
+
+        try self.affordances.append(self.allocator, .{
+            .rel = rel_owned,
+            .method = method_owned,
+            .href = href_owned,
+            .templated = templated,
+            .dynamic = dynamic,
+        });
     }
 
     fn extractServiceCall(self: *ContractBuilder, call: Node.CallExpr) !void {
@@ -4132,6 +4228,126 @@ test "builtin zigttp:fetch extracts the Open-Meteo egress host from a literal ur
     // Exactly one proven host, statically known (not dynamic).
     try std.testing.expectEqual(@as(usize, 1), builder.egress_hosts.items.len);
     try std.testing.expect(!builder.egress_dynamic);
+}
+
+fn findAffordanceByRel(items: []const contract_types.EmittedAffordance, rel: []const u8) ?contract_types.EmittedAffordance {
+    for (items) |a| {
+        if (std.mem.eql(u8, a.rel, rel)) return a;
+    }
+    return null;
+}
+
+test "resource() affordances are extracted strict-literal with method default and templating" {
+    const allocator = std.testing.allocator;
+
+    // `resource` is a bare global; no import. Three affordances: a GET nav link
+    // (method defaults to GET), a POST write, and a templated GET (href has a
+    // {param} placeholder the linker normalizes before route matching).
+    const source =
+        \\function handler(req) {
+        \\  return resource({ id: 1 }, {
+        \\    self: { href: "/orders/1" },
+        \\    pay: { href: "/orders/1/pay", method: "POST" },
+        \\    item: { href: "/orders/{id}", method: "GET" },
+        \\  });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
+    defer builder.deinit();
+
+    try builder.scanImports();
+    try builder.scanCallSites();
+
+    try std.testing.expect(!builder.affordances_dynamic);
+    try std.testing.expectEqual(@as(usize, 3), builder.affordances.items.len);
+
+    const self_aff = findAffordanceByRel(builder.affordances.items, "self").?;
+    try std.testing.expectEqualStrings("/orders/1", self_aff.href);
+    try std.testing.expectEqualStrings("GET", self_aff.method);
+    try std.testing.expect(!self_aff.dynamic);
+    try std.testing.expect(!self_aff.templated);
+
+    const pay = findAffordanceByRel(builder.affordances.items, "pay").?;
+    try std.testing.expectEqualStrings("POST", pay.method);
+    try std.testing.expectEqualStrings("/orders/1/pay", pay.href);
+
+    const item = findAffordanceByRel(builder.affordances.items, "item").?;
+    try std.testing.expect(item.templated);
+    try std.testing.expect(!item.dynamic);
+}
+
+test "resource() with a computed affordances argument fails closed as affordances_dynamic" {
+    const allocator = std.testing.allocator;
+
+    const source =
+        \\function handler(req) {
+        \\  return resource({ id: 1 }, req.links);
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
+    defer builder.deinit();
+
+    try builder.scanImports();
+    try builder.scanCallSites();
+
+    try std.testing.expect(builder.affordances_dynamic);
+    try std.testing.expectEqual(@as(usize, 0), builder.affordances.items.len);
+}
+
+test "resource() affordance with a non-literal href is recorded dynamic, not resolved" {
+    const allocator = std.testing.allocator;
+
+    const source =
+        \\function handler(req) {
+        \\  return resource({ id: 1 }, {
+        \\    self: { href: "/orders/1" },
+        \\    next: { href: req.nextHref, method: "POST" },
+        \\  });
+        \\}
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
+    defer builder.deinit();
+
+    try builder.scanImports();
+    try builder.scanCallSites();
+
+    // The set is enumerable (object literal), so affordances_dynamic stays false,
+    // but the individual non-literal-href affordance is marked dynamic.
+    try std.testing.expect(!builder.affordances_dynamic);
+    const next = findAffordanceByRel(builder.affordances.items, "next").?;
+    try std.testing.expect(next.dynamic);
+    const self_aff = findAffordanceByRel(builder.affordances.items, "self").?;
+    try std.testing.expect(!self_aff.dynamic);
 }
 
 test "missing manifest registry skips partner imports" {

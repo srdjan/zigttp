@@ -165,6 +165,30 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     }
     try writer.writeAll("],\n");
 
+    // affordances (hypermedia resource() links resolved by the system linker)
+    try writer.writeAll("  \"affordances\": [");
+    for (contract.affordances.items, 0..) |aff, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n    {\n");
+        try writer.writeAll("      \"rel\": ");
+        try writeJsonString(writer, aff.rel);
+        try writer.writeAll(",\n");
+        try writer.writeAll("      \"method\": ");
+        try writeJsonString(writer, aff.method);
+        try writer.writeAll(",\n");
+        try writer.writeAll("      \"href\": ");
+        try writeJsonString(writer, aff.href);
+        try writer.writeAll(",\n");
+        try writer.print("      \"templated\": {s},\n", .{if (aff.templated) "true" else "false"});
+        try writer.print("      \"dynamic\": {s}\n", .{if (aff.dynamic) "true" else "false"});
+        try writer.writeAll("    }");
+    }
+    if (contract.affordances.items.len > 0) {
+        try writer.writeAll("\n  ");
+    }
+    try writer.writeAll("],\n");
+    try writer.print("  \"affordancesDynamic\": {s},\n", .{if (contract.affordances_dynamic) "true" else "false"});
+
     // cache
     try writer.writeAll("  \"cache\": {\n");
     try writer.writeAll("    \"namespaces\": [");

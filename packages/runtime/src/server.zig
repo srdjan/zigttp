@@ -27,6 +27,8 @@ const ValidatedRuntimeContract = contract_runtime.ValidatedRuntimeContract;
 const ws_gateway = @import("ws_gateway.zig");
 const ws_frame_loop = @import("ws_frame_loop.zig");
 const websocket_pool = @import("websocket_pool.zig");
+const in_process_dispatch = @import("in_process_dispatch.zig");
+const SystemRuntime = in_process_dispatch.SystemRuntime;
 const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const proof_audit_ring = @import("proof_audit_ring.zig");
@@ -1459,6 +1461,12 @@ pub const Server = struct {
     ws_pool: ?websocket_pool.Pool = null,
     /// Guards ws_pool lazy initialisation against concurrent upgrade attempts.
     ws_pool_mutex: engine.Mutex = .{},
+    /// Co-located sub-handler registry for in-process `zigttp:workflow.call`,
+    /// built from `--system <manifest>` in `start()`. Each pooled orchestrator
+    /// runtime references it via `RuntimeConfig.system_registry`. Null when no
+    /// `--system` bundle is loaded. Deinitialised after the main pool so no
+    /// in-flight orchestrator can still dispatch into it.
+    system_runtime: ?SystemRuntime = null,
     /// Dev/serve policy backing storage. The contract-derived RuntimePolicy
     /// handed to the pool borrows string slices from these structs. Three
     /// generations are kept so that runtimes that started under policy N can
@@ -1543,6 +1551,9 @@ pub const Server = struct {
         if (self.conn_pool) |cp| cp.deinit();
 
         if (self.pool) |*p| p.deinit();
+        // After the main pool: in-flight orchestrators (which dispatch into the
+        // registry) are gone, so its sub-pools are safe to tear down.
+        if (self.system_runtime) |*sr| sr.deinit();
         if (self.proof_cache) |*pc| pc.deinit();
         if (self.ws_pool) |*wsp| wsp.deinit();
         if (self.contract) |*c| c.deinit();
@@ -1868,6 +1879,24 @@ pub const Server = struct {
         // interpreter's cooperative deadline check is enforced per handler call.
         var pool_rt_config = self.config.runtime_config;
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
+
+        // Build the in-process sub-handler registry from `--system <manifest>`
+        // and point every pooled orchestrator runtime at it. The same manifest
+        // also drives `zigttp:service` (HTTP) wiring; here it backs the
+        // in-process `zigttp:workflow.call` path.
+        if (pool_rt_config.system_config_path) |system_path| {
+            self.system_runtime = try in_process_dispatch.SystemRuntime.buildFromSystemConfig(
+                self.allocator,
+                system_path,
+                pool_rt_config,
+                self.config.pool_size,
+            );
+            pool_rt_config.system_registry = @ptrCast(&self.system_runtime.?);
+            std.log.info("Workflow registry: {d} co-located handlers from {s}", .{
+                self.system_runtime.?.targets.items.len, system_path,
+            });
+        }
+
         var pool_timer = engine.Timer.start() catch null;
         self.pool = try engine.initHandlerPool(
             self.allocator,

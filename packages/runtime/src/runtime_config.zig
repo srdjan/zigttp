@@ -29,6 +29,12 @@ pub const RuntimeConfig = struct {
     /// replayed on startup; completed ones keep duplicate keys idempotent.
     durable_oplog_dir: ?[]const u8 = null,
     system_config_path: ?[]const u8 = null,
+    /// In-process co-located handler registry (`*in_process_dispatch.SystemRuntime`)
+    /// for `zigttp:workflow.call`. Type-erased to keep this leaf config free of
+    /// the runtime-pool import cycle; cast back in `zruntime.installBindings`.
+    /// Server-owned and shared by every pooled orchestrator runtime; null when
+    /// no `--system` bundle is loaded.
+    system_registry: ?*anyopaque = null,
     /// Dev/serve live path only: a contract-derived capability policy applied
     /// instead of the embedded (stub) policy by `applyEmbeddedCapabilityPolicy`.
     /// Null on AOT paths, which already carry their full policy in

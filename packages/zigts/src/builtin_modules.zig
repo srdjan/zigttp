@@ -47,6 +47,7 @@ const websocket_mod = @import("modules/net/websocket.zig");
 const io_mod = @import("modules/workflow/io.zig");
 const scope_mod = @import("modules/workflow/scope.zig");
 const durable_mod = @import("modules/workflow/durable.zig");
+const workflow_mod = @import("modules/workflow/workflow.zig");
 
 /// All in-tree virtual module bindings, in registration order.
 pub const builtins = [_]ModuleBinding{
@@ -62,6 +63,7 @@ pub const builtins = [_]ModuleBinding{
     scope_mod.binding,
     ported.compose,
     durable_mod.binding,
+    workflow_mod.binding,
     ported.url,
     ported.id,
     ported.http,
@@ -99,6 +101,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zigttp:scope", .module_path = "packages/zigts/src/modules/workflow/scope.zig", .spec_path = "packages/modules/module-specs/workflow/scope.json" },
     .{ .specifier = "zigttp:compose", .module_path = "packages/modules/src/workflow/compose.zig", .spec_path = "packages/modules/module-specs/workflow/compose.json" },
     .{ .specifier = "zigttp:durable", .module_path = "packages/zigts/src/modules/workflow/durable.zig", .spec_path = "packages/modules/module-specs/workflow/durable.json" },
+    .{ .specifier = "zigttp:workflow", .module_path = "packages/zigts/src/modules/workflow/workflow.zig", .spec_path = "packages/modules/module-specs/workflow/workflow.json" },
     .{ .specifier = "zigttp:url", .module_path = "packages/modules/src/http/url.zig", .spec_path = "packages/modules/module-specs/http/url.json" },
     .{ .specifier = "zigttp:id", .module_path = "packages/modules/src/platform/id.zig", .spec_path = "packages/modules/module-specs/platform/id.json" },
     .{ .specifier = "zigttp:http", .module_path = "packages/modules/src/http/http_mod.zig", .spec_path = "packages/modules/module-specs/http/http-mod.json" },

@@ -15,6 +15,7 @@ pub const Slot = enum(u4) {
     scope = 10,
     fetch = 11,
     websocket = 12,
+    workflow = 13,
 };
 
 pub fn ownerSpecifier(slot: usize) ?[]const u8 {
@@ -29,6 +30,7 @@ pub fn ownerSpecifier(slot: usize) ?[]const u8 {
         @intFromEnum(Slot.scope) => "zigttp:scope",
         @intFromEnum(Slot.fetch) => "zigttp:fetch",
         @intFromEnum(Slot.websocket) => "zigttp:websocket",
+        @intFromEnum(Slot.workflow) => "zigttp:workflow",
         else => null,
     };
 }

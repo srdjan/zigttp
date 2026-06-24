@@ -65,6 +65,7 @@ pub const PathCondition = contract_types.PathCondition;
 pub const PathIoCall = contract_types.PathIoCall;
 pub const BehaviorPath = contract_types.BehaviorPath;
 pub const ServiceCallInfo = contract_types.ServiceCallInfo;
+pub const EmittedAffordance = contract_types.EmittedAffordance;
 pub const CapabilityMatrix = contract_types.CapabilityMatrix;
 pub const computeCapabilityMatrix = contract_types.computeCapabilityMatrix;
 pub const HandlerContract = contract_types.HandlerContract;
@@ -816,10 +817,11 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 14") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 15") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"affordances\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"scope\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"api\": {") != null);

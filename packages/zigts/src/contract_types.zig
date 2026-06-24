@@ -1096,6 +1096,33 @@ pub const ServiceCallInfo = struct {
     }
 };
 
+/// One hypermedia affordance emitted by a `resource(data, affordances)` call:
+/// the single source of truth the system linker resolves to a bundle route
+/// (Subsystem 4 in the workflow/hypermedia design). Extracted strict-literal
+/// and fail-closed exactly like `ServiceCallInfo`: a non-literal `href` (or a
+/// computed `affordances` argument) sets `dynamic` so the linker never claims a
+/// dynamic link resolved.
+pub const EmittedAffordance = struct {
+    rel: []const u8, // owned
+    /// HTTP method, defaulting to "GET" when the affordance omits one (a HAL
+    /// navigation `_links` entry). Owned.
+    method: []const u8, // owned
+    href: []const u8, // owned
+    /// True when `href` carries a `{param}` placeholder (a HAL-FORMS templated
+    /// link). The linker normalizes `{param}` -> `:param` before route matching.
+    templated: bool = false,
+    /// True when `href` (or the enclosing affordance value) was not a compile
+    /// time literal. A dynamic affordance is counted, never resolved, and
+    /// downgrades the bundle proof.
+    dynamic: bool = false,
+
+    pub fn deinit(self: *EmittedAffordance, allocator: std.mem.Allocator) void {
+        allocator.free(self.rel);
+        allocator.free(self.method);
+        allocator.free(self.href);
+    }
+};
+
 /// Aggregate of module capabilities required by a handler's imports.
 /// Stable SHA-256 hash over the canonically-ordered tag names lets the
 /// runtime detect drift between the embedded contract and the linked
@@ -1274,7 +1301,7 @@ pub const EffectCapsuleSummary = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 14,
+    version: u32 = 15,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -1282,6 +1309,14 @@ pub const HandlerContract = struct {
     env: EnvInfo,
     egress: EgressInfo,
     service_calls: std.ArrayList(ServiceCallInfo) = .empty,
+    /// Hypermedia affordances emitted by `resource(data, affordances)` calls.
+    /// The system linker resolves each non-dynamic affordance to a bundle route
+    /// (`all_affordances_resolved`). Owned; each entry's `deinit` runs at free.
+    affordances: std.ArrayList(EmittedAffordance) = .empty,
+    /// True when a `resource()` call passed a computed (non-literal) affordances
+    /// argument, so the emitted affordance set cannot be enumerated. Counted as
+    /// a dynamic link: downgrades the bundle proof, never claimed resolved.
+    affordances_dynamic: bool = false,
     cache: CacheInfo,
     sql: SqlInfo,
     durable: DurableInfo,
@@ -1390,6 +1425,10 @@ pub const HandlerContract = struct {
             call.deinit(allocator);
         }
         self.service_calls.deinit(allocator);
+        for (self.affordances.items) |*aff| {
+            aff.deinit(allocator);
+        }
+        self.affordances.deinit(allocator);
         for (self.cache.namespaces.items) |s| {
             allocator.free(s);
         }

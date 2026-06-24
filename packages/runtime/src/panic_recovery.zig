@@ -11,8 +11,16 @@
 //! - Native stack overflow and SIGSEGV are signals, not panics - out of scope.
 //! - If pool.trace_mutex is held when a panic fires inside the trace recorder,
 //!   subsequent trace writes will deadlock. Window is microseconds; acceptable.
-//! - If rt.deinit() itself panics during quarantine, the recovery frame is
-//!   already disarmed so the process aborts via defaultPanic (fail-closed).
+//! - If rt.deinit() itself panics during quarantine, the current recovery
+//!   frame is already popped, so the panic unwinds to the enclosing frame (a
+//!   nested in-process dispatch) or aborts via defaultPanic when none remains
+//!   (fail-closed).
+//!
+//! NESTING: frames form a per-thread stack. An in-process sub-handler dispatch
+//! (zigttp:workflow.call) arms its own frame on top of the orchestrator's, so a
+//! sub-handler panic longjmps to the sub frame and surfaces as
+//! error.HandlerPanicked to the orchestrator, leaving the orchestrator's outer
+//! frame armed. Without the stack, nested arming would assert/abort.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -43,6 +51,9 @@ pub const Frame = struct {
     jb: c.jmp_buf,
     msg_buf: [256]u8 = undefined,
     msg_len: usize = 0,
+    /// Enclosing frame, if this one was armed inside another guarded handler
+    /// (nested in-process dispatch). Restored on disarm / panic-pop.
+    prev: ?*Frame = null,
 
     pub fn message(self: *const Frame) []const u8 {
         return self.msg_buf[0..self.msg_len];
@@ -51,26 +62,31 @@ pub const Frame = struct {
 
 threadlocal var active_frame: ?*Frame = null;
 
-/// Arm the recovery frame for the current thread. Must not be called when a
-/// frame is already armed (no nested arming).
+/// Arm a recovery frame for the current thread, pushing it onto the per-thread
+/// stack. Nested arming is supported: an orchestrator handler can dispatch a
+/// co-located sub-handler in-process (zigttp:workflow.call), and the sub-call
+/// arms its own frame on top of the orchestrator's.
 pub fn arm(f: *Frame) void {
-    std.debug.assert(active_frame == null); // no nested arming
     f.msg_len = 0;
+    f.prev = active_frame;
     active_frame = f;
 }
 
-/// Disarm the recovery frame for the current thread.
+/// Disarm the current recovery frame (normal-completion path), restoring the
+/// enclosing frame if any. The panic path pops inside `handlePanic` instead,
+/// because longjmp skips this `defer`.
 pub fn disarm() void {
-    active_frame = null;
+    if (active_frame) |f| active_frame = f.prev;
 }
 
 /// Root panic handler body. Wire into binary roots via:
 ///   pub const panic = std.debug.FullPanic(panic_recovery.handlePanic);
 pub fn handlePanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
     if (active_frame) |f| {
-        // Disarm first: a second panic during recovery (e.g. in rt.deinit)
-        // will escalate to defaultPanic and abort the process (fail-closed).
-        active_frame = null;
+        // Pop to the enclosing frame first: a second panic during recovery
+        // (e.g. in rt.deinit) unwinds to that frame, or escalates to
+        // defaultPanic when the stack is empty (fail-closed).
+        active_frame = f.prev;
         const n = @min(msg.len, f.msg_buf.len);
         @memcpy(f.msg_buf[0..n], msg[0..n]);
         f.msg_len = n;

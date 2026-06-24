@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:workflow",
+  "source": "packages/zigts/src/modules/workflow/workflow.zig",
+  "requiredCapabilities": [
+    "runtime_callback"
+  ],
+  "exports": [
+    {
+      "name": "call",
+      "effect": "write",
+      "returns": "object"
+    },
+    {
+      "name": "saga",
+      "effect": "write",
+      "returns": "object"
+    },
+    {
+      "name": "fanout",
+      "effect": "write",
+      "returns": "object"
+    },
+    {
+      "name": "follow",
+      "effect": "write",
+      "returns": "object"
+    }
+  ]
+}

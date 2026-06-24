@@ -348,6 +348,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // separately below: it builds a binary here but precompiles to .zig in
     // `zigts`, so it is deliberately excluded from the shared registry.
     if (zigts_cli.isAnalyzerCommand(command)) {
+        // Inject the persistent-keypair signer so `zigttp link` emits a signed
+        // kind=workflow receipt over the hypermedia verdict. The keyless `zigts`
+        // binary leaves this null and prints no receipt.
+        zigts_cli.system_build.receipt_probe = @import("hypermedia_probe_lib.zig").recordWorkflowReceipt;
         zigts_cli.run(allocator, user_args) catch |err| {
             if (err == error.NoProjectConfig) {
                 printNoProjectConfigDiagnostic(command);

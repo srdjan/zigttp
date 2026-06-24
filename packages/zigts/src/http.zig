@@ -1350,6 +1350,16 @@ pub fn resource(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSVal
     return obj.toValue();
 }
 
+/// Read the affordances object from a branded hypermedia resource, or null if
+/// `val` is not a resource() (or carries no affordances). Used by
+/// `zigttp:workflow.follow` to resolve an affordance `rel` to a dispatch target
+/// without re-rendering the resource at the response boundary.
+pub fn resourceAffordances(ctx: *context.Context, val: value.JSValue) ?value.JSValue {
+    if (!isResource(ctx, val)) return null;
+    const obj = object.JSObject.fromValue(val);
+    return readObjProp(ctx, obj, resource_aff);
+}
+
 /// True when `val` is a branded hypermedia resource produced by resource().
 pub fn isResource(ctx: *context.Context, val: value.JSValue) bool {
     if (!val.isObject()) return false;

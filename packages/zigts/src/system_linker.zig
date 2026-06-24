@@ -55,6 +55,10 @@ pub const LinkStatus = enum {
 pub const LinkKind = enum {
     fetch_url,
     service_call,
+    /// A hypermedia affordance emitted by `resource()`, resolved to a bundle
+    /// route by Phase A2 (HATEOAS link-following). `service_name` carries the
+    /// affordance `rel`; `call_ref` carries its `href`.
+    affordance,
 };
 
 pub const SystemLink = struct {
@@ -121,6 +125,12 @@ pub const FailureCascade = struct {
 pub const SystemProperties = struct {
     all_links_resolved: bool,
     all_responses_covered: bool,
+    /// Every non-dynamic hypermedia affordance emitted by a `resource()` call
+    /// resolves to exactly one bundle route, and no affordance is dynamic.
+    all_affordances_resolved: bool = true,
+    /// Every resolved affordance's target route produces statically-known
+    /// response statuses (the link target is not a response black box).
+    affordance_responses_covered: bool = true,
     payload_compatible: bool,
     injection_safe: bool,
     no_secret_leakage: bool,
@@ -145,6 +155,16 @@ pub const SystemAnalysis = struct {
     payload_proofs: std.ArrayList(PayloadProof),
     cross_boundary_flows: std.ArrayList(CrossBoundaryFlow),
     failure_cascades: std.ArrayList(FailureCascade),
+    /// Hypermedia affordances resolved to a bundle route by Phase A2. Kept
+    /// separate from `links` so the fetch/service response-coverage, payload,
+    /// flow and cascade phases never run over forward HATEOAS links.
+    affordance_links: std.ArrayList(SystemLink) = .empty,
+    /// Count of non-dynamic affordances that matched zero (dangling) or more
+    /// than one (ambiguous) bundle route. Both fail closed.
+    dangling_affordances: u32 = 0,
+    /// Count of affordances the analyzer could not enumerate or whose href was
+    /// not a compile-time literal. Counted, never resolved; downgrades proof.
+    dynamic_affordances: u32 = 0,
     properties: SystemProperties,
     proof_level: ProofLevel,
     dynamic_links: u32,
@@ -159,6 +179,7 @@ pub const SystemAnalysis = struct {
         self.payload_proofs.deinit(allocator);
         self.cross_boundary_flows.deinit(allocator);
         self.failure_cascades.deinit(allocator);
+        self.affordance_links.deinit(allocator);
         for (self.warnings.items) |w| allocator.free(w);
         self.warnings.deinit(allocator);
         self.config.deinit(allocator);
@@ -277,6 +298,74 @@ pub fn parseServiceRoute(route_pattern: []const u8) ?ParsedServiceRoute {
 
 fn methodMatches(expected: []const u8, actual: []const u8) bool {
     return std.ascii.eqlIgnoreCase(expected, actual);
+}
+
+/// True when an affordance href carries a scheme/authority (absolute
+/// `scheme://host/...` or protocol-relative `//host/...`). Such an href cannot
+/// be proven to route to a bundle handler - the runtime `workflow.follow` only
+/// dispatches host-less paths - so the linker treats it as a dynamic (external)
+/// affordance rather than claiming it resolved internally.
+fn hrefHasHost(href: []const u8) bool {
+    return std.mem.indexOf(u8, href, "://") != null or std.mem.startsWith(u8, href, "//");
+}
+
+/// The path portion of an href: everything before an optional `?`/`#`.
+fn stripQueryFragment(href: []const u8) []const u8 {
+    var path = href;
+    if (std.mem.indexOfScalar(u8, path, '?')) |q| path = path[0..q];
+    if (std.mem.indexOfScalar(u8, path, '#')) |h| path = path[0..h];
+    return path;
+}
+
+/// True when `path` is mounted under handler `name`: exactly `/<name>` or
+/// begins with `/<name>/`. Mirrors `in_process_dispatch.pathMountsName` (the
+/// runtime cannot be imported here): proof and runtime resolution must agree.
+fn mountMatchName(path: []const u8, name: []const u8) bool {
+    if (path.len == 0 or path[0] != '/') return false;
+    const rest = path[1..];
+    if (!std.mem.startsWith(u8, rest, name)) return false;
+    const after = rest[name.len..];
+    return after.len == 0 or after[0] == '/';
+}
+
+/// Resolve a host-less path to the bundle handler whose name owns its leading
+/// segment, longest mount wins (so `/payments` does not shadow `/payments-eu`).
+/// Identical rule to the runtime `SystemRuntime.findByRoute`.
+fn mountResolve(config: SystemConfig, path: []const u8) ?usize {
+    var best: ?usize = null;
+    var best_len: usize = 0;
+    for (config.handlers, 0..) |h, i| {
+        if (mountMatchName(path, h.name) and h.name.len > best_len) {
+            best = i;
+            best_len = h.name.len;
+        }
+    }
+    return best;
+}
+
+/// Normalize a hypermedia affordance href to a route-matchable path: strip an
+/// optional scheme/host and any query/fragment, then rewrite `{param}`
+/// placeholders to the `:param` form the route matcher uses. Caller owns the
+/// returned slice.
+fn normalizeHrefPath(allocator: std.mem.Allocator, href: []const u8) ![]u8 {
+    var path = href;
+    if (std.mem.indexOf(u8, path, "://")) |scheme| {
+        const after = path[scheme + 3 ..];
+        path = if (std.mem.indexOfScalar(u8, after, '/')) |slash| after[slash..] else "/";
+    }
+    if (std.mem.indexOfScalar(u8, path, '?')) |q| path = path[0..q];
+    if (std.mem.indexOfScalar(u8, path, '#')) |h| path = path[0..h];
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    for (path) |ch| {
+        switch (ch) {
+            '{' => try buf.append(allocator, ':'),
+            '}' => {},
+            else => try buf.append(allocator, ch),
+        }
+    }
+    return buf.toOwnedSlice(allocator);
 }
 
 fn matchRoutePath(contract: *const HandlerContract, path: []const u8) ?RouteResolution {
@@ -518,6 +607,11 @@ fn appendUnresolvedWarning(
             "{s}: serviceCall({s}, {s}) {s}",
             .{ source_path, service_name orelse "?", call_ref, detail },
         ),
+        .affordance => try std.fmt.allocPrint(
+            allocator,
+            "{s}: affordance \"{s}\" -> {s} {s}",
+            .{ source_path, service_name orelse "?", call_ref, detail },
+        ),
     };
     try warnings.append(allocator, msg);
 }
@@ -538,8 +632,11 @@ pub fn linkSystem(
     var payload_proofs: std.ArrayList(PayloadProof) = .empty;
     var cross_boundary_flows: std.ArrayList(CrossBoundaryFlow) = .empty;
     var failure_cascades: std.ArrayList(FailureCascade) = .empty;
+    var affordance_links: std.ArrayList(SystemLink) = .empty;
     var warnings: std.ArrayList([]const u8) = .empty;
     var dynamic_links: u32 = 0;
+    var dangling_affordances: u32 = 0;
+    var dynamic_affordances: u32 = 0;
 
     // Phase A: Resolve each handler's egress URLs
     for (contracts, 0..) |contract, source_idx| {
@@ -736,6 +833,91 @@ pub fn linkSystem(
         }
     }
 
+    // Phase A2: Resolve hypermedia affordances to bundle routes the SAME way the
+    // runtime `workflow.follow` dispatches them, so the signed kind=workflow
+    // receipt certifies what follow actually does. Resolution is mount-then-route,
+    // fail closed:
+    //   1. A cross-host / absolute href cannot be proven to route to a bundle
+    //      handler (runtime follow only dispatches host-less paths) -> counted as
+    //      a dynamic affordance: downgrades the proof, never claimed resolved.
+    //   2. A host-less href mount-resolves to the handler whose name owns its
+    //      leading path segment ("/<name>", longest match) - identical to the
+    //      runtime findByRoute rule. No mount -> dangling.
+    //   3. The mounted handler must declare a route matching the href (templated
+    //      `{param}` normalized to `:param`); a handler that owns the prefix but
+    //      serves no matching route -> dangling (runtime would 404 too).
+    for (contracts, 0..) |contract, source_idx| {
+        if (contract.affordances_dynamic) {
+            dynamic_affordances += 1;
+            dynamic_links += 1;
+        }
+        for (contract.affordances.items) |aff| {
+            if (aff.dynamic) {
+                dynamic_affordances += 1;
+                dynamic_links += 1;
+                continue;
+            }
+
+            // 1. Cross-host / absolute href: not a provable internal link.
+            if (hrefHasHost(aff.href)) {
+                dynamic_affordances += 1;
+                dynamic_links += 1;
+                continue;
+            }
+
+            // 2. Mount-resolve by the "/<name>" convention (runtime findByRoute).
+            const target_idx = mountResolve(config, stripQueryFragment(aff.href)) orelse {
+                dangling_affordances += 1;
+                try appendUnresolvedWarning(
+                    allocator,
+                    &warnings,
+                    config.handlers[source_idx].path,
+                    .affordance,
+                    aff.rel,
+                    aff.href,
+                    "no bundle handler mounts this path (dangling hypermedia link)",
+                );
+                continue;
+            };
+
+            // 3. The mounted handler must declare a matching route.
+            const normalized = try normalizeHrefPath(allocator, aff.href);
+            defer allocator.free(normalized);
+
+            if (matchRoutePathWithMethod(&contracts[target_idx], aff.method, normalized)) |res| {
+                try affordance_links.append(allocator, .{
+                    .kind = .affordance,
+                    .source_idx = source_idx,
+                    .target_idx = target_idx,
+                    .call_ref = aff.href,
+                    .service_name = aff.rel,
+                    .matched_route = res.matched_route,
+                    .matched_method = res.matched_method,
+                });
+            } else {
+                dangling_affordances += 1;
+                try appendUnresolvedWarning(
+                    allocator,
+                    &warnings,
+                    config.handlers[source_idx].path,
+                    .affordance,
+                    aff.rel,
+                    aff.href,
+                    "mounted handler declares no matching route (dangling hypermedia link)",
+                );
+            }
+        }
+    }
+
+    // Phase A2b: a resolved affordance is "covered" when its target route
+    // produces statically-known response statuses (not a response black box).
+    var affordance_responses_covered = true;
+    for (affordance_links.items) |link| {
+        var rc = try analyzeResponseCoverage(allocator, contracts, link);
+        defer rc.deinit(allocator);
+        if (rc.target_statuses.items.len == 0) affordance_responses_covered = false;
+    }
+
     // Phase C: Response coverage for each link
     for (links.items) |link| {
         const rc = try analyzeResponseCoverage(
@@ -836,6 +1018,8 @@ pub fn linkSystem(
         break :blk false;
     };
     properties.all_links_resolved = !has_unlinked;
+    properties.all_affordances_resolved = dangling_affordances == 0 and dynamic_affordances == 0;
+    properties.affordance_responses_covered = affordance_responses_covered;
 
     for (response_coverage.items) |rc| {
         if (!rc.covered) {
@@ -857,7 +1041,7 @@ pub fn linkSystem(
         break :blk true;
     };
 
-    const proof_level: ProofLevel = if (has_unlinked or !all_verified or dynamic_links > 0)
+    const proof_level: ProofLevel = if (has_unlinked or dangling_affordances > 0 or !all_verified or dynamic_links > 0)
         if (all_verified) .partial else .none
     else
         .complete;
@@ -870,6 +1054,9 @@ pub fn linkSystem(
         .payload_proofs = payload_proofs,
         .cross_boundary_flows = cross_boundary_flows,
         .failure_cascades = failure_cascades,
+        .affordance_links = affordance_links,
+        .dangling_affordances = dangling_affordances,
+        .dynamic_affordances = dynamic_affordances,
         .properties = properties,
         .proof_level = proof_level,
         .dynamic_links = dynamic_links,
@@ -1271,6 +1458,8 @@ pub fn writeSystemContractJson(
     try writer.writeAll("  \"systemProperties\": {\n");
     try writer.print("    \"allLinksResolved\": {s},\n", .{boolStr(p.all_links_resolved)});
     try writer.print("    \"allResponsesCovered\": {s},\n", .{boolStr(p.all_responses_covered)});
+    try writer.print("    \"allAffordancesResolved\": {s},\n", .{boolStr(p.all_affordances_resolved)});
+    try writer.print("    \"affordanceResponsesCovered\": {s},\n", .{boolStr(p.affordance_responses_covered)});
     try writer.print("    \"payloadCompatible\": {s},\n", .{boolStr(p.payload_compatible)});
     try writer.print("    \"injectionSafe\": {s},\n", .{boolStr(p.injection_safe)});
     try writer.print("    \"noSecretLeakage\": {s},\n", .{boolStr(p.no_secret_leakage)});
@@ -1292,6 +1481,26 @@ pub fn writeSystemContractJson(
 
     // dynamicLinks
     try writer.print("  \"dynamicLinks\": {d},\n", .{analysis.dynamic_links});
+
+    // affordances (HATEOAS resolution summary)
+    try writer.writeAll("  \"affordances\": {\n");
+    try writer.print("    \"resolved\": {d},\n", .{analysis.affordance_links.items.len});
+    try writer.print("    \"dangling\": {d},\n", .{analysis.dangling_affordances});
+    try writer.print("    \"dynamic\": {d},\n", .{analysis.dynamic_affordances});
+    try writer.writeAll("    \"links\": [");
+    for (analysis.affordance_links.items, 0..) |link, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n      {\n");
+        try writer.writeAll("        \"rel\": ");
+        try json_utils.writeJsonString(writer, link.service_name orelse "");
+        try writer.writeAll(",\n        \"href\": ");
+        try json_utils.writeJsonString(writer, link.call_ref);
+        try writer.writeAll(",\n        \"route\": ");
+        try json_utils.writeJsonString(writer, link.matched_route);
+        try writer.print(",\n        \"source\": {d},\n        \"target\": {d}\n      }}", .{ link.source_idx, link.target_idx });
+    }
+    if (analysis.affordance_links.items.len > 0) try writer.writeAll("\n    ");
+    try writer.writeAll("]\n  },\n");
 
     // warnings
     try writer.writeAll("  \"warnings\": [\n");
@@ -1432,6 +1641,8 @@ pub fn writeSystemReport(
     const p = analysis.properties;
     try writer.print("  {s} all_links_resolved\n", .{provenLabel(p.all_links_resolved)});
     try writer.print("  {s} all_responses_covered\n", .{provenLabel(p.all_responses_covered)});
+    try writer.print("  {s} all_affordances_resolved\n", .{provenLabel(p.all_affordances_resolved)});
+    try writer.print("  {s} affordance_responses_covered\n", .{provenLabel(p.affordance_responses_covered)});
     try writer.print("  {s} payload_compatible\n", .{provenLabel(p.payload_compatible)});
     try writer.print("  {s} injection_safe\n", .{provenLabel(p.injection_safe)});
     try writer.print("  {s} no_secret_leakage\n", .{provenLabel(p.no_secret_leakage)});
@@ -1566,6 +1777,225 @@ test "linkSystem: linked and external" {
     try std.testing.expectEqual(@as(usize, 0), analysis.links.items[0].source_idx);
     try std.testing.expectEqual(@as(usize, 1), analysis.links.items[0].target_idx);
     try std.testing.expectEqualStrings("/api/v1/:id", analysis.links.items[0].matched_route);
+}
+
+test "linkSystem: a resource() affordance resolves to a bundle route (HATEOAS)" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [2]HandlerContract = undefined;
+
+    // Contract 0 (orders) emits a `pay` affordance -> POST /payments/charge.
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "orders.ts"));
+    var affordances: std.ArrayList(handler_contract.EmittedAffordance) = .empty;
+    try affordances.append(allocator, .{
+        .rel = try allocator.dupe(u8, "pay"),
+        .method = try allocator.dupe(u8, "POST"),
+        .href = try allocator.dupe(u8, "/payments/charge"),
+    });
+    contracts[0].affordances = affordances;
+
+    // Contract 1 (payments) serves POST /payments/charge.
+    contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "payments.ts"));
+    var behaviors: std.ArrayList(BehaviorPath) = .empty;
+    try behaviors.append(allocator, .{
+        .route_method = try allocator.dupe(u8, "POST"),
+        .route_pattern = try allocator.dupe(u8, "/payments/charge"),
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 1,
+        .is_failure_path = false,
+    });
+    contracts[1].behaviors = behaviors;
+
+    var entries: [2]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://orders.internal") },
+        .{ .name = try allocator.dupe(u8, "payments"), .path = try allocator.dupe(u8, "payments.ts"), .base_url = try allocator.dupe(u8, "https://payments.internal") },
+    };
+    const config = SystemConfig{ .version = 1, .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries) };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+        contracts[1].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), analysis.affordance_links.items.len);
+    try std.testing.expectEqual(@as(usize, 0), analysis.dangling_affordances);
+    try std.testing.expectEqual(@as(usize, 0), analysis.dynamic_affordances);
+    try std.testing.expect(analysis.properties.all_affordances_resolved);
+    try std.testing.expect(analysis.properties.affordance_responses_covered);
+    const link = analysis.affordance_links.items[0];
+    try std.testing.expectEqual(@as(usize, 0), link.source_idx);
+    try std.testing.expectEqual(@as(usize, 1), link.target_idx);
+    try std.testing.expectEqualStrings("pay", link.service_name.?);
+    try std.testing.expectEqualStrings("/payments/charge", link.matched_route);
+}
+
+test "linkSystem: a dangling affordance fails the bundle proof" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [2]HandlerContract = undefined;
+
+    // Contract 0 emits an affordance to a route no bundle handler serves.
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "orders.ts"));
+    var affordances: std.ArrayList(handler_contract.EmittedAffordance) = .empty;
+    try affordances.append(allocator, .{
+        .rel = try allocator.dupe(u8, "pay"),
+        .method = try allocator.dupe(u8, "POST"),
+        .href = try allocator.dupe(u8, "/nope/charge"),
+    });
+    contracts[0].affordances = affordances;
+
+    contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "payments.ts"));
+    var behaviors: std.ArrayList(BehaviorPath) = .empty;
+    try behaviors.append(allocator, .{
+        .route_method = try allocator.dupe(u8, "POST"),
+        .route_pattern = try allocator.dupe(u8, "/payments/charge"),
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 1,
+        .is_failure_path = false,
+    });
+    contracts[1].behaviors = behaviors;
+
+    var entries: [2]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://orders.internal") },
+        .{ .name = try allocator.dupe(u8, "payments"), .path = try allocator.dupe(u8, "payments.ts"), .base_url = try allocator.dupe(u8, "https://payments.internal") },
+    };
+    const config = SystemConfig{ .version = 1, .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries) };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+        contracts[1].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), analysis.affordance_links.items.len);
+    try std.testing.expectEqual(@as(usize, 1), analysis.dangling_affordances);
+    try std.testing.expect(!analysis.properties.all_affordances_resolved);
+    // The dangling affordance must downgrade the bundle proof below complete.
+    try std.testing.expect(analysis.proof_level != .complete);
+}
+
+test "linkSystem: a computed affordances argument is dynamic, never resolved" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [1]HandlerContract = undefined;
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "orders.ts"));
+    contracts[0].affordances_dynamic = true;
+
+    var entries: [1]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://orders.internal") },
+    };
+    const config = SystemConfig{ .version = 1, .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries) };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), analysis.dynamic_affordances);
+    try std.testing.expect(!analysis.properties.all_affordances_resolved);
+    try std.testing.expect(analysis.proof_level != .complete);
+}
+
+test "linkSystem: a cross-host affordance href is external, never claimed resolved" {
+    const allocator = std.testing.allocator;
+
+    // The orders handler serves /orders/:id by path, but the affordance points
+    // at a different host. The OLD path-only matcher would strip the host and
+    // claim it resolved internally; the mount-then-route rule must not.
+    var contracts: [1]HandlerContract = undefined;
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "orders.ts"));
+    var behaviors: std.ArrayList(BehaviorPath) = .empty;
+    try behaviors.append(allocator, .{
+        .route_method = try allocator.dupe(u8, "GET"),
+        .route_pattern = try allocator.dupe(u8, "/orders/:id"),
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 1,
+        .is_failure_path = false,
+    });
+    contracts[0].behaviors = behaviors;
+    var affordances: std.ArrayList(handler_contract.EmittedAffordance) = .empty;
+    try affordances.append(allocator, .{
+        .rel = try allocator.dupe(u8, "ext"),
+        .method = try allocator.dupe(u8, "GET"),
+        .href = try allocator.dupe(u8, "https://external.example.com/orders/1"),
+    });
+    contracts[0].affordances = affordances;
+
+    var entries: [1]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://orders.internal") },
+    };
+    const config = SystemConfig{ .version = 1, .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries) };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), analysis.affordance_links.items.len);
+    try std.testing.expectEqual(@as(usize, 0), analysis.dangling_affordances);
+    try std.testing.expectEqual(@as(usize, 1), analysis.dynamic_affordances);
+    try std.testing.expect(!analysis.properties.all_affordances_resolved);
+}
+
+test "linkSystem: an affordance under a handler's mount but not its route is dangling" {
+    const allocator = std.testing.allocator;
+
+    // payments mounts /payments but declares only POST /charge (NOT
+    // /payments/charge). The affordance /payments/charge mounts to payments yet
+    // payments serves no matching route -> dangling. This is exactly the runtime
+    // outcome (follow routes to payments, whose internal router 404s), so proof
+    // and runtime agree.
+    var contracts: [2]HandlerContract = undefined;
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "orders.ts"));
+    var affordances: std.ArrayList(handler_contract.EmittedAffordance) = .empty;
+    try affordances.append(allocator, .{
+        .rel = try allocator.dupe(u8, "pay"),
+        .method = try allocator.dupe(u8, "POST"),
+        .href = try allocator.dupe(u8, "/payments/charge"),
+    });
+    contracts[0].affordances = affordances;
+
+    contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "payments.ts"));
+    var behaviors: std.ArrayList(BehaviorPath) = .empty;
+    try behaviors.append(allocator, .{
+        .route_method = try allocator.dupe(u8, "POST"),
+        .route_pattern = try allocator.dupe(u8, "/charge"),
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 1,
+        .is_failure_path = false,
+    });
+    contracts[1].behaviors = behaviors;
+
+    var entries: [2]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://orders.internal") },
+        .{ .name = try allocator.dupe(u8, "payments"), .path = try allocator.dupe(u8, "payments.ts"), .base_url = try allocator.dupe(u8, "https://payments.internal") },
+    };
+    const config = SystemConfig{ .version = 1, .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries) };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+        contracts[1].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), analysis.affordance_links.items.len);
+    try std.testing.expectEqual(@as(usize, 1), analysis.dangling_affordances);
+    try std.testing.expect(!analysis.properties.all_affordances_resolved);
+    try std.testing.expect(analysis.proof_level != .complete);
 }
 
 test "linkSystem: serviceCall links named services" {

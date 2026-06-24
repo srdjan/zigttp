@@ -12,6 +12,18 @@ const precompile = @import("precompile.zig");
 const system_linker = zigts.system_linker;
 const handler_contract = zigts.handler_contract;
 
+/// Optional signed-receipt hook. The keyless tools layer cannot reach the
+/// persistent attest identity, so the developer CLI injects a runtime signer
+/// (`hypermedia_probe_lib.recordWorkflowReceipt`) here at startup. Null in the
+/// standalone `zigts` binary, which emits no receipt. Called after a successful
+/// link with the bundle's output dir and analysis.
+pub var receipt_probe: ?*const fn (
+    std.mem.Allocator,
+    []const u8,
+    []const u8,
+    *const system_linker.SystemAnalysis,
+) void = null;
+
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var system_path: ?[]const u8 = null;
     var output_dir: []const u8 = "./";
@@ -189,6 +201,13 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
         analysis.links.items.len,
         analysis.unresolved.items.len,
     });
+    if (analysis.affordance_links.items.len > 0 or analysis.dangling_affordances > 0 or analysis.dynamic_affordances > 0) {
+        std.debug.print("Affordances: {d} resolved, {d} dangling, {d} dynamic\n", .{
+            analysis.affordance_links.items.len,
+            analysis.dangling_affordances,
+            analysis.dynamic_affordances,
+        });
+    }
     std.debug.print("Proof level: {s}\n", .{@tagName(analysis.proof_level)});
 
     if (analysis.warnings.items.len > 0) {
@@ -198,11 +217,25 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
         }
     }
 
+    // A dangling hypermedia affordance is a hard miss: fail the build so the
+    // dangling link cannot ship (mirrors the unlinked-route gate below).
+    if (analysis.dangling_affordances > 0) {
+        std.process.exit(1);
+    }
+
     // Exit with error if there are unlinked routes
     for (analysis.unresolved.items) |u| {
         if (u.status == .unlinked) {
             std.process.exit(1);
         }
+    }
+
+    // Sign a kind=workflow receipt over the hypermedia verdict when a runtime
+    // signer is injected (the developer `zigttp` binary). Emitted only AFTER the
+    // failure gates above, so a failed link never leaves a signed receipt on
+    // disk to be mistaken for a passing bundle. Best-effort.
+    if (receipt_probe) |probe| {
+        probe(allocator, system_path, output_dir, &analysis);
     }
 }
 

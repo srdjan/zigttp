@@ -125,6 +125,10 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseEgressSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "serviceCalls")) {
             try parseServiceCalls(&parser, allocator, &contract);
+        } else if (std.mem.eql(u8, key, "affordances")) {
+            try parseAffordances(&parser, allocator, &contract);
+        } else if (std.mem.eql(u8, key, "affordancesDynamic")) {
+            contract.affordances_dynamic = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "cache")) {
             try parseDynamicSection(&parser, allocator, "namespaces", &contract.cache.namespaces, &contract.cache.dynamic);
         } else if (std.mem.eql(u8, key, "sql")) {
@@ -771,6 +775,81 @@ fn parseServiceCalls(parser: *JsonParser, allocator: std.mem.Allocator, contract
         path_params = .empty;
         query_keys = .empty;
         header_keys = .empty;
+    }
+}
+
+fn parseAffordances(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
+    parser.skipWhitespace();
+    if (!parser.consume('[')) return error.InvalidJson;
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var rel: []const u8 = try allocator.dupe(u8, "");
+        var method: []const u8 = try allocator.dupe(u8, "GET");
+        var href: []const u8 = try allocator.dupe(u8, "");
+        var templated = false;
+        var dynamic_flag = false;
+        errdefer {
+            allocator.free(rel);
+            allocator.free(method);
+            allocator.free(href);
+        }
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "rel")) {
+                allocator.free(rel);
+                rel = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "method")) {
+                allocator.free(method);
+                method = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "href")) {
+                allocator.free(href);
+                href = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "templated")) {
+                templated = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "dynamic")) {
+                dynamic_flag = parser.readBool() orelse false;
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try contract.affordances.append(allocator, .{
+            .rel = rel,
+            .method = method,
+            .href = href,
+            .templated = templated,
+            .dynamic = dynamic_flag,
+        });
+        // Successful append moves ownership; null the locals so errdefer is a no-op.
+        rel = "";
+        method = "";
+        href = "";
     }
 }
 

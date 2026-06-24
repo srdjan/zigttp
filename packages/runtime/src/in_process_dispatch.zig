@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const zq = @import("zigts");
 const runtime_pool = @import("runtime_pool.zig");
 const runtime_config = @import("runtime_config.zig");
 const http_types = @import("http_types.zig");
@@ -23,15 +24,19 @@ const RuntimeConfig = runtime_config.RuntimeConfig;
 const HttpRequestView = http_types.HttpRequestView;
 
 /// One co-located sub-handler: a name and its own isolated HandlerPool. The
-/// pool borrows `handler_code` for its lifetime, so it is freed after the pool.
+/// pool borrows `handler_code` and `filename` for its lifetime, so they are
+/// freed after the pool. The registration owns all three so callers may free
+/// the source/path they passed in (e.g. a parsed system.json) right after.
 pub const Target = struct {
     name: []const u8,
+    filename: []const u8,
     handler_code: []const u8,
     pool: HandlerPool,
 
     fn deinit(self: *Target, allocator: std.mem.Allocator) void {
         self.pool.deinit();
         allocator.free(self.handler_code);
+        allocator.free(self.filename);
         allocator.free(self.name);
     }
 };
@@ -64,15 +69,57 @@ pub const SystemRuntime = struct {
         errdefer self.allocator.free(name_owned);
         const code_owned = try self.allocator.dupe(u8, source);
         errdefer self.allocator.free(code_owned);
+        const filename_owned = try self.allocator.dupe(u8, entry);
+        errdefer self.allocator.free(filename_owned);
 
-        var pool = try HandlerPool.init(self.allocator, config, code_owned, entry, pool_size, 0);
+        var pool = try HandlerPool.init(self.allocator, config, code_owned, filename_owned, pool_size, 0);
         errdefer pool.deinit();
 
         try self.targets.append(self.allocator, .{
             .name = name_owned,
+            .filename = filename_owned,
             .handler_code = code_owned,
             .pool = pool,
         });
+    }
+
+    /// Build a registry from a `system.json` manifest: parse it, load each
+    /// handler's source from its `path`, and register it under its `name` in
+    /// its own isolated pool. `base_config` seeds every sub-handler's config
+    /// with `system_registry` cleared so sub-handlers are leaf handlers (no
+    /// nested in-process orchestration in this phase). Caller owns the result
+    /// and must `deinit()` it.
+    pub fn buildFromSystemConfig(
+        allocator: std.mem.Allocator,
+        system_json_path: []const u8,
+        base_config: RuntimeConfig,
+        pool_size: usize,
+    ) !SystemRuntime {
+        const system_json = try zq.file_io.readFile(allocator, system_json_path, 1024 * 1024);
+        defer allocator.free(system_json);
+
+        var config = try zq.system_linker.parseSystemConfig(allocator, system_json);
+        defer config.deinit(allocator);
+
+        var sub_config = base_config;
+        sub_config.system_registry = null;
+
+        var sys = SystemRuntime.init(allocator);
+        errdefer sys.deinit();
+
+        for (config.handlers) |entry| {
+            // A `--system` manifest also drives `zigttp:service` (HTTP), where a
+            // handler may be an external endpoint with no local source. Skip such
+            // entries with a warning rather than failing the whole server; a
+            // workflow.call to a skipped name returns a clear UnknownHandler.
+            const source = zq.file_io.readFile(allocator, entry.path, 10 * 1024 * 1024) catch |err| {
+                std.log.warn("workflow registry: skipping handler '{s}' ({s}: {s})", .{ entry.name, entry.path, @errorName(err) });
+                continue;
+            };
+            defer allocator.free(source);
+            try sys.addHandler(entry.name, source, entry.path, sub_config, pool_size);
+        }
+        return sys;
     }
 
     pub fn find(self: *SystemRuntime, name: []const u8) ?*Target {
@@ -80,6 +127,24 @@ pub const SystemRuntime = struct {
             if (std.mem.eql(u8, t.name, name)) return t;
         }
         return null;
+    }
+
+    /// Resolve a request path to a co-located handler by the "/<name>" mount
+    /// convention: the target whose name, taken as a leading path segment, is
+    /// the longest prefix of `path`. This is how `workflow.follow` dispatches a
+    /// resolved affordance href without a separate route table: a bundle handler
+    /// named `payments` owns `/payments` and `/payments/...`. Returns null when
+    /// no handler mounts a prefix of `path` (a 599 UnknownRoute at the call site).
+    pub fn findByRoute(self: *SystemRuntime, path: []const u8) ?*Target {
+        var best: ?*Target = null;
+        var best_len: usize = 0;
+        for (self.targets.items) |*t| {
+            if (pathMountsName(path, t.name) and t.name.len > best_len) {
+                best = t;
+                best_len = t.name.len;
+            }
+        }
+        return best;
     }
 
     /// Dispatch a request to a co-located sub-handler by name, in-process.
@@ -90,6 +155,17 @@ pub const SystemRuntime = struct {
         return target.pool.executeHandlerBorrowed(request);
     }
 };
+
+/// True when `path` is mounted under handler `name`: `path` is exactly
+/// `/<name>` or begins with `/<name>/`. Avoids matching `/payments` against a
+/// handler named `pay`.
+fn pathMountsName(path: []const u8, name: []const u8) bool {
+    if (path.len == 0 or path[0] != '/') return false;
+    const rest = path[1..];
+    if (!std.mem.startsWith(u8, rest, name)) return false;
+    const after = rest[name.len..];
+    return after.len == 0 or after[0] == '/';
+}
 
 const skip_linux_glibc_heap_corruption_tests = builtin.os.tag == .linux;
 
@@ -132,4 +208,367 @@ test "SystemRuntime dispatches a request to a named co-located handler in-proces
 
     // An unknown sub-handler is a clear error, not a silent default.
     try std.testing.expectError(error.UnknownHandler, sys.dispatch("nope", view));
+}
+
+// The remaining tests exercise the full `zigttp:workflow.call` path end to end:
+// an orchestrator handler (its own HandlerPool, with `config.system_registry`
+// pointing at a SystemRuntime) imports `zigttp:workflow` and dispatches to a
+// co-located sub-handler in-process via `workflowCallCallback`.
+
+test "workflow.call dispatches to a co-located sub-handler and copies out its response" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    try sys.addHandler(
+        "greeter",
+        "function handler(req) { return Response.json({ hello: req.method, at: req.url }); }",
+        "<greeter>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+
+    // The orchestrator returns the sub-handler's Response verbatim; asserting on
+    // it proves the borrowed bytes were copied out before `handle.deinit()`.
+    const orchestrator_src =
+        \\import { call } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return call("greeter", { method: "POST", path: "/hi" });
+        \\}
+    ;
+    var orch = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) },
+        orchestrator_src,
+        "<orchestrator>",
+        1,
+        0,
+    );
+    defer orch.deinit();
+
+    var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    const view = HttpRequestView{
+        .method = "GET",
+        .url = "/",
+        .path = "/",
+        .headers = headers,
+        .body = null,
+    };
+
+    var handle = try orch.executeHandlerBorrowed(view);
+    defer handle.deinit();
+    try std.testing.expectEqual(@as(u16, 200), handle.response.status);
+    // The sub-handler saw the method/path the orchestrator passed in `init`.
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "\"hello\":\"POST\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "/hi") != null);
+}
+
+test "workflow.call to an unknown handler fails soft as a 599 error response" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    try sys.addHandler(
+        "greeter",
+        "function handler(req) { return Response.json({ ok: true }); }",
+        "<greeter>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+
+    // A missing target must not crash the orchestrator: the dispatch error is
+    // turned into a 599 error Response (same catch arm `error.HandlerPanicked`
+    // takes, so this also covers panic isolation surfacing).
+    const orchestrator_src =
+        \\import { call } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return call("nope", { path: "/x" });
+        \\}
+    ;
+    var orch = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) },
+        orchestrator_src,
+        "<orchestrator>",
+        1,
+        0,
+    );
+    defer orch.deinit();
+
+    var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    const view = HttpRequestView{
+        .method = "GET",
+        .url = "/",
+        .path = "/",
+        .headers = headers,
+        .body = null,
+    };
+
+    var handle = try orch.executeHandlerBorrowed(view);
+    defer handle.deinit();
+    try std.testing.expectEqual(@as(u16, 599), handle.response.status);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "UnknownHandler") != null);
+}
+
+test "pathMountsName matches exact and sub-paths, not bare name prefixes" {
+    try std.testing.expect(pathMountsName("/payments", "payments"));
+    try std.testing.expect(pathMountsName("/payments/charge", "payments"));
+    // A handler named `pay` must not capture `/payments`.
+    try std.testing.expect(!pathMountsName("/payments", "pay"));
+    try std.testing.expect(!pathMountsName("/pay", "payments"));
+    // Missing leading slash or root path never mounts.
+    try std.testing.expect(!pathMountsName("payments", "payments"));
+    try std.testing.expect(!pathMountsName("/", "payments"));
+}
+
+test "workflow.follow routes a resolved affordance href to a co-located handler by mount" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    try sys.addHandler(
+        "payments",
+        "function handler(req) { return Response.json({ from: 'payments', at: req.url }); }",
+        "<payments>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+    try sys.addHandler(
+        "orders",
+        "function handler(req) { return Response.json({ from: 'orders' }); }",
+        "<orders>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+
+    // The orchestrator builds a resource() and follows its `pay` affordance;
+    // follow resolves href "/payments/charge" -> the "payments" mount, in-process.
+    const orchestrator_src =
+        \\import { follow } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  const r = resource({ id: 1 }, {
+        \\    pay: { href: "/payments/charge", method: "POST" },
+        \\  });
+        \\  return follow(r, "pay");
+        \\}
+    ;
+    var orch = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) },
+        orchestrator_src,
+        "<orchestrator>",
+        1,
+        0,
+    );
+    defer orch.deinit();
+
+    var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    const view = HttpRequestView{ .method = "GET", .url = "/", .path = "/", .headers = headers, .body = null };
+
+    var handle = try orch.executeHandlerBorrowed(view);
+    defer handle.deinit();
+    try std.testing.expectEqual(@as(u16, 200), handle.response.status);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "\"from\":\"payments\"") != null);
+    // Dispatched with the affordance's href as the request path.
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "/payments/charge") != null);
+}
+
+test "workflow.follow to an unmounted href fails soft as a 599" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    try sys.addHandler(
+        "payments",
+        "function handler(req) { return Response.json({ ok: true }); }",
+        "<payments>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+
+    const orchestrator_src =
+        \\import { follow } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  const r = resource({ id: 1 }, { gone: { href: "/nope/x", method: "GET" } });
+        \\  return follow(r, "gone");
+        \\}
+    ;
+    var orch = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) },
+        orchestrator_src,
+        "<orchestrator>",
+        1,
+        0,
+    );
+    defer orch.deinit();
+
+    var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    const view = HttpRequestView{ .method = "GET", .url = "/", .path = "/", .headers = headers, .body = null };
+
+    var handle = try orch.executeHandlerBorrowed(view);
+    defer handle.deinit();
+    try std.testing.expectEqual(@as(u16, 599), handle.response.status);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "UnknownRoute") != null);
+}
+
+test "workflow.follow on a missing affordance rel fails soft as a 599" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    try sys.addHandler(
+        "payments",
+        "function handler(req) { return Response.json({ ok: true }); }",
+        "<payments>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+
+    const orchestrator_src =
+        \\import { follow } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  const r = resource({ id: 1 }, { pay: { href: "/payments/x", method: "POST" } });
+        \\  return follow(r, "nonexistent");
+        \\}
+    ;
+    var orch = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) },
+        orchestrator_src,
+        "<orchestrator>",
+        1,
+        0,
+    );
+    defer orch.deinit();
+
+    var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    const view = HttpRequestView{ .method = "GET", .url = "/", .path = "/", .headers = headers, .body = null };
+
+    var handle = try orch.executeHandlerBorrowed(view);
+    defer handle.deinit();
+    try std.testing.expectEqual(@as(u16, 599), handle.response.status);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "NoSuchAffordance") != null);
+}
+
+test "workflow.follow substitutes {param} from init.params before dispatch" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    try sys.addHandler(
+        "orders",
+        "function handler(req) { return Response.json({ from: 'orders', at: req.url }); }",
+        "<orders>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+
+    // A templated affordance href; follow fills {id} from init.params, so the
+    // orders handler receives the substituted path (not a literal "/orders/{id}").
+    const orchestrator_src =
+        \\import { follow } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  const r = resource({ id: 1 }, { item: { href: "/orders/{id}", method: "GET" } });
+        \\  return follow(r, "item", { params: { id: "42" } });
+        \\}
+    ;
+    var orch = try HandlerPool.init(allocator, .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
+    defer orch.deinit();
+
+    var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    const view = HttpRequestView{ .method = "GET", .url = "/", .path = "/", .headers = headers, .body = null };
+
+    var handle = try orch.executeHandlerBorrowed(view);
+    defer handle.deinit();
+    try std.testing.expectEqual(@as(u16, 200), handle.response.status);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "/orders/42") != null);
+    // The literal placeholder must NOT survive to the target.
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "{id}") == null);
+}
+
+test "workflow.follow on a templated href with no params fails soft as a 599" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    try sys.addHandler(
+        "orders",
+        "function handler(req) { return Response.json({ ok: true }); }",
+        "<orders>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+
+    const orchestrator_src =
+        \\import { follow } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  const r = resource({ id: 1 }, { item: { href: "/orders/{id}", method: "GET" } });
+        \\  return follow(r, "item");
+        \\}
+    ;
+    var orch = try HandlerPool.init(allocator, .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
+    defer orch.deinit();
+
+    var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    const view = HttpRequestView{ .method = "GET", .url = "/", .path = "/", .headers = headers, .body = null };
+
+    var handle = try orch.executeHandlerBorrowed(view);
+    defer handle.deinit();
+    try std.testing.expectEqual(@as(u16, 599), handle.response.status);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "MissingTemplateParam") != null);
+}
+
+test "buildFromSystemConfig skips a handler whose source file is unreadable" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+
+    const ok_path = try std.fmt.allocPrint(allocator, "{s}/ok.ts", .{dir});
+    defer allocator.free(ok_path);
+    try zq.file_io.writeFile(allocator, ok_path, "function handler(req) { return Response.json({ ok: true }); }");
+
+    // Manifest references the valid handler plus one whose source file is absent.
+    const manifest = try std.fmt.allocPrint(allocator,
+        \\{{ "version": 1, "handlers": [
+        \\  {{ "name": "ok", "path": "{s}/ok.ts", "baseUrl": "https://ok.internal" }},
+        \\  {{ "name": "gone", "path": "{s}/missing.ts", "baseUrl": "https://gone.internal" }}
+        \\] }}
+    , .{ dir, dir });
+    defer allocator.free(manifest);
+    const system_path = try std.fmt.allocPrint(allocator, "{s}/system.json", .{dir});
+    defer allocator.free(system_path);
+    try zq.file_io.writeFile(allocator, system_path, manifest);
+
+    var sys = try SystemRuntime.buildFromSystemConfig(allocator, system_path, .{ .jit_policy = .disabled }, 1);
+    defer sys.deinit();
+
+    // The unreadable 'gone' handler is skipped (logged, not fatal); only 'ok' is
+    // registered. A workflow.call/follow to 'gone' later returns UnknownHandler.
+    try std.testing.expectEqual(@as(usize, 1), sys.targets.items.len);
+    try std.testing.expect(sys.find("ok") != null);
+    try std.testing.expect(sys.find("gone") == null);
 }
