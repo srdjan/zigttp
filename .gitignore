@@ -66,3 +66,4 @@ docs/pi-tui-demo.tape
 /zigttp.d.ts
 demos/
 .playwright-mcp/
+brag-output/
