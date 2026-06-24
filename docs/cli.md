@@ -61,7 +61,7 @@ Common `dev` and `serve` flags:
 | `--test <file>` | Run JSONL handler tests. |
 | `--sqlite <file>` | SQLite database for `zigttp:sql`. |
 | `--durable <dir>` | Durable workflow oplog directory. |
-| `--system <file>` | Internal service registry. |
+| `--system <file>` | Handler bundle manifest: the `zigttp:service` HTTP registry and the `zigttp:workflow` in-process sub-handler registry. |
 | `--outbound-http` / `--outbound-host <host>` | Enable outbound HTTP. The host allowlist matches on host only, not port. |
 | `--static <dir>` | Serve static files. |
 | `--no-env-check` | Skip startup env validation. |

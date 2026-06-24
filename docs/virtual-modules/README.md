@@ -32,6 +32,7 @@ Use `zigttp modules --json` for the live export list from the built binary.
 | `zigttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | none |
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | none |
 | `zigttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `roomFromPath`, `setAutoResponse` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` |
+| `zigttp:workflow` | `call`, `saga`, `fanout`, `follow` | `runtime_callback` |
 
 ## Common Usage
 
@@ -64,6 +65,7 @@ durability boundary need configuration:
 | `zigttp:sql` | Run with `--sqlite <file>` for execution. Use `--sql-schema <schema.sql>` or `-Dsql-schema=<schema.sql>` for schema validation. |
 | `zigttp:fetch` | Enable outbound HTTP with `--outbound-http` or one or more `--outbound-host <host>` flags. Durable fetch also needs `--durable <dir>`. |
 | `zigttp:service` | Run with `--system <file>` or set `"system"` in `zigttp.json`. |
+| `zigttp:workflow` | Run with `--system <file>`: the orchestrator dispatches to co-located sub-handlers in-process. `saga`/`fanout`/`follow` recorded as durable steps also need `--durable <dir>`. |
 | `zigttp:durable` | Run with `--durable <dir>`. |
 | `zigttp:websocket` | Run through the server WebSocket gateway. Peer closes dispatch `onClose(ws, code, reason)` with parsed close metadata. |
 | `zigttp:log` | Writes structured lines to stderr. Do not log raw secrets, tokens, or PII. |

@@ -85,9 +85,9 @@ workflows, WebSocket, and proof examples.
 - Proofs: response-path verification, Result/optional checks, state-isolation
   checks, active `Spec<...>` obligations, flow checks, proof traces, witnesses,
   and proof receipts.
-- Virtual modules: 22 native modules under `zigttp:*` for env, crypto, auth,
-  validation, cache, SQL, fetch, service calls, WebSocket, routing, durable
-  workflows, structured I/O, logging, IDs, time, text, and more.
+- Virtual modules: 23 native modules under `zigttp:*` for env, crypto, auth,
+  validation, cache, SQL, fetch, service calls, WebSocket, routing, durable and
+  multi-handler workflows, structured I/O, logging, IDs, time, text, and more.
 - Local deploy: self-contained binary output under
   `.zigttp/deploy/<project-name>` with default-on attestation.
 

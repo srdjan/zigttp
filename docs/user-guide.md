@@ -259,7 +259,7 @@ Common runtime flags:
 | SQLite queries | `--sqlite <file>` |
 | Outbound HTTP | `--outbound-http` or `--outbound-host <host>` |
 | Durable workflows | `--durable <dir>` |
-| Internal service registry | `--system <file>` |
+| Service registry and in-process workflow bundle | `--system <file>` |
 | Skip env startup check in development | `--no-env-check` |
 
 ## Compile-Time Proofs
