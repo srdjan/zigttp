@@ -12,7 +12,6 @@
 //! separately; this module is the name-keyed core.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const zq = @import("zigts");
 const runtime_pool = @import("runtime_pool.zig");
 const runtime_config = @import("runtime_config.zig");
@@ -109,20 +108,14 @@ pub const SystemRuntime = struct {
 
         const system_dir = std.fs.path.dirname(system_json_path) orelse ".";
         for (config.handlers) |entry| {
-            // A `--system` manifest also drives `zigttp:service` (HTTP), where a
-            // handler may be an external endpoint with no local source. Skip such
-            // entries with a warning rather than failing the whole server; a
-            // workflow.call to a skipped name returns a clear UnknownHandler.
-            const entry_path = if (std.fs.path.isAbsolute(entry.path))
-                try allocator.dupe(u8, entry.path)
-            else
-                try std.fs.path.resolve(allocator, &.{ system_dir, entry.path });
+            // A workflow-enabled `--system` bundle is local and fail-fast: every
+            // handler with a `path` must be readable before the server starts.
+            // Path resolution mirrors the proof tooling (cwd first, then
+            // manifest directory) so runtime and `zigts link` agree.
+            const entry_path = try resolveSystemHandlerPath(allocator, system_dir, entry.path);
             defer allocator.free(entry_path);
 
-            const source = zq.file_io.readFile(allocator, entry_path, 10 * 1024 * 1024) catch |err| {
-                std.log.warn("workflow registry: skipping handler '{s}' ({s}: {s})", .{ entry.name, entry_path, @errorName(err) });
-                continue;
-            };
+            const source = try zq.file_io.readFile(allocator, entry_path, 10 * 1024 * 1024);
             defer allocator.free(source);
             try sys.addHandler(entry.name, source, entry_path, sub_config, pool_size);
         }
@@ -163,6 +156,16 @@ pub const SystemRuntime = struct {
     }
 };
 
+fn resolveSystemHandlerPath(
+    allocator: std.mem.Allocator,
+    system_dir: []const u8,
+    entry_path: []const u8,
+) ![]const u8 {
+    if (std.fs.path.isAbsolute(entry_path)) return try allocator.dupe(u8, entry_path);
+    if (zq.file_io.fileExists(allocator, entry_path)) return try allocator.dupe(u8, entry_path);
+    return std.fs.path.resolve(allocator, &.{ system_dir, entry_path });
+}
+
 /// True when `path` is mounted under handler `name`: `path` is exactly
 /// `/<name>` or begins with `/<name>/`. Avoids matching `/payments` against a
 /// handler named `pay`.
@@ -174,11 +177,8 @@ fn pathMountsName(path: []const u8, name: []const u8) bool {
     return after.len == 0 or after[0] == '/';
 }
 
-const skip_linux_glibc_heap_corruption_tests = builtin.os.tag == .linux;
-
 test "SystemRuntime dispatches a request to a named co-located handler in-process" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
@@ -223,8 +223,7 @@ test "SystemRuntime dispatches a request to a named co-located handler in-proces
 // co-located sub-handler in-process via `workflowCallCallback`.
 
 test "workflow.call dispatches to a co-located sub-handler and copies out its response" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
@@ -273,8 +272,7 @@ test "workflow.call dispatches to a co-located sub-handler and copies out its re
 }
 
 test "workflow.call to an unknown handler fails soft as a 599 error response" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
@@ -333,8 +331,7 @@ test "pathMountsName matches exact and sub-paths, not bare name prefixes" {
 }
 
 test "workflow.follow routes a resolved affordance href to a co-located handler by mount" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
@@ -387,8 +384,7 @@ test "workflow.follow routes a resolved affordance href to a co-located handler 
 }
 
 test "workflow.follow routes hrefs by path while preserving parsed query" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
@@ -426,8 +422,7 @@ test "workflow.follow routes hrefs by path while preserving parsed query" {
 }
 
 test "workflow.follow to an unmounted href fails soft as a 599" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
@@ -467,8 +462,7 @@ test "workflow.follow to an unmounted href fails soft as a 599" {
 }
 
 test "workflow.follow on a missing affordance rel fails soft as a 599" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
@@ -508,8 +502,7 @@ test "workflow.follow on a missing affordance rel fails soft as a 599" {
 }
 
 test "workflow.follow substitutes {param} from init.params before dispatch" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
@@ -546,8 +539,7 @@ test "workflow.follow substitutes {param} from init.params before dispatch" {
 }
 
 test "workflow.follow percent-encodes templated params before dispatch" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
@@ -582,8 +574,7 @@ test "workflow.follow percent-encodes templated params before dispatch" {
 }
 
 test "workflow.follow on a templated href with no params fails soft as a 599" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
@@ -615,9 +606,8 @@ test "workflow.follow on a templated href with no params fails soft as a 599" {
     try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "MissingTemplateParam") != null);
 }
 
-test "buildFromSystemConfig skips a handler whose source file is unreadable" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+test "buildFromSystemConfig fails when a handler source file is unreadable" {
+    const allocator = std.testing.allocator;
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -645,19 +635,14 @@ test "buildFromSystemConfig skips a handler whose source file is unreadable" {
     defer allocator.free(system_path);
     try zq.file_io.writeFile(allocator, system_path, manifest);
 
-    var sys = try SystemRuntime.buildFromSystemConfig(allocator, system_path, .{ .jit_policy = .disabled }, 1);
-    defer sys.deinit();
-
-    // The unreadable 'gone' handler is skipped (logged, not fatal); only 'ok' is
-    // registered. A workflow.call/follow to 'gone' later returns UnknownHandler.
-    try std.testing.expectEqual(@as(usize, 1), sys.targets.items.len);
-    try std.testing.expect(sys.find("ok") != null);
-    try std.testing.expect(sys.find("gone") == null);
+    try std.testing.expectError(
+        error.FileNotFound,
+        SystemRuntime.buildFromSystemConfig(allocator, system_path, .{ .jit_policy = .disabled }, 1),
+    );
 }
 
 test "buildFromSystemConfig resolves handler paths relative to the manifest" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();

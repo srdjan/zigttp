@@ -6,9 +6,10 @@
 //! responses - to a hash of the bundle's system contract, signed with the
 //! operator's persistent Ed25519 identity. A third party can then verify that a
 //! given bundle was proven free of dangling HATEOAS links without trusting the
-//! machine that produced the claim. The signature covers a canonical string of
-//! the verdict; the output is a compact JWS, the same envelope shape the perf,
-//! equivalence and attestation paths use.
+//! machine that produced the claim. The signature covers the canonical bundle
+//! hash plus the proof verdict; the local `system_path` is context only. The
+//! output is a compact JWS, the same envelope shape the perf, equivalence and
+//! attestation paths use.
 //!
 //! This lives in the zigts layer (like `equivalence_receipt.zig`) so both the
 //! tools CLI and the runtime can sign without inverting the build graph: the
@@ -17,9 +18,12 @@
 const std = @import("std");
 const Ed25519 = std.crypto.sign.Ed25519;
 
-/// The hypermedia verdict for a linked bundle. `sign` covers every field, so a
-/// changed proof level or affordance count changes the signature.
+/// The hypermedia verdict for a linked bundle. `sign` covers the bundle hash and
+/// proof facts, so a changed proof level or affordance count changes the
+/// signature. `system_path` is intentionally not signed because it is local
+/// machine context; `system_hash` is the portable bundle identity.
 pub const Verdict = struct {
+    /// Local manifest path used for operator context. Not part of signing input.
     system_path: []const u8,
     /// Hex SHA-256 of the canonical system-contract JSON (the bundle identity).
     system_hash: []const u8,
@@ -136,6 +140,31 @@ test "signing input is stable and a dangling affordance changes it" {
     dangling.dangling_affordances = 1;
     dangling.proof_level = "partial";
     const c = try buildSigningInput(std.testing.allocator, dangling);
+    defer std.testing.allocator.free(c);
+    try std.testing.expect(!std.mem.eql(u8, a, c));
+}
+
+test "signing input ignores local system path and binds bundle hash" {
+    const base: Verdict = .{
+        .system_path = "/tmp/a/system.json",
+        .system_hash = "hash-a",
+        .proof_level = "complete",
+        .all_affordances_resolved = true,
+        .affordance_responses_covered = true,
+        .resolved_affordances = 1,
+    };
+    const a = try buildSigningInput(std.testing.allocator, base);
+    defer std.testing.allocator.free(a);
+
+    var moved = base;
+    moved.system_path = "/other/machine/system.json";
+    const b = try buildSigningInput(std.testing.allocator, moved);
+    defer std.testing.allocator.free(b);
+    try std.testing.expectEqualStrings(a, b);
+
+    var changed = base;
+    changed.system_hash = "hash-b";
+    const c = try buildSigningInput(std.testing.allocator, changed);
     defer std.testing.allocator.free(c);
     try std.testing.expect(!std.mem.eql(u8, a, c));
 }

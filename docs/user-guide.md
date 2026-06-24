@@ -211,7 +211,9 @@ See `examples/jsx/` and `examples/handler/handler-full.tsx`.
 `resource(data, affordances)` is a global that returns one value the runtime
 renders two ways, chosen by the request's `Accept` header. Services that ask for
 `application/hal+json` (or `application/json`) receive a HAL document; browsers
-that ask for `text/html` receive HTML. One affordance declaration drives both.
+that ask for `text/html` receive HTML. This is the v1 beta hypermedia primitive:
+one affordance declaration drives both HAL for services and HTMX controls for
+users.
 
 ```ts
 function handler(req: Request): Response {
@@ -245,6 +247,30 @@ curl -H 'Accept: text/html' -H 'HX-Request: true' http://127.0.0.1:3000/orders/4
 ```
 
 See `examples/hypermedia/order.ts`.
+
+## Workflow Orchestration
+
+`zigttp:workflow` dispatches from a top-level orchestrator to co-located
+handlers loaded from `--system <file>`. The system manifest is strict for
+workflow use: every local handler `path` must be readable at startup, and
+relative paths use the same rule as the proof tools: a path that exists from the
+current working directory is used as-is, otherwise it is resolved from the
+manifest directory.
+
+```ts
+import { call, fanout, follow, saga } from "zigttp:workflow";
+```
+
+`call(name, init?)` dispatches by handler name. `follow(resource, rel, init?)`
+resolves a `resource()` affordance by relation and dispatches by the proven
+bundle route. `fanout(calls)` aggregates multiple co-located calls in declaration
+order. `saga(steps)` runs durable do/compensate steps.
+
+Inside `run()` from `zigttp:durable`, workflow dispatches snapshot plain
+`{status, headers, body}` records into the oplog and rebuild real `Response`
+objects during replay, so completed child calls are not re-dispatched. Existing
+oplogs use the internal `workflow.parallel#N` key for `fanout()` records for
+compatibility.
 
 ## Virtual Modules
 

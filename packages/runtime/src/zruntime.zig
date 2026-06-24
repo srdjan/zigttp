@@ -829,7 +829,7 @@ pub const Runtime = struct {
         workflow_state.* = .{
             .call_fn = workflowCallCallback,
             .saga_fn = workflowSagaCallback,
-            .parallel_fn = workflowParallelCallback,
+            .fanout_fn = workflowFanoutCallback,
             .follow_fn = workflowFollowCallback,
             .runtime_ptr = self,
         };
@@ -3330,7 +3330,7 @@ const RequestParts = struct {
     }
 };
 
-/// Parse the request fields shared by `workflow.call` and `workflow.parallel`.
+/// Parse the request fields shared by `workflow.call` and `workflow.fanout`.
 /// Returns error.InvalidWorkflowInit on a malformed field type (the caller maps
 /// it to a fail-soft error Response). A non-object input yields defaults.
 fn parseHttpRequestParts(ctx: *zq.Context, obj_val: zq.JSValue, arena: std.mem.Allocator) !RequestParts {
@@ -3978,28 +3978,30 @@ fn buildSagaResponse(rt: *Runtime, status: u16, ok: bool, failed: ?[]const u8, c
 
 const MAX_PARALLEL_CALLS: u32 = 16;
 
-/// Runtime side of zigttp:workflow.parallel(calls). Dispatches N co-located
+/// Runtime side of zigttp:workflow.fanout(calls). Dispatches N co-located
 /// sub-handlers and returns their Responses as an array in DECLARATION ORDER.
 /// Inside a durable.run the whole fan-out is recorded as ONE durable step, so on
 /// recovery the aggregate replays from a single oplog entry - concurrency (if
 /// any) stays strictly below the oplog boundary, keeping the sequential oplog
 /// the single source of truth. Each `calls[i]` is
 /// `{ name, method?, path?, body?, headers? }`.
-fn workflowParallelCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, calls_val: zq.JSValue) anyerror!zq.JSValue {
+fn workflowFanoutCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, calls_val: zq.JSValue) anyerror!zq.JSValue {
     const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
     const registry = rt.system_registry_ref orelse {
-        return createFetchErrorResponse(rt, "WorkflowUnavailable", "workflow.parallel requires a --system handler bundle");
+        return createFetchErrorResponse(rt, "WorkflowUnavailable", "workflow.fanout requires a --system handler bundle");
     };
-    if (!calls_val.isObject()) return zq.modules.util.throwError(ctx, "TypeError", "parallel() expects an array of calls");
+    if (!calls_val.isObject()) return zq.modules.util.throwError(ctx, "TypeError", "fanout() expects an array of calls");
     const arr = calls_val.toPtr(zq.JSObject);
-    if (arr.class_id != .array) return zq.modules.util.throwError(ctx, "TypeError", "parallel() expects an array of calls");
+    if (arr.class_id != .array) return zq.modules.util.throwError(ctx, "TypeError", "fanout() expects an array of calls");
     const count = arr.getArrayLength();
-    if (count > MAX_PARALLEL_CALLS) return zq.modules.util.throwError(ctx, "RangeError", "parallel() supports at most 16 calls");
+    if (count > MAX_PARALLEL_CALLS) return zq.modules.util.throwError(ctx, "RangeError", "fanout() supports at most 16 calls");
 
     const durable = if (rt.active_durable_run) |*adr| adr.step_depth == 0 else false;
     if (durable) {
         var name_buf: [48]u8 = undefined;
         const seq = rt.active_durable_run.?.call_seq;
+        // Compatibility: this persisted prefix shipped before the public API was
+        // named `fanout()`. Keep it stable so existing durable oplogs replay.
         const step_name = std.fmt.bufPrint(&name_buf, "workflow.parallel#{d}", .{seq}) catch "workflow.parallel";
         rt.active_durable_run.?.call_seq = seq + 1;
 
@@ -5932,7 +5934,7 @@ test "workflow.saga replays cached do: steps and re-derives compensation on reco
     try std.testing.expect(std.mem.indexOf(u8, out.oplog, "undo:reserve") != null);
 }
 
-test "workflow.parallel returns sub-handler responses in declaration order" {
+test "workflow.fanout returns sub-handler responses in declaration order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -5968,7 +5970,7 @@ test "workflow.parallel returns sub-handler responses in declaration order" {
     try std.testing.expect(ia < ib and ib < ic);
 }
 
-test "workflow.parallel records the whole fan-out as one durable step" {
+test "workflow.fanout records the whole fan-out as one durable step" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -6006,12 +6008,13 @@ test "workflow.parallel records the whole fan-out as one durable step" {
     const path = try durable_executor.buildDurableOplogPath(rt, "par:1");
     defer allocator.free(path);
     const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
-    // One parallel step (step_start + step_result name it), and NO per-call steps.
+    // One fan-out step (step_start + step_result name it), and NO per-call steps.
+    // The durable name stays workflow.parallel#0 for replay compatibility.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, source, "\"name\":\"workflow.parallel#0\""));
     try std.testing.expect(std.mem.indexOf(u8, source, "workflow.call#") == null);
 }
 
-test "workflow.parallel replays its aggregate from cache without re-dispatching" {
+test "workflow.fanout replays its aggregate from cache without re-dispatching" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -6019,7 +6022,7 @@ test "workflow.parallel replays its aggregate from cache without re-dispatching"
     defer tmp_dir.cleanup();
     const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
 
-    // Seed a completed parallel step whose stored aggregate marks both entries
+    // Seed a completed fan-out step whose stored aggregate marks both entries
     // as the cached value. Reuses the single-step seed helper - the step result
     // is just an array of {status,headers,body}.
     try seedIncompleteWorkflowCallStep(

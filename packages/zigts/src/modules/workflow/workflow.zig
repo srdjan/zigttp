@@ -11,9 +11,9 @@
 //! (src/zruntime.zig `workflowCallCallback` over the `SystemRuntime`
 //! registry). This module validates JS arguments, then delegates to the
 //! runtime-owned callback. `self_managed_io` keeps the generic
-//! trace/replay/durable wrappers from auto-recording the dispatched
-//! Response: the combinator layer (P2+) drives determinism through
-//! `durable.step` explicitly.
+//! trace/replay/durable wrappers from auto-recording live Response objects:
+//! the runtime callbacks snapshot workflow dispatches as plain
+//! `{status,headers,body}` data and rebuild Responses during replay.
 
 const std = @import("std");
 const context = @import("../../context.zig");
@@ -28,7 +28,7 @@ pub const MODULE_STATE_SLOT = @intFromEnum(@import("../../module_slots.zig").Slo
 pub const WorkflowCallbacks = struct {
     call_fn: *const fn (*anyopaque, *context.Context, []const u8, value.JSValue) anyerror!value.JSValue,
     saga_fn: *const fn (*anyopaque, *context.Context, value.JSValue) anyerror!value.JSValue,
-    parallel_fn: *const fn (*anyopaque, *context.Context, value.JSValue) anyerror!value.JSValue,
+    fanout_fn: *const fn (*anyopaque, *context.Context, value.JSValue) anyerror!value.JSValue,
     follow_fn: *const fn (*anyopaque, *context.Context, value.JSValue, []const u8, value.JSValue) anyerror!value.JSValue,
     runtime_ptr: *anyopaque,
 
@@ -101,7 +101,7 @@ fn fanoutNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSVal
         return util.throwError(ctx, "TypeError", "fanout() expects an array of { name, method?, path?, body?, headers? } calls");
     }
 
-    return callbacks.parallel_fn(callbacks.runtime_ptr, ctx, args[0]);
+    return callbacks.fanout_fn(callbacks.runtime_ptr, ctx, args[0]);
 }
 
 fn followNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {

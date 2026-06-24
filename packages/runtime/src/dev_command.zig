@@ -378,7 +378,7 @@ pub fn printDevHelp() void {
         \\  --quest               Replay the guided proof quest
         \\  --outbound-http       Enable native outbound HTTP bridge
         \\  --sqlite <FILE>       SQLite database for zigttp:sql
-        \\  --system <FILE>       System registry for zigttp:service
+        \\  --system <FILE>       Handler bundle for zigttp:service/workflow
         \\  --no-env-check        Skip startup env validation
         \\  --help                Show this help
         \\

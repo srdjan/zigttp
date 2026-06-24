@@ -40,7 +40,7 @@ pub fn recordWorkflowReceipt(
 }
 
 /// Key-injected core. Tests pass a deterministic key so the receipt can be
-/// verified without touching `$HOME`. Returns the receipt path the caller owns.
+/// verified without touching `$HOME`.
 pub fn recordWorkflowReceiptWithKey(
     allocator: std.mem.Allocator,
     system_path: []const u8,
@@ -65,7 +65,7 @@ pub fn recordWorkflowReceiptWithKey(
     var envelope = try hypermedia_receipt.sign(allocator, verdict, key_pair);
     defer envelope.deinit(allocator);
 
-    const receipt_path = try std.fmt.allocPrint(allocator, "{s}workflow-receipt.jws", .{output_dir});
+    const receipt_path = try std.fs.path.join(allocator, &.{ output_dir, "workflow-receipt.jws" });
     defer allocator.free(receipt_path);
 
     try precompile.writeFilePosix(receipt_path, envelope.compact, allocator);

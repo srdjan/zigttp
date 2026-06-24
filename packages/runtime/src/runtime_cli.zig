@@ -716,7 +716,7 @@ fn printAppendedHelp() void {
         \\  --no-env-check        Skip required environment checks
         \\  --security-log <FILE> Write security decisions to FILE
         \\  --lifecycle <MODE>    ephemeral, bounded, ttl, or reuse
-        \\  --system <FILE>       System registry for zigttp:service
+        \\  --system <FILE>       Handler bundle for service and workflow
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -783,7 +783,7 @@ fn printServeHelp() void {
         \\  --replay <FILE>       Replay recorded traces and verify handler output
         \\  --test <FILE>         Run declarative handler tests from JSONL file
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
-        \\  --system <FILE>       System registry for zigttp:service
+        \\  --system <FILE>       Handler bundle for zigttp:service/workflow
         \\  --no-env-check        Skip startup env var validation
         \\  --security-log <FILE> Append security events to a JSONL file
         \\  --lifecycle <MODE>    Runtime lifecycle mode
