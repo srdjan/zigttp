@@ -20,7 +20,7 @@ import { run } from "zigttp:durable";
 import { call, saga } from "zigttp:workflow";
 
 function handler(req) {
-  const key = req.headers["idempotency-key"] ?? "saga-demo";
+  const key = req.headers.get("idempotency-key") ?? "saga-demo";
   if (req.url === "/fail") {
     return run(key, () =>
       saga([

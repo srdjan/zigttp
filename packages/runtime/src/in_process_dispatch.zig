@@ -107,17 +107,24 @@ pub const SystemRuntime = struct {
         var sys = SystemRuntime.init(allocator);
         errdefer sys.deinit();
 
+        const system_dir = std.fs.path.dirname(system_json_path) orelse ".";
         for (config.handlers) |entry| {
             // A `--system` manifest also drives `zigttp:service` (HTTP), where a
             // handler may be an external endpoint with no local source. Skip such
             // entries with a warning rather than failing the whole server; a
             // workflow.call to a skipped name returns a clear UnknownHandler.
-            const source = zq.file_io.readFile(allocator, entry.path, 10 * 1024 * 1024) catch |err| {
-                std.log.warn("workflow registry: skipping handler '{s}' ({s}: {s})", .{ entry.name, entry.path, @errorName(err) });
+            const entry_path = if (std.fs.path.isAbsolute(entry.path))
+                try allocator.dupe(u8, entry.path)
+            else
+                try std.fs.path.resolve(allocator, &.{ system_dir, entry.path });
+            defer allocator.free(entry_path);
+
+            const source = zq.file_io.readFile(allocator, entry_path, 10 * 1024 * 1024) catch |err| {
+                std.log.warn("workflow registry: skipping handler '{s}' ({s}: {s})", .{ entry.name, entry_path, @errorName(err) });
                 continue;
             };
             defer allocator.free(source);
-            try sys.addHandler(entry.name, source, entry.path, sub_config, pool_size);
+            try sys.addHandler(entry.name, source, entry_path, sub_config, pool_size);
         }
         return sys;
     }
@@ -379,6 +386,45 @@ test "workflow.follow routes a resolved affordance href to a co-located handler 
     try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "/payments/charge") != null);
 }
 
+test "workflow.follow routes hrefs by path while preserving parsed query" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    try sys.addHandler(
+        "greet",
+        "function handler(req) { return Response.json({ path: req.path, url: req.url, lang: req.query.lang }); }",
+        "<greet>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+
+    const orchestrator_src =
+        \\import { follow } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  const r = resource({ id: 1 }, {
+        \\    hello: { href: "/greet?lang=en#ignored", method: "GET" },
+        \\  });
+        \\  return follow(r, "hello");
+        \\}
+    ;
+    var orch = try HandlerPool.init(allocator, .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
+    defer orch.deinit();
+
+    var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    const view = HttpRequestView{ .method = "GET", .url = "/", .path = "/", .headers = headers, .body = null };
+
+    var handle = try orch.executeHandlerBorrowed(view);
+    defer handle.deinit();
+    try std.testing.expectEqual(@as(u16, 200), handle.response.status);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "\"path\":\"/greet\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "\"url\":\"/greet?lang=en\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "\"lang\":\"en\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "ignored") == null);
+}
+
 test "workflow.follow to an unmounted href fails soft as a 599" {
     if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
@@ -499,6 +545,42 @@ test "workflow.follow substitutes {param} from init.params before dispatch" {
     try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "{id}") == null);
 }
 
+test "workflow.follow percent-encodes templated params before dispatch" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    try sys.addHandler(
+        "orders",
+        "function handler(req) { return Response.json({ at: req.url, path: req.path }); }",
+        "<orders>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+
+    const orchestrator_src =
+        \\import { follow } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  const r = resource({ id: 1 }, { item: { href: "/orders/{id}", method: "GET" } });
+        \\  return follow(r, "item", { params: { id: "42/refund?admin=1#frag" } });
+        \\}
+    ;
+    var orch = try HandlerPool.init(allocator, .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
+    defer orch.deinit();
+
+    var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    const view = HttpRequestView{ .method = "GET", .url = "/", .path = "/", .headers = headers, .body = null };
+
+    var handle = try orch.executeHandlerBorrowed(view);
+    defer handle.deinit();
+    try std.testing.expectEqual(@as(u16, 200), handle.response.status);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "/orders/42%2Frefund%3Fadmin%3D1%23frag") != null);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "/orders/42/refund") == null);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "admin=1") == null);
+}
+
 test "workflow.follow on a templated href with no params fails soft as a 599" {
     if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
@@ -571,4 +653,39 @@ test "buildFromSystemConfig skips a handler whose source file is unreadable" {
     try std.testing.expectEqual(@as(usize, 1), sys.targets.items.len);
     try std.testing.expect(sys.find("ok") != null);
     try std.testing.expect(sys.find("gone") == null);
+}
+
+test "buildFromSystemConfig resolves handler paths relative to the manifest" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.heap.c_allocator;
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+
+    const handler_path = try std.fmt.allocPrint(allocator, "{s}/rel.ts", .{dir});
+    defer allocator.free(handler_path);
+    try zq.file_io.writeFile(allocator, handler_path, "function handler(req) { return Response.json({ ok: true }); }");
+
+    const manifest = try std.fmt.allocPrint(allocator,
+        \\{{ "version": 1, "handlers": [
+        \\  {{ "name": "rel", "path": "rel.ts", "baseUrl": "https://rel.internal" }}
+        \\] }}
+    , .{});
+    defer allocator.free(manifest);
+    const system_path = try std.fmt.allocPrint(allocator, "{s}/system.json", .{dir});
+    defer allocator.free(system_path);
+    try zq.file_io.writeFile(allocator, system_path, manifest);
+
+    var sys = try SystemRuntime.buildFromSystemConfig(allocator, system_path, .{ .jit_policy = .disabled }, 1);
+    defer sys.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), sys.targets.items.len);
+    try std.testing.expect(sys.find("rel") != null);
 }

@@ -9,7 +9,7 @@ import { run } from "zigttp:durable";
 import { call } from "zigttp:workflow";
 
 function handler(req: Request): Response {
-  const key = req.headers["idempotency-key"] ?? "default";
+  const key = req.headers.get("idempotency-key") ?? "default";
   return run(key, () => {
     const res = call("greet", { method: "GET", path: "/greet" });
     return Response.json({ orchestrated: true, subStatus: res.status, sub: res.json() });

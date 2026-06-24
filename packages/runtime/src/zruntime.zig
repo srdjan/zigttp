@@ -3319,12 +3319,14 @@ fn persistResponseToCache(
 /// view does not borrow the orchestrator JS heap across the dispatch boundary.
 const RequestParts = struct {
     method: []const u8 = "GET",
+    url: []const u8 = "/",
     path: []const u8 = "/",
+    query_params: []const QueryParam = &.{},
     body: ?[]const u8 = null,
     headers: std.ArrayListUnmanaged(HttpHeader) = .empty,
 
     fn view(self: RequestParts) HttpRequestView {
-        return .{ .method = self.method, .url = self.path, .path = self.path, .headers = self.headers, .body = self.body };
+        return .{ .method = self.method, .url = self.url, .path = self.path, .query_params = self.query_params, .headers = self.headers, .body = self.body };
     }
 };
 
@@ -3345,6 +3347,7 @@ fn parseHttpRequestParts(ctx: *zq.Context, obj_val: zq.JSValue, arena: std.mem.A
     if (getDynamicProperty(ctx, obj, pool, "path")) |p| {
         if (!p.isUndefined() and !p.isNull()) {
             parts.path = try arena.dupe(u8, getStringDataCtx(p, ctx) orelse return error.InvalidWorkflowInit);
+            parts.url = parts.path;
         }
     }
     if (getDynamicProperty(ctx, obj, pool, "body")) |b| {
@@ -3570,7 +3573,7 @@ fn substituteHrefTemplate(ctx: *zq.Context, href: []const u8, init_val: zq.JSVal
             const po = params_obj orelse return error.MissingTemplateParam;
             const val = getDynamicProperty(ctx, po, pool, key) orelse return error.MissingTemplateParam;
             const s = getStringDataCtx(val, ctx) orelse return error.MissingTemplateParam;
-            try out.appendSlice(arena, s);
+            try appendPercentEncodedInto(arena, &out, s);
             i = close + 1;
         } else {
             try out.append(arena, href[i]);
@@ -3578,6 +3581,23 @@ fn substituteHrefTemplate(ctx: *zq.Context, href: []const u8, init_val: zq.JSVal
         }
     }
     return out.items;
+}
+
+const FollowHref = struct {
+    url: []const u8,
+    path: []const u8,
+    query_params: []const QueryParam,
+};
+
+fn parseFollowHref(arena: std.mem.Allocator, href: []const u8) !FollowHref {
+    const url = if (std.mem.indexOfScalar(u8, href, '#')) |idx| href[0..idx] else href;
+    const split = splitPathAndQuery(url);
+    const parsed_query = try http_parser.parseQueryString(arena, split.query_string, http_parser.DEFAULT_MAX_QUERY_LENGTH);
+    return .{
+        .url = url,
+        .path = split.path,
+        .query_params = parsed_query.params,
+    };
 }
 
 /// Runtime side of `zigttp:workflow.follow(resource, rel, init?)`. Resolves the
@@ -3617,9 +3637,15 @@ fn workflowFollowCallback(
     // `{key}` from init.params; an unsupplied param fails soft rather than
     // sending a literal `{id}` to the target (which the link proof never
     // certifies as routable).
-    const dispatch_path = substituteHrefTemplate(ctx, aff.href, init_val, arena) catch |err| {
+    const dispatch_href = substituteHrefTemplate(ctx, aff.href, init_val, arena) catch |err| {
         return switch (err) {
             error.MissingTemplateParam, error.TemplateUnclosed => createFetchErrorResponse(rt, "MissingTemplateParam", aff.href),
+            else => err,
+        };
+    };
+    const follow_href = parseFollowHref(arena, dispatch_href) catch |err| {
+        return switch (err) {
+            error.QueryTooLong => createFetchErrorResponse(rt, "InvalidHref", "workflow.follow href query is too long"),
             else => err,
         };
     };
@@ -3634,11 +3660,13 @@ fn workflowFollowCallback(
         return err;
     };
     parts.method = aff.method;
-    parts.path = dispatch_path;
+    parts.url = follow_href.url;
+    parts.path = follow_href.path;
+    parts.query_params = follow_href.query_params;
     const view = parts.view();
 
-    const target = registry.findByRoute(dispatch_path) orelse {
-        return createFetchErrorResponse(rt, "UnknownRoute", dispatch_path);
+    const target = registry.findByRoute(follow_href.path) orelse {
+        return createFetchErrorResponse(rt, "UnknownRoute", follow_href.path);
     };
 
     if (rt.active_durable_run) |*adr| {
@@ -4284,15 +4312,19 @@ fn appendEncodedJsValue(rt: *Runtime, buf: *std.ArrayList(u8), val: zq.JSValue) 
 }
 
 fn appendPercentEncoded(rt: *Runtime, buf: *std.ArrayList(u8), input: []const u8) !void {
+    return appendPercentEncodedInto(rt.allocator, buf, input);
+}
+
+fn appendPercentEncodedInto(allocator: std.mem.Allocator, buf: anytype, input: []const u8) !void {
     for (input) |byte| {
         if (isUrlUnreserved(byte)) {
-            try buf.append(rt.allocator, byte);
+            try buf.append(allocator, byte);
             continue;
         }
 
-        try buf.append(rt.allocator, '%');
+        try buf.append(allocator, '%');
         const hex = std.fmt.bytesToHex([_]u8{byte}, .upper);
-        try buf.appendSlice(rt.allocator, &hex);
+        try buf.appendSlice(allocator, &hex);
     }
 }
 
