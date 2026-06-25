@@ -69,6 +69,8 @@ pub const commands = [_]Command{
     .{ .name = "meta", .run = expert.runMeta, .category = .machine, .args = "", .blurb = "Compiler and policy metadata", .usage = "meta [--json]" },
     .{ .name = "describe-rule", .run = describe_rule.runWithArgs, .category = .machine, .args = "[name|code]", .blurb = "Look up a diagnostic rule", .usage = "describe-rule [rule-name|code] [--json] [--hash]" },
     .{ .name = "search", .run = search_rules.runWithArgs, .category = .machine, .args = "<keyword>", .blurb = "Search rules by keyword", .usage = "search <keyword> [--json]" },
+    .{ .name = "spec-check", .run = runSpecCheckCommand, .category = .machine, .args = "", .blurb = "Check the semantics registry against the IR/bytecode tables", .usage = "spec-check [--json]" },
+    .{ .name = "spec-hash", .run = runSpecHashCommand, .category = .machine, .args = "", .blurb = "Print the semantics-registry hash", .usage = "spec-hash" },
     .{ .name = "verify-paths", .run = expert.runVerifyPaths, .category = .machine, .args = "<file>...", .blurb = "Behavior-path verification", .usage = "verify-paths <file>... [--json]" },
     .{ .name = "verify-modules", .run = expert.runVerifyModules, .category = .machine, .args = "<file>...", .blurb = "Module-contract verification", .usage = "verify-modules <file>... [--strict] [--json] | --builtins" },
     .{ .name = "verify-module-manifest", .run = expert.runVerifyModuleManifest, .category = .machine, .args = "<manifest.json>", .blurb = "Verify a module manifest", .usage = "verify-module-manifest <manifest.json> [--json]" },
@@ -395,6 +397,120 @@ fn runFeaturesCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     if (buf.items.len > 0) {
         _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
     }
+}
+
+fn appendFmt(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
+    const s = try std.fmt.allocPrint(allocator, fmt, args);
+    defer allocator.free(s);
+    try buf.appendSlice(allocator, s);
+}
+
+fn runSpecHashCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
+    var json_mode = false;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            json_mode = true;
+        } else if (isHelpToken(arg)) {} else {
+            return error.InvalidArgument;
+        }
+    }
+    const hash = zigts.semantics.semanticsHash();
+    if (json_mode) {
+        const allocator = std.heap.smp_allocator;
+        const line = try std.fmt.allocPrint(allocator, "{{\"semanticsHash\":\"{s}\"}}\n", .{hash});
+        defer allocator.free(line);
+        _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+    } else {
+        _ = std.c.write(std.c.STDOUT_FILENO, &hash, hash.len);
+        _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+    }
+}
+
+fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
+    try buf.append(allocator, '"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try buf.appendSlice(allocator, "\\\""),
+            '\\' => try buf.appendSlice(allocator, "\\\\"),
+            '\n' => try buf.appendSlice(allocator, "\\n"),
+            else => try buf.append(allocator, c),
+        }
+    }
+    try buf.append(allocator, '"');
+}
+
+fn runSpecCheckCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
+    var json_mode = false;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            json_mode = true;
+        } else if (isHelpToken(arg)) {
+            // no separate help screen
+        } else {
+            return error.InvalidArgument;
+        }
+    }
+
+    const allocator = std.heap.smp_allocator;
+    var result = zigts.semantics_check.runCheck(allocator) catch {
+        const msg = "spec-check: internal error\n";
+        _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
+        std.process.exit(2);
+    };
+    defer result.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    if (json_mode) {
+        try writeSpecCheckJson(allocator, &buf, &result);
+    } else {
+        try writeSpecCheckText(allocator, &buf, &result);
+    }
+    if (buf.items.len > 0) {
+        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+    }
+
+    // exit 0 conform, 1 divergence (2 for internal error handled above).
+    if (!result.ok()) std.process.exit(1);
+}
+
+fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: *const zigts.semantics_check.CheckResult) !void {
+    const cov = zigts.semantics.coverage();
+    const sh = zigts.semantics.semanticsHash();
+    try appendFmt(allocator, buf, "zigts semantics spec-check\n", .{});
+    try appendFmt(allocator, buf, "  semantics hash:    {s}\n", .{sh});
+    try appendFmt(allocator, buf, "  nodes specified:   {d}/{d}\n", .{ cov.nodes_specified, cov.nodes_total });
+    try appendFmt(allocator, buf, "  opcodes specified: {d}/{d}\n", .{ cov.opcodes_specified, cov.opcodes_total });
+    try appendFmt(allocator, buf, "  value proofs:      {d} (binop x{d}, unop x{d})\n", .{ r.nodes_proven, r.binop_instances, r.unop_instances });
+    try appendFmt(allocator, buf, "  refinements:       {d}\n", .{r.refinements_proven});
+    try appendFmt(allocator, buf, "  structural-only:   {d}\n", .{r.nodes_structural});
+    try appendFmt(allocator, buf, "  stack-effect:      {d} checks\n", .{r.stack_effect_checked});
+    if (r.ok()) {
+        try appendFmt(allocator, buf, "  result:            PASS\n", .{});
+    } else {
+        try appendFmt(allocator, buf, "  result:            FAIL ({d} divergence)\n", .{r.failures.items.len});
+        for (r.failures.items) |f| {
+            try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ f.code.code(), f.where, f.message });
+        }
+    }
+}
+
+fn writeSpecCheckJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: *const zigts.semantics_check.CheckResult) !void {
+    const cov = zigts.semantics.coverage();
+    const sh = zigts.semantics.semanticsHash();
+    const ir_h = zigts.semantics.irTableHash();
+    const op_h = zigts.semantics.opcodeTableHash();
+    try appendFmt(allocator, buf, "{{\"semanticsHash\":\"{s}\",\"irTableHash\":\"{s}\",\"opcodeTableHash\":\"{s}\",", .{ sh, ir_h, op_h });
+    try appendFmt(allocator, buf, "\"nodes\":{{\"specified\":{d},\"total\":{d}}},\"opcodes\":{{\"specified\":{d},\"total\":{d}}},", .{ cov.nodes_specified, cov.nodes_total, cov.opcodes_specified, cov.opcodes_total });
+    try appendFmt(allocator, buf, "\"valueProofs\":{d},\"binopInstances\":{d},\"unopInstances\":{d},\"refinements\":{d},\"structural\":{d},\"stackEffectChecks\":{d},", .{ r.nodes_proven, r.binop_instances, r.unop_instances, r.refinements_proven, r.nodes_structural, r.stack_effect_checked });
+    try appendFmt(allocator, buf, "\"ok\":{s},\"failures\":[", .{if (r.ok()) "true" else "false"});
+    for (r.failures.items, 0..) |f, i| {
+        if (i != 0) try buf.append(allocator, ',');
+        try appendFmt(allocator, buf, "{{\"code\":\"{s}\",\"where\":\"{s}\",\"message\":", .{ f.code.code(), f.where });
+        try appendJsonString(allocator, buf, f.message);
+        try buf.append(allocator, '}');
+    }
+    try appendFmt(allocator, buf, "]}}\n", .{});
 }
 
 fn runRestrictionsCommand(_: std.mem.Allocator, argv: []const []const u8) !void {

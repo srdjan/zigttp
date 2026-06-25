@@ -109,6 +109,8 @@ pub const sql_analysis = @import("sql_analysis.zig");
 pub const modules = @import("modules/root.zig");
 pub const compat = @import("compat.zig");
 pub const jit = @import("jit/root.zig");
+pub const semantics = @import("semantics.zig");
+pub const semantics_check = @import("semantics_check.zig");
 
 // Re-export main types for convenience
 pub const JSValue = value.JSValue;

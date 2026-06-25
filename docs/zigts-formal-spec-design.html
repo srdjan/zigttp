@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>zigts as a formal spec: readable like TypeScript, tied to the bytecode</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #f4f7f1;
+        --card: #fffdf8;
+        --code: #1e2530;
+        --code-ink: #e7ece3;
+        --ink: #181b22;
+        --muted: #4f5665;
+        --dim: #6b7280;
+        --border: rgba(27, 32, 43, 0.14);
+        --accent: #2a6796;
+        --accent-soft: #6eaddb;
+        --green: #2f8a4f;
+        --green-deep: #1f6f3c;
+        --red: #c43f5f;
+        --amber: #9a6a00;
+        --blue: #2563eb;
+        --violet: #6d4aff;
+        --sans: "Outfit", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--sans);
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap { max-width: 960px; margin: 0 auto; padding: 56px 24px 110px; }
+      header.hero { margin-bottom: 40px; }
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 13px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+        display: flex; align-items: center; gap: 10px;
+      }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); display: inline-block; }
+      h1 { font-size: 44px; line-height: 1.08; letter-spacing: -0.02em; margin: 14px 0 12px; font-weight: 800; }
+      h2 { font-size: 27px; letter-spacing: -0.01em; margin: 60px 0 12px; font-weight: 700; }
+      h2 .num { font-family: var(--mono); font-size: 16px; color: var(--accent); margin-right: 12px; font-weight: 500; }
+      h3 { font-size: 18px; margin: 30px 0 8px; font-weight: 600; }
+      .lede { font-size: 21px; color: var(--muted); max-width: 72ch; }
+      p { max-width: 74ch; }
+      ul, ol { max-width: 74ch; }
+      li { margin: 5px 0; }
+      a { color: var(--accent); }
+      .card {
+        background: var(--card);
+        border: 1.5px solid var(--border);
+        border-radius: 14px;
+        padding: 22px 24px;
+        margin: 18px 0;
+      }
+      .card.tight { padding: 16px 20px; }
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+      .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+      @media (max-width: 820px) { .grid2, .grid3 { grid-template-columns: 1fr; } h1 { font-size: 34px; } }
+      code.inline {
+        font-family: var(--mono); font-size: 0.86em;
+        background: rgba(42, 103, 150, 0.1); color: var(--accent);
+        padding: 2px 6px; border-radius: 5px;
+      }
+      pre {
+        background: var(--code); color: var(--code-ink);
+        border-radius: 12px; padding: 18px 20px; overflow-x: auto;
+        font-family: var(--mono); font-size: 13px; line-height: 1.62; margin: 14px 0;
+      }
+      pre b { font-weight: 700; color: #fff; }
+      pre .k { color: #6eaddb; }
+      pre .s { color: #9ad19a; }
+      pre .n { color: #e0b561; }
+      pre .c { color: #7c8694; font-style: italic; }
+      pre .kw { color: #d98aa6; }
+      pre .t { color: #c9a6ff; }
+      pre .hl { color: #ffd479; }
+      .filename {
+        font-family: var(--mono); font-size: 11.5px; color: var(--dim);
+        letter-spacing: 0.04em; margin: 18px 0 -6px; display: block;
+      }
+      .tag {
+        font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+        text-transform: uppercase; padding: 3px 9px; border-radius: 999px;
+        border: 1.5px solid; display: inline-block; vertical-align: middle;
+      }
+      .tag.l2 { color: var(--violet); border-color: rgba(109,74,255,0.4); background: rgba(109,74,255,0.08); }
+      .tag.ok { color: var(--green-deep); border-color: rgba(47,138,79,0.4); background: rgba(47,138,79,0.08); }
+
+      /* registry strip */
+      .registries { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 20px 0; }
+      @media (max-width: 820px) { .registries { grid-template-columns: 1fr 1fr; } }
+      .reg {
+        border: 1.5px solid var(--border); border-radius: 12px; padding: 14px 16px; background: var(--card);
+      }
+      .reg.new { border-color: rgba(109,74,255,0.5); background: rgba(109,74,255,0.05); }
+      .reg .name { font-family: var(--mono); font-weight: 700; font-size: 14px; }
+      .reg .new-tag { font-family: var(--mono); font-size: 10px; color: var(--violet); letter-spacing: 0.08em; }
+      .reg .desc { font-size: 13px; color: var(--muted); margin-top: 4px; }
+      .reg .src { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-top: 8px; }
+
+      /* pipeline */
+      .pipe { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-family: var(--mono);
+              font-size: 13px; margin: 16px 0; }
+      .pipe .stage { border: 1.5px solid var(--border); border-radius: 9px; padding: 8px 13px; background: var(--card); }
+      .pipe .arrow { color: var(--accent); font-weight: 700; }
+      .pipe .stage.hot { border-color: rgba(42,103,150,0.5); color: var(--accent); }
+
+      /* ladder */
+      .ladder { margin: 18px 0; border-radius: 14px; overflow: hidden; border: 1.5px solid var(--border); }
+      .rung { display: grid; grid-template-columns: 160px 1fr; gap: 0; border-top: 1.5px solid var(--border); }
+      .rung:first-child { border-top: none; }
+      .rung .lvl { padding: 14px 16px; font-family: var(--mono); font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+      .rung .body { padding: 14px 16px; font-size: 14px; color: var(--muted); background: var(--card); }
+      .rung.r1 .lvl { background: rgba(47,138,79,0.12); color: var(--green-deep); }
+      .rung.r2 .lvl { background: rgba(109,74,255,0.12); color: var(--violet); }
+      .rung.r3 .lvl { background: rgba(37,99,235,0.1); color: var(--blue); }
+      .rung.r4 .lvl { background: rgba(154,106,0,0.12); color: var(--amber); }
+      .swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+
+      table.cli { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+      table.cli td { padding: 10px 12px; border-top: 1.5px solid var(--border); vertical-align: top; }
+      table.cli tr:first-child td { border-top: none; }
+      table.cli td.cmd { font-family: var(--mono); font-size: 12.5px; color: var(--accent); white-space: nowrap; }
+      .callout { border-left: 3px solid var(--accent); padding: 4px 0 4px 18px; margin: 18px 0; color: var(--muted); }
+      .callout.warn { border-color: var(--amber); }
+      hr.soft { border: none; border-top: 1.5px solid var(--border); margin: 50px 0; }
+      .foot { color: var(--dim); font-size: 14px; margin-top: 12px; }
+      .kbd { font-family: var(--mono); font-size: 0.85em; background: #eef1ea; border: 1px solid var(--border);
+             border-radius: 5px; padding: 1px 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <div class="eyebrow"><span class="dot"></span> zigts &middot; design note &middot; <span class="tag l2">rigor L2</span></div>
+        <h1>A formal spec for zigts that reads like TypeScript and is provably tied to the bytecode</h1>
+        <p class="lede">
+          The meaning of every IR node and every bytecode opcode is written down once, as a
+          declarative rule table, rendered as high-level TypeScript for people, and machine-checked
+          against the real engine so the spec and the implementation cannot drift apart.
+        </p>
+      </header>
+
+      <p>
+        This note describes the design we converged on: substrate option <b>(b) with a slice of (a)</b>
+        at <b>L2 rigor</b>. The authoritative semantics live as a Zig comptime table next to the
+        enums they describe; TypeScript is a generated, readable projection of that table plus a small
+        reference interpreter. "Provably tied" is realized by four concrete, layered mechanisms, not by prose.
+      </p>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">01</span>The gap this closes</h2>
+      <p>
+        zigts already treats correctness as hashed, signed, drift-proof artifacts. It has three
+        declarative registries today, each the single source of truth for one facet of the system,
+        each reducible to a stable hash. The proposal adds a fourth.
+      </p>
+
+      <div class="registries">
+        <div class="reg">
+          <div class="name">features</div>
+          <div class="desc">Surface grammar gate &mdash; which constructs are allowed or blocked, and the proof each cut unlocks.</div>
+          <div class="src">json_diagnostics.zig</div>
+        </div>
+        <div class="reg">
+          <div class="name">modules</div>
+          <div class="desc">The FFI surface &mdash; virtual-module exports, signatures, capabilities, laws.</div>
+          <div class="src">builtin_modules.zig</div>
+        </div>
+        <div class="reg">
+          <div class="name">rules</div>
+          <div class="desc">Diagnostics, reduced to <code class="inline">policyHash()</code> over <code class="inline">all_rules</code>.</div>
+          <div class="src">rule_registry.zig</div>
+        </div>
+        <div class="reg new">
+          <div class="name">semantics <span class="new-tag">NEW</span></div>
+          <div class="desc">What each <code class="inline">NodeTag</code> means and each <code class="inline">Opcode</code> computes, reduced to <code class="inline">semanticsHash()</code>.</div>
+          <div class="src">semantics.zig</div>
+        </div>
+      </div>
+
+      <p>
+        The meaning of the language is the one facet with <em>no</em> declarative home. It exists only
+        implicitly, scattered across two files: <code class="inline">parser/codegen.zig</code> (IR &rarr;
+        bytecode lowering) and <code class="inline">interpreter.zig</code> (opcode execution). There is
+        partial structure already &mdash; <code class="inline">bytecode.zig</code> defines
+        <code class="inline">OpcodeInfo&nbsp;{size, n_pop, n_push, name}</code> and
+        <code class="inline">getOpcodeInfo()</code>, a per-opcode table that sits right next to the
+        <code class="inline">Opcode</code> enum &mdash; but it captures <em>arity</em>, not <em>meaning</em>.
+        The semantics registry is, quite literally, "extend <code class="inline">OpcodeInfo</code> with what
+        the opcode computes, add the <code class="inline">NodeTag</code> sibling, and hash the whole thing."
+      </p>
+
+      <p>The result closes the loop end to end:</p>
+      <div class="pipe">
+        <span class="stage">surface TS</span>
+        <span class="arrow">&rarr;</span>
+        <span class="stage hot">IR &middot; NodeTag</span>
+        <span class="arrow">&rarr;</span>
+        <span class="stage hot">bytecode &middot; Opcode</span>
+        <span class="arrow">&rarr;</span>
+        <span class="stage">execution</span>
+        <span class="arrow" style="margin-left:6px">&rArr;</span>
+        <span class="stage" style="border-color:rgba(109,74,255,0.5);color:var(--violet)">signed kind=semantics receipt</span>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">02</span>Where the semantics live, and why</h2>
+      <p>
+        The "reads like high-level TypeScript" requirement and the "provably tied" requirement pull in
+        different directions, because at L2 there are <b>three consumers</b> of the spec and no single
+        representation serves all three well.
+      </p>
+
+      <div class="grid3">
+        <div class="card tight">
+          <h3 style="margin-top:0">1. The symbolic checker</h3>
+          <p style="font-size:14px;color:var(--muted)">
+            A Zig program. To prove <code class="inline">lower(node) == eval(node)</code> for all inputs it
+            needs the denotation stated <em>relationally</em> &mdash; reasoned over, not executed. It wants native Zig rules.
+          </p>
+        </div>
+        <div class="card tight">
+          <h3 style="margin-top:0">2. The drift gate</h3>
+          <p style="font-size:14px;color:var(--muted)">
+            Trivial when the rule table sits beside the enum: reflection asserts the rule set equals the
+            <code class="inline">NodeTag</code>/<code class="inline">Opcode</code> set; the build fails on
+            any new opcode. A <code class="inline">.ts</code> source would need a generator and a reverse check.
+          </p>
+        </div>
+        <div class="card tight">
+          <h3 style="margin-top:0">3. People</h3>
+          <p style="font-size:14px;color:var(--muted)">
+            Want it to read like TypeScript. That is a presentation requirement &mdash; met by
+            <em>rendering</em> the table, not by authoring it in TS.
+          </p>
+        </div>
+      </div>
+
+      <p>So the source of truth is Zig, and TypeScript is two derived views off it:</p>
+      <ul>
+        <li><b>Source of truth:</b> <code class="inline">packages/zigts/src/semantics.zig</code> &mdash; a comptime
+          table binding each <code class="inline">NodeTag</code>/<code class="inline">Opcode</code> to its stack
+          effect, denotation, and lowering template. Hashed into <code class="inline">semanticsHash</code>, signed.</li>
+        <li><b>Readable view:</b> <code class="inline">zigts spec</code> renders the table to a literate
+          <code class="inline">spec.ts</code> &mdash; the "reads like high-level TypeScript" artifact, generated so
+          it can never drift from the source.</li>
+        <li><b>Executable companion:</b> a thin <code class="inline">spec/eval.ts</code> in the zigts subset
+          (dogfooded), arms 1:1 with the table, used for the differential pass.</li>
+      </ul>
+
+      <div class="callout">
+        <b>Soundness bonus.</b> Stating meaning independently in Zig gives the differential test a genuinely
+        independent reference. Authoring the spec purely in the subset and running it <em>on</em> the engine would
+        test the engine against itself &mdash; it would only catch divergence between the meta-circular and direct
+        paths, never a shared mistake.
+      </div>
+      <p class="foot">
+        Honest trade-off: meaning is <em>authored</em> in Zig and <em>read</em> in TypeScript, not authored in TS.
+        We judged the drift-proofing and symbolic-proof ergonomics worth that.
+      </p>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">03</span>The three layers</h2>
+      <p>Each registry entry carries three facets, one per layer of the pipeline.</p>
+
+      <span class="filename">packages/zigts/src/semantics.zig &mdash; one entry, all three layers</span>
+      <pre><span class="kw">pub const</span> semantics = [_]<span class="t">NodeRule</span>{
+    .{
+        .tag = .<span class="hl">binary_op</span>,
+
+        <span class="c">// Layer B - denotation: the meaning, as a relation over Values.</span>
+        <span class="c">// ⟦x⟧ is "the Value that subexpression x denotes".</span>
+        .denote = <span class="s">"applyBinop(op, ⟦left⟧, ⟦right⟧)"</span>,
+
+        <span class="c">// Layer C - lowering template: this node -&gt; this opcode sequence.</span>
+        <span class="c">// ⟨x⟩ is "the opcodes that evaluate x and leave its Value on the stack".</span>
+        .lower = <span class="s">"⟨left⟩ ⟨right⟩ &lt;binop-opcode&gt;"</span>,
+    },
+    <span class="c">// ... one entry per NodeTag. Layer A (surface -&gt; IR) is the existing</span>
+    <span class="c">// `features` registry: every allowed construct maps to declared NodeTags.</span>
+};</pre>
+
+      <div class="grid3" style="margin-top:18px">
+        <div class="card tight">
+          <h3 style="margin-top:0">Layer A</h3>
+          <p style="font-size:14px;color:var(--muted)"><b>surface &rarr; IR.</b> Every allowed feature lowers to declared
+          <code class="inline">NodeTag</code>s; coverage is total. Reuses the <code class="inline">features</code> registry.</p>
+        </div>
+        <div class="card tight">
+          <h3 style="margin-top:0">Layer B</h3>
+          <p style="font-size:14px;color:var(--muted)"><b>IR denotation.</b> <code class="inline">eval(node, env) -&gt; Value</code>,
+          the reference big-step semantics. <code class="inline">Value</code> mirrors the NaN-boxed domain of
+          <code class="inline">value.zig</code>.</p>
+        </div>
+        <div class="card tight">
+          <h3 style="margin-top:0">Layer C</h3>
+          <p style="font-size:14px;color:var(--muted)"><b>lowering + transition.</b> Node &rarr; opcode sequence, plus a
+          stack-machine rule per opcode. The L2 theorem lives here: <code class="inline">eval(node) == run(lower(node))</code>.</p>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">04</span>The four binding mechanisms</h2>
+      <p>"Provably tied" is the conjunction of four checks, ordered weakest-but-total to strongest-but-scoped.</p>
+
+      <h3>Mechanism 1 &mdash; Table equality <span class="tag ok">by construction</span></h3>
+      <p>
+        Reflection over the enum asserts the rule set is <em>exactly</em> the
+        <code class="inline">NodeTag</code> and <code class="inline">Opcode</code> sets. Add an opcode without a
+        rule and the build fails &mdash; the same comptime-validation trick that already guards the
+        <code class="inline">features</code> array. This is what makes the spec impossible to leave behind.
+      </p>
+      <pre><span class="kw">comptime</span> {
+    <span class="kw">for</span> (std.enums.values(<span class="t">Opcode</span>)) |op| {
+        <span class="kw">if</span> (!hasRule(op)) <span class="hl">@compileError</span>(<span class="s">"opcode "</span> ++ @tagName(op) ++ <span class="s">" has no semantics rule"</span>);
+    }
+}</pre>
+
+      <h3>Mechanism 2 &mdash; Stack-effect conformance <span class="tag ok">by construction</span></h3>
+      <p>
+        Reuse <code class="inline">OpcodeInfo.n_pop</code>/<code class="inline">n_push</code>. The checker
+        validates every lowering template is stack-balanced and that each transition rule honors the declared
+        arity. A template that leaves the stack unbalanced is rejected before any semantic reasoning happens.
+      </p>
+
+      <h3>Mechanism 3 &mdash; Symbolic lowering correspondence <span class="tag l2">L2 core</span></h3>
+      <p>
+        For each <code class="inline">NodeTag</code>, a symbolic executor proves that running
+        <code class="inline">lower(node)</code> leaves the same denotation on the stack as
+        <code class="inline">eval(node)</code>. This is decidable because the IR is a tree and a single node's
+        lowering has no back-edges &mdash; the same tractability the project already relies on
+        ("no <code class="inline">while</code> means finite path enumeration"). The proof is structural induction;
+        each per-node obligation is a single algebraic equality with the children's denotations held as symbols.
+      </p>
+
+      <span class="filename">worked example: binary_op(add)</span>
+      <pre><span class="c">// goal:  eval(add(L, R))  ==  run( lower(add(L, R)) )</span>
+
+<span class="c">// left side - Layer B denotation:</span>
+  eval(add(L,R)) = applyBinop(add, ⟦L⟧, ⟦R⟧) = <b>numAdd(l, r)</b>     <span class="c">// let l=⟦L⟧, r=⟦R⟧</span>
+
+<span class="c">// right side - Layer C, run the template on a symbolic stack:</span>
+  lower(add(L,R)) = ⟨L⟩ ⟨R⟩ add
+    after ⟨L⟩  :  stack = [ l ]            <span class="c">// induction hypothesis on child L</span>
+    after ⟨R⟩  :  stack = [ l, r ]         <span class="c">// induction hypothesis on child R</span>
+    after add  :  stack = [ <b>numAdd(l, r)</b> ]  <span class="c">// opcode transition: pop b,a -&gt; push numAdd(a,b)</span>
+
+<span class="c">// top of stack == eval(add(L,R)).  ∎  (modulo the IHs on L and R)</span></pre>
+
+      <p>
+        The optimized opcodes &mdash; inline caches (<code class="inline">*_ic</code>), superinstructions, fused
+        arithmetic, type-specialized variants &mdash; are <b>not</b> proven from scratch. Each is proven as a
+        <b>refinement</b>: its single-step transition equals the composition of the base opcodes it fuses. The
+        proof then reduces to the already-proven core.
+      </p>
+
+      <span class="filename">worked example: refinement get_loc_add &equiv; get_loc; add</span>
+      <pre><span class="c">// base transitions:</span>
+  get_loc i :  S          -&gt; S ++ [ locals[i] ]
+  add       :  S ++ [a,b] -&gt; S ++ [ numAdd(a, b) ]
+
+<span class="c">// composing them, starting from a stack that already holds one operand x:</span>
+  get_loc i ; add :  S ++ [x] -&gt; S ++ [x, locals[i]] -&gt; S ++ [ <b>numAdd(x, locals[i])</b> ]
+
+<span class="c">// superinstruction, single step:</span>
+  get_loc_add i   :  S ++ [x] -&gt; S ++ [ <b>numAdd(x, locals[i])</b> ]
+
+<span class="c">// identical resulting stack, symbolically. The fused opcode is sound</span>
+<span class="c">// exactly when emitting get_loc; add would have been.  ∎</span></pre>
+
+      <h3>Mechanism 4 &mdash; Differential execution <span class="tag" style="color:var(--blue);border-color:rgba(37,99,235,0.4);background:rgba(37,99,235,0.08)">testing</span></h3>
+      <p>
+        A corpus &mdash; the <code class="inline">examples/</code> handlers plus generated fixtures &mdash; runs through
+        <code class="inline">spec/eval.ts</code> and through the real engine; observable outputs are asserted
+        identical. This reuses <code class="inline">trace.zig</code>, <code class="inline">--replay</code>, and
+        <code class="inline">mock</code>. It is testing, not proof: coverage-bounded, and labeled as such in the receipt.
+      </p>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">05</span>What is proven vs assumed</h2>
+      <p>The whole point of L2 is to be precise about the strength of each claim. The receipt records exactly this ladder.</p>
+
+      <div class="ladder">
+        <div class="rung r1">
+          <div class="lvl"><span class="swatch" style="background:var(--green)"></span>By construction</div>
+          <div class="body">Table coverage (no drift) and stack balance. Enforced at compile time; cannot regress silently.</div>
+        </div>
+        <div class="rung r2">
+          <div class="lvl"><span class="swatch" style="background:var(--violet)"></span>Symbolic (L2)</div>
+          <div class="body">Lowering correspondence for the pure stack-deterministic core, plus refinement equivalences for every optimized opcode.</div>
+        </div>
+        <div class="rung r3">
+          <div class="lvl"><span class="swatch" style="background:var(--blue)"></span>Differential</div>
+          <div class="body">End-to-end agreement of reference vs engine over the corpus. Strong evidence, coverage-bounded &mdash; not a proof.</div>
+        </div>
+        <div class="rung r4">
+          <div class="lvl"><span class="swatch" style="background:var(--amber)"></span>Assumed</div>
+          <div class="body">Native module semantics (<code class="inline">zigttp:*</code>), GC/heap identity, and JIT tiers. Modeled as opaque oracles with stated contracts; referenced from existing harnesses, not re-proven here.</div>
+        </div>
+      </div>
+
+      <p class="foot">
+        Non-goals: a fully mechanized end-to-end proof (that is L3 &mdash; export to an SMT solver / proof assistant);
+        JIT correctness (rides the existing parity harness); the bodies of native modules (oracles).
+      </p>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">06</span>The artifact: a signed <code style="font-size:0.8em">kind=semantics</code> receipt</h2>
+      <p>
+        The spec becomes a first-class, hashable, signed, third-party-verifiable artifact &mdash; the same
+        lifecycle as contracts and equivalence verdicts, reusing the Ed25519 attest keypair and appending a row to
+        <code class="inline">.zigttp/proofs.jsonl</code>.
+      </p>
+      <pre>{
+  <span class="k">"kind"</span>: <span class="s">"semantics"</span>,
+  <span class="k">"semanticsHash"</span>:   <span class="s">"9f3c8a…"</span>,   <span class="c">// SHA-256 of the canonicalized rule table (mirrors policyHash)</span>
+  <span class="k">"irTableHash"</span>:     <span class="s">"a1b2c3…"</span>,   <span class="c">// SHA-256 of NodeTag member names</span>
+  <span class="k">"opcodeTableHash"</span>: <span class="s">"c4d5e6…"</span>,   <span class="c">// SHA-256 of Opcode member names</span>
+  <span class="k">"corpusHash"</span>:      <span class="s">"77ef01…"</span>,   <span class="c">// differential corpus + results</span>
+  <span class="k">"nodesProven"</span>:    <span class="n">41</span>,
+  <span class="k">"opcodesProven"</span>:  <span class="n">96</span>,
+  <span class="k">"opcodesRefined"</span>: <span class="n">22</span>,         <span class="c">// proven equivalent to a base sequence</span>
+  <span class="k">"oraclesAssumed"</span>: <span class="n">6</span>,
+  <span class="k">"jws"</span>: <span class="s">"eyJhbGciOiJFZERTQS…"</span>     <span class="c">// compact Ed25519 JWS</span>
+}</pre>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">07</span>CLI surface</h2>
+      <p>Thin delegations into the same code path the other machine tools use &mdash; reachable as both <code class="inline">zigts</code> and <code class="inline">zigttp</code>.</p>
+      <table class="cli">
+        <tr><td class="cmd">zigts spec [--json]</td><td>Render <code class="inline">spec.ts</code> (literate) and <code class="inline">spec.json</code> from the registry.</td></tr>
+        <tr><td class="cmd">zigts spec-check</td><td>Run all four mechanisms; emit the signed receipt. Exit <b>0</b> conform / <b>1</b> divergence (with a <code class="inline">ZTS7xx</code> counterexample) / <b>2</b> error.</td></tr>
+        <tr><td class="cmd">zigts spec-hash</td><td>Print <code class="inline">semanticsHash</code> for CI assertions (mirrors <code class="inline">describe-rule --hash</code>).</td></tr>
+        <tr><td class="cmd">zigttp verify &lt;receipt&gt;</td><td>Extended to validate a <code class="inline">kind=semantics</code> receipt from a third-party machine.</td></tr>
+      </table>
+      <p class="foot">New diagnostic family <code class="inline">ZTS7xx</code>: uncovered node, unbalanced lowering, lowering-divergence counterexample, differential mismatch.</p>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">08</span>Files</h2>
+      <div class="grid2">
+        <div class="card tight">
+          <h3 style="margin-top:0">New</h3>
+          <ul style="font-size:13.5px;margin:0;padding-left:18px">
+            <li><code class="inline">packages/zigts/src/semantics.zig</code> &mdash; the registry + <code class="inline">semanticsHash()</code></li>
+            <li><code class="inline">packages/zigts/src/semantics_check.zig</code> &mdash; the L2 checker (table equality, stack effect, symbolic lowering, differential driver)</li>
+            <li><code class="inline">spec/eval.ts</code> &mdash; the subset reference interpreter</li>
+          </ul>
+        </div>
+        <div class="card tight">
+          <h3 style="margin-top:0">Reuse / edit</h3>
+          <ul style="font-size:13.5px;margin:0;padding-left:18px">
+            <li><b>reuse</b> <code class="inline">bytecode.zig</code> <code class="inline">OpcodeInfo</code>; <code class="inline">equivalence_receipt.zig</code> signing; <code class="inline">rule_registry.zig</code> hashing</li>
+            <li><b>edit</b> <code class="inline">zigts_cli.zig</code> &mdash; register <code class="inline">spec</code>, <code class="inline">spec-check</code>, <code class="inline">spec-hash</code></li>
+            <li><b>edit</b> <code class="inline">rule_registry.zig</code> &mdash; add <code class="inline">ZTS7xx</code> codes</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">09</span>Optional validating PoC slice</h2>
+      <p>
+        Per the house rule (validate at small scale before scaling up), a thin end-to-end slice proves the whole
+        pipeline before the full tables are populated.
+      </p>
+      <div class="card">
+        <ul style="margin:0">
+          <li><b>~10 NodeTags:</b> <code class="inline">lit_int, lit_bool, identifier, binary_op, unary_op, ternary, if_stmt, return_stmt, block, call</code></li>
+          <li><b>~15 Opcodes:</b> <code class="inline">push_i16/push_const/push_true/push_false, get_loc, add/sub/mul, lt/eq, if_false, goto, ret, call</code></li>
+          <li>The table-equality check runs against the <b>full</b> enums (fails on any uncovered member) &mdash; proving the drift gate works even though only the slice carries denotations.</li>
+          <li>Symbolic lowering proof for the slice + one signed <code class="inline">kind=semantics</code> receipt over the partial table.</li>
+        </ul>
+      </div>
+      <h3>Verification</h3>
+      <ul>
+        <li><code class="inline">zig build test</code> for the two new modules.</li>
+        <li><code class="inline">zigts spec-check</code> exits 0 on the slice; injecting a deliberately wrong lowering template yields a <code class="inline">ZTS7xx</code> counterexample (exit 1).</li>
+        <li><code class="inline">zigttp verify</code> validates the emitted receipt.</li>
+        <li>Differential: run <code class="inline">examples/</code> through both <code class="inline">spec/eval.ts</code> and the engine; outputs match.</li>
+      </ul>
+
+      <hr class="soft" />
+      <div class="card" style="border-color:rgba(109,74,255,0.4);background:rgba(109,74,255,0.05)">
+        <h3 style="margin-top:0">Your decision</h3>
+        <p style="margin-bottom:0">
+          This document is the design. The open fork is the deliverable scope:
+          <b>(1) design document only</b> &mdash; stop here; implementation is a later, separately-approved step; or
+          <b>(2) design + the validating PoC slice</b> &mdash; build the thin end-to-end slice above to prove the
+          pipeline runs before scaling to the full tables.
+        </p>
+      </div>
+    </div>
+  </body>
+</html>
