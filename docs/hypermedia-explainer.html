@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HATEOAS + HAL workflows, explained</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #f4f7f1;
+        --card: #fffdf8;
+        --code: #1e2530;
+        --code-ink: #e7ece3;
+        --ink: #181b22;
+        --muted: #4f5665;
+        --dim: #6b7280;
+        --border: rgba(27, 32, 43, 0.14);
+        --accent: #2a6796;
+        --accent-soft: #6eaddb;
+        --green: #2f8a4f;
+        --green-deep: #1f6f3c;
+        --red: #c43f5f;
+        --amber: #9a6a00;
+        --blue: #2563eb;
+        --sans: "Outfit", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--sans);
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap { max-width: 940px; margin: 0 auto; padding: 56px 24px 96px; }
+      header.hero { margin-bottom: 44px; }
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 13px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+        display: flex; align-items: center; gap: 10px;
+      }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); display: inline-block; }
+      h1 { font-size: 46px; line-height: 1.08; letter-spacing: -0.02em; margin: 14px 0 10px; font-weight: 800; }
+      h2 { font-size: 28px; letter-spacing: -0.01em; margin: 56px 0 14px; font-weight: 700; }
+      h3 { font-size: 19px; margin: 28px 0 8px; font-weight: 600; }
+      .lede { font-size: 21px; color: var(--muted); max-width: 70ch; }
+      p { max-width: 72ch; }
+      a { color: var(--accent); }
+      .card {
+        background: var(--card);
+        border: 1.5px solid var(--border);
+        border-radius: 14px;
+        padding: 22px 24px;
+        margin: 18px 0;
+      }
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+      @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } h1 { font-size: 36px; } }
+      code.inline {
+        font-family: var(--mono); font-size: 0.88em;
+        background: rgba(42, 103, 150, 0.1); color: var(--accent);
+        padding: 2px 6px; border-radius: 5px;
+      }
+      pre {
+        background: var(--code); color: var(--code-ink);
+        border-radius: 12px; padding: 18px 20px; overflow-x: auto;
+        font-family: var(--mono); font-size: 13.5px; line-height: 1.6; margin: 14px 0;
+      }
+      pre .k { color: #6eaddb; } /* key */
+      pre .s { color: #9ad19a; } /* string */
+      pre .n { color: #e0b561; } /* number */
+      pre .c { color: #7c8694; font-style: italic; } /* comment */
+      pre .kw { color: #d98aa6; } /* keyword */
+      .tag {
+        font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+        text-transform: uppercase; padding: 3px 9px; border-radius: 999px;
+        border: 1.5px solid; display: inline-block; vertical-align: middle;
+      }
+      .tag.links { color: var(--accent); border-color: rgba(42,103,150,0.4); background: rgba(42,103,150,0.07); }
+      .tag.tmpl  { color: var(--green-deep); border-color: rgba(47,138,79,0.4); background: rgba(47,138,79,0.08); }
+
+      /* ---- interactive demo ---- */
+      .demo { border: 1.5px solid var(--border); border-radius: 16px; overflow: hidden; background: var(--card); }
+      .demo-bar {
+        display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+        padding: 14px 20px; border-bottom: 1.5px solid var(--border);
+        background: #fbfcf8;
+      }
+      .pill {
+        font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em;
+        padding: 5px 12px; border-radius: 999px; border: 1.5px solid var(--border); color: var(--dim);
+      }
+      .pill.live { color: var(--green-deep); border-color: rgba(47,138,79,0.4); background: rgba(47,138,79,0.08); }
+      .statechip { font-weight: 700; font-family: var(--mono); }
+      .reset {
+        margin-left: auto; font: inherit; font-size: 13px; cursor: pointer;
+        background: transparent; border: 1.5px solid var(--border); border-radius: 8px;
+        padding: 6px 12px; color: var(--muted);
+      }
+      .reset:hover { border-color: var(--accent); color: var(--accent); }
+      .demo-body { display: grid; grid-template-columns: 1fr 1fr; }
+      @media (max-width: 760px) { .demo-body { grid-template-columns: 1fr; } }
+      .pane { padding: 22px; }
+      .pane.client { border-right: 1.5px solid var(--border); }
+      @media (max-width: 760px) { .pane.client { border-right: none; border-bottom: 1.5px solid var(--border); } }
+      .pane h4 {
+        margin: 0 0 14px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--dim);
+      }
+      .order-card { border: 1.5px solid var(--border); border-radius: 12px; padding: 18px; background: #fff; }
+      .order-card dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; }
+      .order-card dt { color: var(--dim); font-size: 14px; }
+      .order-card dd { margin: 0; font-family: var(--mono); font-weight: 500; }
+      .order-card dd.status-pending { color: var(--amber); }
+      .order-card dd.status-paid { color: var(--blue); }
+      .order-card dd.status-shipped { color: var(--accent); }
+      .order-card dd.status-delivered { color: var(--green-deep); }
+      .order-card dd.status-cancelled { color: var(--red); }
+      .affordances { margin-top: 18px; display: flex; flex-direction: column; gap: 9px; }
+      .aff-empty { color: var(--dim); font-size: 14px; font-style: italic; }
+      button.aff {
+        font: inherit; font-size: 14.5px; cursor: pointer; text-align: left;
+        display: flex; align-items: center; gap: 10px;
+        padding: 11px 14px; border-radius: 10px; border: 1.5px solid; background: #fff;
+        transition: transform 0.08s ease;
+      }
+      button.aff:active { transform: scale(0.98); }
+      button.aff .rel { font-family: var(--mono); font-size: 11px; opacity: 0.7; margin-left: auto; }
+      button.aff.write { border-color: rgba(47,138,79,0.45); color: var(--green-deep); }
+      button.aff.write:hover { background: rgba(47,138,79,0.07); }
+      button.aff.nav { border-color: rgba(42,103,150,0.4); color: var(--accent); }
+      button.aff.nav:hover { background: rgba(42,103,150,0.06); }
+      button.aff.danger { border-color: rgba(196,63,95,0.4); color: var(--red); }
+      button.aff.danger:hover { background: rgba(196,63,95,0.06); }
+      .pane.hal { background: #f7f9f4; }
+      .pane.hal pre { margin: 0; max-height: 460px; }
+      .log {
+        margin-top: 16px; font-family: var(--mono); font-size: 12px; color: var(--muted);
+        border-top: 1.5px dashed var(--border); padding-top: 12px; min-height: 40px;
+      }
+      .log .req { color: var(--green-deep); }
+      .log .nav { color: var(--accent); }
+      .callout {
+        border-left: 3px solid var(--accent); padding: 4px 0 4px 18px; margin: 18px 0;
+        color: var(--muted);
+      }
+      .footer { margin-top: 64px; padding-top: 22px; border-top: 1.5px solid var(--border); color: var(--dim); font-size: 14px; }
+      ul.clean { padding-left: 20px; }
+      ul.clean li { margin: 6px 0; }
+      .key-row { display: flex; gap: 10px; align-items: baseline; margin: 6px 0; }
+      .key-row .badge { flex: none; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <div class="eyebrow"><span class="dot"></span> Hypermedia &middot; HAL &middot; zigttp resource()</div>
+        <h1>HATEOAS + HAL workflows</h1>
+        <p class="lede">
+          The server doesn't just return data. It returns the data <em>plus the
+          set of actions you're allowed to take next</em>. The client follows
+          those, instead of hardcoding URLs. That's the whole idea, and it makes
+          a workflow drive itself.
+        </p>
+      </header>
+
+      <h2>1. HATEOAS: the state machine lives on the server</h2>
+      <p>
+        HATEOAS stands for <strong>Hypermedia As The Engine Of Application
+        State</strong>. Strip the jargon and it's one rule:
+      </p>
+      <div class="callout">
+        Every response carries links to the next valid actions. The client
+        starts at one URL and discovers everything else by following links it
+        was handed, not by knowing them in advance.
+      </div>
+      <p>
+        Think of a restaurant menu. You don't memorize the kitchen's internal
+        order numbers; you read what's <em>offered right now</em> and point at
+        it. A breakfast menu and a dinner menu are the same restaurant in
+        different states, offering different choices. A HATEOAS API works the
+        same way: the available actions are a function of server state, and the
+        server hands them to you on every response.
+      </p>
+      <p>The payoff:</p>
+      <ul class="clean">
+        <li><strong>The client can't reach an illegal state.</strong> If "pay" isn't offered, the UI literally has no button for it. No client-side rule duplicating server logic.</li>
+        <li><strong>URLs stay the server's business.</strong> Routes can move; clients follow <em>relations</em> (<code class="inline">pay</code>, <code class="inline">cancel</code>), not paths.</li>
+        <li><strong>Workflows become discoverable.</strong> An automated client can walk the graph by following relations it understands.</li>
+      </ul>
+
+      <h2>2. HAL: a tiny JSON convention for the links</h2>
+      <p>
+        HATEOAS is the idea; HAL (<em>Hypertext Application Language</em>,
+        media type <code class="inline">application/hal+json</code>) is one
+        concrete way to write it down. A HAL document is just your normal JSON
+        with up to three reserved keys:
+      </p>
+      <div class="card">
+        <div class="key-row"><span class="tag links badge">_links</span> <span>Navigation. A map keyed by <em>relation</em> (rel). Every resource has a <code class="inline">self</code> link; others point to related resources you can <code class="inline">GET</code>.</span></div>
+        <div class="key-row"><span class="tag links badge">_embedded</span> <span>Nested resources shipped inline to save round-trips (e.g. an order's line items), each itself a HAL document.</span></div>
+        <div class="key-row"><span class="tag tmpl badge">_templates</span> <span>Write actions, from the HAL-FORMS extension: method, title, and input <code class="inline">properties</code>. This is what zigttp emits for non-GET affordances.</span></div>
+      </div>
+      <pre><span class="c">// A HAL representation of order #42 in the "pending" state</span>
+{
+  <span class="k">"id"</span>: <span class="n">42</span>,
+  <span class="k">"total"</span>: <span class="n">1999</span>,
+  <span class="k">"status"</span>: <span class="s">"pending"</span>,
+  <span class="k">"_links"</span>: {                              <span class="c">// where can I GO?</span>
+    <span class="k">"self"</span>:     { <span class="k">"href"</span>: <span class="s">"/orders/42"</span> },
+    <span class="k">"customer"</span>: { <span class="k">"href"</span>: <span class="s">"/customers/7"</span> }
+  },
+  <span class="k">"_templates"</span>: {                          <span class="c">// what can I DO?</span>
+    <span class="k">"pay"</span>: {
+      <span class="k">"method"</span>: <span class="s">"POST"</span>, <span class="k">"target"</span>: <span class="s">"/orders/42/pay"</span>,
+      <span class="k">"title"</span>:  <span class="s">"Pay now"</span>,
+      <span class="k">"properties"</span>: [{ <span class="k">"name"</span>: <span class="s">"card"</span> }, { <span class="k">"name"</span>: <span class="s">"cvc"</span> }]
+    },
+    <span class="k">"cancel"</span>: { <span class="k">"method"</span>: <span class="s">"DELETE"</span>, <span class="k">"target"</span>: <span class="s">"/orders/42"</span>, <span class="k">"title"</span>: <span class="s">"Cancel"</span> }
+  }
+}</pre>
+      <p>
+        Same idea for a human: render those <code class="inline">_links</code>
+        as <code class="inline">&lt;a&gt;</code> tags and the
+        <code class="inline">_templates</code> as
+        <code class="inline">&lt;form&gt;</code>/buttons, and a browser walks the
+        exact same state machine a service does.
+      </p>
+
+      <h2>3. The workflow, live</h2>
+      <p>
+        Here's an order lifecycle:
+        <code class="inline">pending &rarr; paid &rarr; shipped &rarr; delivered</code>
+        (with a <code class="inline">cancel</code>/<code class="inline">refund</code>
+        branch). The left pane is the client. <strong>Every button you see came
+        from the server's affordances</strong>, not from hardcoded UI. Click one:
+        the "server" advances its state and returns a new representation, and the
+        available actions change with it. Watch <code class="inline">pay</code>
+        vanish the moment the order is paid.
+      </p>
+
+      <div class="demo">
+        <div class="demo-bar">
+          <span class="pill live"><span class="dot"></span> server state: <span class="statechip" id="stateChip">pending</span></span>
+          <span class="pill">GET /orders/42</span>
+          <button class="reset" id="resetBtn">Reset</button>
+        </div>
+        <div class="demo-body">
+          <div class="pane client">
+            <h4>Client view (follows what's offered)</h4>
+            <div class="order-card">
+              <dl id="orderData"></dl>
+              <div class="affordances" id="affordances"></div>
+            </div>
+            <div class="log" id="log">GET /orders/42 &rarr; 200. The client renders whatever affordances came back.</div>
+          </div>
+          <div class="pane hal">
+            <h4>Server response (application/hal+json)</h4>
+            <pre id="halOut"></pre>
+          </div>
+        </div>
+      </div>
+      <div class="callout">
+        Notice you never told the client the rules. It only ever did two things:
+        <strong>render the affordances it was given</strong>, and
+        <strong>POST the one you clicked</strong>. All the "can this happen
+        next?" logic stayed on the server.
+      </div>
+
+      <h2>4. Following links is the "engine"</h2>
+      <p>
+        An automated workflow does exactly what you just did by hand: fetch a
+        resource, find an affordance <em>by its relation</em>, invoke it, repeat.
+        It never builds a URL:
+      </p>
+      <pre><span class="c">// generic HATEOAS client loop — no URL is ever hardcoded</span>
+<span class="kw">let</span> order = <span class="kw">await</span> get(<span class="s">"/orders/42"</span>);             <span class="c">// entry point</span>
+
+<span class="kw">while</span> (order._templates?.pay) {              <span class="c">// is "pay" offered?</span>
+  <span class="kw">const</span> t = order._templates.pay;
+  order = <span class="kw">await</span> invoke(t.method, t.target, {  <span class="c">// follow it</span>
+    card: <span class="s">"4242..."</span>, cvc: <span class="s">"123"</span>
+  });
+}
+<span class="c">// now order.status === "paid", and pay is gone from _templates</span></pre>
+
+      <h3>In zigttp this is a first-class primitive</h3>
+      <p>
+        zigttp's <code class="inline">follow(resource, rel, init?)</code> from
+        <code class="inline">zigttp:workflow</code> resolves an affordance by its
+        relation and dispatches to the proven route, so an orchestrator advances
+        the workflow by naming relations, never paths:
+      </p>
+      <pre><span class="kw">import</span> { follow } <span class="kw">from</span> <span class="s">"zigttp:workflow"</span>;
+
+<span class="kw">function</span> handler(req) {
+  <span class="kw">const</span> order = getOrder(<span class="n">42</span>);          <span class="c">// { status: "pending", ... }</span>
+  <span class="kw">const</span> paid = follow(order, <span class="s">"pay"</span>, {     <span class="c">// follow the "pay" affordance</span>
+    body: JSON.stringify({ card: <span class="s">"4242..."</span> })
+  });
+  <span class="kw">return</span> follow(paid, <span class="s">"ship"</span>);          <span class="c">// then the "ship" affordance it now exposes</span>
+}</pre>
+
+      <h2>5. zigttp's twist: one declaration, two renderings, proven</h2>
+      <p>
+        The example above is the manual JSON. In zigttp you don't hand-write
+        <code class="inline">_links</code>/<code class="inline">_templates</code>.
+        You declare the affordance set once with the
+        <code class="inline">resource()</code> global, and the runtime renders it
+        for whoever asked:
+      </p>
+      <pre><span class="kw">function</span> handler(req: Request): Response {
+  <span class="kw">const</span> order = { id: <span class="n">42</span>, total: <span class="n">1999</span>, status: <span class="s">"pending"</span> };
+
+  <span class="kw">return</span> resource(order, {
+    self:   { href: <span class="s">"/orders/42"</span> },
+    pay:    { href: <span class="s">"/orders/42/pay"</span>, method: <span class="s">"POST"</span>, title: <span class="s">"Pay now"</span>,
+              target: <span class="s">"#order"</span>, swap: <span class="s">"outerHTML"</span> },
+    cancel: { href: <span class="s">"/orders/42"</span>, method: <span class="s">"DELETE"</span>, title: <span class="s">"Cancel"</span> },
+  });
+}</pre>
+      <div class="grid2">
+        <div class="card">
+          <span class="tag links">Accept: application/hal+json</span>
+          <p style="margin: 12px 0 0; font-size: 15px; color: var(--muted)">
+            A service gets the HAL document: data, plus
+            <code class="inline">_links</code> for the GET/no-method affordances
+            and <code class="inline">_templates</code> for the write ones
+            (<code class="inline">fields</code> become
+            <code class="inline">properties</code>).
+          </p>
+        </div>
+        <div class="card">
+          <span class="tag tmpl">Accept: text/html</span>
+          <p style="margin: 12px 0 0; font-size: 15px; color: var(--muted)">
+            A browser gets an HTMX fragment from the <em>same</em> affordances:
+            <code class="inline">&lt;a&gt;</code> for navigation,
+            <code class="inline">&lt;button hx-post&gt;</code>/<code class="inline">hx-delete</code>
+            carrying <code class="inline">hx-target</code>/<code class="inline">hx-swap</code>.
+          </p>
+        </div>
+      </div>
+      <p>
+        Two more things zigttp adds on top of plain HAL:
+      </p>
+      <ul class="clean">
+        <li><strong>One source of truth.</strong> The same affordance set drives HAL for machines and HTMX controls for humans, so the two can never drift apart.</li>
+        <li><strong>Affordances are proven at compile time.</strong> The contract extractor records every emitted affordance, and the system linker checks each one resolves to a real route. A <code class="inline">follow(order, "ship")</code> that points at a relation no handler serves is a <em>build failure</em>, not a 404 in production.</li>
+      </ul>
+
+      <div class="callout">
+        The shape to remember: <strong>data + the next legal moves, every
+        time</strong>. HAL is how you write the moves down; HATEOAS is letting
+        them drive the workflow; zigttp's <code class="inline">resource()</code>
+        lets you declare them once and have the compiler prove they connect.
+      </div>
+
+      <div class="footer">
+        Interactive demo and code are illustrative. zigttp API per
+        <code class="inline">examples/hypermedia/order.ts</code> and the
+        Hypermedia Resources / Workflow Orchestration sections of the user guide.
+      </div>
+    </div>
+
+    <script>
+      // ---- The "server": one affordance set per state = single source of truth.
+      // Each write affordance carries `to` (the next state). The HAL the client
+      // sees is DERIVED from this; the client has zero hardcoded rules.
+      var ORDER = { id: 42, total: 1999, currency: "USD" };
+
+      var STATES = {
+        pending: {
+          self: { href: "/orders/42" },
+          customer: { href: "/customers/7", title: "Customer" },
+          pay: { href: "/orders/42/pay", method: "POST", title: "Pay now", fields: ["card", "cvc"], to: "paid" },
+          cancel: { href: "/orders/42", method: "DELETE", title: "Cancel order", to: "cancelled" }
+        },
+        paid: {
+          self: { href: "/orders/42" },
+          receipt: { href: "/orders/42/receipt", title: "View receipt" },
+          ship: { href: "/orders/42/ship", method: "POST", title: "Ship it", to: "shipped" },
+          refund: { href: "/orders/42/refund", method: "POST", title: "Refund", to: "cancelled" }
+        },
+        shipped: {
+          self: { href: "/orders/42" },
+          tracking: { href: "/orders/42/tracking", title: "Track package" },
+          deliver: { href: "/orders/42/deliver", method: "POST", title: "Mark delivered", to: "delivered" }
+        },
+        delivered: {
+          self: { href: "/orders/42" },
+          tracking: { href: "/orders/42/tracking", title: "Track package" },
+          reorder: { href: "/orders", method: "POST", title: "Order again", to: "pending" }
+        },
+        cancelled: {
+          self: { href: "/orders/42" }
+        }
+      };
+
+      var state = "pending";
+
+      function isWrite(aff) {
+        var m = (aff.method || "GET").toUpperCase();
+        return m !== "GET" && m !== "HEAD";
+      }
+
+      // Derive the HAL document the same way zigttp's resource() does:
+      // GET/no-method -> _links ; write methods -> _templates.
+      function toHal(stateName) {
+        var affs = STATES[stateName];
+        var doc = { id: ORDER.id, total: ORDER.total, status: stateName };
+        var links = {};
+        var templates = {};
+        Object.keys(affs).forEach(function (rel) {
+          var a = affs[rel];
+          if (isWrite(a)) {
+            var t = { method: a.method.toUpperCase(), target: a.href, title: a.title };
+            if (a.fields) t.properties = a.fields.map(function (f) { return { name: f }; });
+            templates[rel] = t;
+          } else {
+            var l = { href: a.href };
+            if (a.title) l.title = a.title;
+            links[rel] = l;
+          }
+        });
+        doc._links = links;
+        if (Object.keys(templates).length) doc._templates = templates;
+        return doc;
+      }
+
+      // Syntax-highlight a HAL JSON document.
+      function highlight(obj) {
+        var json = JSON.stringify(obj, null, 2);
+        return json
+          .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+          .replace(/"(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?/g, function (m, _g, colon) {
+            var cls = m.slice(-1) === ":" || /:\s*$/.test(m) ? "k" : "s";
+            return '<span class="' + (colon ? "k" : "s") + '">' + m + "</span>";
+          })
+          .replace(/\b(\d+)\b/g, '<span class="n">$1</span>');
+      }
+
+      var dataEl = document.getElementById("orderData");
+      var affEl = document.getElementById("affordances");
+      var halEl = document.getElementById("halOut");
+      var chip = document.getElementById("stateChip");
+      var logEl = document.getElementById("log");
+
+      function money(cents, cur) {
+        return (cents / 100).toLocaleString("en-US", { style: "currency", currency: cur });
+      }
+
+      function render() {
+        var affs = STATES[state];
+        var hal = toHal(state);
+
+        chip.textContent = state;
+
+        // data block (the scalar fields, like zigttp's <dl>)
+        dataEl.innerHTML =
+          '<dt>order</dt><dd>#' + ORDER.id + "</dd>" +
+          "<dt>total</dt><dd>" + money(ORDER.total, ORDER.currency) + "</dd>" +
+          '<dt>status</dt><dd class="status-' + state + '">' + state + "</dd>";
+
+        // affordances -> buttons (navigation vs write vs destructive)
+        affEl.innerHTML = "";
+        var actionable = Object.keys(affs).filter(function (r) { return r !== "self"; });
+        if (actionable.length === 0) {
+          var none = document.createElement("div");
+          none.className = "aff-empty";
+          none.textContent = "No further actions. This is a terminal state (only self remains).";
+          affEl.appendChild(none);
+        }
+        actionable.forEach(function (rel) {
+          var a = affs[rel];
+          var write = isWrite(a);
+          var danger = rel === "cancel" || rel === "refund";
+          var btn = document.createElement("button");
+          btn.className = "aff " + (danger ? "danger" : write ? "write" : "nav");
+          var verb = write ? a.method.toUpperCase() : "GET";
+          btn.innerHTML =
+            "<span>" + (a.title || rel) + "</span>" +
+            '<span class="rel">' + verb + " &middot; " + rel + "</span>";
+          btn.addEventListener("click", function () { act(rel); });
+          affEl.appendChild(btn);
+        });
+
+        halEl.innerHTML = highlight(hal);
+      }
+
+      function act(rel) {
+        var a = STATES[state][rel];
+        if (a.to) {
+          // a write action: the server transitions, then the client re-fetches self
+          var verb = a.method.toUpperCase();
+          logEl.innerHTML =
+            '<span class="req">' + verb + " " + a.href + ' &rarr; 200</span>. ' +
+            "Server moved " + state + " &rarr; " + a.to +
+            '. Client re-fetches self &rarr; new affordances.';
+          state = a.to;
+        } else {
+          // a navigation link: just following a GET, no state change
+          logEl.innerHTML =
+            '<span class="nav">GET ' + a.href + " &rarr; 200</span>. " +
+            'Navigation link ("' + rel + '"). No state change; the workflow stays at ' + state + ".";
+        }
+        render();
+      }
+
+      document.getElementById("resetBtn").addEventListener("click", function () {
+        state = "pending";
+        logEl.innerHTML = "GET /orders/42 &rarr; 200. Back to the entry point.";
+        render();
+      });
+
+      render();
+    </script>
+  </body>
+</html>
