@@ -120,6 +120,8 @@ zigttp restrictions [--json] [--by proof|class]
 zigttp meta [--json]
 zigttp describe-rule [name|code] [--json] [--hash]
 zigttp search <keyword> [--json]
+zigttp spec-check [--json]
+zigttp spec-hash [--json]
 zigttp verify-paths <file>... [--json]
 zigttp verify-modules <file>... [--strict] [--json]
 zigttp verify-modules --builtins --strict --json
@@ -129,7 +131,7 @@ zigttp extension-status --module-manifest <path>... [--json]
 
 Use JSON mode for IDEs, CI, and review-bot integrations.
 
-Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove` and `prove-behavior` return 0 (safe), 1 (breaking), or 2 (usage or error).
+Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove` and `prove-behavior` return 0 (safe), 1 (breaking), or 2 (usage or error). `spec-check` validates the semantics registry against the IR/bytecode tables and returns 0 (conform), 1 (divergence, with a `ZTS75x` counterexample), or 2 (error); `spec-hash` prints the registry hash for CI assertions, the way `describe-rule --hash` prints the policy hash.
 
 ## Expert Mode
 
