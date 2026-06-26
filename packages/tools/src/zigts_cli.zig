@@ -28,6 +28,13 @@ const zigts = @import("zigts");
 const zigts_file_io = zigts.file_io;
 const writeContractJson = zigts.handler_contract.writeContractJson;
 
+/// Runtime-injected signer for the `kind=semantics` receipt. The persistent
+/// attest identity lives in the runtime layer, so the developer CLI registers
+/// this before dispatching `spec-check` (see `dev_cli.zig`); the standalone
+/// keyless `zigts` binary leaves it null and emits no receipt. Mirrors
+/// `system_build.receipt_probe` for the workflow/link seam.
+pub var semantics_receipt_probe: ?*const fn (std.mem.Allocator, zigts.semantics_check.Receipt) void = null;
+
 /// Help-grouping for the canonical analyzer surface. `analyze` commands act on
 /// a handler/system; `machine` commands emit JSON metadata for IDE and
 /// review-bot integrations.
@@ -71,6 +78,7 @@ pub const commands = [_]Command{
     .{ .name = "search", .run = search_rules.runWithArgs, .category = .machine, .args = "<keyword>", .blurb = "Search rules by keyword", .usage = "search <keyword> [--json]" },
     .{ .name = "spec-check", .run = runSpecCheckCommand, .category = .machine, .args = "", .blurb = "Check the semantics registry against the IR/bytecode tables", .usage = "spec-check [--json]" },
     .{ .name = "spec-hash", .run = runSpecHashCommand, .category = .machine, .args = "", .blurb = "Print the semantics-registry hash", .usage = "spec-hash" },
+    .{ .name = "spec-render", .run = runSpecRenderCommand, .category = .machine, .args = "", .blurb = "Render the semantics registry as a readable TypeScript spec", .usage = "spec-render [--out path] [--check path]" },
     .{ .name = "verify-paths", .run = expert.runVerifyPaths, .category = .machine, .args = "<file>...", .blurb = "Behavior-path verification", .usage = "verify-paths <file>... [--json]" },
     .{ .name = "verify-modules", .run = expert.runVerifyModules, .category = .machine, .args = "<file>...", .blurb = "Module-contract verification", .usage = "verify-modules <file>... [--strict] [--json] | --builtins" },
     .{ .name = "verify-module-manifest", .run = expert.runVerifyModuleManifest, .category = .machine, .args = "<manifest.json>", .blurb = "Verify a module manifest", .usage = "verify-module-manifest <manifest.json> [--json]" },
@@ -426,6 +434,57 @@ fn runSpecHashCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     }
 }
 
+fn runSpecRenderCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
+    var out_path: ?[]const u8 = null;
+    var check_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--out")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgument;
+            out_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--check")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgument;
+            check_path = argv[i];
+        } else if (isHelpToken(arg)) {} else {
+            return error.InvalidArgument;
+        }
+    }
+
+    const allocator = std.heap.smp_allocator;
+    const rendered = try zigts.semantics_render.renderSpecTs(allocator);
+    defer allocator.free(rendered);
+
+    if (check_path) |path| {
+        // Drift gate: the committed artifact must match the current registry.
+        const existing = zigts_file_io.readFile(allocator, path, 1 << 20) catch {
+            const msg = "spec-render --check: cannot read the spec artifact\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
+            std.process.exit(2);
+        };
+        defer allocator.free(existing);
+        if (!std.mem.eql(u8, existing, rendered)) {
+            const msg = "spec-render --check: the committed spec is stale; run `zigts spec-render --out <path>`\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
+            std.process.exit(1);
+        }
+        const ok = "spec-render --check: spec is in sync\n";
+        _ = std.c.write(std.c.STDOUT_FILENO, ok, ok.len);
+        return;
+    }
+
+    if (out_path) |path| {
+        try zigts_file_io.writeFile(allocator, path, rendered);
+        return;
+    }
+
+    if (rendered.len > 0) {
+        _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+    }
+}
+
 fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
     try buf.append(allocator, '"');
     for (s) |c| {
@@ -459,22 +518,40 @@ fn runSpecCheckCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     };
     defer result.deinit();
 
+    // Mechanism 4: the differential corpus runs the registry's denotations
+    // against the real compiler's output.
+    var corpus = zigts.semantics_corpus.runCorpus(allocator) catch {
+        const msg = "spec-check: corpus internal error\n";
+        _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
+        std.process.exit(2);
+    };
+    defer corpus.deinit();
+
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     if (json_mode) {
-        try writeSpecCheckJson(allocator, &buf, &result);
+        try writeSpecCheckJson(allocator, &buf, &result, &corpus);
     } else {
-        try writeSpecCheckText(allocator, &buf, &result);
+        try writeSpecCheckText(allocator, &buf, &result, &corpus);
     }
     if (buf.items.len > 0) {
         _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
     }
 
+    // Emit a signed kind=semantics receipt when the runtime injected the persistent
+    // signer. Only on a clean pass - a failing registry should not be attested.
+    if (result.ok() and corpus.ok()) {
+        if (semantics_receipt_probe) |probe| {
+            const receipt = zigts.semantics_check.buildReceipt(&result, @intCast(corpus.cases_passed), @intCast(corpus.cases_total));
+            probe(allocator, receipt);
+        }
+    }
+
     // exit 0 conform, 1 divergence (2 for internal error handled above).
-    if (!result.ok()) std.process.exit(1);
+    if (!result.ok() or !corpus.ok()) std.process.exit(1);
 }
 
-fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: *const zigts.semantics_check.CheckResult) !void {
+fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: *const zigts.semantics_check.CheckResult, corpus: *const zigts.semantics_corpus.CorpusResult) !void {
     const cov = zigts.semantics.coverage();
     const sh = zigts.semantics.semanticsHash();
     try appendFmt(allocator, buf, "zigts semantics spec-check\n", .{});
@@ -485,17 +562,21 @@ fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: 
     try appendFmt(allocator, buf, "  refinements:       {d}\n", .{r.refinements_proven});
     try appendFmt(allocator, buf, "  structural-only:   {d}\n", .{r.nodes_structural});
     try appendFmt(allocator, buf, "  stack-effect:      {d} checks\n", .{r.stack_effect_checked});
-    if (r.ok()) {
+    try appendFmt(allocator, buf, "  differential:      {d}/{d} cases vs real codegen\n", .{ corpus.cases_passed, corpus.cases_total });
+    if (r.ok() and corpus.ok()) {
         try appendFmt(allocator, buf, "  result:            PASS\n", .{});
     } else {
-        try appendFmt(allocator, buf, "  result:            FAIL ({d} divergence)\n", .{r.failures.items.len});
+        try appendFmt(allocator, buf, "  result:            FAIL ({d} divergence)\n", .{r.failures.items.len + corpus.failures.items.len});
         for (r.failures.items) |f| {
             try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ f.code.code(), f.where, f.message });
+        }
+        for (corpus.failures.items) |f| {
+            try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ zigts.semantics.SpecCode.lowering_divergence.code(), f.where, f.message });
         }
     }
 }
 
-fn writeSpecCheckJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: *const zigts.semantics_check.CheckResult) !void {
+fn writeSpecCheckJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: *const zigts.semantics_check.CheckResult, corpus: *const zigts.semantics_corpus.CorpusResult) !void {
     const cov = zigts.semantics.coverage();
     const sh = zigts.semantics.semanticsHash();
     const ir_h = zigts.semantics.irTableHash();
@@ -503,10 +584,20 @@ fn writeSpecCheckJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: 
     try appendFmt(allocator, buf, "{{\"semanticsHash\":\"{s}\",\"irTableHash\":\"{s}\",\"opcodeTableHash\":\"{s}\",", .{ sh, ir_h, op_h });
     try appendFmt(allocator, buf, "\"nodes\":{{\"specified\":{d},\"total\":{d}}},\"opcodes\":{{\"specified\":{d},\"total\":{d}}},", .{ cov.nodes_specified, cov.nodes_total, cov.opcodes_specified, cov.opcodes_total });
     try appendFmt(allocator, buf, "\"valueProofs\":{d},\"binopInstances\":{d},\"unopInstances\":{d},\"refinements\":{d},\"structural\":{d},\"stackEffectChecks\":{d},", .{ r.nodes_proven, r.binop_instances, r.unop_instances, r.refinements_proven, r.nodes_structural, r.stack_effect_checked });
-    try appendFmt(allocator, buf, "\"ok\":{s},\"failures\":[", .{if (r.ok()) "true" else "false"});
-    for (r.failures.items, 0..) |f, i| {
-        if (i != 0) try buf.append(allocator, ',');
+    try appendFmt(allocator, buf, "\"differential\":{{\"passed\":{d},\"total\":{d}}},", .{ corpus.cases_passed, corpus.cases_total });
+    try appendFmt(allocator, buf, "\"ok\":{s},\"failures\":[", .{if (r.ok() and corpus.ok()) "true" else "false"});
+    var first = true;
+    for (r.failures.items) |f| {
+        if (!first) try buf.append(allocator, ',');
+        first = false;
         try appendFmt(allocator, buf, "{{\"code\":\"{s}\",\"where\":\"{s}\",\"message\":", .{ f.code.code(), f.where });
+        try appendJsonString(allocator, buf, f.message);
+        try buf.append(allocator, '}');
+    }
+    for (corpus.failures.items) |f| {
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try appendFmt(allocator, buf, "{{\"code\":\"{s}\",\"where\":\"{s}\",\"message\":", .{ zigts.semantics.SpecCode.lowering_divergence.code(), f.where });
         try appendJsonString(allocator, buf, f.message);
         try buf.append(allocator, '}');
     }

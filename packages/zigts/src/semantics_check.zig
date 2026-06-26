@@ -12,12 +12,15 @@
 //!   3. Symbolic lowering - exec(lower(node)) must equal denote(node), proven by
 //!                         structural equality of RPN denotations. Includes the
 //!                         refinement check (a fused opcode equals its base sequence).
-//!   4. Differential      - DEFERRED for this slice (needs spec/eval.ts + a corpus
-//!                         harness); the symbolic proof already gives the strong tie.
+//!   4. Differential      - the registry's denotations run against the REAL
+//!                         compiler on a corpus (semantics_corpus.zig). Closes
+//!                         the gap mechanism 3 cannot see: that the declared
+//!                         lowering matches what codegen actually emits.
 //!
-//! The signed `kind=semantics` receipt's sign/verify round-trip is proven here with
-//! an ephemeral key. Wiring the persistent attest key (runtime-only, injected like
-//! the workflow/link receipts) and extending `zigttp verify` is the deferred step.
+//! The signed `kind=semantics` receipt (sign/verify round-trip proven here with an
+//! ephemeral key) is emitted under the persistent attest identity by the runtime
+//! probe `semantics_probe_lib.zig`, injected like the workflow/link receipts; the
+//! keyless `zigts` binary prints the unsigned hash only.
 
 const std = @import("std");
 const semantics = @import("semantics.zig");
@@ -343,10 +346,15 @@ pub const Receipt = struct {
     binop_instances: u32,
     unop_instances: u32,
     refinements_proven: u32,
+    // Mechanism 4 (differential corpus vs the real compiler). The counts are
+    // supplied by the caller, which owns both the check and the corpus results -
+    // this module stays free of the engine-dependent corpus.
+    differential_passed: u32,
+    differential_total: u32,
     failures: u32,
 };
 
-pub fn buildReceipt(result: *const CheckResult) Receipt {
+pub fn buildReceipt(result: *const CheckResult, differential_passed: u32, differential_total: u32) Receipt {
     const cov = semantics.coverage();
     return .{
         .semantics_hash = semantics.semanticsHash(),
@@ -359,6 +367,8 @@ pub fn buildReceipt(result: *const CheckResult) Receipt {
         .binop_instances = @intCast(result.binop_instances),
         .unop_instances = @intCast(result.unop_instances),
         .refinements_proven = @intCast(result.refinements_proven),
+        .differential_passed = differential_passed,
+        .differential_total = differential_total,
         .failures = @intCast(result.failures.items.len),
     };
 }
@@ -366,12 +376,13 @@ pub fn buildReceipt(result: *const CheckResult) Receipt {
 fn payloadString(allocator: std.mem.Allocator, r: Receipt) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "zigttp-semantics-v1\n{s}\n{s}\n{s}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}",
+        "zigttp-semantics-v2\n{s}\n{s}\n{s}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}",
         .{
-            r.semantics_hash,     r.ir_table_hash,   r.opcode_table_hash,
-            r.nodes_proven,       r.nodes_total,     r.opcodes_specified,
-            r.opcodes_total,      r.binop_instances, r.unop_instances,
-            r.refinements_proven, r.failures,
+            r.semantics_hash,     r.ir_table_hash,       r.opcode_table_hash,
+            r.nodes_proven,       r.nodes_total,         r.opcodes_specified,
+            r.opcodes_total,      r.binop_instances,     r.unop_instances,
+            r.refinements_proven, r.differential_passed, r.differential_total,
+            r.failures,
         },
     );
 }
@@ -505,7 +516,7 @@ test "receipt sign and verify round-trip" {
     var result = try runCheck(allocator);
     defer result.deinit();
 
-    const receipt = buildReceipt(&result);
+    const receipt = buildReceipt(&result, 10, 10);
 
     const seed = [_]u8{7} ** 32;
     const kp = try Ed25519.KeyPair.generateDeterministic(seed);

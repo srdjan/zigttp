@@ -73,7 +73,7 @@ pub const Compiler = struct {
         return .{
             .allocator = allocator,
             .shared_intern_pool = null,
-            .results = .{},
+            .results = .empty,
             .max_threads = thread_count,
         };
     }

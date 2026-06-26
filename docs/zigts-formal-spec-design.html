@@ -444,12 +444,12 @@
       <h2><span class="num">07</span>CLI surface</h2>
       <p>Thin delegations into the same code path the other machine tools use &mdash; reachable as both <code class="inline">zigts</code> and <code class="inline">zigttp</code>.</p>
       <table class="cli">
-        <tr><td class="cmd">zigts spec [--json]</td><td>Render <code class="inline">spec.ts</code> (literate) and <code class="inline">spec.json</code> from the registry.</td></tr>
-        <tr><td class="cmd">zigts spec-check</td><td>Run all four mechanisms; emit the signed receipt. Exit <b>0</b> conform / <b>1</b> divergence (with a <code class="inline">ZTS7xx</code> counterexample) / <b>2</b> error.</td></tr>
-        <tr><td class="cmd">zigts spec-hash</td><td>Print <code class="inline">semanticsHash</code> for CI assertions (mirrors <code class="inline">describe-rule --hash</code>).</td></tr>
-        <tr><td class="cmd">zigttp verify &lt;receipt&gt;</td><td>Extended to validate a <code class="inline">kind=semantics</code> receipt from a third-party machine.</td></tr>
+        <tr><td class="cmd">zigts spec-render [--out p] [--check p]</td><td>Render the literate <code class="inline">spec.ts</code> from the registry; <code class="inline">--check</code> is the CI drift gate against the committed <code class="inline">docs/spec/semantics.spec.ts</code>.</td></tr>
+        <tr><td class="cmd">zigts spec-check [--json]</td><td>Run all four mechanisms (drift gate, stack-effect, symbolic lowering, differential corpus). Exit <b>0</b> conform / <b>1</b> divergence (with a <code class="inline">ZTS75x</code> counterexample) / <b>2</b> error.</td></tr>
+        <tr><td class="cmd">zigttp spec-check</td><td>Same checks, plus emits the persistent-key-signed <code class="inline">kind=semantics</code> receipt to <code class="inline">.zigttp/semantics-receipt.jws</code> (keyless <code class="inline">zigts</code> emits none).</td></tr>
+        <tr><td class="cmd">zigts spec-hash [--json]</td><td>Print <code class="inline">semanticsHash</code> for CI assertions (mirrors <code class="inline">describe-rule --hash</code>).</td></tr>
       </table>
-      <p class="foot">New diagnostic family <code class="inline">ZTS7xx</code>: uncovered node, unbalanced lowering, lowering-divergence counterexample, differential mismatch.</p>
+      <p class="foot">Diagnostic family <code class="inline">ZTS75x</code>: uncovered node/opcode, unbalanced lowering, lowering-divergence counterexample, refinement divergence. A third-party <em>file</em> verifier (<code class="inline">zigttp verify &lt;receipt&gt;</code>) is a still-to-add convenience; the receipt already verifies against the published attest JWK.</p>
 
       <!-- ============================================================ -->
       <h2><span class="num">08</span>Files</h2>

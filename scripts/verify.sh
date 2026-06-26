@@ -66,6 +66,14 @@ if [ "$ACTUAL" != "$EXPECTED" ]; then
 fi
 echo "policy hash OK: $ACTUAL"
 
+step "semantics spec gate  (spec-check all mechanisms + spec.ts drift)"
+# spec-check exits non-zero on any divergence, including the differential corpus
+# (mechanism 4) running the registry against the real compiler.
+./zig-out/bin/zigts spec-check >/dev/null
+# The committed readable spec must match the registry it is generated from.
+./zig-out/bin/zigts spec-render --check docs/spec/semantics.spec.ts
+echo "semantics spec gate OK"
+
 step "verify expert subsystem  (ci.yml: Verify expert subsystem)"
 if ! command -v jq >/dev/null 2>&1; then
   echo "error: jq is required for the expert-subsystem check (matches ci.yml)" >&2
