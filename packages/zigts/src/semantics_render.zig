@@ -185,6 +185,15 @@ pub fn renderSpecTs(caller: std.mem.Allocator) ![]u8 {
         try fmt(allocator, w, "// {s}:  ({s})  ==  ({s})\n", .{ @tagName(rf.fused), fe, base });
     }
 
+    // Algebraic laws: structurally-different equivalences the SMT check certifies
+    // (spec-check mechanism 5) but structural equality (mechanism 3) cannot.
+    try fmt(allocator, w, "\n// algebraic laws - SMT-certified value-model equivalences (mechanism 5)\n", .{});
+    for (semantics.algebraic_laws) |law| {
+        const lhs = try renderDenote(allocator, law.lhs);
+        const rhs = try renderDenote(allocator, law.rhs);
+        try fmt(allocator, w, "// {s}:  {s}  ==  {s}\n", .{ law.name, lhs, rhs });
+    }
+
     return caller.dupe(u8, out.items);
 }
 
@@ -244,4 +253,14 @@ test "denotations render as readable infix" {
     // binary_op renders its generic infix form; ternary renders the conditional.
     try std.testing.expect(std.mem.indexOf(u8, ts, "(c0 <op> c1)") != null);
     try std.testing.expect(std.mem.indexOf(u8, ts, "(c0 ? c1 : c2)") != null);
+}
+
+test "rendered spec lists the algebraic laws" {
+    const allocator = std.testing.allocator;
+    const ts = try renderSpecTs(allocator);
+    defer allocator.free(ts);
+    // every declared law name appears in the readable spec.
+    for (semantics.algebraic_laws) |law| {
+        try std.testing.expect(std.mem.indexOf(u8, ts, law.name) != null);
+    }
 }

@@ -27,21 +27,25 @@ const Ed25519 = std.crypto.sign.Ed25519;
 const receipt_dir = ".zigttp";
 const receipt_path = ".zigttp/semantics-receipt.jws";
 
+pub const ReceiptOutput = struct {
+    dir: []const u8,
+    path: []const u8,
+};
+
 /// Probe entry registered from `dev_cli.zig`. Loads the persistent attest
 /// keypair and signs; best-effort, never raises.
 pub fn recordSemanticsReceipt(allocator: std.mem.Allocator, receipt: semantics_check.Receipt) void {
     const signer = identity.loadOrCreate(allocator) catch return;
-    recordWithKeyTo(allocator, receipt, signer.key_pair, receipt_dir, receipt_path) catch return;
+    recordWithKeyAt(allocator, receipt, signer.key_pair, .{ .dir = receipt_dir, .path = receipt_path }) catch return;
 }
 
 /// Key-injected core. Tests pass a deterministic key and an explicit path so the
 /// receipt round-trip can be checked without touching `$HOME` or the cwd.
-pub fn recordWithKeyTo(
+pub fn recordWithKeyAt(
     allocator: std.mem.Allocator,
     receipt: semantics_check.Receipt,
     key_pair: Ed25519.KeyPair,
-    dir: []const u8,
-    path: []const u8,
+    output: ReceiptOutput,
 ) !void {
     const compact = try semantics_check.sign(allocator, receipt, key_pair);
     defer allocator.free(compact);
@@ -51,11 +55,22 @@ pub fn recordWithKeyTo(
         return error.SelfVerifyFailed;
     }
 
-    try mkdirIfAbsent(allocator, dir);
-    try precompile.writeFilePosix(path, compact, allocator);
-    std.debug.print("Wrote {s} (kind=semantics, hash={s}, differential={d}/{d})\n", .{
-        path, receipt.semantics_hash, receipt.differential_passed, receipt.differential_total,
+    try mkdirIfAbsent(allocator, output.dir);
+    try precompile.writeFilePosix(output.path, compact, allocator);
+    std.debug.print("Wrote {s} (kind=semantics, hash={s}, differential={d}/{d}, smt={d}/{d})\n", .{
+        output.path,                receipt.semantics_hash, receipt.differential_passed,
+        receipt.differential_total, receipt.smt_proved,     receipt.smt_total,
     });
+}
+
+pub fn recordWithKeyTo(
+    allocator: std.mem.Allocator,
+    receipt: semantics_check.Receipt,
+    key_pair: Ed25519.KeyPair,
+    dir: []const u8,
+    path: []const u8,
+) !void {
+    try recordWithKeyAt(allocator, receipt, key_pair, .{ .dir = dir, .path = path });
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +82,7 @@ test "recorded semantics receipt round-trips under a deterministic key" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(dir);
     const path = try std.fs.path.join(allocator, &.{ dir, "semantics-receipt.jws" });
     defer allocator.free(path);
@@ -85,13 +100,16 @@ test "recorded semantics receipt round-trips under a deterministic key" {
         .refinements_proven = 1,
         .differential_passed = 10,
         .differential_total = 10,
+        .smt_available = 1,
+        .smt_proved = 5,
+        .smt_total = 5,
         .failures = 0,
     };
 
     const seed = [_]u8{42} ** 32;
     const kp = try Ed25519.KeyPair.generateDeterministic(seed);
 
-    try recordWithKeyTo(allocator, receipt, kp, dir, path);
+    try recordWithKeyAt(allocator, receipt, kp, .{ .dir = dir, .path = path });
 
     // Read the persisted JWS back and verify it against the same public key.
     const written = try std.fs.cwd().readFileAlloc(allocator, path, 1 << 16);

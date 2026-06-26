@@ -68,7 +68,10 @@ echo "policy hash OK: $ACTUAL"
 
 step "semantics spec gate  (spec-check all mechanisms + spec.ts drift)"
 # spec-check exits non-zero on any divergence, including the differential corpus
-# (mechanism 4) running the registry against the real compiler.
+# (mechanism 4) running the registry against the real compiler and the SMT
+# equivalence check (mechanism 5). Mechanism 5 needs the z3 binary; where it is
+# absent the SMT obligations are skipped and the structural mechanisms still gate
+# (so CI without z3 stays green). Install z3 (or set ZIGTTP_Z3) to enforce it.
 ./zig-out/bin/zigts spec-check >/dev/null
 # The committed readable spec must match the registry it is generated from.
 ./zig-out/bin/zigts spec-render --check docs/spec/semantics.spec.ts

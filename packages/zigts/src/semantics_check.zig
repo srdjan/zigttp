@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const semantics = @import("semantics.zig");
+const semantics_smt = @import("semantics_smt.zig");
 const bytecode = @import("bytecode.zig");
 
 const Term = semantics.Term;
@@ -278,6 +279,137 @@ pub fn proveRefinement(scratch: std.mem.Allocator, fused_effect: []const Step, b
 }
 
 // ---------------------------------------------------------------------------
+// Mechanism 5: SMT equivalence (the northstar's Alive2-style refinement check).
+//
+// Mechanism 3 proves exec(lower) == denote by *structural* RPN equality, which
+// can only admit a lowering syntactically identical to the denotation. Mechanism
+// 5 lifts the SAME registry data to a semantic check: it asks an SMT solver
+// whether the two sides agree on ALL inputs, so it admits structurally-different
+// but semantically-equal obligations - the refinements and algebraic laws that
+// mechanism 3 cannot. The pure encoder lives in semantics_smt.zig; the solver is
+// injected (the native CLI spawns z3) so std.process.Child never enters this
+// (wasm-reachable) module. When no solver is injected the check is skipped and
+// mechanism 3's structural guarantee stands - so spec-check still works with no
+// z3 (CI, the wasm build, these tests).
+//
+// Outcome policy (each obligation maps to exactly one):
+//   - `equivalent`     -> proved.
+//   - `counterexample` -> FATAL: the law/refinement is false in the value model
+//                         (ZTS755). This is the only positive evidence of a bug.
+//   - `unknown`        -> UNPROVEN, non-fatal. The solver could not decide or
+//                         could not run (missing/broken mid-run, undecidable
+//                         fragment, unwritable scratch dir). That is not evidence
+//                         the law is false - it is the same situation as "no z3
+//                         installed", so it is reported but does not fail the
+//                         build. The receipt records proved < total honestly.
+//   - encode error     -> FATAL: an ill-typed / malformed obligation is a spec
+//                         authoring bug, distinct from a counterexample (ZTS756).
+// Only `counterexample` and encode errors are failures; unknown is unproven.
+// ---------------------------------------------------------------------------
+
+pub const SmtObligation = struct {
+    where: []const u8,
+    lhs: []const Term,
+    rhs: []const Term,
+};
+
+const ObligationError = error{ MalformedRefinement, OutOfMemory };
+
+/// The equivalence obligations whose two sides may differ structurally: each
+/// refinement (exec(fused) vs exec(base)) and each declared algebraic law.
+pub fn collectSmtObligations(arena: std.mem.Allocator) ObligationError![]SmtObligation {
+    var list: std.ArrayList(SmtObligation) = .empty;
+    const seed = [_]Step{.{ .eval_child = 0 }};
+    for (semantics.refinements) |rf| {
+        const fused_full = try std.mem.concat(arena, Step, &.{ &seed, rf.fused_effect });
+        const base_full = try std.mem.concat(arena, Step, &.{ &seed, rf.base });
+        const f = (try execStraight(arena, fused_full)) orelse return error.MalformedRefinement;
+        const b = (try execStraight(arena, base_full)) orelse return error.MalformedRefinement;
+        try list.append(arena, .{ .where = @tagName(rf.fused), .lhs = f, .rhs = b });
+    }
+    for (semantics.algebraic_laws) |law| {
+        try list.append(arena, .{ .where = law.name, .lhs = law.lhs, .rhs = law.rhs });
+    }
+    return list.items;
+}
+
+/// A solver call: encode-then-decide. Injected by the native CLI; returns a
+/// total verdict (the wrapper maps any solver/spawn/IO error to `.unknown`).
+pub const SolveFn = *const fn (query: []const u8, alloc: std.mem.Allocator) semantics_smt.Verdict;
+
+pub const SmtResult = struct {
+    arena: std.heap.ArenaAllocator,
+    available: bool = false,
+    proved: usize = 0,
+    /// Obligations the solver could neither prove nor refute (undecided, or the
+    /// solver could not run). Non-fatal: reported, not a failure.
+    unproven: usize = 0,
+    total: usize = 0,
+    failures: std.ArrayList(Counterexample) = .empty,
+
+    /// A failure is a genuine counterexample (ZTS755) or an unencodable
+    /// obligation (ZTS756). `unproven` is NOT a failure.
+    pub fn ok(self: *const SmtResult) bool {
+        return self.failures.items.len == 0;
+    }
+    pub fn deinit(self: *SmtResult) void {
+        self.arena.deinit();
+    }
+};
+
+/// Run mechanism 5 over every obligation. `solve == null` => skipped (no z3).
+pub fn runSmt(allocator: std.mem.Allocator, solve: ?SolveFn) !SmtResult {
+    var result = SmtResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    errdefer result.deinit();
+
+    var scratch_arena = std.heap.ArenaAllocator.init(allocator);
+    defer scratch_arena.deinit();
+    const scratch = scratch_arena.allocator();
+
+    const obligations = try collectSmtObligations(scratch);
+    result.total = obligations.len;
+
+    const solver = solve orelse return result; // available stays false: skipped.
+    result.available = true;
+
+    try proveSmtObligations(&result, scratch, obligations, solver);
+    return result;
+}
+
+fn proveSmtObligations(
+    result: *SmtResult,
+    scratch: std.mem.Allocator,
+    obligations: []const SmtObligation,
+    solver: SolveFn,
+) !void {
+    const a = result.arena.allocator();
+    for (obligations) |ob| {
+        const query = semantics_smt.encodeEquivalence(scratch, ob.lhs, ob.rhs, false) catch {
+            // An ill-typed / malformed obligation is a spec-authoring bug, not a
+            // value-equivalence counterexample. Fail loud under its own code.
+            try result.failures.append(a, .{
+                .code = .smt_unencodable,
+                .where = try a.dupe(u8, ob.where),
+                .message = try a.dupe(u8, "obligation could not be encoded for SMT (ill-typed or malformed law)"),
+            });
+            continue;
+        };
+        switch (solver(query, scratch)) {
+            .equivalent => result.proved += 1,
+            .counterexample => try result.failures.append(a, .{
+                .code = .smt_counterexample,
+                .where = try a.dupe(u8, ob.where),
+                .message = try a.dupe(u8, "SMT found a counterexample: the two sides are not equivalent"),
+            }),
+            // Could not decide or could not run (undecidable fragment, or the
+            // solver was unavailable / errored mid-run). Same situation as no z3:
+            // unproven, reported, not a failure.
+            .unknown => result.unproven += 1,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Driver: a pure interpreter of the registry.
 // ---------------------------------------------------------------------------
 
@@ -351,10 +483,33 @@ pub const Receipt = struct {
     // this module stays free of the engine-dependent corpus.
     differential_passed: u32,
     differential_total: u32,
+    // Mechanism 5 (SMT equivalence). smt_available is 0 when no solver was
+    // injected (the obligations were skipped); the proof rests on mechanisms 1-4.
+    smt_available: u32,
+    smt_proved: u32,
+    smt_total: u32,
     failures: u32,
 };
 
-pub fn buildReceipt(result: *const CheckResult, differential_passed: u32, differential_total: u32) Receipt {
+/// Mechanism-5 summary the caller threads into the receipt (the CLI owns the
+/// injected solver, so this module does not build it).
+pub const SmtSummary = struct {
+    available: bool,
+    proved: u32,
+    total: u32,
+};
+
+pub const DifferentialSummary = struct {
+    passed: u32,
+    total: u32,
+};
+
+pub const ReceiptInput = struct {
+    differential: DifferentialSummary,
+    smt: SmtSummary,
+};
+
+pub fn buildReceiptFromInput(result: *const CheckResult, input: ReceiptInput) Receipt {
     const cov = semantics.coverage();
     return .{
         .semantics_hash = semantics.semanticsHash(),
@@ -367,21 +522,37 @@ pub fn buildReceipt(result: *const CheckResult, differential_passed: u32, differ
         .binop_instances = @intCast(result.binop_instances),
         .unop_instances = @intCast(result.unop_instances),
         .refinements_proven = @intCast(result.refinements_proven),
-        .differential_passed = differential_passed,
-        .differential_total = differential_total,
+        .differential_passed = input.differential.passed,
+        .differential_total = input.differential.total,
+        .smt_available = @intFromBool(input.smt.available),
+        .smt_proved = input.smt.proved,
+        .smt_total = input.smt.total,
         .failures = @intCast(result.failures.items.len),
     };
+}
+
+pub fn buildReceipt(
+    result: *const CheckResult,
+    differential_passed: u32,
+    differential_total: u32,
+    smt: SmtSummary,
+) Receipt {
+    return buildReceiptFromInput(result, .{
+        .differential = .{ .passed = differential_passed, .total = differential_total },
+        .smt = smt,
+    });
 }
 
 fn payloadString(allocator: std.mem.Allocator, r: Receipt) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "zigttp-semantics-v2\n{s}\n{s}\n{s}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}",
+        "zigttp-semantics-v3\n{s}\n{s}\n{s}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}",
         .{
             r.semantics_hash,     r.ir_table_hash,       r.opcode_table_hash,
             r.nodes_proven,       r.nodes_total,         r.opcodes_specified,
             r.opcodes_total,      r.binop_instances,     r.unop_instances,
             r.refinements_proven, r.differential_passed, r.differential_total,
+            r.smt_available,      r.smt_proved,          r.smt_total,
             r.failures,
         },
     );
@@ -516,7 +687,7 @@ test "receipt sign and verify round-trip" {
     var result = try runCheck(allocator);
     defer result.deinit();
 
-    const receipt = buildReceipt(&result, 10, 10);
+    const receipt = buildReceipt(&result, 10, 10, .{ .available = true, .proved = 5, .total = 5 });
 
     const seed = [_]u8{7} ** 32;
     const kp = try Ed25519.KeyPair.generateDeterministic(seed);
@@ -532,6 +703,93 @@ test "receipt sign and verify round-trip" {
     const dot = std.mem.indexOfScalar(u8, tampered, '.').? + 1;
     tampered[dot] = if (tampered[dot] == 'A') 'B' else 'A';
     try std.testing.expect(!try verify(allocator, tampered, kp.public_key));
+}
+
+fn fakeAllEquivalent(_: []const u8, _: std.mem.Allocator) semantics_smt.Verdict {
+    return .equivalent;
+}
+
+fn fakeAllCounterexample(_: []const u8, _: std.mem.Allocator) semantics_smt.Verdict {
+    return .counterexample;
+}
+
+fn fakeAllUnknown(_: []const u8, _: std.mem.Allocator) semantics_smt.Verdict {
+    return .unknown;
+}
+
+test "collectSmtObligations yields the refinements and the algebraic laws" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const obs = try collectSmtObligations(arena.allocator());
+    try std.testing.expectEqual(
+        @as(usize, semantics.refinements.len + semantics.algebraic_laws.len),
+        obs.len,
+    );
+    // each obligation has both sides populated.
+    for (obs) |ob| {
+        try std.testing.expect(ob.lhs.len > 0);
+        try std.testing.expect(ob.rhs.len > 0);
+    }
+}
+
+test "runSmt skips cleanly when no solver is injected" {
+    var r = try runSmt(std.testing.allocator, null);
+    defer r.deinit();
+    try std.testing.expect(!r.available);
+    try std.testing.expect(r.ok()); // skipped is not a failure
+    try std.testing.expect(r.total > 0);
+    try std.testing.expectEqual(@as(usize, 0), r.proved);
+}
+
+test "runSmt with an all-equivalent solver proves every obligation" {
+    var r = try runSmt(std.testing.allocator, fakeAllEquivalent);
+    defer r.deinit();
+    try std.testing.expect(r.available);
+    try std.testing.expect(r.ok());
+    try std.testing.expectEqual(r.total, r.proved);
+}
+
+test "runSmt records a counterexample as a loud failure" {
+    var r = try runSmt(std.testing.allocator, fakeAllCounterexample);
+    defer r.deinit();
+    try std.testing.expect(r.available);
+    try std.testing.expect(!r.ok());
+    try std.testing.expectEqual(r.total, r.failures.items.len);
+    try std.testing.expectEqual(@as(usize, 0), r.unproven);
+    try std.testing.expectEqual(semantics.SpecCode.smt_counterexample, r.failures.items[0].code);
+}
+
+test "runSmt treats solver unknown as unproven, not a failure" {
+    var r = try runSmt(std.testing.allocator, fakeAllUnknown);
+    defer r.deinit();
+    try std.testing.expect(r.available);
+    try std.testing.expect(r.ok()); // unknown is non-fatal
+    try std.testing.expectEqual(r.total, r.unproven);
+    try std.testing.expectEqual(@as(usize, 0), r.proved);
+    try std.testing.expectEqual(@as(usize, 0), r.failures.items.len);
+}
+
+test "runSmt records unencodable obligations as spec authoring failures" {
+    var r = SmtResult{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer r.deinit();
+    r.available = true;
+    r.total = 1;
+
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+
+    const lhs = [_]Term{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .lt } }; // Bool root
+    const rhs = [_]Term{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add } }; // Int root
+    const obligations = [_]SmtObligation{.{ .where = "bad_law", .lhs = &lhs, .rhs = &rhs }};
+
+    try proveSmtObligations(&r, scratch.allocator(), &obligations, fakeAllEquivalent);
+
+    try std.testing.expect(!r.ok());
+    try std.testing.expectEqual(@as(usize, 0), r.proved);
+    try std.testing.expectEqual(@as(usize, 0), r.unproven);
+    try std.testing.expectEqual(@as(usize, 1), r.failures.items.len);
+    try std.testing.expectEqual(semantics.SpecCode.smt_unencodable, r.failures.items[0].code);
+    try std.testing.expectEqualStrings("bad_law", r.failures.items[0].where);
 }
 
 test "verify rejects an over-long signature segment without overflow" {

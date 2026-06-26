@@ -217,7 +217,54 @@
           <code class="inline">eq</code> opcode has no differential case because the restricted language emits
           <code class="inline">strict_eq</code> for <code class="inline">===</code>, and the third-party
           <em>file</em> verifier is a convenience still to add (the receipt is already verifiable with the existing
-          well-known JWK). Phase 2 (the SMT refinement check) is next.
+          well-known JWK). Phase 2 (the SMT refinement check) follows below.
+        </p>
+      </div>
+
+      <div class="edge">
+        <h3>Status &middot; 2026-06-26: Phase 2 (the SMT refinement check) &mdash; first slice shipped</h3>
+        <p>
+          The symbolic executor is no longer the only judge of equivalence. A <b>fifth mechanism</b> in
+          <code class="inline">spec-check</code> lifts the same registry data to a <em>semantic</em> check: it encodes
+          each obligation over the slice's value model and asks <b>Z3</b> whether the two sides agree on <em>all</em>
+          inputs. This is the Alive2 move &mdash; and it admits exactly what structural equality (mechanism 3) cannot:
+          structurally different but semantically equal lowerings.
+        </p>
+        <ul style="margin:0">
+          <li><b>Value model, encoded.</b> A pure, wasm-safe encoder (<code class="inline">semantics_smt.zig</code>)
+            turns an RPN denotation into SMT-LIB2 over native <code class="inline">Int</code>/<code class="inline">Bool</code>
+            sorts with light type inference. (A tagged value datatype was tried first and rejected: it returns spurious
+            <code class="inline">sat</code> on algebraic laws when a free leaf may be a bool, so
+            <code class="inline">getInt</code> of it is unconstrained junk. Native sorts avoid that; the tagged/poison
+            model is deferred to when the heap enters &mdash; see the caveat below.)</li>
+          <li><b>Algebraic laws as spec.</b> The registry declares laws &mdash; add commutativity, neg and not
+            involution &mdash; structurally <em>different</em> on each side, so mechanism 3 cannot see them. Z3 proves
+            all three; they are hashed into <code class="inline">semanticsHash</code> and rendered into the spec.</li>
+          <li><b>The value model is an abstraction, and that boundary is enforced.</b> Numbers are encoded as unbounded
+            mathematical integers (ℤ), which is an abstraction of the engine's actual number type (i32 promoting to f64
+            on overflow). That is sound only for laws insensitive to float rounding, overflow, NaN, and signed zero.
+            Associativity of <code class="inline">+</code> is the canonical law that holds over ℤ but <em>fails</em> on
+            the engine (a child can be a large mul-overflow float, and f64 add is not associative past 2^53), so it is
+            deliberately <b>not</b> asserted &mdash; a soundness review caught it after an earlier draft shipped it as
+            "proven", which is exactly the false-attestation this mechanism must not produce. The boundary is now
+            documented at the law table and the encoder.</li>
+          <li><b>Injected solver, honest outcomes.</b> The driver takes the solver as a function pointer, so
+            <code class="inline">std.process.Child</code> never enters the freestanding/wasm analyzer. Only a genuine
+            counterexample is a failure: <code class="inline">sat</code> &rarr; <code class="inline">ZTS755</code> (the law
+            is false), an ill-typed obligation &rarr; <code class="inline">ZTS756</code> (a spec-authoring bug), and a
+            solver that cannot decide or run (absent, broken mid-run, undecidable, unwritable scratch dir) &rarr;
+            <em>unproven</em>, reported but non-fatal &mdash; the same outcome as no z3, so an environmental failure never
+            masquerades as a value-equivalence counterexample. SMT is also opt-out: <code class="inline">ZIGTTP_Z3=off</code>
+            disables it even where z3 is installed.</li>
+          <li><b>In the receipt.</b> The signed <code class="inline">kind=semantics</code> JWS carries the SMT
+            availability and proved/total counts (payload v3); unproven obligations show up as proved &lt; total.</li>
+        </ul>
+        <p style="margin-bottom:0">
+          What stays honest: this is the <em>slice's</em> value theory (ints, bools, seven operators) over an integer
+          abstraction &mdash; not yet the engine's real f64 (or the heap). "Replace the symbolic executor" (the original
+          Phase 2 wording) became "subsume it, with a structural fallback" so spec-check still works with no solver
+          installed. The SMT check currently covers the refinements and the algebraic laws; a faithful f64/NaN encoding,
+          extending across every per-node lowering, and then the value/heap model, is the rest of Phase 2.
         </p>
       </div>
 
@@ -250,10 +297,12 @@
             Alive2 takes LLVM IR before and after a transform, encodes both into SMT, and asks Z3 whether the output
             <em>refines</em> the input &mdash; same result, no new undefined behavior, for all inputs &mdash; fully automatic,
             no changes to LLVM. It found 47 real bugs in LLVM's own test suite and 21 more in memory optimizations.
-            "Refinement" is exactly the relation behind <code class="inline">get_loc_add &equiv; get_loc; add</code>. The northstar
-            replaces our hand-rolled symbolic executor with an SMT-backed refinement check: encode each IR node's denotation
-            and the opcode sequence codegen actually emitted, and let Z3 discharge
-            <code class="inline">eval(node) &supe; run(lower(node))</code>.
+            "Refinement" is exactly the relation behind <code class="inline">get_loc_add &equiv; get_loc; add</code>.
+            <b>This now runs in <code class="inline">spec-check</code> for the slice's value theory</b> (mechanism 5): the
+            symbolic executor is subsumed by an SMT-backed equivalence check that encodes each obligation over the value
+            model and lets Z3 discharge <code class="inline">eval(node) &supe; run(lower(node))</code> &mdash; and the
+            registry's algebraic laws, which the syntactic check could not. The northstar extends that encoding from the
+            slice's ints-and-bools to the full value/heap model.
           </p>
         </div>
       </div>
@@ -341,7 +390,7 @@
           <tr><td class="rowlbl">Source of truth</td><td class="dim">Zig comptime table; denotations hand-written</td><td class="ns">One declarative semantics DSL</td></tr>
           <tr><td class="rowlbl">Readable <code class="inline">spec.ts</code></td><td class="dim">Rendered from the table (<code class="inline">spec-render</code>, drift-gated)</td><td class="ns">One generated artifact among several</td></tr>
           <tr><td class="rowlbl">Executable reference</td><td class="dim">Differential corpus: registry vs the real compiler (no separate <code class="inline">spec/eval.ts</code> needed at L2)</td><td class="ns">Derived from the DSL (SpecTec-style)</td></tr>
-          <tr><td class="rowlbl">Lowering proof</td><td class="dim">Hand-rolled symbolic executor + differential corpus</td><td class="ns">SMT refinement check; <b>complete</b> on the bounded-by-construction core</td></tr>
+          <tr><td class="rowlbl">Lowering proof</td><td class="dim">Symbolic executor + differential corpus + <b>SMT equivalence on the slice's value theory</b> (Phase 2 slice)</td><td class="ns">SMT refinement check; <b>complete</b> on the bounded-by-construction core, value+heap model</td></tr>
           <tr><td class="rowlbl">Receipt</td><td class="dim">Hash of results, Ed25519-signed (<code class="inline">kind=semantics</code>)</td><td class="ns">Proof-carrying: ships re-checkable obligations</td></tr>
           <tr><td class="rowlbl">L3 path</td><td class="dim">none</td><td class="ns">Export DSL + obligations to Coq / Isabelle</td></tr>
         </tbody>
@@ -349,7 +398,8 @@
 
       <!-- ============================================================ -->
       <h2><span class="num">04</span>Trajectory</h2>
-      <p>Four phases, each shippable and each strictly stronger than the last. Phase 1 is complete; Phase 2 is next.</p>
+      <p>Four phases, each shippable and each strictly stronger than the last. Phase 1 is complete; Phase 2's first
+        slice has landed; the rest of Phase 2 (full coverage, then the value/heap model) and Phase 3 follow.</p>
 
       <div class="traj">
         <div class="step now">
@@ -358,9 +408,9 @@
           <div class="de">Zig table, hand-rolled symbolic checker, rendered <code class="inline">spec.ts</code>, differential corpus vs the real compiler, one signed receipt. All landed (2026-06-25).</div>
         </div>
         <div class="step now">
-          <div class="ph">Phase 2 &middot; next</div>
+          <div class="ph">Phase 2 &middot; slice shipped</div>
           <div class="ti">SMT validation</div>
-          <div class="de">Replace the symbolic executor with a Z3 refinement check (Alive2-style). Encode the value model; prove the core complete.</div>
+          <div class="de">Z3 refinement check (Alive2-style) over the slice's value theory: a pure SMT-LIB2 encoder (integer abstraction), three SMT-certified algebraic laws, injected solver with structural fallback, counts in the receipt. Landed 2026-06-26. Remaining: faithful f64/NaN model, full per-node coverage, then the value/heap encoding.</div>
         </div>
         <div class="step">
           <div class="ph">Phase 3</div>

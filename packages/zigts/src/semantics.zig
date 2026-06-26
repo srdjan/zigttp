@@ -237,6 +237,60 @@ pub const refinements = [_]Refinement{
     },
 };
 
+/// Algebraic laws the language's value semantics must satisfy: equivalences
+/// between *structurally different* denotations. Mechanism 3 (structural RPN
+/// equality) cannot admit these - both sides have different `Term` sequences -
+/// but the SMT check (mechanism 5, `semantics_smt.zig`) certifies them over the
+/// value model. They are spec content (claims about the language), so they are
+/// hashed into `semanticsHash` and rendered into the spec artifact. A law that
+/// did NOT hold would surface as an SMT counterexample at `spec-check` time.
+///
+/// SOUNDNESS BOUNDARY - read before adding a law. The SMT encoder abstracts the
+/// engine's number type (i32 that promotes to IEEE-754 f64 on overflow; see
+/// interpreter.zig `addValues`) as the unbounded mathematical integers ℤ. That
+/// abstraction is sound ONLY for a law whose truth does not depend on float
+/// rounding, integer overflow, NaN, or signed zero - because over ℤ those
+/// effects do not exist. A law valid over ℤ but not over the engine's f64
+/// behavior would be falsely "proven" and folded into the signed receipt.
+///
+/// Associativity of addition is the canonical such law: it holds over ℤ but
+/// FAILS on the engine, because a `child` can be a large float (e.g. a
+/// mul-overflow result past 2^53) and f64 addition is not associative there. It
+/// is therefore deliberately NOT asserted. The laws below are each valid over
+/// the engine's *reachable* value domain: the slice's operator set
+/// (add/sub/mul/lt/eq/not/neg) cannot produce NaN or infinity, so commutativity
+/// of `+` and the neg/not involutions hold under both ℤ and the engine. Faithful
+/// f64 (and heap) encoding is northstar work; until then, a law must hold under
+/// the engine's value model, not merely under ℤ.
+pub const Law = struct {
+    name: []const u8,
+    lhs: []const Term,
+    rhs: []const Term,
+};
+
+pub const algebraic_laws = [_]Law{
+    // add is commutative:  c0 + c1  ==  c1 + c0  (holds over ℤ and f64; no NaN in slice)
+    .{
+        .name = "add_commutative",
+        .lhs = &.{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add } },
+        .rhs = &.{ .{ .child = 1 }, .{ .child = 0 }, .{ .binop = .add } },
+    },
+    // NB: add_associative is NOT a law here - it holds over ℤ but fails on the
+    // engine's f64-on-overflow numbers. See the SOUNDNESS BOUNDARY note above.
+    // neg is an involution:  -(-(c0))  ==  c0
+    .{
+        .name = "neg_involution",
+        .lhs = &.{ .{ .child = 0 }, .{ .unop = .neg }, .{ .unop = .neg } },
+        .rhs = &.{.{ .child = 0 }},
+    },
+    // not is an involution:  !!(c0)  ==  c0
+    .{
+        .name = "not_involution",
+        .lhs = &.{ .{ .child = 0 }, .{ .unop = .not }, .{ .unop = .not } },
+        .rhs = &.{.{ .child = 0 }},
+    },
+};
+
 /// Conformance diagnostic codes (ZTS75x). Kept as local registry data rather
 /// than in rule_registry.zig: registering them there would change policyHash and
 /// break the pinned policy hash. The 75x block is distinct from the 70x codes
@@ -247,6 +301,8 @@ pub const SpecCode = enum {
     unbalanced_lowering,
     lowering_divergence,
     refinement_divergence,
+    smt_counterexample,
+    smt_unencodable,
 
     pub fn code(self: SpecCode) []const u8 {
         return switch (self) {
@@ -255,6 +311,8 @@ pub const SpecCode = enum {
             .unbalanced_lowering => "ZTS752",
             .lowering_divergence => "ZTS753",
             .refinement_divergence => "ZTS754",
+            .smt_counterexample => "ZTS755",
+            .smt_unencodable => "ZTS756",
         };
     }
 };
@@ -422,6 +480,16 @@ fn computeSemanticsHash() [64]u8 {
         hashSteps(&hasher, rf.fused_effect);
         hasher.update("\x00");
         hashSteps(&hasher, rf.base);
+        hasher.update("\x01");
+    }
+    // algebraic laws (the SMT-certified non-structural equivalences) are spec
+    // content too, so a change to any law moves the hash.
+    for (algebraic_laws) |law| {
+        hasher.update(law.name);
+        hasher.update("\x00");
+        hashTerms(&hasher, law.lhs);
+        hasher.update("\x00");
+        hashTerms(&hasher, law.rhs);
         hasher.update("\x01");
     }
     const digest = hasher.finalResult();

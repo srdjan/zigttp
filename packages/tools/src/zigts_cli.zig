@@ -23,6 +23,7 @@ const search_rules = @import("search_rules.zig");
 const review_patch = @import("review_patch.zig");
 const prove_behavior = @import("prove_behavior.zig");
 const expert = @import("expert.zig");
+const smt_solver = @import("smt_solver.zig");
 const project_config_mod = @import("project_config");
 const zigts = @import("zigts");
 const zigts_file_io = zigts.file_io;
@@ -498,6 +499,22 @@ fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []
     try buf.append(allocator, '"');
 }
 
+const SpecCheckReport = struct {
+    check: *const zigts.semantics_check.CheckResult,
+    corpus: *const zigts.semantics_corpus.CorpusResult,
+    smt: *const zigts.semantics_check.SmtResult,
+
+    fn ok(self: SpecCheckReport) bool {
+        return self.check.ok() and self.corpus.ok() and self.smt.ok();
+    }
+
+    fn failureCount(self: SpecCheckReport) usize {
+        return self.check.failures.items.len +
+            self.corpus.failures.items.len +
+            self.smt.failures.items.len;
+    }
+};
+
 fn runSpecCheckCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
     for (argv) |arg| {
@@ -527,33 +544,53 @@ fn runSpecCheckCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     };
     defer corpus.deinit();
 
+    // Mechanism 5: SMT equivalence (Alive2-style refinement). z3 is injected only
+    // when present, so spec-check still passes on its structural mechanisms where
+    // no solver is installed (CI without z3, the wasm build).
+    const z3_present = smt_solver.available(allocator);
+    var smt = zigts.semantics_check.runSmt(allocator, if (z3_present) smt_solver.solve else null) catch {
+        const msg = "spec-check: smt internal error\n";
+        _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
+        std.process.exit(2);
+    };
+    defer smt.deinit();
+
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
+    const report: SpecCheckReport = .{ .check = &result, .corpus = &corpus, .smt = &smt };
     if (json_mode) {
-        try writeSpecCheckJson(allocator, &buf, &result, &corpus);
+        try writeSpecCheckJson(allocator, &buf, report);
     } else {
-        try writeSpecCheckText(allocator, &buf, &result, &corpus);
+        try writeSpecCheckText(allocator, &buf, report);
     }
     if (buf.items.len > 0) {
         _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
     }
 
+    const all_ok = report.ok();
+
     // Emit a signed kind=semantics receipt when the runtime injected the persistent
     // signer. Only on a clean pass - a failing registry should not be attested.
-    if (result.ok() and corpus.ok()) {
+    if (all_ok) {
         if (semantics_receipt_probe) |probe| {
-            const receipt = zigts.semantics_check.buildReceipt(&result, @intCast(corpus.cases_passed), @intCast(corpus.cases_total));
+            const receipt = zigts.semantics_check.buildReceiptFromInput(&result, .{
+                .differential = .{ .passed = @intCast(corpus.cases_passed), .total = @intCast(corpus.cases_total) },
+                .smt = .{ .available = smt.available, .proved = @intCast(smt.proved), .total = @intCast(smt.total) },
+            });
             probe(allocator, receipt);
         }
     }
 
     // exit 0 conform, 1 divergence (2 for internal error handled above).
-    if (!result.ok() or !corpus.ok()) std.process.exit(1);
+    if (!all_ok) std.process.exit(1);
 }
 
-fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: *const zigts.semantics_check.CheckResult, corpus: *const zigts.semantics_corpus.CorpusResult) !void {
+fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), report: SpecCheckReport) !void {
     const cov = zigts.semantics.coverage();
     const sh = zigts.semantics.semanticsHash();
+    const r = report.check;
+    const corpus = report.corpus;
+    const smt = report.smt;
     try appendFmt(allocator, buf, "zigts semantics spec-check\n", .{});
     try appendFmt(allocator, buf, "  semantics hash:    {s}\n", .{sh});
     try appendFmt(allocator, buf, "  nodes specified:   {d}/{d}\n", .{ cov.nodes_specified, cov.nodes_total });
@@ -563,45 +600,79 @@ fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: 
     try appendFmt(allocator, buf, "  structural-only:   {d}\n", .{r.nodes_structural});
     try appendFmt(allocator, buf, "  stack-effect:      {d} checks\n", .{r.stack_effect_checked});
     try appendFmt(allocator, buf, "  differential:      {d}/{d} cases vs real codegen\n", .{ corpus.cases_passed, corpus.cases_total });
-    if (r.ok() and corpus.ok()) {
+    if (smt.available) {
+        if (smt.unproven > 0) {
+            try appendFmt(allocator, buf, "  smt equivalence:   {d}/{d} proved, {d} unproven (solver could not decide/run) (z3)\n", .{ smt.proved, smt.total, smt.unproven });
+        } else {
+            try appendFmt(allocator, buf, "  smt equivalence:   {d}/{d} proved (z3)\n", .{ smt.proved, smt.total });
+        }
+    } else {
+        try appendFmt(allocator, buf, "  smt equivalence:   skipped ({d} obligations; z3 not found)\n", .{smt.total});
+    }
+    if (report.ok()) {
         try appendFmt(allocator, buf, "  result:            PASS\n", .{});
     } else {
-        try appendFmt(allocator, buf, "  result:            FAIL ({d} divergence)\n", .{r.failures.items.len + corpus.failures.items.len});
-        for (r.failures.items) |f| {
-            try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ f.code.code(), f.where, f.message });
-        }
-        for (corpus.failures.items) |f| {
-            try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ zigts.semantics.SpecCode.lowering_divergence.code(), f.where, f.message });
-        }
+        try appendFmt(allocator, buf, "  result:            FAIL ({d} divergence)\n", .{report.failureCount()});
+        try appendSpecCheckFailuresText(allocator, buf, report);
     }
 }
 
-fn writeSpecCheckJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: *const zigts.semantics_check.CheckResult, corpus: *const zigts.semantics_corpus.CorpusResult) !void {
+fn appendSpecCheckFailuresText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), report: SpecCheckReport) !void {
+    for (report.check.failures.items) |f| {
+        try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ f.code.code(), f.where, f.message });
+    }
+    for (report.corpus.failures.items) |f| {
+        try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ zigts.semantics.SpecCode.lowering_divergence.code(), f.where, f.message });
+    }
+    for (report.smt.failures.items) |f| {
+        try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ f.code.code(), f.where, f.message });
+    }
+}
+
+fn writeSpecCheckJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), report: SpecCheckReport) !void {
     const cov = zigts.semantics.coverage();
     const sh = zigts.semantics.semanticsHash();
     const ir_h = zigts.semantics.irTableHash();
     const op_h = zigts.semantics.opcodeTableHash();
+    const r = report.check;
+    const corpus = report.corpus;
+    const smt = report.smt;
     try appendFmt(allocator, buf, "{{\"semanticsHash\":\"{s}\",\"irTableHash\":\"{s}\",\"opcodeTableHash\":\"{s}\",", .{ sh, ir_h, op_h });
     try appendFmt(allocator, buf, "\"nodes\":{{\"specified\":{d},\"total\":{d}}},\"opcodes\":{{\"specified\":{d},\"total\":{d}}},", .{ cov.nodes_specified, cov.nodes_total, cov.opcodes_specified, cov.opcodes_total });
     try appendFmt(allocator, buf, "\"valueProofs\":{d},\"binopInstances\":{d},\"unopInstances\":{d},\"refinements\":{d},\"structural\":{d},\"stackEffectChecks\":{d},", .{ r.nodes_proven, r.binop_instances, r.unop_instances, r.refinements_proven, r.nodes_structural, r.stack_effect_checked });
     try appendFmt(allocator, buf, "\"differential\":{{\"passed\":{d},\"total\":{d}}},", .{ corpus.cases_passed, corpus.cases_total });
-    try appendFmt(allocator, buf, "\"ok\":{s},\"failures\":[", .{if (r.ok() and corpus.ok()) "true" else "false"});
-    var first = true;
-    for (r.failures.items) |f| {
-        if (!first) try buf.append(allocator, ',');
-        first = false;
-        try appendFmt(allocator, buf, "{{\"code\":\"{s}\",\"where\":\"{s}\",\"message\":", .{ f.code.code(), f.where });
-        try appendJsonString(allocator, buf, f.message);
-        try buf.append(allocator, '}');
-    }
-    for (corpus.failures.items) |f| {
-        if (!first) try buf.append(allocator, ',');
-        first = false;
-        try appendFmt(allocator, buf, "{{\"code\":\"{s}\",\"where\":\"{s}\",\"message\":", .{ zigts.semantics.SpecCode.lowering_divergence.code(), f.where });
-        try appendJsonString(allocator, buf, f.message);
-        try buf.append(allocator, '}');
-    }
+    try appendFmt(allocator, buf, "\"smt\":{{\"available\":{s},\"proved\":{d},\"unproven\":{d},\"total\":{d}}},", .{ if (smt.available) "true" else "false", smt.proved, smt.unproven, smt.total });
+    try appendFmt(allocator, buf, "\"ok\":{s},\"failures\":[", .{if (report.ok()) "true" else "false"});
+    try appendSpecCheckFailuresJson(allocator, buf, report);
     try appendFmt(allocator, buf, "]}}\n", .{});
+}
+
+fn appendJsonFailure(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+    first: *bool,
+    code: []const u8,
+    where: []const u8,
+    message: []const u8,
+) !void {
+    if (!first.*) try buf.append(allocator, ',');
+    first.* = false;
+    try appendFmt(allocator, buf, "{{\"code\":\"{s}\",\"where\":\"{s}\",\"message\":", .{ code, where });
+    try appendJsonString(allocator, buf, message);
+    try buf.append(allocator, '}');
+}
+
+fn appendSpecCheckFailuresJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), report: SpecCheckReport) !void {
+    var first = true;
+    for (report.check.failures.items) |f| {
+        try appendJsonFailure(allocator, buf, &first, f.code.code(), f.where, f.message);
+    }
+    for (report.corpus.failures.items) |f| {
+        try appendJsonFailure(allocator, buf, &first, zigts.semantics.SpecCode.lowering_divergence.code(), f.where, f.message);
+    }
+    for (report.smt.failures.items) |f| {
+        try appendJsonFailure(allocator, buf, &first, f.code.code(), f.where, f.message);
+    }
 }
 
 fn runRestrictionsCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
@@ -859,6 +930,59 @@ fn printGenTestsHelp() void {
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 
+test "spec-check renderers aggregate structural corpus and smt failures" {
+    const allocator = std.testing.allocator;
+
+    var check = zigts.semantics_check.CheckResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    defer check.deinit();
+    try check.failures.append(check.arena.allocator(), .{
+        .code = .lowering_divergence,
+        .where = "binary_op",
+        .message = "lowering mismatch",
+    });
+
+    var corpus = zigts.semantics_corpus.CorpusResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    defer corpus.deinit();
+    corpus.cases_total = 2;
+    corpus.cases_passed = 1;
+    try corpus.failures.append(corpus.arena.allocator(), .{
+        .where = "unary_op",
+        .message = "real codegen mismatch",
+    });
+
+    var smt = zigts.semantics_check.SmtResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    defer smt.deinit();
+    smt.available = true;
+    smt.proved = 1;
+    smt.unproven = 1;
+    smt.total = 3;
+    try smt.failures.append(smt.arena.allocator(), .{
+        .code = .smt_counterexample,
+        .where = "add_commutative",
+        .message = "counterexample",
+    });
+
+    const report: SpecCheckReport = .{ .check = &check, .corpus = &corpus, .smt = &smt };
+    try std.testing.expect(!report.ok());
+    try std.testing.expectEqual(@as(usize, 3), report.failureCount());
+
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(allocator);
+    try writeSpecCheckJson(allocator, &json, report);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"binary_op\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"unary_op\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"add_commutative\"") != null);
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    try writeSpecCheckText(allocator, &text, report);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "FAIL (3 divergence)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "binary_op: lowering mismatch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "unary_op: real codegen mismatch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "add_commutative: counterexample") != null);
+}
+
 test "missing sql schema json uses diagnostic envelope" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
@@ -879,4 +1003,5 @@ test {
     // (see MEMORY.md "CLI test-collection closure").
     _ = describe_rule;
     _ = search_rules;
+    _ = smt_solver;
 }
