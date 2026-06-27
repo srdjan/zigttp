@@ -7,7 +7,7 @@
 //! mirroring the perf / equivalence / workflow probe injections. The standalone
 //! `zigts` binary leaves the probe null and emits no receipt.
 //!
-//! On a clean `zigttp spec-check` (all four mechanisms pass) this signs the
+//! On a clean `zigttp spec-check` (all five mechanisms pass) this signs the
 //! conformance receipt - the semantics/IR/opcode hashes plus the proof and
 //! differential counts - with the persistent keypair and writes a compact
 //! `kind=semantics` JWS to `.zigttp/semantics-receipt.jws`. It self-verifies
@@ -15,12 +15,11 @@
 //! Best-effort: a missing `$HOME` or unwritable cwd must never abort spec-check.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zq = @import("zigts");
-const zigts_cli = @import("zigts_cli");
 const identity = @import("attest/identity.zig");
 
 const semantics_check = zq.semantics_check;
-const precompile = zigts_cli.precompile;
 const mkdirIfAbsent = @import("capsule.zig").mkdirIfAbsent;
 const Ed25519 = std.crypto.sign.Ed25519;
 
@@ -56,7 +55,7 @@ pub fn recordWithKeyAt(
     }
 
     try mkdirIfAbsent(allocator, output.dir);
-    try precompile.writeFilePosix(output.path, compact, allocator);
+    try zq.file_io.writeFile(allocator, output.path, compact);
     std.debug.print("Wrote {s} (kind=semantics, hash={s}, differential={d}/{d}, smt={d}/{d})\n", .{
         output.path,                receipt.semantics_hash, receipt.differential_passed,
         receipt.differential_total, receipt.smt_proved,     receipt.smt_total,
@@ -77,17 +76,8 @@ pub fn recordWithKeyTo(
 // Tests
 // ---------------------------------------------------------------------------
 
-test "recorded semantics receipt round-trips under a deterministic key" {
-    const allocator = std.testing.allocator;
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
-    defer allocator.free(dir);
-    const path = try std.fs.path.join(allocator, &.{ dir, "semantics-receipt.jws" });
-    defer allocator.free(path);
-
-    const receipt: semantics_check.Receipt = .{
+fn sampleReceipt() semantics_check.Receipt {
+    return .{
         .semantics_hash = ("a" ** 64).*,
         .ir_table_hash = ("b" ** 64).*,
         .opcode_table_hash = ("c" ** 64).*,
@@ -105,11 +95,32 @@ test "recorded semantics receipt round-trips under a deterministic key" {
         .smt_total = 5,
         .failures = 0,
     };
+}
+
+fn createSymlinkAbsolute(
+    allocator: std.mem.Allocator,
+    target_path: []const u8,
+    link_path: []const u8,
+) !void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try std.Io.Dir.symLinkAbsolute(io_backend.io(), target_path, link_path, .{});
+}
+
+test "recorded semantics receipt round-trips under a deterministic key" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(dir);
+    const path = try std.fs.path.join(allocator, &.{ dir, "semantics-receipt.jws" });
+    defer allocator.free(path);
 
     const seed = [_]u8{42} ** 32;
     const kp = try Ed25519.KeyPair.generateDeterministic(seed);
 
-    try recordWithKeyAt(allocator, receipt, kp, .{ .dir = dir, .path = path });
+    try recordWithKeyAt(allocator, sampleReceipt(), kp, .{ .dir = dir, .path = path });
 
     // Read the persisted JWS back and verify it against the same public key.
     const written = try std.fs.cwd().readFileAlloc(allocator, path, 1 << 16);
@@ -120,4 +131,33 @@ test "recorded semantics receipt round-trips under a deterministic key" {
     const other_seed = [_]u8{7} ** 32;
     const other = try Ed25519.KeyPair.generateDeterministic(other_seed);
     try std.testing.expect(!try semantics_check.verify(allocator, written, other.public_key));
+}
+
+test "recorded semantics receipt replaces a symlink without truncating its target" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(dir);
+    const target = try std.fs.path.join(allocator, &.{ dir, "outside.txt" });
+    defer allocator.free(target);
+    const path = try std.fs.path.join(allocator, &.{ dir, "semantics-receipt.jws" });
+    defer allocator.free(path);
+
+    try zq.file_io.writeFile(allocator, target, "outside");
+    try createSymlinkAbsolute(allocator, target, path);
+
+    const seed = [_]u8{42} ** 32;
+    const kp = try Ed25519.KeyPair.generateDeterministic(seed);
+    try recordWithKeyAt(allocator, sampleReceipt(), kp, .{ .dir = dir, .path = path });
+
+    const target_after = try std.fs.cwd().readFileAlloc(allocator, target, 64);
+    defer allocator.free(target_after);
+    try std.testing.expectEqualStrings("outside", target_after);
+
+    const written = try std.fs.cwd().readFileAlloc(allocator, path, 1 << 16);
+    defer allocator.free(written);
+    try std.testing.expect(try semantics_check.verify(allocator, written, kp.public_key));
 }

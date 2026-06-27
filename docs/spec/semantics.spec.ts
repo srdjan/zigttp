@@ -1,7 +1,7 @@
 // zigts semantics spec - GENERATED from packages/zigts/src/semantics.zig.
 // Do not edit by hand; run `zigts spec-render` to regenerate.
 //
-// semanticsHash:   a218ca0d8bce77772280aaf5b0e5327880abe4a2740ec7dc98375ba0d1561b72
+// semanticsHash:   13f26e3e999619fa970af9b454bc43c379a2e4bfc8f2ec5645bf39af2fd81415
 // irTableHash:     19ac13b87ab1996a21f39fc7464884765854558b9d2337a5ec47ecdd715a2e20
 // opcodeTableHash: 26613d2f883af91815590308415a7215c9d0c4688b305bece42794dfed39210c
 //
@@ -78,6 +78,4 @@ export const block = { proof: "structural" };
 // get_loc_add:  (get_loc[0]; add)  ==  (get_loc[0]; add)
 
 // algebraic laws - SMT-certified value-model equivalences (mechanism 5)
-// add_commutative:  (c0 + c1)  ==  (c1 + c0)
 // neg_involution:  (-(-c0))  ==  c0
-// not_involution:  (!(!c0))  ==  c0

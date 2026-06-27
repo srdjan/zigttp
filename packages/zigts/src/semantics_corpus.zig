@@ -53,11 +53,12 @@ const Case = struct {
     unop: ?UnKind = null,
     source: []const u8,
     shape: Shape = .straight,
+    required_opcode: ?Opcode = null,
 };
 
 pub const corpus = [_]Case{
-    .{ .tag = .lit_int, .source = "7" },
-    .{ .tag = .lit_bool, .source = "true" },
+    .{ .tag = .lit_int, .source = "7", .required_opcode = .push_i8 },
+    .{ .tag = .lit_bool, .source = "true", .required_opcode = .push_true },
     .{ .tag = .identifier, .source = "const a = 5; a" },
     .{ .tag = .binary_op, .binop = .add, .source = "const a = 5; const b = 3; a + b" },
     .{ .tag = .binary_op, .binop = .sub, .source = "const a = 5; const b = 3; a - b" },
@@ -89,9 +90,26 @@ const Recovered = struct {
     /// Whether the stream used the branch control opcodes (if_false / goto).
     has_if_false: bool,
     has_goto: bool,
+    /// Recovered branch operands for a basic ternary expression. The final value
+    /// is `cond then else select`, matching the registry's denotation.
+    branch_cond: ?[]const Term,
+    branch_then: ?[]const Term,
+    branch_value: ?[]const Term,
     /// First opcode the recoverer did not know how to model (fail loud).
     unhandled: ?Opcode,
 };
+
+fn containsOpcode(code: []const u8, wanted: Opcode) bool {
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const op: Opcode = @enumFromInt(code[pc]);
+        if (op == wanted) return true;
+        const info = bytecode.getOpcodeInfo(op);
+        if (info.size == 0) break;
+        pc += info.size;
+    }
+    return false;
+}
 
 fn isOperandPush(op: Opcode) bool {
     return switch (op) {
@@ -117,7 +135,16 @@ fn isIgnorable(op: Opcode) bool {
 /// Symbolically execute a real bytecode stream, capturing the term sequence
 /// discarded by the (single) expression-statement `drop`. Operands are generic.
 fn recover(scratch: std.mem.Allocator, code: []const u8) !Recovered {
-    var result: Recovered = .{ .dropped = null, .drop_count = 0, .has_if_false = false, .has_goto = false, .unhandled = null };
+    var result: Recovered = .{
+        .dropped = null,
+        .drop_count = 0,
+        .has_if_false = false,
+        .has_goto = false,
+        .branch_cond = null,
+        .branch_then = null,
+        .branch_value = null,
+        .unhandled = null,
+    };
     var stack: std.ArrayList([]const Term) = .empty;
 
     var pc: usize = 0;
@@ -127,17 +154,37 @@ fn recover(scratch: std.mem.Allocator, code: []const u8) !Recovered {
         if (info.size == 0) break;
 
         if (op == .if_false) {
+            if (stack.items.len == 0) {
+                result.unhandled = op;
+                return result;
+            }
+            result.branch_cond = stack.items[stack.items.len - 1];
+            stack.items.len -= 1;
             result.has_if_false = true;
         } else if (op == .goto) {
+            if (stack.items.len == 0) {
+                result.unhandled = op;
+                return result;
+            }
+            result.branch_then = stack.items[stack.items.len - 1];
+            stack.items.len -= 1;
             result.has_goto = true;
         } else if (op == .drop) {
             if (stack.items.len == 0) {
                 result.unhandled = op;
                 return result;
             }
-            result.dropped = stack.items[stack.items.len - 1];
+            const dropped = stack.items[stack.items.len - 1];
+            result.dropped = dropped;
             result.drop_count += 1;
             stack.items.len -= 1;
+            if (result.has_if_false and result.has_goto) {
+                if (result.branch_cond) |cond| {
+                    if (result.branch_then) |then_value| {
+                        result.branch_value = try std.mem.concat(scratch, Term, &.{ cond, then_value, dropped, &.{.select} });
+                    }
+                }
+            }
         } else if (isOperandPush(op)) {
             try stack.append(scratch, try scratch.dupe(Term, &.{operand}));
         } else if (isConsumer(op)) {
@@ -270,6 +317,12 @@ pub fn runCorpus(backing: std.mem.Allocator) !CorpusResult {
             try result.fail(where, try std.fmt.allocPrint(ra, "compile failed: {s}", .{@errorName(e)}));
             continue;
         };
+        if (c.required_opcode) |required| {
+            if (!containsOpcode(func.code, required)) {
+                try result.fail(where, try std.fmt.allocPrint(ra, "real codegen did not emit required opcode: {s}", .{@tagName(required)}));
+                continue;
+            }
+        }
 
         const rec = recover(scratch, func.code) catch {
             try result.fail(where, "recovery ran out of memory");
@@ -306,6 +359,17 @@ pub fn runCorpus(backing: std.mem.Allocator) !CorpusResult {
                 // goto; require the real codegen to use the same control shape.
                 if (!rec.has_if_false or !rec.has_goto) {
                     try result.fail(where, "real codegen did not lower the conditional to an if_false/goto branch");
+                    continue;
+                }
+                const got = rec.branch_value orelse {
+                    try result.fail(where, "real codegen branch did not recover to a selected expression value");
+                    continue;
+                };
+                const want = try expectedDenote(scratch, c);
+                if (!semantics.termsEql(got, want)) {
+                    const w = try termsToString(ra, want);
+                    const g = try termsToString(ra, got);
+                    try result.fail(where, try std.fmt.allocPrint(ra, "registry denote=[{s}] but real branch codegen=>[{s}]", .{ w, g }));
                     continue;
                 }
             },
@@ -361,6 +425,38 @@ test "recover counts every drop so the single-expression invariant is enforceabl
     const rec = try recover(scratch.allocator(), &code);
     try std.testing.expect(rec.unhandled == null);
     try std.testing.expectEqual(@as(usize, 2), rec.drop_count);
+}
+
+test "recover reconstructs ternary branch denotation" {
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+
+    const func = try compiler.compile(scratch.allocator(), "const c = true; const t = 7; const e = 9; c ? t : e");
+    const rec = try recover(scratch.allocator(), func.code);
+    try std.testing.expect(rec.unhandled == null);
+    try std.testing.expect(rec.has_if_false);
+    try std.testing.expect(rec.has_goto);
+    try std.testing.expect(rec.branch_value != null);
+    try std.testing.expect(semantics.termsEql(rec.branch_value.?, &.{ operand, operand, operand, .select }));
+}
+
+test "literal corpus cases require exact literal opcodes" {
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+
+    const true_func = try compiler.compile(scratch.allocator(), "true");
+    try std.testing.expect(containsOpcode(true_func.code, .push_true));
+    try std.testing.expect(!containsOpcode(true_func.code, .push_false));
+
+    const int_func = try compiler.compile(scratch.allocator(), "7");
+    try std.testing.expect(containsOpcode(int_func.code, .push_i8));
+
+    const wrong_true = [_]u8{
+        @intFromEnum(Opcode.push_false),
+        @intFromEnum(Opcode.drop),
+        @intFromEnum(Opcode.ret_undefined),
+    };
+    try std.testing.expect(!containsOpcode(&wrong_true, .push_true));
 }
 
 test "a corpus case whose expected operator is wrong is caught" {

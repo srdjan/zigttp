@@ -247,21 +247,19 @@ pub const refinements = [_]Refinement{
 ///
 /// SOUNDNESS BOUNDARY - read before adding a law. The SMT encoder abstracts the
 /// engine's number type (i32 that promotes to IEEE-754 f64 on overflow; see
-/// interpreter.zig `addValues`) as the unbounded mathematical integers ℤ. That
-/// abstraction is sound ONLY for a law whose truth does not depend on float
-/// rounding, integer overflow, NaN, or signed zero - because over ℤ those
-/// effects do not exist. A law valid over ℤ but not over the engine's f64
+/// interpreter.zig `addValues`) as the unbounded mathematical integers Z. That
+/// abstraction is sound ONLY for a law whose truth does not depend on JS
+/// coercion, string concatenation, truthiness, float rounding, integer overflow,
+/// NaN, or signed zero. A law valid over Z but not over the engine's value
 /// behavior would be falsely "proven" and folded into the signed receipt.
 ///
-/// Associativity of addition is the canonical such law: it holds over ℤ but
-/// FAILS on the engine, because a `child` can be a large float (e.g. a
-/// mul-overflow result past 2^53) and f64 addition is not associative there. It
-/// is therefore deliberately NOT asserted. The laws below are each valid over
-/// the engine's *reachable* value domain: the slice's operator set
-/// (add/sub/mul/lt/eq/not/neg) cannot produce NaN or infinity, so commutativity
-/// of `+` and the neg/not involutions hold under both ℤ and the engine. Faithful
-/// f64 (and heap) encoding is northstar work; until then, a law must hold under
-/// the engine's value model, not merely under ℤ.
+/// Associativity of addition is the canonical numeric boundary: it holds over Z
+/// but FAILS on the engine, because a `child` can be a large float (e.g. a
+/// mul-overflow result past 2^53) and f64 addition is not associative there.
+/// Likewise, generic `+` can concatenate strings and `!` returns a boolean via
+/// JS truthiness, so `a + b == b + a` and `!!x == x` are not slice-wide laws.
+/// Faithful f64 and heap/string encoding is northstar work; until then, a law
+/// must hold under the engine's value model, not merely under Z.
 pub const Law = struct {
     name: []const u8,
     lhs: []const Term,
@@ -269,24 +267,12 @@ pub const Law = struct {
 };
 
 pub const algebraic_laws = [_]Law{
-    // add is commutative:  c0 + c1  ==  c1 + c0  (holds over ℤ and f64; no NaN in slice)
-    .{
-        .name = "add_commutative",
-        .lhs = &.{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add } },
-        .rhs = &.{ .{ .child = 1 }, .{ .child = 0 }, .{ .binop = .add } },
-    },
     // NB: add_associative is NOT a law here - it holds over ℤ but fails on the
     // engine's f64-on-overflow numbers. See the SOUNDNESS BOUNDARY note above.
     // neg is an involution:  -(-(c0))  ==  c0
     .{
         .name = "neg_involution",
         .lhs = &.{ .{ .child = 0 }, .{ .unop = .neg }, .{ .unop = .neg } },
-        .rhs = &.{.{ .child = 0 }},
-    },
-    // not is an involution:  !!(c0)  ==  c0
-    .{
-        .name = "not_involution",
-        .lhs = &.{ .{ .child = 0 }, .{ .unop = .not }, .{ .unop = .not } },
         .rhs = &.{.{ .child = 0 }},
     },
 };
@@ -572,6 +558,19 @@ test "semantics hash input distinguishes transition payloads" {
 
     try std.testing.expect(!std.mem.eql(u8, &add, &sub));
     try std.testing.expect(!std.mem.eql(u8, &add, &not));
+}
+
+fn hasLawForTest(name: []const u8) bool {
+    for (algebraic_laws) |law| {
+        if (std.mem.eql(u8, law.name, name)) return true;
+    }
+    return false;
+}
+
+test "algebraic laws do not claim JS coercive identities" {
+    try std.testing.expect(!hasLawForTest("add_commutative"));
+    try std.testing.expect(!hasLawForTest("not_involution"));
+    try std.testing.expect(hasLawForTest("neg_involution"));
 }
 
 test "table hashes include enum discriminants" {

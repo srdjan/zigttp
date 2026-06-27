@@ -559,6 +559,7 @@ fn payloadString(allocator: std.mem.Allocator, r: Receipt) ![]u8 {
 }
 
 const jws_header = "{\"alg\":\"EdDSA\",\"typ\":\"zigttp-semantics+jws\"}";
+const payload_version = "zigttp-semantics-v3";
 
 const b64 = std.base64.url_safe_no_pad;
 
@@ -566,6 +567,45 @@ fn b64encode(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const out = try allocator.alloc(u8, b64.Encoder.calcSize(bytes.len));
     _ = b64.Encoder.encode(out, bytes);
     return out;
+}
+
+fn b64decode(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, try b64.Decoder.calcSizeForSlice(bytes));
+    errdefer allocator.free(out);
+    try b64.Decoder.decode(out, bytes);
+    return out;
+}
+
+fn isLowerHex64(bytes: []const u8) bool {
+    if (bytes.len != 64) return false;
+    for (bytes) |c| {
+        if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'))) return false;
+    }
+    return true;
+}
+
+fn isDecimal(bytes: []const u8) bool {
+    if (bytes.len == 0) return false;
+    for (bytes) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
+
+fn isReceiptPayload(bytes: []const u8) bool {
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    const version = it.next() orelse return false;
+    if (!std.mem.eql(u8, version, payload_version)) return false;
+
+    for (0..3) |_| {
+        const hash = it.next() orelse return false;
+        if (!isLowerHex64(hash)) return false;
+    }
+    for (0..13) |_| {
+        const n = it.next() orelse return false;
+        if (!isDecimal(n)) return false;
+    }
+    return it.next() == null;
 }
 
 /// Sign a receipt into a compact Ed25519 JWS (header.payload.signature).
@@ -599,6 +639,14 @@ pub fn verify(allocator: std.mem.Allocator, compact: []const u8, public_key: Ed2
     const p64 = it.next() orelse return false;
     const s64 = it.next() orelse return false;
     if (it.next() != null) return false;
+
+    const header = b64decode(allocator, h64) catch return false;
+    defer allocator.free(header);
+    if (!std.mem.eql(u8, header, jws_header)) return false;
+
+    const payload = b64decode(allocator, p64) catch return false;
+    defer allocator.free(payload);
+    if (!isReceiptPayload(payload)) return false;
 
     const decoded_len = b64.Decoder.calcSizeForSlice(s64) catch return false;
     if (decoded_len != Ed25519.Signature.encoded_length) return false;
@@ -703,6 +751,61 @@ test "receipt sign and verify round-trip" {
     const dot = std.mem.indexOfScalar(u8, tampered, '.').? + 1;
     tampered[dot] = if (tampered[dot] == 'A') 'B' else 'A';
     try std.testing.expect(!try verify(allocator, tampered, kp.public_key));
+}
+
+fn signRawCompactForTest(
+    allocator: std.mem.Allocator,
+    header: []const u8,
+    payload: []const u8,
+    key_pair: Ed25519.KeyPair,
+) ![]u8 {
+    const h64 = try b64encode(allocator, header);
+    defer allocator.free(h64);
+    const p64 = try b64encode(allocator, payload);
+    defer allocator.free(p64);
+
+    const signing_input = try std.mem.concat(allocator, u8, &.{ h64, ".", p64 });
+    defer allocator.free(signing_input);
+
+    const sig = try key_pair.sign(signing_input, null);
+    const sig_bytes = sig.toBytes();
+    const s64 = try b64encode(allocator, &sig_bytes);
+    defer allocator.free(s64);
+
+    return std.mem.concat(allocator, u8, &.{ signing_input, ".", s64 });
+}
+
+test "receipt verify rejects a valid signature with the wrong JWS subtype" {
+    const allocator = std.testing.allocator;
+    var result = try runCheck(allocator);
+    defer result.deinit();
+    const receipt = buildReceipt(&result, 10, 10, .{ .available = true, .proved = 5, .total = 5 });
+
+    const seed = [_]u8{7} ** 32;
+    const kp = try Ed25519.KeyPair.generateDeterministic(seed);
+    const payload = try payloadString(allocator, receipt);
+    defer allocator.free(payload);
+
+    const compact = try signRawCompactForTest(
+        allocator,
+        "{\"alg\":\"EdDSA\",\"typ\":\"zigttp-attest+jws\"}",
+        payload,
+        kp,
+    );
+    defer allocator.free(compact);
+
+    try std.testing.expect(!try verify(allocator, compact, kp.public_key));
+}
+
+test "receipt verify rejects a valid signature with a non-semantics payload" {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{7} ** 32;
+    const kp = try Ed25519.KeyPair.generateDeterministic(seed);
+
+    const compact = try signRawCompactForTest(allocator, jws_header, "zigttp-build-v1\nok", kp);
+    defer allocator.free(compact);
+
+    try std.testing.expect(!try verify(allocator, compact, kp.public_key));
 }
 
 fn fakeAllEquivalent(_: []const u8, _: std.mem.Allocator) semantics_smt.Verdict {

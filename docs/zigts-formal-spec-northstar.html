@@ -200,11 +200,11 @@
           <li><b>One source.</b> <code class="inline">semantics.zig</code> carries each node's denotation and lowering
             <em>as data</em> &mdash; 10 IR nodes and 7 opcodes specified &mdash; reduced to a stable
             <code class="inline">semanticsHash</code>.</li>
-          <li><b>Four checking mechanisms</b> in <code class="inline">zigts spec-check</code>: the comptime drift gate,
+          <li><b>Five checking mechanisms</b> in <code class="inline">zigts spec-check</code>: the comptime drift gate,
             the stack-effect arity check, the symbolic lowering proof (12 value proofs: 5 binop + 2 unop instances + the
-            literals/identifier/ternary/call core, plus 1 fused-opcode refinement), and &mdash; new &mdash; the
+            literals/identifier/ternary/call core, plus 1 fused-opcode refinement), the
             <b>differential corpus</b> (10/10 cases) that runs the registry's denotations against the <em>real</em>
-            compiler's output, closing the gap the symbolic proof alone cannot see.</li>
+            compiler's output, and the SMT equivalence check over the slice value theory.</li>
           <li><b>Readable view.</b> <code class="inline">zigts spec-render</code> generates the TypeScript-shaped
             <code class="inline">docs/spec/semantics.spec.ts</code> from the same table, drift-gated in CI
             (<code class="inline">spec-render --check</code>).</li>
