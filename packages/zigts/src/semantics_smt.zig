@@ -282,7 +282,12 @@ pub fn encodeEquivalence(
     if (b.entryTy(l) != b.entryTy(r)) return error.TypeMismatch;
 
     var out: std.ArrayList(u8) = .empty;
-    try out.appendSlice(arena, "(set-logic ALL)\n");
+    // A :timeout makes the `unknown` verdict reachable. Without it a hard or
+    // undecidable obligation (the structurally-different equivalence mechanism 5
+    // exists to admit) would run z3 unbounded and block std.process.run forever
+    // instead of degrading to the non-fatal "unproven" path (see Verdict.unknown).
+    // 15s mirrors the exclusion audit's ceiling.
+    try out.appendSlice(arena, "(set-option :timeout 15000)\n(set-logic ALL)\n");
     for (b.leaves.items) |leaf| {
         try out.appendSlice(arena, try std.fmt.allocPrint(
             arena,
@@ -324,6 +329,8 @@ test "encode a binary_op denotation (int operands)" {
     try std.testing.expect(std.mem.indexOf(u8, q, "(declare-const c1 Int)") != null);
     try std.testing.expect(std.mem.indexOf(u8, q, "(+ c0 c1)") != null);
     try std.testing.expect(std.mem.indexOf(u8, q, "(check-sat)") != null);
+    // a :timeout backstop must be present so the `unknown` verdict is reachable.
+    try std.testing.expect(std.mem.indexOf(u8, q, ":timeout") != null);
     // self-equivalence query must not request a model.
     try std.testing.expect(std.mem.indexOf(u8, q, "get-model") == null);
 }

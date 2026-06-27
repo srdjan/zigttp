@@ -68,7 +68,9 @@ const preamble =
     \\    (ite ((_ is bl) v) (ite (b v) "true" "false") (n2s (n v)))))
     \\(define-fun toBool ((v Val)) Bool
     \\  (ite ((_ is bl) v) (b v)
-    \\    (ite ((_ is num) v) (not (fp.eq (toNum v) ((_ to_fp 11 53) roundNearestTiesToEven 0.0)))
+    \\    (ite ((_ is num) v)
+    \\      (and (not (fp.isNaN (toNum v)))
+    \\           (not (fp.eq (toNum v) ((_ to_fp 11 53) roundNearestTiesToEven 0.0))))
     \\      (not (= (s v) "")))))
     \\(define-fun vadd ((a Val) (b Val)) Val
     \\  (ite (or ((_ is st) a) ((_ is st) b)) (st (str.++ (toStr a) (toStr b)))

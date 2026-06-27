@@ -3,7 +3,7 @@
 //! the meaning lives in the registry (and is covered by semanticsHash); this file
 //! only checks it.
 //!
-//! Four mechanisms, weakest-but-total to strongest-but-scoped:
+//! Five mechanisms, weakest-but-total to strongest-but-scoped:
 //!   1. Table coverage   - the IR/bytecode alphabet size is pinned at comptime
 //!                         (the drift gate in semantics.zig; reported here).
 //!   2. Stack-effect      - every value lowering nets exactly one stack value,
@@ -16,6 +16,14 @@
 //!                         compiler on a corpus (semantics_corpus.zig). Closes
 //!                         the gap mechanism 3 cannot see: that the declared
 //!                         lowering matches what codegen actually emits.
+//!   5. SMT equivalence   - z3 proves denote == exec(lower) over ALL inputs for
+//!                         every value rule (runSmt; a superset of mechanism 3 for
+//!                         value rules) plus any asserted algebraic_laws. Its dual,
+//!                         the exclusion audit (runAudit, semantics_audit.zig),
+//!                         machine-REFUTES every excluded_law over a faithful
+//!                         tagged value model. Both degrade to non-fatal "unproven"
+//!                         when z3 is absent; the audit is fail-closed (ZTS758) when
+//!                         z3 is present but cannot evaluate the faithful model.
 //!
 //! The signed `kind=semantics` receipt (sign/verify round-trip proven here with an
 //! ephemeral key) is emitted under the persistent attest identity by the runtime
