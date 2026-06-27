@@ -93,6 +93,8 @@ fn sampleReceipt() semantics_check.Receipt {
         .smt_available = 1,
         .smt_proved = 5,
         .smt_total = 5,
+        .audit_refuted = 3,
+        .audit_total = 3,
         .failures = 0,
     };
 }

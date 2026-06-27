@@ -194,6 +194,14 @@ pub fn renderSpecTs(caller: std.mem.Allocator) ![]u8 {
         try fmt(allocator, w, "// {s}:  {s}  ==  {s}\n", .{ law.name, lhs, rhs });
     }
 
+    // Excluded laws: machine-REFUTED non-laws (the faithful-model exclusion audit).
+    try fmt(allocator, w, "\n// excluded laws - REFUTED under the faithful value model (false on the engine)\n", .{});
+    for (semantics.excluded_laws) |law| {
+        const lhs = try renderDenote(allocator, law.lhs);
+        const rhs = try renderDenote(allocator, law.rhs);
+        try fmt(allocator, w, "// {s}:  {s}  !=  {s}\n", .{ law.name, lhs, rhs });
+    }
+
     return caller.dupe(u8, out.items);
 }
 
@@ -255,12 +263,16 @@ test "denotations render as readable infix" {
     try std.testing.expect(std.mem.indexOf(u8, ts, "(c0 ? c1 : c2)") != null);
 }
 
-test "rendered spec lists the algebraic laws" {
+test "rendered spec lists the algebraic and excluded laws" {
     const allocator = std.testing.allocator;
     const ts = try renderSpecTs(allocator);
     defer allocator.free(ts);
-    // every declared law name appears in the readable spec.
+    // every declared (and excluded) law name appears in the readable spec.
     for (semantics.algebraic_laws) |law| {
         try std.testing.expect(std.mem.indexOf(u8, ts, law.name) != null);
     }
+    for (semantics.excluded_laws) |law| {
+        try std.testing.expect(std.mem.indexOf(u8, ts, law.name) != null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, ts, "excluded laws") != null);
 }

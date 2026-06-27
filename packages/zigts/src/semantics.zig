@@ -267,12 +267,44 @@ pub const Law = struct {
 };
 
 pub const algebraic_laws = [_]Law{
-    // NB: add_associative is NOT a law here - it holds over ℤ but fails on the
-    // engine's f64-on-overflow numbers. See the SOUNDNESS BOUNDARY note above.
+    // NB: add_associative / add_commutative / not_involution are NOT laws here -
+    // they are in `excluded_laws` below, machine-refuted by the faithful audit.
     // neg is an involution:  -(-(c0))  ==  c0
     .{
         .name = "neg_involution",
         .lhs = &.{ .{ .child = 0 }, .{ .unop = .neg }, .{ .unop = .neg } },
+        .rhs = &.{.{ .child = 0 }},
+    },
+};
+
+/// Excluded laws: equivalences that are tempting but FALSE under the engine's
+/// faithful value model, declared here so the exclusion is machine-checked rather
+/// than only asserted in the SOUNDNESS BOUNDARY comment above. The audit
+/// (`semantics_audit.zig`, via spec-check) encodes each over a faithful
+/// tagged-value model and REQUIRES the solver to find a counterexample - if one
+/// of these ever came back as actually holding, the build fails (the exclusion
+/// was wrong, or the value model drifted). They reuse the `Law` shape; the audit
+/// interprets them as non-laws. NB: `neg_involution` also fails under the faithful
+/// model (string coercion: `-(-"5") !== "5"`), but resolving it needs the
+/// reachability/type-precondition layer and is deliberately left asserted over the
+/// ℤ tier for now - it is NOT in this table.
+pub const excluded_laws = [_]Law{
+    // associativity of +  - holds over ℤ, fails on f64 rounding past 2^53.
+    .{
+        .name = "add_associative",
+        .lhs = &.{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add }, .{ .child = 2 }, .{ .binop = .add } },
+        .rhs = &.{ .{ .child = 0 }, .{ .child = 1 }, .{ .child = 2 }, .{ .binop = .add }, .{ .binop = .add } },
+    },
+    // commutativity of +  - generic `+` concatenates strings: "a"+"b" != "b"+"a".
+    .{
+        .name = "add_commutative",
+        .lhs = &.{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add } },
+        .rhs = &.{ .{ .child = 1 }, .{ .child = 0 }, .{ .binop = .add } },
+    },
+    // involution of !  - `!` coerces via truthiness, so `!!x` is a bool, not x.
+    .{
+        .name = "not_involution",
+        .lhs = &.{ .{ .child = 0 }, .{ .unop = .not }, .{ .unop = .not } },
         .rhs = &.{.{ .child = 0 }},
     },
 };
@@ -289,6 +321,7 @@ pub const SpecCode = enum {
     refinement_divergence,
     smt_counterexample,
     smt_unencodable,
+    excluded_law_holds,
 
     pub fn code(self: SpecCode) []const u8 {
         return switch (self) {
@@ -299,6 +332,7 @@ pub const SpecCode = enum {
             .refinement_divergence => "ZTS754",
             .smt_counterexample => "ZTS755",
             .smt_unencodable => "ZTS756",
+            .excluded_law_holds => "ZTS757",
         };
     }
 };
@@ -471,6 +505,17 @@ fn computeSemanticsHash() [64]u8 {
     // algebraic laws (the SMT-certified non-structural equivalences) are spec
     // content too, so a change to any law moves the hash.
     for (algebraic_laws) |law| {
+        hasher.update(law.name);
+        hasher.update("\x00");
+        hashTerms(&hasher, law.lhs);
+        hasher.update("\x00");
+        hashTerms(&hasher, law.rhs);
+        hasher.update("\x01");
+    }
+    // excluded laws (machine-refuted non-laws) are spec content too: the claim
+    // "these are NOT laws" is part of the soundness boundary.
+    hasher.update("excluded\x00");
+    for (excluded_laws) |law| {
         hasher.update(law.name);
         hasher.update("\x00");
         hashTerms(&hasher, law.lhs);

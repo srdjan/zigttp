@@ -25,6 +25,7 @@
 const std = @import("std");
 const semantics = @import("semantics.zig");
 const semantics_smt = @import("semantics_smt.zig");
+const semantics_audit = @import("semantics_audit.zig");
 const bytecode = @import("bytecode.zig");
 
 const Term = semantics.Term;
@@ -465,6 +466,77 @@ fn proveSmtObligations(
 }
 
 // ---------------------------------------------------------------------------
+// Exclusion audit: the dual of mechanism 5. The ℤ check PROVES laws; this
+// REFUTES the laws the registry declares are NOT slice-wide laws
+// (semantics.excluded_laws), over the faithful value model (semantics_audit.zig).
+// It makes the soundness boundary machine-checked: each excluded law must yield a
+// counterexample.
+//
+// Outcome policy per excluded law (note the verdict is INVERTED vs runSmt):
+//   - counterexample (sat) -> refuted: the exclusion is confirmed (good).
+//   - equivalent (unsat)   -> FATAL: the "non-law" actually holds, so excluding
+//                             it was wrong or the value model drifted (ZTS757).
+//   - unknown              -> inconclusive, non-fatal (a hard refutation that hit
+//                             the per-query timeout; reported, not a failure).
+// ---------------------------------------------------------------------------
+
+pub const AuditResult = struct {
+    arena: std.heap.ArenaAllocator,
+    available: bool = false,
+    refuted: usize = 0,
+    inconclusive: usize = 0,
+    total: usize = 0,
+    failures: std.ArrayList(Counterexample) = .empty,
+
+    pub fn ok(self: *const AuditResult) bool {
+        return self.failures.items.len == 0;
+    }
+    pub fn deinit(self: *AuditResult) void {
+        self.arena.deinit();
+    }
+};
+
+/// Run the exclusion audit. `solve == null` => skipped (no z3). Reuses the same
+/// injected solver as runSmt; only the verdict interpretation differs.
+pub fn runAudit(allocator: std.mem.Allocator, solve: ?SolveFn) !AuditResult {
+    var result = AuditResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    errdefer result.deinit();
+    const a = result.arena.allocator();
+
+    var scratch_arena = std.heap.ArenaAllocator.init(allocator);
+    defer scratch_arena.deinit();
+    const scratch = scratch_arena.allocator();
+
+    result.total = semantics.excluded_laws.len;
+    const solver = solve orelse return result; // available stays false: skipped.
+    result.available = true;
+
+    for (semantics.excluded_laws) |law| {
+        const query = semantics_audit.encodeRefutation(scratch, law.lhs, law.rhs) catch {
+            try result.failures.append(a, .{
+                .code = .smt_unencodable,
+                .where = try a.dupe(u8, law.name),
+                .message = try a.dupe(u8, "excluded law could not be encoded for the faithful audit"),
+            });
+            continue;
+        };
+        switch (solver(query, scratch)) {
+            // sat: a counterexample exists -> the equivalence is NOT a law. Good.
+            .counterexample => result.refuted += 1,
+            // unsat: the equivalence actually holds -> the exclusion was wrong.
+            .equivalent => try result.failures.append(a, .{
+                .code = .excluded_law_holds,
+                .where = try a.dupe(u8, law.name),
+                .message = try a.dupe(u8, "an excluded law actually holds under the faithful model - it should not be excluded"),
+            }),
+            // timeout / could not decide: inconclusive, non-fatal.
+            .unknown => result.inconclusive += 1,
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // Driver: a pure interpreter of the registry.
 // ---------------------------------------------------------------------------
 
@@ -543,6 +615,9 @@ pub const Receipt = struct {
     smt_available: u32,
     smt_proved: u32,
     smt_total: u32,
+    // Exclusion audit: faithful-model refutations of the declared excluded laws.
+    audit_refuted: u32,
+    audit_total: u32,
     failures: u32,
 };
 
@@ -559,9 +634,15 @@ pub const DifferentialSummary = struct {
     total: u32,
 };
 
+pub const AuditSummary = struct {
+    refuted: u32,
+    total: u32,
+};
+
 pub const ReceiptInput = struct {
     differential: DifferentialSummary,
     smt: SmtSummary,
+    audit: AuditSummary = .{ .refuted = 0, .total = 0 },
 };
 
 pub fn buildReceiptFromInput(result: *const CheckResult, input: ReceiptInput) Receipt {
@@ -582,6 +663,8 @@ pub fn buildReceiptFromInput(result: *const CheckResult, input: ReceiptInput) Re
         .smt_available = @intFromBool(input.smt.available),
         .smt_proved = input.smt.proved,
         .smt_total = input.smt.total,
+        .audit_refuted = input.audit.refuted,
+        .audit_total = input.audit.total,
         .failures = @intCast(result.failures.items.len),
     };
 }
@@ -601,20 +684,20 @@ pub fn buildReceipt(
 fn payloadString(allocator: std.mem.Allocator, r: Receipt) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "zigttp-semantics-v3\n{s}\n{s}\n{s}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}",
+        "zigttp-semantics-v4\n{s}\n{s}\n{s}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}",
         .{
             r.semantics_hash,     r.ir_table_hash,       r.opcode_table_hash,
             r.nodes_proven,       r.nodes_total,         r.opcodes_specified,
             r.opcodes_total,      r.binop_instances,     r.unop_instances,
             r.refinements_proven, r.differential_passed, r.differential_total,
             r.smt_available,      r.smt_proved,          r.smt_total,
-            r.failures,
+            r.audit_refuted,      r.audit_total,         r.failures,
         },
     );
 }
 
 const jws_header = "{\"alg\":\"EdDSA\",\"typ\":\"zigttp-semantics+jws\"}";
-const payload_version = "zigttp-semantics-v3";
+const payload_version = "zigttp-semantics-v4";
 
 const b64 = std.base64.url_safe_no_pad;
 
@@ -656,7 +739,9 @@ fn isReceiptPayload(bytes: []const u8) bool {
         const hash = it.next() orelse return false;
         if (!isLowerHex64(hash)) return false;
     }
-    for (0..13) |_| {
+    // 15 decimal fields: 7 check/coverage counts + differential(2) + smt(3) +
+    // audit(2) + failures(1). Bump this with payload_version whenever a field is added.
+    for (0..15) |_| {
         const n = it.next() orelse return false;
         if (!isDecimal(n)) return false;
     }
@@ -939,6 +1024,42 @@ test "runSmt treats solver unknown as unproven, not a failure" {
     try std.testing.expectEqual(r.total, r.unproven);
     try std.testing.expectEqual(@as(usize, 0), r.proved);
     try std.testing.expectEqual(@as(usize, 0), r.failures.items.len);
+}
+
+test "runAudit skips cleanly when no solver is injected" {
+    var r = try runAudit(std.testing.allocator, null);
+    defer r.deinit();
+    try std.testing.expect(!r.available);
+    try std.testing.expect(r.ok());
+    try std.testing.expectEqual(semantics.excluded_laws.len, r.total);
+    try std.testing.expectEqual(@as(usize, 0), r.refuted);
+}
+
+test "runAudit: a counterexample for each excluded law confirms the exclusion" {
+    var r = try runAudit(std.testing.allocator, fakeAllCounterexample);
+    defer r.deinit();
+    try std.testing.expect(r.available);
+    try std.testing.expect(r.ok());
+    try std.testing.expectEqual(r.total, r.refuted);
+}
+
+test "runAudit fails loud when an excluded law actually holds" {
+    // equivalent (unsat) means the 'non-law' holds -> the exclusion was wrong.
+    var r = try runAudit(std.testing.allocator, fakeAllEquivalent);
+    defer r.deinit();
+    try std.testing.expect(r.available);
+    try std.testing.expect(!r.ok());
+    try std.testing.expectEqual(r.total, r.failures.items.len);
+    try std.testing.expectEqual(semantics.SpecCode.excluded_law_holds, r.failures.items[0].code);
+}
+
+test "runAudit treats solver unknown as inconclusive, not a failure" {
+    var r = try runAudit(std.testing.allocator, fakeAllUnknown);
+    defer r.deinit();
+    try std.testing.expect(r.available);
+    try std.testing.expect(r.ok()); // inconclusive is non-fatal
+    try std.testing.expectEqual(r.total, r.inconclusive);
+    try std.testing.expectEqual(@as(usize, 0), r.refuted);
 }
 
 test "runSmt records unencodable obligations as spec authoring failures" {

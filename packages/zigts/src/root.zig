@@ -112,6 +112,7 @@ pub const jit = @import("jit/root.zig");
 pub const semantics = @import("semantics.zig");
 pub const semantics_check = @import("semantics_check.zig");
 pub const semantics_smt = @import("semantics_smt.zig");
+pub const semantics_audit = @import("semantics_audit.zig");
 pub const semantics_corpus = @import("semantics_corpus.zig");
 pub const semantics_render = @import("semantics_render.zig");
 

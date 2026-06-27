@@ -109,15 +109,17 @@ const SpecCheckReport = struct {
     check: *const zigts.semantics_check.CheckResult,
     corpus: *const zigts.semantics_corpus.CorpusResult,
     smt: *const zigts.semantics_check.SmtResult,
+    audit: *const zigts.semantics_check.AuditResult,
 
     fn ok(self: SpecCheckReport) bool {
-        return self.check.ok() and self.corpus.ok() and self.smt.ok();
+        return self.check.ok() and self.corpus.ok() and self.smt.ok() and self.audit.ok();
     }
 
     fn failureCount(self: SpecCheckReport) usize {
         return self.check.failures.items.len +
             self.corpus.failures.items.len +
-            self.smt.failures.items.len;
+            self.smt.failures.items.len +
+            self.audit.failures.items.len;
     }
 };
 
@@ -165,9 +167,18 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
     };
     defer smt.deinit();
 
+    // Exclusion audit: faithful-model refutation of the declared excluded laws
+    // (the dual of mechanism 5). Reuses the same injected solver.
+    var audit = zigts.semantics_check.runAudit(allocator, if (z3_present) smt_solver.solve else null) catch {
+        const msg = "spec-check: audit internal error\n";
+        _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
+        std.process.exit(2);
+    };
+    defer audit.deinit();
+
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
-    const report: SpecCheckReport = .{ .check = &result, .corpus = &corpus, .smt = &smt };
+    const report: SpecCheckReport = .{ .check = &result, .corpus = &corpus, .smt = &smt, .audit = &audit };
     if (json_mode) {
         try writeSpecCheckJson(allocator, &buf, report);
     } else {
@@ -187,6 +198,7 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
             const receipt = zigts.semantics_check.buildReceiptFromInput(&result, .{
                 .differential = .{ .passed = @intCast(corpus.cases_passed), .total = @intCast(corpus.cases_total) },
                 .smt = .{ .available = smt.available, .proved = @intCast(smt.proved), .total = @intCast(smt.total) },
+                .audit = .{ .refuted = @intCast(audit.refuted), .total = @intCast(audit.total) },
             });
             probe(allocator, receipt);
         }
@@ -220,6 +232,16 @@ fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), rep
     } else {
         try appendFmt(allocator, buf, "  smt equivalence:   skipped ({d} obligations; z3 not found)\n", .{smt.total});
     }
+    const audit = report.audit;
+    if (audit.available) {
+        if (audit.inconclusive > 0) {
+            try appendFmt(allocator, buf, "  exclusion audit:   {d}/{d} refuted, {d} inconclusive (faithful model, z3)\n", .{ audit.refuted, audit.total, audit.inconclusive });
+        } else {
+            try appendFmt(allocator, buf, "  exclusion audit:   {d}/{d} excluded laws refuted (faithful model, z3)\n", .{ audit.refuted, audit.total });
+        }
+    } else {
+        try appendFmt(allocator, buf, "  exclusion audit:   skipped ({d} excluded laws; z3 not found)\n", .{audit.total});
+    }
     if (report.ok()) {
         try appendFmt(allocator, buf, "  result:            PASS\n", .{});
     } else {
@@ -238,6 +260,9 @@ fn appendSpecCheckFailuresText(allocator: std.mem.Allocator, buf: *std.ArrayList
     for (report.smt.failures.items) |f| {
         try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ f.code.code(), f.where, f.message });
     }
+    for (report.audit.failures.items) |f| {
+        try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ f.code.code(), f.where, f.message });
+    }
 }
 
 fn writeSpecCheckJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), report: SpecCheckReport) !void {
@@ -253,6 +278,8 @@ fn writeSpecCheckJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), rep
     try appendFmt(allocator, buf, "\"valueProofs\":{d},\"binopInstances\":{d},\"unopInstances\":{d},\"refinements\":{d},\"structural\":{d},\"stackEffectChecks\":{d},", .{ r.nodes_proven, r.binop_instances, r.unop_instances, r.refinements_proven, r.nodes_structural, r.stack_effect_checked });
     try appendFmt(allocator, buf, "\"differential\":{{\"passed\":{d},\"total\":{d}}},", .{ corpus.cases_passed, corpus.cases_total });
     try appendFmt(allocator, buf, "\"smt\":{{\"available\":{s},\"proved\":{d},\"unproven\":{d},\"total\":{d}}},", .{ if (smt.available) "true" else "false", smt.proved, smt.unproven, smt.total });
+    const audit = report.audit;
+    try appendFmt(allocator, buf, "\"audit\":{{\"available\":{s},\"refuted\":{d},\"inconclusive\":{d},\"total\":{d}}},", .{ if (audit.available) "true" else "false", audit.refuted, audit.inconclusive, audit.total });
     try appendFmt(allocator, buf, "\"ok\":{s},\"failures\":[", .{if (report.ok()) "true" else "false"});
     try appendSpecCheckFailuresJson(allocator, buf, report);
     try appendFmt(allocator, buf, "]}}\n", .{});
@@ -282,6 +309,9 @@ fn appendSpecCheckFailuresJson(allocator: std.mem.Allocator, buf: *std.ArrayList
         try appendJsonFailure(allocator, buf, &first, zigts.semantics.SpecCode.lowering_divergence.code(), f.where, f.message);
     }
     for (report.smt.failures.items) |f| {
+        try appendJsonFailure(allocator, buf, &first, f.code.code(), f.where, f.message);
+    }
+    for (report.audit.failures.items) |f| {
         try appendJsonFailure(allocator, buf, &first, f.code.code(), f.where, f.message);
     }
 }
@@ -314,13 +344,24 @@ test "spec-check renderers aggregate structural corpus and smt failures" {
     smt.total = 3;
     try smt.failures.append(smt.arena.allocator(), .{
         .code = .smt_counterexample,
-        .where = "add_commutative",
+        .where = "smt_law",
         .message = "counterexample",
     });
 
-    const report: SpecCheckReport = .{ .check = &check, .corpus = &corpus, .smt = &smt };
+    var audit = zigts.semantics_check.AuditResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    defer audit.deinit();
+    audit.available = true;
+    audit.refuted = 2;
+    audit.total = 3;
+    try audit.failures.append(audit.arena.allocator(), .{
+        .code = .excluded_law_holds,
+        .where = "bad_exclusion",
+        .message = "an excluded law actually holds",
+    });
+
+    const report: SpecCheckReport = .{ .check = &check, .corpus = &corpus, .smt = &smt, .audit = &audit };
     try std.testing.expect(!report.ok());
-    try std.testing.expectEqual(@as(usize, 3), report.failureCount());
+    try std.testing.expectEqual(@as(usize, 4), report.failureCount());
 
     var json: std.ArrayList(u8) = .empty;
     defer json.deinit(allocator);
@@ -328,13 +369,15 @@ test "spec-check renderers aggregate structural corpus and smt failures" {
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"ok\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"binary_op\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"unary_op\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"add_commutative\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"smt_law\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"bad_exclusion\"") != null);
 
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
     try writeSpecCheckText(allocator, &text, report);
-    try std.testing.expect(std.mem.indexOf(u8, text.items, "FAIL (3 divergence)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "FAIL (4 divergence)") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.items, "binary_op: lowering mismatch") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.items, "unary_op: real codegen mismatch") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text.items, "add_commutative: counterexample") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "smt_law: counterexample") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "bad_exclusion: an excluded law actually holds") != null);
 }
