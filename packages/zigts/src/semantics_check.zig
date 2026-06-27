@@ -457,10 +457,10 @@ fn proveSmtObligations(
                 .where = try a.dupe(u8, ob.where),
                 .message = try a.dupe(u8, "SMT found a counterexample: the two sides are not equivalent"),
             }),
-            // Could not decide or could not run (undecidable fragment, or the
-            // solver was unavailable / errored mid-run). Same situation as no z3:
-            // unproven, reported, not a failure.
-            .unknown => result.unproven += 1,
+            // Could not decide (undecidable fragment) or could not run (solver
+            // errored mid-run). Same situation as no z3: unproven, reported, not
+            // a failure - the prover never falsely reports "equivalent".
+            .unknown, .solver_error => result.unproven += 1,
         }
     }
 }
@@ -478,6 +478,11 @@ fn proveSmtObligations(
 //                             it was wrong or the value model drifted (ZTS757).
 //   - unknown              -> inconclusive, non-fatal (a hard refutation that hit
 //                             the per-query timeout; reported, not a failure).
+//   - solver_error         -> FATAL (ZTS758): z3 could not evaluate the faithful
+//                             model (errored / lacks the FP or String theory), so
+//                             the audit did NOT run. Failing loud here is the
+//                             fail-closed guard - a broken solver must not make
+//                             the soundness boundary look checked.
 // ---------------------------------------------------------------------------
 
 pub const AuditResult = struct {
@@ -529,8 +534,17 @@ pub fn runAudit(allocator: std.mem.Allocator, solve: ?SolveFn) !AuditResult {
                 .where = try a.dupe(u8, law.name),
                 .message = try a.dupe(u8, "an excluded law actually holds under the faithful model - it should not be excluded"),
             }),
-            // timeout / could not decide: inconclusive, non-fatal.
+            // timeout / genuinely could not decide: inconclusive, non-fatal.
             .unknown => result.inconclusive += 1,
+            // the solver could NOT evaluate the faithful model (z3 errored, lacks
+            // the FP/String theory, or could not spawn). This means the audit did
+            // not run for this law - fail loud rather than silently passing, so a
+            // broken solver cannot make the soundness boundary look checked.
+            .solver_error => try result.failures.append(a, .{
+                .code = .audit_solver_error,
+                .where = try a.dupe(u8, law.name),
+                .message = try a.dupe(u8, "z3 could not evaluate the faithful-model query (solver error or missing FP/String theory)"),
+            }),
         }
     }
     return result;
@@ -616,6 +630,9 @@ pub const Receipt = struct {
     smt_proved: u32,
     smt_total: u32,
     // Exclusion audit: faithful-model refutations of the declared excluded laws.
+    // audit_available is 0 when the audit did not run (not requested, or no z3),
+    // so audit_refuted=0 is not mistaken for "ran and refuted nothing".
+    audit_available: u32,
     audit_refuted: u32,
     audit_total: u32,
     failures: u32,
@@ -635,6 +652,7 @@ pub const DifferentialSummary = struct {
 };
 
 pub const AuditSummary = struct {
+    available: bool,
     refuted: u32,
     total: u32,
 };
@@ -642,7 +660,7 @@ pub const AuditSummary = struct {
 pub const ReceiptInput = struct {
     differential: DifferentialSummary,
     smt: SmtSummary,
-    audit: AuditSummary = .{ .refuted = 0, .total = 0 },
+    audit: AuditSummary = .{ .available = false, .refuted = 0, .total = 0 },
 };
 
 pub fn buildReceiptFromInput(result: *const CheckResult, input: ReceiptInput) Receipt {
@@ -663,6 +681,7 @@ pub fn buildReceiptFromInput(result: *const CheckResult, input: ReceiptInput) Re
         .smt_available = @intFromBool(input.smt.available),
         .smt_proved = input.smt.proved,
         .smt_total = input.smt.total,
+        .audit_available = @intFromBool(input.audit.available),
         .audit_refuted = input.audit.refuted,
         .audit_total = input.audit.total,
         .failures = @intCast(result.failures.items.len),
@@ -684,20 +703,21 @@ pub fn buildReceipt(
 fn payloadString(allocator: std.mem.Allocator, r: Receipt) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "zigttp-semantics-v4\n{s}\n{s}\n{s}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}",
+        "zigttp-semantics-v5\n{s}\n{s}\n{s}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}\n{d}",
         .{
             r.semantics_hash,     r.ir_table_hash,       r.opcode_table_hash,
             r.nodes_proven,       r.nodes_total,         r.opcodes_specified,
             r.opcodes_total,      r.binop_instances,     r.unop_instances,
             r.refinements_proven, r.differential_passed, r.differential_total,
             r.smt_available,      r.smt_proved,          r.smt_total,
-            r.audit_refuted,      r.audit_total,         r.failures,
+            r.audit_available,    r.audit_refuted,       r.audit_total,
+            r.failures,
         },
     );
 }
 
 const jws_header = "{\"alg\":\"EdDSA\",\"typ\":\"zigttp-semantics+jws\"}";
-const payload_version = "zigttp-semantics-v4";
+const payload_version = "zigttp-semantics-v5";
 
 const b64 = std.base64.url_safe_no_pad;
 
@@ -739,9 +759,9 @@ fn isReceiptPayload(bytes: []const u8) bool {
         const hash = it.next() orelse return false;
         if (!isLowerHex64(hash)) return false;
     }
-    // 15 decimal fields: 7 check/coverage counts + differential(2) + smt(3) +
-    // audit(2) + failures(1). Bump this with payload_version whenever a field is added.
-    for (0..15) |_| {
+    // 16 decimal fields: 7 check/coverage counts + differential(2) + smt(3) +
+    // audit(3) + failures(1). Bump this with payload_version whenever a field is added.
+    for (0..16) |_| {
         const n = it.next() orelse return false;
         if (!isDecimal(n)) return false;
     }
@@ -960,6 +980,10 @@ fn fakeAllUnknown(_: []const u8, _: std.mem.Allocator) semantics_smt.Verdict {
     return .unknown;
 }
 
+fn fakeAllSolverError(_: []const u8, _: std.mem.Allocator) semantics_smt.Verdict {
+    return .solver_error;
+}
+
 test "collectSmtObligations covers every value rule, refinement, and law" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1060,6 +1084,29 @@ test "runAudit treats solver unknown as inconclusive, not a failure" {
     try std.testing.expect(r.ok()); // inconclusive is non-fatal
     try std.testing.expectEqual(r.total, r.inconclusive);
     try std.testing.expectEqual(@as(usize, 0), r.refuted);
+}
+
+test "runAudit fails loud when the solver errors (cannot evaluate the model)" {
+    // z3 erroring on the faithful model (e.g. missing FP theory) must NOT pass
+    // silently - it means the audit did not run.
+    var r = try runAudit(std.testing.allocator, fakeAllSolverError);
+    defer r.deinit();
+    try std.testing.expect(r.available);
+    try std.testing.expect(!r.ok());
+    try std.testing.expectEqual(r.total, r.failures.items.len);
+    try std.testing.expectEqual(semantics.SpecCode.audit_solver_error, r.failures.items[0].code);
+}
+
+test "every excluded law encodes for the faithful audit (catches malformity without z3)" {
+    // Runs in `zig build test` regardless of z3, so a malformed excluded_laws
+    // entry is caught on a z3-less CI - not only where a solver happens to exist.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for (semantics.excluded_laws) |law| {
+        const q = try semantics_audit.encodeRefutation(arena.allocator(), law.lhs, law.rhs);
+        try std.testing.expect(q.len > 0);
+        try std.testing.expect(std.mem.indexOf(u8, q, "(check-sat)") != null);
+    }
 }
 
 test "runSmt records unencodable obligations as spec authoring failures" {

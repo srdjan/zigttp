@@ -266,16 +266,14 @@ pub const Law = struct {
     rhs: []const Term,
 };
 
-pub const algebraic_laws = [_]Law{
-    // NB: add_associative / add_commutative / not_involution are NOT laws here -
-    // they are in `excluded_laws` below, machine-refuted by the faithful audit.
-    // neg is an involution:  -(-(c0))  ==  c0
-    .{
-        .name = "neg_involution",
-        .lhs = &.{ .{ .child = 0 }, .{ .unop = .neg }, .{ .unop = .neg } },
-        .rhs = &.{.{ .child = 0 }},
-    },
-};
+// No unconditioned algebraic law survives the engine's polymorphic, coercing
+// value model: every tempting equivalence is in `excluded_laws` below (machine-
+// refuted). Asserting laws that hold only for a restricted operand type needs the
+// reachability / type-precondition layer (the deferred faithful-model work), so
+// this table is intentionally empty for now. Mechanism 5 still proves every value
+// node's denote == exec(lower) and the refinements; the algebraic-law slot is
+// where guarded laws will land once preconditions exist.
+pub const algebraic_laws = [_]Law{};
 
 /// Excluded laws: equivalences that are tempting but FALSE under the engine's
 /// faithful value model, declared here so the exclusion is machine-checked rather
@@ -284,10 +282,7 @@ pub const algebraic_laws = [_]Law{
 /// tagged-value model and REQUIRES the solver to find a counterexample - if one
 /// of these ever came back as actually holding, the build fails (the exclusion
 /// was wrong, or the value model drifted). They reuse the `Law` shape; the audit
-/// interprets them as non-laws. NB: `neg_involution` also fails under the faithful
-/// model (string coercion: `-(-"5") !== "5"`), but resolving it needs the
-/// reachability/type-precondition layer and is deliberately left asserted over the
-/// ℤ tier for now - it is NOT in this table.
+/// interprets them as non-laws.
 pub const excluded_laws = [_]Law{
     // associativity of +  - holds over ℤ, fails on f64 rounding past 2^53.
     .{
@@ -307,6 +302,14 @@ pub const excluded_laws = [_]Law{
         .lhs = &.{ .{ .child = 0 }, .{ .unop = .not }, .{ .unop = .not } },
         .rhs = &.{.{ .child = 0 }},
     },
+    // involution of unary -  - `-` coerces to number, so `-(-"5") === "5"` is
+    // false (number 5 !== string "5"). Was previously asserted over the ℤ tier;
+    // now machine-refuted here, removing the receipt over-claim.
+    .{
+        .name = "neg_involution",
+        .lhs = &.{ .{ .child = 0 }, .{ .unop = .neg }, .{ .unop = .neg } },
+        .rhs = &.{.{ .child = 0 }},
+    },
 };
 
 /// Conformance diagnostic codes (ZTS75x). Kept as local registry data rather
@@ -322,6 +325,7 @@ pub const SpecCode = enum {
     smt_counterexample,
     smt_unencodable,
     excluded_law_holds,
+    audit_solver_error,
 
     pub fn code(self: SpecCode) []const u8 {
         return switch (self) {
@@ -333,6 +337,7 @@ pub const SpecCode = enum {
             .smt_counterexample => "ZTS755",
             .smt_unencodable => "ZTS756",
             .excluded_law_holds => "ZTS757",
+            .audit_solver_error => "ZTS758",
         };
     }
 };
@@ -612,10 +617,24 @@ fn hasLawForTest(name: []const u8) bool {
     return false;
 }
 
-test "algebraic laws do not claim JS coercive identities" {
-    try std.testing.expect(!hasLawForTest("add_commutative"));
-    try std.testing.expect(!hasLawForTest("not_involution"));
-    try std.testing.expect(hasLawForTest("neg_involution"));
+fn hasExcludedForTest(name: []const u8) bool {
+    for (excluded_laws) |law| {
+        if (std.mem.eql(u8, law.name, name)) return true;
+    }
+    return false;
+}
+
+test "JS coercive identities are excluded, not asserted" {
+    // None of these hold under the engine's polymorphic, coercing value model, so
+    // none may be an asserted algebraic law; each must instead be an excluded law
+    // the faithful audit refutes. neg_involution moved here from the law table
+    // once the audit existed (string coercion: -(-"5") !== "5").
+    for ([_][]const u8{ "add_commutative", "not_involution", "neg_involution", "add_associative" }) |name| {
+        try std.testing.expect(!hasLawForTest(name));
+        try std.testing.expect(hasExcludedForTest(name));
+    }
+    // The law table is intentionally empty until the reachability layer lands.
+    try std.testing.expectEqual(@as(usize, 0), algebraic_laws.len);
 }
 
 test "table hashes include enum discriminants" {

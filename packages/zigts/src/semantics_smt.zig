@@ -45,21 +45,29 @@ pub const Verdict = enum {
     equivalent,
     /// sat: a counterexample exists -> the sides differ on some input.
     counterexample,
-    /// the solver could not decide (must not happen on the decidable slice;
-    /// treated as a failure by the driver).
+    /// the solver ran but could not decide within its budget (a timeout: z3
+    /// prints `unknown`). Genuinely undecided, not broken.
     unknown,
+    /// the solver could not evaluate the query at all - it errored or could not
+    /// be spawned (z3 `(error ...)`, a missing theory, a nonzero exit, or no
+    /// recognizable verdict). Distinct from `unknown` because it means the check
+    /// did NOT run, so the audit must not treat it as a benign timeout.
+    solver_error,
 };
 
 /// Parse a solver's stdout. The first non-empty token is the check-sat result.
+/// `unknown` (a timeout) is distinct from any other non-sat/unsat output, which
+/// is a solver error (e.g. `(error ...)` from an unsupported theory).
 pub fn parseVerdict(stdout: []const u8) Verdict {
     var it = std.mem.tokenizeAny(u8, stdout, " \t\r\n");
     while (it.next()) |tok| {
         if (std.mem.eql(u8, tok, "unsat")) return .equivalent;
         if (std.mem.eql(u8, tok, "sat")) return .counterexample;
-        // anything else on the first token (e.g. "unknown", "(error ...")
-        return .unknown;
+        if (std.mem.eql(u8, tok, "unknown")) return .unknown;
+        // anything else (e.g. "(error ...") means z3 did not evaluate the query.
+        return .solver_error;
     }
-    return .unknown;
+    return .solver_error;
 }
 
 pub const EncodeError = error{
@@ -300,8 +308,10 @@ test "parseVerdict reads the check-sat line" {
     try std.testing.expectEqual(Verdict.equivalent, parseVerdict("unsat\n"));
     try std.testing.expectEqual(Verdict.counterexample, parseVerdict("sat\n(\n (define-fun x () Int 4))\n"));
     try std.testing.expectEqual(Verdict.unknown, parseVerdict("unknown\n"));
-    try std.testing.expectEqual(Verdict.unknown, parseVerdict("(error \"boom\")\n"));
-    try std.testing.expectEqual(Verdict.unknown, parseVerdict("   \n"));
+    // a z3 error or empty/garbage output is a solver_error, NOT a benign timeout.
+    try std.testing.expectEqual(Verdict.solver_error, parseVerdict("(error \"boom\")\n"));
+    try std.testing.expectEqual(Verdict.solver_error, parseVerdict("   \n"));
+    try std.testing.expectEqual(Verdict.solver_error, parseVerdict("garbage\n"));
 }
 
 test "encode a binary_op denotation (int operands)" {

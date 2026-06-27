@@ -71,9 +71,12 @@ step "semantics spec gate  (spec-check all mechanisms + spec.ts drift)"
 # (mechanism 4) running the registry against the real compiler and the SMT
 # equivalence check (mechanism 5). Mechanism 5 needs the z3 binary; where it is
 # absent the SMT obligations are skipped and the structural mechanisms still gate
-# (so CI without z3 stays green). Keep the summary visible so SMT availability
-# and skipped obligations are not hidden in local or CI logs.
-./zig-out/bin/zigts spec-check
+# (so CI without z3 stays green). --audit additionally runs the faithful-model
+# exclusion audit (opt-in because its f64-associativity refutation is slow), so
+# CI machine-checks the soundness boundary even though interactive spec-check
+# stays fast. Keep the summary visible so SMT/audit availability and skipped or
+# inconclusive obligations are not hidden in local or CI logs.
+./zig-out/bin/zigts spec-check --audit
 # The committed readable spec must match the registry it is generated from.
 ./zig-out/bin/zigts spec-render --check docs/spec/semantics.spec.ts
 echo "semantics spec gate OK"

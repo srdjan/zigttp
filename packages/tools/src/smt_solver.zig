@@ -112,14 +112,16 @@ fn tmpQueryPath(alloc: std.mem.Allocator) ![]u8 {
 }
 
 /// SolveFn-compatible: run `query` through z3 and return the verdict. The query
-/// goes via a temp file because `std.process.run` ignores stdin. Failures map to
-/// `.unknown`.
+/// goes via a temp file because `std.process.run` ignores stdin. A spawn/IO
+/// failure (or z3 emitting no usable verdict) maps to `.solver_error`, distinct
+/// from a genuine `.unknown` timeout - the audit must not treat a broken solver
+/// as a benign inconclusive.
 pub fn solve(query: []const u8, alloc: std.mem.Allocator) Verdict {
-    return solveImpl(query, alloc) catch .unknown;
+    return solveImpl(query, alloc) catch .solver_error;
 }
 
 fn solveImpl(query: []const u8, alloc: std.mem.Allocator) !Verdict {
-    const z3 = resolveZ3(alloc) orelse return .unknown;
+    const z3 = resolveZ3(alloc) orelse return .solver_error;
     defer alloc.free(z3);
 
     const tmp = try tmpQueryPath(alloc);
@@ -212,4 +214,18 @@ test "solve proves a true equivalence when z3 is present" {
     const q = try zigts.semantics_smt.encodeEquivalence(a, &lhs, &rhs, false);
     defer a.free(q);
     try std.testing.expectEqual(Verdict.equivalent, solve(q, a));
+}
+
+test "solve refutes a faithful-model non-law when z3 is present" {
+    // Exercises the REFUTE direction through real z3 + the faithful encoder, so a
+    // drift that made the encoding accidentally always-equal (unsat) is caught
+    // here, not only in scripts/verify.sh. add_commutative is the fast refutation
+    // (string concat counterexample).
+    const a = std.testing.allocator;
+    if (!available(a)) return error.SkipZigTest;
+    const lhs = [_]zigts.semantics.Term{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add } };
+    const rhs = [_]zigts.semantics.Term{ .{ .child = 1 }, .{ .child = 0 }, .{ .binop = .add } };
+    const q = try zigts.semantics_audit.encodeRefutation(a, &lhs, &rhs);
+    defer a.free(q);
+    try std.testing.expectEqual(Verdict.counterexample, solve(q, a));
 }

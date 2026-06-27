@@ -110,6 +110,8 @@ const SpecCheckReport = struct {
     corpus: *const zigts.semantics_corpus.CorpusResult,
     smt: *const zigts.semantics_check.SmtResult,
     audit: *const zigts.semantics_check.AuditResult,
+    /// Whether --audit was passed (so "not run" is distinguished from "z3 absent").
+    audit_requested: bool = false,
 
     fn ok(self: SpecCheckReport) bool {
         return self.check.ok() and self.corpus.ok() and self.smt.ok() and self.audit.ok();
@@ -129,9 +131,15 @@ pub fn runSpecCheckCommand(allocator: std.mem.Allocator, argv: []const []const u
 
 pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []const u8, context: RunContext) !void {
     var json_mode = false;
+    var want_audit = false;
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
+        } else if (std.mem.eql(u8, arg, "--audit")) {
+            // The exclusion audit's f64-associativity refutation is slow (~5s),
+            // so it is opt-in: off keeps interactive spec-check fast; CI
+            // (scripts/verify.sh) passes --audit to gate the soundness boundary.
+            want_audit = true;
         } else if (isHelpToken(arg)) {
             // no separate help screen
         } else {
@@ -168,8 +176,9 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
     defer smt.deinit();
 
     // Exclusion audit: faithful-model refutation of the declared excluded laws
-    // (the dual of mechanism 5). Reuses the same injected solver.
-    var audit = zigts.semantics_check.runAudit(allocator, if (z3_present) smt_solver.solve else null) catch {
+    // (the dual of mechanism 5). Opt-in (--audit) because the f64-associativity
+    // refutation is slow; reuses the same injected solver when requested.
+    var audit = zigts.semantics_check.runAudit(allocator, if (want_audit and z3_present) smt_solver.solve else null) catch {
         const msg = "spec-check: audit internal error\n";
         _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
         std.process.exit(2);
@@ -178,7 +187,7 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
-    const report: SpecCheckReport = .{ .check = &result, .corpus = &corpus, .smt = &smt, .audit = &audit };
+    const report: SpecCheckReport = .{ .check = &result, .corpus = &corpus, .smt = &smt, .audit = &audit, .audit_requested = want_audit };
     if (json_mode) {
         try writeSpecCheckJson(allocator, &buf, report);
     } else {
@@ -198,7 +207,7 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
             const receipt = zigts.semantics_check.buildReceiptFromInput(&result, .{
                 .differential = .{ .passed = @intCast(corpus.cases_passed), .total = @intCast(corpus.cases_total) },
                 .smt = .{ .available = smt.available, .proved = @intCast(smt.proved), .total = @intCast(smt.total) },
-                .audit = .{ .refuted = @intCast(audit.refuted), .total = @intCast(audit.total) },
+                .audit = .{ .available = audit.available, .refuted = @intCast(audit.refuted), .total = @intCast(audit.total) },
             });
             probe(allocator, receipt);
         }
@@ -233,7 +242,9 @@ fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), rep
         try appendFmt(allocator, buf, "  smt equivalence:   skipped ({d} obligations; z3 not found)\n", .{smt.total});
     }
     const audit = report.audit;
-    if (audit.available) {
+    if (!report.audit_requested) {
+        try appendFmt(allocator, buf, "  exclusion audit:   not run ({d} excluded laws; pass --audit to enable)\n", .{audit.total});
+    } else if (audit.available) {
         if (audit.inconclusive > 0) {
             try appendFmt(allocator, buf, "  exclusion audit:   {d}/{d} refuted, {d} inconclusive (faithful model, z3)\n", .{ audit.refuted, audit.total, audit.inconclusive });
         } else {
@@ -279,7 +290,7 @@ fn writeSpecCheckJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), rep
     try appendFmt(allocator, buf, "\"differential\":{{\"passed\":{d},\"total\":{d}}},", .{ corpus.cases_passed, corpus.cases_total });
     try appendFmt(allocator, buf, "\"smt\":{{\"available\":{s},\"proved\":{d},\"unproven\":{d},\"total\":{d}}},", .{ if (smt.available) "true" else "false", smt.proved, smt.unproven, smt.total });
     const audit = report.audit;
-    try appendFmt(allocator, buf, "\"audit\":{{\"available\":{s},\"refuted\":{d},\"inconclusive\":{d},\"total\":{d}}},", .{ if (audit.available) "true" else "false", audit.refuted, audit.inconclusive, audit.total });
+    try appendFmt(allocator, buf, "\"audit\":{{\"requested\":{s},\"available\":{s},\"refuted\":{d},\"inconclusive\":{d},\"total\":{d}}},", .{ if (report.audit_requested) "true" else "false", if (audit.available) "true" else "false", audit.refuted, audit.inconclusive, audit.total });
     try appendFmt(allocator, buf, "\"ok\":{s},\"failures\":[", .{if (report.ok()) "true" else "false"});
     try appendSpecCheckFailuresJson(allocator, buf, report);
     try appendFmt(allocator, buf, "]}}\n", .{});
@@ -359,7 +370,7 @@ test "spec-check renderers aggregate structural corpus and smt failures" {
         .message = "an excluded law actually holds",
     });
 
-    const report: SpecCheckReport = .{ .check = &check, .corpus = &corpus, .smt = &smt, .audit = &audit };
+    const report: SpecCheckReport = .{ .check = &check, .corpus = &corpus, .smt = &smt, .audit = &audit, .audit_requested = true };
     try std.testing.expect(!report.ok());
     try std.testing.expectEqual(@as(usize, 4), report.failureCount());
 

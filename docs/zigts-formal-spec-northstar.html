@@ -237,12 +237,12 @@
             <code class="inline">sat</code> on algebraic laws when a free leaf may be a bool, so
             <code class="inline">getInt</code> of it is unconstrained junk. Native sorts avoid that; the tagged/poison
             model is deferred to when the heap enters &mdash; see the caveat below.)</li>
-          <li><b>Full value-rule coverage, plus a law.</b> Every value node's <code class="inline">denote == exec(lower)</code>
-            now goes through the SMT check, so mechanism 5 is a superset of the structural mechanism 3 for the value
-            rules (and catches the day a lowering stops being a syntactic transliteration of its denotation), alongside
-            the fused-opcode refinements. The registry also declares an algebraic law &mdash; <code class="inline">neg</code>
-            involution, <code class="inline">-(-x) == x</code>, structurally <em>different</em> on each side so mechanism 3
-            cannot see it &mdash; hashed into <code class="inline">semanticsHash</code> and rendered into the spec.</li>
+          <li><b>Full value-rule coverage.</b> Every value node's <code class="inline">denote == exec(lower)</code>
+            goes through the SMT check, so mechanism 5 is a superset of the structural mechanism 3 for the value rules
+            (and catches the day a lowering stops being a syntactic transliteration of its denotation), alongside the
+            fused-opcode refinements. The asserted-algebraic-law table is now <em>empty</em>: no unconditioned
+            equivalence survives the engine's coercing operators (see below), so until the reachability layer can assert
+            laws under type guards, the proving tier proves the lowerings and refinements only.</li>
           <li><b>The value model is an abstraction, and that boundary is enforced.</b> Numbers are encoded as unbounded
             mathematical integers (ℤ), an abstraction of the engine's actual values (i32 promoting to f64 on overflow,
             and the polymorphic <code class="inline">+</code> / <code class="inline">!</code> operators). A law is asserted
@@ -260,32 +260,39 @@
             with JS coercion (<code class="inline">toNum</code>/<code class="inline">toStr</code>/<code class="inline">toBool</code>),
             polymorphic <code class="inline">+</code>, type-strict <code class="inline">===</code> &mdash; and REQUIRES z3 to
             find a counterexample. <code class="inline">sat</code> confirms the exclusion; <code class="inline">unsat</code>
-            (the "non-law" actually holds) fails the build with <code class="inline">ZTS757</code>; a timeout is inconclusive
-            (non-fatal). spec-check reports <code class="inline">exclusion audit: 3/3 excluded laws refuted</code>. A go/no-go
-            spike (U1) set the strategy: faithful Float64 refutations and simple proofs are sub-second, only binary
-            commutativity/associativity <em>proofs</em> time out (so they are excluded, not asserted), and the per-query
-            <code class="inline">:timeout</code> degrades a hard refutation to inconclusive rather than hanging.</li>
+            (the "non-law" actually holds) fails the build with <code class="inline">ZTS757</code>; a z3 that cannot evaluate
+            the model (errors, lacks the FP/String theory) fails with <code class="inline">ZTS758</code> rather than silently
+            passing; a genuine timeout is inconclusive (non-fatal). The four excluded laws are associativity and
+            commutativity of <code class="inline">+</code>, and the <code class="inline">!</code> and unary-<code class="inline">-</code>
+            involutions &mdash; <code class="inline">neg_involution</code> moved here from the law table once the audit
+            existed (it is false under string coercion, <code class="inline">-(-"5") !== "5"</code>), which removes the
+            receipt over-claim. spec-check reports <code class="inline">exclusion audit: 4/4 excluded laws refuted</code>.
+            The audit is opt-in (<code class="inline">spec-check --audit</code>, run by CI) because its f64-associativity
+            refutation is ~5s; interactive spec-check stays sub-second. A go/no-go spike (U1) set the strategy: faithful
+            Float64 refutations and simple proofs are sub-second, only binary commutativity/associativity <em>proofs</em>
+            time out (so they are excluded, not asserted).</li>
           <li><b>Injected solver, honest outcomes.</b> The driver takes the solver as a function pointer, so
-            <code class="inline">std.process.Child</code> never enters the freestanding/wasm analyzer. Only a genuine
-            counterexample is a failure: <code class="inline">sat</code> &rarr; <code class="inline">ZTS755</code> (the law
-            is false), an ill-typed obligation &rarr; <code class="inline">ZTS756</code> (a spec-authoring bug), and a
-            solver that cannot decide or run (absent, broken mid-run, undecidable, unwritable scratch dir) &rarr;
-            <em>unproven</em>, reported but non-fatal &mdash; the same outcome as no z3, so an environmental failure never
-            masquerades as a value-equivalence counterexample. SMT is also opt-out: <code class="inline">ZIGTTP_Z3=off</code>
-            disables it even where z3 is installed.</li>
+            <code class="inline">std.process.Child</code> never enters the freestanding/wasm analyzer. For the prover, only a
+            genuine counterexample is a failure: <code class="inline">sat</code> &rarr; <code class="inline">ZTS755</code>,
+            an ill-typed obligation &rarr; <code class="inline">ZTS756</code>, and a solver that cannot decide or run &rarr;
+            <em>unproven</em>, reported but non-fatal &mdash; the same outcome as no z3. The audit inverts this and adds a
+            fail-closed guard: a solver that errors on the faithful model is a failure (<code class="inline">ZTS758</code>),
+            not a benign inconclusive, so a broken z3 cannot make the boundary look checked. SMT is also opt-out:
+            <code class="inline">ZIGTTP_Z3=off</code> disables it even where z3 is installed.</li>
           <li><b>In the receipt.</b> The signed <code class="inline">kind=semantics</code> JWS carries the SMT
-            availability and proved/total counts plus the exclusion-audit refuted/total counts (payload v4); unproven
-            obligations show up as proved &lt; total.</li>
+            availability and proved/total counts plus the exclusion-audit availability and refuted/total counts (payload
+            v5); a receipt where the audit did not run is distinguishable from one where it ran and refuted nothing.</li>
         </ul>
         <p style="margin-bottom:0">
           What stays honest: the PROVING tier still uses the integer abstraction (ints, bools, seven operators), and the
           faithful value model is so far used only for REFUTATION (the exclusion audit), not yet to assert laws. The U1
           spike showed why: faithful binary-commutativity <em>proofs</em> time out, and once operators coerce, every
-          unconditioned law refutes (even <code class="inline">neg_involution</code>, via string coercion). So asserting
-          laws faithfully needs a reachability / type-precondition layer &mdash; the larger, deferred part of Phase 2.
-          What landed: every value-rule lowering, the refinements, the surviving (ℤ-tier) law, and a machine-checked
-          exclusion audit. What remains: the reachability/type-precondition layer (to assert numeric laws under guards
-          and resolve <code class="inline">neg_involution</code>), then the value/heap model.
+          unconditioned law refutes &mdash; so there are currently <em>no</em> asserted algebraic laws, and the four
+          tempting ones are machine-refuted instead. Asserting laws faithfully needs a reachability / type-precondition
+          layer &mdash; the larger, deferred part of Phase 2. What landed: every value-rule lowering, the refinements,
+          and a machine-checked exclusion audit (with <code class="inline">neg_involution</code> now correctly refuted, not
+          over-claimed). What remains: the reachability/type-precondition layer to assert numeric laws under guards, then
+          the value/heap model.
         </p>
       </div>
 
@@ -431,7 +438,7 @@
         <div class="step now">
           <div class="ph">Phase 2 &middot; slice shipped</div>
           <div class="ti">SMT validation</div>
-          <div class="de">Z3 refinement check (Alive2-style) over the slice's value theory: a pure SMT-LIB2 encoder (integer abstraction), full value-rule coverage (every node's denote == exec(lower)) plus the fused-opcode refinements and the surviving neg-involution law, AND a faithful-value-model exclusion audit that machine-refutes the three excluded laws (a tagged number|bool|string model with coercion), injected solver with structural fallback, counts in the receipt. Landed 2026-06-26/27. Remaining: a reachability/type-precondition layer to assert numeric laws faithfully (and resolve neg-involution), then the value/heap encoding.</div>
+          <div class="de">Z3 refinement check (Alive2-style) over the slice's value theory: a pure SMT-LIB2 encoder (integer abstraction), full value-rule coverage (every node's denote == exec(lower)) plus the fused-opcode refinements, AND a faithful-value-model exclusion audit (opt-in, --audit) that machine-refutes the four excluded laws (associativity/commutativity of +, !/unary-- involution) over a tagged number|bool|string model with coercion; injected solver with structural fallback and a fail-closed guard on solver errors, counts in the receipt. Landed 2026-06-26/27. Remaining: a reachability/type-precondition layer to assert numeric laws faithfully under guards, then the value/heap encoding.</div>
         </div>
         <div class="step">
           <div class="ph">Phase 3</div>
