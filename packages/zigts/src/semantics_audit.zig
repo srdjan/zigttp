@@ -26,8 +26,17 @@
 //!
 //! Scope (the bounded "exclusion-audit" tier): this refutes the declared
 //! excluded laws. It does NOT add a reachability/type-precondition layer to let
-//! numeric laws be asserted under guards - that is the larger faithful-model work
-//! the U1 spike showed is the real Phase 2 cost center.
+//! numeric laws be asserted under guards. That layer is deliberately not built:
+//! the U2 reachability analysis showed the slice's `child`/`local`/`call_result`
+//! leaves are genuinely opaque (a local or call_result can carry a string), so
+//! a precondition would narrow nothing - the unconstrained `Val` domain above IS
+//! the reachable domain. Asserting a numeric law would instead need a *typed
+//! leaf* (a registry/`Term`-model change), and the only law it would unlock -
+//! numeric `+` commutativity - the U1 spike measured at ~130s over Float64,
+//! landing `unproven` under the timeout anyway. So the faithful *scalar* value
+//! model is complete here; the next real strengthening is the heap/object model,
+//! not more scalar preconditions. The `excluded-law leaves stay unconstrained`
+//! test below pins the opacity this soundness rests on.
 
 const std = @import("std");
 const semantics = @import("semantics.zig");
@@ -213,4 +222,22 @@ test "a malformed RPN is rejected" {
     const a = std.testing.allocator;
     const terms = [_]Term{ .{ .child = 0 }, .{ .child = 1 } };
     try std.testing.expectError(error.Malformed, encodeRefutation(a, &terms, &terms));
+}
+
+test "excluded-law leaves stay unconstrained (refutation covers the full reachable Val domain)" {
+    // Reachability verdict for the scalar slice: child/local/call_result are
+    // opaque engine values. A local or call_result can carry a string (string
+    // and template literals exist in the language; values are NaN-boxed and
+    // untyped at the slot), so each leaf is declared as an UNCONSTRAINED `Val`.
+    // That is exactly what keeps the excluded laws refutable over the engine's
+    // real domain - if a leaf were narrowed (e.g. asserted numeric), an excluded
+    // law could go vacuously "held" and the boundary would look checked when it
+    // is not. Lock it without a solver: the ONLY assertion in each refutation
+    // query is the root `(not (seq ...))` - no per-leaf constraint is emitted.
+    const a = std.testing.allocator;
+    for (semantics.excluded_laws) |law| {
+        const q = try encodeRefutation(a, law.lhs, law.rhs);
+        defer a.free(q);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, q, "(assert "));
+    }
 }

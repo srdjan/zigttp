@@ -291,8 +291,13 @@
           tempting ones are machine-refuted instead. Asserting laws faithfully needs a reachability / type-precondition
           layer &mdash; the larger, deferred part of Phase 2. What landed: every value-rule lowering, the refinements,
           and a machine-checked exclusion audit (with <code class="inline">neg_involution</code> now correctly refuted, not
-          over-claimed). What remains: the reachability/type-precondition layer to assert numeric laws under guards, then
-          the value/heap model.
+          over-claimed). The U2 reachability analysis then closed out the scalar tier: the slice's operand leaves are
+          genuinely opaque (a local or call result can carry a string), so a type-precondition narrows nothing &mdash; the
+          unconstrained value domain already <em>is</em> the reachable domain, and the four exclusions are machine-tight,
+          not conservative. Asserting a numeric law would need a <em>typed leaf</em> (a registry change), and the one law it
+          would unlock &mdash; numeric <code class="inline">+</code> commutativity &mdash; the U1 spike measured at ~130s,
+          landing unproven under the timeout anyway. So the faithful <em>scalar</em> value model is complete; what remains is
+          the value/heap model (NaN-boxing, object identity, inline caches &mdash; the Alive2 CAV'21 memory-model analog).
         </p>
       </div>
 
@@ -438,7 +443,7 @@
         <div class="step now">
           <div class="ph">Phase 2 &middot; slice shipped</div>
           <div class="ti">SMT validation</div>
-          <div class="de">Z3 refinement check (Alive2-style) over the slice's value theory: a pure SMT-LIB2 encoder (integer abstraction), full value-rule coverage (every node's denote == exec(lower)) plus the fused-opcode refinements, AND a faithful-value-model exclusion audit (opt-in, --audit) that machine-refutes the four excluded laws (associativity/commutativity of +, !/unary-- involution) over a tagged number|bool|string model with coercion; injected solver with structural fallback and a fail-closed guard on solver errors, counts in the receipt. Landed 2026-06-26/27. Remaining: a reachability/type-precondition layer to assert numeric laws faithfully under guards, then the value/heap encoding.</div>
+          <div class="de">Z3 refinement check (Alive2-style) over the slice's value theory: a pure SMT-LIB2 encoder (integer abstraction), full value-rule coverage (every node's denote == exec(lower)) plus the fused-opcode refinements, AND a faithful-value-model exclusion audit (opt-in, --audit) that machine-refutes the four excluded laws (associativity/commutativity of +, !/unary-- involution) over a tagged number|bool|string model with coercion; injected solver with structural fallback and a fail-closed guard on solver errors, counts in the receipt. Landed 2026-06-26/27. The U2 reachability analysis (2026-06-27) closed out the scalar tier: the slice's operand leaves are genuinely opaque (a local/call-result can carry a string), so the exclusions are machine-tight and a type-precondition would narrow nothing; asserting a numeric law would need a typed-leaf registry change to unlock numeric + commutativity, which the U1 spike measured at ~130s (unproven under the timeout) - low payoff, not built. Faithful scalar value model complete; remaining: the value/heap encoding.</div>
         </div>
         <div class="step">
           <div class="ph">Phase 3</div>
