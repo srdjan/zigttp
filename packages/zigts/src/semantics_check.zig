@@ -313,20 +313,75 @@ pub const SmtObligation = struct {
     rhs: []const Term,
 };
 
-const ObligationError = error{ MalformedRefinement, OutOfMemory };
+const ObligationError = error{ MalformedObligation, OutOfMemory };
 
-/// The equivalence obligations whose two sides may differ structurally: each
-/// refinement (exec(fused) vs exec(base)) and each declared algebraic law.
+/// Symbolically execute a lowering (straight or branch) to its denotation, the
+/// same reconstruction proveValueRule does for mechanism 3. Returns null on a
+/// malformed lowering. Shared by the SMT obligation collector.
+fn execLowering(scratch: std.mem.Allocator, lower: Lowering) !?[]const Term {
+    switch (lower) {
+        .straight => |steps| return execStraight(scratch, steps),
+        .branch => |b| {
+            const c = (try execStraight(scratch, b.cond)) orelse return null;
+            const t = (try execStraight(scratch, b.then)) orelse return null;
+            const e = (try execStraight(scratch, b.else_)) orelse return null;
+            return try std.mem.concat(scratch, Term, &.{ c, t, e, &.{.select} });
+        },
+    }
+}
+
+/// Every equivalence obligation mechanism 5 discharges: each value node's
+/// `denote == exec(lower)` (parametric rules instantiated over every operator),
+/// each refinement (exec(fused) vs exec(base)), and each declared algebraic law.
+/// The per-node obligations are structurally identical today, so SMT proves them
+/// trivially - but expressing the full value-rule set in the semantic check makes
+/// mechanism 5 a superset of mechanism 3 and catches the day a lowering stops
+/// being a syntactic transliteration of its denotation.
 pub fn collectSmtObligations(arena: std.mem.Allocator) ObligationError![]SmtObligation {
     var list: std.ArrayList(SmtObligation) = .empty;
+
+    // Per-node value rules: denote vs exec(lower).
+    for (semantics.node_rules) |rule| {
+        if (rule.proof != .value) continue;
+        switch (rule.parametric) {
+            .none => {
+                const got = (try execLowering(arena, rule.lower.?)) orelse return error.MalformedObligation;
+                try list.append(arena, .{ .where = @tagName(rule.tag), .lhs = rule.denote, .rhs = got });
+            },
+            .binop => {
+                const steps = rule.lower.?.straight;
+                inline for (std.meta.tags(BinKind)) |k| {
+                    const d = try instantiateTerms(arena, rule.denote, k, null);
+                    const l = Lowering{ .straight = try instantiateSteps(arena, steps, semantics.binOpcode(k)) };
+                    const got = (try execLowering(arena, l)) orelse return error.MalformedObligation;
+                    const where = try std.fmt.allocPrint(arena, "{s}[{s}]", .{ @tagName(rule.tag), @tagName(k) });
+                    try list.append(arena, .{ .where = where, .lhs = d, .rhs = got });
+                }
+            },
+            .unop => {
+                const steps = rule.lower.?.straight;
+                inline for (std.meta.tags(UnKind)) |k| {
+                    const d = try instantiateTerms(arena, rule.denote, null, k);
+                    const l = Lowering{ .straight = try instantiateSteps(arena, steps, semantics.unOpcode(k)) };
+                    const got = (try execLowering(arena, l)) orelse return error.MalformedObligation;
+                    const where = try std.fmt.allocPrint(arena, "{s}[{s}]", .{ @tagName(rule.tag), @tagName(k) });
+                    try list.append(arena, .{ .where = where, .lhs = d, .rhs = got });
+                }
+            },
+        }
+    }
+
+    // Refinements: a fused opcode equals its base sequence (translation validation).
     const seed = [_]Step{.{ .eval_child = 0 }};
     for (semantics.refinements) |rf| {
         const fused_full = try std.mem.concat(arena, Step, &.{ &seed, rf.fused_effect });
         const base_full = try std.mem.concat(arena, Step, &.{ &seed, rf.base });
-        const f = (try execStraight(arena, fused_full)) orelse return error.MalformedRefinement;
-        const b = (try execStraight(arena, base_full)) orelse return error.MalformedRefinement;
+        const f = (try execStraight(arena, fused_full)) orelse return error.MalformedObligation;
+        const b = (try execStraight(arena, base_full)) orelse return error.MalformedObligation;
         try list.append(arena, .{ .where = @tagName(rf.fused), .lhs = f, .rhs = b });
     }
+
+    // Algebraic laws: structurally-different equivalences (mechanism 3 cannot see).
     for (semantics.algebraic_laws) |law| {
         try list.append(arena, .{ .where = law.name, .lhs = law.lhs, .rhs = law.rhs });
     }
@@ -820,12 +875,26 @@ fn fakeAllUnknown(_: []const u8, _: std.mem.Allocator) semantics_smt.Verdict {
     return .unknown;
 }
 
-test "collectSmtObligations yields the refinements and the algebraic laws" {
+test "collectSmtObligations covers every value rule, refinement, and law" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const obs = try collectSmtObligations(arena.allocator());
+
+    // Expected per-node obligations: 1 per non-parametric value rule, one per
+    // operator for the parametric ones.
+    const n_bin = @typeInfo(semantics.BinKind).@"enum".fields.len;
+    const n_un = @typeInfo(semantics.UnKind).@"enum".fields.len;
+    var per_node: usize = 0;
+    for (semantics.node_rules) |rule| {
+        if (rule.proof != .value) continue;
+        per_node += switch (rule.parametric) {
+            .none => 1,
+            .binop => n_bin,
+            .unop => n_un,
+        };
+    }
     try std.testing.expectEqual(
-        @as(usize, semantics.refinements.len + semantics.algebraic_laws.len),
+        per_node + semantics.refinements.len + semantics.algebraic_laws.len,
         obs.len,
     );
     // each obligation has both sides populated.

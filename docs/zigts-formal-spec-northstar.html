@@ -237,17 +237,23 @@
             <code class="inline">sat</code> on algebraic laws when a free leaf may be a bool, so
             <code class="inline">getInt</code> of it is unconstrained junk. Native sorts avoid that; the tagged/poison
             model is deferred to when the heap enters &mdash; see the caveat below.)</li>
-          <li><b>Algebraic laws as spec.</b> The registry declares laws &mdash; add commutativity, neg and not
-            involution &mdash; structurally <em>different</em> on each side, so mechanism 3 cannot see them. Z3 proves
-            all three; they are hashed into <code class="inline">semanticsHash</code> and rendered into the spec.</li>
+          <li><b>Full value-rule coverage, plus a law.</b> Every value node's <code class="inline">denote == exec(lower)</code>
+            now goes through the SMT check, so mechanism 5 is a superset of the structural mechanism 3 for the value
+            rules (and catches the day a lowering stops being a syntactic transliteration of its denotation), alongside
+            the fused-opcode refinements. The registry also declares an algebraic law &mdash; <code class="inline">neg</code>
+            involution, <code class="inline">-(-x) == x</code>, structurally <em>different</em> on each side so mechanism 3
+            cannot see it &mdash; hashed into <code class="inline">semanticsHash</code> and rendered into the spec.</li>
           <li><b>The value model is an abstraction, and that boundary is enforced.</b> Numbers are encoded as unbounded
-            mathematical integers (ℤ), which is an abstraction of the engine's actual number type (i32 promoting to f64
-            on overflow). That is sound only for laws insensitive to float rounding, overflow, NaN, and signed zero.
-            Associativity of <code class="inline">+</code> is the canonical law that holds over ℤ but <em>fails</em> on
-            the engine (a child can be a large mul-overflow float, and f64 add is not associative past 2^53), so it is
-            deliberately <b>not</b> asserted &mdash; a soundness review caught it after an earlier draft shipped it as
-            "proven", which is exactly the false-attestation this mechanism must not produce. The boundary is now
-            documented at the law table and the encoder.</li>
+            mathematical integers (ℤ), an abstraction of the engine's actual values (i32 promoting to f64 on overflow,
+            and the polymorphic <code class="inline">+</code> / <code class="inline">!</code> operators). A law is asserted
+            only if it holds under the engine's value model, not merely over ℤ. Three tempting laws are deliberately
+            excluded: associativity of <code class="inline">+</code> (holds over ℤ but fails on f64 once a child is a large
+            mul-overflow float past 2^53), commutativity of <code class="inline">+</code> (generic
+            <code class="inline">+</code> also concatenates strings, so <code class="inline">a+b &ne; b+a</code>), and
+            <code class="inline">!</code> involution (<code class="inline">!</code> coerces via truthiness, so
+            <code class="inline">!!x</code> is a boolean, not <code class="inline">x</code>). A soundness review caught
+            associativity after an earlier draft shipped it as "proven" &mdash; exactly the false attestation this
+            mechanism must not produce. The boundary is documented at the law table and the encoder.</li>
           <li><b>Injected solver, honest outcomes.</b> The driver takes the solver as a function pointer, so
             <code class="inline">std.process.Child</code> never enters the freestanding/wasm analyzer. Only a genuine
             counterexample is a failure: <code class="inline">sat</code> &rarr; <code class="inline">ZTS755</code> (the law
@@ -263,8 +269,9 @@
           What stays honest: this is the <em>slice's</em> value theory (ints, bools, seven operators) over an integer
           abstraction &mdash; not yet the engine's real f64 (or the heap). "Replace the symbolic executor" (the original
           Phase 2 wording) became "subsume it, with a structural fallback" so spec-check still works with no solver
-          installed. The SMT check currently covers the refinements and the algebraic laws; a faithful f64/NaN encoding,
-          extending across every per-node lowering, and then the value/heap model, is the rest of Phase 2.
+          installed. The SMT check now covers every value-rule lowering, the refinements, and the surviving law; a
+          faithful f64/NaN/string encoding (which would let the excluded laws be re-admitted under their real
+          preconditions) and then the value/heap model are the rest of Phase 2.
         </p>
       </div>
 
@@ -410,7 +417,7 @@
         <div class="step now">
           <div class="ph">Phase 2 &middot; slice shipped</div>
           <div class="ti">SMT validation</div>
-          <div class="de">Z3 refinement check (Alive2-style) over the slice's value theory: a pure SMT-LIB2 encoder (integer abstraction), three SMT-certified algebraic laws, injected solver with structural fallback, counts in the receipt. Landed 2026-06-26. Remaining: faithful f64/NaN model, full per-node coverage, then the value/heap encoding.</div>
+          <div class="de">Z3 refinement check (Alive2-style) over the slice's value theory: a pure SMT-LIB2 encoder (integer abstraction), full value-rule coverage (every node's denote == exec(lower)) plus the fused-opcode refinements and the surviving neg-involution law, injected solver with structural fallback, counts in the receipt. Landed 2026-06-26/27. Remaining: faithful f64/NaN/string model (to re-admit the excluded laws), then the value/heap encoding.</div>
         </div>
         <div class="step">
           <div class="ph">Phase 3</div>
