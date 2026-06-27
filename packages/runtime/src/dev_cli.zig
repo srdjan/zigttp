@@ -352,10 +352,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // kind=workflow receipt over the hypermedia verdict. The keyless `zigts`
         // binary leaves this null and prints no receipt.
         zigts_cli.system_build.receipt_probe = @import("hypermedia_probe_lib.zig").recordWorkflowReceipt;
-        // Same seam for `zigttp spec-check`: sign the kind=semantics conformance
-        // receipt with the persistent identity. Keyless `zigts` leaves it null.
-        zigts_cli.semantics_receipt_probe = @import("semantics_probe_lib.zig").recordSemanticsReceipt;
-        zigts_cli.run(allocator, user_args) catch |err| {
+        const analyzer_context: zigts_cli.RunContext = .{
+            .receipt_probe = @import("semantics_probe_lib.zig").recordSemanticsReceipt,
+        };
+        zigts_cli.runWithContext(allocator, user_args, analyzer_context) catch |err| {
             if (err == error.NoProjectConfig) {
                 printNoProjectConfigDiagnostic(command);
                 std.process.exit(1);
