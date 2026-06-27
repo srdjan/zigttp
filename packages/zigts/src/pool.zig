@@ -276,11 +276,23 @@ pub const LockFreePool = struct {
     }
 
     pub fn deinit(self: *LockFreePool) void {
-        // Destroy all pooled runtimes
-        for (self.slots) |*slot| {
-            if (slot.load(.acquire)) |runtime| {
-                runtime.destroy(self.allocator);
+        // Unpublish idle runtimes before destroying them. Teardown may run
+        // higher-level user_deinit hooks; while those hooks execute, the slot
+        // must no longer advertise a runtime that is being destroyed.
+        for (self.slots, 0..) |*slot, idx| {
+            const runtime = slot.swap(null, .acq_rel) orelse continue;
+
+            // Defensive cleanup for stale duplicate publications. Normal
+            // release() rejects these in runtime-safety builds, but deinit()
+            // should still avoid double-destroying the same runtime if a slot
+            // table is already poisoned.
+            for (self.slots[idx + 1 ..]) |*later| {
+                if (later.load(.acquire) == runtime) {
+                    later.store(null, .release);
+                }
             }
+
+            runtime.destroy(self.allocator);
         }
         self.allocator.free(self.slots);
     }
@@ -453,6 +465,40 @@ test "Runtime destroy clears user data before context teardown" {
 
     rt.destroy(allocator);
     try std.testing.expectEqual(@as(u8, 2), sequence);
+}
+
+test "LockFreePool deinit unpublishes runtime before user deinit" {
+    const allocator = std.testing.allocator;
+
+    const Hooks = struct {
+        const State = struct {
+            pool: *LockFreePool,
+            saw_published_runtime: bool = false,
+        };
+
+        fn userDeinit(runtime: *LockFreePool.Runtime, _: std.mem.Allocator) void {
+            const state: *State = @ptrCast(@alignCast(runtime.user_data.?));
+            for (state.pool.slots) |*slot| {
+                if (slot.load(.acquire) == runtime) {
+                    state.saw_published_runtime = true;
+                }
+            }
+            runtime.user_data = null;
+            runtime.user_deinit = null;
+        }
+    };
+
+    var pool = try LockFreePool.init(allocator, .{ .max_size = 1 });
+    var state = Hooks.State{ .pool = &pool };
+
+    const rt = try pool.acquire();
+    rt.user_data = &state;
+    rt.user_deinit = Hooks.userDeinit;
+    pool.release(rt);
+
+    pool.deinit();
+
+    try std.testing.expect(!state.saw_published_runtime);
 }
 
 test "LockFreePool multiple runtimes" {
