@@ -114,10 +114,18 @@ pub fn available(alloc: std.mem.Allocator) bool {
     return true;
 }
 
+/// Monotonic per-call suffix so two `solve()` calls never share a temp path.
+/// The callers are sequential today, but keying only on pid would silently break
+/// the moment the obligation loop is parallelized (the z3 calls dominate runtime,
+/// so that is a natural optimization): two concurrent queries would clobber one
+/// file and read each other's verdict.
+var query_seq: std.atomic.Value(u64) = .init(0);
+
 fn tmpQueryPath(alloc: std.mem.Allocator) ![]u8 {
     const dir = if (std.c.getenv("TMPDIR")) |raw| std.mem.span(raw) else "/tmp";
     const trimmed = std.mem.trimEnd(u8, dir, "/");
-    return std.fmt.allocPrint(alloc, "{s}/zigttp-smt-{d}.smt2", .{ trimmed, std.c.getpid() });
+    const seq = query_seq.fetchAdd(1, .monotonic);
+    return std.fmt.allocPrint(alloc, "{s}/zigttp-smt-{d}-{d}.smt2", .{ trimmed, std.c.getpid(), seq });
 }
 
 /// SolveFn-compatible: run `query` through z3 and return the verdict. The query

@@ -285,10 +285,16 @@ pub const LockFreePool = struct {
             // Defensive cleanup for stale duplicate publications. Normal
             // release() rejects these in runtime-safety builds, but deinit()
             // should still avoid double-destroying the same runtime if a slot
-            // table is already poisoned.
-            for (self.slots[idx + 1 ..]) |*later| {
-                if (later.load(.acquire) == runtime) {
-                    later.store(null, .release);
+            // table is already poisoned. Gate the O(n^2) scan behind
+            // runtime_safety like the sibling release()/dropRuntime() poison
+            // checks: a duplicate publication is a safety-checked invariant, so a
+            // release-build pool (esp. a large `-n N`) need not pay N^2/2 atomic
+            // loads on every shutdown for a guard whose precondition is unchecked.
+            if (std.debug.runtime_safety) {
+                for (self.slots[idx + 1 ..]) |*later| {
+                    if (later.load(.acquire) == runtime) {
+                        later.store(null, .release);
+                    }
                 }
             }
 
