@@ -45,27 +45,32 @@ pub const Verdict = enum {
     equivalent,
     /// sat: a counterexample exists -> the sides differ on some input.
     counterexample,
-    /// the solver ran but could not decide within its budget (a timeout: z3
-    /// prints `unknown`). Genuinely undecided, not broken.
+    /// the check did not produce a decision, with no evidence the solver is
+    /// broken: a timeout (z3 prints `unknown`), or an environmental failure to run
+    /// z3 at all this attempt (spawn/IO error, or z3 gone since the availability
+    /// check). Genuinely undecided / not-run, not a z3 evaluation failure.
     unknown,
-    /// the solver could not evaluate the query at all - it errored or could not
-    /// be spawned (z3 `(error ...)`, a missing theory, a nonzero exit, or no
-    /// recognizable verdict). Distinct from `unknown` because it means the check
-    /// did NOT run, so the audit must not treat it as a benign timeout.
+    /// z3 RAN but could not evaluate the query - it errored or produced no
+    /// recognizable verdict (z3 `(error ...)`, an unsupported/missing theory, or
+    /// garbage output). Distinct from `unknown`: the present solver cannot do the
+    /// math, so the audit fails closed rather than treating it as a benign timeout.
     solver_error,
 };
 
-/// Parse a solver's stdout. The first non-empty token is the check-sat result.
-/// `unknown` (a timeout) is distinct from any other non-sat/unsat output, which
-/// is a solver error (e.g. `(error ...)` from an unsupported theory).
+/// Parse a solver's stdout into a verdict. An `(error ...)` anywhere in the output
+/// is a solver error regardless of any verdict z3 prints afterwards. Otherwise the
+/// first `sat`/`unsat`/`unknown` token is the check-sat result; benign preamble (a
+/// z3 startup banner, or `success` lines under :print-success) is skipped. No
+/// verdict at all is a solver error - z3 produced nothing usable.
 pub fn parseVerdict(stdout: []const u8) Verdict {
+    // A reported error wins over any verdict z3 may print after it.
+    if (std.mem.indexOf(u8, stdout, "(error") != null) return .solver_error;
     var it = std.mem.tokenizeAny(u8, stdout, " \t\r\n");
     while (it.next()) |tok| {
         if (std.mem.eql(u8, tok, "unsat")) return .equivalent;
         if (std.mem.eql(u8, tok, "sat")) return .counterexample;
         if (std.mem.eql(u8, tok, "unknown")) return .unknown;
-        // anything else (e.g. "(error ...") means z3 did not evaluate the query.
-        return .solver_error;
+        // skip non-verdict tokens (banner, `success`) and keep scanning.
     }
     return .solver_error;
 }
@@ -317,6 +322,15 @@ test "parseVerdict reads the check-sat line" {
     try std.testing.expectEqual(Verdict.solver_error, parseVerdict("(error \"boom\")\n"));
     try std.testing.expectEqual(Verdict.solver_error, parseVerdict("   \n"));
     try std.testing.expectEqual(Verdict.solver_error, parseVerdict("garbage\n"));
+}
+
+test "parseVerdict skips benign preamble but an (error ...) wins" {
+    // a startup banner or :print-success `success` lines precede the verdict.
+    try std.testing.expectEqual(Verdict.equivalent, parseVerdict("Z3 4.13.0\nunsat\n"));
+    try std.testing.expectEqual(Verdict.equivalent, parseVerdict("success\nsuccess\nunsat\n"));
+    try std.testing.expectEqual(Verdict.counterexample, parseVerdict("success\nsat\n((x 5))\n"));
+    // an error is fatal even when z3 prints `unknown` after it.
+    try std.testing.expectEqual(Verdict.solver_error, parseVerdict("(error \"unsupported\")\nunknown\n"));
 }
 
 test "encode a binary_op denotation (int operands)" {

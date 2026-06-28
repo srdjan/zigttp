@@ -10,12 +10,21 @@
 //!
 //! z3 is resolved to an ABSOLUTE path so argv[0] resolution never depends on the
 //! child's PATH (the empty-environ-breaks-PATH-lookup trap that otherwise makes
-//! tool invocation flaky). The child still inherits the parent environment; z3's
-//! sat/unsat verdict on these tiny ground queries does not depend on it. Any
-//! spawn / IO / parse failure maps to `.unknown`, which the driver records as an
-//! *unproven* obligation (not a counterexample): a broken or missing solver can
-//! never produce a false "equivalent", and an environmental failure does not
-//! masquerade as a value-equivalence counterexample.
+//! tool invocation flaky), and the child runs with an EMPTY environment: on these
+//! tiny ground queries z3's verdict needs no env, and an absolute argv[0] needs no
+//! PATH. Two failure classes are kept DISTINCT, because the exclusion audit treats
+//! them oppositely:
+//!   - A failure to RUN z3 at all this attempt - it vanished after the
+//!     availability check, the temp file could not be written, or the spawn
+//!     failed - maps to `.unknown`. The check did not run, but that says nothing
+//!     about whether z3 can evaluate the model, so it is a benign *unproven* (the
+//!     other `.unknown` is a genuine timeout).
+//!   - z3 RAN but produced no usable verdict - an `(error ...)`, an unsupported
+//!     theory, or unrecognizable output - maps to `.solver_error`: a real signal
+//!     that the present solver cannot evaluate the query. The audit fails closed
+//!     on it (ZTS758); mechanism 5 records it as unproven.
+//! So a broken or missing solver can never manufacture a false "equivalent", and
+//! an environmental hiccup never masquerades as a missing-theory build failure.
 //!
 //! Resolution order, with ZIGTTP_Z3 authoritative so SMT can be turned off:
 //!   - ZIGTTP_Z3 = off / none / 0 / disable / "" -> SMT disabled (resolve null).
@@ -112,16 +121,16 @@ fn tmpQueryPath(alloc: std.mem.Allocator) ![]u8 {
 }
 
 /// SolveFn-compatible: run `query` through z3 and return the verdict. The query
-/// goes via a temp file because `std.process.run` ignores stdin. A spawn/IO
-/// failure (or z3 emitting no usable verdict) maps to `.solver_error`, distinct
-/// from a genuine `.unknown` timeout - the audit must not treat a broken solver
-/// as a benign inconclusive.
+/// goes via a temp file because `std.process.run` ignores stdin. A pre-exec
+/// failure to run z3 (spawn/IO error, or z3 gone since the availability check)
+/// maps to `.unknown` - environmental, benign; only z3 RUNNING and emitting no
+/// usable verdict maps to `.solver_error`, which the audit treats as fatal.
 pub fn solve(query: []const u8, alloc: std.mem.Allocator) Verdict {
-    return solveImpl(query, alloc) catch .solver_error;
+    return solveImpl(query, alloc) catch .unknown;
 }
 
 fn solveImpl(query: []const u8, alloc: std.mem.Allocator) !Verdict {
-    const z3 = resolveZ3(alloc) orelse return .solver_error;
+    const z3 = resolveZ3(alloc) orelse return .unknown;
     defer alloc.free(z3);
 
     const tmp = try tmpQueryPath(alloc);
