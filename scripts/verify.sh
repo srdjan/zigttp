@@ -77,6 +77,34 @@ step "semantics spec gate  (spec-check all mechanisms + spec.ts drift)"
 # stays fast. Keep the summary visible so SMT/audit availability and skipped or
 # inconclusive obligations are not hidden in local or CI logs.
 ./zig-out/bin/zigts spec-check --audit
+# The exclusion audit only checks the soundness boundary when z3 actually ran
+# EVERY refutation. Plain `spec-check --audit` is deliberately lenient (a z3-absent
+# skip or an inconclusive timeout is non-fatal, so a future genuinely un-refutable
+# law cannot wedge the command). This gate is stricter: re-read the machine-
+# readable summary and REQUIRE a complete audit, so a silent skip or timeout
+# cannot pass here with false confidence. An explicit ZIGTTP_Z3 opt-out is honored.
+AUDIT_JSON=$(./zig-out/bin/zigts spec-check --audit --json || true)
+z3_explicitly_disabled() {
+  [ "${ZIGTTP_Z3+set}" = set ] || return 1
+  case "$(printf '%s' "$ZIGTTP_Z3" | tr '[:upper:]' '[:lower:]')" in
+    '' | off | none | 0 | disable | disabled) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+if printf '%s' "$AUDIT_JSON" | jq -e '.audit.available == false' >/dev/null 2>&1; then
+  if z3_explicitly_disabled; then
+    echo "NOTE: ZIGTTP_Z3 disables z3 -> semantics exclusion audit SKIPPED (soundness boundary unchecked, explicit opt-out)"
+  else
+    echo "error: z3 not found, so the semantics exclusion audit (the verify.sh soundness-boundary gate) did not run. Install z3 or set ZIGTTP_Z3=off to skip it explicitly." >&2
+    exit 1
+  fi
+else
+  printf '%s' "$AUDIT_JSON" | jq -e '.audit.refuted == .audit.total and .audit.inconclusive == 0' >/dev/null 2>&1 ||
+    {
+      echo "error: semantics exclusion audit incomplete (not all excluded laws refuted, or an inconclusive timeout): the soundness boundary was not fully machine-checked." >&2
+      exit 1
+    }
+fi
 # The committed readable spec must match the registry it is generated from.
 ./zig-out/bin/zigts spec-render --check docs/spec/semantics.spec.ts
 echo "semantics spec gate OK"

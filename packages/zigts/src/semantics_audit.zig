@@ -50,11 +50,14 @@ const Term = semantics.Term;
 // :timeout is a ceiling, not a fixed cost - the string/type-mix refutations
 // (commutativity, not-involution) return in milliseconds; only the f64
 // associativity counterexample search is slow (~5s, measured), so the ceiling is
-// set well above it (with margin for slower machines) to get a clean refutation
-// rather than an inconclusive timeout. A genuinely un-refutable future law would
-// burn the ceiling once and report inconclusive (non-fatal).
+// set well above it (6x, with margin for slower/loaded machines) to get a clean
+// refutation rather than an inconclusive timeout. This matters because the
+// verify.sh gate now FAILS on an inconclusive audit (refuted < total), so a
+// timeout there is a hard error, not a silent skip; the command level stays
+// lenient (a genuinely un-refutable future law burns the ceiling once and reports
+// inconclusive, non-fatal).
 const preamble =
-    \\(set-option :timeout 15000)
+    \\(set-option :timeout 30000)
     \\(set-logic ALL)
     \\(declare-datatypes ((Val 0)) (((num (n Float64)) (bl (b Bool)) (st (s String)))))
     \\(declare-fun s2n (String) Float64)
