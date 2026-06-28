@@ -799,16 +799,8 @@ pub fn run(
                     }
                 }
             },
-            .session_resume => {
-                // The current session ends here; capture its row before its
-                // events path is swapped for the resumed session's.
-                session.writeSessionSummary(allocator);
-                try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{ .resume_latest = true }));
-            },
-            .session_new => {
-                session.writeSessionSummary(allocator);
-                try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{}));
-            },
+            .session_resume => try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{ .resume_latest = true })),
+            .session_new => try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{})),
             .session_compact => {
                 const msg = try agent.compact(allocator, &session);
                 defer allocator.free(msg);

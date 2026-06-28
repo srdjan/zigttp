@@ -132,11 +132,8 @@ pub const SessionMetrics = struct {
                 self.round_trips_to_first_green = self.total_roundtrips;
             }
             self.verified_patch_count += 1;
-            if (result.proof) |snap| {
-                const counts = snap.guaranteeCounts();
-                self.proven_properties = counts.proven;
-                self.tracked_properties = counts.tracked;
-            }
+            self.proven_properties = result.proven_guarantees;
+            self.tracked_properties = result.tracked_guarantees;
         }
     }
 
@@ -805,6 +802,10 @@ pub fn rebuildSession(
     registry: *const Registry,
     config: SessionConfig,
 ) !void {
+    // The current session ends here; capture its metrics row before its events
+    // path is swapped for the new session's. Centralized so every session-switch
+    // caller (/new, /resume) records without remembering to.
+    session.writeSessionSummary(allocator);
     session.deinit(allocator);
     session.* = try initFromEnvWithSessionConfig(allocator, registry, config);
 }
@@ -862,8 +863,9 @@ test "SessionMetrics folds a clarifying text turn then an applied edit" {
     var m: SessionMetrics = .{};
     // Turn 1: a clarifying question - plain text, ends approved, applies no edit.
     m.record(.{ .final_state = .done, .attempt = 0, .roundtrips = 1 });
-    // Turn 2: the answer drives an applied, compiler-verified edit.
-    m.record(.{ .final_state = .done, .attempt = 1, .roundtrips = 3, .applied_edit = true, .proof = snapshotAll(true) });
+    // Turn 2: the answer drives an applied, compiler-verified edit. The veto
+    // counts the proof guarantees (snapshotAll(true) -> 16/16, see guaranteeCounts).
+    m.record(.{ .final_state = .done, .attempt = 1, .roundtrips = 3, .applied_edit = true, .proven_guarantees = 16, .tracked_guarantees = 16 });
 
     const s = m.summary();
     try testing.expectEqual(@as(u32, 2), s.turn_count);
