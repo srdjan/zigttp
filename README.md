@@ -5,23 +5,30 @@
 
 # zigttp
 
-zigttp is a pure-Zig JavaScript and TypeScript runtime for HTTP handlers.
-It ships as one binary, runs without npm or Node, and uses a restricted
-language profile so the compiler can prove useful handler properties before
-the server starts.
+**The AI writes your handler. The compiler proves it's safe.**
 
-The daily workflow is small:
+zigttp is a pure-Zig JavaScript/TypeScript runtime for HTTP handlers. Describe
+the handler you want in plain English: the built-in agent writes it, and the
+compiler proves it before it ships - every path returns a Response, no secret
+leaks, declared egress only. zigttp ships as one binary, runs without npm or
+Node, and uses a restricted language profile so those proofs are cheap and
+automatic.
 
 ```bash
-zigttp init my-app && cd my-app
-zigttp dev
-zigttp test
-zigttp deploy
+zigttp init my-app --expert
+# then: "add a GET /health route and a POST /echo that validates JSON"
 ```
 
-`zigttp dev` watches the handler, recompiles it, and prints a proof card on
-every save. `zigttp deploy` builds a self-contained local binary, writes a
-proof ledger entry, and signs a proof receipt by default.
+The agent proposes a compiler-verified edit and you approve only code that
+passes. When your intent is ambiguous, it asks one question instead of guessing.
+
+Prefer to write the handler yourself? The same compiler runs the watch loop:
+
+```bash
+zigttp dev      # recompile and print a proof card on every save
+zigttp test
+zigttp deploy   # self-contained binary, proof ledger entry, signed receipt
+```
 
 ## Install
 
