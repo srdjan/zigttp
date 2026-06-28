@@ -368,6 +368,13 @@ Pass `--no-edit` to allow analysis and file reads while blocking all writes.
 Keys are stored in `~/.zigttp/providers.json` with mode `0600`. A shell-set
 `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` overrides the stored value.
 
+When your request is ambiguous - the right edit depends on a choice you have not
+made - the agent asks one clarifying question instead of guessing. Answer it on
+the next line and it proceeds with your choice. Type `/ledger` at any point to
+see the session metrics: turns, model round-trips, verified edits, round-trips
+to the first proven edit, and the share of proof guarantees the final handler
+discharges.
+
 ## Troubleshooting
 
 **The server says no handler was provided.**

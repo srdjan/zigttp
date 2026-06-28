@@ -6,6 +6,11 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Added
+
+- `zigttp expert`: the agent asks one clarifying question when a request is materially ambiguous (which auth scheme, which route, what "safe" means) instead of guessing and spending its veto/round-trip budget on a misread. Implemented as a persona rule in `packages/pi/src/expert_persona.zig`: the question ends the turn as plain text and the answer continues on the next line, reusing the existing multi-turn transcript (no turn-machine change).
+- `zigttp expert`: per-session metrics. Each session writes a `session_summary` event to `events.jsonl` at close with turn count, model round-trips, verified-edit count, round-trips to first green proof, and a proven-path ratio (discharged proof guarantees over those tracked, read from the final verified handler's `PropertiesSnapshot`). `/ledger` prints the live numbers mid-session. Metrics key on the `verified_patch` signal, so a plain-text clarifying turn counts as a turn without being mistaken for an applied edit.
+
 ## [0.1.0-beta] - 2026-06-23
 
 ### Added
