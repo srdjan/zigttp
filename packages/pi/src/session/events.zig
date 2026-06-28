@@ -22,6 +22,7 @@ const EventKind = enum {
     system_note,
     autoloop_outcome,
     turn_end,
+    session_summary,
 };
 
 pub const TurnEndReason = enum {
@@ -35,6 +36,38 @@ pub const TurnEndReason = enum {
 
 pub const TurnEnd = struct {
     reason: TurnEndReason,
+};
+
+/// One per expert session, appended at session close. Carries the signals the
+/// release scorecard is staked on (see STRATEGY.md): expert success rate
+/// (`reached_proof` aggregated across sessions), round-trips to first green
+/// proof (`round_trips_to_first_green`), and the proven-path ratio
+/// (`proven_properties / tracked_properties`). `verified_patch_count` is the
+/// number of edits the compiler veto approved this session - the authoritative
+/// "handler advanced" signal, since a plain-text turn (e.g. a clarifying
+/// question) ends `approved` without applying an edit.
+pub const SessionSummary = struct {
+    turn_count: u32 = 0,
+    total_roundtrips: u32 = 0,
+    verified_patch_count: u32 = 0,
+    reached_proof: bool = false,
+    /// Model round-trips accumulated up to and including the turn that produced
+    /// the first verified edit. 0 when no edit was applied this session.
+    round_trips_to_first_green: u32 = 0,
+    /// Proof guarantees discharged on the final verified handler, over the
+    /// number tracked (see PropertiesSnapshot.guaranteeCounts). Both 0 when the
+    /// session never reached a verified edit.
+    proven_properties: u32 = 0,
+    tracked_properties: u32 = 0,
+    final_outcome: TurnEndReason = .approved,
+
+    /// Fraction of tracked proof guarantees discharged for the final handler.
+    /// 0 when nothing was proven this session.
+    pub fn provenPathRatio(self: SessionSummary) f32 {
+        if (self.tracked_properties == 0) return 0;
+        return @as(f32, @floatFromInt(self.proven_properties)) /
+            @as(f32, @floatFromInt(self.tracked_properties));
+    }
 };
 
 pub const AutoloopVerdict = enum {
@@ -93,6 +126,7 @@ pub const EventRecord = union(EventKind) {
     system_note: []const u8,
     autoloop_outcome: AutoloopOutcome,
     turn_end: TurnEnd,
+    session_summary: SessionSummary,
 };
 
 pub const Meta = struct {
@@ -156,6 +190,7 @@ fn kindTag(record: EventRecord) []const u8 {
         .system_note => "system_note",
         .autoloop_outcome => "autoloop_outcome",
         .turn_end => "turn_end",
+        .session_summary => "session_summary",
     };
 }
 
@@ -200,7 +235,24 @@ fn writePayload(writer: *std.Io.Writer, record: EventRecord) !void {
             try json_writer.writeString(writer, @tagName(te.reason));
             try writer.writeByte('}');
         },
+        .session_summary => |s| try writeSessionSummaryPayload(writer, s),
     }
+}
+
+fn writeSessionSummaryPayload(writer: *std.Io.Writer, s: SessionSummary) !void {
+    try writer.writeByte('{');
+    try writer.print("\"turn_count\":{d}", .{s.turn_count});
+    try writer.print(",\"total_roundtrips\":{d}", .{s.total_roundtrips});
+    try writer.print(",\"verified_patch_count\":{d}", .{s.verified_patch_count});
+    try writer.writeAll(",\"reached_proof\":");
+    try writer.writeAll(if (s.reached_proof) "true" else "false");
+    try writer.print(",\"round_trips_to_first_green\":{d}", .{s.round_trips_to_first_green});
+    try writer.print(",\"proven_properties\":{d}", .{s.proven_properties});
+    try writer.print(",\"tracked_properties\":{d}", .{s.tracked_properties});
+    try writer.print(",\"proven_path_ratio\":{d:.3}", .{s.provenPathRatio()});
+    try writer.writeAll(",\"final_outcome\":");
+    try json_writer.writeString(writer, @tagName(s.final_outcome));
+    try writer.writeByte('}');
 }
 
 fn writeAutoloopOutcomePayload(
@@ -612,4 +664,39 @@ test "appendEvent serializes turn_end with reason" {
     defer allocator.free(raw);
     try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"turn_end\"") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"reason\":\"budget_roundtrips\"") != null);
+}
+
+test "appendEvent serializes session_summary with metrics" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    try appendEvent(allocator, path, .{ .session_summary = .{
+        .turn_count = 2,
+        .total_roundtrips = 5,
+        .verified_patch_count = 1,
+        .reached_proof = true,
+        .round_trips_to_first_green = 4,
+        .proven_properties = 12,
+        .tracked_properties = 16,
+        .final_outcome = .approved,
+    } });
+
+    const raw = try readWhole(allocator, path);
+    defer allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"session_summary\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"turn_count\":2") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"verified_patch_count\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"reached_proof\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"round_trips_to_first_green\":4") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"proven_path_ratio\":0.750") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"final_outcome\":\"approved\"") != null);
+}
+
+test "SessionSummary.provenPathRatio is zero with no tracked properties" {
+    const empty: SessionSummary = .{};
+    try testing.expectEqual(@as(f32, 0), empty.provenPathRatio());
 }

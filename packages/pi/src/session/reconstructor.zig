@@ -113,6 +113,9 @@ fn appendFromLine(
     } else if (std.mem.eql(u8, kind, "turn_end")) {
         // Session-level turn marker; not rebuilt into the transcript.
         return;
+    } else if (std.mem.eql(u8, kind, "session_summary")) {
+        // Session-level metrics row; not rebuilt into the transcript.
+        return;
     } else {
         return error.CorruptEventsLog;
     }

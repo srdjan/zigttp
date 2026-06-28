@@ -567,6 +567,29 @@ pub const PropertiesSnapshot = struct {
             }
         }
     }
+
+    pub const GuaranteeCounts = struct { proven: u32, tracked: u32 };
+
+    /// Count the analyzer-discharged proof guarantees in this snapshot. Each
+    /// boolean field is a handler-wide guarantee the analyzer either proved
+    /// (true) or did not (false). `has_egress` is excluded because it records a
+    /// neutral fact (the handler makes egress), not a guarantee, and the
+    /// non-boolean `max_io_depth` is skipped by the field-type filter. Because
+    /// zigts proofs hold handler-wide over the exhaustively-enumerated path
+    /// space rather than per response path, `proven / tracked` is the fraction
+    /// of tracked guarantees discharged for the handler - the session
+    /// "proven-path ratio".
+    pub fn guaranteeCounts(self: PropertiesSnapshot) GuaranteeCounts {
+        var proven: u32 = 0;
+        var tracked: u32 = 0;
+        inline for (@typeInfo(PropertiesSnapshot).@"struct".fields) |field| {
+            if (field.type != bool) continue;
+            if (comptime std.mem.eql(u8, field.name, "has_egress")) continue;
+            tracked += 1;
+            if (@field(self, field.name)) proven += 1;
+        }
+        return .{ .proven = proven, .tracked = tracked };
+    }
 };
 
 pub const ViolationDeltaItem = struct {

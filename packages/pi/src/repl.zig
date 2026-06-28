@@ -14,6 +14,7 @@ const commands = @import("commands.zig");
 const loop = @import("loop.zig");
 const app = @import("app.zig");
 const ledger = @import("ledger.zig");
+const session_events = @import("session/events.zig");
 const skills_catalog = @import("skills/catalog.zig");
 const prompts_catalog = @import("prompts/catalog.zig");
 const models_registry = @import("providers/models.zig");
@@ -118,7 +119,7 @@ pub fn processSubmit(
     }
 
     if (commands.isViewLedger(trimmed)) {
-        return .{ .tool_result = try renderLedgerGuidance(allocator) };
+        return .{ .tool_result = try renderLedgerGuidance(allocator, session.metrics.summary()) };
     }
 
     if (commands.isViewChat(trimmed)) {
@@ -182,7 +183,7 @@ pub fn dispatchLine(
     if (commands.isCompact(argv[0])) return .session_compact;
     if (commands.isSessionFork(argv[0])) return .session_fork;
     if (commands.isSessionTree(argv[0])) return .{ .result = try renderTree(allocator, null) };
-    if (commands.isViewLedger(argv[0])) return .{ .result = try renderLedgerGuidance(allocator) };
+    if (commands.isViewLedger(argv[0])) return .{ .result = try renderLedgerGuidance(allocator, .{}) };
     if (commands.isViewChat(argv[0])) return .{ .result = try renderChatGuidance(allocator) };
     if (commands.isSettings(argv[0])) return .{ .result = try renderSettings(allocator) };
     if (commands.isHotkeys(argv[0])) return .{ .result = try renderHotkeys(allocator) };
@@ -441,16 +442,39 @@ fn renderHotkeys(allocator: std.mem.Allocator) !ToolResult {
     return ToolResult.withPlainText(allocator, true, msg);
 }
 
-fn renderLedgerGuidance(allocator: std.mem.Allocator) !ToolResult {
-    const msg = try allocator.dupe(
-        u8,
+fn renderLedgerGuidance(allocator: std.mem.Allocator, summary: session_events.SessionSummary) !ToolResult {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+
+    if (summary.turn_count > 0) {
+        try w.writeAll("This session so far:\n");
+        try w.print("  turns:             {d}\n", .{summary.turn_count});
+        try w.print("  model round-trips: {d}\n", .{summary.total_roundtrips});
+        try w.print("  verified edits:    {d}\n", .{summary.verified_patch_count});
+        if (summary.reached_proof) {
+            try w.print("  round-trips to first green proof: {d}\n", .{summary.round_trips_to_first_green});
+            try w.print("  proven-path ratio: {d}/{d} guarantees ({d:.0}%)\n", .{
+                summary.proven_properties,
+                summary.tracked_properties,
+                summary.provenPathRatio() * 100,
+            });
+        } else {
+            try w.writeAll("  no verified edit applied yet\n");
+        }
+        try w.writeAll("\n");
+    }
+
+    try w.writeAll(
         "Session ledger is available from the CLI:\n" ++
             "  /ledger export <path>\n" ++
             "  zigttp ledger export --session <id> --out <path>\n" ++
             "  zigttp ledger replay --input <path> --onto <git-ref>\n",
     );
-    defer allocator.free(msg);
-    return ToolResult.withPlainText(allocator, true, msg);
+
+    buf = aw.toArrayList();
+    return ToolResult.withPlainText(allocator, true, buf.items);
 }
 
 fn renderChatGuidance(allocator: std.mem.Allocator) !ToolResult {
@@ -775,8 +799,16 @@ pub fn run(
                     }
                 }
             },
-            .session_resume => try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{ .resume_latest = true })),
-            .session_new => try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{})),
+            .session_resume => {
+                // The current session ends here; capture its row before its
+                // events path is swapped for the resumed session's.
+                session.writeSessionSummary(allocator);
+                try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{ .resume_latest = true }));
+            },
+            .session_new => {
+                session.writeSessionSummary(allocator);
+                try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{}));
+            },
             .session_compact => {
                 const msg = try agent.compact(allocator, &session);
                 defer allocator.free(msg);
@@ -789,6 +821,9 @@ pub fn run(
             },
         }
     }
+
+    // Session ended (quit or EOF): write the per-session metrics row.
+    session.writeSessionSummary(allocator);
 }
 
 /// First-run orientation for the interactive expert. Leads with the value
@@ -1854,4 +1889,29 @@ test "renderEditDiff: a change spanning more than the cap falls back to the file
     var obuf: [8192]u8 = undefined;
     const out = renderDiffToBuf(&obuf, bw.buffered(), aw.buffered());
     try testing.expect(std.mem.indexOf(u8, out, "large change") != null);
+}
+
+test "renderLedgerGuidance shows live session metrics when turns exist" {
+    var res = try renderLedgerGuidance(testing.allocator, .{
+        .turn_count = 3,
+        .total_roundtrips = 7,
+        .verified_patch_count = 1,
+        .reached_proof = true,
+        .round_trips_to_first_green = 5,
+        .proven_properties = 12,
+        .tracked_properties = 16,
+    });
+    defer res.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, res.llm_text, "This session so far:") != null);
+    try testing.expect(std.mem.indexOf(u8, res.llm_text, "round-trips to first green proof: 5") != null);
+    try testing.expect(std.mem.indexOf(u8, res.llm_text, "12/16 guarantees") != null);
+    // CLI guidance is still appended.
+    try testing.expect(std.mem.indexOf(u8, res.llm_text, "zigttp ledger export") != null);
+}
+
+test "renderLedgerGuidance omits the metrics block for a fresh session" {
+    var res = try renderLedgerGuidance(testing.allocator, .{});
+    defer res.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, res.llm_text, "This session so far:") == null);
+    try testing.expect(std.mem.indexOf(u8, res.llm_text, "zigttp ledger export") != null);
 }

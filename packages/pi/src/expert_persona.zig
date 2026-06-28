@@ -83,6 +83,14 @@ const prologue =
     \\     fallback, `(a: T | undefined)` instead of `(a?: T)`. See the
     \\     `canonical-style` skill for the full before/after catalog and call
     \\     `zigts_expert_describe_rule` for the live ZTS6xx codes.
+    \\  7. When the request is materially ambiguous - when the right edit
+    \\     depends on a choice the user has not made (which auth scheme, which
+    \\     route, which storage, what "safe" should mean) - reply with ONE
+    \\     short clarifying question instead of guessing. Do not call
+    \\     `apply_edit` on that turn: the user answers next and you proceed
+    \\     with their choice. Use this sparingly - only when the ambiguity
+    \\     changes the edit, never for details you can infer from the handler,
+    \\     the request, or a sensible default.
     \\
     \\Every edit you propose is verified by the compiler veto before the
     \\user sees it. Drafts that fail the veto are rejected and you are asked
@@ -707,6 +715,13 @@ test "persona contains the prologue identity statement" {
     defer testing.allocator.free(prompt);
     try testing.expect(std.mem.indexOf(u8, prompt, "native zigts coding agent") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "compiler veto") != null);
+}
+
+test "persona teaches asking one clarifying question on material ambiguity" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "materially ambiguous") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "clarifying question") != null);
 }
 
 test "persona embeds the four skill and reference documents" {

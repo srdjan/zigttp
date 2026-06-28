@@ -177,6 +177,17 @@ pub const TurnResult = struct {
     attempt: u8,
     usage: turn.Usage = .{},
     end_reason: session_events.TurnEndReason = .approved,
+    /// Model round-trips consumed by this turn. Surfaced so the session layer
+    /// can accumulate "round-trips to first green proof" without re-parsing the
+    /// events log.
+    roundtrips: u8 = 0,
+    /// True when this turn applied a compiler-verified edit. A plain-text turn
+    /// (e.g. a clarifying question) ends `.approved` without applying one, so
+    /// metrics key "handler advanced" on this, not on `end_reason`.
+    applied_edit: bool = false,
+    /// Proof snapshot of the applied edit (PropertiesSnapshot is a pure value
+    /// struct, safe to copy out of the turn arena). null when no edit applied.
+    proof: ?ui_payload_mod.PropertiesSnapshot = null,
 };
 
 pub const RunOptions = struct {
@@ -266,6 +277,10 @@ pub fn runTurnWith(
     var sql_veto_fail_count: u32 = 0;
     // Set when a SQL escalation hint should be prepended to the next retry prompt.
     var inject_sql_escalation = false;
+    // Set when this turn applies a compiler-verified edit; carries the proof
+    // snapshot of the applied bytes back to the session layer for metrics.
+    var applied_edit = false;
+    var applied_proof: ?ui_payload_mod.PropertiesSnapshot = null;
 
     while (true) {
         const action = machine.transition(next_event);
@@ -399,7 +414,7 @@ pub fn runTurnWith(
                                 .llm_text = "edit verified but not applied by user approval policy",
                                 .ui_payload = null,
                             } });
-                            return .{ .final_state = .done, .attempt = machine.attempt, .usage = turn_usage, .end_reason = .approval_denied };
+                            return .{ .final_state = .done, .attempt = machine.attempt, .usage = turn_usage, .end_reason = .approval_denied, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proof = applied_proof };
                         }
                     }
                     // Normalize-on-apply: `applied_content` (bound above for the
@@ -421,6 +436,8 @@ pub fn runTurnWith(
                         veto_result.report,
                         post_apply,
                     );
+                    applied_edit = true;
+                    applied_proof = veto_result.report.after_properties;
                 }
                 if (!veto_result.outcome.ok and veto_result.sql_failure) {
                     sql_veto_fail_count += 1;
@@ -486,7 +503,7 @@ pub fn runTurnWith(
                     .diagnostic_box => .veto_exhausted,
                     else => .approved,
                 };
-                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = end_reason };
+                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = end_reason, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proof = applied_proof };
             },
             .prompt_user => |question| {
                 const text = if (hit_timeout_budget)
@@ -500,10 +517,10 @@ pub fn runTurnWith(
                 else
                     question;
                 try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = text } });
-                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = .budget_roundtrips };
+                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = .budget_roundtrips, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proof = applied_proof };
             },
-            .end_turn => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = if (hit_tool_budget) .budget_tool_calls else .approved },
-            .none => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = if (hit_tool_budget) .budget_tool_calls else .approved },
+            .end_turn => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = if (hit_tool_budget) .budget_tool_calls else .approved, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proof = applied_proof },
+            .none => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = if (hit_tool_budget) .budget_tool_calls else .approved, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proof = applied_proof },
         }
     }
 }

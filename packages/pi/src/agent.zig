@@ -106,6 +106,54 @@ const Backend = union(enum) {
     openai: openai_client.Client,
 };
 
+/// Running per-session metrics, folded one turn at a time and emitted as a
+/// `session_summary` event at session close. Keyed on the `verified_patch`
+/// signal (`TurnResult.applied_edit`), not `turn_end`, so a plain-text turn
+/// such as a clarifying question is counted as a turn without being mistaken
+/// for an applied edit. See STRATEGY.md for the three staked metrics.
+pub const SessionMetrics = struct {
+    turn_count: u32 = 0,
+    total_roundtrips: u32 = 0,
+    verified_patch_count: u32 = 0,
+    round_trips_to_first_green: u32 = 0,
+    proven_properties: u32 = 0,
+    tracked_properties: u32 = 0,
+    last_outcome: session_events.TurnEndReason = .approved,
+
+    /// Fold one completed turn's result into the running totals.
+    pub fn record(self: *SessionMetrics, result: loop.TurnResult) void {
+        self.turn_count += 1;
+        self.total_roundtrips +|= result.roundtrips;
+        self.last_outcome = result.end_reason;
+        if (result.applied_edit) {
+            if (self.verified_patch_count == 0) {
+                // Round-trips accumulated up to and including the first verified
+                // edit - "round-trips to first green proof".
+                self.round_trips_to_first_green = self.total_roundtrips;
+            }
+            self.verified_patch_count += 1;
+            if (result.proof) |snap| {
+                const counts = snap.guaranteeCounts();
+                self.proven_properties = counts.proven;
+                self.tracked_properties = counts.tracked;
+            }
+        }
+    }
+
+    pub fn summary(self: SessionMetrics) session_events.SessionSummary {
+        return .{
+            .turn_count = self.turn_count,
+            .total_roundtrips = self.total_roundtrips,
+            .verified_patch_count = self.verified_patch_count,
+            .reached_proof = self.verified_patch_count > 0,
+            .round_trips_to_first_green = self.round_trips_to_first_green,
+            .proven_properties = self.proven_properties,
+            .tracked_properties = self.tracked_properties,
+            .final_outcome = self.last_outcome,
+        };
+    }
+};
+
 pub const AgentSession = struct {
     transcript: Transcript = .{},
     backend: Backend = .{ .stub = .{} },
@@ -127,6 +175,9 @@ pub const AgentSession = struct {
     last_persisted_len: usize = 0,
     /// Running total of tokens consumed by all turns in this session.
     token_totals: turn.Usage = .{},
+    /// Per-session expert metrics, folded each turn and emitted as a
+    /// `session_summary` event by `writeSessionSummary` at session close.
+    metrics: SessionMetrics = .{},
     /// Approval policy read from the resumed session's meta.json. Non-null only
     /// after a --resume when the source session had an approval_policy stored.
     /// app.zig applies it as the session default when no flag override is present.
@@ -256,6 +307,17 @@ pub const AgentSession = struct {
             .openai => |*c| c.config.model = model_id,
             .stub => {},
         }
+    }
+
+    /// Append the per-session metrics row at session close. Best-effort and a
+    /// no-op when the session is not persisted (no events path) or produced no
+    /// turns, so calling it from a session-end path is always safe.
+    pub fn writeSessionSummary(self: *AgentSession, allocator: std.mem.Allocator) void {
+        if (self.metrics.turn_count == 0) return;
+        const path = self.events_path orelse return;
+        session_events.appendEvent(allocator, path, .{
+            .session_summary = self.metrics.summary(),
+        }) catch {};
     }
 };
 
@@ -617,6 +679,7 @@ pub fn runOneTurn(
         return err;
     };
     session.token_totals.add(turn_result.usage);
+    session.metrics.record(turn_result);
     const tr = &session.transcript;
     std.debug.assert(tr.len() >= 1);
 
@@ -755,9 +818,74 @@ const testing = std.testing;
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const EnvOverride = @import("test_support/env.zig").EnvOverride;
 const cwdPathAlloc = @import("test_support/cwd.zig").cwdPathAlloc;
+const ui_payload = @import("ui_payload.zig");
 
 fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
     return IsolatedTmp.init(allocator, "agent");
+}
+
+/// All proof-guarantee booleans set to `value`. Used to exercise the metrics
+/// fold without depending on a live analyzer run.
+fn snapshotAll(value: bool) ui_payload.PropertiesSnapshot {
+    return .{
+        .pure = value,
+        .read_only = value,
+        .stateless = value,
+        .retry_safe = value,
+        .deterministic = value,
+        .has_egress = value,
+        .no_secret_leakage = value,
+        .no_credential_leakage = value,
+        .input_validated = value,
+        .pii_contained = value,
+        .idempotent = value,
+        .injection_safe = value,
+        .state_isolated = value,
+        .fault_covered = value,
+        .result_safe = value,
+        .optional_safe = value,
+        .canonical = value,
+    };
+}
+
+test "guaranteeCounts excludes has_egress and counts discharged guarantees" {
+    const all_true = snapshotAll(true).guaranteeCounts();
+    try testing.expectEqual(@as(u32, 16), all_true.tracked);
+    try testing.expectEqual(@as(u32, 16), all_true.proven);
+
+    const all_false = snapshotAll(false).guaranteeCounts();
+    try testing.expectEqual(@as(u32, 16), all_false.tracked);
+    try testing.expectEqual(@as(u32, 0), all_false.proven);
+}
+
+test "SessionMetrics folds a clarifying text turn then an applied edit" {
+    var m: SessionMetrics = .{};
+    // Turn 1: a clarifying question - plain text, ends approved, applies no edit.
+    m.record(.{ .final_state = .done, .attempt = 0, .roundtrips = 1 });
+    // Turn 2: the answer drives an applied, compiler-verified edit.
+    m.record(.{ .final_state = .done, .attempt = 1, .roundtrips = 3, .applied_edit = true, .proof = snapshotAll(true) });
+
+    const s = m.summary();
+    try testing.expectEqual(@as(u32, 2), s.turn_count);
+    try testing.expectEqual(@as(u32, 4), s.total_roundtrips);
+    try testing.expectEqual(@as(u32, 1), s.verified_patch_count);
+    try testing.expect(s.reached_proof);
+    // Both turns' round-trips count toward reaching the first green proof.
+    try testing.expectEqual(@as(u32, 4), s.round_trips_to_first_green);
+    try testing.expectEqual(@as(u32, 16), s.tracked_properties);
+    try testing.expectEqual(@as(u32, 16), s.proven_properties);
+    try testing.expectEqual(@as(f32, 1.0), s.provenPathRatio());
+}
+
+test "SessionMetrics with no applied edit reports no proof reached" {
+    var m: SessionMetrics = .{};
+    m.record(.{ .final_state = .done, .attempt = 0, .roundtrips = 2, .end_reason = .veto_exhausted });
+    const s = m.summary();
+    try testing.expectEqual(@as(u32, 1), s.turn_count);
+    try testing.expectEqual(@as(u32, 0), s.verified_patch_count);
+    try testing.expect(!s.reached_proof);
+    try testing.expectEqual(@as(u32, 0), s.round_trips_to_first_green);
+    try testing.expectEqual(session_events.TurnEndReason.veto_exhausted, s.final_outcome);
 }
 
 fn writeTestFile(
@@ -824,6 +952,22 @@ test "runOneTurn: two turns back-to-back accumulate in the transcript" {
     // cumulative dump of the whole transcript.
     try testing.expect(std.mem.indexOf(u8, second, "first intent") == null);
     try testing.expect(std.mem.indexOf(u8, second, stub_reply_text) != null);
+}
+
+test "runOneTurn folds the turn into session metrics" {
+    var session = AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const rendered = try runOneTurn(testing.allocator, &session, &registry, "add a GET route", null);
+    defer testing.allocator.free(rendered);
+
+    // A stub reply is plain text - it counts as a turn, but applies no edit, so
+    // it must not register as a verified patch or a reached proof.
+    try testing.expectEqual(@as(u32, 1), session.metrics.turn_count);
+    try testing.expectEqual(@as(u32, 0), session.metrics.verified_patch_count);
+    try testing.expect(!session.metrics.summary().reached_proof);
 }
 
 test "StubClient ignores user_text and always returns the stub reply" {
