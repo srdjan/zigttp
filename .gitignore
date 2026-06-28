@@ -67,3 +67,4 @@ docs/pi-tui-demo.tape
 demos/
 .playwright-mcp/
 brag-output/
+brag-output-*/
