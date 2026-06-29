@@ -42,6 +42,7 @@ comptime {
     _ = @import("transcript.zig");
     _ = @import("expert_workflow.zig");
     _ = @import("expert_eval.zig");
+    _ = @import("expert_codegen_eval.zig");
     _ = @import("auto_repair.zig");
     _ = @import("expert_persona.zig");
     _ = @import("loop.zig");
