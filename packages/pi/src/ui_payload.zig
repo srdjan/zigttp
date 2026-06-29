@@ -1582,6 +1582,10 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
             try writer.writeAll(",\"is_canonical\":");
             try writer.writeAll(if (patch.is_canonical) "true" else "false");
             try writeOptionalStringArray(writer, "rewrite_trace", patch.rewrite_trace);
+            try writer.print(
+                ",\"capsule_total\":{d},\"capsule_regressed\":{d}",
+                .{ patch.capsule_total, patch.capsule_regressed },
+            );
         },
     }
     try writer.writeByte('}');
@@ -1635,6 +1639,12 @@ pub fn writeLegible(writer: *std.Io.Writer, payload: UiPayload) !bool {
             }
             try writer.writeByte('\n');
             if (patch.is_canonical) try writer.writeAll("  canonical\n");
+            if (patch.capsule_regressed > 0) {
+                try writer.print(
+                    "  capsule: {d}/{d} recorded requests regressed\n",
+                    .{ patch.capsule_regressed, patch.capsule_total },
+                );
+            }
             return true;
         },
         .diagnostics => |diagnostics| {
@@ -1986,6 +1996,8 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         const is_canonical = getBool(obj, "is_canonical") orelse false;
         const rewrite_trace = try parseStringArrayField(allocator, obj.get("rewrite_trace"));
         errdefer freeStringSlice(allocator, rewrite_trace);
+        const capsule_total: u32 = @intCast(getUnsignedOrDefault(obj, "capsule_total", 0));
+        const capsule_regressed: u32 = @intCast(getUnsignedOrDefault(obj, "capsule_regressed", 0));
 
         return .{ .verified_patch = .{
             .file = file_copy,
@@ -2020,6 +2032,8 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             .post_apply_summary = post_apply_summary_copy,
             .is_canonical = is_canonical,
             .rewrite_trace = rewrite_trace,
+            .capsule_total = capsule_total,
+            .capsule_regressed = capsule_regressed,
         } };
     }
 
@@ -2793,6 +2807,8 @@ test "verified_patch payload round-trips with rich proof metadata" {
         },
         .post_apply_ok = true,
         .post_apply_summary = try testing.allocator.dupe(u8, "post-apply verification passed"),
+        .capsule_total = 3,
+        .capsule_regressed = 1,
     } };
     defer payload.deinit(testing.allocator);
 
@@ -2830,6 +2846,8 @@ test "verified_patch payload round-trips with rich proof metadata" {
             try testing.expect(patch.post_apply_ok);
             try testing.expect(patch.post_apply_summary != null);
             try testing.expectEqualStrings("post-apply verification passed", patch.post_apply_summary.?);
+            try testing.expectEqual(@as(u32, 3), patch.capsule_total);
+            try testing.expectEqual(@as(u32, 1), patch.capsule_regressed);
             try testing.expect(patch.patch_hash != null);
             try testing.expect(patch.parent_hash != null);
             try testing.expectEqual(@as(u8, 0), patch.patch_hash.?[0]);
@@ -2951,6 +2969,8 @@ test "verified_patch parser accepts legacy minimal schema" {
             try testing.expectEqual(@as(usize, 0), patch.rule_citations.len);
             try testing.expect(!patch.post_apply_ok);
             try testing.expectEqualStrings("verify_paths regressed", patch.post_apply_summary.?);
+            try testing.expectEqual(@as(u32, 0), patch.capsule_total);
+            try testing.expectEqual(@as(u32, 0), patch.capsule_regressed);
         },
         else => return error.TestFailed,
     }
