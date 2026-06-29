@@ -70,7 +70,7 @@ fn parseGoal(s: []const u8) ?counterexample.PropertyTag {
     return property_goals.parseDriveableGoal(s);
 }
 
-fn execute(
+pub fn execute(
     allocator: std.mem.Allocator,
     args: []const []const u8,
 ) anyerror!registry_mod.ToolResult {

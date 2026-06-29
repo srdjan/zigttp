@@ -453,6 +453,13 @@ fn renderLedgerGuidance(allocator: std.mem.Allocator, summary: session_events.Se
         try w.print("  turns:             {d}\n", .{summary.turn_count});
         try w.print("  model round-trips: {d}\n", .{summary.total_roundtrips});
         try w.print("  verified edits:    {d}\n", .{summary.verified_patch_count});
+        try w.print("  workflow hints:    {d} ({d} high-confidence)\n", .{
+            summary.workflow_hint_count,
+            summary.high_confidence_workflow_hint_count,
+        });
+        try w.print("  first-draft passes:{d}\n", .{summary.first_draft_veto_pass_count});
+        try w.print("  veto retries:      {d}\n", .{summary.veto_retry_count});
+        try w.print("  tool calls:        {d}\n", .{summary.tool_call_count});
         if (summary.reached_proof) {
             try w.print("  round-trips to first green proof: {d}\n", .{summary.round_trips_to_first_green});
             try w.print("  proven-path ratio: {d}/{d} guarantees ({d:.0}%)\n", .{
@@ -1892,11 +1899,19 @@ test "renderLedgerGuidance shows live session metrics when turns exist" {
         .round_trips_to_first_green = 5,
         .proven_properties = 12,
         .tracked_properties = 16,
+        .workflow_hint_count = 2,
+        .high_confidence_workflow_hint_count = 1,
+        .first_draft_veto_pass_count = 1,
+        .veto_retry_count = 3,
+        .tool_call_count = 4,
     });
     defer res.deinit(testing.allocator);
     try testing.expect(std.mem.indexOf(u8, res.llm_text, "This session so far:") != null);
     try testing.expect(std.mem.indexOf(u8, res.llm_text, "round-trips to first green proof: 5") != null);
     try testing.expect(std.mem.indexOf(u8, res.llm_text, "12/16 guarantees") != null);
+    try testing.expect(std.mem.indexOf(u8, res.llm_text, "workflow hints:    2 (1 high-confidence)") != null);
+    try testing.expect(std.mem.indexOf(u8, res.llm_text, "veto retries:      3") != null);
+    try testing.expect(std.mem.indexOf(u8, res.llm_text, "tool calls:        4") != null);
     // CLI guidance is still appended.
     try testing.expect(std.mem.indexOf(u8, res.llm_text, "zigttp ledger export") != null);
 }

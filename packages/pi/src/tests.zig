@@ -25,6 +25,7 @@ comptime {
     _ = @import("tools/zig_test_step.zig");
     _ = @import("tools/gen_tests.zig");
     _ = @import("tools/pi_goal_check.zig");
+    _ = @import("tools/pi_goal_candidate.zig");
     _ = @import("tools/pi_repair_plan.zig");
     _ = @import("tools/pi_apply_repair_plan.zig");
     _ = @import("tools/zigts_expert_ast_rewrite.zig");
@@ -39,6 +40,8 @@ comptime {
     _ = @import("turn.zig");
     _ = @import("veto.zig");
     _ = @import("transcript.zig");
+    _ = @import("expert_workflow.zig");
+    _ = @import("expert_eval.zig");
     _ = @import("expert_persona.zig");
     _ = @import("loop.zig");
     _ = @import("proof_enrichment.zig");

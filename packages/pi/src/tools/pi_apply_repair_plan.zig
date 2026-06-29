@@ -32,7 +32,7 @@ pub const tool: registry_mod.ToolDef = .{
 
 const RepairIntent = repair_apply.Intent;
 
-fn execute(
+pub fn execute(
     allocator: std.mem.Allocator,
     args: []const []const u8,
 ) anyerror!registry_mod.ToolResult {

@@ -171,6 +171,12 @@ const prologue =
     \\                                witnesses* (a concrete Request + virtual
     \\                                module stub sequence) for every goal
     \\                                that is violated
+    \\  pi_goal_candidate           - non-writing compiler-native candidate
+    \\                                generator for proof/repair goals; runs
+    \\                                pi_repair_plan plus supported
+    \\                                pi_apply_repair_plan dry-runs in memory
+    \\                                and returns proposed_content only after
+    \\                                edit-simulate reports zero new violations
     \\  pi_repair_plan              - turn verifier/property failures into
     \\                                typed compiler repair intents; apply one
     \\                                plan, then re-run the veto/goal check
@@ -225,6 +231,7 @@ const prologue =
     \\  Contract-pair compatibility proof      -> zigts_expert_prove_patch
     \\  Cross-handler system proof             -> zigts_expert_system_proof
     \\  Proof-guided repair plan               -> pi_repair_plan
+    \\  Multi-repair candidate generation      -> pi_goal_candidate
     \\  Compiler-authored repair dry-run       -> pi_apply_repair_plan
     \\  Preview a new route without writing    -> pi_feature_plan
     \\  Add/prove a new route candidate         -> pi_forge_route
@@ -249,6 +256,13 @@ const prologue =
     \\For language and module questions, always call the live tool even when
     \\you believe you know the answer. The tools reflect the running binary;
     \\training data lags the compiler.
+    \\
+    \\Host workflow notes:
+    \\The pi loop may append an `[expert workflow]` system note immediately
+    \\after the user's message. Treat it as routing help from the host, not as
+    \\user intent. Follow its compiler-native tool path unless a live tool
+    \\result proves that route unsupported. Never cite the note as evidence of
+    \\language behavior; cite the compiler tools and proof output instead.
     \\
     \\Behavioral contract awareness:
     \\Every successful edit produces a proof_card that includes a
@@ -364,10 +378,11 @@ const prologue =
     \\  2. If "ok":true, the goals are already discharged; stop.
     \\  3. Otherwise each "plans" entry is a compiler-authored edit intent
     \\     tied to diagnostics or witnesses. Pass the smallest applicable
-    \\     plan to pi_apply_repair_plan first; if it returns a verified
-    \\     proposed_content, draft that exact edit. If it returns an
-    \\     unsupported reason, fall back to manual editing without broadening
-    \\     the change.
+    \\     plan to pi_goal_candidate first when multiple deterministic repairs
+    \\     may compose; otherwise pass the smallest applicable plan to
+    \\     pi_apply_repair_plan. If either returns a verified proposed_content,
+    \\     draft that exact edit. If it returns an unsupported reason, fall
+    \\     back to manual editing without broadening the change.
     \\  4. Each "witnesses" entry is a concrete (Request,
     \\     io_stubs) tuple that executes the violating path. Read the
     \\     summary and the sink line.
@@ -859,11 +874,20 @@ test "persona routes spec questions through pi_specs_status" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_specs_status") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pi_goal_candidate") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Spec-driven repair") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "ZTS500") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "ZTS501") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "ZTS502") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Spec<\"idempotent\">") != null);
+}
+
+test "persona explains host workflow notes" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Host workflow notes") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "[expert workflow]") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "routing help from the host") != null);
 }
 
 test "persona does not include project context markers" {

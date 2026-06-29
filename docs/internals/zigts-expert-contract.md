@@ -100,14 +100,30 @@ Event kinds and their `d` payloads:
 |---|---|
 | `user_text` | bare string (the submitted prompt) |
 | `model_text` | bare string (assistant prose) |
-| `system_note` | bare string (e.g. a policy-drift notice) |
+| `system_note` | bare string (e.g. a policy-drift notice or `[expert workflow]` routing hint) |
 | `tool_use` | object: `{ "id", "name", "args_json" }` |
 | `tool_result` | object: `{ "tool_use_id", "tool_name", "ok", "llm_text", "body", "ui_payload"? }` |
 | `proof_card` | object: `{ "llm_text", "ui_payload"? }` |
 | `diagnostic_box` | object: `{ "llm_text", "ui_payload"? }` |
 | `verified_patch` | object: `{ "llm_text", "ui_payload"? }` |
 | `autoloop_outcome` | object: `{ "verdict", "iterations", "goals_met", "goals_unmet", ... }` |
+| `session_summary` | object: `{ "turn_count", "total_roundtrips", "verified_patch_count", "workflow_hint_count", "first_draft_veto_pass_count", "veto_retry_count", "tool_call_count", ... }` |
 | `end` | none (terminal sentinel: `{ "v": 2, "k": "end" }`) |
+
+## In-Process Expert Tools
+
+`tools.list` exposes compiler-native Pi tools in addition to the stable analyzer
+commands above. These tools are additive and run inside the same vetoed expert
+loop:
+
+| Tool | Purpose |
+|---|---|
+| `pi_forge_route` | Synthesize and prove a route candidate without hand-writing the route first. |
+| `pi_apply_feature_plan` | Write an approved route/feature candidate after rerunning the compiler veto. |
+| `pi_repair_plan` | Convert verifier/property failures into typed repair intents. |
+| `pi_apply_repair_plan` | Dry-run one repair intent into verified proposed source; never writes. |
+| `pi_goal_candidate` | Compose repair planning and supported repair dry-runs in memory; returns verified `proposed_content` and `applied:false`; never writes. |
+| `pi_goal_check` | Check property goals and return executable counterexample witnesses. |
 
 `zigttp expert --mode rpc` exposes a line-delimited JSON-RPC 2.0 interface over
 stdio for long-lived clients. The agent loads its model backend from

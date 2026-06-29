@@ -30,6 +30,7 @@ const session_events = @import("session/events.zig");
 const persister = @import("session/persister.zig");
 const reconstructor = @import("session/reconstructor.zig");
 const project_context = @import("context/project_context.zig");
+const expert_workflow = @import("expert_workflow.zig");
 
 const Registry = registry_mod.Registry;
 const Transcript = transcript_mod.Transcript;
@@ -118,6 +119,13 @@ pub const SessionMetrics = struct {
     round_trips_to_first_green: u32 = 0,
     proven_properties: u32 = 0,
     tracked_properties: u32 = 0,
+    workflow_hint_count: u32 = 0,
+    high_confidence_workflow_hint_count: u32 = 0,
+    first_draft_veto_pass_count: u32 = 0,
+    veto_retry_count: u32 = 0,
+    tool_call_count: u32 = 0,
+    last_workflow_kind: expert_workflow.TaskKind = .unknown,
+    last_workflow_confidence: expert_workflow.Confidence = .low,
     last_outcome: session_events.TurnEndReason = .approved,
 
     /// Fold one completed turn's result into the running totals.
@@ -125,6 +133,17 @@ pub const SessionMetrics = struct {
         self.turn_count += 1;
         self.total_roundtrips +|= result.roundtrips;
         self.last_outcome = result.end_reason;
+        self.last_workflow_kind = result.workflow_kind;
+        self.last_workflow_confidence = result.workflow_confidence;
+        if (result.workflow_hint_injected) {
+            self.workflow_hint_count += 1;
+            if (result.workflow_confidence == .high) {
+                self.high_confidence_workflow_hint_count += 1;
+            }
+        }
+        if (result.first_draft_veto_pass) self.first_draft_veto_pass_count += 1;
+        self.veto_retry_count +|= result.veto_retry_count;
+        self.tool_call_count +|= result.tool_call_count;
         if (result.applied_edit) {
             if (self.verified_patch_count == 0) {
                 // Round-trips accumulated up to and including the first verified
@@ -146,6 +165,13 @@ pub const SessionMetrics = struct {
             .round_trips_to_first_green = self.round_trips_to_first_green,
             .proven_properties = self.proven_properties,
             .tracked_properties = self.tracked_properties,
+            .workflow_hint_count = self.workflow_hint_count,
+            .high_confidence_workflow_hint_count = self.high_confidence_workflow_hint_count,
+            .first_draft_veto_pass_count = self.first_draft_veto_pass_count,
+            .veto_retry_count = self.veto_retry_count,
+            .tool_call_count = self.tool_call_count,
+            .last_workflow_kind = expert_workflow.taskKindName(self.last_workflow_kind),
+            .last_workflow_confidence = expert_workflow.confidenceName(self.last_workflow_confidence),
             .final_outcome = self.last_outcome,
         };
     }
@@ -865,7 +891,19 @@ test "SessionMetrics folds a clarifying text turn then an applied edit" {
     m.record(.{ .final_state = .done, .attempt = 0, .roundtrips = 1 });
     // Turn 2: the answer drives an applied, compiler-verified edit. The veto
     // counts the proof guarantees (snapshotAll(true) -> 16/16, see guaranteeCounts).
-    m.record(.{ .final_state = .done, .attempt = 1, .roundtrips = 3, .applied_edit = true, .proven_guarantees = 16, .tracked_guarantees = 16 });
+    m.record(.{
+        .final_state = .done,
+        .attempt = 1,
+        .roundtrips = 3,
+        .applied_edit = true,
+        .proven_guarantees = 16,
+        .tracked_guarantees = 16,
+        .workflow_kind = .route_add,
+        .workflow_confidence = .high,
+        .workflow_hint_injected = true,
+        .first_draft_veto_pass = true,
+        .tool_call_count = 2,
+    });
 
     const s = m.summary();
     try testing.expectEqual(@as(u32, 2), s.turn_count);
@@ -876,6 +914,12 @@ test "SessionMetrics folds a clarifying text turn then an applied edit" {
     try testing.expectEqual(@as(u32, 4), s.round_trips_to_first_green);
     try testing.expectEqual(@as(u32, 16), s.tracked_properties);
     try testing.expectEqual(@as(u32, 16), s.proven_properties);
+    try testing.expectEqual(@as(u32, 1), s.workflow_hint_count);
+    try testing.expectEqual(@as(u32, 1), s.high_confidence_workflow_hint_count);
+    try testing.expectEqual(@as(u32, 1), s.first_draft_veto_pass_count);
+    try testing.expectEqual(@as(u32, 2), s.tool_call_count);
+    try testing.expectEqualStrings("route_add", s.last_workflow_kind);
+    try testing.expectEqualStrings("high", s.last_workflow_confidence);
     try testing.expectEqual(@as(f32, 1.0), s.provenPathRatio());
 }
 
@@ -916,12 +960,16 @@ test "runOneTurn: fresh stub session grows transcript by 2 and renders model rep
     const rendered = try runOneTurn(testing.allocator, &session, &registry, "add a GET route", null);
     defer testing.allocator.free(rendered);
 
-    try testing.expectEqual(@as(usize, 2), session.transcript.len());
+    try testing.expectEqual(@as(usize, 3), session.transcript.len());
     switch (session.transcript.at(0).*) {
         .user_text => |body| try testing.expectEqualStrings("add a GET route", body),
         else => return error.TestFailed,
     }
     switch (session.transcript.at(1).*) {
+        .system_note => |body| try testing.expect(std.mem.indexOf(u8, body, "kind=route_add") != null),
+        else => return error.TestFailed,
+    }
+    switch (session.transcript.at(2).*) {
         .model_text => |body| try testing.expectEqualStrings(stub_reply_text, body),
         else => return error.TestFailed,
     }
@@ -969,6 +1017,9 @@ test "runOneTurn folds the turn into session metrics" {
     // it must not register as a verified patch or a reached proof.
     try testing.expectEqual(@as(u32, 1), session.metrics.turn_count);
     try testing.expectEqual(@as(u32, 0), session.metrics.verified_patch_count);
+    try testing.expectEqual(@as(u32, 1), session.metrics.workflow_hint_count);
+    try testing.expectEqual(@as(u32, 1), session.metrics.high_confidence_workflow_hint_count);
+    try testing.expectEqualStrings("route_add", session.metrics.summary().last_workflow_kind);
     try testing.expect(!session.metrics.summary().reached_proof);
 }
 

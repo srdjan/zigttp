@@ -3,9 +3,11 @@ name: auth-jwt
 description: Add JWT verification to a handler using zigttp:auth.
 ---
 Add JWT auth to the handler:
-1. Import `parseBearer` and `jwtVerify` from `zigttp:auth`.
-2. Extract the token: `const token = parseBearer(req.headers.get("authorization"))`.
-3. Verify: `const claims = jwtVerify(token, env.JWT_SECRET)`.
-4. Return 401 on verification failure: `if (!claims.ok) return Response.json({ error: "unauthorized" }, { status: 401 })`.
-5. Use `claims.value.sub` (or other standard claims) in the handler body.
-Add `JWT_SECRET` to the env contract. Never log or expose the raw token.
+1. Call `zigts_expert_modules` first and confirm the live `zigttp:auth` and `zigttp:env` exports.
+2. Import only what is needed: usually `parseBearer`, `jwtVerify`, and `env`.
+3. Read the configured secret with `env("JWT_SECRET")` and return a 500 setup error if it is `undefined`. Never invent a fallback secret.
+4. Extract the bearer token from the authorization header and return 401 when it is `undefined`.
+5. Call `jwtVerify(token, secret)`. It returns a `Result`, so check `.ok` before reading `.value`.
+6. Verify the edit with `pi_goal_check` or the proof card for `no_credential_leakage` and `no_secret_leakage`.
+
+Never log or expose the raw token, secret, or full claims payload. Return only the minimum subject/authorization outcome the handler needs.

@@ -14,6 +14,7 @@ const apply_edit = @import("providers/anthropic/apply_edit.zig");
 const tools_common = @import("tools/common.zig");
 const json_writer = @import("providers/anthropic/json_writer.zig");
 const session_events = @import("session/events.zig");
+const expert_workflow = @import("expert_workflow.zig");
 
 const PostApplyReport = struct {
     ok: bool,
@@ -189,6 +190,17 @@ pub const TurnResult = struct {
     /// veto (see PropertiesSnapshot.guaranteeCounts). Both 0 when no edit applied.
     proven_guarantees: u32 = 0,
     tracked_guarantees: u32 = 0,
+    /// Host-classified workflow for this turn. The hint is advisory; compiler
+    /// veto remains the authority on whether edits can land.
+    workflow_kind: expert_workflow.TaskKind = .unknown,
+    workflow_confidence: expert_workflow.Confidence = .low,
+    workflow_hint_injected: bool = false,
+    /// True when the first model draft passed the edit-simulate veto. This is
+    /// a quality signal for "expert first draft" effectiveness, not an apply
+    /// authorization.
+    first_draft_veto_pass: bool = false,
+    veto_retry_count: u32 = 0,
+    tool_call_count: u32 = 0,
 };
 
 pub const RunOptions = struct {
@@ -245,6 +257,12 @@ pub fn runTurnWith(
     const ta = arena.allocator();
 
     try transcript.append(allocator, .{ .user_text = user_text });
+    const workflow_hint = expert_workflow.classify(user_text);
+    var workflow_hint_injected = false;
+    if (try expert_workflow.renderSystemNote(ta, workflow_hint)) |note| {
+        try transcript.append(allocator, .{ .system_note = note });
+        workflow_hint_injected = true;
+    }
 
     var machine: turn.TurnMachine = .{ .max_attempts = options.max_attempts };
     var next_event: turn.TurnEvent = .{ .user_submitted = user_text };
@@ -283,6 +301,8 @@ pub fn runTurnWith(
     var applied_edit = false;
     var applied_proven: u32 = 0;
     var applied_tracked: u32 = 0;
+    var first_draft_veto_pass = false;
+    var veto_retry_count: u32 = 0;
 
     while (true) {
         const action = machine.transition(next_event);
@@ -318,6 +338,7 @@ pub fn runTurnWith(
                     next_event = .budget_exhausted;
                     continue;
                 }
+                veto_retry_count += 1;
                 model_roundtrips += 1;
                 diag_history = try std.fmt.allocPrint(
                     ta,
@@ -377,6 +398,7 @@ pub fn runTurnWith(
                     .before = prepared.edit.before,
                 }, sql_schema_path);
                 if (veto_result.outcome.ok and !options.replay_mode) {
+                    if (machine.attempt == 1) first_draft_veto_pass = true;
                     // The bytes that will actually be written (post-normalization).
                     // Bound here so the approval preview shows exactly what lands.
                     const applied_content = veto_result.report.normalized_content orelse prepared.edit.content;
@@ -416,7 +438,20 @@ pub fn runTurnWith(
                                 .llm_text = "edit verified but not applied by user approval policy",
                                 .ui_payload = null,
                             } });
-                            return .{ .final_state = .done, .attempt = machine.attempt, .usage = turn_usage, .end_reason = .approval_denied, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proven_guarantees = applied_proven, .tracked_guarantees = applied_tracked };
+                            return finishTurn(
+                                &machine,
+                                turn_usage,
+                                .approval_denied,
+                                model_roundtrips,
+                                applied_edit,
+                                applied_proven,
+                                applied_tracked,
+                                workflow_hint,
+                                workflow_hint_injected,
+                                first_draft_veto_pass,
+                                veto_retry_count,
+                                tool_calls_used,
+                            );
                         }
                     }
                     // Normalize-on-apply: `applied_content` (bound above for the
@@ -509,7 +544,20 @@ pub fn runTurnWith(
                     .diagnostic_box => .veto_exhausted,
                     else => .approved,
                 };
-                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = end_reason, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proven_guarantees = applied_proven, .tracked_guarantees = applied_tracked };
+                return finishTurn(
+                    &machine,
+                    turn_usage,
+                    end_reason,
+                    model_roundtrips,
+                    applied_edit,
+                    applied_proven,
+                    applied_tracked,
+                    workflow_hint,
+                    workflow_hint_injected,
+                    first_draft_veto_pass,
+                    veto_retry_count,
+                    tool_calls_used,
+                );
             },
             .prompt_user => |question| {
                 const text = if (hit_timeout_budget)
@@ -524,12 +572,83 @@ pub fn runTurnWith(
                     question;
                 try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = text } });
                 const budget_reason: session_events.TurnEndReason = if (hit_timeout_budget) .budget_timeout else .budget_roundtrips;
-                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = budget_reason, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proven_guarantees = applied_proven, .tracked_guarantees = applied_tracked };
+                return finishTurn(
+                    &machine,
+                    turn_usage,
+                    budget_reason,
+                    model_roundtrips,
+                    applied_edit,
+                    applied_proven,
+                    applied_tracked,
+                    workflow_hint,
+                    workflow_hint_injected,
+                    first_draft_veto_pass,
+                    veto_retry_count,
+                    tool_calls_used,
+                );
             },
-            .end_turn => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = if (hit_tool_budget) .budget_tool_calls else .approved, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proven_guarantees = applied_proven, .tracked_guarantees = applied_tracked },
-            .none => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = if (hit_tool_budget) .budget_tool_calls else .approved, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proven_guarantees = applied_proven, .tracked_guarantees = applied_tracked },
+            .end_turn => return finishTurn(
+                &machine,
+                turn_usage,
+                if (hit_tool_budget) .budget_tool_calls else .approved,
+                model_roundtrips,
+                applied_edit,
+                applied_proven,
+                applied_tracked,
+                workflow_hint,
+                workflow_hint_injected,
+                first_draft_veto_pass,
+                veto_retry_count,
+                tool_calls_used,
+            ),
+            .none => return finishTurn(
+                &machine,
+                turn_usage,
+                if (hit_tool_budget) .budget_tool_calls else .approved,
+                model_roundtrips,
+                applied_edit,
+                applied_proven,
+                applied_tracked,
+                workflow_hint,
+                workflow_hint_injected,
+                first_draft_veto_pass,
+                veto_retry_count,
+                tool_calls_used,
+            ),
         }
     }
+}
+
+fn finishTurn(
+    machine: *const turn.TurnMachine,
+    usage: turn.Usage,
+    reason: session_events.TurnEndReason,
+    model_roundtrips: u8,
+    applied_edit: bool,
+    applied_proven: u32,
+    applied_tracked: u32,
+    workflow_hint: expert_workflow.WorkflowHint,
+    workflow_hint_injected: bool,
+    first_draft_veto_pass: bool,
+    veto_retry_count: u32,
+    tool_calls_used: usize,
+) TurnResult {
+    return .{
+        .final_state = machine.state,
+        .attempt = machine.attempt,
+        .usage = usage,
+        .end_reason = reason,
+        .roundtrips = model_roundtrips,
+        .applied_edit = applied_edit,
+        .proven_guarantees = applied_proven,
+        .tracked_guarantees = applied_tracked,
+        .workflow_kind = workflow_hint.kind,
+        .workflow_confidence = workflow_hint.confidence,
+        .workflow_hint_injected = workflow_hint_injected,
+        .first_draft_veto_pass = first_draft_veto_pass,
+        .veto_retry_count = veto_retry_count,
+        .tool_call_count = @intCast(@min(tool_calls_used, std.math.maxInt(u32))),
+    };
 }
 
 /// Monotonic time in milliseconds. Delegates to zigts.compat.monotonicNowNs
@@ -853,6 +972,8 @@ const Tag = transcript_mod.Tag;
 
 const CannedClient = struct {
     reply: turn.AssistantReply,
+    saw_workflow_note: bool = false,
+    request_count: usize = 0,
 
     fn requestFn(
         ctx: *anyopaque,
@@ -862,8 +983,18 @@ const CannedClient = struct {
     ) anyerror!ModelCallResult {
         const self: *CannedClient = @ptrCast(@alignCast(ctx));
         _ = arena;
-        _ = transcript;
         _ = extra_user_text;
+        self.request_count += 1;
+        for (transcript.entries.items) |entry| {
+            switch (entry) {
+                .system_note => |body| {
+                    if (std.mem.indexOf(u8, body, "[expert workflow]") != null) {
+                        self.saw_workflow_note = true;
+                    }
+                },
+                else => {},
+            }
+        }
         return .{ .reply = self.reply };
     }
 
@@ -935,7 +1066,7 @@ const bad_handler =
 const clean_handler =
     "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }";
 
-test "text reply path: user -> model text -> render" {
+test "text reply path injects workflow note before model text" {
     var canned: CannedClient = .{ .reply = .{
         .response = .{ .final_text = "here is the plan" },
     } };
@@ -946,11 +1077,19 @@ test "text reply path: user -> model text -> render" {
 
     const result = try runTurnWith(testing.allocator, canned.asClient(), &registry, &tr, "add a GET route", .{});
     try testing.expectEqual(turn.TurnState.done, result.final_state);
+    try testing.expectEqual(expert_workflow.TaskKind.route_add, result.workflow_kind);
+    try testing.expect(result.workflow_hint_injected);
+    try testing.expect(canned.saw_workflow_note);
+    try testing.expectEqual(@as(usize, 1), canned.request_count);
     switch (tr.at(0).*) {
         .user_text => |body| try testing.expectEqualStrings("add a GET route", body),
         else => return error.TestFailed,
     }
     switch (tr.at(1).*) {
+        .system_note => |body| try testing.expect(std.mem.indexOf(u8, body, "pi_forge_route") != null),
+        else => return error.TestFailed,
+    }
+    switch (tr.at(2).*) {
         .model_text => |body| try testing.expectEqualStrings("here is the plan", body),
         else => return error.TestFailed,
     }
@@ -1092,6 +1231,8 @@ test "retry: one bad draft then one good draft lands a proof card" {
     );
 
     try testing.expectEqual(@as(u8, 2), result.attempt);
+    try testing.expectEqual(@as(u32, 1), result.veto_retry_count);
+    try testing.expect(!result.first_draft_veto_pass);
     switch (tr.at(tr.len() - 1).*) {
         .proof_card => {},
         else => return error.TestFailed,

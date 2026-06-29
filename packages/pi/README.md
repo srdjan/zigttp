@@ -31,6 +31,7 @@ packages/pi/
     agent.zig             # AgentSession: transcript, backend union (stub|anthropic), session persistence
     loop.zig              # runTurnWith: drives turn.zig state machine, owns I/O + retries
     turn.zig              # pure state machine (idle → awaiting_model → verifying_edit → ...)
+    expert_workflow.zig   # deterministic task routing hints before first model round-trip
     veto.zig              # runVeto: wraps zigts_cli.edit_simulate for pre-apply gate
     transcript.zig        # OwnedEntry union + renderers
     expert_persona.zig    # buildSystemPromptWithContext: prologue + skill + live rule / feature / module snapshots + optional AGENTS.md
@@ -47,7 +48,7 @@ packages/pi/
     registry/
       tool.zig            # ToolDef + JSON decoders
       registry.zig        # invoke / invokeJson / findByName
-    tools/                # the 16 compiler primitives exposed to the model
+    tools/                # compiler and Pi primitives exposed to the model
     session/
       session_id.zig      # 26-char ULID
       paths.zig           # $HOME/.zigttp/sessions/<cwd_hash>/<sid>
@@ -105,6 +106,15 @@ run reports a new violation. Pre-existing violations do not block new
 edits, only newly introduced ones. Failures feed back as a `retry_draft`
 turn event.
 
+### Expert workflow hints (`expert_workflow.zig`)
+
+Before the first model call for a turn, the host classifies common asks
+such as route additions, proof goals, SQL work, JWT auth, and violation
+repair. High-confidence matches append an `[expert workflow]` system note
+to the transcript with the compiler-native tool route to try first. This
+costs no model round-trip and does not authorize edits; every candidate
+still goes through the compiler veto.
+
 ### Proof Intent Forge (`pi_forge_spec.zig`)
 
 `/forge spec` turns explicit proof intent into source-level
@@ -117,6 +127,14 @@ The v1 repair lane supports deterministic/idempotent handlers by wrapping
 `Date.now()` and `Math.random()` in `step(...)` from `zigttp:durable`.
 Other unsupported structural repairs return typed blockers rather than
 writing speculative code.
+
+### Goal candidates (`tools/pi_goal_candidate.zig`)
+
+`pi_goal_candidate` is a non-writing wrapper for supported deterministic
+repairs. It calls `pi_repair_plan`, dry-runs repair intents through
+`pi_apply_repair_plan`, and returns `proposed_content` only after
+`edit_simulate` reports zero new violations. The model must still apply
+those bytes through `apply_edit` or another vetoed writer.
 
 ### Post-apply verification (`loop.zig:postApplyCheck`)
 

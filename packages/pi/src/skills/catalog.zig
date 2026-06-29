@@ -90,3 +90,22 @@ test "handler-scaffold body preserves the conventions list verbatim" {
     try testing.expect(std.mem.indexOf(u8, skill.body, "zigttp:decode") != null);
     try testing.expect(std.mem.indexOf(u8, skill.body, "No classes, no async/await") != null);
 }
+
+test "skills steer coding tasks through compiler-native expert tools" {
+    const fix = findByName("fix-violations") orelse return error.TestExpected;
+    try testing.expect(std.mem.indexOf(u8, fix.body, "zigts_expert_verify_paths") != null);
+    try testing.expect(std.mem.indexOf(u8, fix.body, "pi_goal_candidate") != null);
+    try testing.expect(std.mem.indexOf(u8, fix.body, "/check") == null);
+
+    const route = findByName("route-table") orelse return error.TestExpected;
+    try testing.expect(std.mem.indexOf(u8, route.body, "pi_forge_route") != null);
+    try testing.expect(std.mem.indexOf(u8, route.body, "pi_apply_feature_plan") != null);
+
+    const auth = findByName("auth-jwt") orelse return error.TestExpected;
+    try testing.expect(std.mem.indexOf(u8, auth.body, "no_credential_leakage") != null);
+    try testing.expect(std.mem.indexOf(u8, auth.body, "fallback secret") != null);
+
+    const sql = findByName("sql-query") orelse return error.TestExpected;
+    try testing.expect(std.mem.indexOf(u8, sql.body, "named SQL parameters") != null);
+    try testing.expect(std.mem.indexOf(u8, sql.body, "WHERE id = ?") == null);
+}

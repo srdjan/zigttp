@@ -36,6 +36,7 @@ const zig_build_step_tool = @import("tools/zig_build_step.zig");
 const zig_test_step_tool = @import("tools/zig_test_step.zig");
 const gen_tests_tool = @import("tools/gen_tests.zig");
 const pi_goal_check_tool = @import("tools/pi_goal_check.zig");
+const pi_goal_candidate_tool = @import("tools/pi_goal_candidate.zig");
 const pi_repair_plan_tool = @import("tools/pi_repair_plan.zig");
 const pi_apply_repair_plan_tool = @import("tools/pi_apply_repair_plan.zig");
 const ast_rewrite_tool = @import("tools/zigts_expert_ast_rewrite.zig");
@@ -112,6 +113,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, zig_test_step_tool.tool);
     try reg.register(allocator, gen_tests_tool.tool);
     try reg.register(allocator, pi_goal_check_tool.tool);
+    try reg.register(allocator, pi_goal_candidate_tool.tool);
     try reg.register(allocator, pi_repair_plan_tool.tool);
     try reg.register(allocator, pi_apply_repair_plan_tool.tool);
     try reg.register(allocator, ast_rewrite_tool.tool);

@@ -133,6 +133,20 @@ test "findByName returns a pointer for a known template" {
     try testing.expectEqualStrings("explain", tmpl.name);
 }
 
+test "coding templates point at compiler-native Pi workflows" {
+    const route = findByName("add-route") orelse return error.TestFailed;
+    try testing.expect(std.mem.indexOf(u8, route.body, "pi_forge_route") != null);
+    try testing.expect(std.mem.indexOf(u8, route.body, "pi_apply_feature_plan") != null);
+
+    const fix = findByName("fix") orelse return error.TestFailed;
+    try testing.expect(std.mem.indexOf(u8, fix.body, "zigts_expert_verify_paths") != null);
+    try testing.expect(std.mem.indexOf(u8, fix.body, "pi_goal_candidate") != null);
+    try testing.expect(std.mem.indexOf(u8, fix.body, "/check") == null);
+
+    const env = findByName("add-env") orelse return error.TestFailed;
+    try testing.expect(std.mem.indexOf(u8, env.body, "no_secret_leakage") != null);
+}
+
 /// Expand `template_body` by substituting {{1}}, {{2}}, ..., {{args}}.
 /// `args` are the trailing tokens after the template name.
 /// Returns an allocated string the caller must free.
