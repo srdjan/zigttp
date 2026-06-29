@@ -15,6 +15,8 @@ const tools_common = @import("tools/common.zig");
 const json_writer = @import("providers/anthropic/json_writer.zig");
 const session_events = @import("session/events.zig");
 const expert_workflow = @import("expert_workflow.zig");
+const auto_repair = @import("auto_repair.zig");
+const pi_repair_plan = @import("tools/pi_repair_plan.zig");
 
 const PostApplyReport = struct {
     ok: bool,
@@ -285,6 +287,11 @@ pub fn runTurnWith(
     // prompt feeds the whole history (not just the latest envelope) so the model
     // does not re-introduce a violation it already fixed on an earlier attempt.
     var diag_history: []const u8 = "";
+    // Compiler-authored repair guidance for the most recent failed draft, built
+    // by the in-process repair lane on a veto failure and consumed by the next
+    // `.retry_draft` so the model gets the exact fix instead of re-deriving it.
+    // Arena-owned; null when the lane produced no actionable plans.
+    var auto_repair_block: ?[]const u8 = null;
     // Project SQL schema for the veto, discovered lazily on the first edit
     // attempt and reused for every retry in the turn (the discovery walks the
     // filesystem for zigttp.json; once per turn is enough). Arena-owned.
@@ -353,13 +360,18 @@ pub fn runTurnWith(
                         "Use the zigts_expert_describe_rule tool to look up ZTS3xx SQL rules, " ++
                         "or ask the user to verify the schema path in zigttp.json.";
                 } else "";
+                // Compiler-authored repair guidance for the draft that just
+                // failed, if the lane produced any. Consumed once: it pertains to
+                // the latest draft, so it is cleared after this prompt is built.
+                const repair_block: []const u8 = auto_repair_block orelse "";
+                auto_repair_block = null;
                 const prompt = try std.fmt.allocPrint(
                     ta,
                     "Your previous edit failed compiler verification (attempt {d}/{d}). " ++
-                        "Below are the diagnostics from every failed attempt so far. Fix all " ++
-                        "flagged violations and do NOT re-introduce one you already fixed in an " ++
-                        "earlier attempt. Emit a new, complete edit.\n\n{s}{s}",
-                    .{ payload.attempt, payload.max_attempts, diag_history, sql_hint },
+                        "Apply the compiler-authored repairs below verbatim, fix all flagged " ++
+                        "violations, and do NOT re-introduce one you already fixed in an earlier " ++
+                        "attempt. Emit a new, complete edit.\n\n{s}{s}{s}",
+                    .{ payload.attempt, payload.max_attempts, repair_block, diag_history, sql_hint },
                 );
                 const result = try callModel(allocator, ta, client, transcript, prompt);
                 turn_usage.add(result.usage);
@@ -483,6 +495,24 @@ pub fn runTurnWith(
                 if (!veto_result.outcome.ok and veto_result.sql_failure) {
                     sql_veto_fail_count += 1;
                     if (sql_veto_fail_count >= 2) inject_sql_escalation = true;
+                }
+                // Failed draft: ask the compiler to author the fix in-process so
+                // the next retry carries the exact repair templates (and the
+                // smallest counterexample) instead of only raw diagnostics. The
+                // lane is local compiler passes (no model call, no disk writes:
+                // persist_witnesses=false) and is skipped for SQL failures (own
+                // escalation path), zero-new-violation failures, and replay
+                // reconstruction.
+                if (!veto_result.outcome.ok and !options.replay_mode and
+                    auto_repair.shouldRunLane(veto_result.sql_failure, veto_result.report.new))
+                {
+                    if (pi_repair_plan.planFromSource(ta, prepared.edit.content, prepared.edit.file, &.{}, false)) |plan_res| {
+                        var pr = plan_res;
+                        defer pr.deinit(ta);
+                        if (auto_repair.buildRetryBlock(ta, pr.llm_text) catch null) |block| {
+                            auto_repair_block = block;
+                        }
+                    } else |_| {}
                 }
                 next_event = .{ .edit_verified = veto_result.outcome };
             },
@@ -1065,6 +1095,76 @@ const bad_handler =
     "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }";
 const clean_handler =
     "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }";
+
+// Accesses result.value without checking result.ok: a HandlerVerifier error
+// (ZTS303 unchecked_result_value) that the repair lane can author a fix for.
+const unchecked_result_handler =
+    "import { validateJson } from \"zigttp:validate\";\n" ++
+    "function handler(req: Request): Response & Spec<\"deterministic\"> {\n" ++
+    "  const result = validateJson(\"item\", req.body);\n" ++
+    "  const data = result.value;\n" ++
+    "  return Response.json({ data });\n" ++
+    "}\n";
+
+// A scripted client that flags whether any retry prompt carried the
+// compiler-authored repair block, so the auto-repair wiring can be asserted
+// end-to-end without reaching into the loop's internal prompt construction.
+const RetryCaptureClient = struct {
+    replies: []const turn.AssistantReply,
+    index: usize = 0,
+    saw_repair_block: bool = false,
+
+    fn requestFn(
+        ctx: *anyopaque,
+        arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
+        extra_user_text: ?[]const u8,
+    ) anyerror!ModelCallResult {
+        const self: *RetryCaptureClient = @ptrCast(@alignCast(ctx));
+        _ = arena;
+        _ = transcript;
+        if (extra_user_text) |t| {
+            if (std.mem.indexOf(u8, t, "COMPILER-AUTHORED FIX") != null) self.saw_repair_block = true;
+        }
+        if (self.index >= self.replies.len) return error.TestSequenceExhausted;
+        const reply = self.replies[self.index];
+        self.index += 1;
+        return .{ .reply = reply };
+    }
+
+    pub fn asClient(self: *RetryCaptureClient) ModelClient {
+        return .{ .context = self, .request_fn = requestFn };
+    }
+};
+
+test "veto failure feeds compiler-authored repair into the retry prompt" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+
+    var client: RetryCaptureClient = .{ .replies = &.{
+        .{ .response = .{ .edit = .{ .file = "src/handler.ts", .content = unchecked_result_handler, .before = null } } },
+        .{ .response = .{ .edit = .{ .file = "src/handler.ts", .content = clean_handler, .before = null } } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const result = try runTurnWith(testing.allocator, client.asClient(), &registry, &tr, "fix the handler", .{
+        .workspace_root = workspace_root,
+        .max_attempts = 2,
+        .approval_fn = ApprovalFn.fromFn(autoApprove),
+        .turn_timeout_ms = 0,
+    });
+
+    // First draft failed veto, the lane authored a fix, the retry carried it,
+    // and the second draft landed.
+    try testing.expect(client.saw_repair_block);
+    try testing.expect(result.applied_edit);
+    try testing.expectEqual(@as(u32, 1), result.veto_retry_count);
+}
 
 test "text reply path injects workflow note before model text" {
     var canned: CannedClient = .{ .reply = .{

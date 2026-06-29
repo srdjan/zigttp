@@ -90,7 +90,7 @@ pub fn execute(
     };
     defer allocator.free(source);
 
-    return planFromSource(allocator, source, args[0], args[1..]);
+    return planFromSource(allocator, source, args[0], args[1..], true);
 }
 
 /// Run handler verification + property-witness analysis over an in-memory
@@ -99,11 +99,16 @@ pub fn execute(
 /// `source` bytes (not the file on disk at `rel_path`) are analyzed, so a
 /// draft that has not been written yet can still be planned. `goal_args` are
 /// goal name strings; an empty slice means the default supported goal set.
+/// `persist_witnesses` controls whether materialised witnesses are written to
+/// the on-disk corpus: the tool path persists, but the in-loop auto-repair
+/// feedback lane passes false so computing retry guidance stays side-effect
+/// free (no cwd-relative writes).
 pub fn planFromSource(
     allocator: std.mem.Allocator,
     source: []const u8,
     rel_path: []const u8,
     goal_args: []const []const u8,
+    persist_witnesses: bool,
 ) anyerror!registry_mod.ToolResult {
     var goals: std.ArrayListUnmanaged(counterexample.PropertyTag) = .empty;
     defer goals.deinit(allocator);
@@ -183,7 +188,10 @@ pub fn planFromSource(
     // same handler maps to the same directory across tool invocations.
     // Failures here are non-fatal: the repair plan still surfaces, just
     // without persistence.
-    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, rel_path) catch null;
+    const corpus_dir = if (persist_witnesses)
+        (zigts.witness_corpus.corpusDir(allocator, rel_path) catch null)
+    else
+        null;
     defer if (corpus_dir) |d| allocator.free(d);
     if (corpus_dir) |d| {
         zigts.witness_corpus.ensureCorpusDir(allocator, d, rel_path) catch {};
@@ -500,7 +508,7 @@ test "planFromSource plans repairs from an in-memory draft" {
         \\  return Response.json({ data });
         \\}
     ;
-    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
+    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{}, false);
     defer result.deinit(testing.allocator);
     // The draft accesses result.value without checking result.ok: a failure
     // with a concrete check_result_before_value repair template.
