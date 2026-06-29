@@ -6,7 +6,7 @@ const std = @import("std");
 const json_writer = @import("json_writer.zig");
 const transcript_mod = @import("../../transcript.zig");
 
-pub const default_model = "claude-sonnet-4-6";
+pub const default_model = "claude-haiku-4-5-20251001";
 pub const default_max_tokens: u32 = 8192;
 
 pub const RequestParams = struct {
@@ -323,6 +323,10 @@ test "writeRequestBody: model defaults and max_tokens appear on the root" {
     try testing.expectEqualStrings(default_model, parsed.value.object.get("model").?.string);
     try testing.expectEqual(@as(i64, default_max_tokens), parsed.value.object.get("max_tokens").?.integer);
     try testing.expect(parsed.value.object.get("stream").?.bool);
+}
+
+test "writeRequestBody: default model is Haiku unless the user overrides it" {
+    try testing.expectEqualStrings("claude-haiku-4-5-20251001", default_model);
 }
 
 test "writeRequestBody: tools_json is embedded verbatim when provided" {

@@ -171,8 +171,9 @@ zigttp expert --handler src/handler.ts --goal no_secret_leakage
 | `--handler <file>` | Override the handler file (default: auto-detected from `zigttp.json`). |
 | `--goal <property>` | Restrict the session to edits that achieve a named proof property. |
 
-`--model <id>` starts the session on a specific provider model; run `/model`
-in-session to list the available ids.
+Pi defaults to `claude-haiku-4-5-20251001`. `--model <id>` starts the session
+on a user-selected provider model; run `/model` in-session to list the available
+ids.
 
 The stored provider file is `~/.zigttp/providers.json` with mode `0600`.
 Environment variables `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` override stored

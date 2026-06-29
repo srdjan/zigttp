@@ -355,14 +355,15 @@ zigttp expert
 zigttp expert --yes                                # apply edits without prompting
 zigttp expert --no-edit                            # read-only analysis, no writes
 zigttp expert --resume                             # continue last session
-zigttp expert --model claude-sonnet-4-6
+zigttp expert --model claude-sonnet-4-6            # user-selected override
 zigttp expert --print "add a GET /health route"
 zigttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
 
-Pass `--model <id>` to start on a specific provider model, or switch mid-session
-with the `/model` command. Pass `--yes` to apply every verified edit without a
-confirmation prompt; the approval policy is persisted through `--resume`.
+Pi defaults to `claude-haiku-4-5-20251001`. Pass `--model <id>` to start on a
+specific provider model, or switch mid-session with the `/model` command. Pass
+`--yes` to apply every verified edit without a confirmation prompt; the approval
+policy is persisted through `--resume`.
 Pass `--no-edit` to allow analysis and file reads while blocking all writes.
 
 Keys are stored in `~/.zigttp/providers.json` with mode `0600`. A shell-set
