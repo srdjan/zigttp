@@ -10,6 +10,7 @@ const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");
 const apply_edit = @import("apply_edit.zig");
 const http_errors = @import("../http_errors.zig");
+const cassette_record = @import("../cassette_record.zig");
 
 const default_base_url = "https://api.anthropic.com/v1/messages";
 const default_anthropic_version = "2023-06-01";
@@ -31,9 +32,25 @@ pub const ClientError = error{
 
 pub const Client = struct {
     config: Config,
+    /// When set, every model roundtrip's raw SSE body is teed to a cassette
+    /// under `<record_dir>/<record_scenario>/step_<N>.jsonl`, one per call.
+    /// Used by the codegen-eval recorder to capture a faithful baseline that
+    /// the replay client plays back deterministically. null disables recording
+    /// (the default), so the live path is unchanged for normal sessions.
+    record_dir: ?[]const u8 = null,
+    record_scenario: []const u8 = "",
+    record_step: usize = 0,
 
     pub fn init(config: Config) Client {
         return .{ .config = config };
+    }
+
+    /// Point this client at a per-scenario cassette directory and reset the
+    /// step counter. The recorder calls this once per corpus case.
+    pub fn enableRecording(self: *Client, dir: []const u8, scenario: []const u8) void {
+        self.record_dir = dir;
+        self.record_scenario = scenario;
+        self.record_step = 0;
     }
 
     pub fn asModelClient(self: *Client) loop.ModelClient {
@@ -58,6 +75,11 @@ pub const Client = struct {
     ) !loop.ModelCallResult {
         const body = try buildRequestBody(arena, self.config, transcript, extra_user_text);
         const response_body = try postAnthropic(arena, self.config, body);
+        if (self.record_dir) |dir| {
+            // Best-effort: a recording failure must never break a live turn.
+            recordCassette(arena, dir, self.record_scenario, self.record_step, self.config.model, response_body) catch {};
+            self.record_step += 1;
+        }
         const event_list = try sse_parser.parseAll(arena, response_body);
         const outcome = try response_assembler.assemble(arena, event_list);
         const reply = try apply_edit.maybeRemap(arena, outcome.reply);
@@ -84,6 +106,32 @@ pub fn buildRequestBody(
     });
     buf = aw.toArrayList();
     return try buf.toOwnedSlice(arena);
+}
+
+/// Tee one roundtrip's SSE body to `<dir>/<scenario>/step_<step>.jsonl`. The
+/// cassette stores the stream verbatim; replay parses it through the same
+/// sse_parser/response_assembler this client uses, so the recorded reply and
+/// the live reply are identical bytes.
+fn recordCassette(
+    arena: std.mem.Allocator,
+    dir: []const u8,
+    scenario: []const u8,
+    step: usize,
+    model: []const u8,
+    sse_body: []const u8,
+) !void {
+    const scenario_dir = try std.fs.path.join(arena, &.{ dir, scenario });
+    var io_backend = std.Io.Threaded.init(arena, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), scenario_dir);
+
+    const path = try std.fmt.allocPrint(arena, "{s}/step_{d}.jsonl", .{ scenario_dir, step });
+    try cassette_record.writeCassette(arena, path, sse_body, .{
+        .provider = .anthropic,
+        .scenario = scenario,
+        .stream = true,
+        .model = model,
+    });
 }
 
 fn postAnthropic(

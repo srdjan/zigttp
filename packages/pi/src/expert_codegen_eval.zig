@@ -80,6 +80,7 @@ pub fn runCase(
     allocator: std.mem.Allocator,
     case: CodegenCase,
     client: loop.ModelClient,
+    registry: *const registry_mod.Registry,
 ) !CaseResult {
     var tmp = try IsolatedTmp.init(allocator, "codegen-eval");
     defer tmp.cleanup(allocator);
@@ -87,10 +88,8 @@ pub fn runCase(
 
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(allocator);
-    var registry: registry_mod.Registry = .{};
-    defer registry.deinit(allocator);
 
-    const result = try loop.runTurnWith(allocator, client, &registry, &tr, case.prompt, .{
+    const result = try loop.runTurnWith(allocator, client, registry, &tr, case.prompt, .{
         .workspace_root = tmp.abs_path,
         .max_attempts = case.max_attempts,
         .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
@@ -240,7 +239,9 @@ test "runCase scores a clean first draft as a veto pass" {
         .expected_kind = .route_add,
         .criterion = .passes_veto,
     };
-    const r = try runCase(testing.allocator, case, client.asClient());
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    const r = try runCase(testing.allocator, case, client.asClient(), &registry);
     try testing.expect(r.first_draft_pass);
     try testing.expect(r.applied);
     try testing.expect(r.passed_criterion);
@@ -259,7 +260,9 @@ test "runCase records the failing ZTS code for a bad first draft" {
         .expected_kind = .violation_fix,
         .criterion = .passes_veto,
     };
-    const r = try runCase(testing.allocator, case, client.asClient());
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    const r = try runCase(testing.allocator, case, client.asClient(), &registry);
     try testing.expect(!r.first_draft_pass);
     try testing.expect(!r.passed_criterion);
     try testing.expectEqualStrings("ZTS303", r.failingCode().?);
