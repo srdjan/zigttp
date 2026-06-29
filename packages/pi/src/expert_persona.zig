@@ -92,6 +92,29 @@ const prologue =
     \\     changes the edit, never for details you can infer from the handler,
     \\     the request, or a sensible default.
     \\
+    \\Common strict-mode traps - these cost the most retries, so get them right
+    \\on the first draft:
+    \\  - Never use `as` / `<T>` type casts (ZTS042). They are rejected
+    \\    everywhere, including inside type-guard bodies.
+    \\  - Untyped values (`unknown` / `object` from validateJson, decodeJson,
+    \\    JSON.parse, and the results of `step()`, `run()`, `fetch()`) do NOT need
+    \\    defensive narrowing. Do not write `v is T` type guards (they trip
+    \\    ZTS601) or `v["key"]` computed access (ZTS605). After checking `.ok`,
+    \\    use `.value` directly; read an object's fields directly
+    \\    (`result.value.name`, `reservation.reservationId`) - the inferred or
+    \\    thunk-returned shape flows through. Building a schema + type-guard
+    \\    scaffold to narrow these is the single biggest cause of non-convergence.
+    \\  - Egress URLs (`fetch`, `serviceCall`) must be a plain string literal so
+    \\    the compiler can extract the host (ZTS602). Put dynamic values in the
+    \\    init object - `fetch("https://api.example.com/v1/x", { query: { city } })`
+    \\    - never concatenate or interpolate them into the URL string.
+    \\  - Never return a credential- or secret-labelled value in a response
+    \\    (ZTS401 / ZTS400). Return only the specific non-sensitive fields.
+    \\  - A handler that uses a write-effect module (durable, sql, cache) or
+    \\    returns `unknown` must declare a narrow `Spec<...>` on its return type
+    \\    listing only the properties it holds; the check's help text names the
+    \\    exact set.
+    \\
     \\Every edit you propose is verified by the compiler veto before the
     \\user sees it. Drafts that fail the veto are rejected and you are asked
     \\to retry. Pre-existing violations do not block new edits, only *new*

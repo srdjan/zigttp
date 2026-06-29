@@ -52,6 +52,17 @@ const CassetteSequenceClient = struct {
     }
 };
 
+/// Delete a case's cassette directory (`<out_dir_abs>/<name>`) via its absolute
+/// parent, so it works regardless of the current working directory. Best-effort.
+fn removeCaseDir(allocator: std.mem.Allocator, out_dir_abs: []const u8, name: []const u8) void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var parent = std.Io.Dir.openDirAbsolute(io, out_dir_abs, .{}) catch return;
+    defer parent.close(io);
+    parent.deleteTree(io, name) catch {};
+}
+
 /// Read step_0.jsonl, step_1.jsonl, ... from an absolute case directory until a
 /// step is missing. Returns an empty slice when the case has no cassette yet.
 fn readCaseSteps(allocator: std.mem.Allocator, dir_abs: []const u8) ![][]u8 {
@@ -159,16 +170,18 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a handler in handler.ts that requires a bearer JWT using zigttp:auth " ++
             "with the secret from env JWT_SECRET, returns 401 when the token is missing or invalid, " ++
             "and otherwise returns the verified claims as JSON. Never use a fallback secret.",
-        // Recorded: failed first draft, recovered in 2 retries.
-        .expect_first_draft_pass = false,
+        // Was ZTS401 (credential in response); closed by the strict-mode traps
+        // teaching (return only non-sensitive fields).
+        .expect_first_draft_pass = true,
     },
     .{
         .name = "weather-egress",
         .prompt = "Create a handler in handler.ts that reads a `city` query parameter and " ++
             "fetches the current weather for that city from https://api.open-meteo.com/v1/forecast " ++
             "using zigttp:fetch, returning the JSON response.",
-        // Recorded: never converged (user input -> egress URL gap).
-        .expect_first_draft_pass = false,
+        // Was ZTS602 (never converged); closed by the literal-URL + init-query
+        // egress teaching.
+        .expect_first_draft_pass = true,
     },
     .{
         .name = "websocket-echo",
@@ -180,8 +193,9 @@ const record_corpus = [_]RecordCase{
         .name = "durable-order",
         .prompt = "Create a durable handler in handler.ts using zigttp:durable that runs a " ++
             "two-step order workflow: a `reserve` step then a `charge` step, via run() and step().",
-        // Recorded: never converged (durable workflow API gap).
-        .expect_first_draft_pass = false,
+        // Was ZTS042/narrowing death-spiral (never converged); closed by the
+        // "use untyped values directly, never narrow with as/guards" teaching.
+        .expect_first_draft_pass = true,
     },
 };
 
@@ -231,6 +245,11 @@ test "record codegen baseline corpus (live, gated)" {
         defer tmp.cleanup(allocator);
         for (rc.seed_files) |sf| try tmp.writeFile(allocator, sf.path, sf.bytes);
 
+        // Clear any prior cassette for this case so a shorter new recording (or
+        // a transient mid-turn failure) cannot leave stale trailing steps that
+        // would corrupt replay.
+        removeCaseDir(allocator, out_dir, rc.name);
+
         const saved_cwd = try cwdPathAlloc(allocator);
         defer allocator.free(saved_cwd);
         try std.Io.Threaded.chdir(tmp.abs_path);
@@ -247,8 +266,13 @@ test "record codegen baseline corpus (live, gated)" {
             .replay_mode = false,
             .turn_timeout_ms = 0,
         }) catch |err| {
-            std.debug.print("[codegen-record] {s}: turn failed: {s}\n", .{ rc.name, @errorName(err) });
-            return err;
+            // A transient live error (e.g. a network ReadFailed) on one case
+            // must not abort the whole corpus run; skip and keep recording the
+            // rest. Remove the partial cassette so replay never reads a
+            // truncated step sequence.
+            std.debug.print("[codegen-record] {s}: turn failed: {s} (skipped)\n", .{ rc.name, @errorName(err) });
+            removeCaseDir(allocator, out_dir, rc.name);
+            continue;
         };
         if (result.first_draft_veto_pass) first_draft_passes += 1;
         if (result.applied_edit) greens += 1;
