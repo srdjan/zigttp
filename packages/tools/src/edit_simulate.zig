@@ -45,7 +45,15 @@ pub const SimulateResult = struct {
     preexisting_count: u32 = 0,
     /// Behavioral properties from contract extraction. Present only when the
     /// analysis pipeline reached the contract phase (no parse or type errors).
+    /// `properties.read_only` is the BEHAVIORAL fact (no state mutations).
     properties: ?HandlerProperties = null,
+    /// True when an imported module (zigttp:sql / zigttp:cache) forbids DECLARING
+    /// read_only (ZTS501), even though the handler may be behaviorally read-only.
+    /// The agent-facing HUD reports read_only as held only when behavioral AND
+    /// not forbidden, so the agent is never told to declare a property the import
+    /// would reject. The behavioral `properties.read_only` is left intact for the
+    /// receipt and other proof consumers.
+    read_only_forbidden_by_import: bool = false,
 
     pub fn deinit(self: *SimulateResult, allocator: std.mem.Allocator) void {
         for (self.violations.items) |v| {
@@ -69,7 +77,20 @@ pub fn simulate(
         allocator.free(tmp_path);
     }
 
-    var new_check = try precompile.runCheckOnly(allocator, tmp_path, input.sql_schema_path, true, null);
+    // When the caller passes no explicit schema, discover the project's from cwd
+    // exactly as the CLI boundary (`run`) does. Without this, every in-process
+    // tool that simulates a zigttp:sql handler (the repair-apply lane, review
+    // patch, ast rewrite, feature apply) throws MissingSqlSchema even though the
+    // project has a configured schema. The veto and CLI already pass a non-null
+    // path, so discovery only runs for the schema-less in-process callers.
+    const discovered_schema: ?[]u8 = if (input.sql_schema_path == null)
+        discoverProjectSqlSchemaPath(allocator, null)
+    else
+        null;
+    defer if (discovered_schema) |p| allocator.free(p);
+    const schema_path = input.sql_schema_path orelse discovered_schema;
+
+    var new_check = try precompile.runCheckOnly(allocator, tmp_path, schema_path, true, null);
     defer new_check.deinit(allocator);
 
     var baseline_counts: ?std.AutoHashMapUnmanaged(ViolationKey, u32) = null;
@@ -82,7 +103,7 @@ pub fn simulate(
             allocator.free(before_path);
         }
 
-        var old_check = try precompile.runCheckOnly(allocator, before_path, input.sql_schema_path, true, null);
+        var old_check = try precompile.runCheckOnly(allocator, before_path, schema_path, true, null);
         defer old_check.deinit(allocator);
 
         baseline_counts = .empty;
@@ -93,6 +114,10 @@ pub fn simulate(
 
     var result = SimulateResult{
         .properties = new_check.properties,
+        .read_only_forbidden_by_import = if (new_check.contract) |c|
+            zigts.spec_discharge.readOnlyForbiddenByImport(c.modules.items)
+        else
+            false,
     };
     errdefer result.deinit(allocator);
 
@@ -204,9 +229,14 @@ pub fn writeResultJson(writer: anytype, result: *const SimulateResult) !void {
     try writer.print("{d}", .{result.preexisting_count});
     try writer.writeAll("}");
     if (result.properties) |p| {
+        // read_only is reported as DECLARABLE here (behavioral AND not import-
+        // forbidden): this HUD is what the agent reads to decide what Spec to
+        // declare, and declaring read_only with a zigttp:sql/cache import is a
+        // ZTS501 error. The behavioral fact stays in `result.properties`.
+        const read_only_declarable = p.read_only and !result.read_only_forbidden_by_import;
         try writer.print(",\"properties\":{{\"pure\":{},\"read_only\":{},\"deterministic\":{},\"retry_safe\":{},\"idempotent\":{},\"state_isolated\":{},\"injection_safe\":{},\"fault_covered\":{}}}", .{
             p.pure,
-            p.read_only,
+            read_only_declarable,
             p.deterministic,
             p.retry_safe,
             p.idempotent,
@@ -493,6 +523,40 @@ test "writeResultJson includes properties when present" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"injection_safe\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"state_isolated\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"fault_covered\":false") != null);
+    // Without an import forbidding it, behavioral read_only surfaces as declarable.
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"read_only\":true") != null);
+}
+
+test "writeResultJson reports read_only as not-declarable under a forbidding import" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+
+    // A behaviorally read-only handler (a SELECT) whose zigttp:sql import forbids
+    // DECLARING read_only: the HUD the agent reads must show read_only:false so it
+    // does not declare a property ZTS501 would reject. The other held properties
+    // (retry_safe/idempotent) are unaffected.
+    const result = SimulateResult{
+        .properties = .{
+            .pure = false,
+            .read_only = true,
+            .stateless = true,
+            .retry_safe = true,
+            .deterministic = true,
+            .has_egress = false,
+            .injection_safe = true,
+            .state_isolated = true,
+            .idempotent = true,
+            .fault_covered = false,
+        },
+        .read_only_forbidden_by_import = true,
+    };
+    try writeResultJson(&aw.writer, &result);
+
+    buf = aw.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"read_only\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"retry_safe\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"idempotent\":true") != null);
 }
 
 test "violationKey excludes line numbers" {

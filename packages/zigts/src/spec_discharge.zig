@@ -226,8 +226,9 @@ const incompatible_modules_for_read_only = [_][]const u8{
 
 /// True when any imported module forbids the `read_only` property at the import
 /// level (the same set ZTS501 keys on). Used to keep the ZTS500 suggestion from
-/// recommending a property the import would then reject.
-fn readOnlyForbiddenByImport(modules: []const []const u8) bool {
+/// recommending a property the import would then reject, and by the edit-simulate
+/// HUD to show the agent read_only as not-declarable for such handlers.
+pub fn readOnlyForbiddenByImport(modules: []const []const u8) bool {
     for (incompatible_modules_for_read_only) |m| {
         if (containsString(modules, m)) return true;
     }

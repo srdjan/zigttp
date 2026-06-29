@@ -380,13 +380,20 @@ pub fn runTurnWith(
                 // the latest draft, so it is cleared after this prompt is built.
                 const repair_block: []const u8 = auto_repair_block orelse "";
                 auto_repair_block = null;
+                // The lead-in must match what is actually in the prompt: only
+                // claim "compiler-authored repairs below" when the lane produced
+                // a block. On the common no-block paths (hard/parse failures, no
+                // repairable plans) the model would otherwise be told to apply
+                // content that is not there.
+                const lead_in: []const u8 = if (repair_block.len > 0)
+                    "Apply the compiler-authored repairs below verbatim, fix any remaining flagged violations, and do NOT re-introduce one you already fixed in an earlier attempt."
+                else
+                    "Fix all the flagged violations below, and do NOT re-introduce one you already fixed in an earlier attempt.";
                 const prompt = try std.fmt.allocPrint(
                     ta,
                     "Your previous edit failed compiler verification (attempt {d}/{d}). " ++
-                        "Apply the compiler-authored repairs below verbatim, fix all flagged " ++
-                        "violations, and do NOT re-introduce one you already fixed in an earlier " ++
-                        "attempt. Emit a new, complete edit.\n\n{s}{s}{s}",
-                    .{ payload.attempt, payload.max_attempts, repair_block, diag_history, sql_hint },
+                        "{s} Emit a new, complete edit.\n\n{s}{s}{s}",
+                    .{ payload.attempt, payload.max_attempts, lead_in, repair_block, diag_history, sql_hint },
                 );
                 const result = try callModel(allocator, ta, client, transcript, prompt);
                 turn_usage.add(result.usage);
@@ -477,17 +484,34 @@ pub fn runTurnWith(
                                     applied_proven = st.proven;
                                     applied_tracked = st.tracked;
                                     compiler_authored_apply = true;
-                                    edit_event = .{ .ok = true, .llm_text = try ta.dupe(u8, "compiler-authored repair applied") };
+                                    // Carry the re-veto's proof HUD so the model-
+                                    // free apply renders the same proof card as an
+                                    // ordinary verified apply (ui_payload is on
+                                    // `ta`, matching the model-green path above).
+                                    edit_event = .{
+                                        .ok = true,
+                                        .llm_text = try ta.dupe(u8, "compiler-authored repair applied"),
+                                        .ui_payload = reveto.outcome.ui_payload,
+                                    };
                                     phase_b_applied = true;
                                 }
                             }
                         }
                         if (!phase_b_applied) {
-                            if (auto_repair.buildRetryBlock(ta, cand.plans_json) catch null) |block| {
-                                auto_repair_block = block;
-                            }
+                            const block_opt = auto_repair.buildRetryBlock(ta, cand.plans_json) catch |err| switch (err) {
+                                error.OutOfMemory => return err,
+                                else => null,
+                            };
+                            if (block_opt) |block| auto_repair_block = block;
                         }
-                    } else |_| {}
+                    } else |err| switch (err) {
+                        // Best-effort lane: a schema-less project or an
+                        // unparseable plan just means no model-free repair this
+                        // turn (fall back to the normal model retry). OOM is a
+                        // real fault and must not be hidden behind the fallback.
+                        error.OutOfMemory => return err,
+                        else => {},
+                    }
                 }
                 next_event = .{ .edit_verified = edit_event };
             },

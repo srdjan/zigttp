@@ -3696,21 +3696,16 @@ pub const ContractBuilder = struct {
         // would re-run them, violating at-most-once guarantees for resource cleanup.
         const retry_safe = !self.scope_used and (read_only or durable_only_writes);
 
-        // Declarable read_only: a write-effect module import (zigttp:sql /
-        // zigttp:cache) forbids DECLARING read_only at the import level (ZTS501),
-        // even for a SELECT or cacheGet that only reads. Gate only the declared
-        // read_only property here - retry_safe and stateless stay on the
-        // behavioral value above, since a read-only query genuinely holds them.
-        // Without this gate the property HUD and the agent's self-check report
-        // read_only as held, the agent declares it, and ZTS501 then rejects it.
-        const read_only_import_forbidden =
-            containsString(self.modules_list.items, "zigttp:sql") or
-            containsString(self.modules_list.items, "zigttp:cache");
-        const declarable_read_only = read_only and !read_only_import_forbidden;
-
+        // read_only here is the BEHAVIORAL fact (the handler performs no state
+        // mutations). That is what deploy manifests, the proof report, and the
+        // runtime pooling policy consume, so a SELECT-only zigttp:sql handler
+        // must keep read_only == true. The separate question of whether a handler
+        // may *declare* read_only (a zigttp:sql/cache import forbids it at the
+        // import level, ZTS501) is enforced by spec_discharge and surfaced to the
+        // agent via the edit-simulate HUD, not by weakening this behavioral fact.
         return .{
             .pure = pure,
-            .read_only = declarable_read_only,
+            .read_only = read_only,
             .stateless = read_only and !s.has_cache_read,
             .retry_safe = retry_safe,
             .deterministic = deterministic,

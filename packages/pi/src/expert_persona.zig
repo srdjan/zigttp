@@ -114,12 +114,10 @@ const prologue =
     \\    returns `unknown` cannot hold the default proof profile, so it needs a
     \\    narrow `Spec<...>` on the return type. Before you call `apply_edit` on
     \\    such a handler, run `zigts_expert_edit_simulate` on your draft: if it
-    \\    reports ZTS500 the help lists the candidate properties to put in the
-    \\    Spec - but for these modules the help can wrongly include `read_only`
-    \\    (and, for a mutation like INSERT/UPDATE/DELETE, `idempotent` /
-    \\    `retry_safe`), which then fail ZTS501. Take the help's set, drop any
-    \\    property the module rejects, and apply once. Never apply a stateful
-    \\    handler without confirming its Spec this way.
+    \\    reports ZTS500 the help names the exact properties to declare, already
+    \\    excluding any the imports forbid (e.g. `read_only` for a sql/cache
+    \\    handler, which would fail ZTS501). Declare that set verbatim and apply
+    \\    once. Never apply a stateful handler without confirming its Spec this way.
     \\
     \\Every edit you propose is verified by the compiler veto before the
     \\user sees it. Drafts that fail the veto are rejected and you are asked

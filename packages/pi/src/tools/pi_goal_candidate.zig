@@ -492,8 +492,13 @@ pub fn candidateFromSource(
         var apply_json = try parseApplyJson(allocator, apply_result.llm_text);
         defer apply_json.deinit(allocator);
         if (!apply_json.ok or apply_json.proposed_content == null) {
+            // Dupe into a temp BEFORE freeing the previous reason: if the dupe
+            // OOMs after the free, the function-level defer would double-free the
+            // already-freed pointer (benign on the loop's arena, a real fault on
+            // a non-arena allocator).
+            const reason_copy = try allocator.dupe(u8, apply_json.reason orelse "repair_not_verified");
             if (last_failure_reason) |r| allocator.free(r);
-            last_failure_reason = try allocator.dupe(u8, apply_json.reason orelse "repair_not_verified");
+            last_failure_reason = reason_copy;
             continue;
         }
         const next_source = try allocator.dupe(u8, apply_json.proposed_content.?);

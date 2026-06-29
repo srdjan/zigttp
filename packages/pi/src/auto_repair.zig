@@ -48,6 +48,11 @@ pub fn buildRetryBlock(allocator: std.mem.Allocator, plan_json: []const u8) !?[]
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    // fromArrayList empties `buf` and moves the buffer into `aw`, so the only
+    // cleanup that reclaims written bytes on an early `return null` (or a write
+    // error) is aw.deinit(). On the success path toArrayList() empties aw before
+    // this defer runs, so it is a no-op there.
+    defer aw.deinit();
     const w = &aw.writer;
 
     try w.writeAll(
