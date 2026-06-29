@@ -208,15 +208,13 @@ const record_corpus = [_]RecordCase{
             .{ .path = "zigttp.json", .bytes = "{\n  \"sqlite\": \"schema.sql\"\n}\n" },
             .{ .path = "schema.sql", .bytes = "CREATE TABLE users (\n  id INTEGER PRIMARY KEY,\n  name TEXT NOT NULL\n);\n" },
         },
-        // Recorded with the best model (Sonnet). Writes correct SQL and now
-        // self-checks cleanly (the edit_simulate tool discovers the schema), but
-        // still first-draft-fails: the property analysis reports read_only as
-        // PROVEN for a SELECT (it does not write), so the agent declares it -
-        // then ZTS501 rejects it (a zigttp:sql import forbids read_only). It
-        // recovers in 1 retry by dropping read_only. A pinned gap: the deeper
-        // fix is to stop classifying read_only as held when a write-effect
-        // module is imported (so the agent is never told to declare it).
-        .expect_first_draft_pass = false,
+        // Recorded with the best model (Sonnet): writes correct SQL, self-checks
+        // cleanly, and first-draft-passes. Previously it failed because the
+        // property analysis reported read_only as PROVEN for a SELECT and the
+        // agent declared it (then ZTS501 rejected it); the classifier now gates
+        // declarable read_only on write-effect imports, so the agent is no
+        // longer told to declare a property the import forbids.
+        .expect_first_draft_pass = true,
     },
 };
 
