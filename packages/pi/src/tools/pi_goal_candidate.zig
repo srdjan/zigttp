@@ -403,7 +403,159 @@ fn writePrefix(writer: *std.Io.Writer, input: ParsedInput, ok: bool, reason: []c
     try json_utils.writeJsonString(writer, reason);
 }
 
+/// In-memory result of running the repair lane over a source snapshot, for
+/// callers (the veto loop's auto-repair hook) that need the verified candidate
+/// bytes directly rather than the tool's JSON envelope.
+pub const Candidate = struct {
+    /// "candidate_verified" | "already_satisfied" | "no_repair_plans" |
+    /// "all_repairs_failed" | <last per-plan failure reason>.
+    reason: []u8,
+    /// The repaired source; non-null only when reason == candidate_verified.
+    proposed_content: ?[]u8,
+    /// Ids of the repair plans that were applied (empty unless verified).
+    plan_ids: [][]u8,
+    /// The raw pi_repair_plan output, so the caller can format retry guidance
+    /// (templates + witness) without re-running the analysis.
+    plans_json: []u8,
+
+    pub fn verified(self: *const Candidate) bool {
+        return std.mem.eql(u8, self.reason, "candidate_verified");
+    }
+
+    pub fn deinit(self: *Candidate, allocator: std.mem.Allocator) void {
+        allocator.free(self.reason);
+        if (self.proposed_content) |c| allocator.free(c);
+        for (self.plan_ids) |id| allocator.free(id);
+        allocator.free(self.plan_ids);
+        allocator.free(self.plans_json);
+        self.* = undefined;
+    }
+};
+
+/// Run the deterministic repair lane over an in-memory `source` snapshot and
+/// return a compiler-verified candidate (or the reason none could be built).
+/// Side-effect free: it plans from `source` (persist_witnesses=false) and
+/// dry-runs each supported repair through pi_apply_repair_plan in memory; it
+/// never writes files or calls the model. The apply loop mirrors `execute`'s
+/// (parse plans, sort by line desc, apply each, keep the verified source) but
+/// returns the candidate struct instead of the tool JSON.
+pub fn candidateFromSource(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    rel_path: []const u8,
+    goal_args: []const []const u8,
+    max_repairs: usize,
+) !Candidate {
+    var rr = try pi_repair_plan.planFromSource(allocator, source, rel_path, goal_args, false);
+    defer rr.deinit(allocator);
+    const plans_json = try allocator.dupe(u8, rr.llm_text);
+    errdefer allocator.free(plans_json);
+
+    if (rr.ok) {
+        return .{
+            .reason = try allocator.dupe(u8, "already_satisfied"),
+            .proposed_content = null,
+            .plan_ids = &.{},
+            .plans_json = plans_json,
+        };
+    }
+
+    var plans = try parsePlans(allocator, rr.llm_text);
+    defer plans.deinit(allocator);
+    if (plans.items.len == 0) {
+        return .{
+            .reason = try allocator.dupe(u8, "no_repair_plans"),
+            .proposed_content = null,
+            .plan_ids = &.{},
+            .plans_json = plans_json,
+        };
+    }
+    std.sort.insertion(ParsedPlan, plans.items, {}, comparePlanLineDesc);
+
+    var current_source = try allocator.dupe(u8, source);
+    defer allocator.free(current_source);
+    var applied_ids: std.ArrayList([]u8) = .empty;
+    defer {
+        for (applied_ids.items) |id| allocator.free(id);
+        applied_ids.deinit(allocator);
+    }
+    var last_failure_reason: ?[]u8 = null;
+    defer if (last_failure_reason) |r| allocator.free(r);
+    var repairs_applied: usize = 0;
+
+    for (plans.items) |plan| {
+        if (repairs_applied >= max_repairs) break;
+        const apply_args_json = try buildApplyArgsJson(allocator, rel_path, current_source, plan.raw_json);
+        defer allocator.free(apply_args_json);
+        var apply_result = try pi_apply_repair_plan.execute(allocator, &.{apply_args_json});
+        defer apply_result.deinit(allocator);
+        var apply_json = try parseApplyJson(allocator, apply_result.llm_text);
+        defer apply_json.deinit(allocator);
+        if (!apply_json.ok or apply_json.proposed_content == null) {
+            if (last_failure_reason) |r| allocator.free(r);
+            last_failure_reason = try allocator.dupe(u8, apply_json.reason orelse "repair_not_verified");
+            continue;
+        }
+        const next_source = try allocator.dupe(u8, apply_json.proposed_content.?);
+        allocator.free(current_source);
+        current_source = next_source;
+        try applied_ids.append(allocator, try allocator.dupe(u8, plan.id));
+        repairs_applied += 1;
+    }
+
+    if (repairs_applied == 0) {
+        return .{
+            .reason = try allocator.dupe(u8, last_failure_reason orelse "all_repairs_failed"),
+            .proposed_content = null,
+            .plan_ids = &.{},
+            .plans_json = plans_json,
+        };
+    }
+
+    const proposed = try allocator.dupe(u8, current_source);
+    errdefer allocator.free(proposed);
+    const ids = try applied_ids.toOwnedSlice(allocator);
+    errdefer {
+        for (ids) |id| allocator.free(id);
+        allocator.free(ids);
+    }
+    return .{
+        .reason = try allocator.dupe(u8, "candidate_verified"),
+        .proposed_content = proposed,
+        .plan_ids = ids,
+        .plans_json = plans_json,
+    };
+}
+
 const testing = std.testing;
+
+test "candidateFromSource verifies a guard repair in memory" {
+    const source =
+        \\import { validateJson } from "zigttp:validate";
+        \\
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  const result = validateJson("item", req.body);
+        \\  const data = result.value;
+        \\  return Response.json({ data });
+        \\}
+    ;
+    var cand = try candidateFromSource(testing.allocator, source, "handler.ts", &.{}, 4);
+    defer cand.deinit(testing.allocator);
+    try testing.expect(cand.verified());
+    try testing.expect(cand.proposed_content != null);
+    try testing.expect(std.mem.indexOf(u8, cand.proposed_content.?, "if (!result.ok)") != null);
+    try testing.expect(cand.plan_ids.len >= 1);
+}
+
+test "candidateFromSource reports already_satisfied for a clean handler" {
+    const clean =
+        "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ ok: true }); }";
+    var cand = try candidateFromSource(testing.allocator, clean, "handler.ts", &.{}, 4);
+    defer cand.deinit(testing.allocator);
+    try testing.expect(!cand.verified());
+    try testing.expectEqualStrings("already_satisfied", cand.reason);
+    try testing.expect(cand.proposed_content == null);
+}
 
 test "parsePlans sorts higher line targets first" {
     var plans = try parsePlans(testing.allocator,
