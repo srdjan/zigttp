@@ -121,11 +121,11 @@ pub fn available(alloc: std.mem.Allocator) bool {
 /// file and read each other's verdict.
 var query_seq: std.atomic.Value(u64) = .init(0);
 
-fn tmpQueryPath(alloc: std.mem.Allocator) ![]u8 {
+fn tmpQueryPath(alloc: std.mem.Allocator) ![:0]u8 {
     const dir = if (std.c.getenv("TMPDIR")) |raw| std.mem.span(raw) else "/tmp";
     const trimmed = std.mem.trimEnd(u8, dir, "/");
     const seq = query_seq.fetchAdd(1, .monotonic);
-    return std.fmt.allocPrint(alloc, "{s}/zigttp-smt-{d}-{d}.smt2", .{ trimmed, std.c.getpid(), seq });
+    return std.fmt.allocPrintSentinel(alloc, "{s}/zigttp-smt-{d}-{d}.smt2", .{ trimmed, std.c.getpid(), seq }, 0);
 }
 
 /// SolveFn-compatible: run `query` through z3 and return the verdict. The query
@@ -144,13 +144,9 @@ fn solveImpl(query: []const u8, alloc: std.mem.Allocator) !Verdict {
     const tmp = try tmpQueryPath(alloc);
     defer alloc.free(tmp);
     try file_io.writeFile(alloc, tmp, query);
-    defer {
-        const tz = alloc.dupeZ(u8, tmp) catch null;
-        if (tz) |z| {
-            _ = std.c.unlink(z.ptr);
-            alloc.free(z);
-        }
-    }
+    // `tmp` is already NUL-terminated, so cleanup needs no fallible re-dup: an
+    // OOM at unlink time can no longer leak the temp file.
+    defer _ = std.c.unlink(tmp.ptr);
 
     var io_backend = std.Io.Threaded.init(alloc, .{ .environ = .empty });
     defer io_backend.deinit();
