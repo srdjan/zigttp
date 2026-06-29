@@ -90,12 +90,27 @@ pub fn execute(
     };
     defer allocator.free(source);
 
+    return planFromSource(allocator, source, args[0], args[1..]);
+}
+
+/// Run handler verification + property-witness analysis over an in-memory
+/// source snapshot and return the typed repair-plan JSON. `rel_path` is the
+/// workspace-relative handler path used only to key the witness corpus; the
+/// `source` bytes (not the file on disk at `rel_path`) are analyzed, so a
+/// draft that has not been written yet can still be planned. `goal_args` are
+/// goal name strings; an empty slice means the default supported goal set.
+pub fn planFromSource(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    rel_path: []const u8,
+    goal_args: []const []const u8,
+) anyerror!registry_mod.ToolResult {
     var goals: std.ArrayListUnmanaged(counterexample.PropertyTag) = .empty;
     defer goals.deinit(allocator);
-    if (args.len == 1) {
+    if (goal_args.len == 0) {
         try goals.appendSlice(allocator, &property_goals.supported_goals);
     } else {
-        for (args[1..]) |g| {
+        for (goal_args) |g| {
             const tag = parseGoal(g) orelse {
                 return registry_mod.ToolResult.errFmt(allocator, name ++ ": unknown goal {s}\n", .{g});
             };
@@ -164,14 +179,14 @@ pub fn execute(
     try w.writeAll("],\"witnesses\":[");
 
     // Persist materialised witnesses into the on-disk corpus. The corpus
-    // is keyed by the workspace-relative handler path (args[0]) so the
+    // is keyed by the workspace-relative handler path (rel_path) so the
     // same handler maps to the same directory across tool invocations.
     // Failures here are non-fatal: the repair plan still surfaces, just
     // without persistence.
-    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, args[0]) catch null;
+    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, rel_path) catch null;
     defer if (corpus_dir) |d| allocator.free(d);
     if (corpus_dir) |d| {
-        zigts.witness_corpus.ensureCorpusDir(allocator, d, args[0]) catch {};
+        zigts.witness_corpus.ensureCorpusDir(allocator, d, rel_path) catch {};
     }
 
     var first_witness = true;
@@ -473,6 +488,25 @@ test "execute rejects structural property goals" {
 
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "unknown goal pii_contained") != null);
+}
+
+test "planFromSource plans repairs from an in-memory draft" {
+    const source =
+        \\import { validateJson } from "zigttp:validate";
+        \\
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  const result = validateJson("item", req.body);
+        \\  const data = result.value;
+        \\  return Response.json({ data });
+        \\}
+    ;
+    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
+    defer result.deinit(testing.allocator);
+    // The draft accesses result.value without checking result.ok: a failure
+    // with a concrete check_result_before_value repair template.
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"plans\":[{") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (!result.ok)") != null);
 }
 
 test "tool description names repair plan authority boundary" {
