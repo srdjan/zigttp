@@ -6,6 +6,8 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+## [0.1.1-beta] - 2026-06-29
+
 ### Added
 
 - `zigttp expert`: the agent asks one clarifying question when a request is materially ambiguous (which auth scheme, which route, what "safe" means) instead of guessing and spending its veto/round-trip budget on a misread. Implemented as a persona rule in `packages/pi/src/expert_persona.zig`: the question ends the turn as plain text and the answer continues on the next line, reusing the existing multi-turn transcript (no turn-machine change).
@@ -115,7 +117,8 @@ See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-i
 - Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
 - HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.1.0-beta...HEAD
+[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.1.1-beta...HEAD
+[0.1.1-beta]: https://github.com/srdjan/zigttp/compare/v0.1.0-beta...v0.1.1-beta
 [0.1.0-beta]: https://github.com/srdjan/zigttp/compare/v0.16.0-rc2...v0.1.0-beta
 [0.16.0-rc2]: https://github.com/srdjan/zigttp/compare/v0.16.0-rc1...v0.16.0-rc2
 [0.16.0-rc1]: https://github.com/srdjan/zigttp/compare/v0.15.0...v0.16.0-rc1

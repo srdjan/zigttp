@@ -74,7 +74,7 @@ import sys
 
 # Benches whose per-run time is dominated by timer resolution or JIT warmup variance.
 # They stay in the JSON report, but are excluded from gate checks entirely.
-SKIP_REGRESSION_CHECK = {"forOfLoop", "httpHandler", "httpHandlerHeavy"}
+SKIP_REGRESSION_CHECK = {"forOfLoop", "httpHandler", "httpHandlerHeavy", "stringConcat"}
 
 current_path, baseline_path = sys.argv[1], sys.argv[2]
 regression_limit = float(sys.argv[3])

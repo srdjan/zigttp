@@ -10,7 +10,7 @@ ZIGTTP_INSTALLER_SOURCE_ONLY=1
 export ZIGTTP_INSTALLER_SOURCE_ONLY
 . "$ROOT_DIR/install.sh"
 
-EXPECTED_ROOT="zigttp-v0.1.0-beta-macos-aarch64"
+EXPECTED_ROOT="zigttp-v0.1.1-beta-macos-aarch64"
 
 fail() {
     printf "FAIL: %s\n" "$*" >&2

@@ -157,7 +157,7 @@ pub fn printDoctorHelp() void {
         \\path, or a zigttp.json path. Prints a checklist for the files and
         \\runtime options that affect local development.
         \\
-        \\With --release, validates the v0.1.0-beta release evidence and prints
+        \\With --release, validates the current beta release evidence and prints
         \\a release proof passport. The release check reads existing files only;
         \\it does not run the benchmark or test suite.
         \\

@@ -435,7 +435,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (std.mem.eql(u8, command, "deploy")) {
         if (deployArgsRequestCloud(user_args[1..])) |flag| {
             std.debug.print(
-                "zigttp deploy with `{s}` selects hosted cloud deploy, which is not available in v0.1.0-beta.\n" ++
+                "zigttp deploy with `{s}` selects hosted cloud deploy, which is not available in this beta.\n" ++
                     "Run `zigttp deploy` without the flag to build a self-contained binary you can run anywhere.\n",
                 .{flag},
             );
@@ -647,7 +647,7 @@ test "release passport reports ready for a complete fixture" {
     const json = try cli_release_check.renderReleasePassportJson(testing.allocator, &passport);
     defer testing.allocator.free(json);
     try testing.expect(std.mem.indexOf(u8, json, "\"verdict\":\"ready\"") != null);
-    try testing.expect(std.mem.indexOf(u8, json, "\"release\":\"0.1.0-beta\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"release\":\"0.1.1-beta\"") != null);
 }
 
 test "release passport blocks stale public claims" {
@@ -770,7 +770,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .data =
         \\.{
         \\    .name = .zigttp,
-        \\    .version = "0.1.0-beta",
+        \\    .version = "0.1.1-beta",
         \\}
         ,
     });
@@ -778,7 +778,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .sub_path = "packages/zigts/src/root.zig",
         .data =
         \\pub const version = struct {
-        \\    pub const string = "0.1.0-beta";
+        \\    pub const string = "0.1.1-beta";
         \\};
         ,
     });
@@ -786,14 +786,56 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .sub_path = "build.zig",
         .data =
         \\// smoke-v1
+        \\// test-panic-isolation
+        \\// smoke-getting-started
+        \\// smoke-demo
+        \\// smoke-studio
         \\// test-module-governance
         \\// test-capability-audit
+        \\// test-docs-drift
         ,
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "scripts/smoke-v1.sh", .data = "#!/bin/sh\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "scripts/test-examples.sh", .data = "#!/bin/sh\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = ".github/workflows/ci.yml", .data = "name: ci\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = ".github/workflows/release.yml", .data = "name: release\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "scripts/test-install-archive-safety.sh", .data = "#!/bin/sh\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "scripts/check-semantics-spec.sh", .data = "#!/bin/sh\n" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "scripts/verify.sh",
+        .data = "bash scripts/check-semantics-spec.sh\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".github/workflows/ci.yml",
+        .data =
+        \\zig build test
+        \\zig build test-zruntime
+        \\zig build test-docs-drift test-doc-links
+        \\zig build -Doptimize=ReleaseFast
+        \\zig build smoke-v1
+        \\zig build test-panic-isolation
+        \\bash scripts/test-examples.sh
+        \\bash scripts/test-install-archive-safety.sh
+        \\bash scripts/check-semantics-spec.sh
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".github/workflows/release.yml",
+        .data =
+        \\zig build test
+        \\zig build test-zruntime
+        \\zig build test-docs-drift test-doc-links
+        \\zig build -Doptimize=ReleaseFast
+        \\zig build smoke-v1
+        \\zig build test-panic-isolation
+        \\zig build smoke-getting-started
+        \\zig build smoke-demo
+        \\zig build smoke-studio
+        \\bash scripts/test-examples.sh
+        \\bash scripts/test-install-archive-safety.sh
+        \\bash scripts/check-semantics-spec.sh
+        \\./zig-out/bin/zigttp doctor --release --json
+        \\contents: write
+        ,
+    });
     try tmp.dir.writeFile(io, .{
         .sub_path = "docs/README.md",
         .data =

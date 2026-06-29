@@ -244,6 +244,21 @@ fn populateStudioResponse(
 // Connection Thread Pool (for macOS threaded backend)
 // ============================================================================
 
+const max_logged_request_id_len: usize = 128;
+
+fn accessLogRequestId(value: ?[]const u8) []const u8 {
+    const raw = value orelse return "-";
+    if (raw.len == 0 or raw.len > max_logged_request_id_len) return "-";
+    for (raw) |c| {
+        if (!isAccessLogRequestIdByte(c)) return "-";
+    }
+    return raw;
+}
+
+fn isAccessLogRequestIdByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == ':';
+}
+
 /// Thread pool for handling connections without spawning threads per-connection.
 /// Used on macOS where evented I/O is unavailable.
 const ConnectionPool = struct {
@@ -718,7 +733,7 @@ const ConnectionPool = struct {
 
         const now_ms = unixMillisNow();
         const duration_ms: i64 = if (now_ms >= started_ms) now_ms - started_ms else 0;
-        const request_id = findHeaderValue(headers, "X-Request-Id") orelse "-";
+        const request_id = accessLogRequestId(findHeaderValue(headers, "X-Request-Id"));
         std.log.info("access method={s} path={s} status={d} duration_ms={d} request_id={s}", .{
             method,
             path,
@@ -2593,6 +2608,21 @@ test "splitHeaderLine accepts no-space colon" {
     const h2 = h2_opt.?;
     try std.testing.expectEqualStrings("X-Test", h2.key);
     try std.testing.expectEqualStrings("123", h2.value);
+}
+
+test "accessLogRequestId keeps safe token values" {
+    try std.testing.expectEqualStrings("req-123_abc.DEF:456", accessLogRequestId("req-123_abc.DEF:456"));
+}
+
+test "accessLogRequestId hides missing empty control whitespace and oversized values" {
+    try std.testing.expectEqualStrings("-", accessLogRequestId(null));
+    try std.testing.expectEqualStrings("-", accessLogRequestId(""));
+    try std.testing.expectEqualStrings("-", accessLogRequestId("abc\x00def"));
+    try std.testing.expectEqualStrings("-", accessLogRequestId("abc\ndef"));
+    try std.testing.expectEqualStrings("-", accessLogRequestId("abc def"));
+
+    const oversized = "a" ** (max_logged_request_id_len + 1);
+    try std.testing.expectEqualStrings("-", accessLogRequestId(oversized));
 }
 
 test "static file cache hit and invalidation" {

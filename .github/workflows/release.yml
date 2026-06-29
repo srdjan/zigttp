@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   ZIG_VERSION: '0.16.0'
@@ -23,8 +23,10 @@ jobs:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      # actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: ${{ env.ZIG_VERSION }}
 
@@ -42,14 +44,23 @@ jobs:
             exit 1
           fi
 
+      - name: Install z3
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install z3
+          else
+            sudo apt-get update
+            sudo apt-get install -y z3
+          fi
+
       - name: Run aggregate tests
         run: zig build test
 
       - name: Run focused runtime tests
         run: zig build test-zruntime
 
-      - name: Run docs link gate
-        run: zig build test-doc-links
+      - name: Run docs drift and link gates
+        run: zig build test-docs-drift test-doc-links
 
       - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast
@@ -101,11 +112,17 @@ jobs:
             exit 1
           fi
 
+      - name: Run semantics spec gate
+        run: bash scripts/check-semantics-spec.sh
+
       - name: Verify expert subsystem
         run: |
           META=$(./zig-out/bin/zigts meta --json)
           echo "$META" | jq -e '.rule_count >= 25'
           echo "$META" | jq -e '.policy_hash | length == 64'
+
+      - name: Run release doctor
+        run: ./zig-out/bin/zigttp doctor --release --json
 
   build:
     needs: test
@@ -127,8 +144,10 @@ jobs:
             os: linux
             arch: aarch64
     steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      # actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: ${{ env.ZIG_VERSION }}
 
@@ -160,7 +179,8 @@ jobs:
           tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/VERSION"
           shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
 
-      - uses: actions/upload-artifact@v4
+      # actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: zigttp-${{ matrix.os }}-${{ matrix.arch }}
           path: |
@@ -171,7 +191,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      # actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: zigttp-linux-x86_64
 
@@ -209,10 +230,14 @@ jobs:
   release:
     needs: [build, smoke-linux]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - uses: actions/download-artifact@v4
+      # actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           merge-multiple: true
 
@@ -220,7 +245,8 @@ jobs:
         run: cat *.sha256 > checksums-sha256.txt
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        # softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           generate_release_notes: true
           body: |

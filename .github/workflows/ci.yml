@@ -22,8 +22,10 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      # actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: ${{ env.ZIG_VERSION }}
       - name: Check formatting
@@ -37,10 +39,21 @@ jobs:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      # actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: ${{ env.ZIG_VERSION }}
+
+      - name: Install z3
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install z3
+          else
+            sudo apt-get update
+            sudo apt-get install -y z3
+          fi
 
       - name: Run aggregate tests
         run: zig build test
@@ -48,8 +61,8 @@ jobs:
       - name: Run focused runtime tests
         run: zig build test-zruntime
 
-      - name: Run docs link gate
-        run: zig build test-doc-links
+      - name: Run docs drift and link gates
+        run: zig build test-docs-drift test-doc-links
 
       - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast
@@ -62,6 +75,9 @@ jobs:
 
       - name: Run example handler tests
         run: bash scripts/test-examples.sh
+
+      - name: Run installer archive safety tests
+        run: bash scripts/test-install-archive-safety.sh
 
       - name: Assert policy hash unchanged
         run: |
@@ -79,6 +95,9 @@ jobs:
             echo "Run: ./zig-out/bin/zigts describe-rule --hash > policy-hash.txt"
             exit 1
           fi
+
+      - name: Run semantics spec gate
+        run: bash scripts/check-semantics-spec.sh
 
       - name: Verify expert subsystem
         run: |

@@ -53,8 +53,8 @@ line to the Zig logger:
 access method=GET path=/api status=200 duration_ms=4 request_id=abc-123
 ```
 
-`request_id` comes from the `X-Request-Id` request header when present;
-otherwise it is `-`.
+`request_id` comes from the `X-Request-Id` request header only when it is a
+short token-like value; malformed, empty, or oversized values are logged as `-`.
 
 ## Health And Readiness Probes
 

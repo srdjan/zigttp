@@ -27,6 +27,11 @@ zig build bench
 zig build bench-check
 ```
 
+For release readiness, treat `zig build bench-check` as an advisory confidence
+gate. If one benchmark misses the threshold once, rerun immediately on the same
+machine; a clean rerun clears the release, while two consecutive failures block
+for investigation.
+
 ## What Affects Latency
 
 - Build-time precompile with `zig build -Dhandler=handler.ts` or `zigttp build`

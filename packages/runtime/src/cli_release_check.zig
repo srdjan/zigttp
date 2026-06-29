@@ -14,6 +14,55 @@
 const std = @import("std");
 const zigts = @import("zigts");
 
+const release_verify_commands = [_][]const u8{
+    "zig fmt --check build.zig packages/",
+    "zig build test",
+    "zig build test-zruntime",
+    "zig build test-docs-drift test-doc-links",
+    "zig build -Doptimize=ReleaseFast",
+    "zig build smoke-v1",
+    "zig build test-panic-isolation",
+    "zig build smoke-getting-started",
+    "zig build smoke-demo",
+    "zig build smoke-studio",
+    "bash scripts/test-examples.sh",
+    "bash scripts/test-install-archive-safety.sh",
+    "bash scripts/check-semantics-spec.sh",
+    "zig build bench-check",
+    "./zig-out/bin/zigttp doctor --release --json",
+};
+
+const build_gate_markers = [_][]const u8{
+    "smoke-v1",
+    "test-panic-isolation",
+    "smoke-getting-started",
+    "smoke-demo",
+    "smoke-studio",
+    "test-module-governance",
+    "test-capability-audit",
+    "test-docs-drift",
+};
+
+const ci_gate_markers = [_][]const u8{
+    "zig build test",
+    "zig build test-zruntime",
+    "zig build test-docs-drift test-doc-links",
+    "zig build -Doptimize=ReleaseFast",
+    "zig build smoke-v1",
+    "zig build test-panic-isolation",
+    "bash scripts/test-examples.sh",
+    "bash scripts/test-install-archive-safety.sh",
+    "bash scripts/check-semantics-spec.sh",
+};
+
+const release_only_gate_markers = [_][]const u8{
+    "zig build smoke-getting-started",
+    "zig build smoke-demo",
+    "zig build smoke-studio",
+    "./zig-out/bin/zigttp doctor --release --json",
+    "contents: write",
+};
+
 pub const ReleaseDoctorOptions = struct {
     json: bool = false,
     out_path: ?[]const u8 = null,
@@ -145,13 +194,7 @@ pub const ReleasePassport = struct {
         try json.endArray();
         try json.objectField("verifyCommands");
         try json.beginArray();
-        inline for (.{
-            "zig fmt --check build.zig packages/runtime/src/dev_cli.zig",
-            "zig build test",
-            "zig build smoke-v1",
-            "bash scripts/test-examples.sh",
-            "zig build -Doptimize=ReleaseFast",
-        }) |cmd| {
+        for (release_verify_commands) |cmd| {
             try json.write(cmd);
         }
         try json.endArray();
@@ -264,22 +307,26 @@ fn addReleaseEvidenceCheck(allocator: std.mem.Allocator, passport: *ReleasePassp
 fn addReleaseGateCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
     const build_zig = readOptionalFile(allocator, "build.zig", 1024 * 1024);
     defer if (build_zig) |bytes| allocator.free(bytes);
+    const ci_yml = readOptionalFile(allocator, ".github/workflows/ci.yml", 512 * 1024);
+    defer if (ci_yml) |bytes| allocator.free(bytes);
+    const release_yml = readOptionalFile(allocator, ".github/workflows/release.yml", 512 * 1024);
+    defer if (release_yml) |bytes| allocator.free(bytes);
+    const verify_sh = readOptionalFile(allocator, "scripts/verify.sh", 256 * 1024);
+    defer if (verify_sh) |bytes| allocator.free(bytes);
 
-    const ci_ok = zigts.file_io.fileExists(allocator, ".github/workflows/ci.yml");
-    const release_ok = zigts.file_io.fileExists(allocator, ".github/workflows/release.yml");
     const smoke_ok = zigts.file_io.fileExists(allocator, "scripts/smoke-v1.sh");
     const examples_ok = zigts.file_io.fileExists(allocator, "scripts/test-examples.sh");
-    const build_ok = if (build_zig) |bytes|
-        std.mem.indexOf(u8, bytes, "smoke-v1") != null and
-            std.mem.indexOf(u8, bytes, "test-module-governance") != null and
-            std.mem.indexOf(u8, bytes, "test-capability-audit") != null
+    const installer_ok = zigts.file_io.fileExists(allocator, "scripts/test-install-archive-safety.sh");
+    const semantics_ok = zigts.file_io.fileExists(allocator, "scripts/check-semantics-spec.sh");
+    const workflow_ok = if (build_zig != null and ci_yml != null and release_yml != null and verify_sh != null)
+        releaseGateRequirementsPresent(build_zig.?, ci_yml.?, release_yml.?, verify_sh.?)
     else
         false;
 
-    if (ci_ok and release_ok and smoke_ok and examples_ok and build_ok) {
-        try passport.add(allocator, "release_gates", "Release gates", .ok, "CI, release workflow, smoke-v1, examples, and governance gates are wired", "zig build test && zig build smoke-v1 && bash scripts/test-examples.sh");
+    if (smoke_ok and examples_ok and installer_ok and semantics_ok and workflow_ok) {
+        try passport.add(allocator, "release_gates", "Release gates", .ok, "CI, release workflow, local verifier, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && ./zig-out/bin/zigttp doctor --release --json");
     } else {
-        try passport.add(allocator, "release_gates", "Release gates", .fail, "one or more release gates are missing from build wiring or workflows", "zig build test && zig build smoke-v1 && bash scripts/test-examples.sh");
+        try passport.add(allocator, "release_gates", "Release gates", .fail, "one or more release gates are missing from build wiring, scripts, or workflows", "bash scripts/verify.sh && ./zig-out/bin/zigttp doctor --release --json");
     }
 }
 
@@ -401,16 +448,11 @@ fn renderReleasePassportText(allocator: std.mem.Allocator, passport: *const Rele
         try aw.writer.print("[{s}] {s}: {s}\n", .{ check.status.toString(), check.label, check.detail });
         if (check.command) |cmd| try aw.writer.print("      verify: {s}\n", .{cmd});
     }
-    try aw.writer.writeAll(
-        \\
-        \\Release verification commands:
-        \\  zig fmt --check build.zig packages/runtime/src/dev_cli.zig
-        \\  zig build test
-        \\  zig build smoke-v1
-        \\  bash scripts/test-examples.sh
-        \\  zig build -Doptimize=ReleaseFast
-        \\
-    );
+    try aw.writer.writeAll("\nRelease verification commands:\n");
+    for (release_verify_commands) |cmd| {
+        try aw.writer.print("  {s}\n", .{cmd});
+    }
+    try aw.writer.writeByte('\n');
     if (out_path) |path| {
         try aw.writer.print("Wrote JSON passport: {s}\n", .{path});
     }
@@ -447,4 +489,57 @@ fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
         if (std.mem.indexOf(u8, haystack, needle) != null) return true;
     }
     return false;
+}
+
+fn containsAll(haystack: []const u8, needles: []const []const u8) bool {
+    for (needles) |needle| {
+        if (std.mem.indexOf(u8, haystack, needle) == null) return false;
+    }
+    return true;
+}
+
+fn releaseGateRequirementsPresent(build_zig: []const u8, ci_yml: []const u8, release_yml: []const u8, verify_sh: []const u8) bool {
+    return containsAll(build_zig, &build_gate_markers) and
+        containsAll(ci_yml, &ci_gate_markers) and
+        containsAll(release_yml, &ci_gate_markers) and
+        containsAll(release_yml, &release_only_gate_markers) and
+        std.mem.indexOf(u8, verify_sh, "bash scripts/check-semantics-spec.sh") != null;
+}
+
+fn hasReleaseVerifyCommand(command: []const u8) bool {
+    for (release_verify_commands) |candidate| {
+        if (std.mem.eql(u8, candidate, command)) return true;
+    }
+    return false;
+}
+
+test "release verify commands cover release gates" {
+    try std.testing.expect(hasReleaseVerifyCommand("zig fmt --check build.zig packages/"));
+    try std.testing.expect(hasReleaseVerifyCommand("zig build test-zruntime"));
+    try std.testing.expect(hasReleaseVerifyCommand("zig build test-docs-drift test-doc-links"));
+    try std.testing.expect(hasReleaseVerifyCommand("bash scripts/test-install-archive-safety.sh"));
+    try std.testing.expect(hasReleaseVerifyCommand("bash scripts/check-semantics-spec.sh"));
+    try std.testing.expect(hasReleaseVerifyCommand("zig build bench-check"));
+    try std.testing.expect(hasReleaseVerifyCommand("./zig-out/bin/zigttp doctor --release --json"));
+}
+
+test "release gate requirements require semantics and doctor wiring" {
+    const build_zig =
+        "smoke-v1 test-panic-isolation smoke-getting-started smoke-demo smoke-studio " ++
+        "test-module-governance test-capability-audit test-docs-drift";
+    const ci_yml =
+        "zig build test\nzig build test-zruntime\nzig build test-docs-drift test-doc-links\n" ++
+        "zig build -Doptimize=ReleaseFast\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
+        "bash scripts/test-examples.sh\nbash scripts/test-install-archive-safety.sh\n" ++
+        "bash scripts/check-semantics-spec.sh\n";
+    const release_yml =
+        ci_yml ++
+        "zig build smoke-getting-started\nzig build smoke-demo\nzig build smoke-studio\n" ++
+        "./zig-out/bin/zigttp doctor --release --json\ncontents: write\n";
+    const verify_sh = "bash scripts/check-semantics-spec.sh\n";
+
+    try std.testing.expect(releaseGateRequirementsPresent(build_zig, ci_yml, release_yml, verify_sh));
+    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, "zig build test\n", verify_sh));
+    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, "zig build test\n", release_yml, verify_sh));
+    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, release_yml, "zig build test\n"));
 }

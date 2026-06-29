@@ -17,7 +17,7 @@ behavior lives in [User Guide](user-guide.md).
 - Local self-contained deploy artifacts with default-on attestation.
 - Compile-time checks for response paths, Result and optional handling,
   state isolation, active specs, flow properties, contracts, and module policy.
-- 22 built-in `zigttp:*` virtual modules listed in
+- Built-in `zigttp:*` virtual modules listed in
   [Virtual Modules](virtual-modules/README.md).
 - Optional Studio and edge runtime builds via `-Dstudio` and `-Dedge`.
 
