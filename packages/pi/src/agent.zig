@@ -124,6 +124,10 @@ pub const SessionMetrics = struct {
     first_draft_veto_pass_count: u32 = 0,
     veto_retry_count: u32 = 0,
     tool_call_count: u32 = 0,
+    /// Edits that landed via the compiler-authored repair lane with no model
+    /// round-trip. The numerator of "% of edits that became model-free"
+    /// (denominator: verified_patch_count).
+    compiler_authored_apply_count: u32 = 0,
     last_workflow_kind: expert_workflow.TaskKind = .unknown,
     last_workflow_confidence: expert_workflow.Confidence = .low,
     last_outcome: session_events.TurnEndReason = .approved,
@@ -144,6 +148,7 @@ pub const SessionMetrics = struct {
         if (result.first_draft_veto_pass) self.first_draft_veto_pass_count += 1;
         self.veto_retry_count +|= result.veto_retry_count;
         self.tool_call_count +|= result.tool_call_count;
+        if (result.compiler_authored_apply) self.compiler_authored_apply_count += 1;
         if (result.applied_edit) {
             if (self.verified_patch_count == 0) {
                 // Round-trips accumulated up to and including the first verified
@@ -170,6 +175,7 @@ pub const SessionMetrics = struct {
             .first_draft_veto_pass_count = self.first_draft_veto_pass_count,
             .veto_retry_count = self.veto_retry_count,
             .tool_call_count = self.tool_call_count,
+            .compiler_authored_apply_count = self.compiler_authored_apply_count,
             .last_workflow_kind = expert_workflow.taskKindName(self.last_workflow_kind),
             .last_workflow_confidence = expert_workflow.confidenceName(self.last_workflow_confidence),
             .final_outcome = self.last_outcome,

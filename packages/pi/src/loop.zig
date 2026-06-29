@@ -16,7 +16,7 @@ const json_writer = @import("providers/anthropic/json_writer.zig");
 const session_events = @import("session/events.zig");
 const expert_workflow = @import("expert_workflow.zig");
 const auto_repair = @import("auto_repair.zig");
-const pi_repair_plan = @import("tools/pi_repair_plan.zig");
+const pi_goal_candidate = @import("tools/pi_goal_candidate.zig");
 
 const PostApplyReport = struct {
     ok: bool,
@@ -203,6 +203,11 @@ pub const TurnResult = struct {
     first_draft_veto_pass: bool = false,
     veto_retry_count: u32 = 0,
     tool_call_count: u32 = 0,
+    /// True when this turn applied a compiler-authored repair candidate with no
+    /// model round-trip (the model's draft failed veto, the deterministic lane
+    /// produced a fix that passed the full veto, and it landed through the
+    /// approval gate). The headline "model-free apply" signal.
+    compiler_authored_apply: bool = false,
 };
 
 pub const RunOptions = struct {
@@ -226,6 +231,12 @@ pub const RunOptions = struct {
 /// multiple issues, and three attempts ends the turn "failed" with nothing
 /// applied. Sourced here so the REPL `/settings` display cannot drift from it.
 pub const interactive_max_attempts: u8 = 5;
+
+/// Upper bound on repairs the in-process auto-repair lane chains onto one
+/// failed draft before producing a candidate. Matches pi_goal_candidate's
+/// max_repairs cap; a draft needing more distinct fixes than this falls back to
+/// an enriched model retry.
+const max_auto_repairs: usize = 8;
 
 const PreparedEdit = struct {
     edit: turn.Edit,
@@ -310,6 +321,10 @@ pub fn runTurnWith(
     var applied_tracked: u32 = 0;
     var first_draft_veto_pass = false;
     var veto_retry_count: u32 = 0;
+    // Set when this turn lands a compiler-authored repair candidate model-free
+    // (Phase B). Carried into the TurnResult so the session layer can report
+    // "% of edits that became model-free".
+    var compiler_authored_apply = false;
 
     while (true) {
         const action = machine.transition(next_event);
@@ -409,112 +424,72 @@ pub fn runTurnWith(
                     .content = prepared.edit.content,
                     .before = prepared.edit.before,
                 }, sql_schema_path);
+                // The outcome handed to the state machine. The model-free
+                // repair path (Phase B) overrides it to a pass after it lands a
+                // candidate, so the failed draft still drives the turn to done.
+                var edit_event: turn.EditOutcome = veto_result.outcome;
                 if (veto_result.outcome.ok and !options.replay_mode) {
                     if (machine.attempt == 1) first_draft_veto_pass = true;
-                    // The bytes that will actually be written (post-normalization).
-                    // Bound here so the approval preview shows exactly what lands.
-                    const applied_content = veto_result.report.normalized_content orelse prepared.edit.content;
-                    // Log canonical normalization to stderr in auto-approve mode
-                    // so the user knows what changed even when there is no prompt.
-                    const is_auto_approve: bool = if (options.approval_fn) |fn_| switch (fn_) {
-                        .bare => |f| f == &autoApprove,
-                        else => false,
-                    } else false;
-                    if (is_auto_approve and veto_result.report.rewrite_trace.len > 0) {
-                        var buf: [512]u8 = undefined;
-                        var fw = std.Io.Writer.fixed(&buf);
-                        fw.writeAll("note: canonical normalization applied ") catch {};
-                        fw.print("{d}", .{veto_result.report.rewrite_trace.len}) catch {};
-                        fw.writeAll(" rewrite(s): ") catch {};
-                        for (veto_result.report.rewrite_trace, 0..) |name, ri| {
-                            if (ri > 0) fw.writeAll(", ") catch {};
-                            fw.writeAll(name) catch {};
-                        }
-                        fw.writeByte('\n') catch {};
-                        const out = fw.buffered();
-                        _ = std.c.write(std.c.STDERR_FILENO, out.ptr, out.len);
+                    const st = try applyVerifiedEdit(allocator, ta, registry, transcript, options, prepared, veto_result.report, null);
+                    if (st.denied) {
+                        return finishTurn(&machine, turn_usage, .approval_denied, model_roundtrips, applied_edit, applied_proven, applied_tracked, workflow_hint, workflow_hint_injected, first_draft_veto_pass, veto_retry_count, tool_calls_used, compiler_authored_apply);
                     }
-                    if (options.approval_fn) |approve| {
-                        const preview: ApprovalPreview = .{
-                            .file = prepared.edit.file,
-                            .before = prepared.edit.before,
-                            .after = applied_content,
-                            .properties = veto_result.report.after_properties,
-                            .rewrite_trace = veto_result.report.rewrite_trace,
-                        };
-                        if (!try approve.call(preview)) {
-                            try transcript.append(allocator, .{ .tool_result = .{
-                                .tool_use_id = "approval",
-                                .tool_name = "apply_edit",
-                                .ok = false,
-                                .llm_text = "edit verified but not applied by user approval policy",
-                                .ui_payload = null,
-                            } });
-                            return finishTurn(
-                                &machine,
-                                turn_usage,
-                                .approval_denied,
-                                model_roundtrips,
-                                applied_edit,
-                                applied_proven,
-                                applied_tracked,
-                                workflow_hint,
-                                workflow_hint_injected,
-                                first_draft_veto_pass,
-                                veto_retry_count,
-                                tool_calls_used,
-                            );
-                        }
-                    }
-                    // Normalize-on-apply: `applied_content` (bound above for the
-                    // preview) is the veto's Canonical Normal Form reduction, fed
-                    // to BOTH the disk write and the verified-patch entry so the
-                    // file on disk, the equivalence receipt (after=applied), and
-                    // the transcript attest the same bytes. normalizeSource is
-                    // behavior-preserving and equivalence is transitive, so the
-                    // verdict against the pre-edit handler is unchanged.
-                    try applyPreparedEdit(ta, prepared, applied_content);
-                    const post_apply = try postApplyCheck(allocator, ta, registry, transcript, prepared);
-                    defer if (post_apply.summary) |s| allocator.free(s);
-                    try appendVerifiedPatchEntry(
-                        allocator,
-                        transcript,
-                        options.workspace_root,
-                        prepared,
-                        applied_content,
-                        veto_result.report,
-                        post_apply,
-                    );
-                    applied_edit = true;
-                    if (veto_result.report.after_properties) |snap| {
-                        const counts = snap.guaranteeCounts();
-                        applied_proven = counts.proven;
-                        applied_tracked = counts.tracked;
-                    }
+                    applied_edit = st.applied;
+                    applied_proven = st.proven;
+                    applied_tracked = st.tracked;
                 }
                 if (!veto_result.outcome.ok and veto_result.sql_failure) {
                     sql_veto_fail_count += 1;
                     if (sql_veto_fail_count >= 2) inject_sql_escalation = true;
                 }
-                // Failed draft: ask the compiler to author the fix in-process so
-                // the next retry carries the exact repair templates (and the
-                // smallest counterexample) instead of only raw diagnostics. The
-                // lane is local compiler passes (no model call, no disk writes:
-                // persist_witnesses=false) and is skipped for SQL failures (own
-                // escalation path), zero-new-violation failures, and replay
-                // reconstruction.
+                // Failed draft: run the deterministic repair lane in-process on
+                // the un-written draft. If it produces a candidate that ALSO
+                // passes the full veto against the ORIGINAL pre-edit handler (the
+                // authority - the lane only verifies repairs against the draft),
+                // apply it model-free through the same approval gate and receipt
+                // (Phase B). Otherwise feed the exact repair templates + smallest
+                // witness into the next retry (Phase A). Skipped for SQL failures
+                // (own escalation), zero-new-violation failures, and replay.
                 if (!veto_result.outcome.ok and !options.replay_mode and
                     auto_repair.shouldRunLane(veto_result.sql_failure, veto_result.report.new))
                 {
-                    if (pi_repair_plan.planFromSource(ta, prepared.edit.content, prepared.edit.file, &.{}, false)) |plan_res| {
-                        var pr = plan_res;
-                        defer pr.deinit(ta);
-                        if (auto_repair.buildRetryBlock(ta, pr.llm_text) catch null) |block| {
-                            auto_repair_block = block;
+                    if (pi_goal_candidate.candidateFromSource(ta, prepared.edit.content, prepared.edit.file, &.{}, max_auto_repairs)) |cand_val| {
+                        var cand = cand_val;
+                        defer cand.deinit(ta);
+                        var phase_b_applied = false;
+                        if (cand.verified()) {
+                            if (cand.proposed_content) |proposed| {
+                                const synth: PreparedEdit = .{
+                                    .edit = .{ .file = prepared.edit.file, .content = proposed, .before = prepared.edit.before },
+                                    .resolved_path = prepared.resolved_path,
+                                };
+                                const reveto = try veto.runVetoWithSchema(ta, .{
+                                    .file = synth.edit.file,
+                                    .content = synth.edit.content,
+                                    .before = synth.edit.before,
+                                }, sql_schema_path);
+                                if (reveto.outcome.ok) {
+                                    const st = try applyVerifiedEdit(allocator, ta, registry, transcript, options, synth, reveto.report, cand.plan_ids);
+                                    if (st.denied) {
+                                        return finishTurn(&machine, turn_usage, .approval_denied, model_roundtrips, applied_edit, applied_proven, applied_tracked, workflow_hint, workflow_hint_injected, first_draft_veto_pass, veto_retry_count, tool_calls_used, compiler_authored_apply);
+                                    }
+                                    applied_edit = st.applied;
+                                    applied_proven = st.proven;
+                                    applied_tracked = st.tracked;
+                                    compiler_authored_apply = true;
+                                    edit_event = .{ .ok = true, .llm_text = try ta.dupe(u8, "compiler-authored repair applied") };
+                                    phase_b_applied = true;
+                                }
+                            }
+                        }
+                        if (!phase_b_applied) {
+                            if (auto_repair.buildRetryBlock(ta, cand.plans_json) catch null) |block| {
+                                auto_repair_block = block;
+                            }
                         }
                     } else |_| {}
                 }
-                next_event = .{ .edit_verified = veto_result.outcome };
+                next_event = .{ .edit_verified = edit_event };
             },
             .invoke_tool_batch => |calls| {
                 try transcript.append(allocator, .{ .assistant_tool_use = calls });
@@ -587,6 +562,7 @@ pub fn runTurnWith(
                     first_draft_veto_pass,
                     veto_retry_count,
                     tool_calls_used,
+                    compiler_authored_apply,
                 );
             },
             .prompt_user => |question| {
@@ -615,6 +591,7 @@ pub fn runTurnWith(
                     first_draft_veto_pass,
                     veto_retry_count,
                     tool_calls_used,
+                    compiler_authored_apply,
                 );
             },
             .end_turn => return finishTurn(
@@ -630,6 +607,7 @@ pub fn runTurnWith(
                 first_draft_veto_pass,
                 veto_retry_count,
                 tool_calls_used,
+                compiler_authored_apply,
             ),
             .none => return finishTurn(
                 &machine,
@@ -644,6 +622,7 @@ pub fn runTurnWith(
                 first_draft_veto_pass,
                 veto_retry_count,
                 tool_calls_used,
+                compiler_authored_apply,
             ),
         }
     }
@@ -662,6 +641,7 @@ fn finishTurn(
     first_draft_veto_pass: bool,
     veto_retry_count: u32,
     tool_calls_used: usize,
+    compiler_authored_apply: bool,
 ) TurnResult {
     return .{
         .final_state = machine.state,
@@ -678,6 +658,7 @@ fn finishTurn(
         .first_draft_veto_pass = first_draft_veto_pass,
         .veto_retry_count = veto_retry_count,
         .tool_call_count = @intCast(@min(tool_calls_used, std.math.maxInt(u32))),
+        .compiler_authored_apply = compiler_authored_apply,
     };
 }
 
@@ -761,6 +742,103 @@ fn applyPreparedEdit(
         try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), dir_path);
     }
     try file_io.writeFile(allocator, prepared.resolved_path, content);
+}
+
+const ApplyState = struct {
+    applied: bool = false,
+    proven: u32 = 0,
+    tracked: u32 = 0,
+    /// True when the approval policy rejected the verified edit. The caller
+    /// ends the turn with .approval_denied; nothing was written.
+    denied: bool = false,
+};
+
+/// Apply an already-veto-passed edit: surface the approval preview, write the
+/// (normalized) bytes, run the post-apply regression checks, and append the
+/// verified-patch receipt. Shared by the model-green path and the model-free
+/// compiler-repair path (Phase B) so both go through the exact same approval
+/// gate and equivalence receipt. `repair_plan_ids_override` is non-null only
+/// for the compiler-repair path, where the plan ids come from the in-process
+/// candidate rather than a transcript tool_result.
+fn applyVerifiedEdit(
+    allocator: std.mem.Allocator,
+    ta: std.mem.Allocator,
+    registry: *const registry_mod.Registry,
+    transcript: *transcript_mod.Transcript,
+    options: RunOptions,
+    prepared: PreparedEdit,
+    report: veto.VetoReport,
+    repair_plan_ids_override: ?[]const []const u8,
+) !ApplyState {
+    // The bytes that will actually be written (post-normalization). Bound here
+    // so the approval preview shows exactly what lands.
+    const applied_content = report.normalized_content orelse prepared.edit.content;
+
+    // Log canonical normalization to stderr in auto-approve mode so the user
+    // knows what changed even when there is no prompt.
+    const is_auto_approve: bool = if (options.approval_fn) |fn_| switch (fn_) {
+        .bare => |f| f == &autoApprove,
+        else => false,
+    } else false;
+    if (is_auto_approve and report.rewrite_trace.len > 0) {
+        var buf: [512]u8 = undefined;
+        var fw = std.Io.Writer.fixed(&buf);
+        fw.writeAll("note: canonical normalization applied ") catch {};
+        fw.print("{d}", .{report.rewrite_trace.len}) catch {};
+        fw.writeAll(" rewrite(s): ") catch {};
+        for (report.rewrite_trace, 0..) |rname, ri| {
+            if (ri > 0) fw.writeAll(", ") catch {};
+            fw.writeAll(rname) catch {};
+        }
+        fw.writeByte('\n') catch {};
+        const out = fw.buffered();
+        _ = std.c.write(std.c.STDERR_FILENO, out.ptr, out.len);
+    }
+
+    if (options.approval_fn) |approve| {
+        const preview: ApprovalPreview = .{
+            .file = prepared.edit.file,
+            .before = prepared.edit.before,
+            .after = applied_content,
+            .properties = report.after_properties,
+            .rewrite_trace = report.rewrite_trace,
+        };
+        if (!try approve.call(preview)) {
+            try transcript.append(allocator, .{ .tool_result = .{
+                .tool_use_id = "approval",
+                .tool_name = "apply_edit",
+                .ok = false,
+                .llm_text = "edit verified but not applied by user approval policy",
+                .ui_payload = null,
+            } });
+            return .{ .denied = true };
+        }
+    }
+
+    // Normalize-on-apply: `applied_content` is the veto's Canonical Normal Form
+    // reduction, fed to BOTH the disk write and the verified-patch entry so the
+    // file on disk, the equivalence receipt (after=applied), and the transcript
+    // attest the same bytes.
+    try applyPreparedEdit(ta, prepared, applied_content);
+    const post_apply = try postApplyCheck(allocator, ta, registry, transcript, prepared);
+    defer if (post_apply.summary) |s| allocator.free(s);
+    try appendVerifiedPatchEntry(
+        allocator,
+        transcript,
+        options.workspace_root,
+        prepared,
+        applied_content,
+        report,
+        post_apply,
+        repair_plan_ids_override,
+    );
+    var st: ApplyState = .{ .applied = true };
+    if (report.after_properties) |snap| {
+        const counts = snap.guaranteeCounts();
+        st.proven = counts.proven;
+        st.tracked = counts.tracked;
+    }
+    return st;
 }
 
 /// One post-apply tool check. The tool name + args + diagnostic prefix +
@@ -889,21 +967,29 @@ fn appendVerifiedPatchEntry(
     applied_content: []const u8,
     report: veto.VetoReport,
     post_apply: PostApplyReport,
+    repair_plan_ids_override: ?[]const []const u8,
 ) !void {
     const workspace_root_abs = try std.fs.path.resolve(allocator, &.{workspace_root});
     defer allocator.free(workspace_root_abs);
-    // The repair-link match keys on the model's *proposed* content (what the
-    // candidate tool emitted), not the post-normalize bytes — a candidate that
-    // the model echoed verbatim should still link even if normalize then
-    // canonicalized it on the way to disk.
-    var repair_links = try collectRecentRepairLinks(
-        allocator,
-        transcript,
-        workspace_root_abs,
-        prepared.edit.file,
-        prepared.edit.content,
-    );
-    defer repair_links.deinit(allocator);
+    // Repair-plan provenance: the model-free compiler-repair path passes its
+    // candidate's plan ids directly (there is no pi_apply_repair_plan
+    // tool_result in the transcript to scan). The model path passes null and we
+    // recover the links from the transcript, keying on the model's *proposed*
+    // content (what the candidate tool emitted), not the post-normalize bytes —
+    // a candidate the model echoed verbatim should still link even if normalize
+    // then canonicalized it on the way to disk.
+    var owned_links: ?RepairLinks = null;
+    defer if (owned_links) |*l| l.deinit(allocator);
+    const repair_plan_ids: []const []const u8 = if (repair_plan_ids_override) |ids| ids else blk: {
+        owned_links = try collectRecentRepairLinks(
+            allocator,
+            transcript,
+            workspace_root_abs,
+            prepared.edit.file,
+            prepared.edit.content,
+        );
+        break :blk owned_links.?.repair_plan_ids;
+    };
 
     // `after` (the equivalence-receipt after-image), the disk write, and the
     // transcript all attest `applied_content` — the canonicalized bytes.
@@ -919,7 +1005,7 @@ fn appendVerifiedPatchEntry(
             .post_apply_ok = post_apply.ok,
             .post_apply_summary = post_apply.summary,
             .transcript = transcript,
-            .repair_plan_ids = repair_links.repair_plan_ids,
+            .repair_plan_ids = repair_plan_ids,
             .emit_perf_receipt = true,
             .is_canonical = report.is_canonical,
             .rewrite_trace = report.rewrite_trace,
@@ -1137,11 +1223,13 @@ const RetryCaptureClient = struct {
     }
 };
 
-test "veto failure feeds compiler-authored repair into the retry prompt" {
+test "veto failure triggers model-free compiler-authored apply" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/src/handler.ts", .{workspace_root});
+    defer testing.allocator.free(written_path);
 
     var client: RetryCaptureClient = .{ .replies = &.{
         .{ .response = .{ .edit = .{ .file = "src/handler.ts", .content = unchecked_result_handler, .before = null } } },
@@ -1159,11 +1247,19 @@ test "veto failure feeds compiler-authored repair into the retry prompt" {
         .turn_timeout_ms = 0,
     });
 
-    // First draft failed veto, the lane authored a fix, the retry carried it,
-    // and the second draft landed.
-    try testing.expect(client.saw_repair_block);
+    // The first draft (unchecked result) failed veto; the deterministic lane
+    // authored a fix that passed the binding re-veto and landed model-free -
+    // no retry, no second model call.
     try testing.expect(result.applied_edit);
-    try testing.expectEqual(@as(u32, 1), result.veto_retry_count);
+    try testing.expect(result.compiler_authored_apply);
+    try testing.expectEqual(@as(u32, 0), result.veto_retry_count);
+    try testing.expect(!client.saw_repair_block);
+    try testing.expectEqual(@as(usize, 1), client.index); // second reply never requested
+
+    // The compiler-authored guard is what actually landed on disk.
+    const written = try file_io.readFile(testing.allocator, written_path, 1 << 20);
+    defer testing.allocator.free(written);
+    try testing.expect(std.mem.indexOf(u8, written, "if (!result.ok)") != null);
 }
 
 test "text reply path injects workflow note before model text" {

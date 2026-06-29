@@ -219,14 +219,6 @@ const ScriptedClient = struct {
 const clean_health =
     "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ ok: true }); }";
 
-const unchecked_result =
-    "import { validateJson } from \"zigttp:validate\";\n" ++
-    "function handler(req: Request): Response & Spec<\"deterministic\"> {\n" ++
-    "  const result = validateJson(\"item\", req.body);\n" ++
-    "  const data = result.value;\n" ++
-    "  return Response.json({ data });\n" ++
-    "}\n";
-
 test "runCase scores a clean first draft as a veto pass" {
     var client: ScriptedClient = .{ .reply = .{ .response = .{ .edit = .{
         .file = "handler.ts",
@@ -249,14 +241,17 @@ test "runCase scores a clean first draft as a veto pass" {
 }
 
 test "runCase records the failing ZTS code for a bad first draft" {
+    // A forbidden `var` is a hard parse error (ZTS001) that the repair lane
+    // cannot author a fix for, so it stays failed and the histogram records its
+    // code - exactly the hard-failure case the gap histogram is meant to rank.
     var client: ScriptedClient = .{ .reply = .{ .response = .{ .edit = .{
         .file = "handler.ts",
-        .content = unchecked_result,
+        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({ x }); }",
         .before = null,
     } } } };
     const case: CodegenCase = .{
-        .name = "unchecked-result",
-        .prompt = "fix the ZTS303 violation",
+        .name = "forbidden-var",
+        .prompt = "fix the violation",
         .expected_kind = .violation_fix,
         .criterion = .passes_veto,
     };
@@ -265,7 +260,8 @@ test "runCase records the failing ZTS code for a bad first draft" {
     const r = try runCase(testing.allocator, case, client.asClient(), &registry);
     try testing.expect(!r.first_draft_pass);
     try testing.expect(!r.passed_criterion);
-    try testing.expectEqualStrings("ZTS303", r.failingCode().?);
+    const code = r.failingCode() orelse return error.ExpectedFailingCode;
+    try testing.expect(std.mem.startsWith(u8, code, "ZTS"));
 }
 
 test "summarize aggregates pass rate and failing-code histogram" {

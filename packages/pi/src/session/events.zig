@@ -68,6 +68,10 @@ pub const SessionSummary = struct {
     first_draft_veto_pass_count: u32 = 0,
     veto_retry_count: u32 = 0,
     tool_call_count: u32 = 0,
+    /// Edits that landed via the compiler-authored repair lane with no model
+    /// round-trip (model-free applies). Over verified_patch_count this is the
+    /// "% of edits that became model-free" win.
+    compiler_authored_apply_count: u32 = 0,
     last_workflow_kind: []const u8 = "unknown",
     last_workflow_confidence: []const u8 = "low",
     final_outcome: TurnEndReason = .approved,
@@ -266,6 +270,7 @@ fn writeSessionSummaryPayload(writer: *std.Io.Writer, s: SessionSummary) !void {
     try writer.print(",\"first_draft_veto_pass_count\":{d}", .{s.first_draft_veto_pass_count});
     try writer.print(",\"veto_retry_count\":{d}", .{s.veto_retry_count});
     try writer.print(",\"tool_call_count\":{d}", .{s.tool_call_count});
+    try writer.print(",\"compiler_authored_apply_count\":{d}", .{s.compiler_authored_apply_count});
     try writer.writeAll(",\"last_workflow_kind\":");
     try json_writer.writeString(writer, s.last_workflow_kind);
     try writer.writeAll(",\"last_workflow_confidence\":");
@@ -724,6 +729,7 @@ test "appendEvent serializes session_summary with metrics" {
         .first_draft_veto_pass_count = 1,
         .veto_retry_count = 3,
         .tool_call_count = 5,
+        .compiler_authored_apply_count = 2,
         .last_workflow_kind = "route_add",
         .last_workflow_confidence = "high",
         .final_outcome = .approved,
@@ -741,6 +747,7 @@ test "appendEvent serializes session_summary with metrics" {
     try testing.expect(std.mem.indexOf(u8, raw, "\"first_draft_veto_pass_count\":1") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"veto_retry_count\":3") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"tool_call_count\":5") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"compiler_authored_apply_count\":2") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"last_workflow_kind\":\"route_add\"") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"last_workflow_confidence\":\"high\"") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"final_outcome\":\"approved\"") != null);
