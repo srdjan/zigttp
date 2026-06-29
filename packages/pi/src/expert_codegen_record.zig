@@ -197,6 +197,25 @@ const record_corpus = [_]RecordCase{
         // "use untyped values directly, never narrow with as/guards" teaching.
         .expect_first_draft_pass = true,
     },
+    .{
+        .name = "sql-users",
+        .prompt = "Create a handler in handler.ts that returns all users (id and name) from " ++
+            "the sqlite database using zigttp:sql. The users table has columns id (integer) " ++
+            "and name (text).",
+        // Seeds the project SQL schema the veto discovers via zigttp.json's
+        // `sqlite` key (resolved relative to the workspace).
+        .seed_files = &.{
+            .{ .path = "zigttp.json", .bytes = "{\n  \"sqlite\": \"schema.sql\"\n}\n" },
+            .{ .path = "schema.sql", .bytes = "CREATE TABLE users (\n  id INTEGER PRIMARY KEY,\n  name TEXT NOT NULL\n);\n" },
+        },
+        // Recorded with claude-haiku-4-5: writes correct SQL but misses the
+        // narrow Spec<...> on the first draft (ZTS500 spec_not_discharged - a
+        // zigttp:sql write-module cannot hold read_only), recovered in 1 retry.
+        // The histogram cannot show the code automatically because Haiku applied
+        // without self-checking, so the veto failure is not in the transcript.
+        // A pinned gap for the next teaching iteration (narrow-Spec-first).
+        .expect_first_draft_pass = false,
+    },
 };
 
 // Record the real expert agent against the corpus and report the live baseline.
@@ -217,12 +236,19 @@ test "record codegen baseline corpus (live, gated)" {
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
+    // ZIGTTP_CODEGEN_MODEL overrides the model for this recording (e.g. a
+    // cheaper model for a single case); env strings live for the process so the
+    // borrowed slice is safe for the session's lifetime.
     var session = try agent.initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
         .no_context_files = true,
+        .model = envValue("ZIGTTP_CODEGEN_MODEL"),
     });
     defer session.deinit(allocator);
     if (session.authKind() != .anthropic_api_key) return error.SkipZigTest;
+    // ZIGTTP_CODEGEN_ONLY=<name> records just one case, leaving the others'
+    // committed cassettes untouched.
+    const only_case = envValue("ZIGTTP_CODEGEN_ONLY");
 
     const repo_root = try cwdPathAlloc(allocator);
     defer allocator.free(repo_root);
@@ -239,6 +265,9 @@ test "record codegen baseline corpus (live, gated)" {
     var total: usize = 0;
     for (record_corpus, 0..) |rc, i| {
         if (i >= limit) break;
+        if (only_case) |only| {
+            if (!std.mem.eql(u8, only, rc.name)) continue;
+        }
         total += 1;
 
         var tmp = try IsolatedTmp.init(allocator, "codegen-record");
