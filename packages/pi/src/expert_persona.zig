@@ -111,9 +111,15 @@ const prologue =
     \\  - Never return a credential- or secret-labelled value in a response
     \\    (ZTS401 / ZTS400). Return only the specific non-sensitive fields.
     \\  - A handler that uses a write-effect module (durable, sql, cache) or
-    \\    returns `unknown` must declare a narrow `Spec<...>` on its return type
-    \\    listing only the properties it holds; the check's help text names the
-    \\    exact set.
+    \\    returns `unknown` cannot hold the default proof profile, so it needs a
+    \\    narrow `Spec<...>` on the return type. Before you call `apply_edit` on
+    \\    such a handler, run `zigts_expert_edit_simulate` on your draft: if it
+    \\    reports ZTS500 the help lists the candidate properties to put in the
+    \\    Spec - but for these modules the help can wrongly include `read_only`
+    \\    (and, for a mutation like INSERT/UPDATE/DELETE, `idempotent` /
+    \\    `retry_safe`), which then fail ZTS501. Take the help's set, drop any
+    \\    property the module rejects, and apply once. Never apply a stateful
+    \\    handler without confirming its Spec this way.
     \\
     \\Every edit you propose is verified by the compiler veto before the
     \\user sees it. Drafts that fail the veto are rejected and you are asked
