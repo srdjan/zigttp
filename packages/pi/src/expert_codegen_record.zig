@@ -129,27 +129,59 @@ const RecordCase = struct {
     name: []const u8,
     prompt: []const u8,
     seed_files: []const codegen.SeedFile = &.{},
+    /// The recorded first-draft outcome, locked in after recording. The offline
+    /// ratchet asserts replay reproduces exactly this, so a case the agent
+    /// currently fails is a valid, pinned corpus entry (it feeds the gap
+    /// histogram) - not a broken test.
+    expect_first_draft_pass: bool = true,
 };
 
-// Representative first-baseline tasks. These elicit realistic multi-roundtrip
-// agent behaviour (explore then edit), so each records as step_0/step_1/...
+// The corpus spans common tasks the agent handles cleanly and harder ones that
+// probe known gap areas (user-input egress, websocket events, durable
+// workflows). Each elicits realistic multi-roundtrip behaviour (explore then
+// edit) and records as step_0/step_1/...
 const record_corpus = [_]RecordCase{
     .{
         .name = "health",
         .prompt = "Create a handler in handler.ts that responds to GET /health with " ++
             "Response.json({ ok: true }). Keep it minimal and deterministic.",
+        .expect_first_draft_pass = true,
     },
     .{
         .name = "validate-body",
         .prompt = "Create a handler in handler.ts that decodes the JSON request body with " ++
             "zigttp:validate against a schema named \"item\" requiring a string field \"name\", " ++
             "returns the validated data on success, and returns a 400 with the errors on failure.",
+        .expect_first_draft_pass = true,
     },
     .{
         .name = "jwt-auth",
         .prompt = "Create a handler in handler.ts that requires a bearer JWT using zigttp:auth " ++
             "with the secret from env JWT_SECRET, returns 401 when the token is missing or invalid, " ++
             "and otherwise returns the verified claims as JSON. Never use a fallback secret.",
+        // Recorded: failed first draft, recovered in 2 retries.
+        .expect_first_draft_pass = false,
+    },
+    .{
+        .name = "weather-egress",
+        .prompt = "Create a handler in handler.ts that reads a `city` query parameter and " ++
+            "fetches the current weather for that city from https://api.open-meteo.com/v1/forecast " ++
+            "using zigttp:fetch, returning the JSON response.",
+        // Recorded: never converged (user input -> egress URL gap).
+        .expect_first_draft_pass = false,
+    },
+    .{
+        .name = "websocket-echo",
+        .prompt = "Create a WebSocket echo handler in handler.ts using zigttp:websocket that " ++
+            "echoes every received message back to the sending client.",
+        .expect_first_draft_pass = true,
+    },
+    .{
+        .name = "durable-order",
+        .prompt = "Create a durable handler in handler.ts using zigttp:durable that runs a " ++
+            "two-step order workflow: a `reserve` step then a `charge` step, via run() and step().",
+        // Recorded: never converged (durable workflow API gap).
+        .expect_first_draft_pass = false,
     },
 };
 
@@ -220,8 +252,9 @@ test "record codegen baseline corpus (live, gated)" {
         };
         if (result.first_draft_veto_pass) first_draft_passes += 1;
         if (result.applied_edit) greens += 1;
+        const fail_code = codegen.firstZtsCode(&tr) orelse "-";
         std.debug.print(
-            "[codegen-record] {s}: first_draft_pass={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} steps={d}\n",
+            "[codegen-record] {s}: first_draft_pass={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} steps={d} fail={s}\n",
             .{
                 rc.name,
                 result.first_draft_veto_pass,
@@ -231,6 +264,7 @@ test "record codegen baseline corpus (live, gated)" {
                 result.veto_retry_count,
                 result.tool_call_count,
                 session.backend.anthropic.record_step,
+                fail_code,
             },
         );
     }
@@ -283,11 +317,27 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             .replay_mode = false,
             .turn_timeout_ms = 0,
         });
-        if (result.first_draft_veto_pass) passes += 1;
+        // Ratchet: replay must reproduce the recorded first-draft outcome
+        // exactly. A regression flips a recorded pass to fail (or vice versa).
+        if (result.first_draft_veto_pass != rc.expect_first_draft_pass) {
+            std.debug.print(
+                "[codegen-replay] {s}: expected first_draft_pass={} got {} (code {s})\n",
+                .{ rc.name, rc.expect_first_draft_pass, result.first_draft_veto_pass, codegen.firstZtsCode(&tr) orelse "-" },
+            );
+            return error.CassetteRatchetMismatch;
+        }
+        // Gap histogram: the first rule each non-passing case tripped, ranking
+        // which teaching gap to close next.
+        if (!rc.expect_first_draft_pass) {
+            std.debug.print("[codegen-gap] {s}: {s} (green={})\n", .{
+                rc.name,
+                codegen.firstZtsCode(&tr) orelse "?",
+                result.applied_edit,
+            });
+        }
+        passes += 1;
     }
 
-    // Ratchet: at least one committed cassette, and every one of them still
-    // passes veto on the first draft.
     try testing.expect(with_cassettes > 0);
     try testing.expectEqual(with_cassettes, passes);
 }

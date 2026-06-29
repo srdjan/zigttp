@@ -168,15 +168,26 @@ pub fn countFailingCode(results: []const CaseResult, code: []const u8) usize {
     return n;
 }
 
-fn firstZtsCode(tr: *const transcript_mod.Transcript) ?[]const u8 {
+pub fn firstZtsCode(tr: *const transcript_mod.Transcript) ?[]const u8 {
     for (tr.entries.items) |entry| {
         const text: []const u8 = switch (entry) {
             .diagnostic_box => |b| b.llm_text,
+            // The agent's own analysis-tool results carry the violations its
+            // draft tripped, even when the turn recovered (so no terminal
+            // diagnostic box). A clean result lists no violations, so it has no
+            // ZTSxxx code and is skipped.
+            .tool_result => |t| if (isViolationTool(t.tool_name)) t.llm_text else continue,
             else => continue,
         };
         if (findZts(text)) |code| return code;
     }
     return null;
+}
+
+fn isViolationTool(tool_name: []const u8) bool {
+    return std.mem.eql(u8, tool_name, "zigts_expert_edit_simulate") or
+        std.mem.eql(u8, tool_name, "zigts_expert_review_patch") or
+        std.mem.eql(u8, tool_name, "zigts_check");
 }
 
 fn findZts(text: []const u8) ?[]const u8 {
