@@ -53,10 +53,18 @@ fn execute(
     else
         null;
 
+    // Discover the project SQL schema from cwd, exactly as the apply-time veto
+    // does. Without it, simulating a zigttp:sql handler returns MissingSqlSchema
+    // and the agent's own dry-run self-check fails for SQL handlers (it then
+    // applies blind and only learns the real diagnostics from the veto).
+    const sql_schema_path = edit_simulate.discoverProjectSqlSchemaPath(allocator, null);
+    defer if (sql_schema_path) |p| allocator.free(p);
+
     const input: edit_simulate.EditSimulateInput = .{
         .file = file_val.string,
         .content = content_val.string,
         .before = before,
+        .sql_schema_path = sql_schema_path,
     };
 
     var result = try edit_simulate.simulate(allocator, input);

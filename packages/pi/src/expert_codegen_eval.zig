@@ -195,7 +195,10 @@ fn findZts(text: []const u8) ?[]const u8 {
     while (std.mem.indexOfPos(u8, text, i, "ZTS")) |pos| {
         var end = pos + 3;
         while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
-        if (end > pos + 3) return text[pos..end];
+        // ZTS000 is the synthesized "no violations" / envelope marker, not a
+        // real diagnostic; skip it so a clean tool result is not mistaken for a
+        // failing code in the gap histogram.
+        if (end > pos + 3 and !std.mem.eql(u8, text[pos..end], "ZTS000")) return text[pos..end];
         i = pos + 3;
     }
     return null;

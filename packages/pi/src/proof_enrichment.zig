@@ -246,10 +246,18 @@ pub fn analyzePatch(
     const system_path = try discoverSystemPath(allocator, workspace_root, absolute_path);
     defer if (system_path) |path| allocator.free(path);
 
+    // zigttp:sql handlers need the project SQL schema to analyze; discover it
+    // from cwd exactly as the veto does. Without it, simulate() on a SQL handler
+    // throws MissingSqlSchema and crashes the receipt build after an otherwise
+    // successful apply.
+    const sql_schema_path = edit_simulate.discoverProjectSqlSchemaPath(allocator, null);
+    defer if (sql_schema_path) |p| allocator.free(p);
+
     var simulated = try edit_simulate.simulate(allocator, .{
         .file = absolute_path,
         .content = after,
         .before = before,
+        .sql_schema_path = sql_schema_path,
     });
     defer simulated.deinit(allocator);
 
@@ -259,13 +267,13 @@ pub fn analyzePatch(
         allocator.free(violations);
     }
 
-    const before_snapshot = try optionalPropertiesSnapshot(allocator, absolute_path, before, system_path);
+    const before_snapshot = try optionalPropertiesSnapshot(allocator, absolute_path, before, system_path, sql_schema_path);
     const after_snapshot = if (simulated.properties) |properties|
         propertiesSnapshot(properties)
     else
-        try optionalPropertiesSnapshot(allocator, absolute_path, after, system_path);
+        try optionalPropertiesSnapshot(allocator, absolute_path, after, system_path, sql_schema_path);
 
-    var prove = try optionalProveSummary(allocator, absolute_path, before, after, system_path);
+    var prove = try optionalProveSummary(allocator, absolute_path, before, after, system_path, sql_schema_path);
     errdefer if (prove) |*summary| summary.deinit(allocator);
     var system = try optionalSystemSummary(allocator, system_path);
     errdefer if (system) |*summary| summary.deinit(allocator);
@@ -312,7 +320,9 @@ pub fn loadProveSummaryForPatch(
     defer allocator.free(absolute_path);
     const system_path = try discoverSystemPath(allocator, workspace_root, absolute_path);
     defer if (system_path) |path| allocator.free(path);
-    return computeProveSummary(allocator, absolute_path, before, after, system_path);
+    const sql_schema_path = edit_simulate.discoverProjectSqlSchemaPath(allocator, null);
+    defer if (sql_schema_path) |p| allocator.free(p);
+    return computeProveSummary(allocator, absolute_path, before, after, system_path, sql_schema_path);
 }
 
 pub fn loadSystemSummary(
@@ -434,13 +444,14 @@ fn loadPropertiesSnapshot(
     absolute_path: []const u8,
     source: ?[]const u8,
     system_path: ?[]const u8,
+    sql_schema_path: ?[]const u8,
 ) !?ui_payload.PropertiesSnapshot {
     const content = source orelse return null;
     var result = try precompile.runCheckOnlyFromSource(
         allocator,
         content,
         absolute_path,
-        null,
+        sql_schema_path,
         true,
         system_path,
         false,
@@ -458,8 +469,9 @@ fn optionalPropertiesSnapshot(
     absolute_path: []const u8,
     source: ?[]const u8,
     system_path: ?[]const u8,
+    sql_schema_path: ?[]const u8,
 ) !?ui_payload.PropertiesSnapshot {
-    return loadPropertiesSnapshot(allocator, absolute_path, source, system_path) catch |err| switch (err) {
+    return loadPropertiesSnapshot(allocator, absolute_path, source, system_path, sql_schema_path) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => null,
     };
@@ -471,6 +483,7 @@ fn computeProveSummary(
     before: ?[]const u8,
     after: []const u8,
     system_path: ?[]const u8,
+    sql_schema_path: ?[]const u8,
 ) !?ui_payload.ProveSummary {
     const before_source = before orelse return null;
 
@@ -478,7 +491,7 @@ fn computeProveSummary(
         allocator,
         before_source,
         absolute_path,
-        null,
+        sql_schema_path,
         true,
         system_path,
         false,
@@ -489,7 +502,7 @@ fn computeProveSummary(
         allocator,
         after,
         absolute_path,
-        null,
+        sql_schema_path,
         true,
         system_path,
         false,
@@ -539,8 +552,9 @@ fn optionalProveSummary(
     before: ?[]const u8,
     after: []const u8,
     system_path: ?[]const u8,
+    sql_schema_path: ?[]const u8,
 ) !?ui_payload.ProveSummary {
-    return computeProveSummary(allocator, absolute_path, before, after, system_path) catch |err| switch (err) {
+    return computeProveSummary(allocator, absolute_path, before, after, system_path, sql_schema_path) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => null,
     };
