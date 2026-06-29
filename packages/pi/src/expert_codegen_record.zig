@@ -236,13 +236,16 @@ test "record codegen baseline corpus (live, gated)" {
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
-    // ZIGTTP_CODEGEN_MODEL overrides the model for this recording (e.g. a
-    // cheaper model for a single case); env strings live for the process so the
-    // borrowed slice is safe for the session's lifetime.
+    // The codegen corpus measures the QUALITY users actually get, and users run
+    // the best models - so the corpus defaults to a strong model regardless of
+    // the product's default_model (which may be a cheaper model). ZIGTTP_CODEGEN
+    // _MODEL overrides it (e.g. Haiku) for cheap harness testing. Env strings
+    // live for the process, so the borrowed slice is safe for the session.
+    const corpus_model = envValue("ZIGTTP_CODEGEN_MODEL") orelse "claude-sonnet-4-6";
     var session = try agent.initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
         .no_context_files = true,
-        .model = envValue("ZIGTTP_CODEGEN_MODEL"),
+        .model = corpus_model,
     });
     defer session.deinit(allocator);
     if (session.authKind() != .anthropic_api_key) return error.SkipZigTest;
