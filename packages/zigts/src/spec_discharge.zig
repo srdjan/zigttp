@@ -224,6 +224,16 @@ const incompatible_modules_for_read_only = [_][]const u8{
     "zigttp:sql",
 };
 
+/// True when any imported module forbids the `read_only` property at the import
+/// level (the same set ZTS501 keys on). Used to keep the ZTS500 suggestion from
+/// recommending a property the import would then reject.
+fn readOnlyForbiddenByImport(modules: []const []const u8) bool {
+    for (incompatible_modules_for_read_only) |m| {
+        if (containsString(modules, m)) return true;
+    }
+    return false;
+}
+
 /// Compute the set of diagnostics for a handler given its declared specs,
 /// classified properties, and imported modules. The caller owns the
 /// returned ArrayList and is responsible for calling `SpecDiagnostic.deinit`
@@ -334,7 +344,7 @@ pub fn dischargeSpecs(
     if (implicit_default and undischarged.items.len > 0) {
         const spec_name = try std.mem.join(allocator, ", ", undischarged.items);
         errdefer allocator.free(spec_name);
-        const suggestion = try implicitDefaultSuggestion(allocator, properties, undischarged.items);
+        const suggestion = try implicitDefaultSuggestion(allocator, properties, modules, undischarged.items);
         errdefer allocator.free(suggestion);
         try out.append(allocator, .{
             .kind = .not_discharged,
@@ -379,18 +389,25 @@ fn appendNotDischarged(
 fn implicitDefaultSuggestion(
     allocator: std.mem.Allocator,
     properties: ?HandlerProperties,
+    modules: []const []const u8,
     undischarged: []const []const u8,
 ) ![]u8 {
     // The properties the handler still holds form the minimal Spec the author
     // can declare and have pass immediately. Read them straight off the
-    // classified `properties` so we never recommend one the handler fails -
-    // including read_only, which the import-contradiction path (ZTS501) emits
-    // separately and so is absent from `undischarged`. Without classified
-    // properties, fall back to the v1 profile minus the undischarged set.
+    // classified `properties` so we never recommend one the handler fails.
+    // Without classified properties, fall back to the v1 profile minus the
+    // undischarged set.
+    const read_only_forbidden = readOnlyForbiddenByImport(modules);
     var holds: std.ArrayList(u8) = .empty;
     defer holds.deinit(allocator);
     var holds_count: usize = 0;
     for (v1_spec_names) |cn| {
+        // Never suggest a property an imported module forbids at the import
+        // level. The classifier marks read_only true for a SQL SELECT (it does
+        // not write), but a zigttp:sql / zigttp:cache import means declaring
+        // read_only trips ZTS501 - the exact contradiction (ZTS500 says "add
+        // read_only", ZTS501 says "drop it") this suggestion must not create.
+        if (read_only_forbidden and std.mem.eql(u8, cn, "read_only")) continue;
         const cn_holds = if (properties) |props| blk: {
             const spec = lookupV1(cn) orelse break :blk false;
             break :blk spec.field.lookup(props);
@@ -817,6 +834,52 @@ test "dischargeSpecs implicit default profile gives the narrow-Spec remedy" {
         }
     }
     try std.testing.expect(saw_remedy);
+}
+
+test "dischargeSpecs implicit default omits import-forbidden read_only from the suggestion" {
+    const allocator = std.testing.allocator;
+    // A SQL SELECT handler: the classifier marks read_only TRUE (it does not
+    // write), but the zigttp:sql import forbids declaring read_only (ZTS501).
+    // The ZTS500 suggestion must not list read_only, or it contradicts ZTS501 -
+    // the spiral that made stateful handlers hard to land on the first draft.
+    const props = HandlerProperties{
+        .pure = false,
+        .read_only = true, // classifier: a SELECT does not write
+        .stateless = true,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = false,
+        .idempotent = true,
+        .state_isolated = true,
+        .fault_covered = false, // forces a ZTS500 so the suggestion is emitted
+        .injection_safe = true,
+    };
+    const modules: [1][]const u8 = .{"zigttp:sql"};
+
+    var diags = try dischargeSpecs(allocator, &v1_spec_names, props, &modules, true);
+    defer {
+        for (diags.items) |*d| @constCast(d).deinit(allocator);
+        diags.deinit(allocator);
+    }
+
+    var saw_zts500 = false;
+    var saw_zts501 = false;
+    for (diags.items) |d| {
+        switch (d.kind) {
+            .not_discharged => {
+                saw_zts500 = true;
+                const s = d.suggestion orelse continue;
+                // Omits read_only despite the classifier holding it (sql forbids it).
+                try std.testing.expect(std.mem.indexOf(u8, s, "\"read_only\"") == null);
+                // Still lists properties the handler genuinely holds.
+                try std.testing.expect(std.mem.indexOf(u8, s, "\"deterministic\"") != null);
+            },
+            .incompatible_with_import => saw_zts501 = true,
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_zts500);
+    try std.testing.expect(saw_zts501); // read_only vs sql is still flagged separately
 }
 
 test "dischargeSpecs Spec-less pure handler collapses to one ZTS500 naming real props" {
