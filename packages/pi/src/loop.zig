@@ -523,7 +523,8 @@ pub fn runTurnWith(
                 else
                     question;
                 try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = text } });
-                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = .budget_roundtrips, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proven_guarantees = applied_proven, .tracked_guarantees = applied_tracked };
+                const budget_reason: session_events.TurnEndReason = if (hit_timeout_budget) .budget_timeout else .budget_roundtrips;
+                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = budget_reason, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proven_guarantees = applied_proven, .tracked_guarantees = applied_tracked };
             },
             .end_turn => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = if (hit_tool_budget) .budget_tool_calls else .approved, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proven_guarantees = applied_proven, .tracked_guarantees = applied_tracked },
             .none => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage, .end_reason = if (hit_tool_budget) .budget_tool_calls else .approved, .roundtrips = model_roundtrips, .applied_edit = applied_edit, .proven_guarantees = applied_proven, .tracked_guarantees = applied_tracked },

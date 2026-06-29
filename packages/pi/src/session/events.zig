@@ -30,6 +30,10 @@ pub const TurnEndReason = enum {
     veto_exhausted,
     budget_roundtrips,
     budget_tool_calls,
+    /// Turn ended on the wall-clock time limit rather than the round-trip or
+    /// tool-call count, so a stalled session is distinguishable from one that
+    /// merely ran out of round-trips.
+    budget_timeout,
     approval_denied,
     error_exit,
 };
@@ -664,6 +668,23 @@ test "appendEvent serializes turn_end with reason" {
     defer allocator.free(raw);
     try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"turn_end\"") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"reason\":\"budget_roundtrips\"") != null);
+}
+
+test "appendEvent serializes a wall-clock timeout end reason distinctly" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .budget_timeout } });
+
+    const raw = try readWhole(allocator, path);
+    defer allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"reason\":\"budget_timeout\"") != null);
+    // Must not collapse into the round-trip bucket the scorecard reads.
+    try testing.expect(std.mem.indexOf(u8, raw, "budget_roundtrips") == null);
 }
 
 test "appendEvent serializes session_summary with metrics" {
