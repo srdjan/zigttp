@@ -19,6 +19,7 @@ const x86 = @import("x86.zig");
 const arm64 = @import("arm64.zig");
 const alloc = @import("alloc.zig");
 const deopt = @import("deopt.zig");
+const readU16 = @import("common.zig").readU16;
 const baseline = @import("baseline.zig");
 const bytecode = @import("../bytecode.zig");
 const value_mod = @import("../value.zig");
@@ -2652,10 +2653,6 @@ fn getFramePointerReg() Register {
     if (is_x86_64) return .r15;
     if (is_aarch64) return .x22;
     @trap();
-}
-
-fn readU16(code: []const u8, offset: u32) u16 {
-    return std.mem.readInt(u16, code[offset..][0..2], .little);
 }
 
 /// Try to compile a function using the optimized tier.

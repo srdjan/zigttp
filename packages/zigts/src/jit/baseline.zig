@@ -13,6 +13,7 @@ const x86 = @import("x86.zig");
 const arm64 = @import("arm64.zig");
 const alloc = @import("alloc.zig");
 const deopt = @import("deopt.zig");
+const readU16 = @import("common.zig").readU16;
 const bytecode = @import("../bytecode.zig");
 const value_mod = @import("../value.zig");
 const context_mod = @import("../context.zig");
@@ -6403,10 +6404,6 @@ pub const BaselineCompiler = struct {
         }
     }
 };
-
-fn readU16(code: []const u8, offset: u32) u16 {
-    return @as(u16, code[offset]) | (@as(u16, code[offset + 1]) << 8);
-}
 
 /// Compile a function to native code
 pub fn compileFunction(allocator: std.mem.Allocator, code_alloc: *CodeAllocator, func: *const bytecode.FunctionBytecode, hidden_class_pool: ?*object.HiddenClassPool) CompileError!CompiledCode {
