@@ -253,12 +253,17 @@ pub const EdgeServer = struct {
         const allocator = arena.allocator();
 
         const request_data = readRequestData(fd, allocator, self.config.max_body_size, self.config.timeout_ms) catch |err| {
+            if (err == error.UnsupportedTransferEncoding) sendError(fd, 501, "Not Implemented") catch {};
             if (err == error.FileTooBig) sendError(fd, 413, "Payload Too Large") catch {};
             if (err == error.RequestTimeout or err == error.WouldBlock) sendError(fd, 408, "Request Timeout") catch {};
             return;
         };
-        var parsed = parseRequest(allocator, request_data, self.config.max_headers, self.config.max_body_size) catch {
-            sendError(fd, 400, "Bad Request") catch {};
+        var parsed = parseRequest(allocator, request_data, self.config.max_headers, self.config.max_body_size) catch |err| {
+            if (err == error.UnsupportedTransferEncoding) {
+                sendError(fd, 501, "Not Implemented") catch {};
+            } else {
+                sendError(fd, 400, "Bad Request") catch {};
+            }
             return;
         };
         defer parsed.deinit(allocator);
@@ -737,14 +742,13 @@ fn parseRequest(allocator: std.mem.Allocator, data: []const u8, max_headers: usi
             } else {
                 slots.content_length = parsed_len;
             }
-        } else if (std.ascii.eqlIgnoreCase(header.key, "transfer-encoding")) {
-            if (std.ascii.indexOfIgnoreCase(header.value, "chunked") != null) slots.has_chunked_encoding = true;
         }
         header_count += 1;
     }
+    slots.transfer_encoding = try http_parser.parseTransferEncoding(data[0..header_end]);
     const body_start = header_end + 4;
     var body_owned = false;
-    const body = if (slots.has_chunked_encoding) blk: {
+    const body = if (slots.transfer_encoding == .chunked) blk: {
         if (slots.content_length != null) return error.InvalidRequest;
         const decoded = try http_parser.decodeChunkedBody(allocator, data[body_start..], max_body_size);
         if (decoded.len == 0) {
@@ -804,7 +808,8 @@ fn readRequestData(fd: std.posix.fd_t, allocator: std.mem.Allocator, max_body_si
             if (http_parser.findHeaderEnd(buf.items)) |end| {
                 header_end = end;
                 const content_len_opt = try http_parser.parseContentLength(buf.items[0..end]);
-                is_chunked = http_parser.hasTransferEncodingChunked(buf.items[0..end]);
+                const transfer_encoding = try http_parser.parseTransferEncoding(buf.items[0..end]);
+                is_chunked = transfer_encoding == .chunked;
                 if (is_chunked and content_len_opt != null) return error.InvalidRequest;
                 const content_len = content_len_opt orelse 0;
                 if (content_len > max_body_size) return error.FileTooBig;
@@ -986,6 +991,36 @@ test "edge parseRequest decodes chunked request body" {
     defer parsed.deinit(allocator);
     try std.testing.expect(parsed.request.body != null);
     try std.testing.expectEqualStrings("hello world", parsed.request.body.?);
+}
+
+test "edge parseRequest rejects unsupported transfer-encoding" {
+    const allocator = std.testing.allocator;
+    const data =
+        "POST /api HTTP/1.1\r\n" ++
+        "Host: example.test\r\n" ++
+        "Transfer-Encoding: gzip\r\n" ++
+        "\r\n" ++
+        "hello";
+
+    try std.testing.expectError(error.UnsupportedTransferEncoding, parseRequest(allocator, data, 64, 1024));
+}
+
+test "edge readRequestData rejects unsupported transfer-encoding" {
+    const allocator = std.testing.allocator;
+    const fds = try io_mod.createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    try io_mod.writeAllFd(
+        fds[1],
+        "POST /api HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: gzip\r\n\r\n" ++
+            "GET /next HTTP/1.1\r\nHost: example.test\r\n\r\n",
+    );
+
+    try std.testing.expectError(
+        error.UnsupportedTransferEncoding,
+        readRequestData(fds[0], allocator, 1024, 30_000),
+    );
 }
 
 test "edge sendResponse drops handler supplied framing headers" {

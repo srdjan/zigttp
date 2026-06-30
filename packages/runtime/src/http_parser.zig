@@ -299,7 +299,12 @@ pub const FastHeaderSlots = struct {
     connection: ?[]const u8 = null,
     content_length: ?usize = null,
     content_type: ?[]const u8 = null,
-    has_chunked_encoding: bool = false,
+    transfer_encoding: TransferEncoding = .none,
+};
+
+pub const TransferEncoding = enum {
+    none,
+    chunked,
 };
 
 /// Process a single header line: normalize key to lowercase, copy into storage,
@@ -337,9 +342,7 @@ fn processHeaderLine(
     } else if (std.mem.eql(u8, key_lower, "content-type")) {
         fast_slots.content_type = value_dup;
     } else if (std.mem.eql(u8, key_lower, "transfer-encoding")) {
-        if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) {
-            fast_slots.has_chunked_encoding = true;
-        }
+        try updateTransferEncodingSlot(fast_slots, value);
     }
 }
 
@@ -367,10 +370,19 @@ fn processHeaderLineBorrowed(
     } else if (std.ascii.eqlIgnoreCase(key, "content-type")) {
         fast_slots.content_type = value;
     } else if (std.ascii.eqlIgnoreCase(key, "transfer-encoding")) {
-        if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) {
-            fast_slots.has_chunked_encoding = true;
-        }
+        try updateTransferEncodingSlot(fast_slots, value);
     }
+}
+
+fn updateTransferEncodingSlot(fast_slots: *FastHeaderSlots, value: []const u8) !void {
+    if (fast_slots.transfer_encoding != .none) return error.UnsupportedTransferEncoding;
+    fast_slots.transfer_encoding = try parseTransferEncodingValue(value);
+}
+
+fn parseTransferEncodingValue(value: []const u8) !TransferEncoding {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (std.ascii.eqlIgnoreCase(trimmed, "chunked")) return .chunked;
+    return error.UnsupportedTransferEncoding;
 }
 
 pub fn splitHeaderLine(line: []const u8) ?struct { key: []const u8, value: []const u8 } {
@@ -408,19 +420,22 @@ pub fn parseContentLength(header_section: []const u8) !?usize {
     return found;
 }
 
-/// Check if headers contain Transfer-Encoding: chunked
-pub fn hasTransferEncodingChunked(header_section: []const u8) bool {
+/// Parse request Transfer-Encoding. zigttp supports only a single `chunked`
+/// coding; every other coding or ambiguous list is rejected so request framing
+/// cannot diverge between frontend and backend parsers.
+pub fn parseTransferEncoding(header_section: []const u8) !TransferEncoding {
+    var result: TransferEncoding = .none;
     var lines = std.mem.splitSequence(u8, header_section, "\r\n");
-    _ = lines.next() orelse return false; // skip request line
+    _ = lines.next() orelse return .none; // skip request line
     while (lines.next()) |line| {
         if (line.len == 0) break;
         const header = splitHeaderLine(line) orelse continue;
         if (std.ascii.eqlIgnoreCase(header.key, "transfer-encoding")) {
-            const val = std.mem.trim(u8, header.value, " \t");
-            if (std.ascii.indexOfIgnoreCase(val, "chunked") != null) return true;
+            if (result != .none) return error.UnsupportedTransferEncoding;
+            result = try parseTransferEncodingValue(header.value);
         }
     }
-    return false;
+    return result;
 }
 
 const MAX_CHUNK_SIZE_LINE_BYTES: usize = 8 * 1024;
@@ -730,24 +745,45 @@ test "parseContentLength: duplicate different values errors" {
     try testing.expectError(error.DuplicateContentLength, parseContentLength(headers));
 }
 
-test "hasTransferEncodingChunked: chunked detected" {
+test "transferEncoding accepts absent and chunked" {
+    try testing.expectEqual(
+        TransferEncoding.none,
+        try parseTransferEncoding("GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
+    );
+
     const headers = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
-    try testing.expect(hasTransferEncodingChunked(headers));
+    try testing.expectEqual(TransferEncoding.chunked, try parseTransferEncoding(headers));
 }
 
-test "hasTransferEncodingChunked: case-insensitive value" {
+test "transferEncoding accepts case-insensitive chunked" {
     const headers = "POST / HTTP/1.1\r\nTransfer-Encoding: Chunked\r\n\r\n";
-    try testing.expect(hasTransferEncodingChunked(headers));
+    try testing.expectEqual(TransferEncoding.chunked, try parseTransferEncoding(headers));
 }
 
-test "hasTransferEncodingChunked: comma-list containing chunked" {
-    const headers = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
-    try testing.expect(hasTransferEncodingChunked(headers));
+test "transferEncoding rejects unsupported request codings" {
+    try testing.expectError(
+        error.UnsupportedTransferEncoding,
+        parseTransferEncoding("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"),
+    );
+    try testing.expectError(
+        error.UnsupportedTransferEncoding,
+        parseTransferEncoding("POST / HTTP/1.1\r\nTransfer-Encoding: identity\r\n\r\n"),
+    );
 }
 
-test "hasTransferEncodingChunked: absent or other encoding returns false" {
-    try testing.expect(!hasTransferEncodingChunked("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
-    try testing.expect(!hasTransferEncodingChunked("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"));
+test "transferEncoding rejects ambiguous comma lists and duplicates" {
+    try testing.expectError(
+        error.UnsupportedTransferEncoding,
+        parseTransferEncoding("POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"),
+    );
+    try testing.expectError(
+        error.UnsupportedTransferEncoding,
+        parseTransferEncoding("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n\r\n"),
+    );
+    try testing.expectError(
+        error.UnsupportedTransferEncoding,
+        parseTransferEncoding("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n"),
+    );
 }
 
 test "chunkedBodyConsumed detects complete body with trailers" {

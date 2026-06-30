@@ -245,6 +245,8 @@ fn populateStudioResponse(
 // ============================================================================
 
 const max_logged_request_id_len: usize = 128;
+const max_logged_access_field_len: usize = 256;
+const max_logged_access_field_bytes: usize = max_logged_access_field_len * 3;
 
 fn accessLogRequestId(value: ?[]const u8) []const u8 {
     const raw = value orelse return "-";
@@ -257,6 +259,34 @@ fn accessLogRequestId(value: ?[]const u8) []const u8 {
 
 fn isAccessLogRequestIdByte(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == ':';
+}
+
+fn accessLogField(value: []const u8, out: *[max_logged_access_field_bytes]u8) []const u8 {
+    if (value.len == 0) return "-";
+
+    const input = value[0..@min(value.len, max_logged_access_field_len)];
+    var pos: usize = 0;
+    for (input) |c| {
+        if (isAccessLogFieldByte(c)) {
+            out[pos] = c;
+            pos += 1;
+            continue;
+        }
+        out[pos] = '%';
+        out[pos + 1] = hexDigit(c >> 4);
+        out[pos + 2] = hexDigit(c & 0x0f);
+        pos += 3;
+    }
+
+    return if (pos == 0) "-" else out[0..pos];
+}
+
+fn isAccessLogFieldByte(c: u8) bool {
+    return c > 0x20 and c < 0x7f;
+}
+
+fn hexDigit(n: u8) u8 {
+    return if (n < 10) '0' + n else 'A' + (n - 10);
 }
 
 /// Thread pool for handling connections without spawning threads per-connection.
@@ -734,9 +764,13 @@ const ConnectionPool = struct {
         const now_ms = unixMillisNow();
         const duration_ms: i64 = if (now_ms >= started_ms) now_ms - started_ms else 0;
         const request_id = accessLogRequestId(findHeaderValue(headers, "X-Request-Id"));
+        var method_buf: [max_logged_access_field_bytes]u8 = undefined;
+        var path_buf: [max_logged_access_field_bytes]u8 = undefined;
+        const logged_method = accessLogField(method, &method_buf);
+        const logged_path = accessLogField(path, &path_buf);
         std.log.info("access method={s} path={s} status={d} duration_ms={d} request_id={s}", .{
-            method,
-            path,
+            logged_method,
+            logged_path,
             status,
             duration_ms,
             request_id,
@@ -846,10 +880,10 @@ const ConnectionPool = struct {
         const body_start = header_end + 4;
         const header_section = data[0..header_end];
         const content_length_opt = try parseContentLength(header_section);
-        const is_chunked = http_parser.hasTransferEncodingChunked(header_section);
-        if (is_chunked and content_length_opt != null) return error.InvalidRequest;
+        const transfer_encoding = try http_parser.parseTransferEncoding(header_section);
+        if (transfer_encoding == .chunked and content_length_opt != null) return error.InvalidRequest;
 
-        if (is_chunked) {
+        if (transfer_encoding == .chunked) {
             const encoded_len = (try http_parser.chunkedBodyConsumed(
                 data[body_start..],
                 self.server.config.max_body_size,
@@ -2199,7 +2233,7 @@ pub const Server = struct {
 
         // Extract body if present
         var body: ?[]u8 = null;
-        if (fast_slots.has_chunked_encoding) {
+        if (fast_slots.transfer_encoding == .chunked) {
             if (fast_slots.content_length != null) return error.InvalidRequest;
             const decoded = try http_parser.decodeChunkedBody(
                 allocator,
@@ -2625,6 +2659,23 @@ test "accessLogRequestId hides missing empty control whitespace and oversized va
     try std.testing.expectEqualStrings("-", accessLogRequestId(oversized));
 }
 
+test "accessLogField percent-escapes unsafe bytes" {
+    var buf: [max_logged_access_field_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("GET", accessLogField("GET", &buf));
+    try std.testing.expectEqualStrings(
+        "/a%00b%0Ac%20d%7F%80",
+        accessLogField("/a\x00b\nc d\x7F\x80", &buf),
+    );
+}
+
+test "accessLogField caps oversized values" {
+    const oversized = "a" ** (max_logged_access_field_len + 1);
+    var buf: [max_logged_access_field_bytes]u8 = undefined;
+    const logged = accessLogField(oversized, &buf);
+    try std.testing.expectEqual(@as(usize, max_logged_access_field_len), logged.len);
+    try std.testing.expectEqualStrings("a" ** max_logged_access_field_len, logged);
+}
+
 test "static file cache hit and invalidation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2765,6 +2816,42 @@ test "threaded readRequestData preserves pipelined bytes for the next request" {
     var second_request = try server.parseRequestFromBuffer(allocator, second_data);
     defer second_request.deinit(allocator);
     try std.testing.expectEqualStrings("/second", second_request.path);
+}
+
+test "threaded readRequestData rejects unsupported transfer-encoding before preserving body bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &server,
+        .allocator = allocator,
+    };
+
+    const fds = try createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    try writeAllFd(
+        fds[1],
+        "POST /first HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: gzip\r\n\r\n" ++
+            "GET /second HTTP/1.1\r\nHost: example.com\r\n\r\n",
+    );
+
+    var pending: ConnectionPool.PendingRequestBytes = .{};
+    defer pending.deinit(pool.allocator);
+
+    try std.testing.expectError(
+        error.UnsupportedTransferEncoding,
+        pool.readRequestData(fds[0], allocator, &pending),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pending.bytes.len);
 }
 
 test "connection queue drain closes queued file descriptors" {
@@ -2951,6 +3038,24 @@ test "parseRequestFromBuffer rejects content-length with chunked transfer encodi
         "5\r\nhello\r\n0\r\n\r\n";
 
     try std.testing.expectError(error.InvalidRequest, server.parseRequestFromBuffer(allocator, data));
+}
+
+test "parseRequestFromBuffer rejects unsupported transfer-encoding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    const data =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Transfer-Encoding: gzip\r\n" ++
+        "\r\n" ++
+        "hello";
+
+    try std.testing.expectError(error.UnsupportedTransferEncoding, server.parseRequestFromBuffer(allocator, data));
 }
 
 test "buildDynamicResponseHeader filters handler supplied framing headers" {
