@@ -240,10 +240,15 @@ pub const TenuredHeap = struct {
                         cb(obj);
                     }
 
-                    // CRITICAL: Actually free the memory to prevent leak
-                    // Objects in tenured were allocated via heap.allocRaw (embedded header).
-                    // heap_ptr must be non-null - asserted at sweep entry points.
-                    const h = heap_ptr orelse unreachable;
+                    // CRITICAL: Actually free the memory to prevent leak.
+                    // Objects in tenured were allocated via heap.allocRaw (embedded
+                    // header), so freeing them requires the backing heap. Reaching
+                    // a tenured object to free with no heap is a setup bug (setHeap
+                    // was never called); fail loud and local in every build mode
+                    // rather than rely on `unreachable`, which is silent UB in
+                    // ReleaseFast.
+                    const h = heap_ptr orelse
+                        @panic("GC tenured sweep reached a live object with no backing heap; call GC.setHeap() before collection");
                     h.freeRaw(obj);
 
                     _ = self.object_index.remove(obj);
