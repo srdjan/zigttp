@@ -90,10 +90,25 @@ pub const HandlerPool = struct {
         runtime: *Runtime,
         base_rt: *zq.LockFreePool.Runtime,
         pool: *HandlerPool,
+        released: bool = false,
 
+        /// Releasing the runtime resets it, so any `response.body` borrowed from
+        /// runtime-managed memory (requires_runtime) is only valid until this
+        /// call. The caller must finish sending the body before deinit. That
+        /// contract is not expressible in the type system, so harden it in
+        /// safety builds by poisoning the borrowed body after release: a
+        /// use-after-release then reads obviously-wrong empty bytes instead of
+        /// reset runtime memory. Idempotent on repeated deinit, matching
+        /// WorkerRuntimeLease.
         pub fn deinit(self: *ResponseHandle) void {
+            if (self.released) return;
+            self.released = true;
             self.response.deinit();
             self.pool.releaseForRequest(self.base_rt);
+            if (std.debug.runtime_safety) {
+                self.response.body = &.{};
+                self.response.body_owner = null;
+            }
         }
     };
 
