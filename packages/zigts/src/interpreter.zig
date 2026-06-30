@@ -215,7 +215,18 @@ pub const Interpreter = struct {
     /// Main bytecode dispatch loop - executes opcodes until halt, return, or error.
     ///
     /// This is the core interpreter loop that executes JavaScript bytecode. It uses
-    /// a switch-based dispatch (Zig optimizes this to computed goto on supported platforms).
+    /// a labeled switch (`sw: switch (...) { ... continue :sw ... }`) that the Zig
+    /// compiler lowers to computed-goto dispatch on supported platforms.
+    ///
+    /// Intentionally one large function: the labeled switch and its `continue :sw`
+    /// edges must share a single switch for the computed-goto lowering, so the
+    /// opcode handlers cannot be split into separate functions without losing the
+    /// dispatch optimization. The body is organized into labeled case groups in
+    /// this order: Stack Operations, Local Variables, Arithmetic, Math Builtins,
+    /// Comparison / Logical, Bitwise, Control Flow, Object Operations,
+    /// Function / Closure Creation, Await / typeof / spread, Function Calls,
+    /// Iterator Operations, Module Operations, and the remaining specialized
+    /// opcodes. Each group is delimited by a `// ====` banner; navigate by those.
     ///
     /// Execution model:
     /// - Fetches opcode at pc, increments pc, then executes via switch
