@@ -16,6 +16,7 @@ const zruntime = @import("zruntime.zig");
 const natives = @import("runtime_natives.zig");
 const http_parser = @import("http_parser.zig");
 const durable_executor = @import("durable_executor.zig");
+const http = @import("runtime_http.zig");
 
 const Runtime = zruntime.Runtime;
 const HttpResponse = zruntime.HttpResponse;
@@ -24,13 +25,14 @@ const QueryParam = zruntime.QueryParam;
 const SystemRuntime = zruntime.SystemRuntime;
 const Target = @import("in_process_dispatch.zig").Target;
 
-// Helpers that remain in zruntime.zig / runtime_natives.zig, reached by alias.
-const createFetchResponse = zruntime.createFetchResponse;
-const createFetchErrorResponse = zruntime.createFetchErrorResponse;
-const httpRequestErrorJsonAlloc = zruntime.httpRequestErrorJsonAlloc;
-const parseHttpRequestParts = zruntime.parseHttpRequestParts;
-const extractResponseStatus = zruntime.extractResponseStatus;
-const appendPercentEncodedInto = zruntime.appendPercentEncodedInto;
+// Response/request helpers now in runtime_http.zig and runtime_natives.zig,
+// reached by alias.
+const createFetchResponse = http.createFetchResponse;
+const createFetchErrorResponse = http.createFetchErrorResponse;
+const httpRequestErrorJsonAlloc = http.httpRequestErrorJsonAlloc;
+const parseHttpRequestParts = http.parseHttpRequestParts;
+const extractResponseStatus = http.extractResponseStatus;
+const appendPercentEncodedInto = http.appendPercentEncodedInto;
 const getDynamicProperty = natives.getDynamicProperty;
 const splitPathAndQuery = natives.splitPathAndQuery;
 const getHeaderAtom = natives.getHeaderAtom;
