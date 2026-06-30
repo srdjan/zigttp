@@ -19,6 +19,7 @@ const http_parser = @import("http_parser.zig");
 const server_io = @import("server_io.zig");
 const contract_runtime = @import("contract_runtime.zig");
 const runtime_builtins = @import("runtime_builtins.zig");
+const console = @import("runtime_console.zig");
 pub const websocket_codec = @import("websocket_codec.zig");
 
 // Bytecode caching for faster cold starts
@@ -591,11 +592,11 @@ pub const Runtime = struct {
         try self.ctx.builtin_objects.append(self.allocator, console_obj);
         console_obj_unowned = false;
 
-        try self.addMethod(console_obj, .log, consoleLog, 0);
-        try self.addDynamicMethod(console_obj, "error", consoleError, 0);
-        try self.addDynamicMethod(console_obj, "warn", consoleError, 0);
-        try self.addDynamicMethod(console_obj, "info", consoleLog, 0);
-        try self.addDynamicMethod(console_obj, "debug", consoleLog, 0);
+        try self.addMethod(console_obj, .log, console.consoleLog, 0);
+        try self.addDynamicMethod(console_obj, "error", console.consoleError, 0);
+        try self.addDynamicMethod(console_obj, "warn", console.consoleError, 0);
+        try self.addDynamicMethod(console_obj, "info", console.consoleLog, 0);
+        try self.addDynamicMethod(console_obj, "debug", console.consoleLog, 0);
 
         // Register on global
         try self.ctx.setGlobal(.console, console_obj.toValue());
@@ -4887,56 +4888,6 @@ fn httpRequestErrorJsonAlloc(a: std.mem.Allocator, err_code: []const u8, details
     try stream.write(details);
     try stream.endObject();
     return try aw.toOwnedSlice();
-}
-
-fn consoleLog(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    for (args, 0..) |arg, i| {
-        if (i > 0) writeToFd(std.c.STDOUT_FILENO, " ");
-        printValue(arg, std.c.STDOUT_FILENO);
-    }
-    writeToFd(std.c.STDOUT_FILENO, "\n");
-    return zq.JSValue.undefined_val;
-}
-
-fn consoleError(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    writeToFd(std.c.STDERR_FILENO, "\x1b[31m[ERROR]\x1b[0m ");
-    for (args, 0..) |arg, i| {
-        if (i > 0) writeToFd(std.c.STDERR_FILENO, " ");
-        printValue(arg, std.c.STDERR_FILENO);
-    }
-    writeToFd(std.c.STDERR_FILENO, "\n");
-    return zq.JSValue.undefined_val;
-}
-
-fn writeToFd(fd: std.c.fd_t, data: []const u8) void {
-    _ = std.c.write(fd, data.ptr, data.len);
-}
-
-fn printValue(val: zq.JSValue, fd: std.c.fd_t) void {
-    if (val.isUndefined()) {
-        writeToFd(fd, "undefined");
-    } else if (val.isNull()) {
-        writeToFd(fd, "null");
-    } else if (val.isTrue()) {
-        writeToFd(fd, "true");
-    } else if (val.isFalse()) {
-        writeToFd(fd, "false");
-    } else if (val.isInt()) {
-        var buf: [32]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return;
-        writeToFd(fd, s);
-    } else if (val.isFloat()) {
-        var buf: [32]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "{d}", .{val.getFloat64()}) catch return;
-        writeToFd(fd, s);
-    } else if (val.isString()) {
-        const str = val.toPtr(zq.JSString);
-        writeToFd(fd, str.data());
-    } else if (val.isObject()) {
-        writeToFd(fd, "[Object]");
-    } else {
-        writeToFd(fd, "[unknown]");
-    }
 }
 
 // ============================================================================
