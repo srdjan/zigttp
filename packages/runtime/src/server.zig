@@ -1891,6 +1891,11 @@ pub const Server = struct {
             }
         }
 
+        if (self.config.runtime_config.workflow_queue_enabled) {
+            if (self.config.runtime_config.durable_oplog_dir == null) return error.WorkflowQueueRequiresDurable;
+            if (self.config.runtime_config.system_config_path == null) return error.WorkflowQueueRequiresSystem;
+        }
+
         // Parse embedded contract (if present), then promote to Validated before
         // prewarming the handler pool. This rejects artifact hash drift before
         // appended bytecode is loaded into any runtime.

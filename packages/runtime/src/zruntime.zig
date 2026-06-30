@@ -14,6 +14,7 @@ const embedded_handler = @import("embedded_handler");
 const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
 const durable_executor = @import("durable_executor.zig");
+const workflow_queue = @import("workflow_queue.zig");
 const trace_request_recorder = @import("trace_request_recorder.zig");
 const http_parser = @import("http_parser.zig");
 const server_io = @import("server_io.zig");
@@ -2764,6 +2765,65 @@ test "workflow.call inside durable run records its dispatch as a durable step" {
     var parsed = try zq.trace.parseDurableOplog(allocator, source);
     defer parsed.deinit();
     try std.testing.expect(parsed.complete);
+}
+
+test "workflow.call queue mode persists child result before durable step result" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    try sys.addHandler(
+        "greet",
+        "function handler(req) { return Response.json({ from: 'greet', method: req.method, body: req.body, trace: req.headers.get('x-trace') }); }",
+        "<greet>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+
+    const rt = try Runtime.init(allocator, .{
+        .durable_oplog_dir = durable_dir,
+        .system_registry = @ptrCast(&sys),
+        .workflow_queue_enabled = true,
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run } from "zigttp:durable";
+        \\import { call } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return run("wf:queue", () => {
+        \\    const res = call("greet", { method: "POST", path: "/greet", body: "hello", headers: { "x-trace": "queued" } });
+        \\    return Response.json({ subStatus: res.status, sub: res.json() });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<wf-queue>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", "wf:queue");
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"from\":\"greet\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"method\":\"POST\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"body\":\"hello\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"trace\":\"queued\"") != null);
+
+    const item_id = try workflow_queue.itemId(allocator, "wf:queue", "workflow.call#0");
+    const result_json = (try workflow_queue.readResult(allocator, durable_dir, item_id)) orelse return error.MissingWorkflowQueueResult;
+    try std.testing.expect(std.mem.indexOf(u8, result_json, "\"status\":200") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result_json, "greet") != null);
+
+    const path = try durable_executor.buildDurableOplogPath(rt, "wf:queue");
+    const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, source, "\"name\":\"workflow.call#0\""));
+    try std.testing.expect(std.mem.indexOf(u8, source, "\"type\":\"step_result\"") != null);
 }
 
 // Saga (P3): an empty SystemRuntime is enough to enable the workflow module;

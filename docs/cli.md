@@ -62,6 +62,7 @@ Common `dev` and `serve` flags:
 | `--sqlite <file>` | SQLite database for `zigttp:sql`. |
 | `--durable <dir>` | Durable workflow oplog directory. |
 | `--system <file>` | Handler bundle manifest: the `zigttp:service` HTTP registry and the `zigttp:workflow` in-process sub-handler registry. Workflow startup fails if a local handler path is unreadable. |
+| `--workflow-queue` | Persist durable workflow `call`, `follow`, and `fanout` child dispatch through the workflow queue. Requires `--durable <dir>` and `--system <file>`. |
 | `--outbound-http` / `--outbound-host <host>` | Enable outbound HTTP. The host allowlist matches on host only, not port. |
 | `--static <dir>` | Serve static files. |
 | `--no-env-check` | Skip startup env validation. |

@@ -479,6 +479,10 @@ fn parseCommonServeFlag(
         config.runtime_config.durable_oplog_dir = try shared.takeArg(i, argv, error.MissingDurableDir);
         return true;
     }
+    if (std.mem.eql(u8, arg, "--workflow-queue")) {
+        config.runtime_config.workflow_queue_enabled = true;
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--outbound-http")) {
         config.runtime_config.outbound_http_enabled = true;
         return true;
@@ -717,6 +721,8 @@ fn printAppendedHelp() void {
         \\  --security-log <FILE> Write security decisions to FILE
         \\  --lifecycle <MODE>    ephemeral, bounded, ttl, or reuse
         \\  --system <FILE>       Handler bundle for service and workflow
+        \\  --durable <DIR>       Enable durable execution with write-ahead oplog
+        \\  --workflow-queue      Queue durable workflow dispatch; requires --system and --durable
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -784,6 +790,7 @@ fn printServeHelp() void {
         \\  --test <FILE>         Run declarative handler tests from JSONL file
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
         \\  --system <FILE>       Handler bundle for zigttp:service/workflow
+        \\  --workflow-queue      Queue durable workflow dispatch; requires --system and --durable
         \\  --no-env-check        Skip startup env var validation
         \\  --security-log <FILE> Append security events to a JSONL file
         \\  --lifecycle <MODE>    Runtime lifecycle mode

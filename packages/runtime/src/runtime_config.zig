@@ -29,6 +29,9 @@ pub const RuntimeConfig = struct {
     /// replayed on startup; completed ones keep duplicate keys idempotent.
     durable_oplog_dir: ?[]const u8 = null,
     system_config_path: ?[]const u8 = null,
+    /// Route durable `zigttp:workflow` child dispatch through a persisted
+    /// workflow queue. Requires both `durable_oplog_dir` and `system_config_path`.
+    workflow_queue_enabled: bool = false,
     /// In-process co-located handler registry (`*in_process_dispatch.SystemRuntime`)
     /// for `zigttp:workflow.call`. Type-erased to keep this leaf config free of
     /// the runtime-pool import cycle; cast back in `zruntime.installBindings`.

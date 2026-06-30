@@ -274,6 +274,18 @@ objects during replay, so completed child calls are not re-dispatched. Existing
 oplogs use the internal `workflow.parallel#N` key for `fanout()` records for
 compatibility.
 
+Queue-mediated workflow dispatch is opt-in with `--workflow-queue` and requires
+both `--durable <dir>` and `--system <file>`. In that mode, durable top-level
+`call`, `follow`, and `fanout` write child requests to `<durable>/workflow-queue`
+before dispatch, lease queued items while they run, and write completed response
+parts under `done/` before the parent durable step result is persisted. If the
+process stops before the parent step completes, durable recovery re-enters the
+run and resumes from the queue result or retries the leased item after its lease
+expires. Child handlers should be idempotent because a process crash after a
+child side effect but before its queue result is written can re-run that child.
+`saga()` is not supported with `--workflow-queue`; keep queue-mediated handler
+communication at top-level durable `call`, `follow`, or `fanout` boundaries.
+
 ## Virtual Modules
 
 Virtual modules are native Zig APIs exposed through `import { ... } from
@@ -288,6 +300,7 @@ Common runtime flags:
 | Outbound HTTP | `--outbound-http` or `--outbound-host <host>` |
 | Durable workflows | `--durable <dir>` |
 | Service registry and in-process workflow bundle | `--system <file>` |
+| Queue-mediated durable workflow dispatch | `--workflow-queue` |
 | Skip env startup check in development | `--no-env-check` |
 
 ## Compile-Time Proofs

@@ -17,6 +17,7 @@ const natives = @import("runtime_natives.zig");
 const http_parser = @import("http_parser.zig");
 const durable_executor = @import("durable_executor.zig");
 const http = @import("runtime_http.zig");
+const workflow_queue = @import("workflow_queue.zig");
 
 const Runtime = zruntime.Runtime;
 const HttpResponse = zruntime.HttpResponse;
@@ -39,6 +40,8 @@ const getHeaderAtom = natives.getHeaderAtom;
 const statusTextFor = natives.statusTextFor;
 const getStringDataCtx = zq.builtins.helpers.getStringDataCtx;
 const appendEscapedJson = @import("durable_store.zig").appendEscaped;
+
+const WORKFLOW_QUEUE_RETRY_DELAY_MS: i64 = 1_000;
 
 /// Runtime side of `zigttp:workflow.call(name, init)`. Builds an
 /// `HttpRequestView` from the `init` object, dispatches it to a co-located
@@ -86,6 +89,9 @@ pub fn workflowCallCallback(
         if (adr.step_depth == 0) {
             return workflowCallDurable(rt, ctx, registry, name, view);
         }
+    }
+    if (rt.config.workflow_queue_enabled) {
+        return createFetchErrorResponse(rt, "WorkflowQueueRequiresRun", "queued workflow.call must run at top level inside durable.run");
     }
 
     // The sub-handler dispatch reuses executeHandlerBorrowed, which sets-then-
@@ -156,8 +162,22 @@ fn workflowCallDurable(
         .live => try rt.active_durable_run.?.state.persistStepStart(step_name),
     }
 
-    // Guarded nested dispatch (see workflowCallCallback for why these per-thread
-    // globals are snapshotted/restored).
+    const parts = if (rt.config.workflow_queue_enabled)
+        try workflowQueuedDispatchParts(rt, ctx, registry, step_name, name, view)
+    else
+        try workflowDirectDispatchParts(rt, ctx, registry, name, view);
+
+    try rt.active_durable_run.?.state.persistStepResult(step_name, ctx, parts);
+    return responseFromPartsObject(rt, parts);
+}
+
+fn workflowDirectDispatchParts(
+    rt: *Runtime,
+    ctx: *zq.Context,
+    registry: *SystemRuntime,
+    name: []const u8,
+    view: HttpRequestView,
+) !zq.JSValue {
     const saved_runtime = zruntime.current_runtime;
     const saved_interpreter = zq.interpreter.current_interpreter;
     const saved_call_cb = zq.http.call_function_callback;
@@ -166,18 +186,117 @@ fn workflowCallDurable(
     zq.interpreter.current_interpreter = saved_interpreter;
     zq.http.call_function_callback = saved_call_cb;
 
-    const parts = blk: {
-        var handle = dispatch_result catch |err| {
-            const code = if (err == error.UnknownHandler) "UnknownHandler" else "WorkflowDispatchFailed";
-            const detail = if (err == error.UnknownHandler) name else @errorName(err);
-            break :blk try workflowErrorParts(rt, ctx, code, detail);
-        };
-        defer handle.deinit();
-        break :blk try workflowResponseParts(ctx, &handle.response);
+    var handle = dispatch_result catch |err| {
+        const code = if (err == error.UnknownHandler) "UnknownHandler" else "WorkflowDispatchFailed";
+        const detail = if (err == error.UnknownHandler) name else @errorName(err);
+        return workflowErrorParts(rt, ctx, code, detail);
     };
+    defer handle.deinit();
+    return workflowResponseParts(ctx, &handle.response);
+}
 
-    try rt.active_durable_run.?.state.persistStepResult(step_name, ctx, parts);
-    return responseFromPartsObject(rt, parts);
+fn workflowDirectTargetDispatchParts(
+    rt: *Runtime,
+    ctx: *zq.Context,
+    target: *Target,
+    view: HttpRequestView,
+) !zq.JSValue {
+    const saved_runtime = zruntime.current_runtime;
+    const saved_interpreter = zq.interpreter.current_interpreter;
+    const saved_call_cb = zq.http.call_function_callback;
+    const dispatch_result = target.pool.executeHandlerBorrowed(view);
+    zruntime.current_runtime = saved_runtime;
+    zq.interpreter.current_interpreter = saved_interpreter;
+    zq.http.call_function_callback = saved_call_cb;
+
+    var handle = dispatch_result catch |err| {
+        return workflowErrorParts(rt, ctx, "WorkflowDispatchFailed", @errorName(err));
+    };
+    defer handle.deinit();
+    return workflowResponseParts(ctx, &handle.response);
+}
+
+fn workflowQueuedDispatchParts(
+    rt: *Runtime,
+    ctx: *zq.Context,
+    registry: *SystemRuntime,
+    item_step_name: []const u8,
+    target_name: []const u8,
+    view: HttpRequestView,
+) anyerror!zq.JSValue {
+    const durable_dir = rt.config.durable_oplog_dir orelse return error.WorkflowQueueRequiresDurable;
+    if (rt.active_durable_run == null) return error.NoActiveDurableRun;
+    const active = &rt.active_durable_run.?;
+    const item_id = try workflow_queue.itemId(rt.allocator, active.key, item_step_name);
+    defer rt.allocator.free(item_id);
+
+    try workflow_queue.enqueueRequest(rt.allocator, durable_dir, item_id, target_name, view);
+
+    const now_ms = zq.trace.unixMillis();
+    var claim = try workflow_queue.tryClaim(
+        rt.allocator,
+        durable_dir,
+        item_id,
+        now_ms,
+        workflow_queue.defaultLeaseMs(),
+    );
+    defer claim.deinit(rt.allocator);
+
+    switch (claim) {
+        .done => |result_json| {
+            return zq.trace.jsonToJSValue(ctx, result_json);
+        },
+        .busy => {
+            try suspendQueuedWorkflowDispatch(rt, now_ms);
+            return error.DurableSuspended;
+        },
+        .claimed => |*queued_request| {
+            var queued_view = try queued_request.toView(rt.allocator);
+            defer queued_view.headers.deinit(rt.allocator);
+            try completeQueuedDispatch(rt, registry, durable_dir, item_id, queued_request, queued_view);
+
+            const result_json = (try workflow_queue.readResult(rt.allocator, durable_dir, item_id)) orelse {
+                try suspendQueuedWorkflowDispatch(rt, now_ms);
+                return error.DurableSuspended;
+            };
+            defer rt.allocator.free(result_json);
+            return zq.trace.jsonToJSValue(ctx, result_json);
+        },
+    }
+}
+
+fn completeQueuedDispatch(
+    rt: *Runtime,
+    registry: *SystemRuntime,
+    durable_dir: []const u8,
+    item_id: []const u8,
+    queued_request: *const workflow_queue.QueuedRequest,
+    view: HttpRequestView,
+) !void {
+    const saved_runtime = zruntime.current_runtime;
+    const saved_interpreter = zq.interpreter.current_interpreter;
+    const saved_call_cb = zq.http.call_function_callback;
+    const dispatch_result = registry.dispatch(queued_request.target, view);
+    zruntime.current_runtime = saved_runtime;
+    zq.interpreter.current_interpreter = saved_interpreter;
+    zq.http.call_function_callback = saved_call_cb;
+
+    var handle = dispatch_result catch |err| {
+        const code = if (err == error.UnknownHandler) "UnknownHandler" else "WorkflowDispatchFailed";
+        const detail = if (err == error.UnknownHandler) queued_request.target else @errorName(err);
+        try workflow_queue.completeError(rt.allocator, durable_dir, item_id, code, detail);
+        return;
+    };
+    defer handle.deinit();
+    try workflow_queue.completeResponse(rt.allocator, durable_dir, item_id, handle.response);
+}
+
+fn suspendQueuedWorkflowDispatch(rt: *Runtime, now_ms: i64) !void {
+    if (rt.active_durable_run == null) return error.NoActiveDurableRun;
+    const active = &rt.active_durable_run.?;
+    const retry_at_ms = std.math.add(i64, now_ms, WORKFLOW_QUEUE_RETRY_DELAY_MS) catch std.math.maxInt(i64);
+    try active.state.persistWaitTimer(retry_at_ms);
+    try active.setPendingTimer(rt.allocator, retry_at_ms);
 }
 
 const ResolvedAffordance = struct {
@@ -337,8 +456,11 @@ pub fn workflowFollowCallback(
 
     if (rt.active_durable_run) |*adr| {
         if (adr.step_depth == 0) {
-            return workflowFollowDurable(rt, ctx, target, view);
+            return workflowFollowDurable(rt, ctx, registry, target, view);
         }
+    }
+    if (rt.config.workflow_queue_enabled) {
+        return createFetchErrorResponse(rt, "WorkflowQueueRequiresRun", "queued workflow.follow must run at top level inside durable.run");
     }
 
     // Guarded nested dispatch (see workflowCallCallback for the per-thread
@@ -379,6 +501,7 @@ pub fn workflowFollowCallback(
 fn workflowFollowDurable(
     rt: *Runtime,
     ctx: *zq.Context,
+    registry: *SystemRuntime,
     target: *Target,
     view: HttpRequestView,
 ) anyerror!zq.JSValue {
@@ -396,21 +519,10 @@ fn workflowFollowDurable(
         .live => try rt.active_durable_run.?.state.persistStepStart(step_name),
     }
 
-    const saved_runtime = zruntime.current_runtime;
-    const saved_interpreter = zq.interpreter.current_interpreter;
-    const saved_call_cb = zq.http.call_function_callback;
-    const dispatch_result = target.pool.executeHandlerBorrowed(view);
-    zruntime.current_runtime = saved_runtime;
-    zq.interpreter.current_interpreter = saved_interpreter;
-    zq.http.call_function_callback = saved_call_cb;
-
-    const parts = blk: {
-        var handle = dispatch_result catch |err| {
-            break :blk try workflowErrorParts(rt, ctx, "WorkflowDispatchFailed", @errorName(err));
-        };
-        defer handle.deinit();
-        break :blk try workflowResponseParts(ctx, &handle.response);
-    };
+    const parts = if (rt.config.workflow_queue_enabled)
+        try workflowQueuedDispatchParts(rt, ctx, registry, step_name, target.name, view)
+    else
+        try workflowDirectTargetDispatchParts(rt, ctx, target, view);
 
     try rt.active_durable_run.?.state.persistStepResult(step_name, ctx, parts);
     return responseFromPartsObject(rt, parts);
@@ -518,6 +630,9 @@ fn responseFromPartsObject(rt: *Runtime, parts: zq.JSValue) !zq.JSValue {
 /// terminal 500 "manual intervention", with the oplog as the audit trail.
 pub fn workflowSagaCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, steps_val: zq.JSValue) anyerror!zq.JSValue {
     const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    if (rt.config.workflow_queue_enabled) {
+        return zq.modules.util.throwError(ctx, "Error", "saga() is not supported with --workflow-queue; use top-level durable call/follow/fanout");
+    }
     if (rt.active_durable_run == null) {
         return zq.modules.util.throwError(ctx, "Error", "saga() must be called inside run()");
     }
@@ -679,9 +794,16 @@ pub fn workflowFanoutCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, calls_v
             .execute => {},
             .live => try rt.active_durable_run.?.state.persistStepStart(step_name),
         }
-        const parts_arr = try dispatchAllToPartsArray(rt, ctx, registry, arr, count);
+        const parts_arr = if (rt.config.workflow_queue_enabled)
+            try dispatchAllQueuedToPartsArray(rt, ctx, registry, arr, count, step_name)
+        else
+            try dispatchAllToPartsArray(rt, ctx, registry, arr, count);
         try rt.active_durable_run.?.state.persistStepResult(step_name, ctx, parts_arr);
         return responsesFromPartsArray(rt, ctx, parts_arr);
+    }
+
+    if (rt.config.workflow_queue_enabled) {
+        return zq.modules.util.throwError(ctx, "Error", "queued workflow.fanout must run at top level inside durable.run");
     }
 
     const parts_arr = try dispatchAllToPartsArray(rt, ctx, registry, arr, count);
@@ -743,6 +865,48 @@ fn dispatchAllToPartsArray(rt: *Runtime, ctx: *zq.Context, registry: *SystemRunt
             return e;
         };
         handle.deinit();
+        try parts_arr.arrayPush(ctx.allocator, item_parts);
+    }
+    return parts_arr.toValue();
+}
+
+fn dispatchAllQueuedToPartsArray(
+    rt: *Runtime,
+    ctx: *zq.Context,
+    registry: *SystemRuntime,
+    arr: *zq.JSObject,
+    count: u32,
+    step_name: []const u8,
+) !zq.JSValue {
+    var view_arena = std.heap.ArenaAllocator.init(rt.allocator);
+    defer view_arena.deinit();
+    const arena = view_arena.allocator();
+
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const parts_arr = try ctx.createArray();
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const desc = arr.getIndex(i) orelse {
+            try parts_arr.arrayPush(ctx.allocator, try workflowErrorParts(rt, ctx, "InvalidCall", "missing call descriptor"));
+            continue;
+        };
+        const name: ?[]const u8 = blk: {
+            if (!desc.isObject()) break :blk null;
+            const dobj = desc.toPtr(zq.JSObject);
+            const nv = getDynamicProperty(ctx, dobj, pool, "name") orelse break :blk null;
+            break :blk getStringDataCtx(nv, ctx);
+        };
+        if (name == null) {
+            try parts_arr.arrayPush(ctx.allocator, try workflowErrorParts(rt, ctx, "InvalidCall", "call is missing a name"));
+            continue;
+        }
+        const parts = parseHttpRequestParts(ctx, desc, arena) catch {
+            try parts_arr.arrayPush(ctx.allocator, try workflowErrorParts(rt, ctx, "InvalidInit", "malformed call init"));
+            continue;
+        };
+
+        const item_step_name = try std.fmt.allocPrint(arena, "{s}.{d}", .{ step_name, i });
+        const item_parts = try workflowQueuedDispatchParts(rt, ctx, registry, item_step_name, name.?, parts.view());
         try parts_arr.arrayPush(ctx.allocator, item_parts);
     }
     return parts_arr.toValue();
