@@ -123,6 +123,18 @@ pub const ToolDef = struct {
     execute: ExecuteFn,
 };
 
+/// Heap-allocate a one-element argv slice. `&.{x}` with a *runtime* `x` returns
+/// the address of a stack temporary that dangles the moment the decode fn
+/// returns; ReleaseFast then reuses the slot and the tool reads a garbage slice
+/// (a `len > 0`, `ptr == 0x1` value that segfaults on first index). Routing
+/// every single-value decode through the allocator makes the slice outlive the
+/// call, matching `decodeStringArrayField`.
+pub fn singleArg(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
+    const out = try allocator.alloc([]const u8, 1);
+    out[0] = value;
+    return out;
+}
+
 pub fn decodeNoArgs(
     allocator: std.mem.Allocator,
     args_json: []const u8,
@@ -145,7 +157,7 @@ pub fn decodeSingleStringField(
     const parsed = try parseObject(allocator, args_json);
     const value = parsed.get(field) orelse return error.InvalidToolArgsJson;
     if (value != .string) return error.InvalidToolArgsJson;
-    return &.{value.string};
+    return singleArg(allocator, value.string);
 }
 
 pub fn decodeOptionalSingleStringField(
@@ -156,7 +168,7 @@ pub fn decodeOptionalSingleStringField(
     const parsed = try parseObject(allocator, args_json);
     if (parsed.get(field)) |value| {
         if (value != .string) return error.InvalidToolArgsJson;
-        return &.{value.string};
+        return singleArg(allocator, value.string);
     }
     return &.{};
 }
@@ -184,7 +196,7 @@ pub fn decodeJsonPassthrough(
 ) ![]const []const u8 {
     const trimmed = std.mem.trim(u8, args_json, " \t\r\n");
     if (trimmed.len == 0) return error.InvalidToolArgsJson;
-    return &.{try allocator.dupe(u8, trimmed)};
+    return singleArg(allocator, try allocator.dupe(u8, trimmed));
 }
 
 fn parseObject(
@@ -237,4 +249,31 @@ test "withSessionTree duplicates llm_text and payload nodes" {
         },
         else => return error.TestFailed,
     }
+}
+
+test "decodeJsonPassthrough returns a heap-owned slice usable after the call" {
+    // Regression: the decoder used to `return &.{dupe(...)}`, a pointer to a
+    // stack temporary that dangles after return (segfaults under ReleaseFast).
+    // Drive it through an arena exactly like invokeJson does, then read the
+    // result after the decode frame is gone.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const args = try decodeJsonPassthrough(arena.allocator(), "  {\"path\":\".\"}  ");
+    try testing.expectEqual(@as(usize, 1), args.len);
+    try testing.expectEqualStrings("{\"path\":\".\"}", args[0]);
+}
+
+test "decodeSingleStringField returns a heap-owned slice" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const args = try decodeSingleStringField(arena.allocator(), "{\"file\":\"src/handler.ts\"}", "file");
+    try testing.expectEqual(@as(usize, 1), args.len);
+    try testing.expectEqualStrings("src/handler.ts", args[0]);
+}
+
+test "singleArg allocates a one-element argv on the allocator" {
+    const args = try singleArg(testing.allocator, "hello");
+    defer testing.allocator.free(args);
+    try testing.expectEqual(@as(usize, 1), args.len);
+    try testing.expectEqualStrings("hello", args[0]);
 }

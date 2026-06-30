@@ -844,7 +844,7 @@ fn applyVerifiedEdit(
     // file on disk, the equivalence receipt (after=applied), and the transcript
     // attest the same bytes.
     try applyPreparedEdit(ta, prepared, applied_content);
-    const post_apply = try postApplyCheck(allocator, ta, registry, transcript, prepared);
+    const post_apply = try postApplyCheck(allocator, ta, registry, transcript, prepared, applied_content);
     defer if (post_apply.summary) |s| allocator.free(s);
     try appendVerifiedPatchEntry(
         allocator,
@@ -934,6 +934,7 @@ fn postApplyCheck(
     registry: *const registry_mod.Registry,
     transcript: *transcript_mod.Transcript,
     prepared: PreparedEdit,
+    applied_content: []const u8,
 ) !PostApplyReport {
     var report: PostApplyReport = .{ .ok = true, .summary = null };
     errdefer if (report.summary) |s| allocator.free(s);
@@ -965,8 +966,15 @@ fn postApplyCheck(
             var buf: std.ArrayList(u8) = .empty;
             var aw: std.Io.Writer.Allocating = .fromArrayList(arena, &buf);
             const w = &aw.writer;
+            // review_patch requires "file" and "content" (the applied bytes) and
+            // takes "before" so diff_only can mark genuinely new violations.
+            // Omitting content silently disabled this gate ("missing content").
             try w.writeAll("{\"file\":");
             try json_writer.writeString(w, prepared.edit.file);
+            try w.writeAll(",\"content\":");
+            try json_writer.writeString(w, applied_content);
+            try w.writeAll(",\"before\":");
+            try json_writer.writeString(w, prepared.edit.before.?);
             try w.writeAll(",\"diff_only\":true}");
             buf = aw.toArrayList();
             break :blk buf.items;

@@ -44,7 +44,12 @@ fn decodeJson(
         out[1] = output_val.string;
         return out;
     }
-    return &.{handler_val.string};
+    // Heap-allocate rather than `&.{handler_val.string}`: the latter returns a
+    // pointer to a stack temporary that dangles once this fn returns (garbage
+    // under ReleaseFast). Mirror the two-element branch above.
+    const out = try allocator.alloc([]const u8, 1);
+    out[0] = handler_val.string;
+    return out;
 }
 
 fn execute(
