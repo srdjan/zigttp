@@ -88,8 +88,16 @@ resolve_version() {
     case "$CHANNEL" in
         beta)
             printf "Fetching latest beta version...\n"
-            VERSION=$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=20" \
-                | grep '"tag_name"' | grep -- '-beta' | head -1 | cut -d'"' -f4)
+            RELEASES=$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=20")
+            # The beta channel tracks the newest pre-release line. Match either
+            # -beta or -rc tags; fall back to the newest release of any kind so a
+            # first-time `curl | sh` never dead-ends when only -rc tags exist.
+            VERSION=$(printf '%s\n' "$RELEASES" \
+                | grep '"tag_name"' | grep -E -- '-(beta|rc)' | head -1 | cut -d'"' -f4)
+            if [ -z "$VERSION" ]; then
+                VERSION=$(printf '%s\n' "$RELEASES" \
+                    | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+            fi
             ;;
         latest)
             printf "Fetching latest version, including prereleases...\n"
