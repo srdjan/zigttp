@@ -22,11 +22,34 @@
 //! // Execute JavaScript
 //! const result = runtime.ctx.eval("1 + 2");
 //! ```
+//!
+//! ## Stability of this surface
+//!
+//! Two tiers are re-exported below:
+//!
+//! - **Stable public surface** - the convenience type and entry-point
+//!   re-exports near the bottom of this file (`JSValue`, `Context`, `GC`,
+//!   `LockFreePool`, `Runtime`, `Interpreter`, `Parser`, `strip`,
+//!   `createContext`, ...). These are the curated surface for embedding the
+//!   engine and are kept deliberately small and stable.
+//! - **Internal implementation modules** - the `pub const <module> =
+//!   @import("...")` re-exports in the next section. They are exposed only so
+//!   the in-repo runtime, tools, and pi packages can share implementation; they
+//!   are NOT a curated public API and may change between releases without
+//!   notice. Depend on them only from within this repository, and prefer the
+//!   curated types above for anything new. (This is documentation, not a
+//!   compiler-enforced boundary: all consumers live in this monorepo and move
+//!   together under one test suite.)
 
 const std = @import("std");
 const build_options = @import("build_options");
 
-// Core modules
+// ============================================================================
+// Internal implementation modules (no cross-release stability guarantee).
+// Exposed for the in-repo runtime/tools/pi packages; prefer the curated public
+// types in the "Stable public surface" section below. See the Stability note
+// at the top of this file.
+// ============================================================================
 pub const value = @import("value.zig");
 pub const heap = @import("heap.zig");
 pub const gc = @import("gc.zig");
@@ -116,7 +139,10 @@ pub const semantics_audit = @import("semantics_audit.zig");
 pub const semantics_corpus = @import("semantics_corpus.zig");
 pub const semantics_render = @import("semantics_render.zig");
 
-// Re-export main types for convenience
+// ============================================================================
+// Stable public surface: primary types and entry points for embedding the
+// engine. This is the curated API; keep it small and stable.
+// ============================================================================
 pub const JSValue = value.JSValue;
 pub const Context = context.Context;
 pub const GC = gc.GC;
