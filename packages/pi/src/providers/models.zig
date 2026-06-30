@@ -14,6 +14,12 @@ pub const Model = struct {
 
 pub const registry = [_]Model{
     .{
+        .id = "claude-opus-4-8",
+        .display_name = "Claude Opus 4.8",
+        .context_window = 200_000,
+        .max_output_tokens = 32_000,
+    },
+    .{
         .id = "claude-opus-4-6",
         .display_name = "Claude Opus 4.6",
         .context_window = 200_000,
