@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
     const perf_histogram_enabled = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
     const studio_enabled = b.option(bool, "studio", "Compile the browser proof workbench (zigttp studio) into the dev CLI") orelse false;
     const edge_enabled = b.option(bool, "edge", "Compile the in-process edge runtime (zigttp edge) into the binaries") orelse false;
+    const strip_enabled = b.option(bool, "strip", "Strip debug info from the installed zigttp/zigts/zigttp-runtime binaries (release artifacts)") orelse false;
     const zigts_dep = b.dependency("zigts", .{
         .target = target,
         .optimize = optimize,
@@ -518,6 +519,16 @@ pub fn build(b: *std.Build) void {
     });
     zigts_exe.root_module.addImport("zigts_cli", zigts_cli_mod);
     b.installArtifact(zigts_exe);
+
+    // Strip debug info from the three installed binaries when -Dstrip is set.
+    // The release workflow passes -Dstrip so shipped tarballs stay small; local
+    // builds keep symbols by default. Stripping happens at link time, so it is
+    // correct for every cross-compiled -Dtarget.
+    if (strip_enabled) {
+        runtime_exe.root_module.strip = true;
+        cli_exe.root_module.strip = true;
+        zigts_exe.root_module.strip = true;
+    }
 
     // Runtime purity guard: the deployable `zigttp-runtime` template and the
     // pi-free `zigts` analyzer must carry no expert-agent / model-provider

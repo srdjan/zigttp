@@ -31,9 +31,11 @@ gates, and keep release notes user-facing.
 SQLite is vendored as a static amalgamation, so release builds should
 cross-compile without Docker.
 
-- [ ] `zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-gnu`
-- [ ] `zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-gnu`
-- [ ] Check release binary sizes with `ls -lh zig-out/bin/`.
+- [ ] `zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-gnu -Dstrip`
+- [ ] `zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-gnu -Dstrip`
+- [ ] Check release binary sizes with `ls -lh zig-out/bin/`. The release workflow
+      builds with `-Dstrip`; stripped `zigttp` is roughly 8-9 MB (vs ~50 MB
+      unstripped). A debug-sized artifact in the release means `-Dstrip` was dropped.
 
 ## Documentation
 
