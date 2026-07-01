@@ -42,6 +42,15 @@ engine includes a garbage collector, but the default serving configuration
 uses the hybrid arena allocator, which disables collection on the serving path
 (`Context.setHybridAllocator` in `packages/zigts/src/context.zig`).
 
+Actor-style handler communication is opt-in. With `--actor-queue`, the server
+creates a process-owned `ActorQueue` and passes it through `RuntimeConfig` to
+each pooled runtime. `zigttp:queue` serializes payloads to queue-owned JSON,
+`receive()` moves a message into an in-flight table, and `ack()`/`nack()`
+complete or retry delivery. This keeps queued messages outside the JS heap, so
+handler reset, timeout invalidation, and panic quarantine do not drop retained
+messages. Normal HTTP ingress still uses the direct `handler(req)` path unless
+a handler explicitly imports and uses `zigttp:queue`.
+
 ## Compiler Pipeline
 
 For a handler source file:

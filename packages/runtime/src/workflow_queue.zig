@@ -166,12 +166,14 @@ pub fn tryClaim(
     }
 
     if (try fileExists(allocator, p.pending_file)) {
-        renamePath(p.pending_file, p.leased_file) catch |err| switch (err) {
+        if (renamePath(p.pending_file, p.leased_file)) {
+            return try claimLeasedFile(allocator, p.leased_file, now_ms + lease_ms);
+        } else |err| switch (err) {
+            // A concurrent tryClaim already won the pending->leased rename;
+            // fall through to the lease-aware check below instead of
+            // re-claiming the file it just created.
             error.FileNotFound => {},
             else => return err,
-        };
-        if (try fileExists(allocator, p.leased_file)) {
-            return try claimLeasedFile(allocator, p.leased_file, now_ms + lease_ms);
         }
     }
 

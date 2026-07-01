@@ -297,7 +297,7 @@ fn boolField(obj: anytype, key: []const u8) ?bool {
     return value.bool;
 }
 
-fn validSpecifier(specifier: []const u8) bool {
+pub fn validSpecifier(specifier: []const u8) bool {
     return std.mem.startsWith(u8, specifier, "zigttp:") or
         std.mem.startsWith(u8, specifier, "zigttp-ext:");
 }

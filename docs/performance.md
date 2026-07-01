@@ -41,6 +41,9 @@ for investigation.
 - `-m` sets a per-runtime allocator ceiling. The default is no explicit limit.
 - `zigttp:fetch`, `zigttp:service`, `zigttp:io`, durable workflows, and
   WebSocket paths depend on external systems and runtime flags.
+- `--actor-queue` allocates in-memory mailbox rings only when enabled. The
+  default serving path pays no queue-worker or mailbox cost, and queued payloads
+  are stored as compact JSON byte slices outside the JS heap.
 - Handlers proven deterministic and read-only can serve cached GET/HEAD
   responses from Zig memory.
 

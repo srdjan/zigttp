@@ -286,6 +286,43 @@ child side effect but before its queue result is written can re-run that child.
 `saga()` is not supported with `--workflow-queue`; keep queue-mediated handler
 communication at top-level durable `call`, `follow`, or `fanout` boundaries.
 
+## Actor Queues
+
+`zigttp:queue` provides opt-in in-process actor mailboxes for handlers that need
+to exchange work without sharing JS runtime state. Enable the server-owned
+in-memory queue with `--actor-queue`.
+
+```ts
+import { send, request, receive, ack, nack, reply } from "zigttp:queue";
+
+function handler(req) {
+  const sent = send("worker", { kind: "resize", image: "hero.jpg" });
+  if (!sent.ok) return Response.json({ error: sent.error }, { status: 503 });
+
+  const inbox = receive("worker");
+  if (!inbox.ok) return Response.json({ error: inbox.error }, { status: 503 });
+  if (inbox.value === null) return Response.json({ queued: sent.value });
+
+  const msg = inbox.value;
+  const done = ack(msg.id);
+  return Response.json({ id: msg.id, payload: msg.payload, acked: done.ok });
+}
+```
+
+`send(target, payload)` stores a JSON snapshot of `payload` and returns
+`Result<string>` with the message id. `request(target, payload)` also sets the
+current actor as the reply target. `receive(actor?)` leases one message and
+returns `Result<Message | null>`; the default actor is `main`. A leased message
+stays retained until `ack(id)` deletes it or `nack(id, reason?)` requeues it.
+After the configured attempt limit, `nack()` moves the message to the in-memory
+dead-letter set. `reply(id, payload)` sends a high-priority response to the
+original message's reply actor and sets `correlationId`.
+
+The current backend is process-local memory. It survives handler VM reset,
+timeout invalidation, and panic quarantine because payloads are owned by the
+queue, not the JS heap. It does not survive process restart; use
+`--workflow-queue` for the existing durable workflow child-dispatch queue.
+
 ## Virtual Modules
 
 Virtual modules are native Zig APIs exposed through `import { ... } from
@@ -301,6 +338,7 @@ Common runtime flags:
 | Durable workflows | `--durable <dir>` |
 | Service registry and in-process workflow bundle | `--system <file>` |
 | Queue-mediated durable workflow dispatch | `--workflow-queue` |
+| In-memory actor mailboxes | `--actor-queue` |
 | Skip env startup check in development | `--no-env-check` |
 
 ## Compile-Time Proofs

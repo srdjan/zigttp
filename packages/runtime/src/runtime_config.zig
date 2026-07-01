@@ -38,6 +38,24 @@ pub const RuntimeConfig = struct {
     /// Server-owned and shared by every pooled orchestrator runtime; null when
     /// no `--system` bundle is loaded.
     system_registry: ?*anyopaque = null,
+    /// Optional in-process actor queue (`*actor_queue.ActorQueue`) used by
+    /// `zigttp:queue`. Type-erased to keep RuntimeConfig independent from the
+    /// server/runtime ownership graph. Null keeps the module importable but
+    /// makes queue operations return Result errors.
+    queue_system: ?*anyopaque = null,
+    /// When true, the server creates a process-owned in-memory actor queue and
+    /// wires it into every pooled runtime unless queue_system is already set.
+    queue_actor_enabled: bool = false,
+    /// Actor identity used by `zigttp:queue.receive()` when no actor name is
+    /// supplied, and as the source/reply actor for sends from this runtime.
+    queue_actor_name: []const u8 = "main",
+    /// Mailbox capacity used by server-owned ActorQueue instances.
+    queue_capacity: usize = 1024,
+    /// Delivery attempts before nack() moves a message to the dead-letter set.
+    queue_max_attempts: u32 = 3,
+    /// Soft lease window written into message metadata when receive() leases a
+    /// message. The in-memory backend keeps the message in-flight until ack/nack.
+    queue_lease_ms: i64 = 30_000,
     /// Dev/serve live path only: a contract-derived capability policy applied
     /// instead of the embedded (stub) policy by `applyEmbeddedCapabilityPolicy`.
     /// Null on AOT paths, which already carry their full policy in

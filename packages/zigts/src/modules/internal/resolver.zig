@@ -69,8 +69,7 @@ pub fn registerVirtualModule(comptime binding: mb.ModuleBinding, ctx: *context.C
 
     inline for (binding.exports) |exp| {
         const base_func = comptime wrappedExportFn(binding, exp);
-        const name_atom = try ctx.atoms.intern(exp.name);
-        try registerNativeExport(ctx, allocator, pool, name_atom, base_func, exp.arg_count);
+        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, base_func);
     }
 }
 
@@ -84,8 +83,7 @@ pub fn registerVirtualModuleTraced(comptime binding: mb.ModuleBinding, ctx: *con
             comptime trace.makeTracingWrapper(binding.name, exp.name, base_func)
         else
             base_func;
-        const name_atom = try ctx.atoms.intern(exp.name);
-        try registerNativeExport(ctx, allocator, pool, name_atom, func, exp.arg_count);
+        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, func);
     }
 }
 
@@ -107,8 +105,7 @@ pub fn registerVirtualModuleReplay(comptime binding: mb.ModuleBinding, ctx: *con
                 comptime trace.makeReplayStub(binding.name, exp.name))
         else
             base_func;
-        const name_atom = try ctx.atoms.intern(exp.name);
-        try registerNativeExport(ctx, allocator, pool, name_atom, func, exp.arg_count);
+        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, func);
     }
 }
 
@@ -122,9 +119,27 @@ pub fn registerVirtualModuleDurable(comptime binding: mb.ModuleBinding, ctx: *co
             comptime trace.makeDurableWrapper(binding.name, exp.name, base_func)
         else
             base_func;
-        const name_atom = try ctx.atoms.intern(exp.name);
-        try registerNativeExport(ctx, allocator, pool, name_atom, func, exp.arg_count);
+        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, func);
     }
+}
+
+fn registerNativeExportForBinding(
+    comptime binding: mb.ModuleBinding,
+    comptime exp: mb.FunctionBinding,
+    ctx: *context.Context,
+    allocator: std.mem.Allocator,
+    pool: *object.HiddenClassPool,
+    func: object.NativeFn,
+) !void {
+    // Only the namespaced atom is registered: two virtual modules may export
+    // the same function name (e.g. zigttp:queue.send vs zigttp:websocket.send),
+    // and a single shared bare-name global cannot resolve both. Import codegen
+    // (importGlobalAtom) always binds `import { fn } from "zigttp:module"` to
+    // this namespaced atom, so it is the only reachable path for virtual
+    // module exports.
+    const namespaced_name = comptime binding.specifier ++ "#" ++ exp.name;
+    const namespaced_atom = try ctx.atoms.intern(namespaced_name);
+    try registerNativeExport(ctx, allocator, pool, namespaced_atom, func, exp.arg_count);
 }
 
 fn registerNativeExport(

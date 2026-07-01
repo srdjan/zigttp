@@ -16,6 +16,7 @@ pub const Slot = enum(u4) {
     fetch = 11,
     websocket = 12,
     workflow = 13,
+    queue = 14,
 };
 
 pub fn ownerSpecifier(slot: usize) ?[]const u8 {
@@ -31,6 +32,7 @@ pub fn ownerSpecifier(slot: usize) ?[]const u8 {
         @intFromEnum(Slot.fetch) => "zigttp:fetch",
         @intFromEnum(Slot.websocket) => "zigttp:websocket",
         @intFromEnum(Slot.workflow) => "zigttp:workflow",
+        @intFromEnum(Slot.queue) => "zigttp:queue",
         else => null,
     };
 }
@@ -60,6 +62,7 @@ test "module state slots are owned by one active module specifier" {
     try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.validate), "zigttp:decode"));
     try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.sql), "zigttp:decode"));
     try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.cache), "zigttp:decode"));
+    try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.queue), "zigttp:queue"));
     try testing.expect(ownerSpecifier(@intFromEnum(Slot.replay)) == null);
     try testing.expect(ownerSpecifier(15) == null);
 }

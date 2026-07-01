@@ -48,6 +48,7 @@ const io_mod = @import("modules/workflow/io.zig");
 const scope_mod = @import("modules/workflow/scope.zig");
 const durable_mod = @import("modules/workflow/durable.zig");
 const workflow_mod = @import("modules/workflow/workflow.zig");
+const queue_mod = @import("modules/workflow/queue.zig");
 
 /// All in-tree virtual module bindings, in registration order.
 pub const builtins = [_]ModuleBinding{
@@ -64,6 +65,7 @@ pub const builtins = [_]ModuleBinding{
     ported.compose,
     durable_mod.binding,
     workflow_mod.binding,
+    queue_mod.binding,
     ported.url,
     ported.id,
     ported.http,
@@ -102,6 +104,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zigttp:compose", .module_path = "packages/modules/src/workflow/compose.zig", .spec_path = "packages/modules/module-specs/workflow/compose.json" },
     .{ .specifier = "zigttp:durable", .module_path = "packages/zigts/src/modules/workflow/durable.zig", .spec_path = "packages/modules/module-specs/workflow/durable.json" },
     .{ .specifier = "zigttp:workflow", .module_path = "packages/zigts/src/modules/workflow/workflow.zig", .spec_path = "packages/modules/module-specs/workflow/workflow.json" },
+    .{ .specifier = "zigttp:queue", .module_path = "packages/zigts/src/modules/workflow/queue.zig", .spec_path = "packages/modules/module-specs/workflow/queue.json" },
     .{ .specifier = "zigttp:url", .module_path = "packages/modules/src/http/url.zig", .spec_path = "packages/modules/module-specs/http/url.json" },
     .{ .specifier = "zigttp:id", .module_path = "packages/modules/src/platform/id.zig", .spec_path = "packages/modules/module-specs/platform/id.json" },
     .{ .specifier = "zigttp:http", .module_path = "packages/modules/src/http/http_mod.zig", .spec_path = "packages/modules/module-specs/http/http-mod.json" },
@@ -194,6 +197,7 @@ test "fromSpecifier finds known modules" {
     try std.testing.expect(fromSpecifier("zigttp:cache") != null);
     try std.testing.expect(fromSpecifier("zigttp:url") != null);
     try std.testing.expect(fromSpecifier("zigttp:id") != null);
+    try std.testing.expect(fromSpecifier("zigttp:queue") != null);
     try std.testing.expect(fromSpecifier("zigttp-ext:math") == null);
     try std.testing.expect(fromSpecifier("zigttp:unknown") == null);
 }
@@ -307,6 +311,9 @@ test "module capability annotations cover audited helper-enforced built-ins" {
 
     const durable_binding = fromSpecifier("zigttp:durable").?;
     try std.testing.expect(bindingHasCapability(durable_binding, .runtime_callback));
+
+    const queue_binding = fromSpecifier("zigttp:queue").?;
+    try std.testing.expect(bindingHasCapability(queue_binding, .runtime_callback));
 
     const ratelimit_binding = fromSpecifier("zigttp:ratelimit").?;
     try std.testing.expect(bindingHasCapability(ratelimit_binding, .clock));

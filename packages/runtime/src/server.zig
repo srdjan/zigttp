@@ -29,6 +29,7 @@ const ws_frame_loop = @import("ws_frame_loop.zig");
 const websocket_pool = @import("websocket_pool.zig");
 const in_process_dispatch = @import("in_process_dispatch.zig");
 const SystemRuntime = in_process_dispatch.SystemRuntime;
+const actor_queue = @import("actor_queue.zig");
 const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const proof_audit_ring = @import("proof_audit_ring.zig");
@@ -1516,6 +1517,9 @@ pub const Server = struct {
     /// `--system` bundle is loaded. Deinitialised after the main pool so no
     /// in-flight orchestrator can still dispatch into it.
     system_runtime: ?SystemRuntime = null,
+    /// Process-owned in-memory actor queue for opt-in `zigttp:queue` delivery.
+    /// Deinitialised after handler pools so no runtime can hold a queue pointer.
+    actor_queue: ?actor_queue.ActorQueue = null,
     /// Dev/serve policy backing storage. The contract-derived RuntimePolicy
     /// handed to the pool borrows string slices from these structs. Three
     /// generations are kept so that runtimes that started under policy N can
@@ -1603,6 +1607,7 @@ pub const Server = struct {
         // After the main pool: in-flight orchestrators (which dispatch into the
         // registry) are gone, so its sub-pools are safe to tear down.
         if (self.system_runtime) |*sr| sr.deinit();
+        if (self.actor_queue) |*q| q.deinit();
         if (self.proof_cache) |*pc| pc.deinit();
         if (self.ws_pool) |*wsp| wsp.deinit();
         if (self.contract) |*c| c.deinit();
@@ -1933,6 +1938,19 @@ pub const Server = struct {
         // interpreter's cooperative deadline check is enforced per handler call.
         var pool_rt_config = self.config.runtime_config;
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
+
+        if (pool_rt_config.queue_actor_enabled and pool_rt_config.queue_system == null) {
+            self.actor_queue = actor_queue.ActorQueue.init(
+                self.allocator,
+                pool_rt_config.queue_capacity,
+                pool_rt_config.queue_lease_ms,
+            );
+            pool_rt_config.queue_system = @ptrCast(&self.actor_queue.?);
+            std.log.info("Actor queue: in-memory mailboxes capacity={d} lease_ms={d}", .{
+                pool_rt_config.queue_capacity,
+                pool_rt_config.queue_lease_ms,
+            });
+        }
 
         // Build the in-process sub-handler registry from `--system <manifest>`
         // and point every pooled orchestrator runtime at it. The same manifest

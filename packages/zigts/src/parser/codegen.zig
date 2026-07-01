@@ -16,6 +16,7 @@ const js_object = @import("../object.zig");
 const context = @import("../context.zig");
 const handler_analyzer = @import("../handler_analyzer.zig");
 const bool_checker = @import("../bool_checker.zig");
+const module_manifest = @import("../module_manifest.zig");
 
 // Re-export types used by this module
 const JSValue = value.JSValue;
@@ -587,12 +588,36 @@ pub const CodeGen = struct {
             // Parser currently only accepts named imports.
             if (spec.kind != .named) continue;
 
-            // Copy the exported global into the local import binding.
+            // Copy the exported global into the local import binding. Virtual
+            // modules use namespaced globals to avoid collisions such as
+            // zigttp:queue.send vs zigttp:websocket.send; relative file imports
+            // keep the legacy unqualified export name.
             try self.emit(.get_global);
-            try self.emitU16(spec.imported_atom);
+            try self.emitU16(try self.importGlobalAtom(import_decl.module_idx, spec.imported_atom));
             self.pushStack(1);
             try self.emitSetBinding(spec.local_binding);
         }
+    }
+
+    fn importGlobalAtom(self: *CodeGen, module_idx: u16, imported_atom: u16) !u16 {
+        const module_name = self.ir.getString(module_idx) orelse return imported_atom;
+        if (!module_manifest.validSpecifier(module_name)) return imported_atom;
+
+        const atoms = self.atoms orelse return imported_atom;
+        const imported_name = self.atomName(imported_atom) orelse return imported_atom;
+        const namespaced = try std.fmt.allocPrint(self.allocator, "{s}#{s}", .{ module_name, imported_name });
+        defer self.allocator.free(namespaced);
+        const atom = try atoms.intern(namespaced);
+        return @truncate(@intFromEnum(atom));
+    }
+
+    fn atomName(self: *CodeGen, atom_idx: u16) ?[]const u8 {
+        const atom: js_object.Atom = @enumFromInt(@as(u32, atom_idx));
+        if (atom.isPredefined()) return atom.toPredefinedName();
+        if (self.atoms) |atoms| {
+            if (atoms.getName(atom)) |name| return name;
+        }
+        return self.ir.getString(atom_idx);
     }
 
     // ============ Expression Emission ============

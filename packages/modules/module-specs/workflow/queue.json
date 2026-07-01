@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:queue",
+  "source": "packages/zigts/src/modules/workflow/queue.zig",
+  "requiredCapabilities": [
+    "runtime_callback"
+  ],
+  "exports": [
+    {
+      "name": "send",
+      "effect": "write",
+      "returns": "result",
+      "failureSeverity": "expected"
+    },
+    {
+      "name": "request",
+      "effect": "write",
+      "returns": "result",
+      "failureSeverity": "expected"
+    },
+    {
+      "name": "receive",
+      "effect": "write",
+      "returns": "result",
+      "failureSeverity": "expected"
+    },
+    {
+      "name": "ack",
+      "effect": "write",
+      "returns": "result",
+      "failureSeverity": "expected"
+    },
+    {
+      "name": "nack",
+      "effect": "write",
+      "returns": "result",
+      "failureSeverity": "expected"
+    },
+    {
+      "name": "reply",
+      "effect": "write",
+      "returns": "result",
+      "failureSeverity": "expected"
+    }
+  ]
+}

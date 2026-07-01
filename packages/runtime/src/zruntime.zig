@@ -15,6 +15,7 @@ const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
 const durable_executor = @import("durable_executor.zig");
 const workflow_queue = @import("workflow_queue.zig");
+const actor_queue = @import("actor_queue.zig");
 const trace_request_recorder = @import("trace_request_recorder.zig");
 const http_parser = @import("http_parser.zig");
 const server_io = @import("server_io.zig");
@@ -98,9 +99,15 @@ fn systemRegistryFromConfig(config: RuntimeConfig) ?*SystemRuntime {
     return @ptrCast(@alignCast(ptr));
 }
 
+fn queueSystemFromConfig(config: RuntimeConfig) ?*actor_queue.ActorQueue {
+    const ptr = config.queue_system orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
 test {
     // Force collection of in_process_dispatch.zig tests under test-zruntime.
     _ = @import("in_process_dispatch.zig");
+    _ = @import("actor_queue.zig");
 }
 
 const openTraceFile = runtime_config_mod.openTraceFile;
@@ -203,6 +210,9 @@ pub const Runtime = struct {
     /// (cast from the type-erased pointer). Null on runtimes with no `--system`
     /// bundle. Read by `workflowCallCallback`; gates `installWorkflowModuleState`.
     system_registry_ref: ?*SystemRuntime = null,
+    /// Server/test-owned actor queue used by `zigttp:queue`. Null keeps the
+    /// module importable but makes queue functions return Result errors.
+    queue_system_ref: ?*actor_queue.ActorQueue = null,
 
     const Self = @This();
 
@@ -354,6 +364,7 @@ pub const Runtime = struct {
             .hybrid_state = hybrid_state,
             .ws_pool_ref = null,
             .system_registry_ref = systemRegistryFromConfig(config),
+            .queue_system_ref = queueSystemFromConfig(config),
         };
         self.strings = &self.owned_strings.?;
         errdefer self.owned_strings.?.deinit();
@@ -422,6 +433,7 @@ pub const Runtime = struct {
             .hybrid_state = null,
             .ws_pool_ref = null,
             .system_registry_ref = systemRegistryFromConfig(config),
+            .queue_system_ref = queueSystemFromConfig(config),
         };
 
         applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
@@ -500,6 +512,9 @@ pub const Runtime = struct {
         }
         if (self.system_registry_ref != null) {
             try self.installWorkflowModuleState();
+        }
+        if (self.queue_system_ref != null) {
+            try self.installQueueModuleState();
         }
         try self.installFetchModuleState();
 
@@ -882,6 +897,24 @@ pub const Runtime = struct {
         );
     }
 
+    fn installQueueModuleState(self: *Self) !void {
+        const queue_state = try self.allocator.create(zq.modules.queue.QueueCallbacks);
+        queue_state.* = .{
+            .send_fn = queueSendCallback,
+            .request_fn = queueRequestCallback,
+            .receive_fn = queueReceiveCallback,
+            .ack_fn = queueAckCallback,
+            .nack_fn = queueNackCallback,
+            .reply_fn = queueReplyCallback,
+            .runtime_ptr = self,
+        };
+        self.ctx.setModuleState(
+            zq.modules.queue.MODULE_STATE_SLOT,
+            @ptrCast(queue_state),
+            &zq.modules.queue.QueueCallbacks.deinitOpaque,
+        );
+    }
+
     fn installSqlModuleState(self: *Self) !void {
         try zq.modules.sql.installStore(self.ctx, self.config.sqlite_path);
     }
@@ -893,6 +926,148 @@ pub const Runtime = struct {
 
     fn installFetchModuleState(self: *Self) !void {
         try zq.modules.fetch.installState(self.ctx, self, fetchModuleCallback);
+    }
+
+    fn queueRef(self: *Self) ?*actor_queue.ActorQueue {
+        return self.queue_system_ref;
+    }
+
+    /// Per-pooled-instance reply identity for `zigttp:queue.request()`/
+    /// `receive()` round trips. `config.queue_actor_name` ("main" by default)
+    /// is a single value shared by every pooled Runtime, so using it directly
+    /// as the reply-to actor would let concurrent in-flight requests on
+    /// different pool slots cross-deliver each other's replies out of the
+    /// same shared mailbox. Suffixing with this instance's stable address
+    /// (each pool slot's Runtime is allocated once and reused, never moved)
+    /// gives every concurrently in-flight request its own private mailbox
+    /// while leaving explicit, well-known actor names (e.g. `receive("worker")`)
+    /// untouched.
+    fn queueSelfActorName(self: *Self, buf: *[128]u8) []const u8 {
+        return std.fmt.bufPrint(buf, "{s}#{x}", .{ self.config.queue_actor_name, @intFromPtr(self) }) catch self.config.queue_actor_name;
+    }
+
+    fn queueSendCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, target: []const u8, payload: zq.JSValue) anyerror!zq.JSValue {
+        const rt: *Self = @ptrCast(@alignCast(runtime_ptr));
+        return rt.queueSendInternal(ctx, target, payload, false);
+    }
+
+    fn queueRequestCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, target: []const u8, payload: zq.JSValue) anyerror!zq.JSValue {
+        const rt: *Self = @ptrCast(@alignCast(runtime_ptr));
+        return rt.queueSendInternal(ctx, target, payload, true);
+    }
+
+    fn queueReceiveCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, actor: ?[]const u8) anyerror!zq.JSValue {
+        const rt: *Self = @ptrCast(@alignCast(runtime_ptr));
+        const queue = rt.queueRef() orelse return zq.modules.util.createPlainResultErr(ctx, "queue runtime is not installed");
+        var actor_buf: [128]u8 = undefined;
+        const actor_name = actor orelse rt.queueSelfActorName(&actor_buf);
+        const message = queue.receive(actor_name) catch |err| {
+            return queueErrorResult(ctx, err);
+        };
+        const msg = message orelse return zq.modules.util.createPlainResultOk(ctx, zq.JSValue.null_val);
+        return zq.modules.util.createPlainResultOk(ctx, try rt.queueMessageToValue(ctx, msg));
+    }
+
+    fn queueAckCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, id_text: []const u8) anyerror!zq.JSValue {
+        const rt: *Self = @ptrCast(@alignCast(runtime_ptr));
+        const queue = rt.queueRef() orelse return zq.modules.util.createPlainResultErr(ctx, "queue runtime is not installed");
+        const id = parseMessageId(id_text) catch return zq.modules.util.createPlainResultErr(ctx, "invalid message id");
+        if (!queue.ack(id)) return zq.modules.util.createPlainResultErr(ctx, "message is not in flight");
+        return zq.modules.util.createPlainResultOk(ctx, zq.JSValue.true_val);
+    }
+
+    fn queueNackCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, id_text: []const u8, reason: []const u8) anyerror!zq.JSValue {
+        const rt: *Self = @ptrCast(@alignCast(runtime_ptr));
+        const queue = rt.queueRef() orelse return zq.modules.util.createPlainResultErr(ctx, "queue runtime is not installed");
+        const id = parseMessageId(id_text) catch return zq.modules.util.createPlainResultErr(ctx, "invalid message id");
+        const outcome = queue.nack(id, reason) catch |err| {
+            return queueErrorResult(ctx, err);
+        };
+        return switch (outcome) {
+            .not_found => zq.modules.util.createPlainResultErr(ctx, "message is not in flight"),
+            .requeued => zq.modules.util.createPlainResultOk(ctx, try ctx.createString("requeued")),
+            .dead_lettered => zq.modules.util.createPlainResultOk(ctx, try ctx.createString("dead_lettered")),
+        };
+    }
+
+    fn queueReplyCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, id_text: []const u8, payload: zq.JSValue) anyerror!zq.JSValue {
+        const rt: *Self = @ptrCast(@alignCast(runtime_ptr));
+        const queue = rt.queueRef() orelse return zq.modules.util.createPlainResultErr(ctx, "queue runtime is not installed");
+        const id = parseMessageId(id_text) catch return zq.modules.util.createPlainResultErr(ctx, "invalid message id");
+        const payload_json = zq.http.valueToJson(ctx, payload) catch |err| {
+            return queueErrorResult(ctx, err);
+        };
+        defer ctx.allocator.free(payload_json);
+        const reply_id = queue.reply(id, payload_json, rt.config.queue_max_attempts) catch |err| {
+            return queueErrorResult(ctx, err);
+        };
+        return queueIdResult(ctx, reply_id);
+    }
+
+    fn queueSendInternal(self: *Self, ctx: *zq.Context, target: []const u8, payload: zq.JSValue, comptime request_reply: bool) !zq.JSValue {
+        const queue = self.queueRef() orelse return zq.modules.util.createPlainResultErr(ctx, "queue runtime is not installed");
+        const payload_json = zq.http.valueToJson(ctx, payload) catch |err| {
+            return queueErrorResult(ctx, err);
+        };
+        defer ctx.allocator.free(payload_json);
+        var actor_buf: [128]u8 = undefined;
+        const source = self.queueSelfActorName(&actor_buf);
+        const id = queue.send(target, payload_json, .{
+            .source = source,
+            .reply_to = if (request_reply) source else null,
+            .max_attempts = self.config.queue_max_attempts,
+        }) catch |err| {
+            return queueErrorResult(ctx, err);
+        };
+        return queueIdResult(ctx, id);
+    }
+
+    fn queueMessageToValue(self: *Self, ctx: *zq.Context, msg: *const actor_queue.MessageEnvelope) !zq.JSValue {
+        _ = self;
+        const obj = try ctx.createObject(ctx.object_prototype);
+        try setStringField(ctx, obj, "id", try formatMessageId(ctx, msg.id));
+        try setStringField(ctx, obj, "source", try ctx.createString(msg.source));
+        try setStringField(ctx, obj, "target", try ctx.createString(msg.target));
+        const attempt_limit: u32 = @intCast(std.math.maxInt(i32));
+        const attempt_i32: i32 = @intCast(@min(msg.attempt, attempt_limit));
+        try ctx.setPropertyChecked(obj, try ctx.atoms.intern("attempt"), zq.JSValue.fromInt(attempt_i32));
+        try ctx.setPropertyChecked(obj, try ctx.atoms.intern("payload"), zq.trace.jsonToJSValue(ctx, msg.payload_json));
+        if (msg.correlation_id) |correlation_id| {
+            try setStringField(ctx, obj, "correlationId", try formatMessageId(ctx, correlation_id));
+        }
+        if (msg.reply_to) |reply_to| {
+            try setStringField(ctx, obj, "replyTo", try ctx.createString(reply_to));
+        }
+        return obj.toValue();
+    }
+
+    fn queueIdResult(ctx: *zq.Context, id: actor_queue.MessageId) !zq.JSValue {
+        return zq.modules.util.createPlainResultOk(ctx, try formatMessageId(ctx, id));
+    }
+
+    fn formatMessageId(ctx: *zq.Context, id: actor_queue.MessageId) !zq.JSValue {
+        var buf: [20]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "{d}", .{id}) catch unreachable;
+        return ctx.createString(text);
+    }
+
+    fn setStringField(ctx: *zq.Context, obj: *zq.JSObject, name: []const u8, val: zq.JSValue) !void {
+        try ctx.setPropertyChecked(obj, try ctx.atoms.intern(name), val);
+    }
+
+    fn parseMessageId(id_text: []const u8) !actor_queue.MessageId {
+        return std.fmt.parseInt(actor_queue.MessageId, id_text, 10);
+    }
+
+    fn queueErrorResult(ctx: *zq.Context, err: anyerror) !zq.JSValue {
+        const message = switch (err) {
+            error.QueueFull => "queue full",
+            error.InvalidActor => "invalid actor",
+            error.MessageNotInFlight => "message is not in flight",
+            error.OutOfMemory => "out of memory",
+            else => @errorName(err),
+        };
+        return zq.modules.util.createPlainResultErr(ctx, message);
     }
 
     /// Install the WebSocket callback table on this runtime, pointed at
@@ -2355,6 +2530,65 @@ fn makeTestRequest(
     }
 
     return request;
+}
+
+test "zigttp:queue sends receives and acks JSON payloads" {
+    const allocator = std.testing.allocator;
+
+    var queue = actor_queue.ActorQueue.init(allocator, 8, 30_000);
+    defer queue.deinit();
+
+    const rt = try Runtime.init(allocator, .{
+        .jit_policy = .disabled,
+        .queue_system = @ptrCast(&queue),
+        .queue_actor_name = "main",
+    });
+    defer rt.deinit();
+
+    const direct_payload = try rt.ctx.createString("direct");
+    _ = try rt.queueSendInternal(rt.ctx, "direct", direct_payload, false);
+    try std.testing.expect(!rt.ctx.hasException());
+    const direct_msg = (try queue.receive("direct")).?;
+    try std.testing.expect(queue.ack(direct_msg.id));
+
+    const handler_code =
+        \\import { send, receive, ack } from "zigttp:queue";
+        \\function handler(req) {
+        \\  const sent = send("worker", { kind: "work", n: 3 });
+        \\  if (!sent.ok) return Response.json({ error: sent.error }, { status: 500 });
+        \\  const inbox = receive("worker");
+        \\  if (!inbox.ok) return Response.json({ error: inbox.error }, { status: 500 });
+        \\  const msg = inbox.value;
+        \\  const acknowledged = ack(msg.id);
+        \\  return Response.json({
+        \\    id: sent.value,
+        \\    source: msg.source,
+        \\    target: msg.target,
+        \\    attempt: msg.attempt,
+        \\    kind: msg.payload.kind,
+        \\    n: msg.payload.n,
+        \\    acked: acknowledged.ok
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<queue>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    // The default reply-to identity is namespaced per Runtime instance
+    // ("main#<address>") so concurrent pooled runtimes never share a
+    // mailbox; only the prefix is deterministic across test runs.
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"source\":\"main#") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"target\":\"worker\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"kind\":\"work\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"n\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"acked\":true") != null);
+    try std.testing.expectEqual(@as(?*actor_queue.MessageEnvelope, null), try queue.receive("worker"));
 }
 
 fn seedIncompleteDurableRandomStep(

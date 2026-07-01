@@ -483,6 +483,10 @@ fn parseCommonServeFlag(
         config.runtime_config.workflow_queue_enabled = true;
         return true;
     }
+    if (std.mem.eql(u8, arg, "--actor-queue")) {
+        config.runtime_config.queue_actor_enabled = true;
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--outbound-http")) {
         config.runtime_config.outbound_http_enabled = true;
         return true;
@@ -723,6 +727,7 @@ fn printAppendedHelp() void {
         \\  --system <FILE>       Handler bundle for service and workflow
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
         \\  --workflow-queue      Queue durable workflow dispatch; requires --system and --durable
+        \\  --actor-queue         Enable in-memory zigttp:queue actor mailboxes
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -791,6 +796,7 @@ fn printServeHelp() void {
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
         \\  --system <FILE>       Handler bundle for zigttp:service/workflow
         \\  --workflow-queue      Queue durable workflow dispatch; requires --system and --durable
+        \\  --actor-queue         Enable in-memory zigttp:queue actor mailboxes
         \\  --no-env-check        Skip startup env var validation
         \\  --security-log <FILE> Append security events to a JSONL file
         \\  --lifecycle <MODE>    Runtime lifecycle mode
@@ -932,6 +938,14 @@ test "parseCommonServeFlag: --lifecycle parses known value" {
     var i: usize = 0;
     try std.testing.expect(try parseCommonServeFlag(argv[0], &i, &argv, &config));
     try std.testing.expectEqual(contract_runtime.PoolingPolicy.ephemeral, config.lifecycle_override.?);
+}
+
+test "parseCommonServeFlag: --actor-queue enables queue runtime" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    const argv = [_][]const u8{"--actor-queue"};
+    var i: usize = 0;
+    try std.testing.expect(try parseCommonServeFlag(argv[0], &i, &argv, &config));
+    try std.testing.expect(config.runtime_config.queue_actor_enabled);
 }
 
 test "parseCommonServeFlag: --lifecycle rejects unknown value" {

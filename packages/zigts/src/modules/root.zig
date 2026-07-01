@@ -21,6 +21,7 @@ pub const io = @import("workflow/io.zig");
 pub const scope = @import("workflow/scope.zig");
 pub const durable = @import("workflow/durable.zig");
 pub const workflow = @import("workflow/workflow.zig");
+pub const queue = @import("workflow/queue.zig");
 
 pub const service = @import("net/service.zig");
 pub const fetch = @import("net/fetch.zig");
