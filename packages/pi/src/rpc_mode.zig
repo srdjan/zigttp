@@ -861,7 +861,7 @@ test "rpc: model.list enumerates registered models" {
     );
 
     buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "claude-opus-4-6") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "claude-sonnet-5") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "claude-sonnet-4-6") != null);
 }
 
