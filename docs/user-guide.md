@@ -286,6 +286,14 @@ child side effect but before its queue result is written can re-run that child.
 `saga()` is not supported with `--workflow-queue`; keep queue-mediated handler
 communication at top-level durable `call`, `follow`, or `fanout` boundaries.
 
+The analyzer records durable workflow proof properties separately from the
+handler-wide property chips. Receipts, deploy manifests, and proof traces expose
+`durableWorkflowProofLevel`, `durableWorkflowRetrySafe`,
+`durableWorkflowIdempotent`, `durableWorkflowFaultCovered`, and
+`proofTrace.durable_workflow_*` so replay guarantees are visible in the same
+artifacts you already inspect. See [Durable Workflows](durable-workflows.md) and
+[First Durable Workflow](tutorials/first-durable-workflow.md).
+
 ## Actor Queues
 
 `zigttp:queue` provides opt-in in-process actor mailboxes for handlers that need

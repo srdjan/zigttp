@@ -1,6 +1,11 @@
 # Examples
 
-Handler files grouped by what they demonstrate. The compiler treats every example as a complete program: parse, contract, verify, then run. Each `.test.jsonl` file beside a handler is replayable through `zigttp mock`; build-time replay uses `zig build -Dhandler=<handler> -Dtest-file=<tests>`.
+Handler files grouped by what they demonstrate. The compiler treats every
+example as a complete program: parse, contract, verify, then run. Each
+`.test.jsonl` file beside a handler is replayable through `zigttp mock`;
+build-time replay uses `zig build -Dhandler=<handler> -Dtest-file=<tests>`.
+Workflow examples use live server checks in `scripts/test-examples.sh` because
+they exercise real durable state, signals, and the persisted workflow queue.
 
 ## Start here
 
@@ -60,6 +65,7 @@ with an explicit outbound host allow-list.
 ### Advanced surfaces
 
 - **durable/** - `run`, `step`, `waitSignal` from `zigttp:durable`. Replay-safe execution. See [approval.ts](durable/approval.ts).
+- **workflow/** - `call`, `fanout`, `follow`, durable workflow queue, signal resume, timeout, and dead-letter replay fixtures. See [../docs/durable-workflows.md](../docs/durable-workflows.md).
 - **parallel/** - `parallel` and `race` from `zigttp:io`.
 - **websocket/** - WebSocket events with `serializeAttachment` and rooms.
 - **sql/** - the `sql` tagged template from `zigttp:sql`.
@@ -86,6 +92,9 @@ deliberately do *not* carry a `Spec<...>`, so they exit non-zero under `check`.
 That is expected, not a bug: the example test harness
 (`scripts/test-examples.sh`) replays each `.test.jsonl` for observable
 behavior, which is a separate gate from the strict `check` discharge.
+Workflow fixtures in `examples/workflow/` run as live server checks because the
+JSONL replay runner intentionally stubs virtual-module I/O and creates a fresh
+runtime per test case.
 
 The canonical example that declares and fully discharges a `Spec<...>` - and so
 passes strict `check` cleanly - is [handler/handler.ts](handler/handler.ts).

@@ -13,6 +13,8 @@ path.
   proof-ledger commands, expert mode, and machine-readable output.
 - [Virtual Modules](virtual-modules/README.md) - complete current `zigttp:*`
   module list, exports, capabilities, effects, and runtime requirements.
+- [Durable Workflows](durable-workflows.md) - durable run/step/signal,
+  workflow queue, dead-letter handling, proof receipts, and replay boundaries.
 - [Roadmap](roadmap.md) - one forward-looking document for supported platforms,
   current limitations, and planned work.
 

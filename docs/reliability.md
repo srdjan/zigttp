@@ -37,11 +37,30 @@ key, user, or route.
 - Slow request reads return `408`.
 - Handler execution deadlines return `504` and the runtime slot is replaced
   before it is reused.
+- Durable `stepWithTimeout()` returns `{ ok: false, error: "timeout" }` when
+  the step deadline expires. Timers and signal waits inside that step obey the
+  same deadline.
 - Exhausted runtime pools return `503`.
 - A handler panic is caught by a setjmp/longjmp boundary around each handler
   invocation, returns `500`, and quarantines the pool slot. The server and other
   workers keep running. A panic in server infrastructure outside that boundary
   still aborts the process.
+
+## Durable Replay And Workflow Queue
+
+Durable replay is conservative when a validated contract is present:
+
+- incomplete replay requires a proven `durable.workflow.properties.retrySafe`
+  claim or a matching `Idempotency-Key`;
+- completed response reuse requires proven
+  `durable.workflow.properties.idempotent` or a matching `Idempotency-Key`;
+- unproven replay returns a `599` JSON response with
+  `DurableRetryUnproven` or `DurableIdempotencyUnproven`.
+
+`--workflow-queue` persists durable workflow child dispatch under
+`<durable>/workflow-queue`. Dead letters are visible operator state, not hidden
+cleanup: list, inspect, replay, or discard them with `zigttp workflow-queue`.
+`saga()` remains unsupported with `--workflow-queue`.
 
 ## Access Logs
 

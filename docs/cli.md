@@ -100,6 +100,23 @@ zigttp proofs gate --base origin/main --head HEAD
 verify <url>` verifies a live endpoint's attestation. `zigttp proofs verify
 <bundle-dir>` re-hashes a local proof bundle.
 
+`zigttp verify --json` includes durable workflow receipt fields when a build was
+attested with a workflow contract: `durableWorkflowProofLevel`,
+`durableWorkflowRetrySafe`, `durableWorkflowIdempotent`, and
+`durableWorkflowFaultCovered`.
+
+Workflow queue dead-letter commands:
+
+```bash
+zigttp workflow-queue list --durable <dir>
+zigttp workflow-queue show --durable <dir> <item-id>
+zigttp workflow-queue replay --durable <dir> <item-id>
+zigttp workflow-queue discard --durable <dir> <item-id>
+```
+
+These commands inspect the persisted queue used by `--workflow-queue`; they do
+not operate on the in-memory actor queue from `zigttp:queue`.
+
 ## Analyzer Commands
 
 These commands are listed by `zigttp help --all` from the shared `zigts`
