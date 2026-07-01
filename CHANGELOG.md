@@ -10,6 +10,10 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 - **Breaking:** durable `run()` no longer trusts an automatic retry or a duplicate-response replay by default. Reusing a completed durable response, or retrying a run that a crash left incomplete, now requires either a workflow proof (`idempotent` for response reuse, `retry_safe` for retries) or a client-supplied `Idempotency-Key` header matching the `run()` key, recorded in an on-disk ledger keyed by that header. Without one of those, the handler gets a soft `599` JSON error (`DurableIdempotencyUnproven` / `DurableRetryUnproven`) instead of silently re-running or replaying a side effect. Enforcement is on by default for any handler with durable storage configured; unproven workflows should either declare `Spec<"idempotent" | "retry_safe">` or have callers send `Idempotency-Key`.
 
+### Fixed
+
+- Durable crash recovery no longer double-frees nested function bytecode when `recoverOne` replays a run to completion. Every non-closure function value created at runtime (including the zero-upvalue arrow callbacks passed to `run()`/`step()`) shared its underlying bytecode with the enclosing function's constant pool, so both were freed independently on teardown; a durable run resuming after a crash and finishing successfully could corrupt memory. Fixed by deduplicating bytecode teardown against a single per-teardown-pass tracking set.
+
 ### Added
 
 - `--workflow-queue`: recovery for `.reclaim-*` files left behind by a crashed lease-reclaim attempt (a stray reclaim is now surfaced via `zigttp` queue tooling and reclaimed automatically once it is older than the lease window, instead of being invisible to future claims).
