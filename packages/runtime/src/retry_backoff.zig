@@ -4,7 +4,7 @@ pub fn exponentialCapMs(base_ms: i64, max_ms: i64, attempt: u32) i64 {
     if (base_ms <= 0) return 0;
     if (max_ms <= 0) return 0;
     const shift: u6 = @intCast(@min(attempt, 6));
-    return @min(base_ms << shift, max_ms);
+    return @min(base_ms <<| shift, max_ms);
 }
 
 pub fn seedBytes(bytes: []const u8, salt: u64) u64 {
@@ -35,6 +35,15 @@ test "retry backoff caps exponential delay" {
     try std.testing.expectEqual(@as(i64, 100), exponentialCapMs(100, 60_000, 0));
     try std.testing.expectEqual(@as(i64, 6_400), exponentialCapMs(100, 60_000, 6));
     try std.testing.expectEqual(@as(i64, 60_000), exponentialCapMs(1_000, 60_000, 9));
+}
+
+test "retry backoff does not sign-flip when base_ms << shift overflows i64" {
+    // A plain `<<` silently wraps/flips sign on overflow instead of
+    // saturating, which used to collapse the cap to a negative value (and
+    // then, via boundedJitterMs's cap_ms <= 1 branch, to a 0ms backoff)
+    // instead of clamping to max_ms.
+    const huge_base: i64 = 200_000_000_000_000_000;
+    try std.testing.expectEqual(@as(i64, 60_000), exponentialCapMs(huge_base, 60_000, 6));
 }
 
 test "retry backoff jitter stays inside upper half of cap" {
