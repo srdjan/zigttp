@@ -22,6 +22,7 @@ const handler_loader = @import("handler_loader.zig");
 const durable_executor = @import("durable_executor.zig");
 const DurableStore = @import("durable_store.zig").DurableStore;
 const runtime_natives = @import("runtime_natives.zig");
+const retry_backoff = @import("retry_backoff.zig");
 
 const c = @cImport({
     @cInclude("dirent.h");
@@ -82,8 +83,11 @@ pub const RetryTracker = struct {
             }
             return;
         }
-        const shift: u6 = @intCast(@min(gop.value_ptr.consecutive_failures - 1, 6));
-        const backoff = @min(base_backoff_ms << shift, max_backoff_ms);
+        const attempt = gop.value_ptr.consecutive_failures - 1;
+        var seed = retry_backoff.seedBytes(name, 0x44555241424c4552);
+        seed = retry_backoff.mix(seed, @intCast(gop.value_ptr.consecutive_failures));
+        seed = retry_backoff.mix(seed, @bitCast(now_ms));
+        const backoff = retry_backoff.retryDelayMs(base_backoff_ms, max_backoff_ms, attempt, seed);
         gop.value_ptr.next_attempt_ms = now_ms + backoff;
     }
 
@@ -186,7 +190,11 @@ pub fn recoverIncompleteOplogsTracked(
                 // replay (which otherwise repeats every poll with no backoff,
                 // since .pending is neutral to the retry tracker) when no
                 // matching signal is present yet.
-                .wait_signal => |w| if (signalDefinitelyAbsent(allocator, oplog_dir, run_key, w.name)) continue,
+                .wait_signal => |w| if (signalDefinitelyAbsent(allocator, oplog_dir, run_key, w.name)) {
+                    if (w.timeout_ms) |deadline| {
+                        if (deadline > trace.unixMillis()) continue;
+                    } else continue;
+                },
                 else => {},
             }
         }
@@ -456,17 +464,30 @@ test "durable recovery: RetryTracker backs off and quarantines persistent failur
     const name = "durable-abc.jsonl";
     try testing.expect(tracker.shouldAttempt(name, 0));
 
-    // First failure: 1s backoff.
+    // First failure: jittered 1s-cap backoff.
     tracker.recordFailure(name, 0);
-    try testing.expect(!tracker.shouldAttempt(name, 500));
-    try testing.expect(tracker.shouldAttempt(name, 1_000));
+    var seed = retry_backoff.seedBytes(name, 0x44555241424c4552);
+    seed = retry_backoff.mix(seed, 1);
+    seed = retry_backoff.mix(seed, @as(u64, @bitCast(@as(i64, 0))));
+    const first_delay = retry_backoff.retryDelayMs(RetryTracker.base_backoff_ms, RetryTracker.max_backoff_ms, 0, seed);
+    try testing.expect(first_delay >= 500);
+    try testing.expect(first_delay <= 1_000);
+    try testing.expect(!tracker.shouldAttempt(name, first_delay - 1));
+    try testing.expect(tracker.shouldAttempt(name, first_delay));
 
-    // Backoff doubles and caps at 60s.
     tracker.recordFailure(name, 1_000);
-    try testing.expect(!tracker.shouldAttempt(name, 2_500));
-    try testing.expect(tracker.shouldAttempt(name, 3_000));
+    seed = retry_backoff.seedBytes(name, 0x44555241424c4552);
+    seed = retry_backoff.mix(seed, 2);
+    seed = retry_backoff.mix(seed, @as(u64, @bitCast(@as(i64, 1_000))));
+    const second_delay = retry_backoff.retryDelayMs(RetryTracker.base_backoff_ms, RetryTracker.max_backoff_ms, 1, seed);
+    try testing.expect(second_delay >= 1_000);
+    try testing.expect(second_delay <= 2_000);
+    try testing.expect(!tracker.shouldAttempt(name, 1_000 + second_delay - 1));
+    try testing.expect(tracker.shouldAttempt(name, 1_000 + second_delay));
+
+    // Backoff still caps at 60s before jitter chooses inside the cap.
     for (0..5) |_| tracker.recordFailure(name, 10_000);
-    try testing.expect(!tracker.shouldAttempt(name, 10_000 + 59_999));
+    try testing.expect(!tracker.shouldAttempt(name, 10_000 + 29_999));
     try testing.expect(tracker.shouldAttempt(name, 10_000 + 60_000));
 
     // Success clears the entry entirely.

@@ -368,6 +368,7 @@ pub const StepResultTrace = struct {
 
 pub const WaitTimerTrace = struct {
     until_ms: i64,
+    timeout_ms: ?i64 = null,
 };
 
 pub const ResumeTimerTrace = struct {
@@ -376,6 +377,7 @@ pub const ResumeTimerTrace = struct {
 
 pub const WaitSignalTrace = struct {
     name: []const u8,
+    timeout_ms: ?i64 = null,
 };
 
 pub const ResumeSignalTrace = struct {
@@ -510,6 +512,7 @@ pub fn parseTraceLine(line: []const u8) !TraceEntry {
     } else if (std.mem.eql(u8, type_str, "wait_timer")) {
         return .{ .wait_timer = .{
             .until_ms = findJsonIntValue(line, "\"until_ms\"") orelse 0,
+            .timeout_ms = findJsonIntValue(line, "\"timeout_ms\""),
         } };
     } else if (std.mem.eql(u8, type_str, "resume_timer")) {
         return .{ .resume_timer = .{
@@ -518,6 +521,7 @@ pub fn parseTraceLine(line: []const u8) !TraceEntry {
     } else if (std.mem.eql(u8, type_str, "wait_signal")) {
         return .{ .wait_signal = .{
             .name = findJsonStringValue(line, "\"name\"") orelse "",
+            .timeout_ms = findJsonIntValue(line, "\"timeout_ms\""),
         } };
     } else if (std.mem.eql(u8, type_str, "resume_signal")) {
         return .{ .resume_signal = .{
@@ -1419,10 +1423,14 @@ pub const DurableState = struct {
         try self.persistBuffer();
     }
 
-    pub fn persistWaitTimer(self: *DurableState, until_ms: i64) DurablePersistenceError!void {
+    pub fn persistWaitTimer(self: *DurableState, until_ms: i64, timeout_ms: ?i64) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
         try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"wait_timer\",\"until_ms\":"));
         try requireAppend(appendInt(&self.write_buf, self.allocator, until_ms));
+        if (timeout_ms) |deadline| {
+            try requireAppend(appendSlice(&self.write_buf, self.allocator, ",\"timeout_ms\":"));
+            try requireAppend(appendInt(&self.write_buf, self.allocator, deadline));
+        }
         try requireAppend(appendSlice(&self.write_buf, self.allocator, "}\n"));
         try self.persistBuffer();
     }
@@ -1435,11 +1443,16 @@ pub const DurableState = struct {
         try self.persistBuffer();
     }
 
-    pub fn persistWaitSignal(self: *DurableState, name: []const u8) DurablePersistenceError!void {
+    pub fn persistWaitSignal(self: *DurableState, name: []const u8, timeout_ms: ?i64) DurablePersistenceError!void {
         self.write_buf.clearRetainingCapacity();
         try requireAppend(appendSlice(&self.write_buf, self.allocator, "{\"type\":\"wait_signal\",\"name\":\""));
         try requireAppend(appendEscapedSlice(&self.write_buf, self.allocator, name));
-        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\"}\n"));
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "\""));
+        if (timeout_ms) |deadline| {
+            try requireAppend(appendSlice(&self.write_buf, self.allocator, ",\"timeout_ms\":"));
+            try requireAppend(appendInt(&self.write_buf, self.allocator, deadline));
+        }
+        try requireAppend(appendSlice(&self.write_buf, self.allocator, "}\n"));
         try self.persistBuffer();
     }
 
@@ -1964,12 +1977,35 @@ test "parseTraceLine durable step result" {
     }
 }
 
+test "parseTraceLine durable wait timer timeout metadata" {
+    const line = "{\"type\":\"wait_timer\",\"until_ms\":1000,\"timeout_ms\":900}";
+    const entry = try parseTraceLine(line);
+    switch (entry) {
+        .wait_timer => |wait| {
+            try std.testing.expectEqual(@as(i64, 1000), wait.until_ms);
+            try std.testing.expectEqual(@as(?i64, 900), wait.timeout_ms);
+        },
+        else => return error.UnexpectedTraceType,
+    }
+}
+
 test "parseTraceLine durable wait and resume signal" {
     const wait_line = "{\"type\":\"wait_signal\",\"name\":\"approval\"}";
     const wait_entry = try parseTraceLine(wait_line);
     switch (wait_entry) {
         .wait_signal => |wait| {
             try std.testing.expectEqualStrings("approval", wait.name);
+            try std.testing.expectEqual(@as(?i64, null), wait.timeout_ms);
+        },
+        else => return error.UnexpectedTraceType,
+    }
+
+    const timed_wait_line = "{\"type\":\"wait_signal\",\"name\":\"approval\",\"timeout_ms\":1234}";
+    const timed_wait_entry = try parseTraceLine(timed_wait_line);
+    switch (timed_wait_entry) {
+        .wait_signal => |wait| {
+            try std.testing.expectEqualStrings("approval", wait.name);
+            try std.testing.expectEqual(@as(?i64, 1234), wait.timeout_ms);
         },
         else => return error.UnexpectedTraceType,
     }

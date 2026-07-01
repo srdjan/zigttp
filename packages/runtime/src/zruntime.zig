@@ -236,6 +236,7 @@ pub const Runtime = struct {
         owned_events: ?[]const zq.trace.DurableEvent = null,
         source_snapshot: ?[]u8 = null,
         step_depth: u32 = 0,
+        step_timeout_deadline_ms: ?i64 = null,
         /// Monotonic per-run counter naming each `zigttp:workflow.call` as its
         /// own durable step ("workflow.call#N"). Deterministic across replay
         /// because the orchestrator re-executes the same control flow, so the
@@ -2641,6 +2642,7 @@ test {
     _ = @import("ws_gateway.zig");
     _ = @import("ws_frame_loop.zig");
     _ = @import("durable_fetch.zig");
+    _ = @import("retry_backoff.zig");
     _ = @import("benchmark.zig");
 }
 
@@ -3555,6 +3557,116 @@ test "durable waitSignal resumes from queued signal" {
     const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"type\":\"wait_signal\""));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"type\":\"resume_signal\""));
+}
+
+test "durable stepWithTimeout times out a durable sleep boundary" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run, stepWithTimeout, sleep } from "zigttp:durable";
+        \\function handler(req) {
+        \\  return run("timeout:sleep", () => {
+        \\    const result = stepWithTimeout("slow", 5, () => {
+        \\      sleep(1000);
+        \\      return "late";
+        \\    });
+        \\    return Response.json({ ok: result.ok, error: result.error });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-step-timeout-sleep>");
+
+    var first_request = try makeTestRequest(allocator, "GET", "/", null);
+    defer first_request.deinit(allocator);
+    var first_response = try rt.executeHandler(first_request.asView());
+    defer first_response.deinit();
+    try std.testing.expectEqual(@as(u16, 202), first_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, first_response.body, "\"type\":\"timer\"") != null);
+
+    std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake) catch {};
+
+    var second_request = try makeTestRequest(allocator, "GET", "/", null);
+    defer second_request.deinit(allocator);
+    var second_response = try rt.executeHandler(second_request.asView());
+    defer second_response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), second_response.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, second_response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(false, obj.get("ok").?.bool);
+    try std.testing.expectEqualStrings("timeout", obj.get("error").?.string);
+}
+
+test "durable stepWithTimeout times out waitSignal before consuming a later signal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run, stepWithTimeout, waitSignal, signal } from "zigttp:durable";
+        \\function handler(req) {
+        \\  if (req.url === "/signal") {
+        \\    return Response.json({ delivered: signal("timeout:signal", "approved", { ok: true }) });
+        \\  }
+        \\  return run("timeout:signal", () => {
+        \\    const result = stepWithTimeout("approval", 5, () => waitSignal("approved"));
+        \\    return Response.json({ ok: result.ok, error: result.error });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-step-timeout-signal>");
+
+    var wait_request = try makeTestRequest(allocator, "GET", "/wait", null);
+    defer wait_request.deinit(allocator);
+    var pending_response = try rt.executeHandler(wait_request.asView());
+    defer pending_response.deinit();
+    try std.testing.expectEqual(@as(u16, 202), pending_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, pending_response.body, "\"type\":\"signal\"") != null);
+
+    std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake) catch {};
+
+    var signal_request = try makeTestRequest(allocator, "GET", "/signal", null);
+    defer signal_request.deinit(allocator);
+    var signal_response = try rt.executeHandler(signal_request.asView());
+    defer signal_response.deinit();
+    var parsed_signal = try std.json.parseFromSlice(std.json.Value, allocator, signal_response.body, .{});
+    defer parsed_signal.deinit();
+    try std.testing.expect(parsed_signal.value.object.get("delivered").?.bool);
+
+    var resume_request = try makeTestRequest(allocator, "GET", "/wait", null);
+    defer resume_request.deinit(allocator);
+    var resumed_response = try rt.executeHandler(resume_request.asView());
+    defer resumed_response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resumed_response.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, resumed_response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(false, obj.get("ok").?.bool);
+    try std.testing.expectEqualStrings("timeout", obj.get("error").?.string);
+
+    const path = try durable_executor.buildDurableOplogPath(rt, "timeout:signal");
+    defer allocator.free(path);
+    const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
+    try std.testing.expect(std.mem.indexOf(u8, source, "\"timeout_ms\"") != null);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "\"type\":\"resume_signal\""));
 }
 
 test "durable signal returns false after completion" {

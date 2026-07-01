@@ -302,7 +302,7 @@ fn saturatingAddMs(now_ms: i64, delay_ms: i64) i64 {
 fn suspendQueuedWorkflowDispatch(rt: *Runtime, retry_at_ms: i64) !void {
     if (rt.active_durable_run == null) return error.NoActiveDurableRun;
     const active = &rt.active_durable_run.?;
-    try active.state.persistWaitTimer(retry_at_ms);
+    try active.state.persistWaitTimer(retry_at_ms, null);
     try active.setPendingTimer(rt.allocator, retry_at_ms);
 }
 

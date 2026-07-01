@@ -26,6 +26,7 @@ const zruntime = @import("zruntime.zig");
 const Runtime = zruntime.Runtime;
 const HttpResponse = zruntime.HttpResponse;
 const HttpHeader = @import("http_types.zig").HttpHeader;
+const compat = zq.compat;
 const ActiveDurableRun = Runtime.ActiveDurableRun;
 const PendingDurableRecovery = Runtime.PendingDurableRecovery;
 const PendingDurableWait = Runtime.PendingDurableWait;
@@ -46,6 +47,46 @@ const parseHeadersFromJson = trace_helpers.parseHeadersFromJson;
 // The few helpers that genuinely live in zruntime (pub there).
 const createFetchResponse = zruntime.createFetchResponse;
 const splitHeaderKV = zruntime.splitHeaderKV;
+
+const StepDeadlineGuard = struct {
+    deadline_ns: u64,
+    interrupt_requested: bool,
+    jit_inhibited: bool,
+
+    fn arm(rt: *Runtime, timeout_ms: i64) StepDeadlineGuard {
+        const guard: StepDeadlineGuard = .{
+            .deadline_ns = rt.ctx.deadline_ns,
+            .interrupt_requested = rt.ctx.interrupt_requested.load(.monotonic),
+            .jit_inhibited = rt.ctx.jit_inhibited,
+        };
+        const now = compat.monotonicNowNs() catch return guard;
+        const timeout_ns = if (timeout_ms <= 0)
+            @as(u64, 0)
+        else
+            @as(u64, @intCast(timeout_ms)) *| std.time.ns_per_ms;
+        const step_deadline = now +| timeout_ns;
+        rt.ctx.deadline_ns = if (guard.deadline_ns == 0) step_deadline else @min(guard.deadline_ns, step_deadline);
+        rt.ctx.interrupt_requested.store(false, .monotonic);
+        rt.ctx.jit_inhibited = true;
+        return guard;
+    }
+
+    fn restore(self: StepDeadlineGuard, rt: *Runtime) void {
+        rt.ctx.deadline_ns = self.deadline_ns;
+        rt.ctx.interrupt_requested.store(self.interrupt_requested, .monotonic);
+        rt.ctx.jit_inhibited = self.jit_inhibited;
+    }
+};
+
+fn timeoutResult(rt: *Runtime, ctx: *zq.Context, name: []const u8) !zq.JSValue {
+    const result = try zq.modules.util.createPlainResultErr(ctx, "timeout");
+    try rt.active_durable_run.?.state.persistStepResult(name, ctx, result);
+    return result;
+}
+
+fn timeoutExpired(deadline_ms: i64, now_ms: i64) bool {
+    return now_ms >= deadline_ms;
+}
 
 pub fn setPendingDurableRecovery(
     rt: *Runtime,
@@ -167,23 +208,27 @@ pub fn durableStepWithTimeout(rt: *Runtime, ctx: *zq.Context, name: []const u8, 
     defer rt.active_durable_run.?.step_depth -= 1;
 
     const deadline_ms = std.math.add(i64, unixMillis(), timeout_ms) catch std.math.maxInt(i64);
+    const prev_deadline_ms = rt.active_durable_run.?.step_timeout_deadline_ms;
+    rt.active_durable_run.?.step_timeout_deadline_ms = deadline_ms;
+    defer rt.active_durable_run.?.step_timeout_deadline_ms = prev_deadline_ms;
+
+    const deadline_guard = StepDeadlineGuard.arm(rt, timeout_ms);
+    defer deadline_guard.restore(rt);
+
     const func_obj = step_val.toPtr(zq.JSObject);
     const result = rt.callFunction(func_obj, &.{}) catch |err| {
         if (err == error.DurableSuspended) return err;
-        // On execution error, check if we exceeded the deadline
-        if (unixMillis() >= deadline_ms) {
-            const timeout_result = try zq.modules.util.createPlainResultErr(ctx, "timeout");
-            try rt.active_durable_run.?.state.persistStepResult(name, ctx, timeout_result);
-            return timeout_result;
+        if (err == error.DurableStepTimedOut or err == error.RequestTimeout) {
+            return timeoutResult(rt, ctx, name);
+        }
+        if (timeoutExpired(deadline_ms, unixMillis())) {
+            return timeoutResult(rt, ctx, name);
         }
         return err;
     };
 
-    // Check if execution exceeded the deadline
-    if (unixMillis() >= deadline_ms) {
-        const timeout_result = try zq.modules.util.createPlainResultErr(ctx, "timeout");
-        try rt.active_durable_run.?.state.persistStepResult(name, ctx, timeout_result);
-        return timeout_result;
+    if (timeoutExpired(deadline_ms, unixMillis())) {
+        return timeoutResult(rt, ctx, name);
     }
 
     const ok_result = try zq.modules.util.createPlainResultOk(ctx, result);
@@ -196,28 +241,44 @@ pub fn durableSleepUntil(rt: *Runtime, ctx: *zq.Context, until_ms: i64) anyerror
         return zq.modules.util.throwError(ctx, "Error", "sleepUntil() must be called inside run()");
     }
     const active = &rt.active_durable_run.?;
-    if (active.step_depth > 0) {
+    const timeout_deadline_ms = active.step_timeout_deadline_ms;
+    if (active.step_depth > 0 and timeout_deadline_ms == null) {
         return zq.modules.util.throwError(ctx, "Error", "sleepUntil() is not supported inside step()");
     }
 
     const now_ms = unixMillis();
+    if (timeout_deadline_ms) |deadline| {
+        if (timeoutExpired(deadline, now_ms)) return error.DurableStepTimedOut;
+    }
+    const effective_until_ms = if (timeout_deadline_ms) |deadline| @min(until_ms, deadline) else until_ms;
     switch (active.state.beginTimerWait()) {
         .ready => return zq.JSValue.undefined_val,
         .pending => |wait| {
+            if (wait.timeout_ms) |deadline| {
+                if (timeoutExpired(deadline, now_ms)) return error.DurableStepTimedOut;
+            }
+            if (timeout_deadline_ms) |deadline| {
+                if (timeoutExpired(deadline, now_ms)) return error.DurableStepTimedOut;
+            }
             if (wait.until_ms <= now_ms) {
                 try active.state.persistResumeTimer(now_ms);
                 return zq.JSValue.undefined_val;
             }
-            try active.setPendingTimer(rt.allocator, wait.until_ms);
+            const pending_until_ms = if (timeout_deadline_ms) |deadline| @min(wait.until_ms, deadline) else wait.until_ms;
+            try active.setPendingTimer(rt.allocator, pending_until_ms);
             return error.DurableSuspended;
         },
         .live => {
-            try active.state.persistWaitTimer(until_ms);
-            if (until_ms <= now_ms) {
+            const timer_timeout_ms = if (timeout_deadline_ms) |deadline|
+                if (effective_until_ms == deadline and deadline < until_ms) deadline else null
+            else
+                null;
+            try active.state.persistWaitTimer(effective_until_ms, timer_timeout_ms);
+            if (effective_until_ms <= now_ms) {
                 try active.state.persistResumeTimer(now_ms);
                 return zq.JSValue.undefined_val;
             }
-            try active.setPendingTimer(rt.allocator, until_ms);
+            try active.setPendingTimer(rt.allocator, effective_until_ms);
             return error.DurableSuspended;
         },
     }
@@ -228,17 +289,25 @@ pub fn durableWaitSignal(rt: *Runtime, ctx: *zq.Context, name: []const u8) anyer
         return zq.modules.util.throwError(ctx, "Error", "waitSignal() must be called inside run()");
     }
     const active = &rt.active_durable_run.?;
-    if (active.step_depth > 0) {
+    const timeout_deadline_ms = active.step_timeout_deadline_ms;
+    if (active.step_depth > 0 and timeout_deadline_ms == null) {
         return zq.modules.util.throwError(ctx, "Error", "waitSignal() is not supported inside step()");
     }
 
     var store = try initDurableStore(rt);
     const now_ms = unixMillis();
+    if (timeout_deadline_ms) |deadline| {
+        if (timeoutExpired(deadline, now_ms)) return error.DurableStepTimedOut;
+    }
 
     switch (active.state.beginSignalWait(name)) {
         .delivered => |payload_json| return zq.trace.jsonToJSValue(ctx, payload_json),
-        .live => try active.state.persistWaitSignal(name),
-        .pending => {},
+        .live => try active.state.persistWaitSignal(name, timeout_deadline_ms),
+        .pending => |wait| {
+            if (wait.timeout_ms) |deadline| {
+                if (timeoutExpired(deadline, now_ms)) return error.DurableStepTimedOut;
+            }
+        },
     }
 
     if (try store.tryConsumeSignal(active.key, name, now_ms)) |payload| {

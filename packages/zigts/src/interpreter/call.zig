@@ -79,6 +79,7 @@ pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!vo
             .none => blk: {
                 break :blk native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
                     if (err == error.DurableSuspended) return error.DurableSuspended;
+                    if (err == error.DurableStepTimedOut) return error.DurableStepTimedOut;
                     const func_name = if (native_data.name.toPredefinedName()) |name| name else "<native>";
                     std.log.err("Native function '{s}' error: {}", .{ func_name, err });
                     self.ctx.throwException(value.JSValue.exception_val);

@@ -209,6 +209,7 @@ pub const Interpreter = struct {
         NoHiddenClassPool,
         SoundModeViolation, // Non-boolean value in boolean context
         DurableSuspended,
+        DurableStepTimedOut,
         RequestTimeout,
     };
 

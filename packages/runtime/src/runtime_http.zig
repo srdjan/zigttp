@@ -17,6 +17,7 @@ const zruntime = @import("zruntime.zig");
 const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
 const http_parser = @import("http_parser.zig");
+const retry_backoff = @import("retry_backoff.zig");
 
 const Runtime = zruntime.Runtime;
 const HttpResponse = zruntime.HttpResponse;
@@ -36,6 +37,27 @@ const FetchResponseObjects = struct {
 const appendEscapedJson = durable_store_mod.appendEscaped;
 
 const unixMillis = zq.trace.unixMillis;
+
+fn effectiveOutboundTimeoutMs(rt: *Runtime) u32 {
+    var timeout_ms = rt.config.outbound_timeout_ms;
+    if (rt.active_durable_run) |active| {
+        if (active.step_timeout_deadline_ms) |deadline_ms| {
+            const remaining_ms = deadline_ms - unixMillis();
+            const step_timeout_ms: u32 = if (remaining_ms <= 0)
+                1
+            else
+                @intCast(@min(remaining_ms, std.math.maxInt(u32)));
+            if (timeout_ms == 0 or step_timeout_ms < timeout_ms) timeout_ms = step_timeout_ms;
+        }
+    }
+    return timeout_ms;
+}
+
+fn outboundTimeout(timeout_ms: u32) std.Io.Timeout {
+    if (timeout_ms == 0) return .none;
+    const duration = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms));
+    return .{ .duration = .{ .raw = duration, .clock = .awake } };
+}
 
 const natives = @import("runtime_natives.zig");
 pub const getStringData = natives.getStringData;
@@ -837,10 +859,8 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     bootstrapClientTls(&client, protocol) catch {
         return createFetchErrorResponse(rt, "ConnectFailed", "CertificateBundleLoadFailure");
     };
-    const timeout: std.Io.Timeout = if (rt.config.outbound_timeout_ms == 0) .none else blk: {
-        const duration = std.Io.Duration.fromMilliseconds(@intCast(rt.config.outbound_timeout_ms));
-        break :blk .{ .duration = .{ .raw = duration, .clock = .awake } };
-    };
+    const timeout_ms = effectiveOutboundTimeoutMs(rt);
+    const timeout = outboundTimeout(timeout_ms);
     const connection = client.connectTcpOptions(.{
         .host = host,
         .port = uri.port orelse switch (protocol) {
@@ -868,7 +888,7 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
 
     var deadline: FetchDeadline = .{
         .stream = connection.stream_reader.stream,
-        .timeout_ms = rt.config.outbound_timeout_ms,
+        .timeout_ms = timeout_ms,
         .io = client.io,
     };
     deadline.arm();
@@ -1281,7 +1301,10 @@ fn runDurableFetch(
         const exhausted = attempt >= opts.retries;
         if (!retryable or exhausted) break;
         if (opts.backoff == .exponential) {
-            const delay_ms: i64 = @as(i64, 100) << @intCast(@min(attempt, 6));
+            var seed = retry_backoff.seedBytes(hash[0..], 0x4645544348524554);
+            seed = retry_backoff.mix(seed, attempt);
+            seed = retry_backoff.mix(seed, @as(u64, @bitCast(unixMillis())));
+            const delay_ms = retry_backoff.retryDelayMs(100, 6_400, attempt, seed);
             if (rt.outbound_io_backend) |*backend| {
                 std.Io.sleep(backend.io(), .fromMilliseconds(delay_ms), .awake) catch {};
             }
@@ -2144,10 +2167,8 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
     bootstrapClientTls(&client, protocol) catch {
         return try httpRequestErrorJsonAlloc(a, "ConnectFailed", "CertificateBundleLoadFailure");
     };
-    const timeout: std.Io.Timeout = if (rt.config.outbound_timeout_ms == 0) .none else blk: {
-        const duration = std.Io.Duration.fromMilliseconds(@intCast(rt.config.outbound_timeout_ms));
-        break :blk .{ .duration = .{ .raw = duration, .clock = .awake } };
-    };
+    const timeout_ms = effectiveOutboundTimeoutMs(rt);
+    const timeout = outboundTimeout(timeout_ms);
     const connection = client.connectTcpOptions(.{
         .host = host,
         .port = uri.port orelse switch (protocol) {
@@ -2175,7 +2196,7 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
 
     var deadline: FetchDeadline = .{
         .stream = connection.stream_reader.stream,
-        .timeout_ms = rt.config.outbound_timeout_ms,
+        .timeout_ms = timeout_ms,
         .io = client.io,
     };
     deadline.arm();
