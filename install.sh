@@ -92,15 +92,12 @@ resolve_version() {
             # The beta channel prefers the newest -beta tag; only fall back to
             # -rc, then to the newest release of any kind, so a first-time
             # `curl | sh` never dead-ends when no -beta tag exists yet.
-            VERSION=$(printf '%s\n' "$RELEASES" \
-                | grep '"tag_name"' | grep -E -- '-beta' | head -1 | cut -d'"' -f4)
+            VERSION=$(first_release_tag "$RELEASES" "-beta")
             if [ -z "$VERSION" ]; then
-                VERSION=$(printf '%s\n' "$RELEASES" \
-                    | grep '"tag_name"' | grep -E -- '-rc' | head -1 | cut -d'"' -f4)
+                VERSION=$(first_release_tag "$RELEASES" "-rc")
             fi
             if [ -z "$VERSION" ]; then
-                VERSION=$(printf '%s\n' "$RELEASES" \
-                    | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+                VERSION=$(first_release_tag "$RELEASES" "")
             fi
             ;;
         latest)
@@ -122,6 +119,17 @@ resolve_version() {
     if [ -z "$VERSION" ]; then
         printf "Error: could not determine latest version\n" >&2
         exit 1
+    fi
+}
+
+first_release_tag() {
+    releases="$1"
+    pattern="$2"
+
+    if [ -n "$pattern" ]; then
+        printf '%s\n' "$releases" | grep '"tag_name"' | grep -E -- "$pattern" | head -1 | cut -d'"' -f4
+    else
+        printf '%s\n' "$releases" | grep '"tag_name"' | head -1 | cut -d'"' -f4
     fi
 }
 

@@ -51,14 +51,16 @@ pub const MessageEnvelope = struct {
     max_attempts: u32 = 3,
     enqueued_ms: i64 = 0,
     state: DeliveryState = .pending,
-    dead_reason: ?[]u8 = null,
 
     pub fn deinit(self: *MessageEnvelope, allocator: std.mem.Allocator) void {
         allocator.free(self.source);
         allocator.free(self.target);
         allocator.free(self.payload_json);
         if (self.reply_to) |reply_to| allocator.free(reply_to);
-        if (self.dead_reason) |reason| allocator.free(reason);
+        switch (self.state) {
+            .dead => |dead| allocator.free(dead.reason),
+            else => {},
+        }
         allocator.destroy(self);
     }
 };
@@ -372,8 +374,6 @@ pub const ActorQueue = struct {
             _ = self.inflight.remove(id);
             self.mutex.unlock();
 
-            if (message.dead_reason) |old| self.allocator.free(old);
-            message.dead_reason = reason_owned;
             message.state = .{
                 .dead = .{
                     .attempt = message.attempt,

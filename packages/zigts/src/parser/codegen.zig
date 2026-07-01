@@ -605,7 +605,11 @@ pub const CodeGen = struct {
 
         const atoms = self.atoms orelse return imported_atom;
         const imported_name = self.atomName(imported_atom) orelse return imported_atom;
-        const namespaced = try std.fmt.allocPrint(self.allocator, "{s}#{s}", .{ module_name, imported_name });
+        const namespaced = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}" ++ module_manifest.namespaced_export_separator ++ "{s}",
+            .{ module_name, imported_name },
+        );
         defer self.allocator.free(namespaced);
         const atom = try atoms.intern(namespaced);
         return @truncate(@intFromEnum(atom));

@@ -8,6 +8,8 @@
 const std = @import("std");
 const mb = @import("module_binding.zig");
 
+pub const namespaced_export_separator = "#";
+
 pub const ManifestError = error{
     InvalidJson,
     InvalidManifest,

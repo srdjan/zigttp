@@ -138,9 +138,9 @@ pub fn enqueueRequest(
     defer p.deinit();
     try ensureQueueDirs(&p);
 
-    if (try fileExists(allocator, p.done_file)) return;
-    if (try fileExists(allocator, p.pending_file)) return;
-    if (try fileExists(allocator, p.leased_file)) return;
+    if (try fileExists(p.done_file)) return;
+    if (try fileExists(p.pending_file)) return;
+    if (try fileExists(p.leased_file)) return;
 
     const payload = try requestEnvelopeJson(allocator, target, view, 0);
     defer allocator.free(payload);
@@ -150,8 +150,7 @@ pub fn enqueueRequest(
 pub fn readResult(allocator: Allocator, durable_dir: []const u8, id: []const u8) !?[]u8 {
     var p = try queuePaths(allocator, durable_dir, id);
     defer p.deinit();
-    if (!(try fileExists(allocator, p.done_file))) return null;
-    return try zq.file_io.readFile(allocator, p.done_file, MAX_QUEUE_FILE_BYTES);
+    return readDoneFile(allocator, p.done_file);
 }
 
 pub fn tryClaim(
@@ -165,23 +164,21 @@ pub fn tryClaim(
     defer p.deinit();
     try ensureQueueDirs(&p);
 
-    if (try readResult(allocator, durable_dir, id)) |result| {
+    if (try readDoneFile(allocator, p.done_file)) |result| {
         return .{ .done = result };
     }
 
-    if (try fileExists(allocator, p.pending_file)) {
-        if (renamePath(p.pending_file, p.leased_file)) {
-            return try claimLeasedFile(allocator, p.leased_file, now_ms + lease_ms);
-        } else |err| switch (err) {
-            // A concurrent tryClaim already won the pending->leased rename;
-            // fall through to the lease-aware check below instead of
-            // re-claiming the file it just created.
-            error.FileNotFound => {},
-            else => return err,
-        }
+    if (renamePath(p.pending_file, p.leased_file)) {
+        return try claimLeasedFile(allocator, p.leased_file, now_ms + lease_ms);
+    } else |err| switch (err) {
+        // A concurrent tryClaim already won the pending->leased rename;
+        // fall through to the lease-aware check below instead of
+        // re-claiming the file it just created.
+        error.FileNotFound => {},
+        else => return err,
     }
 
-    if (try fileExists(allocator, p.leased_file)) {
+    if (try fileExists(p.leased_file)) {
         const envelope = try zq.file_io.readFile(allocator, p.leased_file, MAX_QUEUE_FILE_BYTES);
         defer allocator.free(envelope);
         const lease_until_ms = parseLeaseUntilMs(envelope) catch 0;
@@ -333,8 +330,12 @@ fn ensureDir(path: []const u8) !void {
     }
 }
 
-fn fileExists(allocator: Allocator, path: []const u8) !bool {
-    _ = allocator;
+fn readDoneFile(allocator: Allocator, done_file: []const u8) !?[]u8 {
+    if (!(try fileExists(done_file))) return null;
+    return try zq.file_io.readFile(allocator, done_file, MAX_QUEUE_FILE_BYTES);
+}
+
+fn fileExists(path: []const u8) !bool {
     const z = try std.heap.c_allocator.dupeZ(u8, path);
     defer std.heap.c_allocator.free(z);
     if (std.c.access(z, std.c.F_OK) == 0) return true;
@@ -430,23 +431,8 @@ fn requestEnvelopeJson(allocator: Allocator, target: []const u8, view: HttpReque
 }
 
 fn requestEnvelopeJsonFromQueued(allocator: Allocator, request: QueuedRequest, lease_until_ms: i64) ![]u8 {
-    var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
-    defer headers.deinit(allocator);
-    try headers.ensureTotalCapacity(allocator, request.headers.len);
-    for (request.headers) |header| {
-        headers.appendAssumeCapacity(.{
-            .key = header.key,
-            .value = header.value,
-        });
-    }
-    const view: HttpRequestView = .{
-        .method = request.method,
-        .path = request.path,
-        .url = request.url,
-        .query_params = request.query_params,
-        .headers = headers,
-        .body = request.body,
-    };
+    var view = try request.toView(allocator);
+    defer view.headers.deinit(allocator);
     return requestEnvelopeJson(allocator, request.target, view, lease_until_ms);
 }
 
