@@ -1643,9 +1643,7 @@ pub const Server = struct {
         if (self.contract) |*c| c.deinit();
         self.contract = new_contract;
         if (self.pool) |*pool| {
-            var workflow_properties = self.contract.?.durableWorkflowProperties();
-            workflow_properties.enforced = true;
-            pool.setDurableWorkflowProperties(workflow_properties);
+            pool.setDurableWorkflowProperties(enforcedDurableWorkflowProperties(&self.contract.?));
         }
 
         // Always rebuild: even if eligibility is unchanged, cached responses
@@ -1947,9 +1945,7 @@ pub const Server = struct {
         var pool_rt_config = self.config.runtime_config;
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
         if (self.contract) |*contract| {
-            var workflow_properties = contract.durableWorkflowProperties();
-            workflow_properties.enforced = true;
-            pool_rt_config.durable_workflow_properties = workflow_properties;
+            pool_rt_config.durable_workflow_properties = enforcedDurableWorkflowProperties(contract);
         }
 
         if (pool_rt_config.queue_actor_enabled and pool_rt_config.queue_system == null) {
@@ -2605,6 +2601,17 @@ const StaticFileCache = struct {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Durable workflow properties enforced for a served contract: the pool
+/// always enforces the retry/idempotency proof regardless of what the
+/// contract's own `enforced` bit says. Shared by the initial pool-init path
+/// and the live-swap path (`updateContract`) so the derivation can't drift
+/// between the two.
+fn enforcedDurableWorkflowProperties(contract: *const ValidatedRuntimeContract) contract_runtime.DurableWorkflowProperties {
+    var workflow_properties = contract.durableWorkflowProperties();
+    workflow_properties.enforced = true;
+    return workflow_properties;
+}
 
 fn logContractSummary(contract: *const ValidatedRuntimeContract) void {
     const inner = contract.view();
