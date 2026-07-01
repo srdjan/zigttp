@@ -8,9 +8,24 @@ product_contract_source: ce-brainstorm
 execution: code
 date: 2026-06-30
 updated: 2026-07-01
+implementation_status: landed-through-82d4494b
 ---
 
 # Complete Workflow & Fault Tolerance - Plan
+
+## Implementation Status
+
+This plan is a decision record for the workflow/fault-tolerance work, not an
+open backlog. As of `82d4494b`, U1-U7 and the runtime part of U8 have landed:
+durable deadlines and fetch retries respect step deadlines, workflow queue
+encoding and the idempotency ledger are split into focused modules,
+dead-lettered children suspend and can be replayed, orphaned reclaim files are
+recovered, and proof-gated durable retry/reuse fails closed unless proof or a
+matching `Idempotency-Key` ledger entry permits it.
+
+Do not use the implementation units below as new runtime work. Release closeout
+is limited to keeping release notes and public docs aligned with the landed
+semantics, then re-running the verification gates.
 
 ## Goal Capsule
 
