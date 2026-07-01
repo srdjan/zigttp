@@ -47,10 +47,6 @@ run_tests_with_args() {
     fi
 }
 
-run_tests() {
-    run_tests_with_args "$1" "$2"
-}
-
 # Assert a handler type-checks clean (exit 0, no errors/warnings) under the
 # analyzer. Used for examples whose value is the static proof, not runtime I/O.
 check_types() {
@@ -211,37 +207,37 @@ echo "====================="
 echo ""
 
 # handler/
-run_tests "examples/handler/handler-full.tsx" "examples/handler/handler.test.jsonl"
-run_tests "examples/handler/handler.ts"       "examples/handler/handler-ts.test.jsonl"
-run_tests "examples/handler/handler.tsx"       "examples/handler/handler-tsx.test.jsonl"
-run_tests "examples/handler/sugar.ts"          "examples/handler/sugar.test.jsonl"
-run_tests "examples/handler/feature-probes.ts" "examples/handler/feature-probes.test.jsonl"
+run_tests_with_args "examples/handler/handler-full.tsx" "examples/handler/handler.test.jsonl"
+run_tests_with_args "examples/handler/handler.ts"       "examples/handler/handler-ts.test.jsonl"
+run_tests_with_args "examples/handler/handler.tsx"       "examples/handler/handler-tsx.test.jsonl"
+run_tests_with_args "examples/handler/sugar.ts"          "examples/handler/sugar.test.jsonl"
+run_tests_with_args "examples/handler/feature-probes.ts" "examples/handler/feature-probes.test.jsonl"
 
 # jsx/
-run_tests "examples/jsx/jsx-simple.tsx"    "examples/jsx/jsx-simple.test.jsonl"
-run_tests "examples/jsx/jsx-component.tsx" "examples/jsx/jsx-component.test.jsonl"
-run_tests "examples/jsx/jsx-ssr.tsx"       "examples/jsx/jsx-ssr.test.jsonl"
+run_tests_with_args "examples/jsx/jsx-simple.tsx"    "examples/jsx/jsx-simple.test.jsonl"
+run_tests_with_args "examples/jsx/jsx-component.tsx" "examples/jsx/jsx-component.test.jsonl"
+run_tests_with_args "examples/jsx/jsx-ssr.tsx"       "examples/jsx/jsx-ssr.test.jsonl"
 
 # modules/
-run_tests "examples/modules/modules.ts"      "examples/modules/modules.test.jsonl"
-run_tests "examples/modules/modules_all.ts"  "examples/modules/modules_all.test.jsonl"
+run_tests_with_args "examples/modules/modules.ts"      "examples/modules/modules.test.jsonl"
+run_tests_with_args "examples/modules/modules_all.ts"  "examples/modules/modules_all.test.jsonl"
 
 # fetch/
-run_tests "examples/fetch/weather-forecasts.ts" "examples/fetch/weather-forecasts.test.jsonl"
-run_tests "examples/fetch/weather-app.ts"       "examples/fetch/weather-app.test.jsonl"
-run_tests "examples/fetch/webhook.ts"           "examples/fetch/webhook.test.jsonl"
+run_tests_with_args "examples/fetch/weather-forecasts.ts" "examples/fetch/weather-forecasts.test.jsonl"
+run_tests_with_args "examples/fetch/weather-app.ts"       "examples/fetch/weather-app.test.jsonl"
+run_tests_with_args "examples/fetch/webhook.ts"           "examples/fetch/webhook.test.jsonl"
 
 # routing/
-run_tests "examples/routing/router.ts"         "examples/routing/router.test.jsonl"
-run_tests "examples/routing/guard-compose.ts"  "examples/routing/guard-compose.test.jsonl"
-run_tests "examples/routing/match-handler.ts"  "examples/routing/match-handler.test.jsonl"
+run_tests_with_args "examples/routing/router.ts"         "examples/routing/router.test.jsonl"
+run_tests_with_args "examples/routing/guard-compose.ts"  "examples/routing/guard-compose.test.jsonl"
+run_tests_with_args "examples/routing/match-handler.ts"  "examples/routing/match-handler.test.jsonl"
 
 # patterns/ - every pattern example must type-check clean; the
 # request-dependent handlers additionally get behavioral suites.
 for h in examples/patterns/*.ts; do check_types "$h"; done
-run_tests "examples/patterns/validate-external.ts"         "examples/patterns/validate-external.test.jsonl"
-run_tests "examples/patterns/discriminated-union-match.ts" "examples/patterns/discriminated-union-match.test.jsonl"
-run_tests "examples/patterns/derive-types.ts"              "examples/patterns/derive-types.test.jsonl"
+run_tests_with_args "examples/patterns/validate-external.ts"         "examples/patterns/validate-external.test.jsonl"
+run_tests_with_args "examples/patterns/discriminated-union-match.ts" "examples/patterns/discriminated-union-match.test.jsonl"
+run_tests_with_args "examples/patterns/derive-types.ts"              "examples/patterns/derive-types.test.jsonl"
 
 # sql/ - a zigttp:sql handler needs its schema to type-check; assert it proves
 # clean (this is the example whose one-arg sqlMany("listTodos") regressed when
