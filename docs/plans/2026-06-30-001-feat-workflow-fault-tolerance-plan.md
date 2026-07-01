@@ -1,270 +1,489 @@
 ---
+title: Complete Workflow & Fault Tolerance - Plan
+type: feat
+topic: workflow-fault-tolerance
 artifact_contract: ce-unified-plan/v1
-artifact_readiness: requirements-only
+artifact_readiness: implementation-ready
 product_contract_source: ce-brainstorm
+execution: code
 date: 2026-06-30
-status: deferred-post-beta
+updated: 2026-07-01
 ---
 
 # Complete Workflow & Fault Tolerance - Plan
 
-## Context
+## Goal Capsule
 
-zigttp's workflow orchestration and durable-execution surface is *implemented* but not
-*complete* in the senses that ship trust: advanced paths are untested, the durability
-guarantees are undocumented, a handful of behaviors are surprising, and the
-fault-tolerance primitives a real durable-workflow user reaches for are missing. Two
-independent code-mapping passes both concluded the surface is "production-ready, no
-stubs" - and that is exactly the trap. The code runs; the *feature* is unfinished
-where it matters for someone betting a payment flow on it.
+Complete Zigttp's workflow and fault-tolerance work so durable execution is not just available, but proven, replay-safe, operable after crashes, and clearly documented.
 
-The product thesis is "the AI writes your handler, the compiler proves it's safe."
-Durable-execution correctness is mostly a *runtime* property, which sits in tension with
-a compile-time proof story. This plan resolves that tension on purpose: wherever a
-fault-tolerance property is decidable on the restricted JS subset, we **prove it and let
-the runtime trust the proof**; where it is inherently runtime (wall-clock deadlines,
-backoff timing, external non-idempotent effects), we build a solid runtime floor. That
-turns this work from an orphan runtime feature into one that *compounds* the named
-Proof-engine and Expert-agent tracks.
+The product anchor is the current Strategy: solo developers should be able to let AI write serverless handlers while Zigttp gives them compile-time and runtime evidence about safety, determinism, and deployment behavior.
+For this plan, "fault tolerant" means the durable workflow surface has honest semantics across retry, timeout, crash recovery, signals, queue dispatch, receipts, and docs.
 
-### Decisions locked (from brainstorm dialogue)
+Execution profile:
 
-1. **Scope bar: Capability completion, in full.** Ship-integrity (test + document +
-   fix the existing surface) *and* the missing fault-tolerance primitives. Durable
-   workflows treated as a first-class product surface, not an experiment.
-2. **Philosophy: Proof-first where decidable.** Enforce the `idempotent` / `retry_safe`
-   properties the contract system already extracts; the runtime acts on the proof. A
-   step that can't be proven gets a veto/warning the expert loop teaches the user to
-   fix. Runtime mechanism is the fallback for the genuinely-undecidable cases only.
-3. **Timing: deferred post-beta.** v0.1.0-beta ships on the expert-first core. This plan
-   is authored in full now and executed as the next milestone after the beta.
+- **Depth**: Deep.
+- **Mode**: Implementation-ready code plan.
+- **Primary surface**: runtime durability, workflow queue, durable signal store, proof contracts, receipts, examples, and docs.
+- **Stop conditions**: do not introduce automatic destructive retention, do not weaken proof soundness, do not break persisted replay names such as `workflow.parallel#N`, and do not make saga queue support appear supported before it is actually proven.
+- **Tail ownership**: the final unit closes docs, examples, crash drills, and repo gates so the work does not end with unverified primitives.
 
-### Goal Capsule
+## Product Contract
 
-- **Objective:** A solo developer can author a durable, multi-step workflow, have the
-  compiler prove its idempotency / retry-safety where decidable, and trust the runtime
-  to recover, retry, time-out, and dead-letter correctly for everything else - with
-  documented guarantees and tested crash paths.
-- **Product authority:** Decisions 1-3 above are settled. The proof-first interlock
-  (below) is the spine; do not silently substitute a runtime-mechanism-first design.
-- **Open blockers:** None blocking authorship. Sequencing is post-beta. Two design
-  questions (deadline cancellation depth, compensation ordering semantics) are flagged
-  in Open Questions and resolved at execution time, not now.
+### Summary
 
----
+This plan covers the full brainstorm scope: finish the workflow/fault-tolerance capability that already exists in pieces, make the proof system the authority for retry and idempotency claims, and close the testing/docs gaps around crash behavior.
+It deliberately treats adjacent `zigttp:queue` actor work as a boundary to document, not as a durable-workflow persistence target.
 
-## Current state: the three-part gap
+The plan resolves the open brainstorm questions conservatively:
 
-**Implementation (done):** `call` / `saga` / `fanout` / `follow`
-(`packages/runtime/src/runtime_workflow.zig`), durable's 8 exports
-(`packages/zigts/src/modules/workflow/durable.zig`, runtime in
-`packages/runtime/src/durable_executor.zig`), `io` / `scope` / `compose`, crash recovery
-(`packages/runtime/src/durable_recovery.zig`), trace journaling with `fsync`
-(`packages/zigts/src/trace.zig`), and the new durable lease-based async queue
-(`packages/runtime/src/workflow_queue.zig`, currently uncommitted).
+- Deadline cancellation lands first at fetch, durable waits, sleeps, and other suspension points; general interpreter preemption is deferred.
+- Idempotency and retry automation are gated by conservative proof properties and explicit runtime ledgers.
+- Saga plus workflow queue remains a documented guardrail for this plan.
+- Retention defaults are non-destructive; cleanup is explicit and inspectable.
 
-**Correctness surprises (latent):** `stepWithTimeout` checks the deadline *after* the
-step finishes; durable fetch retries 5xx but not connection errors (599); no backoff
-jitter; saga compensation failure is terminal; signals are last-write-wins (no queue);
-idempotency is a *marked* contract property but not runtime-enforced; saga is
-deliberately unsupported with `--workflow-queue`.
+### Problem Frame
 
-**Testing gaps:** `stepWithTimeout` has zero tests; `workflow_queue` has happy-path only
-(no crash/recovery, no `FailingAllocator`, no corrupted-file quarantine); all five
-`examples/workflow/*.ts` have no `.test.jsonl` and aren't in `scripts/test-examples.sh`;
-saga-compensation idempotency, signal races, and nested workflows are untested.
+Zigttp now has a broad workflow surface: durable runs, steps, sleeps, signals, fanout, follow, saga, workflow queue dispatch, durable fetch retry for transport failures, and proof/receipt foundations.
+The remaining risk is that those pieces can look "done" while still being under-specified in the exact failure modes users care about: crashes between file moves, stuck signals, retry safety, timeout behavior, dead-letter handling, and proof receipts that do not explain the guarantee.
 
-**Docs gaps:** no dedicated durable-workflows guide; durability guarantees (exactly-once
-vs at-least-once, oplog retention) unspecified; `stepWithTimeout`, idempotency,
-crash-recovery behavior, and "why saga != queue" undocumented; no first-workflow
-tutorial.
+The desired outcome is a system where a user can inspect a handler and answer three questions without reading runtime internals:
 
----
+- Will this workflow retry safely?
+- What happens if the process dies at the bad moment?
+- Which guarantee is proven, which is runtime-enforced, and which is explicitly unsupported?
 
-## The proof-first interlock (design spine)
+### Requirements
 
-The differentiated mechanism that ties the three workstreams together. The contract
-system already extracts `idempotent` and `retry_safe` per handler/step
-(`packages/zigts/src/handler_contract.zig`; surfaced today in
-`packages/tools/src/deploy_manifest.zig` and proof review). Today they are advisory.
-This plan makes them load-bearing:
+**Durable runtime behavior**
 
-- **Prove → enforce.** A step whose effects are provably idempotent (read-only, or only
-  idempotent module calls, or keyed/upsert writes) is *proven idempotent*; the runtime
-  then skips the idempotency-key ledger for it. A step proven `retry_safe` is eligible
-  for **automatic** retry.
-- **Can't prove → expert teaches, runtime floors.** An unprovable step does not silently
-  get weaker guarantees. In `expert` mode it surfaces as a teachable veto ("this step
-  isn't provably idempotent because it POSTs to a non-idempotent egress host; wrap it in
-  an idempotency key or a keyed write"). Outside expert mode, the developer opts into the
-  runtime idempotency-key ledger (WS-C3) explicitly - the ledger is the *fallback*, not
-  the default.
-- **Auto-retry gating.** Step-level auto-retry (WS-C1) is enabled by default *only* for
-  proven-`retry_safe` steps. For unproven steps, retries require an explicit opt-in, so
-  the runtime never silently double-executes a non-idempotent effect.
-- **Receipts.** The proven fault-tolerance properties extend the existing signed
-  `kind=workflow` receipt, so the guarantee is portable, not just printed.
+- **R1 - Existing workflow APIs stay first-class**: `workflow.call`, `workflow.follow`, `workflow.fanout`, `workflow.saga`, durable steps, sleeps, waits, signals, and durable fetch keep their current public role, with tests and docs describing their actual guarantees.
+- **R2 - Deadlines become operational**: `stepWithTimeout` and workflow deadlines must interrupt or fail at supported blocking boundaries, not merely notice that a deadline passed after user code returns.
+- **R3 - Retry policy becomes explicit**: durable fetch and recovery retry must preserve current 599/5xx retry behavior while adding bounded jitter and clear exhaustion behavior.
+- **R4 - Workflow queue is crash-tolerant enough to operate**: queued child dispatch must survive partial writes, corrupt files, expired leases, concurrent reclaim, repeated failure, and dead-letter recovery without losing successful results or silently duplicating completed work.
+- **R5 - Durable signals do not strand resumes**: immediate and scheduled signals must be hidden until due, consumed only after a persisted resume path exists, finalized after success, and inspectable or cleaned up without unsafe default deletion.
 
-This is why "proof-first" is not a slogan here: it is the gate that decides whether a
-runtime mechanism (ledger, auto-retry) runs at all.
+**Proof-first fault tolerance**
 
----
+- **R6 - Proof properties are conservative**: `retry_safe`, `idempotent`, and fault-coverage claims default to false when the analyzer cannot prove them.
+- **R7 - Runtime automation obeys proofs**: automatic retry and idempotency shortcuts must require proven properties or an explicit idempotency ledger; unproven automatic retry should fail closed with actionable diagnostics while normal manual execution remains possible.
+- **R8 - Receipts explain the guarantee**: deploy manifests, proof traces, HAL/expert outputs, and build receipts must surface the relevant workflow/fault-tolerance properties so users can tell what was proven and what was only configured.
 
-## Workstream A - Ship-integrity (make the existing surface honest)
+**User-facing completion**
 
-Goal: the durable surface that already exists is tested on its crash paths, documents
-its real guarantees, and has no surprising behavior. This is the part that most directly
-serves the trust thesis.
+- **R9 - Queue/saga boundaries are honest**: saga under workflow queue remains rejected and documented in this plan; lifting that limitation requires separate proof and runtime design.
+- **R10 - Actor queue remains adjacent**: `zigttp:queue` continues to be documented as a process-local actor mailbox with retries/dead letters, not as the durable workflow guarantee.
+- **R11 - Examples and docs make crash behavior reproducible**: the repo must include workflow examples, mock fixtures, a first durable-workflow tutorial, and a crash drill that exercise the shipped behavior.
 
-### A1. Fix the correctness surprises
-- **Real deadline enforcement for `stepWithTimeout`** - thread the step deadline into
-  the `io` / fetch timeout used inside the step and add a cooperative deadline check at
-  durable suspension points, so a long fetch is interrupted rather than the deadline
-  being noticed only after the step returns.
-  Files: `packages/runtime/src/durable_executor.zig` (the post-execution check ~L145-192),
-  `packages/runtime/src/runtime_http.zig` (fetch timeout plumbing). See Open Question Q1
-  for cancellation depth.
-- **Retry connection errors, not just 5xx** - durable fetch treats 599 connection
-  failures as retryable under the same `retries` budget. File:
-  `packages/runtime/src/runtime_http.zig` (~L1275-1289), `durable_fetch.zig`.
-- **Backoff jitter** - add full jitter to the exponential backoff to avoid thundering
-  herd. Files: `runtime_http.zig` retry loop, `durable_recovery.zig` `RetryTracker`.
+### Success Criteria
 
-### A2. Test the untested paths
-- **`stepWithTimeout` tests** (currently zero): timeout fires, error shape, nested-call
-  rejection, millisecond semantics. File: `packages/runtime/src/zruntime.zig` test blocks.
-- **`workflow_queue` crash/recovery + failure injection**: partial write + crash →
-  recovery, lease-expiry + concurrent re-claim race, corrupted-file quarantine,
-  `FailingAllocator` on every queue op (mirror the existing `HandlerPool` stress test).
-  Files: `packages/runtime/src/workflow_queue.zig`, `zruntime.zig`.
-- **Example test fixtures**: add `.test.jsonl` for all five
-  `examples/workflow/*.ts` and wire `workflow/` into `scripts/test-examples.sh`
-  (it currently skips that directory).
-- **Saga + signal edge cases**: compensation idempotency under replay, partial
-  compensation (step 3 of 5 fails), signal sent mid-step (buffered vs lost), nested
-  `workflow.call`.
+- A workflow author can use durable steps, wait for signals, fanout/follow, and workflow queue dispatch with docs that state the real crash and retry semantics.
+- `stepWithTimeout` has meaningful tests for timeout during supported blocking operations.
+- Workflow queue tests cover crash recovery, partial/corrupt state, concurrent reclaim, max-attempt-to-dead-letter, and replay from dead letter.
+- Signal tests cover consume/finalize crash windows, scheduled visibility, corrupt files, and cleanup/inspection behavior.
+- Proof JSON, receipts, and expert/HAL output expose conservative retry/idempotency/fault-coverage properties.
+- Runtime retry/idempotency behavior is gated by proofs or explicit ledgers.
+- Examples and docs run through the repo's verification scripts.
 
-### A3. Document the guarantees
-- New `docs/durable-workflows.md`: the durability-guarantee contract
-  (exactly-once-effects vs at-least-once, what oplog replay does and does not protect),
-  oplog retention/pruning, crash-recovery behavior (retry backoff, the 10-failure
-  quarantine), `stepWithTimeout` semantics, "why saga != `--workflow-queue`."
-- New `docs/tutorials/first-durable-workflow.md`: end-to-end payment/reservation
-  example with tests and a crash-recovery walkthrough.
-- Expand the workflow section of `docs/user-guide.md` (currently ~2 paragraphs,
-  L253-287) and link out; update `docs/reliability.md` with the recovery/quarantine
-  section.
+### Scope Boundaries
 
----
+In scope:
 
-## Workstream B - Proof-first property layer (the differentiator)
+- Hardening current durable/workflow primitives.
+- Adding proof-derived retry/idempotency/fault-coverage properties where the existing analyzer can prove them conservatively.
+- Runtime gates and ledgers that consume those properties.
+- Workflow queue dead-letter inspection/replay and explicit cleanup/retention behavior.
+- Documentation, examples, and repo verification for the workflow/fault-tolerance surface.
 
-Goal: lift fault-tolerance correctness into the compile-time boundary wherever the
-restricted subset makes it decidable, and make the runtime + expert loop act on it.
+Out of scope:
 
-### B1. Prove and enforce `idempotent` / `retry_safe`
-- **Sound extraction** - derive the properties from the existing effect/flow analysis
-  (`packages/zigts/src/flow_checker.zig`, `handler_contract.zig`), not from a declared
-  annotation. Conservative decidable slice: a step is idempotent if its effects are
-  read-only or restricted to idempotent module calls / keyed writes; `retry_safe`
-  follows similarly. Anything outside the slice is `unproven`, never silently `true`.
-- **Runtime trust** - `durable_executor.zig` reads the proven property and (a) skips the
-  idempotency-key ledger for proven-idempotent steps, (b) permits auto-retry for proven-
-  `retry_safe` steps.
-- **Expert teaching** - when a step is `unproven`, the `expert` agent surfaces the
-  specific reason and the fix (idempotency key, keyed write, split effect). This is the
-  on-brand loop: the agent authors code the compiler can prove.
-- **Receipt extension** - add the proven properties to the signed `kind=workflow` receipt.
+- General-purpose interpreter preemption for arbitrary CPU-bound user code.
+- Full saga execution through `--workflow-queue`.
+- Durable persistence for the process-local `zigttp:queue` actor module.
+- Hosted/cloud workflow orchestration.
+- Automatic default pruning that deletes durable history or queue state without an explicit operator action.
+- Full Node/V8 fidelity or broad JavaScript runtime expansion.
 
-### B2. Proven-exhaustive compensation
-- Where decidable, prove a saga's compensation set covers every forward step (every
-  `do:` has a reachable `undo:`), so a partial-rollback hole is caught at compile time
-  rather than discovered at 2am. Builds on the existing affordance/contract extraction in
-  `runtime_workflow.zig` saga handling and `system_linker.zig`.
+### Sources
 
----
+The plan is grounded in the current checkout:
 
-## Workstream C - Runtime primitives (the inherently-runtime floor)
+- `STRATEGY.md` frames the product as proof-first, AI-assisted serverless development.
+- `packages/runtime/src/durable_executor.zig` has durable steps, sleeps, signals, and `stepWithTimeout`, with timeout currently checked after the body returns.
+- `packages/runtime/src/runtime_http.zig` already retries durable fetch on transport failure as synthetic 599 and server errors.
+- `packages/runtime/src/workflow_queue.zig` has pending/leased/done/dead lanes and lease reclaim, but only narrow queue tests.
+- `packages/runtime/src/durable_store.zig` documents the current signal claim/resume crash window.
+- `packages/runtime/src/runtime_workflow.zig` already rejects saga under workflow queue and preserves `workflow.parallel#N` step names for replay compatibility.
+- `packages/zigts/src/contract_types.zig` already models durable workflow nodes, edges, and proof level.
+- `docs/user-guide.md` and `docs/virtual-modules/README.md` describe the current workflow, durable, and queue surfaces but do not yet provide the tutorial/crash-drill level guide.
 
-Goal: build the conventional fault-tolerance machinery for the cases proof can't reach.
-Each primitive is gated by, or interlocks with, the WS-B proof layer.
+## Planning Contract
 
-- **C1. Step-level retries with backoff/jitter.** `step(name, fn, {retries, backoff})`.
-  Auto-enabled for proven-`retry_safe` steps (WS-B1); explicit opt-in otherwise. Backoff
-  shared with A1 jitter. File: `durable_executor.zig`.
-- **C2. True deadline enforcement.** Generalizes A1's `stepWithTimeout` fix into an
-  optional workflow-level deadline for `durable.run(...)`, with cooperative cancellation
-  at suspension/io points.
-- **C3. Idempotency-key ledger (fallback floor).** `<durable>/idempotency/<handler>/<key>.json`
-  state machine (arrived → processing → complete) for steps that call genuinely
-  non-idempotent external effects and are therefore `unproven`. Off by default for proven-
-  idempotent steps (WS-B1). Files: new `durable` store path, `durable_store.zig`.
-- **C4. Signal queues + scheduled-signal TTL.** Replace last-write-wins signal files with
-  FIFO enqueue/consume so multiple `signal(key, name)` deliveries survive; add TTL cleanup
-  for expired `signalAt` files. Files: `durable_store.zig` (`scanSignals`, signal write),
-  `durable_executor.zig` (`waitSignal`).
-- **C5. Dead-letter queue + max-attempts policy.** `workflow_queue.zig` already has a
-  `dead/` lane and `markDead`, but no attempt counter or max-attempts → dead transition,
-  and nothing reads the DLQ. Add an attempt counter to the queue envelope, a configurable
-  max-attempts policy, and a `zigttp` inspection path (list/replay dead items). Files:
-  `workflow_queue.zig`, a CLI surface in the runtime.
-- **C6. Reconcile saga with `--workflow-queue`.** Today saga rejects under the queue
-  (`runtime_workflow.zig` ~L634) because compensation order emerges from oplog replay and
-  closures don't survive JSON flattening. Either (a) lift the limitation by representing
-  compensation as queue-addressable durable steps, or (b) make the rejection a documented,
-  first-class "use top-level call/follow/fanout" guardrail. Resolve at execution (Q3).
-- **C7. Operational ergonomics.** Configurable recovery poll interval (currently fixed
-  1s in `durable_recovery.zig`); queue-depth / pending-work visibility for operators.
+### Product Contract Preservation
 
----
+This plan reorganizes the brainstorm into stable requirements and implementation units without narrowing the intended product outcome.
+The only scope decisions added by planning are conservative resolutions to the brainstorm's open questions: suspension-point deadlines first, proof-gated idempotency first, saga queue support deferred, and no destructive retention default.
 
-## Success criteria
+### Key Technical Decisions
 
-- A developer can build a durable workflow from the new tutorial, kill the process
-  mid-run, restart, and observe correct resume - with a test that proves it.
-- `zig build test`, `zig build test-zruntime`, `zig build test-cli`, and
-  `scripts/test-examples.sh` (now including `workflow/`) are green; `scripts/verify.sh`
-  passes.
-- `stepWithTimeout`, `workflow_queue` crash recovery, saga-compensation idempotency,
-  signal queues, and the idempotency ledger each have failing-path + `FailingAllocator`
-  coverage.
-- A proven-idempotent step runs with no idempotency ledger; an unprovable one is either
-  taught-and-fixed in `expert` mode or explicitly ledger-backed - never silently weaker.
-- The signed `kind=workflow` receipt carries the proven fault-tolerance properties.
-- `docs/durable-workflows.md` documents the guarantee contract precisely enough that a
-  user can answer "is this exactly-once?" without reading Zig.
+- **KTD1 - Proof first, runtime second**: runtime conveniences such as automatic retry must consume proof properties instead of becoming an independent source of truth.
+- **KTD2 - Deadline boundary**: implement cancellation at durable suspension points and outbound fetch/watchdog boundaries first; arbitrary CPU-bound interpreter preemption is deferred.
+- **KTD3 - Retry jitter**: use bounded jitter for durable fetch and recovery backoff while preserving existing retry classification for synthetic 599 and 5xx statuses.
+- **KTD4 - Signal consume protocol**: close the documented claim/resume crash window by persisting the resume intent before removing or hiding the signal from the available queue.
+- **KTD5 - Queue dead letters**: repeated queue dispatch failure moves work to an inspectable dead-letter lane with explicit replay or discard commands.
+- **KTD6 - Saga queue guardrail**: keep the current saga-under-queue rejection as a tested, documented guardrail; queue-addressable saga compensation is future work.
+- **KTD7 - Retention safety**: add inspection and explicit cleanup controls, but do not introduce default background deletion of durable state.
+- **KTD8 - Replay compatibility**: preserve response-part replay, `workflow.parallel#N` internal step keys, `workflow.follow` receipt alignment, and portable `system_hash` identity.
+- **KTD9 - Actor queue boundary**: keep `zigttp:queue` as process-local actor messaging; do not blend its semantics with durable workflow state.
 
-## Verification
+### High-Level Technical Design
 
-1. Unit/integration: the new tests in `zruntime.zig` and `workflow_queue.zig`
-   (crash-injection, `FailingAllocator`, lease races).
-2. Example E2E: `scripts/test-examples.sh` runs the five workflow fixtures.
-3. Manual crash drill: `zigttp dev --durable .zigttp/durable` a multi-step handler,
-   `kill -9` mid-step, restart, curl, confirm resume and no double-effect.
-4. Proof drill: author an idempotent and a non-idempotent step; confirm `check` /
-   `expert` report `proven` vs `unproven` and that the runtime ledger engages only for
-   the latter.
-5. Full gate: `bash scripts/verify.sh` plus `zig fmt --check` (run separately per repo
-   convention).
+```mermaid
+flowchart TD
+  Handler[Handler source] --> Analyzer[ZigTS analyzer]
+  Analyzer --> Contract[Contract JSON and proof trace]
+  Contract --> RuntimeGates[Runtime retry and idempotency gates]
+  RuntimeGates -->|proven safe| AutoRetry[Automatic retry path]
+  RuntimeGates -->|unproven| FailClosed[Diagnostic or explicit ledger required]
+  RuntimeGates --> Receipts[Manifest, build receipt, HAL, expert output]
+  RuntimeFloors[Deadlines, signal store, workflow queue, DLQ] --> RuntimeGates
+  RuntimeFloors --> Examples[Examples and crash drills]
+  Receipts --> Docs[User guide and durable workflow docs]
+  Examples --> Docs
+```
 
-## Sequencing (all post-beta)
+The runtime and proof layers meet through a small set of explicit properties:
 
-1. **WS-A** first - it is bounded, de-risks the surface already in users' hands, and the
-   tests it adds are the safety net for B and C.
-2. **WS-B1** next - the proof interlock that gates C1/C3; do it before the runtime
-   primitives so they can read the proven properties from day one.
-3. **WS-C** - retries (C1) and idempotency ledger (C3) right after B1 (they depend on
-   it), then C4/C5/C2, then B2 and C6/C7.
+- `retry_safe`: automatic retry will not repeat non-idempotent side effects.
+- `idempotent`: repeated execution of the same durable operation can be collapsed by key.
+- `fault_covered`: the workflow has a known durable recovery path for the effects it uses.
+- `durable_workflow_proof_level`: the durable graph is complete enough for receipts and expert output to make a strong claim.
 
-## Open questions (resolve at execution, not now)
+The file-backed runtime surfaces share one rule: data can move from available to in-progress only when there is a durable recovery path back to either completion, retry, or operator-visible dead letter.
 
-- **Q1. Deadline cancellation depth.** True mid-step cancellation needs cooperative
-  checkpoints in the interpreter/io. How deep do we go - interrupt only at fetch/io
-  boundaries (cheaper, covers the common case) or add general cancellation points?
-- **Q2. Idempotency decidable slice.** Exact boundary of what counts as "provably
-  idempotent" on the subset - confirm the conservative rule (read-only ∪ idempotent
-  module calls ∪ keyed writes) is both sound and useful enough to not flag everything.
-- **Q3. saga × queue (C6).** Lift the limitation or formalize the guardrail? Lifting is
-  more work and more value; formalizing is honest and cheap.
-- **Q4. Oplog/queue retention policy.** Pruning of completed oplogs and dead-letter items
-  is currently unbounded-on-disk; pick a default retention and whether it's configurable.
+### System-Wide Impact
+
+- Runtime persistence paths gain more validation, retry metadata, dead-letter operations, and tests.
+- Proof contract JSON may gain or tighten fields, so parser/writer fixtures and compatibility tests must move together.
+- Receipts and expert output gain new user-visible guarantee text.
+- Docs and examples become part of the completion gate, not post-work cleanup.
+- Existing replay data must remain compatible for `workflow.parallel#N`, response part snapshots, and durable run identity.
+
+### Risks
+
+- **False proof positives**: any analyzer uncertainty must produce false or partial, not a confident guarantee.
+- **Double delivery**: signal and queue changes must prefer visible retry/dead-letter over hidden duplicate completion.
+- **Data loss**: retention and cleanup work must be explicit and tested before deleting durable files.
+- **Replay breakage**: renaming existing durable step keys or response snapshot formats would break existing oplogs.
+- **Long-running gates**: broad verification can be slow; implementation should keep focused tests close to each touched module before the full verify script.
+
+## Implementation Units
+
+### U1 - Durable Deadline and Retry Floor
+
+**Goal**
+
+Make current durable deadline and retry behavior operational and testable before adding higher-level proof gates.
+
+**Requirements**
+
+- Covers R2 and R3.
+- Feeds R7 by making the runtime retry floor deterministic enough for proof-gated use.
+
+**Files**
+
+- `packages/runtime/src/durable_executor.zig`
+- `packages/runtime/src/runtime_http.zig`
+- `packages/runtime/src/durable_recovery.zig`
+- `packages/runtime/src/zruntime.zig`
+
+**Approach**
+
+- Replace post-body-only `stepWithTimeout` behavior with supported-boundary timeout behavior for durable sleeps, wait-signal, and outbound fetch.
+- Thread deadline information through existing durable execution context instead of adding a global timer.
+- Add a shared bounded-jitter helper for durable fetch retry and recovery polling/backoff.
+- Preserve synthetic 599 retry classification for transport errors and preserve 5xx retry behavior.
+- Keep unsupported CPU-bound preemption explicit in docs and diagnostics.
+
+**Tests**
+
+- `stepWithTimeout` times out a durable sleep before the sleep completes.
+- `stepWithTimeout` times out `waitSignal` without consuming a later signal.
+- Durable fetch retries synthetic 599 and 5xx with bounded delays and stops after exhaustion.
+- Recovery retry backoff applies jitter without exceeding the configured cap.
+- A CPU-bound body remains documented unsupported behavior rather than pretending to be preempted.
+
+### U2 - Workflow Queue Reliability and Dead-Letter Operations
+
+**Goal**
+
+Move workflow queue from happy-path queueing plus lease reclaim to an operable crash-tolerant dispatch surface.
+
+**Requirements**
+
+- Covers R4, R9, and part of R11.
+
+**Files**
+
+- `packages/runtime/src/workflow_queue.zig`
+- `packages/runtime/src/runtime_workflow.zig`
+- `packages/runtime/src/runtime_cli.zig`
+- `packages/runtime/src/cli_help.zig`
+- `packages/runtime/src/zruntime.zig`
+
+**Approach**
+
+- Extend queue item metadata with attempt count, last error, lease owner, and timestamps needed for dead-letter decisions.
+- Keep pending, leased, done, and dead lanes, but harden each file move with temp-file plus rename discipline.
+- Move repeated failures or corrupt unrecoverable items to dead letter instead of spinning forever.
+- Add a workflow-queue command group through the existing runtime CLI for listing dead letters, replaying a dead item, and discarding one item.
+- Keep saga-under-queue rejection as a first-class tested branch.
+
+**Tests**
+
+- Queue item survives partial write by quarantine or rejection without poisoning the lane.
+- Corrupt pending and leased files become visible operator failures.
+- Two workers racing to reclaim one expired lease result in one claimant.
+- Max attempts move a child request to dead letter with last error preserved.
+- Replaying a dead item returns it to pending without losing the original idempotency key.
+- Saga under workflow queue returns the documented guardrail.
+
+### U3 - Durable Signal Queue Hardening
+
+**Goal**
+
+Close the signal claim/resume crash window documented in the current store and make scheduled signal behavior inspectable.
+
+**Requirements**
+
+- Covers R5 and contributes to R11.
+
+**Files**
+
+- `packages/runtime/src/durable_store.zig`
+- `packages/runtime/src/durable_executor.zig`
+- `packages/runtime/src/zruntime.zig`
+
+**Approach**
+
+- Persist the waiter's resume intent before hiding or removing the signal from the available queue.
+- Finalize consumed signals only after the resumed workflow step is durably recorded.
+- Keep scheduled signals invisible until due.
+- Add explicit inspection and cleanup helpers for old consumed/torn/quarantined signal files.
+- Avoid default background deletion.
+
+**Tests**
+
+- Crash after signal claim but before resume persistence leaves the signal recoverable.
+- Crash after resume persistence but before finalize does not double-deliver.
+- Scheduled signals remain hidden until due.
+- Torn or corrupt signal files move to quarantine.
+- Cleanup only removes files selected by explicit operator action or test-controlled retention settings.
+
+### U4 - Conservative Proof Property Derivation
+
+**Goal**
+
+Teach the proof layer to emit useful retry/idempotency/fault-coverage claims without overstating what the analyzer knows.
+
+**Requirements**
+
+- Covers R6 and prepares R7/R8.
+
+**Files**
+
+- `packages/zigts/src/contract_types.zig`
+- `packages/zigts/src/contract_builder.zig`
+- `packages/zigts/src/contract_json_writer.zig`
+- `packages/zigts/src/contract_json_parser.zig`
+- `packages/zigts/src/flow_checker.zig`
+- `packages/zigts/src/proof_trace.zig`
+- `packages/zigts/src/system_linker.zig`
+- `packages/zigts/src/handler_contract.zig`
+
+**Approach**
+
+- Reuse existing durable workflow node/edge modeling for step, timeout, sleep, wait signal, signal, and response return.
+- Derive `retry_safe`, `idempotent`, and `fault_covered` from known durable effects and explicit idempotency keys.
+- Treat unknown native calls, dynamic names, unmodeled side effects, and unsupported workflow combinations as false or partial.
+- Keep JSON parser/writer compatibility explicit with fixture updates.
+- Add proof-trace reasons for both positive and negative claims.
+
+**Tests**
+
+- A simple durable step with a stable key is marked idempotent/retry-safe.
+- A dynamic side-effecting call is not marked retry-safe.
+- A workflow using `waitSignal` has a fault-coverage claim only when its resume path is modeled.
+- Saga under queue does not get a complete durable proof.
+- Contract JSON round-trips new fields and defaults missing fields conservatively.
+
+### U5 - Runtime Proof-Gated Retry and Idempotency Ledger
+
+**Goal**
+
+Connect proof properties to runtime behavior so the system fails closed when a workflow is not proven safe.
+
+**Requirements**
+
+- Covers R7 and reinforces R2-R6.
+
+**Files**
+
+- `packages/runtime/src/durable_executor.zig`
+- `packages/runtime/src/durable_store.zig`
+- `packages/runtime/src/runtime_workflow.zig`
+- `packages/runtime/src/zruntime.zig`
+- `packages/zigts/src/modules/workflow/durable.zig`
+
+**Approach**
+
+- Load or pass proof properties into the runtime boundary that decides automatic retry.
+- Require `retry_safe` for automatic durable retry unless the call provides an explicit idempotency key backed by a durable ledger.
+- Store ledger entries using the same fsync/rename discipline as other durable state.
+- Return clear diagnostics for unproven retry attempts.
+- Keep manual user retry possible when no automatic guarantee is claimed.
+
+**Tests**
+
+- Proven retry-safe workflow retries automatically.
+- Unproven workflow does not auto retry and returns a diagnostic.
+- Explicit idempotency key collapses duplicate durable work.
+- Ledger crash between write and finalize recovers to either completed value or retry-visible state.
+- Replay of old oplogs without proof properties defaults to safe false behavior.
+
+### U6 - Receipts, HAL, and Expert Surfacing
+
+**Goal**
+
+Make workflow/fault-tolerance guarantees visible in the artifacts users already inspect.
+
+**Requirements**
+
+- Covers R8 and contributes to R11.
+
+**Files**
+
+- `packages/tools/src/deploy_manifest.zig`
+- `packages/runtime/src/attest/build_receipt.zig`
+- `packages/runtime/src/attest/header_strings.zig`
+- `packages/zigts/src/hypermedia_receipt.zig`
+- `packages/zigts/src/contract_json_writer.zig`
+- `packages/zigts/src/proof_trace.zig`
+- `packages/pi/src/proof_enrichment.zig`
+- `packages/pi/src/expert_workflow.zig`
+- `packages/tools/tests/fixtures/expert/`
+
+**Approach**
+
+- Add workflow fault-tolerance properties to manifest/receipt surfaces without making them the product headline.
+- Include concise negative reasons in expert/HAL output when a guarantee is partial or absent.
+- Keep `system_hash` identity stable and portable.
+- Update golden fixtures together with schema changes.
+
+**Tests**
+
+- Build receipt includes durable workflow proof level and retry/idempotency status.
+- HAL/expert output says when retry safety is unproven and why.
+- Manifest schema round-trips workflow properties.
+- Golden fixtures update only for intentional user-visible changes.
+
+### U7 - Workflow Examples, Fixtures, and Docs
+
+**Goal**
+
+Turn the runtime/proof behavior into runnable examples and user-facing documentation.
+
+**Requirements**
+
+- Covers R1, R9, R10, and R11.
+
+**Files**
+
+- `examples/workflow/`
+- `scripts/test-examples.sh`
+- `docs/user-guide.md`
+- `docs/virtual-modules/README.md`
+- `docs/durable-workflows.md`
+- `docs/tutorials/first-durable-workflow.md`
+- `docs/reliability.md`
+- `docs/cli.md`
+
+**Approach**
+
+- Add deterministic workflow example fixtures for durable step, fanout, follow, wait signal, queued child dispatch, timeout, and dead-letter replay.
+- Extend the example test script to run workflow fixtures.
+- Add a durable workflows guide that explains proof vs runtime guarantees.
+- Add a first-workflow tutorial with a crash drill.
+- Document the `zigttp:queue` actor boundary separately from durable workflow queue semantics.
+- Keep saga queue behavior documented as unsupported for now.
+
+**Tests**
+
+- Example fixtures run through `scripts/test-examples.sh`.
+- Docs mention new CLI/runtime behavior and stay consistent with generated help.
+- Crash drill instructions are reproducible from a clean checkout.
+- No doc claims automatic cleanup or saga queue support that the runtime does not provide.
+
+### U8 - Verification Gate and Release Readiness
+
+**Goal**
+
+Make the implementation complete only when focused tests, examples, docs, and repo-wide gates agree.
+
+**Requirements**
+
+- Covers all requirements as the closing unit.
+
+**Files**
+
+- `build.zig`
+- `scripts/verify.sh`
+- `scripts/test-examples.sh`
+- `docs/plans/2026-06-30-001-feat-workflow-fault-tolerance-plan.md`
+
+**Approach**
+
+- Add or update test steps only when existing gates do not already cover the new workflow fixtures.
+- Run focused tests after each unit and the full verification script before final commit.
+- Keep this plan updated if implementation discovers a scope conflict.
+- Record any deliberately deferred behavior in docs rather than leaving it implicit.
+
+**Tests**
+
+- Focused unit tests from U1-U7 pass.
+- Example fixtures pass.
+- Docs drift and link checks pass.
+- Full repo verification passes.
+
+## Verification Contract
+
+Run focused gates during implementation, then close with the aggregate gates.
+
+| Gate | Command |
+|---|---|
+| Format | `zig fmt --check build.zig packages/` |
+| Runtime workflow tests | `zig build test-zruntime` |
+| ZigTS/proof tests | `zig build test-zigts` |
+| CLI tests | `zig build test-cli` |
+| Examples | `bash scripts/test-examples.sh` |
+| Docs | `zig build test-docs-drift test-doc-links` |
+| Full verification | `bash scripts/verify.sh` |
+| Diff hygiene | `git diff --check` |
+
+Manual drills to keep with the implementation branch:
+
+- Start a durable workflow with `--durable` and `--workflow-queue`, kill the process after child dispatch is leased, restart, and confirm the child either completes once or lands in dead letter.
+- Trigger a waiting workflow signal, crash before finalize, restart, and confirm the workflow resumes once.
+- Compile a proven retry-safe handler and an unproven side-effecting handler, then confirm runtime retry behavior differs and receipts explain why.
+
+If a full gate is too slow during an intermediate unit, run the focused command for the touched package first and leave `bash scripts/verify.sh` for the closing unit.
+
+## Definition of Done
+
+- R1-R11 are implemented, tested, and documented; only items already listed under Scope Boundaries may remain deferred.
+- U1-U8 focused tests pass.
+- `bash scripts/verify.sh`, `zig build test-docs-drift test-doc-links`, and `git diff --check` pass before final commit.
+- Receipts, proof output, and docs agree on retry/idempotency/fault-coverage wording.
+- Workflow queue dead letters and signal cleanup are explicit operator actions, not hidden deletion.
+- Saga under workflow queue remains rejected, tested, and documented.
+- No persisted replay key, response-part snapshot format, or `system_hash` behavior is changed without a compatibility note.
+- The final commit includes the plan update, code, tests, examples, and docs needed to make the feature reviewable end to end.
