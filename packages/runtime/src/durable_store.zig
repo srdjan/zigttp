@@ -9,6 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zq = @import("zigts");
 const trace = zq.trace;
+const idempotency_ledger = @import("idempotency_ledger.zig");
 
 const c = @cImport({
     @cInclude("dirent.h");
@@ -159,17 +160,7 @@ pub const DurableStore = union(enum) {
     }
 };
 
-pub const IdempotencyLedgerState = enum {
-    started,
-    completed,
-
-    fn jsonString(self: IdempotencyLedgerState) []const u8 {
-        return switch (self) {
-            .started => "started",
-            .completed => "completed",
-        };
-    }
-};
+pub const IdempotencyLedgerState = idempotency_ledger.IdempotencyLedgerState;
 
 pub const SignalArtifactKind = enum {
     claimed,
@@ -257,7 +248,7 @@ const FsDurableStore = struct {
         defer self.allocator.free(scheduled_dir);
         try self.ensureDir(scheduled_dir);
 
-        const idempotency_dir = try self.allocIdempotencyDir();
+        const idempotency_dir = try idempotency_ledger.dirPath(self.allocator, self.durable_dir);
         defer self.allocator.free(idempotency_dir);
         try self.ensureDir(idempotency_dir);
         self.dirs_ready = true;
@@ -593,24 +584,7 @@ const FsDurableStore = struct {
         state: IdempotencyLedgerState,
     ) !void {
         try self.ensureDirs();
-        const path = try self.allocIdempotencyPath(idempotency_key);
-        defer self.allocator.free(path);
-
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(self.allocator);
-        try buf.appendSlice(self.allocator, "{\"idempotency_key\":\"");
-        try appendEscaped(&buf, self.allocator, idempotency_key);
-        try buf.appendSlice(self.allocator, "\",\"durable_key\":\"");
-        try appendEscaped(&buf, self.allocator, durable_key);
-        try buf.appendSlice(self.allocator, "\",\"state\":\"");
-        try appendEscaped(&buf, self.allocator, state.jsonString());
-        try buf.appendSlice(self.allocator, "\",\"updated_ms\":");
-        var tmp: [32]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&tmp, "{d}", .{unixMillis()});
-        try buf.appendSlice(self.allocator, printed);
-        try buf.appendSlice(self.allocator, "}");
-
-        try zq.file_io.writeFile(self.allocator, path, buf.items);
+        return idempotency_ledger.write(self.allocator, self.durable_dir, idempotency_key, durable_key, state);
     }
 
     fn hasIdempotencyLedger(
@@ -619,16 +593,7 @@ const FsDurableStore = struct {
         durable_key: []const u8,
     ) !bool {
         try self.ensureDirs();
-        const path = try self.allocIdempotencyPath(idempotency_key);
-        defer self.allocator.free(path);
-
-        const source = zq.file_io.readFile(self.allocator, path, 1024 * 1024) catch |err| switch (err) {
-            error.FileNotFound => return false,
-            else => return err,
-        };
-        defer self.allocator.free(source);
-
-        return ledgerMatches(self.allocator, source, idempotency_key, durable_key);
+        return idempotency_ledger.has(self.allocator, self.durable_dir, idempotency_key, durable_key);
     }
 
     fn allocSignalsDir(self: *Self) ![]u8 {
@@ -637,19 +602,6 @@ const FsDurableStore = struct {
 
     fn allocScheduledDir(self: *Self) ![]u8 {
         return std.fmt.allocPrint(self.allocator, "{s}/scheduled", .{self.durable_dir});
-    }
-
-    fn allocIdempotencyDir(self: *Self) ![]u8 {
-        return std.fmt.allocPrint(self.allocator, "{s}/idempotency", .{self.durable_dir});
-    }
-
-    fn allocIdempotencyPath(self: *Self, idempotency_key: []const u8) ![]u8 {
-        const dir = try self.allocIdempotencyDir();
-        defer self.allocator.free(dir);
-        return std.fmt.allocPrint(self.allocator, "{s}/idem-{x}.json", .{
-            dir,
-            std.hash.Fnv1a_64.hash(idempotency_key),
-        });
     }
 
     /// Rename an unparseable signal file out of the scanned namespace
@@ -836,27 +788,6 @@ fn deletePath(path: []const u8) void {
     _ = std.c.unlink(path_z);
 }
 
-fn ledgerMatches(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    idempotency_key: []const u8,
-    durable_key: []const u8,
-) bool {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, source, .{}) catch return false;
-    defer parsed.deinit();
-    if (parsed.value != .object) return false;
-    const obj = parsed.value.object;
-
-    const stored_idempotency = obj.get("idempotency_key") orelse return false;
-    const stored_durable = obj.get("durable_key") orelse return false;
-    const stored_state = obj.get("state") orelse return false;
-    if (stored_idempotency != .string or stored_durable != .string or stored_state != .string) return false;
-    if (!std.mem.eql(u8, stored_idempotency.string, idempotency_key)) return false;
-    if (!std.mem.eql(u8, stored_durable.string, durable_key)) return false;
-    return std.mem.eql(u8, stored_state.string, "started") or
-        std.mem.eql(u8, stored_state.string, "completed");
-}
-
 fn isSignalEnvelopeFileName(name: []const u8, include_claimed: bool) bool {
     if (std.mem.endsWith(u8, name, ".json")) return true;
     return include_claimed and isClaimedSignalFileName(name);
@@ -937,7 +868,7 @@ test "subtreeDir rejects names that would escape the root" {
     try std.testing.expectError(error.InvalidSubtreeName, store.subtreeDir(allocator, "has space"));
 }
 
-test "durable store idempotency ledger records started and completed states" {
+test "durable store wires idempotency ledger calls through to the fs store" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -951,15 +882,6 @@ test "durable store idempotency ledger records started and completed states" {
 
     try store.writeIdempotencyLedger("idem:123", "order:123", .started);
     try std.testing.expect(try store.hasIdempotencyLedger("idem:123", "order:123"));
-    try std.testing.expect(!try store.hasIdempotencyLedger("idem:123", "other"));
-
-    try store.writeIdempotencyLedger("idem:123", "order:123", .completed);
-    try std.testing.expect(try store.hasIdempotencyLedger("idem:123", "order:123"));
-}
-
-test "durable store idempotency ledger ignores malformed records" {
-    try std.testing.expect(!ledgerMatches(std.testing.allocator, "{\"idempotency_key\":false}", "idem", "key"));
-    try std.testing.expect(!ledgerMatches(std.testing.allocator, "{\"idempotency_key\":\"idem\",\"durable_key\":\"key\",\"state\":\"unknown\"}", "idem", "key"));
 }
 
 test "durable store hides future scheduled signals until due" {
