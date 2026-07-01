@@ -315,9 +315,15 @@ pub fn durableStepWithTimeout(rt: *Runtime, ctx: *zq.Context, name: []const u8, 
     const func_obj = step_val.toPtr(zq.JSObject);
     const result = rt.callFunction(func_obj, &.{}) catch |err| {
         if (err == error.DurableSuspended) return err;
-        if (err == error.DurableStepTimedOut or err == error.RequestTimeout) {
+        if (err == error.DurableStepTimedOut) {
             return timeoutResult(rt, ctx, name);
         }
+        // error.RequestTimeout can be raised by either this step's own
+        // deadline or the shorter outer per-request deadline that
+        // StepDeadlineGuard.arm folds in via min(). Only swallow it as
+        // this step's timeout when the step's own deadline actually
+        // expired; otherwise propagate so the outer request-timeout
+        // safety net (504 + invalidateRuntime) still fires.
         if (timeoutExpired(deadline_ms, unixMillis())) {
             return timeoutResult(rt, ctx, name);
         }
