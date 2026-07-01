@@ -8,12 +8,14 @@
 
 const std = @import("std");
 const zq = @import("zigts");
+const runtime_config = @import("runtime_config.zig");
 const HandlerContract = zq.HandlerContract;
 const HandlerProperties = zq.handler_contract.HandlerProperties;
 const ModuleCapability = zq.module_binding.ModuleCapability;
 const capability_count = zq.module_binding.capability_count;
 
 pub const CapabilityMatrix = zq.handler_contract.CapabilityMatrix;
+pub const DurableWorkflowProperties = runtime_config.DurableWorkflowProperties;
 
 /// Proven handler properties extracted from the contract.
 /// Each field is a mathematical proof, not an annotation.
@@ -96,6 +98,7 @@ pub const RuntimeContract = struct {
     /// treated as header-independent.
     reads_request_state: bool = false,
     properties: Properties,
+    durable_workflow_properties: DurableWorkflowProperties = .{},
     websocket: WebSocketInfo = .{},
     /// Null when the embedded contract did not emit a sandbox block (old
     /// contract, or contract parse fell through). A non-null matrix with
@@ -212,6 +215,10 @@ pub const ValidatedRuntimeContract = struct {
 
     pub fn properties(self: *const ValidatedRuntimeContract) Properties {
         return self.inner.properties;
+    }
+
+    pub fn durableWorkflowProperties(self: *const ValidatedRuntimeContract) DurableWorkflowProperties {
+        return self.inner.durable_workflow_properties;
     }
 
     pub fn websocket(self: *const ValidatedRuntimeContract) WebSocketInfo {
@@ -347,6 +354,7 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
 
     // Parse properties
     const properties = parseProperties(root);
+    const durable_workflow_properties = parseDurableWorkflowProperties(root);
 
     var capabilities: ?CapabilityMatrix = null;
     var artifact_sha256 = [_]u8{0} ** 32;
@@ -421,6 +429,7 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
         .routes_dynamic = routes_dynamic,
         .reads_request_state = reads_request_state,
         .properties = properties,
+        .durable_workflow_properties = durable_workflow_properties,
         .websocket = websocket,
         .capabilities = capabilities,
         .artifact_sha256 = artifact_sha256,
@@ -512,6 +521,22 @@ fn parseProperties(root: std.json.ObjectMap) Properties {
         }
     }
 
+    return props;
+}
+
+fn parseDurableWorkflowProperties(root: std.json.ObjectMap) DurableWorkflowProperties {
+    var props = DurableWorkflowProperties{};
+    const durable_val = root.get("durable") orelse return props;
+    if (durable_val != .object) return props;
+    const workflow_val = durable_val.object.get("workflow") orelse return props;
+    if (workflow_val != .object) return props;
+    const prop_val = workflow_val.object.get("properties") orelse return props;
+    if (prop_val != .object) return props;
+
+    const obj = prop_val.object;
+    props.retry_safe = getBool(obj, "retrySafe");
+    props.idempotent = getBool(obj, "idempotent");
+    props.fault_covered = getBool(obj, "faultCovered");
     return props;
 }
 
@@ -644,6 +669,11 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
             .fault_covered = hp.fault_covered,
             .result_safe = hp.result_safe,
             .optional_safe = hp.optional_safe,
+        },
+        .durable_workflow_properties = .{
+            .retry_safe = hc.durable.workflow.properties.retry_safe,
+            .idempotent = hc.durable.workflow.properties.idempotent,
+            .fault_covered = hc.durable.workflow.properties.fault_covered,
         },
         .capabilities = hc.capabilities,
         .artifact_sha256 = hc.artifact_sha256,
@@ -809,6 +839,33 @@ test "parseContractJson minimal" {
     try std.testing.expect(!contract.env_dynamic);
     try std.testing.expectEqual(@as(usize, 0), contract.routes.len);
     try std.testing.expect(!contract.properties.pure);
+    try std.testing.expect(!contract.durable_workflow_properties.retry_safe);
+    try std.testing.expect(!contract.durable_workflow_properties.idempotent);
+    try std.testing.expect(!contract.durable_workflow_properties.fault_covered);
+}
+
+test "parseContractJson reads durable workflow properties" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "durable": {
+        \\    "workflow": {
+        \\      "properties": {
+        \\        "retrySafe": true,
+        \\        "idempotent": true,
+        \\        "faultCovered": true
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
+
+    try std.testing.expect(raw.inner.durable_workflow_properties.retry_safe);
+    try std.testing.expect(raw.inner.durable_workflow_properties.idempotent);
+    try std.testing.expect(raw.inner.durable_workflow_properties.fault_covered);
 }
 
 test "parseContractJson with properties and routes" {
@@ -1083,6 +1140,9 @@ test "fromHandlerContract converts properties and env vars" {
 
     // Add an env var
     try hc.env.literal.append(allocator, try allocator.dupe(u8, "API_KEY"));
+    hc.durable.workflow.properties.retry_safe = true;
+    hc.durable.workflow.properties.idempotent = true;
+    hc.durable.workflow.properties.fault_covered = true;
 
     var raw = try fromHandlerContract(allocator, &hc);
     defer raw.deinit();
@@ -1095,6 +1155,9 @@ test "fromHandlerContract converts properties and env vars" {
     try std.testing.expect(rc.properties.retry_safe);
     try std.testing.expect(rc.properties.deterministic);
     try std.testing.expect(!rc.properties.pure);
+    try std.testing.expect(rc.durable_workflow_properties.retry_safe);
+    try std.testing.expect(rc.durable_workflow_properties.idempotent);
+    try std.testing.expect(rc.durable_workflow_properties.fault_covered);
 }
 
 // Drift guard: parseContractJson is a second, hand-rolled reader of the contract
@@ -1103,8 +1166,8 @@ test "fromHandlerContract converts properties and env vars" {
 // condition that the wire keys it hardcodes match what the writer emits. This
 // test pins that link: it emits a contract through the canonical writer and
 // reads it back here, so any future writer-side key rename (env/literal,
-// api/routes/method/path, properties.*, modules) fails loudly instead of
-// silently disabling a runtime check.
+// api/routes/method/path, properties.*, modules, durable.workflow.properties.*)
+// fails loudly instead of silently disabling a runtime check.
 test "contract wire format round-trips between writer and runtime parser" {
     const allocator = std.testing.allocator;
 
@@ -1149,6 +1212,9 @@ test "contract wire format round-trips between writer and runtime parser" {
 
     try hc.env.literal.append(allocator, try allocator.dupe(u8, "API_KEY"));
     try hc.modules.append(allocator, try allocator.dupe(u8, "zigttp:crypto"));
+    hc.durable.workflow.properties.retry_safe = true;
+    hc.durable.workflow.properties.idempotent = true;
+    hc.durable.workflow.properties.fault_covered = true;
     try hc.api.routes.append(allocator, .{
         .method = try allocator.dupe(u8, "GET"),
         .path = try allocator.dupe(u8, "/users"),
@@ -1179,6 +1245,9 @@ test "contract wire format round-trips between writer and runtime parser" {
     try std.testing.expect(rc.properties.retry_safe);
     try std.testing.expect(rc.properties.deterministic);
     try std.testing.expect(!rc.properties.pure);
+    try std.testing.expect(rc.durable_workflow_properties.retry_safe);
+    try std.testing.expect(rc.durable_workflow_properties.idempotent);
+    try std.testing.expect(rc.durable_workflow_properties.fault_covered);
 }
 
 test "parseContractJson reads sandbox block" {

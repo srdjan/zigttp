@@ -2861,6 +2861,183 @@ test "durable run resumes from completed step state" {
     try std.testing.expectEqualStrings("resume:123", parsed.run_key.?);
 }
 
+test "proof-gated durable retry allows proven workflow replay" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    try seedIncompleteDurableRandomStep(
+        allocator,
+        durable_dir,
+        "retry:proven",
+        "seed",
+        "0.75",
+    );
+
+    const rt = try Runtime.init(allocator, .{
+        .durable_oplog_dir = durable_dir,
+        .durable_workflow_properties = .{ .enforced = true, .retry_safe = true },
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run, step } from "zigttp:durable";
+        \\function handler(req) {
+        \\  return run("retry:proven", () => {
+        \\    const seed = step("seed", () => Math.random());
+        \\    return Response.json({ seed });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-retry-proven>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"seed\":0.75") != null);
+}
+
+test "proof-gated durable retry blocks unproven workflow replay" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    try seedIncompleteDurableRandomStep(
+        allocator,
+        durable_dir,
+        "retry:unproven",
+        "seed",
+        "0.5",
+    );
+
+    const rt = try Runtime.init(allocator, .{
+        .durable_oplog_dir = durable_dir,
+        .durable_workflow_properties = .{ .enforced = true },
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run, step } from "zigttp:durable";
+        \\function handler(req) {
+        \\  return run("retry:unproven", () => {
+        \\    const seed = step("seed", () => Math.random());
+        \\    return Response.json({ seed });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-retry-unproven>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 599), response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "DurableRetryUnproven") != null);
+}
+
+test "idempotency ledger allows unproven durable retry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    try seedIncompleteDurableRandomStep(
+        allocator,
+        durable_dir,
+        "retry:ledger",
+        "seed",
+        "0.25",
+    );
+    var store = durable_store_mod.DurableStore.initFs(allocator, durable_dir);
+    try store.writeIdempotencyLedger("retry:ledger", "retry:ledger", .started);
+
+    const rt = try Runtime.init(allocator, .{
+        .durable_oplog_dir = durable_dir,
+        .durable_workflow_properties = .{ .enforced = true },
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run, step } from "zigttp:durable";
+        \\function handler(req) {
+        \\  const key = req.headers.get("idempotency-key") ?? "missing";
+        \\  return run(key, () => {
+        \\    const seed = step("seed", () => Math.random());
+        \\    return Response.json({ seed });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-retry-ledger>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", "retry:ledger");
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"seed\":0.25") != null);
+    try std.testing.expect(try store.hasIdempotencyLedger("retry:ledger", "retry:ledger"));
+}
+
+test "idempotency ledger allows unproven duplicate durable response reuse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    const rt = try Runtime.init(allocator, .{
+        .durable_oplog_dir = durable_dir,
+        .durable_workflow_properties = .{ .enforced = true },
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run } from "zigttp:durable";
+        \\function handler(req) {
+        \\  const key = req.headers.get("idempotency-key") ?? "missing";
+        \\  return run(key, () => Response.json({ value: Math.random() }));
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-idem-ledger>");
+
+    var first_request = try makeTestRequest(allocator, "GET", "/", "idem:duplicate");
+    defer first_request.deinit(allocator);
+    var first_response = try rt.executeHandler(first_request.asView());
+    defer first_response.deinit();
+    const first_body = try allocator.dupe(u8, first_response.body);
+
+    var second_request = try makeTestRequest(allocator, "GET", "/", "idem:duplicate");
+    defer second_request.deinit(allocator);
+    var second_response = try rt.executeHandler(second_request.asView());
+    defer second_response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), second_response.status);
+    try std.testing.expectEqualStrings(first_body, second_response.body);
+
+    const path = try durable_executor.buildDurableOplogPath(rt, "idem:duplicate");
+    defer allocator.free(path);
+    const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"fn\":\"Math.random\""));
+}
+
 fn seedIncompleteWorkflowCallStep(
     allocator: std.mem.Allocator,
     durable_dir: []const u8,

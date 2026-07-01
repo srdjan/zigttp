@@ -1642,6 +1642,11 @@ pub const Server = struct {
 
         if (self.contract) |*c| c.deinit();
         self.contract = new_contract;
+        if (self.pool) |*pool| {
+            var workflow_properties = self.contract.?.durableWorkflowProperties();
+            workflow_properties.enforced = true;
+            pool.setDurableWorkflowProperties(workflow_properties);
+        }
 
         // Always rebuild: even if eligibility is unchanged, cached responses
         // are from the old handler and must not be served after a swap.
@@ -1685,6 +1690,9 @@ pub const Server = struct {
         if (self.contract) |*c| {
             c.deinit();
             self.contract = null;
+        }
+        if (self.pool) |*pool| {
+            pool.setDurableWorkflowProperties(.{});
         }
         if (self.proof_cache) |*pc| {
             pc.deinit();
@@ -1938,6 +1946,11 @@ pub const Server = struct {
         // interpreter's cooperative deadline check is enforced per handler call.
         var pool_rt_config = self.config.runtime_config;
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
+        if (self.contract) |*contract| {
+            var workflow_properties = contract.durableWorkflowProperties();
+            workflow_properties.enforced = true;
+            pool_rt_config.durable_workflow_properties = workflow_properties;
+        }
 
         if (pool_rt_config.queue_actor_enabled and pool_rt_config.queue_system == null) {
             self.actor_queue = actor_queue.ActorQueue.init(

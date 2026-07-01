@@ -659,6 +659,14 @@ pub const HandlerPool = struct {
         self.pooling_policy = policy;
     }
 
+    pub fn setDurableWorkflowProperties(self: *Self, properties: runtime_config_mod.DurableWorkflowProperties) void {
+        self.runtime_init_mutex.lock();
+        self.config.durable_workflow_properties = properties;
+        self.runtime_init_mutex.unlock();
+
+        _ = self.reload_generation.fetchAdd(1, .acq_rel);
+    }
+
     fn emitRuntimeEvent(kind: zq.security_events.SecurityEventKind, detail: []const u8) void {
         zq.security_events.emitGlobal(
             zq.security_events.SecurityEvent.init(kind, "runtime", detail),

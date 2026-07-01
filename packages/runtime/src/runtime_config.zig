@@ -6,6 +6,16 @@ const std = @import("std");
 const zq = @import("zigts");
 const embedded_handler = @import("embedded_handler");
 
+pub const DurableWorkflowProperties = struct {
+    /// Runtime proof gates are off for direct/no-contract runtime use. The
+    /// server turns this on only after loading a contract, so older contracts
+    /// that omit workflow properties fail closed through the false booleans.
+    enforced: bool = false,
+    retry_safe: bool = false,
+    idempotent: bool = false,
+    fault_covered: bool = false,
+};
+
 pub const RuntimeConfig = struct {
     memory_limit: usize = 0,
     nursery_size: usize = 64 * 1024,
@@ -28,6 +38,8 @@ pub const RuntimeConfig = struct {
     /// Per-request durable oplog directory. Incomplete oplogs are
     /// replayed on startup; completed ones keep duplicate keys idempotent.
     durable_oplog_dir: ?[]const u8 = null,
+    /// Proof snapshot for durable workflow retry/idempotency gates.
+    durable_workflow_properties: DurableWorkflowProperties = .{},
     system_config_path: ?[]const u8 = null,
     /// Route durable `zigttp:workflow` child dispatch through a persisted
     /// workflow queue. Requires both `durable_oplog_dir` and `system_config_path`.

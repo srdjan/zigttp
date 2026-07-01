@@ -88,6 +88,77 @@ fn timeoutExpired(deadline_ms: i64, now_ms: i64) bool {
     return now_ms >= deadline_ms;
 }
 
+fn requestIdempotencyKeyForRun(rt: *Runtime, durable_key: []const u8) ?[]const u8 {
+    const request = rt.active_request orelse return null;
+    for (request.headers.items) |header| {
+        if (ascii.eqlIgnoreCase(header.key, "idempotency-key") and
+            std.mem.eql(u8, header.value, durable_key))
+        {
+            return header.value;
+        }
+    }
+    return null;
+}
+
+fn durableCompletedResponseAllowed(rt: *Runtime, idempotency_key: ?[]const u8) bool {
+    const props = rt.config.durable_workflow_properties;
+    if (!props.enforced) return true;
+    if (props.idempotent) return true;
+    return idempotency_key != null;
+}
+
+fn durableRetryAllowed(rt: *Runtime, durable_key: []const u8, idempotency_key: ?[]const u8) !bool {
+    const props = rt.config.durable_workflow_properties;
+    if (!props.enforced) return true;
+    if (props.retry_safe) return true;
+    if (!try durableRetryWouldResume(rt, durable_key)) return true;
+
+    const ledger_key = idempotency_key orelse return false;
+    var store = try initDurableStore(rt);
+    return store.hasIdempotencyLedger(ledger_key, durable_key);
+}
+
+fn durableRetryWouldResume(rt: *Runtime, durable_key: []const u8) !bool {
+    if (rt.pending_durable_recovery != null) return true;
+
+    const path = try buildDurableOplogPath(rt, durable_key);
+    defer rt.allocator.free(path);
+
+    const source = try readDurableLogIfExists(rt, path) orelse return false;
+    defer rt.allocator.free(source);
+
+    var parsed = try zq.trace.parseDurableOplog(rt.allocator, source);
+    defer parsed.deinit();
+    if (parsed.run_key) |existing_key| {
+        if (!std.mem.eql(u8, existing_key, durable_key)) return error.DurableKeyCollision;
+    }
+    return !parsed.complete;
+}
+
+fn recordIdempotencyLedger(
+    rt: *Runtime,
+    idempotency_key: []const u8,
+    durable_key: []const u8,
+    state: durable_store_mod.IdempotencyLedgerState,
+) !void {
+    var store = try initDurableStore(rt);
+    try store.writeIdempotencyLedger(idempotency_key, durable_key, state);
+}
+
+fn durableSoftErrorResponse(rt: *Runtime, code: []const u8, detail: []const u8) !zq.JSValue {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(rt.allocator);
+
+    try body.appendSlice(rt.allocator, "{\"error\":\"");
+    try appendEscapedJson(&body, rt.allocator, code);
+    try body.appendSlice(rt.allocator, "\",\"detail\":\"");
+    try appendEscapedJson(&body, rt.allocator, detail);
+    try body.appendSlice(rt.allocator, "\"}");
+
+    const created = try createFetchResponse(rt, 599, statusTextFor(599), body.items, "application/json");
+    return created.value;
+}
+
 pub fn setPendingDurableRecovery(
     rt: *Runtime,
     key: []const u8,
@@ -112,8 +183,31 @@ pub fn durableRun(rt: *Runtime, ctx: *zq.Context, key: []const u8, run_val: zq.J
         return zq.modules.util.throwError(ctx, "Error", "run() is only valid during request handling");
     };
 
+    const idempotency_key = requestIdempotencyKeyForRun(rt, key);
+
     if (try tryLoadCompletedDurableResponse(rt, key)) |cached| {
+        if (!durableCompletedResponseAllowed(rt, idempotency_key)) {
+            return durableSoftErrorResponse(
+                rt,
+                "DurableIdempotencyUnproven",
+                "reusing a completed durable response requires an idempotent workflow proof or an Idempotency-Key header matching run() key",
+            );
+        }
+        if (idempotency_key) |ledger_key| {
+            try recordIdempotencyLedger(rt, ledger_key, key, .completed);
+        }
         return cached;
+    }
+
+    if (!try durableRetryAllowed(rt, key, idempotency_key)) {
+        return durableSoftErrorResponse(
+            rt,
+            "DurableRetryUnproven",
+            "automatic durable retry requires a retry_safe workflow proof or an Idempotency-Key header matching run() key from the original attempt",
+        );
+    }
+    if (idempotency_key) |ledger_key| {
+        try recordIdempotencyLedger(rt, ledger_key, key, .started);
     }
 
     const active = openActiveDurableRun(rt, key) catch |err| switch (err) {
@@ -150,6 +244,9 @@ pub fn durableRun(rt: *Runtime, ctx: *zq.Context, key: []const u8, run_val: zq.J
     var response = try rt.extractResponseInternal(upgraded, false);
     defer response.deinit();
     try persistActiveDurableResponse(rt, &response);
+    if (idempotency_key) |ledger_key| {
+        try recordIdempotencyLedger(rt, ledger_key, key, .completed);
+    }
     return upgraded;
 }
 
