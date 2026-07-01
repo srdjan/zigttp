@@ -84,7 +84,12 @@ zigttp serve examples/workflow/queued-orchestrator.ts \
 The queue lives under `<durable>/workflow-queue`. Items move through
 `pending/`, `leased/`, `done/`, and `dead/`. Leases expire and can be reclaimed.
 After the attempt cap, the item moves to a dead letter. Dead letters block new
-enqueue for the same item id until an operator replays or discards them:
+enqueue for the same item id until an operator replays or discards them. The
+parent workflow suspends (`202`) while its child is dead-lettered rather than
+completing with a terminal error, so the queue item's state and the parent
+run's state are separate: `replay`/`discard` only change the queue item, and
+the parent request must be retried with the same `Idempotency-Key` afterward
+to actually resolve:
 
 ```bash
 zigttp workflow-queue list --durable ./.durable

@@ -246,8 +246,18 @@ fn workflowQueuedDispatchParts(
         .done => |result_json| {
             return zq.trace.jsonToJSValue(ctx, result_json);
         },
-        .dead => |dead_json| {
-            return workflowErrorParts(rt, ctx, "WorkflowQueueDeadLetter", dead_json);
+        .dead => {
+            // A dead-lettered child needs an operator to act (`workflow-queue
+            // replay` moves it back to pending; `discard` clears it so a
+            // later attempt starts fresh) before this can resolve
+            // differently. Suspend like `.busy` instead of returning a
+            // terminal error Response: `durableRun`'s
+            // `persistActiveDurableResponse` marks the run complete on any
+            // returned Response, and once complete the run never re-checks
+            // the queue again - `workflow-queue replay` would un-stick the
+            // queue item but never the parent workflow waiting on it.
+            try suspendQueuedWorkflowDispatch(rt, saturatingAddMs(now_ms, WORKFLOW_QUEUE_RETRY_DELAY_MS));
+            return error.DurableSuspended;
         },
         .busy => |lease_until_ms| {
             // Wake close to the real lease expiry rather than polling on a

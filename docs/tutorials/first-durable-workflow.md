@@ -67,13 +67,18 @@ find ./.durable-demo/workflow-queue -maxdepth 2 -type f | sort
 
 Completed child responses appear under `done/`. If a child queue item exceeds
 the attempt cap or its envelope is invalid, it moves to `dead/` and stays there
-until an operator acts:
+until an operator acts. The parent workflow suspends (returning `202`) while
+its child is dead-lettered rather than caching a terminal error, so replaying
+or discarding the item and then retrying the *parent* request with the same
+`Idempotency-Key` is what actually resolves the workflow -- `replay`/`discard`
+alone only change the queue item's own state:
 
 ```bash
 $ZIGTTP workflow-queue list --durable ./.durable-demo
 $ZIGTTP workflow-queue show --durable ./.durable-demo <item-id>
 $ZIGTTP workflow-queue replay --durable ./.durable-demo <item-id>
 $ZIGTTP workflow-queue discard --durable ./.durable-demo <item-id>
+curl -H 'Idempotency-Key: queued-1' http://127.0.0.1:3000/
 ```
 
 ## Signal Drill

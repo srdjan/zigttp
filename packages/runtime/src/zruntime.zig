@@ -3247,6 +3247,95 @@ test "workflow.call queue mode persists child result before durable step result"
     try std.testing.expect(std.mem.indexOf(u8, source, "\"type\":\"step_result\"") != null);
 }
 
+test "workflow-queue dead letter suspends the parent, and replay resolves it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    try sys.addHandler(
+        "greet",
+        "function handler(req) { return Response.json({ from: 'greet' }); }",
+        "<greet>",
+        .{ .jit_policy = .disabled },
+        1,
+    );
+
+    const rt = try Runtime.init(allocator, .{
+        .durable_oplog_dir = durable_dir,
+        .system_registry = @ptrCast(&sys),
+        .workflow_queue_enabled = true,
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run } from "zigttp:durable";
+        \\import { call } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return run("wf:dead-retry", () => {
+        \\    const res = call("greet", { method: "GET", path: "/greet" });
+        \\    return Response.json({ subStatus: res.status, sub: res.json() });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<wf-dead-retry>");
+
+    const item_id = try workflow_queue.itemId(allocator, "wf:dead-retry", "workflow.call#0");
+
+    const view: HttpRequestView = .{
+        .method = "GET",
+        .path = "/greet",
+        .url = "/greet",
+        .query_params = &.{},
+        .headers = .empty,
+        .body = null,
+    };
+    try workflow_queue.enqueueRequest(allocator, durable_dir, item_id, "greet", view);
+
+    // Drive the queue item to dead-letter by exhausting its attempt cap
+    // through repeated lease-expiry reclaims without ever completing it -
+    // simulating the child handler crashing every time before it finishes.
+    const lease_ms = workflow_queue.defaultLeaseMs();
+    var now_ms: i64 = 0;
+    var attempt: u32 = 0;
+    while (attempt <= workflow_queue.defaultMaxAttempts()) : (attempt += 1) {
+        var claim = try workflow_queue.tryClaim(allocator, durable_dir, item_id, now_ms, lease_ms);
+        defer claim.deinit(allocator);
+        if (claim == .dead) break;
+        now_ms += lease_ms + 1;
+    }
+
+    const dead_ids = try workflow_queue.listDeadIds(allocator, durable_dir);
+    try std.testing.expectEqual(@as(usize, 1), dead_ids.len);
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+
+    // First attempt: the child is dead-lettered, so the parent must suspend
+    // (202, pending) rather than caching a terminal error response that a
+    // later replay could never undo - the finding #2 fix.
+    var suspended = try rt.executeHandler(request.asView());
+    defer suspended.deinit();
+    try std.testing.expectEqual(@as(u16, 202), suspended.status);
+    try std.testing.expect(std.mem.indexOf(u8, suspended.body, "\"pending\":true") != null);
+
+    try workflow_queue.replayDead(allocator, durable_dir, item_id);
+
+    // Retrying the same parent request now actually dispatches the child
+    // and completes the run - the recovery guarantee `workflow-queue
+    // replay` is supposed to provide.
+    var recovered = try rt.executeHandler(request.asView());
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(u16, 200), recovered.status);
+    try std.testing.expect(std.mem.indexOf(u8, recovered.body, "\"from\":\"greet\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, recovered.body, "\"subStatus\":200") != null);
+}
+
 test "workflow.saga is rejected under workflow queue mode" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
