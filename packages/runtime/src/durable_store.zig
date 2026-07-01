@@ -174,6 +174,15 @@ pub const IdempotencyLedgerState = enum {
 pub const SignalArtifactKind = enum {
     claimed,
     quarantined,
+    /// A plain, undelivered signal envelope (not yet claimed by any live
+    /// waitSignal()). Includes signals whose waiter already timed out and
+    /// moved on - durableWaitSignal returns before ever consuming the
+    /// signal once its deadline expires, so a late delivery is otherwise
+    /// invisible and never cleaned up. Unlike `claimed`/`quarantined`,
+    /// this kind may also match a signal that is still legitimately
+    /// awaiting an in-progress waitSignal() call - callers must not sweep
+    /// it away unconditionally.
+    pending,
 };
 
 pub const SignalArtifact = struct {
@@ -441,33 +450,42 @@ const FsDurableStore = struct {
 
     fn finalizeResumedSignalClaims(self: *Self, key: []const u8, name: []const u8, payload_json: []const u8) !u32 {
         try self.ensureDirs();
-        var removed: u32 = 0;
 
+        // A replay resumes exactly one logical delivery per `.delivered`
+        // oplog entry, so at most one on-disk claim may correspond to this
+        // call. Matching is by (key, name, payload_json) content since the
+        // exact claimed path isn't persisted to the oplog - if two distinct
+        // deliveries share identical content, deleting every match here
+        // would also destroy a still-unresumed claim for a later
+        // occurrence of the same waitSignal name+payload. Stop at the
+        // first match instead.
         const signals_dir = try self.allocSignalsDir();
         defer self.allocator.free(signals_dir);
-        removed += try self.finalizeMatchingClaimsInDir(signals_dir, key, name, payload_json);
+        if (try self.finalizeMatchingClaimsInDir(signals_dir, key, name, payload_json)) return 1;
 
         const scheduled_dir = try self.allocScheduledDir();
         defer self.allocator.free(scheduled_dir);
-        removed += try self.finalizeMatchingClaimsInDir(scheduled_dir, key, name, payload_json);
+        if (try self.finalizeMatchingClaimsInDir(scheduled_dir, key, name, payload_json)) return 1;
 
-        return removed;
+        return 0;
     }
 
+    /// Removes at most one matching claimed-signal file, returning whether
+    /// one was found. See finalizeResumedSignalClaims for why this must not
+    /// delete every content-matching claim.
     fn finalizeMatchingClaimsInDir(
         self: *Self,
         dir_path: []const u8,
         key: []const u8,
         name: []const u8,
         payload_json: []const u8,
-    ) !u32 {
+    ) !bool {
         const dir_path_z = try self.allocator.dupeZ(u8, dir_path);
         defer self.allocator.free(dir_path_z);
 
-        const dir = c.opendir(dir_path_z) orelse return 0;
+        const dir = c.opendir(dir_path_z) orelse return false;
         defer _ = c.closedir(dir);
 
-        var removed: u32 = 0;
         while (c.readdir(dir)) |entry| {
             const name_ptr: [*:0]const u8 = @ptrCast(&entry.*.d_name);
             const file_name = std.mem.sliceTo(name_ptr, 0);
@@ -487,9 +505,9 @@ const FsDurableStore = struct {
             if (!std.mem.eql(u8, parsed.payload_json, payload_json)) continue;
 
             deletePath(full_path);
-            removed += 1;
+            return true;
         }
-        return removed;
+        return false;
     }
 
     fn listSignalArtifacts(self: *Self, allocator: std.mem.Allocator) ![]SignalArtifact {
@@ -531,6 +549,8 @@ const FsDurableStore = struct {
                 .claimed
             else if (std.mem.endsWith(u8, name, ".quarantined"))
                 .quarantined
+            else if (std.mem.endsWith(u8, name, ".json"))
+                .pending
             else
                 continue;
             const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, name });
@@ -1027,6 +1047,46 @@ test "durable store finalizes resumed claims without touching available signals"
     try std.testing.expectEqualStrings("{\"second\":true}", second.payload_json);
 }
 
+test "durable store finalizeResumedSignalClaims removes only one claim among identical-content duplicates" {
+    // Two independent waitSignal("approved") deliveries with identical
+    // payload content, both claimed but never cleaned up (simulating a
+    // crash between the claim-rename and the oplog resume-persist for
+    // each). A single finalizeResumedSignalClaims call - matching by
+    // (key, name, payload_json) content since the exact claimed path isn't
+    // persisted to the oplog - must resolve exactly one logical delivery,
+    // not sweep away every content-matching claim at once and destroy the
+    // other, still-unresumed one.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = DurableStore.initFs(allocator, durable_dir);
+    try store.enqueueSignal("order:dup", "approved", "{\"approved\":true}");
+    try store.enqueueSignal("order:dup", "approved", "{\"approved\":true}");
+
+    var first_claim = (try store.tryConsumeSignal("order:dup", "approved", unixMillis())).?;
+    defer first_claim.deinit();
+    var second_claim = (try store.tryConsumeSignal("order:dup", "approved", unixMillis())).?;
+    defer second_claim.deinit();
+
+    // Neither claim is finalized via its exact path (simulating the crash
+    // window), leaving two claim files with identical content on disk.
+    try std.testing.expectEqual(
+        @as(u32, 1),
+        try store.finalizeResumedSignalClaims("order:dup", "approved", "{\"approved\":true}"),
+    );
+
+    // Exactly one claim was removed; the other must still be recoverable
+    // for the second waitSignal() call's own resolution.
+    var recovered = (try store.tryRecoverSignal("order:dup", "approved", unixMillis())).?;
+    defer recovered.deinit();
+    try std.testing.expectEqualStrings("{\"approved\":true}", recovered.payload_json);
+}
+
 test "durable store quarantines a torn signal file instead of poisoning scans" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1090,4 +1150,34 @@ test "durable store cleanup removes only selected signal artifact kind" {
     defer recovered.deinit();
     try std.testing.expectEqual(@as(u32, 1), try store.cleanupSignalArtifacts(.claimed));
     try std.testing.expect((try store.tryRecoverSignal("order:cleanup", "approved", unixMillis())) == null);
+}
+
+test "durable store surfaces and purges an orphaned undelivered signal" {
+    // A signal delivered after its waitSignal()'s deadline has already
+    // expired is never claimed (durableWaitSignal returns before touching
+    // the store once timeoutExpired), so the plain envelope file is
+    // otherwise invisible to listSignalArtifacts/cleanupSignalArtifacts -
+    // unlike claimed/quarantined artifacts, nothing ever discovers or
+    // purges it.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = DurableStore.initFs(allocator, durable_dir);
+    try store.enqueueSignal("order:orphan", "approved", "{\"late\":true}");
+
+    const artifacts = try store.listSignalArtifacts(allocator);
+    defer {
+        for (artifacts) |*artifact| artifact.deinit();
+        allocator.free(artifacts);
+    }
+    try std.testing.expectEqual(@as(usize, 1), artifacts.len);
+    try std.testing.expectEqual(SignalArtifactKind.pending, artifacts[0].kind);
+
+    try std.testing.expectEqual(@as(u32, 1), try store.cleanupSignalArtifacts(.pending));
+    try std.testing.expect((try store.tryConsumeSignal("order:orphan", "approved", unixMillis())) == null);
 }
