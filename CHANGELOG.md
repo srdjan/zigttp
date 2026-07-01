@@ -6,6 +6,16 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** durable `run()` no longer trusts an automatic retry or a duplicate-response replay by default. Reusing a completed durable response, or retrying a run that a crash left incomplete, now requires either a workflow proof (`idempotent` for response reuse, `retry_safe` for retries) or a client-supplied `Idempotency-Key` header matching the `run()` key, recorded in an on-disk ledger keyed by that header. Without one of those, the handler gets a soft `599` JSON error (`DurableIdempotencyUnproven` / `DurableRetryUnproven`) instead of silently re-running or replaying a side effect. Enforcement is on by default for any handler with durable storage configured; unproven workflows should either declare `Spec<"idempotent" | "retry_safe">` or have callers send `Idempotency-Key`.
+
+### Added
+
+- `--workflow-queue`: recovery for `.reclaim-*` files left behind by a crashed lease-reclaim attempt (a stray reclaim is now surfaced via `zigttp` queue tooling and reclaimed automatically once it is older than the lease window, instead of being invisible to future claims).
+- `--workflow-queue`: a dead-lettered child request is now resolvable via `zigttp proof replay`/queue replay instead of returning a terminal error to the parent durable step.
+- Durable fetch (`zigttp:fetch`'s `fetch()`) now stops its retry/backoff loop as soon as the enclosing step's deadline passes, instead of continuing to retry past it.
+
 ## [0.1.1-beta] - 2026-06-29
 
 ### Added
