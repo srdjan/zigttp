@@ -1002,9 +1002,17 @@ pub const Context = struct {
             }
         }
 
+        // A non-closure function object's FunctionBytecode is also reachable
+        // by recursing through whichever tracked ancestor's constant pool
+        // embeds it (nested function literals are always compiled as a
+        // constant of their lexically enclosing function). Share one
+        // seen-set across the whole walk so each FunctionBytecode is freed
+        // exactly once regardless of which tracked object reaches it first.
+        var destroyed_bytecode: object.JSObject.FunctionBytecodeSeen = .empty;
         for (self.bytecode_functions.items) |obj| {
-            obj.destroyFull(self.allocator);
+            obj.destroyFullTracked(self.allocator, &destroyed_bytecode);
         }
+        destroyed_bytecode.deinit(self.allocator);
         self.bytecode_functions.deinit(self.allocator);
 
         // Destroy prototypes with destroyBuiltin to clean up their method properties

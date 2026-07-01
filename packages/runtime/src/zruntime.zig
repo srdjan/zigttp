@@ -2569,6 +2569,44 @@ fn makeTestRequest(
     return request;
 }
 
+test "durable run+step cycle frees nested non-closure function bytecode exactly once" {
+    // Regression for a double-free in Context.deinit's bytecode_functions
+    // teardown: run()'s and step()'s zero-upvalue arrow callbacks compile to
+    // non-closure make_function objects (no captured locals), so their
+    // FunctionBytecode is simultaneously (a) a constant of their lexically
+    // enclosing function - freed recursively via destroyConstant - and (b)
+    // independently tracked in ctx.bytecode_functions - freed again via
+    // destroyFullTracked. Masked everywhere else in this file because those
+    // tests wrap Runtime in an arena, where a double-free is a silent no-op.
+    const allocator = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+    defer allocator.free(durable_dir);
+
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run, step } from "zigttp:durable";
+        \\function handler(req) {
+        \\  return run("nested-bytecode-owner", () => {
+        \\    const v = step("s", () => 1);
+        \\    return Response.json({ v: v });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<nested-bytecode-owner>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+}
+
 test "zigttp:queue sends receives and acks JSON payloads" {
     const allocator = std.testing.allocator;
 

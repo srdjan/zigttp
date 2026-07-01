@@ -1490,12 +1490,25 @@ pub const JSObject = extern struct {
         allocator.destroy(self);
     }
 
-    fn destroyConstant(allocator: std.mem.Allocator, constant: value.JSValue) void {
+    /// Nested function literals are compiled as constants of their lexically
+    /// enclosing function (see codegen.zig's emitFunctionExpr: every func_bc,
+    /// closure or not, is appended to the parent's constant pool before the
+    /// make_function/make_closure opcode is emitted). A non-closure function
+    /// object created at runtime by make_function/make_async is therefore
+    /// NOT the sole owner of its FunctionBytecode: the same struct is also
+    /// reachable by recursing through whichever ancestor's constant pool
+    /// embeds it. destroyFunctionBytecode can be reached from both the
+    /// top-level ctx.bytecode_functions teardown walk (context.zig) and this
+    /// recursive constant destruction, so a seen-set dedups whichever path
+    /// gets there first; the other becomes a no-op instead of a double-free.
+    pub const FunctionBytecodeSeen = std.AutoHashMapUnmanaged(*bytecode.FunctionBytecode, void);
+
+    fn destroyConstant(allocator: std.mem.Allocator, constant: value.JSValue, seen: ?*FunctionBytecodeSeen) void {
         if (constant.isExternPtr()) {
             const magic = constant.toExternPtr(u32);
             if (magic.* == bytecode.MAGIC) {
                 const nested = constant.toExternPtr(bytecode.FunctionBytecode);
-                destroyFunctionBytecode(allocator, nested);
+                destroyFunctionBytecode(allocator, nested, seen);
             }
             return;
         }
@@ -1512,7 +1525,12 @@ pub const JSObject = extern struct {
         }
     }
 
-    fn destroyFunctionBytecode(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode) void {
+    fn destroyFunctionBytecode(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode, seen: ?*FunctionBytecodeSeen) void {
+        if (seen) |s| {
+            const gop = s.getOrPut(allocator, func) catch return;
+            if (gop.found_existing) return;
+        }
+
         const jit = @import("jit/alloc.zig");
 
         if (func.compiled_code) |cc| {
@@ -1531,7 +1549,7 @@ pub const JSObject = extern struct {
         }
 
         for (func.constants) |constant| {
-            destroyConstant(allocator, constant);
+            destroyConstant(allocator, constant, seen);
         }
 
         if (func.code.len > 0) allocator.free(@constCast(func.code));
@@ -1544,6 +1562,15 @@ pub const JSObject = extern struct {
     /// Destroy object including internal data (e.g., NativeFunctionData, BytecodeFunctionData)
     /// Use this for builtin objects that won't be GC'd
     pub fn destroyFull(self: *JSObject, allocator: std.mem.Allocator) void {
+        self.destroyFullTracked(allocator, null);
+    }
+
+    /// Like destroyFull, but shares `seen` with sibling destroyFullTracked
+    /// calls so a FunctionBytecode reachable from more than one tracked
+    /// object in the same teardown pass is only actually freed once. Callers
+    /// that destroy a single, freshly-created, not-yet-shared object (tests,
+    /// OOM errdefer paths) should keep using plain destroyFull.
+    pub fn destroyFullTracked(self: *JSObject, allocator: std.mem.Allocator, seen: ?*FunctionBytecodeSeen) void {
         // Free function data if this is a function
         if (self.class_id == .function and self.flags.is_callable) {
             const is_bytecode_val = self.inline_slots[Slots.FUNC_IS_BYTECODE];
@@ -1563,7 +1590,7 @@ pub const JSObject = extern struct {
                 } else {
                     // Bytecode function - free the BytecodeFunctionData and FunctionBytecode internals
                     const bc_data = data_val.toExternPtr(BytecodeFunctionData);
-                    destroyFunctionBytecode(allocator, @constCast(bc_data.bytecode));
+                    destroyFunctionBytecode(allocator, @constCast(bc_data.bytecode), seen);
                     allocator.destroy(bc_data);
                 }
             }

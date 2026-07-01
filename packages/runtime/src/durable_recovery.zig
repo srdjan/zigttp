@@ -560,6 +560,55 @@ test "durable recovery: attempts (rather than skips) a run whose waitSignal time
     try testing.expect(!tracker.shouldAttempt(filename, trace.unixMillis()));
 }
 
+test "durable recovery: recoverOne completes real JS execution without double-freeing bytecode" {
+    // Regression: recoverOne re-executes the handler to completion (unlike
+    // this file's other tests, which stop short of real JS execution - see
+    // the "waitSignal timeout has already expired" test above). Completing
+    // execution used to double-free nested non-closure function bytecode in
+    // Context.deinit (run()'s and step()'s zero-upvalue arrow callbacks are
+    // both a constant of their enclosing function AND independently tracked
+    // in ctx.bytecode_functions - see object.zig's destroyFullTracked).
+    // Invisible under test-zruntime's arena-wrapped allocator; only test-cli's
+    // per-test-fresh GPA runner catches it.
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const durable_dir = try allocator.dupe(u8, dir_buf[0..dir_len]);
+    defer allocator.free(durable_dir);
+
+    const run_key = "recover:complete-execution";
+    const filename = try std.fmt.allocPrint(allocator, "durable-{x}.jsonl", .{std.hash.Fnv1a_64.hash(run_key)});
+    defer allocator.free(filename);
+    const oplog_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ durable_dir, filename });
+    defer allocator.free(oplog_path);
+
+    // An oplog that recorded the run started, but crashed before any step.
+    const oplog =
+        "{\"type\":\"durable_run\",\"key\":\"recover:complete-execution\"}\n" ++
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n";
+    try zq.file_io.writeFile(allocator, oplog_path, oplog);
+
+    const handler_code =
+        \\import { run, step } from "zigttp:durable";
+        \\function handler(req) {
+        \\  return run("recover:complete-execution", () => {
+        \\    const v = step("s", () => 1);
+        \\    return Response.json({ v: v });
+        \\  });
+        \\}
+    ;
+
+    const config = ServerConfig{
+        .handler = .{ .inline_code = handler_code },
+        .runtime_config = .{ .durable_oplog_dir = durable_dir },
+    };
+    const recovered = try recoverIncompleteOplogsTracked(allocator, config, null);
+    try testing.expectEqual(@as(u32, 1), recovered);
+}
+
 test "durable recovery: a trailing un-resumed wait reads as pending, not failed" {
     const suspended =
         "{\"type\":\"durable_run\",\"key\":\"order:1\"}\n" ++
