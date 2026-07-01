@@ -1908,9 +1908,74 @@ pub const ContractBuilder = struct {
     fn isUnhandledWorkflowCall(self: *const ContractBuilder, expr: NodeIndex) bool {
         const tag = self.ir_view.getTag(expr) orelse return false;
         if (tag == .method_call) return true;
-        if (tag != .call) return false;
-        const call = self.ir_view.getCall(expr) orelse return true;
-        return !self.isModeledWorkflowCall(call);
+        if (tag == .call) {
+            const call = self.ir_view.getCall(expr) orelse return true;
+            return !self.isModeledWorkflowCall(call);
+        }
+        // The expression isn't itself a bare call, but a call anywhere in
+        // its subtree (assignment target/value, binary/ternary operand,
+        // etc.) is still an immediate side effect that appendWorkflowCall
+        // cannot model as a graph node - treat it as unhandled rather than
+        // silently dropping it and over-claiming proof_level == .complete.
+        return self.containsUnmodeledCall(expr);
+    }
+
+    /// Returns true if a call/method_call appears anywhere in `root`'s
+    /// expression subtree. Does not recurse into nested function/arrow
+    /// bodies: a call there fires later, at its own statement, which is
+    /// checked independently when that statement is walked.
+    fn containsUnmodeledCall(self: *const ContractBuilder, root: NodeIndex) bool {
+        if (root == null_node) return false;
+        const tag = self.ir_view.getTag(root) orelse return false;
+        switch (tag) {
+            .call, .method_call => return true,
+            .binary_op => {
+                const expr = self.ir_view.getBinary(root) orelse return false;
+                return self.containsUnmodeledCall(expr.left) or self.containsUnmodeledCall(expr.right);
+            },
+            .unary_op, .spread => {
+                const expr = self.ir_view.getUnary(root) orelse return false;
+                return self.containsUnmodeledCall(expr.operand);
+            },
+            .ternary => {
+                const expr = self.ir_view.getTernary(root) orelse return false;
+                return self.containsUnmodeledCall(expr.condition) or
+                    self.containsUnmodeledCall(expr.then_branch) or
+                    self.containsUnmodeledCall(expr.else_branch);
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(root) orelse return false;
+                return self.containsUnmodeledCall(member.object) or self.containsUnmodeledCall(member.computed);
+            },
+            .assignment => {
+                const assign = self.ir_view.getAssignment(root) orelse return false;
+                return self.containsUnmodeledCall(assign.target) or self.containsUnmodeledCall(assign.value);
+            },
+            .array_literal => {
+                const arr = self.ir_view.getArray(root) orelse return false;
+                for (0..arr.elements_count) |i| {
+                    if (self.containsUnmodeledCall(self.ir_view.getListIndex(arr.elements_start, @intCast(i)))) return true;
+                }
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(root) orelse return false;
+                for (0..obj.properties_count) |i| {
+                    if (self.containsUnmodeledCall(self.ir_view.getListIndex(obj.properties_start, @intCast(i)))) return true;
+                }
+            },
+            .object_property => {
+                const prop = self.ir_view.getProperty(root) orelse return false;
+                return self.containsUnmodeledCall(prop.key) or self.containsUnmodeledCall(prop.value);
+            },
+            .template_literal => {
+                const tmpl = self.ir_view.getTemplate(root) orelse return false;
+                for (0..tmpl.parts_count) |i| {
+                    if (self.containsUnmodeledCall(self.ir_view.getListIndex(tmpl.parts_start, @intCast(i)))) return true;
+                }
+            },
+            else => {},
+        }
+        return false;
     }
 
     fn isModeledWorkflowCall(self: *const ContractBuilder, call: Node.CallExpr) bool {
@@ -4176,6 +4241,28 @@ test "durable workflow properties reject unmodeled side effects" {
         \\  return run("job:cache", () => {
         \\    cacheSet(req.url, "x");
         \\    return Response.json({ ok: true });
+        \\  });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(DurableWorkflowProofLevel.partial, contract.durable.workflow.proof_level);
+    try std.testing.expect(!contract.durable.workflow.properties.retry_safe);
+    try std.testing.expect(!contract.durable.workflow.properties.idempotent);
+    try std.testing.expect(!contract.durable.workflow.properties.fault_covered);
+}
+
+test "durable workflow properties reject unmodeled side effect hidden behind assignment" {
+    const source =
+        \\import { run, step } from "zigttp:durable";
+        \\import { uuid } from "zigttp:id";
+        \\function handler(req) {
+        \\  return run("job:uuid", () => {
+        \\    let id = "";
+        \\    id = uuid();
+        \\    const value = step("charge", () => 1);
+        \\    return Response.json({ value, id });
         \\  });
         \\}
     ;
