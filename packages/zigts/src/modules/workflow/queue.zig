@@ -106,8 +106,10 @@ fn nackNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue
     const id = util.extractString(args[0]) orelse {
         return util.createPlainResultErr(ctx, "nack() id must be a string");
     };
-    const reason = if (args.len >= 2)
-        util.extractString(args[1]) orelse "nack"
+    const reason = if (args.len >= 2 and !args[1].isUndefined())
+        util.extractString(args[1]) orelse {
+            return util.createPlainResultErr(ctx, "nack() reason must be a string");
+        }
     else
         "nack";
     return callbacks.?.nack_fn(callbacks.?.runtime_ptr, ctx, id, reason);

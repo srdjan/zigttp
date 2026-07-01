@@ -48,8 +48,10 @@ each pooled runtime. `zigttp:queue` serializes payloads to queue-owned JSON,
 `receive()` moves a message into an in-flight table, and `ack()`/`nack()`
 complete or retry delivery. This keeps queued messages outside the JS heap, so
 handler reset, timeout invalidation, and panic quarantine do not drop retained
-messages. Normal HTTP ingress still uses the direct `handler(req)` path unless
-a handler explicitly imports and uses `zigttp:queue`.
+messages. Pending and leased messages count against the actor mailbox capacity;
+dead-lettered messages are retained separately and release their mailbox slot.
+Normal HTTP ingress still uses the direct `handler(req)` path unless a handler
+explicitly imports and uses `zigttp:queue`.
 
 ## Compiler Pipeline
 

@@ -67,7 +67,7 @@ durability boundary need configuration:
 | `zigttp:fetch` | Enable outbound HTTP with `--outbound-http` or one or more `--outbound-host <host>` flags. Durable fetch also needs `--durable <dir>`. |
 | `zigttp:service` | Run with `--system <file>` or set `"system"` in `zigttp.json`. |
 | `zigttp:workflow` | Run with `--system <file>`: the orchestrator dispatches to co-located sub-handlers in-process. Every local handler path in the manifest must be readable at startup. Durable `call`/`saga`/`fanout`/`follow` replay also needs `--durable <dir>`. Add `--workflow-queue` to force durable top-level `call`, `follow`, and `fanout` child dispatch through the persisted queue; `saga()` is rejected in that mode because step closures would hide direct dispatch inside the flat oplog. |
-| `zigttp:queue` | Run with `--actor-queue` for server-owned in-memory actor mailboxes. Exports `send`, `request`, `receive`, `ack`, `nack`, and `reply`; all return `Result` objects. Messages own JSON snapshots of payloads and remain retained until ack/nack, but the current backend is not durable across process restart. |
+| `zigttp:queue` | Run with `--actor-queue` for server-owned in-memory actor mailboxes. Exports `send`, `request`, `receive`, `ack`, `nack`, and `reply`; all return `Result` objects. Messages own JSON snapshots of payloads and remain retained until ack, requeue, or dead-lettering, but the current backend is not durable across process restart. |
 | `zigttp:durable` | Run with `--durable <dir>`. |
 | `zigttp:websocket` | Run through the server WebSocket gateway. Peer closes dispatch `onClose(ws, code, reason)` with parsed close metadata. |
 | `zigttp:log` | Writes structured lines to stderr. Do not log raw secrets, tokens, or PII. |

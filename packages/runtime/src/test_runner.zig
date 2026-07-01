@@ -23,6 +23,7 @@ const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const HttpResponse = @import("http_types.zig").HttpResponse;
 const ServerConfig = @import("server.zig").ServerConfig;
+const actor_queue = @import("actor_queue.zig");
 const handler_loader = @import("handler_loader.zig");
 const runtime_natives = @import("runtime_natives.zig");
 
@@ -149,7 +150,21 @@ fn runOneTest(
         return .{ .pass = false, .name = test_case.name, .failures = failures, .err = null };
     };
 
-    const rt = Runtime.init(allocator, config) catch |err| {
+    // Each test case gets its own zigttp:queue ActorQueue, matching the
+    // fresh Runtime and ReplayState below: sharing one queue across test
+    // cases in the same file would leak mailbox/lease/dead-letter state
+    // (e.g. a message left un-received by one test would be visible to
+    // the next, unlike every other virtual module which replays isolated
+    // per test case).
+    var test_config = config;
+    var test_queue: ?actor_queue.ActorQueue = null;
+    defer if (test_queue) |*queue| queue.deinit();
+    if (test_config.queue_actor_enabled and test_config.queue_system == null) {
+        test_queue = actor_queue.ActorQueue.init(allocator, test_config.queue_capacity, test_config.queue_lease_ms);
+        test_config.queue_system = @ptrCast(&test_queue.?);
+    }
+
+    const rt = Runtime.init(allocator, test_config) catch |err| {
         return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
     };
     defer rt.deinit();
@@ -511,6 +526,50 @@ test "checkAssertions: bodyContains mismatch fails" {
     }
     try std.testing.expectEqual(@as(usize, 1), failures.items.len);
     try std.testing.expect(std.mem.indexOf(u8, failures.items[0], "body does not contain") != null);
+}
+
+test "run: actor queue flag installs queue runtime for declarative tests" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "queue.test.jsonl",
+        .data =
+        \\{"type":"test","name":"queue"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect","status":200,"bodyContains":"queued"}
+        ,
+    });
+
+    const handler_code =
+        \\import { send, receive, ack } from "zigttp:queue";
+        \\function handler(req) {
+        \\  const sent = send("worker", { ok: true });
+        \\  if (!sent.ok) return Response.text(sent.error, { status: 500 });
+        \\  const inbox = receive("worker");
+        \\  if (!inbox.ok) return Response.text(inbox.error, { status: 500 });
+        \\  const done = ack(inbox.value.id);
+        \\  return Response.text(done.ok && inbox.value.payload.ok ? "queued" : "bad");
+        \\}
+    ;
+
+    try run(testing.allocator, .{
+        .handler = .{ .inline_code = handler_code },
+        .runtime_config = .{
+            .test_file_path = "queue.test.jsonl",
+            .queue_actor_enabled = true,
+            .queue_capacity = 2,
+        },
+    });
 }
 
 test "runOneTest: request url with query string yields path without query (CLI-1 scaffold)" {

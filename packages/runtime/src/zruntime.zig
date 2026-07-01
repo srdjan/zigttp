@@ -811,7 +811,15 @@ pub const Runtime = struct {
         if (self.config.replay_file_path != null) {
             // Replay mode: stubs that return recorded values from ReplayState
             inline for (zq.builtin_modules.all) |binding| {
-                try zq.modules.registerVirtualModuleReplay(binding, self.ctx, self.allocator);
+                if (comptime std.mem.eql(u8, binding.specifier, "zigttp:queue")) {
+                    if (self.queue_system_ref != null) {
+                        try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
+                    } else {
+                        try zq.modules.registerVirtualModuleReplay(binding, self.ctx, self.allocator);
+                    }
+                } else {
+                    try zq.modules.registerVirtualModuleReplay(binding, self.ctx, self.allocator);
+                }
             }
         } else if (self.config.durable_oplog_dir != null) {
             // Durable mode: hybrid replay/record wrappers

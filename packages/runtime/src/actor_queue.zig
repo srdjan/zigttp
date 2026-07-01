@@ -106,6 +106,8 @@ const Ring = struct {
 pub const Mailbox = struct {
     capacity: usize,
     rings: [3]Ring,
+    /// Retained messages for this actor: pending in a ring or leased
+    /// in-flight. Released on ack, or when a message is dead-lettered.
     count: std.atomic.Value(usize),
     mutex: compat.Mutex = .{},
 
@@ -131,8 +133,7 @@ pub const Mailbox = struct {
 
     pub fn deinit(self: *Mailbox, allocator: std.mem.Allocator) void {
         self.mutex.lock();
-        while (self.count.load(.acquire) > 0) {
-            const msg = self.popLocked() orelse break;
+        while (self.popLocked()) |msg| {
             msg.deinit(allocator);
         }
         self.mutex.unlock();
@@ -140,7 +141,7 @@ pub const Mailbox = struct {
         for (&self.rings) |*ring| ring.deinit(allocator);
     }
 
-    pub fn push(self: *Mailbox, item: *MessageEnvelope) bool {
+    pub fn pushNew(self: *Mailbox, item: *MessageEnvelope) bool {
         if (self.count.load(.acquire) >= self.capacity) return false;
 
         self.mutex.lock();
@@ -153,19 +154,35 @@ pub const Mailbox = struct {
         return true;
     }
 
-    pub fn tryPop(self: *Mailbox) ?*MessageEnvelope {
-        if (self.count.load(.acquire) == 0) return null;
+    pub fn pushRetained(self: *Mailbox, item: *MessageEnvelope) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
+        const idx = priorityIndex(item.priority);
+        return self.rings[idx].push(item);
+    }
+
+    pub fn tryPop(self: *Mailbox) ?*MessageEnvelope {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         return self.popLocked();
     }
 
+    pub fn releaseRetained(self: *Mailbox) void {
+        const old = self.count.fetchSub(1, .release);
+        if (std.debug.runtime_safety and old == 0) {
+            std.debug.panic("actor queue mailbox retained count underflow", .{});
+        }
+    }
+
+    pub fn retainedCount(self: *const Mailbox) usize {
+        return self.count.load(.acquire);
+    }
+
     fn popLocked(self: *Mailbox) ?*MessageEnvelope {
         inline for (0..3) |idx| {
             if (self.rings[idx].pop()) |item| {
-                _ = self.count.fetchSub(1, .release);
                 return item;
             }
         }
@@ -228,7 +245,7 @@ pub const ActorQueue = struct {
         errdefer message.deinit(self.allocator);
 
         const mailbox = try self.ensureMailbox(target);
-        if (!mailbox.push(message)) return error.QueueFull;
+        if (!mailbox.pushNew(message)) return error.QueueFull;
         return message.id;
     }
 
@@ -252,7 +269,10 @@ pub const ActorQueue = struct {
             self.mutex.unlock();
             message.state = .pending;
             message.attempt -= 1;
-            if (!mailbox.push(message)) message.deinit(self.allocator);
+            if (!mailbox.pushRetained(message)) {
+                mailbox.releaseRetained();
+                message.deinit(self.allocator);
+            }
             return err;
         };
         self.mutex.unlock();
@@ -290,7 +310,7 @@ pub const ActorQueue = struct {
 
             message.state = .pending;
             const mailbox = try self.ensureMailbox(message.target);
-            if (!mailbox.push(message)) {
+            if (!mailbox.pushRetained(message)) {
                 // Preserve the message rather than dropping it when a lease
                 // expires into a saturated mailbox. It can be reclaimed again
                 // on the next receive attempt.
@@ -303,6 +323,7 @@ pub const ActorQueue = struct {
                 self.mutex.lock();
                 self.inflight.put(self.allocator, message.id, message) catch {
                     self.mutex.unlock();
+                    mailbox.releaseRetained();
                     message.deinit(self.allocator);
                     return error.OutOfMemory;
                 };
@@ -321,6 +342,9 @@ pub const ActorQueue = struct {
 
         if (removed) |entry| {
             entry.value.state = .done;
+            if (self.lookupMailbox(entry.value.target)) |mailbox| {
+                mailbox.releaseRetained();
+            }
             entry.value.deinit(self.allocator);
             return true;
         }
@@ -356,6 +380,14 @@ pub const ActorQueue = struct {
                     .reason = reason_owned,
                 },
             };
+            // Dead letters move out of the mailbox's pending/in-flight
+            // accounting into `dead_letters`, which has no capacity cap of
+            // its own; release the retained slot so a run of dead-lettered
+            // messages doesn't permanently exhaust mailbox_capacity for
+            // this actor the way ack() already avoids for completed ones.
+            if (self.lookupMailbox(message.target)) |mailbox| {
+                mailbox.releaseRetained();
+            }
             return .dead_lettered;
         }
 
@@ -368,11 +400,12 @@ pub const ActorQueue = struct {
         self.mutex.unlock();
 
         message.state = .pending;
-        if (!mailbox.push(message)) {
+        if (!mailbox.pushRetained(message)) {
             message.state = old_state;
             self.mutex.lock();
             self.inflight.put(self.allocator, message.id, message) catch |err| {
                 self.mutex.unlock();
+                mailbox.releaseRetained();
                 message.deinit(self.allocator);
                 return err;
             };
@@ -567,4 +600,42 @@ test "actor queue reclaims expired leases for redelivery" {
     try std.testing.expectEqual(id, second.id);
     try std.testing.expectEqual(@as(u32, 2), second.attempt);
     try std.testing.expect(queue.ack(second.id));
+}
+
+test "actor queue counts leased messages against mailbox capacity" {
+    const allocator = std.testing.allocator;
+    var queue = ActorQueue.init(allocator, 1, 30_000);
+    defer queue.deinit();
+
+    const id = try queue.send("worker", "{\"job\":1}", .{ .source = "main" });
+    const mailbox = queue.lookupMailbox("worker").?;
+    try std.testing.expectEqual(@as(usize, 1), mailbox.retainedCount());
+
+    const leased = (try queue.receive("worker")).?;
+    try std.testing.expectEqual(id, leased.id);
+    try std.testing.expectEqual(@as(usize, 1), mailbox.retainedCount());
+    try std.testing.expectError(error.QueueFull, queue.send("worker", "{\"job\":2}", .{ .source = "main" }));
+
+    try std.testing.expect(queue.ack(id));
+    try std.testing.expectEqual(@as(usize, 0), mailbox.retainedCount());
+    const next_id = try queue.send("worker", "{\"job\":2}", .{ .source = "main" });
+    const next = (try queue.receive("worker")).?;
+    try std.testing.expectEqual(next_id, next.id);
+    try std.testing.expect(queue.ack(next_id));
+}
+
+test "actor queue releases mailbox capacity on dead letter" {
+    const allocator = std.testing.allocator;
+    var queue = ActorQueue.init(allocator, 1, 30_000);
+    defer queue.deinit();
+
+    const id = try queue.send("worker", "{\"job\":1}", .{ .source = "main", .max_attempts = 1 });
+    _ = (try queue.receive("worker")).?;
+    try std.testing.expectEqual(NackOutcome.dead_lettered, try queue.nack(id, "boom"));
+    try std.testing.expectEqual(@as(usize, 1), queue.deadLetterCount());
+    // Dead-lettering releases the mailbox slot (dead_letters tracks the
+    // message separately) so a run of permanently-failing messages cannot
+    // exhaust mailbox_capacity for this actor forever.
+    try std.testing.expectEqual(@as(usize, 0), queue.lookupMailbox("worker").?.retainedCount());
+    _ = try queue.send("worker", "{\"job\":2}", .{ .source = "main" });
 }

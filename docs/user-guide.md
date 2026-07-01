@@ -315,8 +315,9 @@ current actor as the reply target. `receive(actor?)` leases one message and
 returns `Result<Message | null>`; the default actor is `main`. A leased message
 stays retained until `ack(id)` deletes it or `nack(id, reason?)` requeues it.
 After the configured attempt limit, `nack()` moves the message to the in-memory
-dead-letter set. `reply(id, payload)` sends a high-priority response to the
-original message's reply actor and sets `correlationId`.
+dead-letter set and releases the actor mailbox slot; dead letters are retained
+outside mailbox capacity. `reply(id, payload)` sends a high-priority response to
+the original message's reply actor and sets `correlationId`.
 
 The current backend is process-local memory. It survives handler VM reset,
 timeout invalidation, and panic quarantine because payloads are owned by the
