@@ -426,7 +426,6 @@ fn claimLeasedFile(
     const next_attempts = request.attempts +| 1;
     if (next_attempts > DEFAULT_MAX_ATTEMPTS) {
         const last_error = request.last_error orelse "lease expired too many times";
-        defer request.deinit();
         const dead = try writeDeadLetter(
             allocator,
             dead_file,
@@ -437,6 +436,7 @@ fn claimLeasedFile(
             "leased",
             envelope,
         );
+        request.deinit();
         deleteIfExists(leased_file);
         return dead;
     }

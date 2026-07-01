@@ -313,11 +313,18 @@ const FsDurableStore = struct {
 
     fn tryClaimSignal(self: *Self, candidate: *const Signal) !?Signal {
         if (isClaimedSignalPath(candidate.path)) {
+            const key = try self.allocator.dupe(u8, candidate.key);
+            errdefer self.allocator.free(key);
+            const name = try self.allocator.dupe(u8, candidate.name);
+            errdefer self.allocator.free(name);
+            const payload_json = try self.allocator.dupe(u8, candidate.payload_json);
+            errdefer self.allocator.free(payload_json);
+            const path = try self.allocator.dupe(u8, candidate.path);
             return .{
-                .key = try self.allocator.dupe(u8, candidate.key),
-                .name = try self.allocator.dupe(u8, candidate.name),
-                .payload_json = try self.allocator.dupe(u8, candidate.payload_json),
-                .path = try self.allocator.dupe(u8, candidate.path),
+                .key = key,
+                .name = name,
+                .payload_json = payload_json,
+                .path = path,
                 .at_ms = candidate.at_ms,
                 .allocator = self.allocator,
             };
