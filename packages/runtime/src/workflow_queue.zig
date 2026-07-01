@@ -284,7 +284,17 @@ pub fn tryClaim(
         return .{ .done = result };
     }
     if (try readDeadFile(allocator, p.dead_file)) |dead| {
-        return .{ .dead = dead };
+        // replayDead() writes the fresh pending envelope before removing
+        // the dead-letter file; if that removal was interrupted (crash or
+        // a failed unlink - deleteIfExists is best-effort), a stale dead
+        // file can transiently coexist with a legitimate pending/leased
+        // one. Don't let it permanently mask a successfully replayed item
+        // - prefer pending/leased and finish the interrupted cleanup.
+        if (!(try fileExists(p.pending_file)) and !(try fileExists(p.leased_file))) {
+            return .{ .dead = dead };
+        }
+        allocator.free(dead);
+        deleteIfExists(p.dead_file);
     }
 
     var owner_buf: [32]u8 = undefined;
@@ -1130,6 +1140,53 @@ test "workflow queue max attempts dead letter can be replayed" {
     try std.testing.expectEqualStrings("body", request.body.?);
     try std.testing.expectEqual(@as(u32, 1), request.attempts);
     try std.testing.expect(request.last_error == null);
+}
+
+test "workflow queue claim recovers from a dead letter left behind by an interrupted replay" {
+    // Simulates replayDead() being interrupted (crash / failed unlink)
+    // after it writes the fresh pending envelope but before it removes the
+    // stale dead-letter file, so both files exist at once. tryClaim must
+    // not get permanently stuck reporting `.dead` in that state.
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const durable_dir = try allocator.dupe(u8, dir_buf[0..dir_len]);
+    defer allocator.free(durable_dir);
+
+    const view: HttpRequestView = .{
+        .method = "POST",
+        .path = "/child",
+        .url = "/child",
+        .query_params = &.{},
+        .headers = .empty,
+        .body = "body",
+    };
+
+    var p = try queuePaths(allocator, durable_dir, "item-stuck-dead");
+    defer p.deinit();
+    try ensureQueueDirs(&p);
+
+    const dead_payload = try deadEnvelopeJson(allocator, "boom", 3, "boom", 1, "workflow-queue", null);
+    defer allocator.free(dead_payload);
+    try writeFileAtomic(allocator, p.dead_file, dead_payload);
+
+    const pending_payload = try requestEnvelopeJson(allocator, "child", view, .{
+        .created_at_ms = 2,
+        .updated_at_ms = 2,
+    });
+    defer allocator.free(pending_payload);
+    try writeFileAtomic(allocator, p.pending_file, pending_payload);
+
+    var claim = try tryClaim(allocator, durable_dir, "item-stuck-dead", 20, 100);
+    defer claim.deinit(allocator);
+    const request = switch (claim) {
+        .claimed => |*req| req,
+        else => return error.ExpectedClaimedQueueItem,
+    };
+    try std.testing.expectEqualStrings("child", request.target);
+    try std.testing.expect(!(try fileExists(p.dead_file)));
 }
 
 test "workflow queue dead letters block enqueue until discarded" {
