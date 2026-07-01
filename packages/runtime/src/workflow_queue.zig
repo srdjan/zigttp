@@ -72,7 +72,11 @@ pub const QueuedRequest = struct {
 pub const ClaimResult = union(enum) {
     done: []u8,
     claimed: QueuedRequest,
-    busy,
+    /// Another caller holds the active lease. Carries the wall-clock time
+    /// (same clock as `now_ms`) after which retrying is worthwhile, so
+    /// callers can wake near the real lease expiry instead of polling on a
+    /// fixed interval.
+    busy: i64,
 
     pub fn deinit(self: *ClaimResult, allocator: Allocator) void {
         switch (self.*) {
@@ -181,11 +185,31 @@ pub fn tryClaim(
         const envelope = try zq.file_io.readFile(allocator, p.leased_file, MAX_QUEUE_FILE_BYTES);
         defer allocator.free(envelope);
         const lease_until_ms = parseLeaseUntilMs(envelope) catch 0;
-        if (lease_until_ms > now_ms) return .busy;
-        return try claimLeasedFile(allocator, p.leased_file, now_ms + lease_ms);
+        if (lease_until_ms > now_ms) return .{ .busy = lease_until_ms };
+
+        // The lease has expired, but another caller may be racing to
+        // reclaim the same item at the same time. Renaming the leased file
+        // to a reclaim-specific staging path is atomic and single-winner
+        // (the same guarantee the pending->leased transition above relies
+        // on): only the caller whose rename succeeds may claim and
+        // re-dispatch this item, so two racers can never both get `.claimed`
+        // back for the same expired lease.
+        const reclaim_file = try std.fmt.allocPrint(allocator, "{s}.reclaim-{d}-{x}", .{ p.leased_file, std.c.getpid(), @intFromPtr(&p) });
+        defer allocator.free(reclaim_file);
+        if (renamePath(p.leased_file, reclaim_file)) {
+            var result = try claimLeasedFile(allocator, reclaim_file, now_ms + lease_ms);
+            errdefer result.deinit(allocator);
+            try renamePath(reclaim_file, p.leased_file);
+            return result;
+        } else |err| switch (err) {
+            // Another caller already won the reclaim race and just set a
+            // fresh lease of roughly `now_ms + lease_ms`.
+            error.FileNotFound => return .{ .busy = now_ms + lease_ms },
+            else => return err,
+        }
     }
 
-    return .busy;
+    return .{ .busy = now_ms + lease_ms };
 }
 
 pub fn completeResponse(

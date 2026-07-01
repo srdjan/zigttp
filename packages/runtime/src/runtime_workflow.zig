@@ -246,8 +246,12 @@ fn workflowQueuedDispatchParts(
         .done => |result_json| {
             return zq.trace.jsonToJSValue(ctx, result_json);
         },
-        .busy => {
-            try suspendQueuedWorkflowDispatch(rt, now_ms);
+        .busy => |lease_until_ms| {
+            // Wake close to the real lease expiry rather than polling on a
+            // fixed interval, but never sooner than the minimum delay so a
+            // near-expired lease can't cause a tight retry loop.
+            const retry_at_ms = @max(lease_until_ms, saturatingAddMs(now_ms, WORKFLOW_QUEUE_RETRY_DELAY_MS));
+            try suspendQueuedWorkflowDispatch(rt, retry_at_ms);
             return error.DurableSuspended;
         },
         .claimed => |*queued_request| {
@@ -256,7 +260,7 @@ fn workflowQueuedDispatchParts(
             try completeQueuedDispatch(rt, registry, durable_dir, item_id, queued_request, queued_view);
 
             const result_json = (try workflow_queue.readResult(rt.allocator, durable_dir, item_id)) orelse {
-                try suspendQueuedWorkflowDispatch(rt, now_ms);
+                try suspendQueuedWorkflowDispatch(rt, saturatingAddMs(now_ms, WORKFLOW_QUEUE_RETRY_DELAY_MS));
                 return error.DurableSuspended;
             };
             defer rt.allocator.free(result_json);
@@ -291,10 +295,13 @@ fn completeQueuedDispatch(
     try workflow_queue.completeResponse(rt.allocator, durable_dir, item_id, handle.response);
 }
 
-fn suspendQueuedWorkflowDispatch(rt: *Runtime, now_ms: i64) !void {
+fn saturatingAddMs(now_ms: i64, delay_ms: i64) i64 {
+    return std.math.add(i64, now_ms, delay_ms) catch std.math.maxInt(i64);
+}
+
+fn suspendQueuedWorkflowDispatch(rt: *Runtime, retry_at_ms: i64) !void {
     if (rt.active_durable_run == null) return error.NoActiveDurableRun;
     const active = &rt.active_durable_run.?;
-    const retry_at_ms = std.math.add(i64, now_ms, WORKFLOW_QUEUE_RETRY_DELAY_MS) catch std.math.maxInt(i64);
     try active.state.persistWaitTimer(retry_at_ms);
     try active.setPendingTimer(rt.allocator, retry_at_ms);
 }
