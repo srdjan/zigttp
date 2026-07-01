@@ -230,6 +230,40 @@ pub fn listDeadIds(allocator: Allocator, durable_dir: []const u8) ![][]u8 {
     return ids.toOwnedSlice(allocator);
 }
 
+/// Lists ids stranded under a stray `.reclaim-*` staging file in the leased
+/// directory (see findStrayReclaimFile) so an operator can notice items that
+/// crashed mid-reclaim instead of them silently parking forever. A
+/// subsequent tryClaim on the returned id recovers it automatically.
+pub fn listOrphanedReclaimIds(allocator: Allocator, durable_dir: []const u8) ![][]u8 {
+    const leased_dir = try std.fs.path.join(allocator, &.{ durable_dir, "workflow-queue", "leased" });
+    defer allocator.free(leased_dir);
+
+    const leased_dir_z = try allocator.dupeZ(u8, leased_dir);
+    defer allocator.free(leased_dir_z);
+
+    const dir = c.opendir(leased_dir_z) orelse return try allocator.alloc([]u8, 0);
+    defer _ = c.closedir(dir);
+
+    var ids: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (ids.items) |id| allocator.free(id);
+        ids.deinit(allocator);
+    }
+
+    const marker = ".json.reclaim-";
+    while (c.readdir(dir)) |entry| {
+        const name_ptr: [*:0]const u8 = @ptrCast(&entry.*.d_name);
+        const name = std.mem.sliceTo(name_ptr, 0);
+        const marker_idx = std.mem.indexOf(u8, name, marker) orelse continue;
+        const id = name[0..marker_idx];
+        if (id.len == 0) continue;
+        try ids.append(allocator, try allocator.dupe(u8, id));
+    }
+
+    std.mem.sort([]u8, ids.items, {}, lessThanBytes);
+    return ids.toOwnedSlice(allocator);
+}
+
 pub fn replayDead(allocator: Allocator, durable_dir: []const u8, id: []const u8) !void {
     var p = try queuePaths(allocator, durable_dir, id);
     defer p.deinit();
@@ -311,38 +345,81 @@ pub fn tryClaim(
     }
 
     if (try fileExists(p.leased_file)) {
-        const envelope = try zq.file_io.readFile(allocator, p.leased_file, MAX_QUEUE_FILE_BYTES);
-        defer allocator.free(envelope);
-        const lease_until_ms = parseLeaseUntilMs(envelope) catch 0;
-        if (lease_until_ms > now_ms) return .{ .busy = lease_until_ms };
+        return try handleLeasedFile(allocator, &p, now_ms, lease_ms, owner);
+    }
 
-        // The lease has expired, but another caller may be racing to
-        // reclaim the same item at the same time. Renaming the leased file
-        // to a reclaim-specific staging path is atomic and single-winner
-        // (the same guarantee the pending->leased transition above relies
-        // on): only the caller whose rename succeeds may claim and
-        // re-dispatch this item, so two racers can never both get `.claimed`
-        // back for the same expired lease.
-        const reclaim_file = try std.fmt.allocPrint(allocator, "{s}.reclaim-{d}-{x}", .{ p.leased_file, std.c.getpid(), @intFromPtr(&p) });
-        defer allocator.free(reclaim_file);
-        if (renamePath(p.leased_file, reclaim_file)) {
-            var result = try claimLeasedFile(allocator, reclaim_file, p.dead_file, now_ms + lease_ms, now_ms, owner);
-            errdefer result.deinit(allocator);
-            switch (result) {
-                .claimed => try renamePath(reclaim_file, p.leased_file),
-                .dead => deleteIfExists(reclaim_file),
-                .done, .busy => {},
-            }
-            return result;
+    // No pending/leased/done/dead file exists for this id. A crash during a
+    // previous reclaim attempt (between the leased->reclaim rename below and
+    // the rename-back/dead-letter that follows it) can leave the item under
+    // a private `.reclaim-*` staging name that no other code path scans for,
+    // stranding it forever. Recover it here instead of guessing `.busy`.
+    const file_name = try std.fmt.allocPrint(allocator, "{s}.json", .{id});
+    defer allocator.free(file_name);
+    if (try findStrayReclaimFile(allocator, p.leased_dir, file_name)) |stray_file| {
+        defer allocator.free(stray_file);
+        if (renamePath(stray_file, p.leased_file)) {
+            return try handleLeasedFile(allocator, &p, now_ms, lease_ms, owner);
         } else |err| switch (err) {
-            // Another caller already won the reclaim race and just set a
-            // fresh lease of roughly `now_ms + lease_ms`.
+            // Another caller already won the recovery race.
             error.FileNotFound => return .{ .busy = now_ms + lease_ms },
             else => return err,
         }
     }
 
     return .{ .busy = now_ms + lease_ms };
+}
+
+fn handleLeasedFile(allocator: Allocator, p: *const QueuePaths, now_ms: i64, lease_ms: i64, owner: []const u8) !ClaimResult {
+    const envelope = try zq.file_io.readFile(allocator, p.leased_file, MAX_QUEUE_FILE_BYTES);
+    defer allocator.free(envelope);
+    const lease_until_ms = parseLeaseUntilMs(envelope) catch 0;
+    if (lease_until_ms > now_ms) return .{ .busy = lease_until_ms };
+
+    // The lease has expired, but another caller may be racing to
+    // reclaim the same item at the same time. Renaming the leased file
+    // to a reclaim-specific staging path is atomic and single-winner
+    // (the same guarantee the pending->leased transition above relies
+    // on): only the caller whose rename succeeds may claim and
+    // re-dispatch this item, so two racers can never both get `.claimed`
+    // back for the same expired lease.
+    const reclaim_file = try std.fmt.allocPrint(allocator, "{s}.reclaim-{d}-{x}", .{ p.leased_file, std.c.getpid(), @intFromPtr(p) });
+    defer allocator.free(reclaim_file);
+    if (renamePath(p.leased_file, reclaim_file)) {
+        var result = try claimLeasedFile(allocator, reclaim_file, p.dead_file, now_ms + lease_ms, now_ms, owner);
+        errdefer result.deinit(allocator);
+        switch (result) {
+            .claimed => try renamePath(reclaim_file, p.leased_file),
+            .dead => deleteIfExists(reclaim_file),
+            .done, .busy => {},
+        }
+        return result;
+    } else |err| switch (err) {
+        // Another caller already won the reclaim race and just set a
+        // fresh lease of roughly `now_ms + lease_ms`.
+        error.FileNotFound => return .{ .busy = now_ms + lease_ms },
+        else => return err,
+    }
+}
+
+/// Scans `leased_dir` for a stray `{file_name}.reclaim-*` staging file left
+/// behind by a reclaim attempt that crashed before renaming it back to
+/// `file_name` or dead-lettering it.
+fn findStrayReclaimFile(allocator: Allocator, leased_dir: []const u8, file_name: []const u8) !?[]u8 {
+    const prefix = try std.fmt.allocPrint(allocator, "{s}.reclaim-", .{file_name});
+    defer allocator.free(prefix);
+
+    const dir_z = try allocator.dupeZ(u8, leased_dir);
+    defer allocator.free(dir_z);
+    const dir = c.opendir(dir_z) orelse return null;
+    defer _ = c.closedir(dir);
+
+    while (c.readdir(dir)) |entry| {
+        const name_ptr: [*:0]const u8 = @ptrCast(&entry.*.d_name);
+        const name = std.mem.sliceTo(name_ptr, 0);
+        if (!std.mem.startsWith(u8, name, prefix)) continue;
+        return try std.fs.path.join(allocator, &.{ leased_dir, name });
+    }
+    return null;
 }
 
 pub fn completeResponse(
@@ -1187,6 +1264,69 @@ test "workflow queue claim recovers from a dead letter left behind by an interru
     };
     try std.testing.expectEqualStrings("child", request.target);
     try std.testing.expect(!(try fileExists(p.dead_file)));
+}
+
+test "workflow queue recovers an item stranded in an orphaned .reclaim-* file" {
+    // Simulates a crash between the leased->reclaim rename in
+    // handleLeasedFile and the rename-back/dead-letter that follows it,
+    // leaving the item under a private `.reclaim-*` staging name that
+    // tryClaim's normal pending/leased/done/dead checks never see.
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const durable_dir = try allocator.dupe(u8, dir_buf[0..dir_len]);
+    defer allocator.free(durable_dir);
+
+    const view: HttpRequestView = .{
+        .method = "GET",
+        .path = "/",
+        .url = "/",
+        .query_params = &.{},
+        .headers = .empty,
+        .body = null,
+    };
+
+    try enqueueRequest(allocator, durable_dir, "item-orphan", "child", view);
+    var first = try tryClaim(allocator, durable_dir, "item-orphan", 10, 100);
+    defer first.deinit(allocator);
+    try std.testing.expect(first == .claimed);
+
+    var p = try queuePaths(allocator, durable_dir, "item-orphan");
+    defer p.deinit();
+
+    // Simulate the crash: rename the leased file out to a stray reclaim
+    // staging path exactly as handleLeasedFile would, then stop (no
+    // rename-back, no dead-letter).
+    const stray_file = try std.fmt.allocPrint(allocator, "{s}.reclaim-99999-dead", .{p.leased_file});
+    defer allocator.free(stray_file);
+    try renamePath(p.leased_file, stray_file);
+    try std.testing.expect(!(try fileExists(p.leased_file)));
+    try std.testing.expect(try fileExists(stray_file));
+
+    const orphaned_before = try listOrphanedReclaimIds(allocator, durable_dir);
+    defer {
+        for (orphaned_before) |id| allocator.free(id);
+        allocator.free(orphaned_before);
+    }
+    try std.testing.expectEqual(@as(usize, 1), orphaned_before.len);
+    try std.testing.expectEqualStrings("item-orphan", orphaned_before[0]);
+
+    // A later claim attempt must recover the stray file instead of
+    // reporting `.busy` forever.
+    var recovered = try tryClaim(allocator, durable_dir, "item-orphan", 300, 100);
+    defer recovered.deinit(allocator);
+    try std.testing.expect(recovered == .claimed);
+    try std.testing.expect(try fileExists(p.leased_file));
+    try std.testing.expect(!(try fileExists(stray_file)));
+
+    const orphaned_after = try listOrphanedReclaimIds(allocator, durable_dir);
+    defer {
+        for (orphaned_after) |id| allocator.free(id);
+        allocator.free(orphaned_after);
+    }
+    try std.testing.expectEqual(@as(usize, 0), orphaned_after.len);
 }
 
 test "workflow queue dead letters block enqueue until discarded" {

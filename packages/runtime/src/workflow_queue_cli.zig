@@ -142,11 +142,21 @@ fn listCommand(allocator: std.mem.Allocator, durable_dir: []const u8, stdout: *s
         allocator.free(ids);
     }
 
-    if (ids.len == 0) {
+    const orphaned = try workflow_queue.listOrphanedReclaimIds(allocator, durable_dir);
+    defer {
+        for (orphaned) |id| allocator.free(id);
+        allocator.free(orphaned);
+    }
+
+    if (ids.len == 0 and orphaned.len == 0) {
         try stdout.writeAll("(none)\n");
         return;
     }
     for (ids) |id| try stdout.print("{s}\n", .{id});
+    if (orphaned.len > 0) {
+        try stdout.writeAll("orphaned (stray reclaim, recovers on next claim attempt):\n");
+        for (orphaned) |id| try stdout.print("  {s}\n", .{id});
+    }
 }
 
 fn showCommand(

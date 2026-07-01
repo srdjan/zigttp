@@ -2109,6 +2109,11 @@ pub const ContractBuilder = struct {
     }
 
     fn appendReturnWorkflowNode(self: *ContractBuilder, node: NodeIndex, cursors: *std.ArrayList(WorkflowCursor)) !void {
+        if (self.ir_view.getOptValue(node)) |ret_val| {
+            if (self.returnExpressionHidesUnmodeledCall(ret_val)) {
+                self.markWorkflowPartial();
+            }
+        }
         const status = self.extractWorkflowReturnStatus(node);
         const label = if (status) |code|
             try std.fmt.allocPrint(self.allocator, "Response {d}", .{code})
@@ -2116,6 +2121,33 @@ pub const ContractBuilder = struct {
             try self.allocator.dupe(u8, "Response");
         _ = try self.appendWorkflowNode(.return_response, label, null, status, cursors);
         self.deinitWorkflowCursors(cursors);
+    }
+
+    /// Unlike expr_stmt/var_decl, a return statement's expression is never
+    /// routed through appendWorkflowCall/isUnhandledWorkflowCall, so a side
+    /// effect placed directly in the return position (or nested in a
+    /// Response.* helper's arguments) was silently unmodeled: the graph
+    /// still got a clean `.return_response` node and the workflow could be
+    /// proven retry-safe/idempotent while executing an unaccounted call on
+    /// every (recovered) replay. A `Response.*` helper call itself is the
+    /// expected, modeled shape - only its arguments are checked; any other
+    /// bare call in return position is unmodeled by definition.
+    fn returnExpressionHidesUnmodeledCall(self: *const ContractBuilder, ret_val: NodeIndex) bool {
+        const tag = self.ir_view.getTag(ret_val) orelse return false;
+        if (tag == .call) {
+            if (self.ir_view.getCall(ret_val)) |call| {
+                if (self.isResponseHelper(call.callee)) {
+                    var i: u16 = 0;
+                    while (i < call.args_count) : (i += 1) {
+                        if (self.containsUnmodeledCall(self.ir_view.getListIndex(call.args_start, i))) return true;
+                    }
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (tag == .method_call) return true;
+        return self.containsUnmodeledCall(ret_val);
     }
 
     fn appendWorkflowNode(
@@ -4263,6 +4295,26 @@ test "durable workflow properties reject unmodeled side effect hidden behind ass
         \\    id = uuid();
         \\    const value = step("charge", () => 1);
         \\    return Response.json({ value, id });
+        \\  });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(DurableWorkflowProofLevel.partial, contract.durable.workflow.proof_level);
+    try std.testing.expect(!contract.durable.workflow.properties.retry_safe);
+    try std.testing.expect(!contract.durable.workflow.properties.idempotent);
+    try std.testing.expect(!contract.durable.workflow.properties.fault_covered);
+}
+
+test "durable workflow properties reject unmodeled side effect hidden in return expression" {
+    const source =
+        \\import { run, step } from "zigttp:durable";
+        \\import { cacheSet } from "zigttp:cache";
+        \\function handler(req) {
+        \\  return run("job:return-cache", () => {
+        \\    const value = step("charge", () => 1);
+        \\    return Response.json({ value, cached: cacheSet("k", "v") });
         \\  });
         \\}
     ;
