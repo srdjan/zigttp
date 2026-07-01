@@ -14,6 +14,7 @@ const project_config_mod = @import("project_config");
 const self_extract = @import("self_extract.zig");
 const live_reload_mod = @import("runtime_features.zig").live_reload;
 const shared = @import("cli_shared.zig");
+const workflow_queue_cli = @import("workflow_queue_cli.zig");
 
 const embedded_handler = @import("embedded_handler");
 
@@ -36,6 +37,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const user_args = args[1..];
     const command = if (user_args.len == 0) "" else user_args[0];
+
+    if (std.mem.eql(u8, command, "workflow-queue")) {
+        workflow_queue_cli.run(allocator, user_args[1..]) catch |err| {
+            if (workflow_queue_cli.isExpectedUserError(err)) std.process.exit(1);
+            return err;
+        };
+        return;
+    }
 
     if (self_payload) |payload| {
         defer payload.deinit(allocator);
@@ -740,6 +749,7 @@ fn printHelp() void {
         \\Usage:
         \\  zigttp serve [options] [handler.ts]    Run handler
         \\  zigttp edge [--config FILE]            Run in-process edge runtime
+        \\  zigttp workflow-queue <cmd> --durable <DIR>  Inspect workflow queue dead letters
         \\  zigttp attest                           Inspect embedded proof artifact
         \\  zigttp version                          Show version
         \\  zigttp help                             Show this help

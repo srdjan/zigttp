@@ -3070,6 +3070,22 @@ test "workflow.call queue mode persists child result before durable step result"
     try std.testing.expect(std.mem.indexOf(u8, source, "\"type\":\"step_result\"") != null);
 }
 
+test "workflow.saga is rejected under workflow queue mode" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .workflow_queue_enabled = true,
+    });
+    defer rt.deinit();
+
+    const result = try workflow.workflowSagaCallback(@ptrCast(rt), rt.ctx, zq.JSValue.undefined_val);
+    try std.testing.expect(result.isException());
+    try std.testing.expect(rt.ctx.hasException());
+    rt.ctx.clearException();
+}
+
 // Saga (P3): an empty SystemRuntime is enough to enable the workflow module;
 // each saga step's run/compensate thunk returns a Response.json directly so the
 // success/failure status is controlled without sub-handlers.

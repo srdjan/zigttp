@@ -39,6 +39,7 @@ const init_command = @import("init_command.zig");
 const build_command = @import("build_command.zig");
 const dev_command = @import("dev_command.zig");
 const cli_help = @import("cli_help.zig");
+const workflow_queue_cli = @import("workflow_queue_cli.zig");
 
 test {
     // Command modules are reached only through `main`'s dispatch, which the
@@ -53,6 +54,7 @@ test {
     _ = @import("dev_command.zig");
     _ = @import("ratchet_command.zig");
     _ = @import("cli_help.zig");
+    _ = @import("workflow_queue_cli.zig");
     // cli_auth and verify_cli are likewise only reached via main's dispatch;
     // reference them so their tests (API-key store 0600 perms/masking, and the
     // Ed25519 verifier arg parsing incl. trust-key validation) actually run.
@@ -289,6 +291,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (std.mem.eql(u8, command, "edge")) {
         try runtime_cli.edgeCommand(allocator, user_args[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "workflow-queue")) {
+        workflow_queue_cli.run(allocator, user_args[1..]) catch |err| {
+            if (workflow_queue_cli.isExpectedUserError(err)) std.process.exit(1);
+            return err;
+        };
         return;
     }
     if (std.mem.eql(u8, command, "doctor")) {

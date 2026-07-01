@@ -246,6 +246,9 @@ fn workflowQueuedDispatchParts(
         .done => |result_json| {
             return zq.trace.jsonToJSValue(ctx, result_json);
         },
+        .dead => |dead_json| {
+            return workflowErrorParts(rt, ctx, "WorkflowQueueDeadLetter", dead_json);
+        },
         .busy => |lease_until_ms| {
             // Wake close to the real lease expiry rather than polling on a
             // fixed interval, but never sooner than the minimum delay so a

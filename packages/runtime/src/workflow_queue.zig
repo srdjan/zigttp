@@ -12,7 +12,21 @@ const appendEscaped = durable_store.appendEscaped;
 const writeAllChecked = zq.trace.writeAllChecked;
 
 const DEFAULT_LEASE_MS: i64 = 30_000;
+const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 const MAX_QUEUE_FILE_BYTES: usize = 1024 * 1024;
+
+const c = @cImport({
+    @cInclude("dirent.h");
+});
+
+const QueueMeta = struct {
+    attempts: u32 = 0,
+    lease_until_ms: i64 = 0,
+    lease_owner: ?[]const u8 = null,
+    created_at_ms: i64 = 0,
+    updated_at_ms: i64 = 0,
+    last_error: ?[]const u8 = null,
+};
 
 pub const Header = struct {
     key: []u8,
@@ -28,6 +42,12 @@ pub const QueuedRequest = struct {
     query_params: []QueryParam,
     body: ?[]u8,
     headers: []Header,
+    attempts: u32 = 0,
+    lease_until_ms: i64 = 0,
+    lease_owner: ?[]u8 = null,
+    created_at_ms: i64 = 0,
+    updated_at_ms: i64 = 0,
+    last_error: ?[]u8 = null,
 
     pub fn deinit(self: *QueuedRequest) void {
         self.allocator.free(self.target);
@@ -45,6 +65,8 @@ pub const QueuedRequest = struct {
             self.allocator.free(header.value);
         }
         self.allocator.free(self.headers);
+        if (self.lease_owner) |lease_owner| self.allocator.free(lease_owner);
+        if (self.last_error) |last_error| self.allocator.free(last_error);
         self.* = undefined;
     }
 
@@ -71,6 +93,7 @@ pub const QueuedRequest = struct {
 
 pub const ClaimResult = union(enum) {
     done: []u8,
+    dead: []u8,
     claimed: QueuedRequest,
     /// Another caller holds the active lease. Carries the wall-clock time
     /// (same clock as `now_ms`) after which retrying is worthwhile, so
@@ -81,6 +104,7 @@ pub const ClaimResult = union(enum) {
     pub fn deinit(self: *ClaimResult, allocator: Allocator) void {
         switch (self.*) {
             .done => |bytes| allocator.free(bytes),
+            .dead => |bytes| allocator.free(bytes),
             .claimed => |*request| request.deinit(),
             .busy => {},
         }
@@ -118,6 +142,19 @@ pub fn defaultLeaseMs() i64 {
     return DEFAULT_LEASE_MS;
 }
 
+pub fn defaultMaxAttempts() u32 {
+    return DEFAULT_MAX_ATTEMPTS;
+}
+
+pub fn isValidItemId(id: []const u8) bool {
+    if (id.len == 0) return false;
+    for (id) |ch| {
+        if (std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_') continue;
+        return false;
+    }
+    return true;
+}
+
 pub fn itemId(allocator: Allocator, run_key: []const u8, step_name: []const u8) ![]u8 {
     var hasher = std.hash.Wyhash.init(0);
     hasher.update(run_key);
@@ -139,10 +176,15 @@ pub fn enqueueRequest(
     try ensureQueueDirs(&p);
 
     if (try fileExists(p.done_file)) return;
+    if (try fileExists(p.dead_file)) return;
     if (try fileExists(p.pending_file)) return;
     if (try fileExists(p.leased_file)) return;
 
-    const payload = try requestEnvelopeJson(allocator, target, view, 0);
+    const now_ms = zq.trace.unixMillis();
+    const payload = try requestEnvelopeJson(allocator, target, view, .{
+        .created_at_ms = now_ms,
+        .updated_at_ms = now_ms,
+    });
     defer allocator.free(payload);
     try writeFileAtomic(allocator, p.pending_file, payload);
 }
@@ -151,6 +193,80 @@ pub fn readResult(allocator: Allocator, durable_dir: []const u8, id: []const u8)
     var p = try queuePaths(allocator, durable_dir, id);
     defer p.deinit();
     return readDoneFile(allocator, p.done_file);
+}
+
+pub fn readDead(allocator: Allocator, durable_dir: []const u8, id: []const u8) !?[]u8 {
+    var p = try queuePaths(allocator, durable_dir, id);
+    defer p.deinit();
+    return readDeadFile(allocator, p.dead_file);
+}
+
+pub fn listDeadIds(allocator: Allocator, durable_dir: []const u8) ![][]u8 {
+    const dead_dir = try std.fs.path.join(allocator, &.{ durable_dir, "workflow-queue", "dead" });
+    defer allocator.free(dead_dir);
+
+    const dead_dir_z = try allocator.dupeZ(u8, dead_dir);
+    defer allocator.free(dead_dir_z);
+
+    const dir = c.opendir(dead_dir_z) orelse return try allocator.alloc([]u8, 0);
+    defer _ = c.closedir(dir);
+
+    var ids: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (ids.items) |id| allocator.free(id);
+        ids.deinit(allocator);
+    }
+
+    while (c.readdir(dir)) |entry| {
+        const name_ptr: [*:0]const u8 = @ptrCast(&entry.*.d_name);
+        const name = std.mem.sliceTo(name_ptr, 0);
+        if (!std.mem.endsWith(u8, name, ".json")) continue;
+        const id = name[0 .. name.len - ".json".len];
+        if (id.len == 0) continue;
+        try ids.append(allocator, try allocator.dupe(u8, id));
+    }
+
+    std.mem.sort([]u8, ids.items, {}, lessThanBytes);
+    return ids.toOwnedSlice(allocator);
+}
+
+pub fn replayDead(allocator: Allocator, durable_dir: []const u8, id: []const u8) !void {
+    var p = try queuePaths(allocator, durable_dir, id);
+    defer p.deinit();
+    try ensureQueueDirs(&p);
+
+    if (try fileExists(p.done_file)) return error.WorkflowQueueResultAlreadyDone;
+    if (try fileExists(p.pending_file)) return error.WorkflowQueueItemAlreadyPending;
+    if (try fileExists(p.leased_file)) return error.WorkflowQueueItemAlreadyLeased;
+
+    const dead = (try readDeadFile(allocator, p.dead_file)) orelse return error.WorkflowQueueDeadLetterMissing;
+    defer allocator.free(dead);
+
+    const request_json = try requestJsonFromDeadLetter(allocator, dead);
+    defer allocator.free(request_json);
+
+    var request = try parseQueuedRequest(allocator, request_json);
+    defer request.deinit();
+    const now_ms = zq.trace.unixMillis();
+    const pending_payload = try requestEnvelopeJsonFromQueued(allocator, request, .{
+        .attempts = 0,
+        .lease_until_ms = 0,
+        .lease_owner = null,
+        .created_at_ms = if (request.created_at_ms != 0) request.created_at_ms else now_ms,
+        .updated_at_ms = now_ms,
+        .last_error = null,
+    });
+    defer allocator.free(pending_payload);
+
+    try writeFileAtomic(allocator, p.pending_file, pending_payload);
+    deleteIfExists(p.dead_file);
+}
+
+pub fn discardDead(allocator: Allocator, durable_dir: []const u8, id: []const u8) !void {
+    var p = try queuePaths(allocator, durable_dir, id);
+    defer p.deinit();
+    if (!(try fileExists(p.dead_file))) return error.WorkflowQueueDeadLetterMissing;
+    deleteIfExists(p.dead_file);
 }
 
 pub fn tryClaim(
@@ -167,9 +283,15 @@ pub fn tryClaim(
     if (try readDoneFile(allocator, p.done_file)) |result| {
         return .{ .done = result };
     }
+    if (try readDeadFile(allocator, p.dead_file)) |dead| {
+        return .{ .dead = dead };
+    }
+
+    var owner_buf: [32]u8 = undefined;
+    const owner = try claimOwner(&owner_buf);
 
     if (renamePath(p.pending_file, p.leased_file)) {
-        return try claimLeasedFile(allocator, p.leased_file, now_ms + lease_ms);
+        return try claimLeasedFile(allocator, p.leased_file, p.dead_file, now_ms + lease_ms, now_ms, owner);
     } else |err| switch (err) {
         // A concurrent tryClaim already won the pending->leased rename;
         // fall through to the lease-aware check below instead of
@@ -194,9 +316,13 @@ pub fn tryClaim(
         const reclaim_file = try std.fmt.allocPrint(allocator, "{s}.reclaim-{d}-{x}", .{ p.leased_file, std.c.getpid(), @intFromPtr(&p) });
         defer allocator.free(reclaim_file);
         if (renamePath(p.leased_file, reclaim_file)) {
-            var result = try claimLeasedFile(allocator, reclaim_file, now_ms + lease_ms);
+            var result = try claimLeasedFile(allocator, reclaim_file, p.dead_file, now_ms + lease_ms, now_ms, owner);
             errdefer result.deinit(allocator);
-            try renamePath(reclaim_file, p.leased_file);
+            switch (result) {
+                .claimed => try renamePath(reclaim_file, p.leased_file),
+                .dead => deleteIfExists(reclaim_file),
+                .done, .busy => {},
+            }
             return result;
         } else |err| switch (err) {
             // Another caller already won the reclaim race and just set a
@@ -254,29 +380,105 @@ pub fn markDead(
     defer p.deinit();
     try ensureQueueDirs(&p);
 
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try payload.appendSlice(allocator, "{\"reason\":\"");
-    try appendEscaped(&payload, allocator, reason);
-    try payload.appendSlice(allocator, "\"}");
-    try writeFileAtomic(allocator, p.dead_file, payload.items);
+    const payload = try deadEnvelopeJson(allocator, reason, 0, reason, zq.trace.unixMillis(), "operator", null);
+    defer allocator.free(payload);
+    try writeFileAtomic(allocator, p.dead_file, payload);
     deleteIfExists(p.pending_file);
     deleteIfExists(p.leased_file);
 }
 
-fn claimLeasedFile(allocator: Allocator, leased_file: []const u8, lease_until_ms: i64) !ClaimResult {
+fn claimLeasedFile(
+    allocator: Allocator,
+    leased_file: []const u8,
+    dead_file: []const u8,
+    lease_until_ms: i64,
+    now_ms: i64,
+    lease_owner: []const u8,
+) !ClaimResult {
     const envelope = try zq.file_io.readFile(allocator, leased_file, MAX_QUEUE_FILE_BYTES);
     defer allocator.free(envelope);
-    var request = try parseQueuedRequest(allocator, envelope);
+    var request = parseQueuedRequest(allocator, envelope) catch |err| {
+        const dead = try writeDeadLetter(
+            allocator,
+            dead_file,
+            "invalid workflow queue envelope",
+            0,
+            @errorName(err),
+            now_ms,
+            "leased",
+            null,
+        );
+        deleteIfExists(leased_file);
+        return dead;
+    };
     errdefer request.deinit();
 
-    const payload = try requestEnvelopeJsonFromQueued(allocator, request, lease_until_ms);
+    const next_attempts = request.attempts +| 1;
+    if (next_attempts > DEFAULT_MAX_ATTEMPTS) {
+        const last_error = request.last_error orelse "lease expired too many times";
+        defer request.deinit();
+        const dead = try writeDeadLetter(
+            allocator,
+            dead_file,
+            "workflow queue max attempts exceeded",
+            request.attempts,
+            last_error,
+            now_ms,
+            "leased",
+            envelope,
+        );
+        deleteIfExists(leased_file);
+        return dead;
+    }
+
+    const payload = try requestEnvelopeJsonFromQueued(allocator, request, .{
+        .attempts = next_attempts,
+        .lease_until_ms = lease_until_ms,
+        .lease_owner = lease_owner,
+        .created_at_ms = request.created_at_ms,
+        .updated_at_ms = now_ms,
+        .last_error = request.last_error,
+    });
     defer allocator.free(payload);
     try writeFileAtomic(allocator, leased_file, payload);
+    request.attempts = next_attempts;
+    request.lease_until_ms = lease_until_ms;
+    if (request.lease_owner) |old_owner| {
+        request.allocator.free(old_owner);
+        request.lease_owner = null;
+    }
+    request.lease_owner = try request.allocator.dupe(u8, lease_owner);
+    request.updated_at_ms = now_ms;
     return .{ .claimed = request };
 }
 
+fn writeDeadLetter(
+    allocator: Allocator,
+    dead_file: []const u8,
+    reason: []const u8,
+    attempts: u32,
+    last_error: []const u8,
+    dead_at_ms: i64,
+    source: []const u8,
+    request_json: ?[]const u8,
+) !ClaimResult {
+    const payload = try deadEnvelopeJson(allocator, reason, attempts, last_error, dead_at_ms, source, request_json);
+    errdefer allocator.free(payload);
+    try writeFileAtomic(allocator, dead_file, payload);
+    return .{ .dead = payload };
+}
+
+fn claimOwner(buf: []u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "pid:{d}", .{std.c.getpid()});
+}
+
+fn lessThanBytes(_: void, lhs: []u8, rhs: []u8) bool {
+    return std.mem.lessThan(u8, lhs, rhs);
+}
+
 fn queuePaths(allocator: Allocator, durable_dir: []const u8, id: []const u8) !QueuePaths {
+    if (!isValidItemId(id)) return error.InvalidWorkflowQueueItemId;
+
     const root = try std.fs.path.join(allocator, &.{ durable_dir, "workflow-queue" });
     errdefer allocator.free(root);
     const pending_dir = try std.fs.path.join(allocator, &.{ root, "pending" });
@@ -335,6 +537,11 @@ fn readDoneFile(allocator: Allocator, done_file: []const u8) !?[]u8 {
     return try zq.file_io.readFile(allocator, done_file, MAX_QUEUE_FILE_BYTES);
 }
 
+fn readDeadFile(allocator: Allocator, dead_file: []const u8) !?[]u8 {
+    if (!(try fileExists(dead_file))) return null;
+    return try zq.file_io.readFile(allocator, dead_file, MAX_QUEUE_FILE_BYTES);
+}
+
 fn fileExists(path: []const u8) !bool {
     const z = try std.heap.c_allocator.dupeZ(u8, path);
     defer std.heap.c_allocator.free(z);
@@ -385,7 +592,7 @@ fn writeFileAtomic(allocator: Allocator, final_path: []const u8, bytes: []const 
     try renamePath(tmp_path, final_path);
 }
 
-fn requestEnvelopeJson(allocator: Allocator, target: []const u8, view: HttpRequestView, lease_until_ms: i64) ![]u8 {
+fn requestEnvelopeJson(allocator: Allocator, target: []const u8, view: HttpRequestView, meta: QueueMeta) ![]u8 {
     var payload: std.ArrayList(u8) = .empty;
     errdefer payload.deinit(allocator);
     try payload.appendSlice(allocator, "{\"target\":\"");
@@ -422,18 +629,39 @@ fn requestEnvelopeJson(allocator: Allocator, target: []const u8, view: HttpReque
     } else {
         try payload.appendSlice(allocator, "null");
     }
+    var int_buf: [32]u8 = undefined;
+    try payload.appendSlice(allocator, ",\"attempts\":");
+    try payload.appendSlice(allocator, try std.fmt.bufPrint(&int_buf, "{d}", .{meta.attempts}));
     try payload.appendSlice(allocator, ",\"lease_until_ms\":");
-    var lease_buf: [32]u8 = undefined;
-    const lease_printed = try std.fmt.bufPrint(&lease_buf, "{d}", .{lease_until_ms});
-    try payload.appendSlice(allocator, lease_printed);
+    try payload.appendSlice(allocator, try std.fmt.bufPrint(&int_buf, "{d}", .{meta.lease_until_ms}));
+    try payload.appendSlice(allocator, ",\"lease_owner\":");
+    if (meta.lease_owner) |lease_owner| {
+        try payload.appendSlice(allocator, "\"");
+        try appendEscaped(&payload, allocator, lease_owner);
+        try payload.appendSlice(allocator, "\"");
+    } else {
+        try payload.appendSlice(allocator, "null");
+    }
+    try payload.appendSlice(allocator, ",\"created_at_ms\":");
+    try payload.appendSlice(allocator, try std.fmt.bufPrint(&int_buf, "{d}", .{meta.created_at_ms}));
+    try payload.appendSlice(allocator, ",\"updated_at_ms\":");
+    try payload.appendSlice(allocator, try std.fmt.bufPrint(&int_buf, "{d}", .{meta.updated_at_ms}));
+    try payload.appendSlice(allocator, ",\"last_error\":");
+    if (meta.last_error) |last_error| {
+        try payload.appendSlice(allocator, "\"");
+        try appendEscaped(&payload, allocator, last_error);
+        try payload.appendSlice(allocator, "\"");
+    } else {
+        try payload.appendSlice(allocator, "null");
+    }
     try payload.appendSlice(allocator, "}");
     return payload.toOwnedSlice(allocator);
 }
 
-fn requestEnvelopeJsonFromQueued(allocator: Allocator, request: QueuedRequest, lease_until_ms: i64) ![]u8 {
+fn requestEnvelopeJsonFromQueued(allocator: Allocator, request: QueuedRequest, meta: QueueMeta) ![]u8 {
     var view = try request.toView(allocator);
     defer view.headers.deinit(allocator);
-    return requestEnvelopeJson(allocator, request.target, view, lease_until_ms);
+    return requestEnvelopeJson(allocator, request.target, view, meta);
 }
 
 fn responseEnvelopeJson(allocator: Allocator, response: HttpResponse) ![]u8 {
@@ -469,6 +697,54 @@ fn errorEnvelopeJson(allocator: Allocator, code: []const u8, detail: []const u8)
     return payload.toOwnedSlice(allocator);
 }
 
+fn deadEnvelopeJson(
+    allocator: Allocator,
+    reason: []const u8,
+    attempts: u32,
+    last_error: []const u8,
+    dead_at_ms: i64,
+    source: []const u8,
+    request_json: ?[]const u8,
+) ![]u8 {
+    var payload: std.ArrayList(u8) = .empty;
+    errdefer payload.deinit(allocator);
+    try payload.appendSlice(allocator, "{\"reason\":\"");
+    try appendEscaped(&payload, allocator, reason);
+    try payload.appendSlice(allocator, "\",\"attempts\":");
+    var int_buf: [32]u8 = undefined;
+    try payload.appendSlice(allocator, try std.fmt.bufPrint(&int_buf, "{d}", .{attempts}));
+    try payload.appendSlice(allocator, ",\"last_error\":\"");
+    try appendEscaped(&payload, allocator, last_error);
+    try payload.appendSlice(allocator, "\",\"dead_at_ms\":");
+    try payload.appendSlice(allocator, try std.fmt.bufPrint(&int_buf, "{d}", .{dead_at_ms}));
+    try payload.appendSlice(allocator, ",\"source\":\"");
+    try appendEscaped(&payload, allocator, source);
+    try payload.appendSlice(allocator, "\",\"request_json\":");
+    if (request_json) |json| {
+        try payload.appendSlice(allocator, "\"");
+        try appendEscaped(&payload, allocator, json);
+        try payload.appendSlice(allocator, "\"");
+    } else {
+        try payload.appendSlice(allocator, "null");
+    }
+    try payload.appendSlice(allocator, "}");
+    return payload.toOwnedSlice(allocator);
+}
+
+fn requestJsonFromDeadLetter(allocator: Allocator, source: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.InvalidWorkflowQueueDeadLetter,
+    };
+    const maybe_request = dupeOptionalStringField(allocator, obj, "request_json") catch |err| switch (err) {
+        error.InvalidWorkflowQueueEnvelope => return error.InvalidWorkflowQueueDeadLetter,
+        else => return err,
+    };
+    return maybe_request orelse error.WorkflowQueueDeadLetterNotReplayable;
+}
+
 fn parseQueuedRequest(allocator: Allocator, source: []const u8) !QueuedRequest {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
     defer parsed.deinit();
@@ -495,6 +771,10 @@ fn parseQueuedRequest(allocator: Allocator, source: []const u8) !QueuedRequest {
     }
     const body = try dupeOptionalStringField(allocator, obj, "body");
     errdefer if (body) |bytes| allocator.free(bytes);
+    const lease_owner = try dupeOptionalStringField(allocator, obj, "lease_owner");
+    errdefer if (lease_owner) |bytes| allocator.free(bytes);
+    const last_error = try dupeOptionalStringField(allocator, obj, "last_error");
+    errdefer if (last_error) |bytes| allocator.free(bytes);
 
     const headers_value = obj.get("headers") orelse return error.InvalidWorkflowQueueEnvelope;
     const headers_obj = switch (headers_value) {
@@ -539,6 +819,12 @@ fn parseQueuedRequest(allocator: Allocator, source: []const u8) !QueuedRequest {
         .query_params = query_params,
         .body = body,
         .headers = headers,
+        .attempts = parseU32Field(obj, "attempts", 0),
+        .lease_until_ms = parseI64Field(obj, "lease_until_ms", 0),
+        .lease_owner = lease_owner,
+        .created_at_ms = parseI64Field(obj, "created_at_ms", 0),
+        .updated_at_ms = parseI64Field(obj, "updated_at_ms", 0),
+        .last_error = last_error,
     };
 }
 
@@ -553,6 +839,22 @@ fn parseLeaseUntilMs(source: []const u8) !i64 {
     return switch (value) {
         .integer => |integer| @intCast(integer),
         else => 0,
+    };
+}
+
+fn parseU32Field(obj: std.json.ObjectMap, name: []const u8, default: u32) u32 {
+    const value = obj.get(name) orelse return default;
+    return switch (value) {
+        .integer => |integer| std.math.cast(u32, integer) orelse default,
+        else => default,
+    };
+}
+
+fn parseI64Field(obj: std.json.ObjectMap, name: []const u8, default: i64) i64 {
+    const value = obj.get(name) orelse return default;
+    return switch (value) {
+        .integer => |integer| @intCast(integer),
+        else => default,
     };
 }
 
@@ -641,6 +943,10 @@ test "workflow queue claim completes with durable result" {
     try std.testing.expectEqualStrings("x", request.query_params[0].key);
     try std.testing.expectEqualStrings("1", request.query_params[0].value);
     try std.testing.expectEqualStrings("hello", request.body.?);
+    try std.testing.expectEqual(@as(u32, 1), request.attempts);
+    try std.testing.expectEqual(@as(i64, 110), request.lease_until_ms);
+    try std.testing.expect(request.lease_owner != null);
+    try std.testing.expect(std.mem.startsWith(u8, request.lease_owner.?, "pid:"));
 
     var response_headers: std.ArrayListUnmanaged(http_types.ResponseHeader) = .empty;
     defer response_headers.deinit(allocator);
@@ -698,4 +1004,169 @@ test "workflow queue lease remains busy until expiry" {
     var third = try tryClaim(allocator, durable_dir, "item-b", 111, 100);
     defer third.deinit(allocator);
     try std.testing.expect(third == .claimed);
+
+    var fourth = try tryClaim(allocator, durable_dir, "item-b", 112, 100);
+    defer fourth.deinit(allocator);
+    try std.testing.expect(fourth == .busy);
+}
+
+test "workflow queue corrupt pending moves to non-replayable dead letter" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const durable_dir = try allocator.dupe(u8, dir_buf[0..dir_len]);
+    defer allocator.free(durable_dir);
+
+    var p = try queuePaths(allocator, durable_dir, "item-corrupt-pending");
+    defer p.deinit();
+    try ensureQueueDirs(&p);
+    try writeFileAtomic(allocator, p.pending_file, "{\"target\":");
+
+    var claim = try tryClaim(allocator, durable_dir, "item-corrupt-pending", 10, 100);
+    defer claim.deinit(allocator);
+    const dead = switch (claim) {
+        .dead => |bytes| bytes,
+        else => return error.ExpectedDeadQueueItem,
+    };
+    try std.testing.expect(std.mem.indexOf(u8, dead, "invalid workflow queue envelope") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dead, "\"request_json\":null") != null);
+    try std.testing.expect(!(try fileExists(p.pending_file)));
+    try std.testing.expect(!(try fileExists(p.leased_file)));
+    try std.testing.expect(try fileExists(p.dead_file));
+    try std.testing.expectError(error.WorkflowQueueDeadLetterNotReplayable, replayDead(allocator, durable_dir, "item-corrupt-pending"));
+}
+
+test "workflow queue corrupt expired lease moves to visible dead letter" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const durable_dir = try allocator.dupe(u8, dir_buf[0..dir_len]);
+    defer allocator.free(durable_dir);
+
+    var p = try queuePaths(allocator, durable_dir, "item-corrupt-leased");
+    defer p.deinit();
+    try ensureQueueDirs(&p);
+    try writeFileAtomic(allocator, p.leased_file, "{\"lease_until_ms\":1,\"target\":false}");
+
+    var claim = try tryClaim(allocator, durable_dir, "item-corrupt-leased", 10, 100);
+    defer claim.deinit(allocator);
+    const dead = switch (claim) {
+        .dead => |bytes| bytes,
+        else => return error.ExpectedDeadQueueItem,
+    };
+    try std.testing.expect(std.mem.indexOf(u8, dead, "invalid workflow queue envelope") != null);
+    try std.testing.expect(!(try fileExists(p.leased_file)));
+    try std.testing.expect(try fileExists(p.dead_file));
+}
+
+test "workflow queue max attempts dead letter can be replayed" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const durable_dir = try allocator.dupe(u8, dir_buf[0..dir_len]);
+    defer allocator.free(durable_dir);
+
+    const view: HttpRequestView = .{
+        .method = "POST",
+        .path = "/child",
+        .url = "/child",
+        .query_params = &.{},
+        .headers = .empty,
+        .body = "body",
+    };
+
+    var p = try queuePaths(allocator, durable_dir, "item-max-attempts");
+    defer p.deinit();
+    try ensureQueueDirs(&p);
+    const leased_payload = try requestEnvelopeJson(allocator, "child", view, .{
+        .attempts = defaultMaxAttempts(),
+        .lease_until_ms = 1,
+        .lease_owner = "pid:old",
+        .created_at_ms = 1,
+        .updated_at_ms = 2,
+        .last_error = "boom",
+    });
+    defer allocator.free(leased_payload);
+    try writeFileAtomic(allocator, p.leased_file, leased_payload);
+
+    var claim = try tryClaim(allocator, durable_dir, "item-max-attempts", 10, 100);
+    defer claim.deinit(allocator);
+    const dead = switch (claim) {
+        .dead => |bytes| bytes,
+        else => return error.ExpectedDeadQueueItem,
+    };
+    try std.testing.expect(std.mem.indexOf(u8, dead, "workflow queue max attempts exceeded") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dead, "\"attempts\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dead, "\"last_error\":\"boom\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dead, "\"request_json\":\"") != null);
+    try std.testing.expect(!(try fileExists(p.leased_file)));
+    try std.testing.expect(try fileExists(p.dead_file));
+
+    const ids = try listDeadIds(allocator, durable_dir);
+    defer {
+        for (ids) |id| allocator.free(id);
+        allocator.free(ids);
+    }
+    try std.testing.expectEqual(@as(usize, 1), ids.len);
+    try std.testing.expectEqualStrings("item-max-attempts", ids[0]);
+
+    try replayDead(allocator, durable_dir, "item-max-attempts");
+    try std.testing.expect(!(try fileExists(p.dead_file)));
+    try std.testing.expect(try fileExists(p.pending_file));
+
+    var replayed = try tryClaim(allocator, durable_dir, "item-max-attempts", 20, 100);
+    defer replayed.deinit(allocator);
+    const request = switch (replayed) {
+        .claimed => |*req| req,
+        else => return error.ExpectedClaimedQueueItem,
+    };
+    try std.testing.expectEqualStrings("child", request.target);
+    try std.testing.expectEqualStrings("body", request.body.?);
+    try std.testing.expectEqual(@as(u32, 1), request.attempts);
+    try std.testing.expect(request.last_error == null);
+}
+
+test "workflow queue dead letters block enqueue until discarded" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const durable_dir = try allocator.dupe(u8, dir_buf[0..dir_len]);
+    defer allocator.free(durable_dir);
+
+    const view: HttpRequestView = .{
+        .method = "GET",
+        .path = "/",
+        .url = "/",
+        .query_params = &.{},
+        .headers = .empty,
+        .body = null,
+    };
+
+    try markDead(allocator, durable_dir, "item-discard", "operator review");
+    try enqueueRequest(allocator, durable_dir, "item-discard", "child", view);
+
+    var claim = try tryClaim(allocator, durable_dir, "item-discard", 10, 100);
+    defer claim.deinit(allocator);
+    try std.testing.expect(claim == .dead);
+
+    const dead_payload = (try readDead(allocator, durable_dir, "item-discard")) orelse return error.ExpectedDeadQueueItem;
+    defer allocator.free(dead_payload);
+    try std.testing.expect(std.mem.indexOf(u8, dead_payload, "operator review") != null);
+
+    try discardDead(allocator, durable_dir, "item-discard");
+    try std.testing.expect((try readDead(allocator, durable_dir, "item-discard")) == null);
+    try std.testing.expectError(error.WorkflowQueueDeadLetterMissing, discardDead(allocator, durable_dir, "item-discard"));
+
+    try enqueueRequest(allocator, durable_dir, "item-discard", "child", view);
+    var after_discard = try tryClaim(allocator, durable_dir, "item-discard", 20, 100);
+    defer after_discard.deinit(allocator);
+    try std.testing.expect(after_discard == .claimed);
 }
