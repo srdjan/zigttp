@@ -53,6 +53,12 @@ fn effectiveOutboundTimeoutMs(rt: *Runtime) u32 {
     return timeout_ms;
 }
 
+fn stepDeadlinePassed(rt: *Runtime) bool {
+    const active = rt.active_durable_run orelse return false;
+    const deadline_ms = active.step_timeout_deadline_ms orelse return false;
+    return unixMillis() >= deadline_ms;
+}
+
 fn outboundTimeout(timeout_ms: u32) std.Io.Timeout {
     if (timeout_ms == 0) return .none;
     const duration = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms));
@@ -1299,7 +1305,16 @@ fn runDurableFetch(
         const status = extractResponseStatus(rt, last_response);
         const retryable = status >= 500;
         const exhausted = attempt >= opts.retries;
-        if (!retryable or exhausted) break;
+        // effectiveOutboundTimeoutMs already collapses each attempt's own
+        // connect/read timeout once the step deadline passes, but nothing
+        // stopped this loop from still classifying that fast-failing
+        // attempt as retryable and sleeping a full jittered backoff before
+        // the next one - since this loop is one synchronous native call,
+        // the interpreter's cooperative deadline check never runs between
+        // attempts to catch it from outside. Check the deadline explicitly
+        // so the loop stops growing the step's overrun instead of spending
+        // its full retry/backoff budget past the deadline.
+        if (!retryable or exhausted or stepDeadlinePassed(rt)) break;
         if (opts.backoff == .exponential) {
             var seed = retry_backoff.seedBytes(hash[0..], 0x4645544348524554);
             seed = retry_backoff.mix(seed, attempt);

@@ -2214,11 +2214,15 @@ const TestHttpServer = struct {
     thread: ?std.Thread = null,
     closed: bool = false,
     thread_error: std.atomic.Value(TestErrorInt) = std.atomic.Value(TestErrorInt).init(0),
+    // Only consulted when mode == .sequenced_status: one status code per
+    // accepted connection, in order.
+    status_sequence: []const u16 = &.{},
 
     const Mode = enum {
         echo_request_json,
         large_plain_text,
         silent_hold,
+        sequenced_status,
     };
 
     fn init(allocator: std.mem.Allocator, mode: Mode) !TestHttpServer {
@@ -2267,6 +2271,22 @@ const TestHttpServer = struct {
 
     fn runInner(self: *TestHttpServer) !void {
         const io = self.io_backend.io();
+
+        if (self.mode == .sequenced_status) {
+            for (self.status_sequence) |status| {
+                var stream = while (true) {
+                    break self.listener.accept(io) catch |err| switch (err) {
+                        error.ConnectionAborted => continue,
+                        error.SocketNotListening => return,
+                        else => return err,
+                    };
+                };
+                defer stream.close(io);
+                try self.respondWithStatus(&stream, io, status);
+            }
+            return;
+        }
+
         var stream = while (true) {
             break self.listener.accept(io) catch |err| switch (err) {
                 error.ConnectionAborted => continue,
@@ -2280,6 +2300,7 @@ const TestHttpServer = struct {
             .echo_request_json => try self.respondWithEcho(&stream, io),
             .large_plain_text => try self.respondWithLargeBody(&stream, io),
             .silent_hold => try self.holdSilently(&stream, io),
+            .sequenced_status => unreachable,
         }
     }
 
@@ -2339,6 +2360,13 @@ const TestHttpServer = struct {
             &.{"Content-Type: text/plain"},
             "0123456789abcdef0123456789abcdef",
         );
+    }
+
+    fn respondWithStatus(self: *TestHttpServer, stream: *std.Io.net.Stream, io: std.Io, status: u16) !void {
+        var captured = try captureRequest(self.allocator, stream, io);
+        defer captured.deinit(self.allocator);
+        const reason: []const u8 = if (status >= 500) "Internal Server Error" else "OK";
+        try writeTestResponse(stream, io, status, reason, &.{"Content-Type: text/plain"}, "");
     }
 };
 
@@ -3949,6 +3977,160 @@ test "durable stepWithTimeout times out waitSignal before consuming a later sign
     const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
     try std.testing.expect(std.mem.indexOf(u8, source, "\"timeout_ms\"") != null);
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "\"type\":\"resume_signal\""));
+}
+
+test "durable fetch retries 5xx responses and succeeds within the retry budget" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    var server = try TestHttpServer.init(allocator, .sequenced_status);
+    server.status_sequence = &.{ 500, 500, 200 };
+    defer server.join() catch {};
+    try server.start();
+
+    const url = try server.url(allocator, "/");
+    defer allocator.free(url);
+
+    const rt = try Runtime.init(allocator, .{
+        .durable_oplog_dir = durable_dir,
+        .outbound_http_enabled = true,
+    });
+    defer rt.deinit();
+    rt.ctx.capability_policy = .{
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"127.0.0.1"} },
+    };
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zigttp:fetch";
+        \\function handler(req) {{
+        \\  const res = fetch("{s}", {{ durable: {{ key: "retry-success", retries: 5, backoff: "none" }} }});
+        \\  return Response.json({{ status: res.status }});
+        \\}}
+    , .{url});
+    try rt.loadHandler(handler_code, "<durable-fetch-retry-success>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("status").?.integer);
+}
+
+test "durable fetch stops retrying once the retry budget is exhausted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    var server = try TestHttpServer.init(allocator, .sequenced_status);
+    server.status_sequence = &.{500};
+    defer server.join() catch {};
+    try server.start();
+
+    const url = try server.url(allocator, "/");
+    defer allocator.free(url);
+
+    const rt = try Runtime.init(allocator, .{
+        .durable_oplog_dir = durable_dir,
+        .outbound_http_enabled = true,
+    });
+    defer rt.deinit();
+    rt.ctx.capability_policy = .{
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"127.0.0.1"} },
+    };
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zigttp:fetch";
+        \\function handler(req) {{
+        \\  const res = fetch("{s}", {{ durable: {{ key: "retry-exhausted", retries: 0, backoff: "none" }} }});
+        \\  return Response.json({{ status: res.status }});
+        \\}}
+    , .{url});
+    try rt.loadHandler(handler_code, "<durable-fetch-retry-exhausted>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    // retries: 0 means exactly one attempt - the server's single-item
+    // sequence is consumed exactly once, proving the loop did not retry
+    // past a `retries: 0` budget.
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 500), parsed.value.object.get("status").?.integer);
+}
+
+test "durable fetch retry loop stops once the step deadline passes instead of exhausting its retry budget" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    // Point at a closed local port instead of a real server: each connect
+    // attempt is refused near-instantly (no listener, no background thread
+    // to coordinate or tear down), and a refused connection is classified
+    // exactly like a 5xx response (synthetic 599) by fetchSyncResult, so
+    // the retry loop treats it identically.
+    const rt = try Runtime.init(allocator, .{
+        .durable_oplog_dir = durable_dir,
+        .outbound_http_enabled = true,
+    });
+    defer rt.deinit();
+    rt.ctx.capability_policy = .{
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"127.0.0.1"} },
+    };
+
+    const handler_code =
+        \\import { run, stepWithTimeout } from "zigttp:durable";
+        \\import { fetch } from "zigttp:fetch";
+        \\function handler(req) {
+        \\  return run("fetch:deadline", () => {
+        \\    const result = stepWithTimeout("call", 50, () => {
+        \\      return fetch("http://127.0.0.1:18711/", { durable: { key: "deadline-fetch", retries: 8, backoff: "exponential" } });
+        \\    });
+        \\    return Response.json({ ok: result.ok, error: result.error });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-fetch-deadline>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+
+    var timer = try zq.compat.Timer.start();
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    const elapsed_ms = timer.read() / std.time.ns_per_ms;
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(false, obj.get("ok").?.bool);
+    try std.testing.expectEqualStrings("timeout", obj.get("error").?.string);
+
+    // With retries: 8 and exponential backoff, an unbounded retry loop
+    // could spend several seconds (backoff caps grow to 6400ms per
+    // attempt); stopping at the step deadline keeps this well under a
+    // second even with two real network round-trips and one backoff sleep.
+    try std.testing.expect(elapsed_ms < 2000);
 }
 
 test "durable signal returns false after completion" {
