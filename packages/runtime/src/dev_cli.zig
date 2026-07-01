@@ -39,7 +39,6 @@ const init_command = @import("init_command.zig");
 const build_command = @import("build_command.zig");
 const dev_command = @import("dev_command.zig");
 const cli_help = @import("cli_help.zig");
-const workflow_queue_cli = @import("workflow_queue_cli.zig");
 
 test {
     // Command modules are reached only through `main`'s dispatch, which the
@@ -294,10 +293,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "workflow-queue")) {
-        workflow_queue_cli.run(allocator, user_args[1..]) catch |err| {
-            if (workflow_queue_cli.isExpectedUserError(err)) std.process.exit(1);
-            return err;
-        };
+        try runtime_cli.workflowQueueCommand(allocator, user_args[1..]);
         return;
     }
     if (std.mem.eql(u8, command, "doctor")) {

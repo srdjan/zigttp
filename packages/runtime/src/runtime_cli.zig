@@ -39,10 +39,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const command = if (user_args.len == 0) "" else user_args[0];
 
     if (std.mem.eql(u8, command, "workflow-queue")) {
-        workflow_queue_cli.run(allocator, user_args[1..]) catch |err| {
-            if (workflow_queue_cli.isExpectedUserError(err)) std.process.exit(1);
-            return err;
-        };
+        try workflowQueueCommand(allocator, user_args[1..]);
         return;
     }
 
@@ -110,6 +107,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Backward-compatible default: treat bare `zigttp <handler>` usage as `serve`.
     try serveCommandWithEnviron(allocator, user_args, init.environ);
+}
+
+pub fn workflowQueueCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    workflow_queue_cli.run(allocator, argv) catch |err| {
+        if (workflow_queue_cli.isExpectedUserError(err)) std.process.exit(1);
+        return err;
+    };
 }
 
 pub fn edgeCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
