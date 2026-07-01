@@ -72,6 +72,12 @@ pub const DurableStore = union(enum) {
         };
     }
 
+    pub fn scanRecoverableSignals(self: *DurableStore, allocator: std.mem.Allocator, now_ms: i64) ![]Signal {
+        return switch (self.*) {
+            .fs => |*store| store.scanRecoverableSignals(allocator, now_ms),
+        };
+    }
+
     pub fn tryClaimSignal(self: *DurableStore, candidate: *const Signal) !?Signal {
         return switch (self.*) {
             .fs => |*store| store.tryClaimSignal(candidate),
@@ -89,12 +95,61 @@ pub const DurableStore = union(enum) {
         };
     }
 
+    pub fn tryRecoverSignal(
+        self: *DurableStore,
+        key: []const u8,
+        name: []const u8,
+        now_ms: i64,
+    ) !?ConsumedSignal {
+        return switch (self.*) {
+            .fs => |*store| store.tryRecoverSignal(key, name, now_ms),
+        };
+    }
+
     /// Remove the claimed file behind a consumed signal. Call only after the
     /// consumption has been persisted to the run oplog.
     pub fn finalizeConsumedSignal(self: *DurableStore, consumed: *const ConsumedSignal) void {
         switch (self.*) {
             .fs => deletePath(consumed.path),
         }
+    }
+
+    pub fn finalizeResumedSignalClaims(
+        self: *DurableStore,
+        key: []const u8,
+        name: []const u8,
+        payload_json: []const u8,
+    ) !u32 {
+        return switch (self.*) {
+            .fs => |*store| store.finalizeResumedSignalClaims(key, name, payload_json),
+        };
+    }
+
+    pub fn listSignalArtifacts(self: *DurableStore, allocator: std.mem.Allocator) ![]SignalArtifact {
+        return switch (self.*) {
+            .fs => |*store| store.listSignalArtifacts(allocator),
+        };
+    }
+
+    pub fn cleanupSignalArtifacts(self: *DurableStore, kind: SignalArtifactKind) !u32 {
+        return switch (self.*) {
+            .fs => |*store| store.cleanupSignalArtifacts(kind),
+        };
+    }
+};
+
+pub const SignalArtifactKind = enum {
+    claimed,
+    quarantined,
+};
+
+pub const SignalArtifact = struct {
+    path: []u8,
+    kind: SignalArtifactKind,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *SignalArtifact) void {
+        self.allocator.free(self.path);
     }
 };
 
@@ -119,19 +174,10 @@ pub const ConsumedSignal = struct {
     /// Claimed on-disk file backing this signal. The caller deletes it via
     /// `finalizeConsumedSignal` only AFTER the consumption is durably
     /// persisted to the run oplog; unlinking first would lose the signal on
-    /// a crash between unlink and persist. A claim left unfinalized is invisible
-    /// to scans (they skip `.claim-` files) and is deliberately never
-    /// re-delivered, which keeps consume from double-delivering a signal.
-    ///
-    /// KNOWN LIMITATION: a crash in the narrow window between the claim-rename
-    /// and the oplog resume-persist strands that one signal - the run replays,
-    /// re-waits, and the payload (locked in the invisible `.claim-` file) is
-    /// unreachable, so it re-suspends until a fresh signal arrives. The sound
-    /// fix is to persist the resume BEFORE claiming (oplog-first), so a crash
-    /// either leaves the signal consumable or the oplog already records it; that
-    /// reorders the consume protocol across the durable runtime and needs
-    /// crash-injection coverage, so it is deferred rather than patched here with
-    /// a `.claim-` recovery that could double-deliver under shared run keys.
+    /// a crash between unlink and persist. Normal scans skip `.claim-` files so
+    /// a live waiter cannot double-deliver one. Recovery scans can include them
+    /// when the oplog has a pending wait without a resume record, making the
+    /// claim-before-resume crash window recoverable.
     path: []const u8,
     allocator: std.mem.Allocator,
 
@@ -193,6 +239,14 @@ const FsDurableStore = struct {
     }
 
     fn scanSignals(self: *Self, allocator: std.mem.Allocator, now_ms: i64) ![]Signal {
+        return self.scanSignalsInternal(allocator, now_ms, false);
+    }
+
+    fn scanRecoverableSignals(self: *Self, allocator: std.mem.Allocator, now_ms: i64) ![]Signal {
+        return self.scanSignalsInternal(allocator, now_ms, true);
+    }
+
+    fn scanSignalsInternal(self: *Self, allocator: std.mem.Allocator, now_ms: i64, include_claimed: bool) ![]Signal {
         try self.ensureDirs();
         var out: std.ArrayList(Signal) = .empty;
         errdefer {
@@ -202,16 +256,27 @@ const FsDurableStore = struct {
 
         const signals_dir = try self.allocSignalsDir();
         defer self.allocator.free(signals_dir);
-        try self.scanDirSignals(allocator, &out, signals_dir, false, now_ms);
+        try self.scanDirSignals(allocator, &out, signals_dir, false, now_ms, include_claimed);
 
         const scheduled_dir = try self.allocScheduledDir();
         defer self.allocator.free(scheduled_dir);
-        try self.scanDirSignals(allocator, &out, scheduled_dir, true, now_ms);
+        try self.scanDirSignals(allocator, &out, scheduled_dir, true, now_ms, include_claimed);
 
         return out.toOwnedSlice(allocator);
     }
 
     fn tryClaimSignal(self: *Self, candidate: *const Signal) !?Signal {
+        if (isClaimedSignalPath(candidate.path)) {
+            return .{
+                .key = try self.allocator.dupe(u8, candidate.key),
+                .name = try self.allocator.dupe(u8, candidate.name),
+                .payload_json = try self.allocator.dupe(u8, candidate.payload_json),
+                .path = try self.allocator.dupe(u8, candidate.path),
+                .at_ms = candidate.at_ms,
+                .allocator = self.allocator,
+            };
+        }
+
         const claimed_path = try self.allocClaimedPath(candidate.path);
         errdefer self.allocator.free(claimed_path);
         if (!try renamePath(candidate.path, claimed_path)) {
@@ -234,7 +299,15 @@ const FsDurableStore = struct {
     }
 
     fn tryConsumeSignal(self: *Self, key: []const u8, name: []const u8, now_ms: i64) !?ConsumedSignal {
-        const candidates = try self.scanSignals(self.allocator, now_ms);
+        return self.tryConsumeSignalInternal(key, name, now_ms, false);
+    }
+
+    fn tryRecoverSignal(self: *Self, key: []const u8, name: []const u8, now_ms: i64) !?ConsumedSignal {
+        return self.tryConsumeSignalInternal(key, name, now_ms, true);
+    }
+
+    fn tryConsumeSignalInternal(self: *Self, key: []const u8, name: []const u8, now_ms: i64, include_claimed: bool) !?ConsumedSignal {
+        const candidates = try self.scanSignalsInternal(self.allocator, now_ms, include_claimed);
         defer {
             for (candidates) |*candidate| candidate.deinit();
             self.allocator.free(candidates);
@@ -269,6 +342,7 @@ const FsDurableStore = struct {
         dir_path: []const u8,
         scheduled_only: bool,
         now_ms: i64,
+        include_claimed: bool,
     ) !void {
         const dir_path_z = try self.allocator.dupeZ(u8, dir_path);
         defer self.allocator.free(dir_path_z);
@@ -279,8 +353,7 @@ const FsDurableStore = struct {
         while (c.readdir(dir)) |entry| {
             const name_ptr: [*:0]const u8 = @ptrCast(&entry.*.d_name);
             const name = std.mem.sliceTo(name_ptr, 0);
-            if (!std.mem.endsWith(u8, name, ".json")) continue;
-            if (std.mem.indexOf(u8, name, ".claim-") != null) continue;
+            if (!isSignalEnvelopeFileName(name, include_claimed)) continue;
 
             const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, name });
             errdefer allocator.free(full_path);
@@ -327,6 +400,126 @@ const FsDurableStore = struct {
             });
             parsed.disarm();
         }
+    }
+
+    fn finalizeResumedSignalClaims(self: *Self, key: []const u8, name: []const u8, payload_json: []const u8) !u32 {
+        try self.ensureDirs();
+        var removed: u32 = 0;
+
+        const signals_dir = try self.allocSignalsDir();
+        defer self.allocator.free(signals_dir);
+        removed += try self.finalizeMatchingClaimsInDir(signals_dir, key, name, payload_json);
+
+        const scheduled_dir = try self.allocScheduledDir();
+        defer self.allocator.free(scheduled_dir);
+        removed += try self.finalizeMatchingClaimsInDir(scheduled_dir, key, name, payload_json);
+
+        return removed;
+    }
+
+    fn finalizeMatchingClaimsInDir(
+        self: *Self,
+        dir_path: []const u8,
+        key: []const u8,
+        name: []const u8,
+        payload_json: []const u8,
+    ) !u32 {
+        const dir_path_z = try self.allocator.dupeZ(u8, dir_path);
+        defer self.allocator.free(dir_path_z);
+
+        const dir = c.opendir(dir_path_z) orelse return 0;
+        defer _ = c.closedir(dir);
+
+        var removed: u32 = 0;
+        while (c.readdir(dir)) |entry| {
+            const name_ptr: [*:0]const u8 = @ptrCast(&entry.*.d_name);
+            const file_name = std.mem.sliceTo(name_ptr, 0);
+            if (!isClaimedSignalFileName(file_name)) continue;
+
+            const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir_path, file_name });
+            defer self.allocator.free(full_path);
+
+            const source = zq.file_io.readFile(self.allocator, full_path, 1024 * 1024) catch continue;
+            defer self.allocator.free(source);
+
+            var parsed = parseSignalEnvelope(self.allocator, source) catch continue;
+            defer parsed.deinit();
+
+            if (!std.mem.eql(u8, parsed.key, key)) continue;
+            if (!std.mem.eql(u8, parsed.name, name)) continue;
+            if (!std.mem.eql(u8, parsed.payload_json, payload_json)) continue;
+
+            deletePath(full_path);
+            removed += 1;
+        }
+        return removed;
+    }
+
+    fn listSignalArtifacts(self: *Self, allocator: std.mem.Allocator) ![]SignalArtifact {
+        try self.ensureDirs();
+        var artifacts: std.ArrayList(SignalArtifact) = .empty;
+        errdefer {
+            for (artifacts.items) |*artifact| artifact.deinit();
+            artifacts.deinit(allocator);
+        }
+
+        const signals_dir = try self.allocSignalsDir();
+        defer self.allocator.free(signals_dir);
+        try self.listSignalArtifactsInDir(allocator, &artifacts, signals_dir);
+
+        const scheduled_dir = try self.allocScheduledDir();
+        defer self.allocator.free(scheduled_dir);
+        try self.listSignalArtifactsInDir(allocator, &artifacts, scheduled_dir);
+
+        std.mem.sort(SignalArtifact, artifacts.items, {}, lessThanSignalArtifactPath);
+        return artifacts.toOwnedSlice(allocator);
+    }
+
+    fn listSignalArtifactsInDir(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        artifacts: *std.ArrayList(SignalArtifact),
+        dir_path: []const u8,
+    ) !void {
+        const dir_path_z = try self.allocator.dupeZ(u8, dir_path);
+        defer self.allocator.free(dir_path_z);
+
+        const dir = c.opendir(dir_path_z) orelse return;
+        defer _ = c.closedir(dir);
+
+        while (c.readdir(dir)) |entry| {
+            const name_ptr: [*:0]const u8 = @ptrCast(&entry.*.d_name);
+            const name = std.mem.sliceTo(name_ptr, 0);
+            const kind: SignalArtifactKind = if (isClaimedSignalFileName(name))
+                .claimed
+            else if (std.mem.endsWith(u8, name, ".quarantined"))
+                .quarantined
+            else
+                continue;
+            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, name });
+            errdefer allocator.free(full_path);
+            try artifacts.append(allocator, .{
+                .path = full_path,
+                .kind = kind,
+                .allocator = allocator,
+            });
+        }
+    }
+
+    fn cleanupSignalArtifacts(self: *Self, kind: SignalArtifactKind) !u32 {
+        const artifacts = try self.listSignalArtifacts(self.allocator);
+        defer {
+            for (artifacts) |*artifact| artifact.deinit();
+            self.allocator.free(artifacts);
+        }
+
+        var removed: u32 = 0;
+        for (artifacts) |artifact| {
+            if (artifact.kind != kind) continue;
+            deletePath(artifact.path);
+            removed += 1;
+        }
+        return removed;
     }
 
     fn allocSignalsDir(self: *Self) ![]u8 {
@@ -521,6 +714,24 @@ fn deletePath(path: []const u8) void {
     _ = std.c.unlink(path_z);
 }
 
+fn isSignalEnvelopeFileName(name: []const u8, include_claimed: bool) bool {
+    if (std.mem.endsWith(u8, name, ".json")) return true;
+    return include_claimed and isClaimedSignalFileName(name);
+}
+
+fn isClaimedSignalFileName(name: []const u8) bool {
+    if (std.mem.endsWith(u8, name, ".quarantined")) return false;
+    return std.mem.indexOf(u8, name, ".json.claim-") != null;
+}
+
+fn isClaimedSignalPath(path: []const u8) bool {
+    return isClaimedSignalFileName(std.fs.path.basename(path));
+}
+
+fn lessThanSignalArtifactPath(_: void, lhs: SignalArtifact, rhs: SignalArtifact) bool {
+    return std.mem.lessThan(u8, lhs.path, rhs.path);
+}
+
 const writeAll = trace.writeAll;
 
 test "durable store enqueue and consume immediate signal" {
@@ -629,6 +840,52 @@ test "durable store consume is crash-safe: unlink only at finalize" {
     try std.testing.expectError(error.FileNotFound, zq.file_io.readFile(allocator, consumed.path, 64 * 1024));
 }
 
+test "durable store recovers claimed signal when resume was not persisted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = DurableStore.initFs(allocator, durable_dir);
+    try store.enqueueSignal("order:recover", "approved", "{\"ok\":true}");
+
+    var claimed = (try store.tryConsumeSignal("order:recover", "approved", unixMillis())).?;
+    defer claimed.deinit();
+    try std.testing.expect((try store.tryConsumeSignal("order:recover", "approved", unixMillis())) == null);
+
+    var recovered = (try store.tryRecoverSignal("order:recover", "approved", unixMillis())).?;
+    defer recovered.deinit();
+    try std.testing.expectEqualStrings("{\"ok\":true}", recovered.payload_json);
+
+    store.finalizeConsumedSignal(&recovered);
+    try std.testing.expect((try store.tryRecoverSignal("order:recover", "approved", unixMillis())) == null);
+}
+
+test "durable store finalizes resumed claims without touching available signals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = DurableStore.initFs(allocator, durable_dir);
+    try store.enqueueSignal("order:resume", "approved", "{\"first\":true}");
+    var claimed = (try store.tryConsumeSignal("order:resume", "approved", unixMillis())).?;
+    defer claimed.deinit();
+
+    try store.enqueueSignal("order:resume", "approved", "{\"second\":true}");
+    try std.testing.expectEqual(@as(u32, 1), try store.finalizeResumedSignalClaims("order:resume", "approved", "{\"first\":true}"));
+
+    var second = (try store.tryConsumeSignal("order:resume", "approved", unixMillis())).?;
+    defer second.deinit();
+    try std.testing.expectEqualStrings("{\"second\":true}", second.payload_json);
+}
+
 test "durable store quarantines a torn signal file instead of poisoning scans" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -656,4 +913,40 @@ test "durable store quarantines a torn signal file instead of poisoning scans" {
     const quarantined = try std.fmt.allocPrint(allocator, "{s}.quarantined", .{torn_path});
     const quarantined_bytes = try zq.file_io.readFile(allocator, quarantined, 64 * 1024);
     allocator.free(quarantined_bytes);
+}
+
+test "durable store cleanup removes only selected signal artifact kind" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = DurableStore.initFs(allocator, durable_dir);
+    try store.enqueueSignal("order:cleanup", "approved", "{\"ok\":true}");
+    var claimed = (try store.tryConsumeSignal("order:cleanup", "approved", unixMillis())).?;
+    defer claimed.deinit();
+
+    const torn_path = try std.fmt.allocPrint(allocator, "{s}/signals/signal-torn.json", .{durable_dir});
+    try zq.file_io.writeFile(allocator, torn_path, "{\"key\":\"order");
+    const scanned = try store.scanSignals(allocator, unixMillis());
+    defer {
+        for (scanned) |*signal| signal.deinit();
+        allocator.free(scanned);
+    }
+
+    const artifacts = try store.listSignalArtifacts(allocator);
+    defer {
+        for (artifacts) |*artifact| artifact.deinit();
+        allocator.free(artifacts);
+    }
+    try std.testing.expectEqual(@as(usize, 2), artifacts.len);
+
+    try std.testing.expectEqual(@as(u32, 1), try store.cleanupSignalArtifacts(.quarantined));
+    var recovered = (try store.tryRecoverSignal("order:cleanup", "approved", unixMillis())) orelse return error.ExpectedRecoverableSignal;
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(u32, 1), try store.cleanupSignalArtifacts(.claimed));
+    try std.testing.expect((try store.tryRecoverSignal("order:cleanup", "approved", unixMillis())) == null);
 }

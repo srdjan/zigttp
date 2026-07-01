@@ -300,17 +300,28 @@ pub fn durableWaitSignal(rt: *Runtime, ctx: *zq.Context, name: []const u8) anyer
         if (timeoutExpired(deadline, now_ms)) return error.DurableStepTimedOut;
     }
 
-    switch (active.state.beginSignalWait(name)) {
-        .delivered => |payload_json| return zq.trace.jsonToJSValue(ctx, payload_json),
-        .live => try active.state.persistWaitSignal(name, timeout_deadline_ms),
-        .pending => |wait| {
+    const recover_claimed_signal = switch (active.state.beginSignalWait(name)) {
+        .delivered => |payload_json| {
+            _ = try store.finalizeResumedSignalClaims(active.key, name, payload_json);
+            return zq.trace.jsonToJSValue(ctx, payload_json);
+        },
+        .live => blk: {
+            try active.state.persistWaitSignal(name, timeout_deadline_ms);
+            break :blk false;
+        },
+        .pending => |wait| blk: {
             if (wait.timeout_ms) |deadline| {
                 if (timeoutExpired(deadline, now_ms)) return error.DurableStepTimedOut;
             }
+            break :blk true;
         },
-    }
+    };
 
-    if (try store.tryConsumeSignal(active.key, name, now_ms)) |payload| {
+    const maybe_signal = if (recover_claimed_signal)
+        try store.tryRecoverSignal(active.key, name, now_ms)
+    else
+        try store.tryConsumeSignal(active.key, name, now_ms);
+    if (maybe_signal) |payload| {
         var consumed = payload;
         defer consumed.deinit();
         try active.state.persistResumeSignal(name, consumed.payload_json);

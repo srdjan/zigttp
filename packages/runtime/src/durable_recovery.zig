@@ -241,7 +241,7 @@ fn signalDefinitelyAbsent(
     name: []const u8,
 ) bool {
     var store = DurableStore.initFs(allocator, durable_dir);
-    const signals = store.scanSignals(allocator, trace.unixMillis()) catch return false;
+    const signals = store.scanRecoverableSignals(allocator, trace.unixMillis()) catch return false;
     defer {
         for (signals) |*s| s.deinit();
         allocator.free(signals);
