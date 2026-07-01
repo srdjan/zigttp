@@ -281,6 +281,17 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll("      \"proofLevel\": ");
     try writeJsonString(writer, contract.durable.workflow.proof_level.toString());
     try writer.writeAll(",\n");
+    try writer.writeAll("      \"properties\": {\n");
+    try writer.print("        \"retrySafe\": {s},\n", .{if (contract.durable.workflow.properties.retry_safe) "true" else "false"});
+    try writer.print("        \"idempotent\": {s},\n", .{if (contract.durable.workflow.properties.idempotent) "true" else "false"});
+    try writer.print("        \"faultCovered\": {s},\n", .{if (contract.durable.workflow.properties.fault_covered) "true" else "false"});
+    try writer.writeAll("        \"reasons\": [");
+    for (contract.durable.workflow.properties.reasons.items, 0..) |reason, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeJsonString(writer, reason);
+    }
+    try writer.writeAll("]\n");
+    try writer.writeAll("      },\n");
     try writer.writeAll("      \"nodes\": [");
     for (contract.durable.workflow.nodes.items, 0..) |node, i| {
         if (i > 0) try writer.writeAll(",");

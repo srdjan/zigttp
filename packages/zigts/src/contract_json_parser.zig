@@ -37,6 +37,7 @@ const DurableWorkflowNode = handler_contract.DurableWorkflowNode;
 const DurableWorkflowEdge = handler_contract.DurableWorkflowEdge;
 const DurableWorkflowNodeKind = handler_contract.DurableWorkflowNodeKind;
 const DurableWorkflowProofLevel = handler_contract.DurableWorkflowProofLevel;
+const DurableWorkflowProperties = handler_contract.DurableWorkflowProperties;
 const RouteInfo = handler_contract.RouteInfo;
 const SqlQueryInfo = handler_contract.SqlQueryInfo;
 const VerificationInfo = handler_contract.VerificationInfo;
@@ -1090,10 +1091,45 @@ fn parseDurableWorkflow(
             workflow.workflow_id = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
         } else if (std.mem.eql(u8, key, "proofLevel")) {
             workflow.proof_level = DurableWorkflowProofLevel.fromString(parser.readString() orelse "none");
+        } else if (std.mem.eql(u8, key, "properties")) {
+            try parseDurableWorkflowProperties(parser, allocator, &workflow.properties);
         } else if (std.mem.eql(u8, key, "nodes")) {
             try parseDurableWorkflowNodes(parser, allocator, &workflow.nodes);
         } else if (std.mem.eql(u8, key, "edges")) {
             try parseDurableWorkflowEdges(parser, allocator, &workflow.edges);
+        } else {
+            parser.skipValue();
+        }
+    }
+}
+
+fn parseDurableWorkflowProperties(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    properties: *DurableWorkflowProperties,
+) !void {
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "retrySafe")) {
+            properties.retry_safe = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "idempotent")) {
+            properties.idempotent = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "faultCovered")) {
+            properties.fault_covered = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "reasons")) {
+            try parseStringArray(parser, allocator, &properties.reasons);
         } else {
             parser.skipValue();
         }

@@ -202,14 +202,28 @@ pub const DurableWorkflowEdge = struct {
     }
 };
 
+pub const DurableWorkflowProperties = struct {
+    retry_safe: bool = false,
+    idempotent: bool = false,
+    fault_covered: bool = false,
+    reasons: std.ArrayList([]const u8) = .empty,
+
+    pub fn deinit(self: *DurableWorkflowProperties, allocator: std.mem.Allocator) void {
+        for (self.reasons.items) |reason| allocator.free(reason);
+        self.reasons.deinit(allocator);
+    }
+};
+
 pub const DurableWorkflow = struct {
     workflow_id: ?[]const u8 = null,
     proof_level: DurableWorkflowProofLevel = .none,
+    properties: DurableWorkflowProperties = .{},
     nodes: std.ArrayList(DurableWorkflowNode) = .empty,
     edges: std.ArrayList(DurableWorkflowEdge) = .empty,
 
     pub fn deinit(self: *DurableWorkflow, allocator: std.mem.Allocator) void {
         if (self.workflow_id) |workflow_id| allocator.free(workflow_id);
+        self.properties.deinit(allocator);
         for (self.nodes.items) |*node| node.deinit(allocator);
         self.nodes.deinit(allocator);
         for (self.edges.items) |*edge| edge.deinit(allocator);

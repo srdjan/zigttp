@@ -60,6 +60,7 @@ const FaultCoverageInfo = contract_types.FaultCoverageInfo;
 const HandlerProperties = contract_types.HandlerProperties;
 const RateLimitInfo = contract_types.RateLimitInfo;
 const ServiceCallInfo = contract_types.ServiceCallInfo;
+const DurableWorkflowProofLevel = contract_types.DurableWorkflowProofLevel;
 const computeCapabilityMatrix = contract_types.computeCapabilityMatrix;
 
 const containsString = json_utils.containsString;
@@ -1713,6 +1714,7 @@ pub const ContractBuilder = struct {
         const func = self.ir_view.getFunction(handler_fn) orelse return;
         const run_call = self.findDurableRunCall(func.body) orelse {
             self.durable_workflow.proof_level = .none;
+            try self.addWorkflowReason("no durable run callback was statically identified");
             return;
         };
 
@@ -1724,6 +1726,7 @@ pub const ContractBuilder = struct {
 
         const callback_fn = self.ir_view.getFunction(run_call.callback_node) orelse {
             self.markWorkflowPartial();
+            try self.deriveDurableWorkflowProperties();
             return;
         };
 
@@ -1735,6 +1738,7 @@ pub const ContractBuilder = struct {
         });
 
         try self.walkWorkflowBlock(callback_fn.body, &cursors);
+        try self.deriveDurableWorkflowProperties();
     }
 
     const RunCallInfo = struct {
@@ -1819,13 +1823,17 @@ pub const ContractBuilder = struct {
             .return_stmt => try self.appendReturnWorkflowNode(node, cursors),
             .expr_stmt => {
                 if (self.ir_view.getOptValue(node)) |expr| {
-                    _ = try self.appendWorkflowCall(expr, cursors);
+                    if (!try self.appendWorkflowCall(expr, cursors) and self.isUnhandledWorkflowCall(expr)) {
+                        self.markWorkflowPartial();
+                    }
                 }
             },
             .var_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 if (decl.init != null_node) {
-                    _ = try self.appendWorkflowCall(decl.init, cursors);
+                    if (!try self.appendWorkflowCall(decl.init, cursors) and self.isUnhandledWorkflowCall(decl.init)) {
+                        self.markWorkflowPartial();
+                    }
                 }
             },
             .match_expr, .switch_stmt, .for_stmt, .for_of_stmt, .for_in_stmt, .while_stmt, .do_while_stmt => {
@@ -1895,6 +1903,77 @@ pub const ContractBuilder = struct {
             cursors,
         );
         return true;
+    }
+
+    fn isUnhandledWorkflowCall(self: *const ContractBuilder, expr: NodeIndex) bool {
+        const tag = self.ir_view.getTag(expr) orelse return false;
+        if (tag == .method_call) return true;
+        if (tag != .call) return false;
+        const call = self.ir_view.getCall(expr) orelse return true;
+        return !self.isModeledWorkflowCall(call);
+    }
+
+    fn isModeledWorkflowCall(self: *const ContractBuilder, call: Node.CallExpr) bool {
+        return self.isModuleBindingName(call.callee, "step") or
+            self.isModuleBindingName(call.callee, "stepWithTimeout") or
+            self.isModuleBindingName(call.callee, "sleep") or
+            self.isModuleBindingName(call.callee, "sleepUntil") or
+            self.isModuleBindingName(call.callee, "waitSignal") or
+            self.isModuleBindingName(call.callee, "signal") or
+            self.isModuleBindingName(call.callee, "signalAt");
+    }
+
+    fn deriveDurableWorkflowProperties(self: *ContractBuilder) !void {
+        self.durable_workflow.properties.deinit(self.allocator);
+        self.durable_workflow.properties = .{};
+
+        if (self.durable_workflow.proof_level == .none) {
+            try self.addWorkflowReason("durable workflow graph is not available");
+            return;
+        }
+        if (self.durable_workflow.nodes.items.len == 0) {
+            try self.addWorkflowReason("durable workflow graph has no modeled nodes");
+            return;
+        }
+        if (self.durable_workflow.proof_level != .complete) {
+            try self.addWorkflowReason("durable workflow proof is partial due to dynamic names, unmodeled calls, or multiple run calls");
+            return;
+        }
+
+        var has_return = false;
+        var has_wait_signal = false;
+        var has_signal_producer = false;
+        for (self.durable_workflow.nodes.items) |node| {
+            switch (node.kind) {
+                .return_response => has_return = true,
+                .wait_signal => has_wait_signal = true,
+                .signal, .signal_at => has_signal_producer = true,
+                else => {},
+            }
+        }
+
+        if (!has_return) {
+            try self.addWorkflowReason("durable workflow has no modeled response return");
+            return;
+        }
+        if (has_signal_producer) {
+            try self.addWorkflowReason("durable signal producers can duplicate external delivery and are not yet retry-safe");
+            return;
+        }
+
+        self.durable_workflow.properties.idempotent = true;
+        self.durable_workflow.properties.fault_covered = true;
+        self.durable_workflow.properties.retry_safe = true;
+        try self.addWorkflowReason("complete durable workflow graph uses stable keys, stable names, and modeled recovery nodes");
+        if (has_wait_signal) {
+            try self.addWorkflowReason("waitSignal resume is covered by durable signal claim recovery");
+        }
+    }
+
+    fn addWorkflowReason(self: *ContractBuilder, reason: []const u8) !void {
+        const owned_reason = try self.allocator.dupe(u8, reason);
+        errdefer self.allocator.free(owned_reason);
+        try self.durable_workflow.properties.reasons.append(self.allocator, owned_reason);
     }
 
     const WorkflowCall = struct {
@@ -4068,6 +4147,101 @@ test "contract builder does not exempt eager durable step argument" {
     const props = contract.properties orelse return error.MissingProperties;
     try std.testing.expect(!props.deterministic);
     try std.testing.expect(!props.idempotent);
+}
+
+test "durable workflow properties prove stable step workflow" {
+    const source =
+        \\import { run, step } from "zigttp:durable";
+        \\function handler(req) {
+        \\  return run("job:stable", () => {
+        \\    const value = step("charge", () => 1);
+        \\    return Response.json({ value });
+        \\  });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(DurableWorkflowProofLevel.complete, contract.durable.workflow.proof_level);
+    try std.testing.expect(contract.durable.workflow.properties.retry_safe);
+    try std.testing.expect(contract.durable.workflow.properties.idempotent);
+    try std.testing.expect(contract.durable.workflow.properties.fault_covered);
+}
+
+test "durable workflow properties reject unmodeled side effects" {
+    const source =
+        \\import { run } from "zigttp:durable";
+        \\import { cacheSet } from "zigttp:cache";
+        \\function handler(req) {
+        \\  return run("job:cache", () => {
+        \\    cacheSet(req.url, "x");
+        \\    return Response.json({ ok: true });
+        \\  });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(DurableWorkflowProofLevel.partial, contract.durable.workflow.proof_level);
+    try std.testing.expect(!contract.durable.workflow.properties.retry_safe);
+    try std.testing.expect(!contract.durable.workflow.properties.idempotent);
+    try std.testing.expect(!contract.durable.workflow.properties.fault_covered);
+}
+
+test "durable workflow waitSignal has fault coverage when modeled" {
+    const source =
+        \\import { run, waitSignal } from "zigttp:durable";
+        \\function handler(req) {
+        \\  return run("job:signal", () => {
+        \\    const payload = waitSignal("approved");
+        \\    return Response.json(payload);
+        \\  });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(DurableWorkflowProofLevel.complete, contract.durable.workflow.proof_level);
+    try std.testing.expect(contract.durable.workflow.properties.fault_covered);
+    try std.testing.expect(contract.durable.workflow.properties.retry_safe);
+    try std.testing.expectEqual(@as(usize, 2), contract.durable.workflow.properties.reasons.items.len);
+}
+
+test "durable workflow dynamic waitSignal is not fault covered" {
+    const source =
+        \\import { run, waitSignal } from "zigttp:durable";
+        \\function handler(req) {
+        \\  return run("job:signal", () => {
+        \\    const payload = waitSignal(req.url);
+        \\    return Response.json(payload);
+        \\  });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(DurableWorkflowProofLevel.partial, contract.durable.workflow.proof_level);
+    try std.testing.expect(!contract.durable.workflow.properties.fault_covered);
+}
+
+test "durable workflow saga call remains partial and unproven" {
+    const source =
+        \\import { run } from "zigttp:durable";
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return run("job:saga", () => {
+        \\    const result = saga([]);
+        \\    return Response.json(result);
+        \\  });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(DurableWorkflowProofLevel.partial, contract.durable.workflow.proof_level);
+    try std.testing.expect(!contract.durable.workflow.properties.retry_safe);
+    try std.testing.expect(!contract.durable.workflow.properties.idempotent);
+    try std.testing.expect(!contract.durable.workflow.properties.fault_covered);
 }
 
 test "computeProperties egress is conservative write" {

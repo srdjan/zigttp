@@ -36,6 +36,7 @@ pub const DurableWorkflowProofLevel = contract_types.DurableWorkflowProofLevel;
 pub const DurableWorkflowNodeKind = contract_types.DurableWorkflowNodeKind;
 pub const DurableWorkflowNode = contract_types.DurableWorkflowNode;
 pub const DurableWorkflowEdge = contract_types.DurableWorkflowEdge;
+pub const DurableWorkflowProperties = contract_types.DurableWorkflowProperties;
 pub const DurableWorkflow = contract_types.DurableWorkflow;
 pub const DurableInfo = contract_types.DurableInfo;
 pub const ScopeInfo = contract_types.ScopeInfo;
@@ -586,6 +587,9 @@ test "parseFromJson roundtrip preserves durable workflow" {
         .condition = try allocator.dupe(u8, "then@4:7"),
     });
 
+    var workflow_reasons: std.ArrayList([]const u8) = .empty;
+    try workflow_reasons.append(allocator, try allocator.dupe(u8, "complete durable workflow graph uses stable keys"));
+
     const path = try allocator.dupe(u8, "workflow.ts");
 
     var original = HandlerContract{
@@ -605,6 +609,12 @@ test "parseFromJson roundtrip preserves durable workflow" {
             .workflow = .{
                 .workflow_id = try allocator.dupe(u8, "workflow.ts:handler:4:10"),
                 .proof_level = .complete,
+                .properties = .{
+                    .retry_safe = true,
+                    .idempotent = true,
+                    .fault_covered = true,
+                    .reasons = workflow_reasons,
+                },
                 .nodes = workflow_nodes,
                 .edges = workflow_edges,
             },
@@ -632,6 +642,10 @@ test "parseFromJson roundtrip preserves durable workflow" {
 
     try std.testing.expectEqualStrings("workflow.ts:handler:4:10", parsed.durable.workflow.workflow_id.?);
     try std.testing.expectEqual(DurableWorkflowProofLevel.complete, parsed.durable.workflow.proof_level);
+    try std.testing.expect(parsed.durable.workflow.properties.retry_safe);
+    try std.testing.expect(parsed.durable.workflow.properties.idempotent);
+    try std.testing.expect(parsed.durable.workflow.properties.fault_covered);
+    try std.testing.expectEqualStrings("complete durable workflow graph uses stable keys", parsed.durable.workflow.properties.reasons.items[0]);
     try std.testing.expectEqual(@as(usize, 2), parsed.durable.workflow.nodes.items.len);
     try std.testing.expectEqual(DurableWorkflowNodeKind.step, parsed.durable.workflow.nodes.items[0].kind);
     try std.testing.expectEqualStrings("charge", parsed.durable.workflow.nodes.items[0].label);
@@ -639,6 +653,40 @@ test "parseFromJson roundtrip preserves durable workflow" {
     try std.testing.expectEqual(@as(u16, 202), parsed.durable.workflow.nodes.items[1].status.?);
     try std.testing.expectEqual(@as(usize, 2), parsed.durable.workflow.edges.items.len);
     try std.testing.expectEqualStrings("then@4:7", parsed.durable.workflow.edges.items[1].condition.?);
+}
+
+test "parseFromJson defaults missing durable workflow properties to false" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "routes": [],
+        \\  "modules": [],
+        \\  "functions": [],
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "cache": {"namespaces": [], "dynamic": false},
+        \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
+        \\  "durable": {
+        \\    "used": true,
+        \\    "keys": {"literal": [], "dynamic": false},
+        \\    "steps": [],
+        \\    "timers": false,
+        \\    "signals": {"literal": [], "dynamic": false},
+        \\    "producerKeys": {"literal": [], "dynamic": false},
+        \\    "workflow": {"workflowId": null, "proofLevel": "none", "nodes": [], "edges": []}
+        \\  },
+        \\  "scope": {"used": false, "names": [], "dynamic": false, "maxDepth": 0},
+        \\  "api": {"schemas": [], "requests": {"schemaRefs": [], "dynamic": false}, "auth": {"bearer": false, "jwt": false}, "routes": [], "schemasDynamic": false, "routesDynamic": false}
+        \\}
+    ;
+    var parsed = try parseFromJson(allocator, source);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expect(!parsed.durable.workflow.properties.retry_safe);
+    try std.testing.expect(!parsed.durable.workflow.properties.idempotent);
+    try std.testing.expect(!parsed.durable.workflow.properties.fault_covered);
+    try std.testing.expectEqual(@as(usize, 0), parsed.durable.workflow.properties.reasons.items.len);
 }
 
 test "parseFromJson roundtrip preserves api route response schema" {
