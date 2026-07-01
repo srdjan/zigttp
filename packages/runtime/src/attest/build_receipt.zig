@@ -84,6 +84,10 @@ fn buildJwsWithKey(
         .signed_at_unix = @divTrunc(proof_ledger.defaultNowMs(), std.time.ms_per_s),
         .property_summary = property_summary,
         .routes_count = @intCast(contract.api.routes.items.len),
+        .durable_workflow_proof_level = contract.durable.workflow.proof_level.toString(),
+        .durable_workflow_retry_safe = contract.durable.workflow.properties.retry_safe,
+        .durable_workflow_idempotent = contract.durable.workflow.properties.idempotent,
+        .durable_workflow_fault_covered = contract.durable.workflow.properties.fault_covered,
     };
 
     var env = try envelope.sign(allocator, claims, key_pair);

@@ -54,7 +54,7 @@ pub fn classify(user_text: []const u8) WorkflowHint {
         return .{ .kind = .sql_feature, .confidence = .high };
     }
 
-    if (containsAny(user_text, &.{ "spec<", "proof", "prove", "property goal", "injection_safe", "no_secret_leakage", "no_credential_leakage", "deterministic", "idempotent", "safe to cache" })) {
+    if (containsAny(user_text, &.{ "spec<", "proof", "prove", "property goal", "injection_safe", "no_secret_leakage", "no_credential_leakage", "deterministic", "idempotent", "retry_safe", "retry safe", "fault_covered", "fault covered", "durable workflow", "zigttp:durable", "at-least-once", "safe to cache" })) {
         return .{ .kind = .spec_goal, .confidence = .high };
     }
 
@@ -115,7 +115,7 @@ fn workflowRoute(kind: TaskKind) []const u8 {
         \\Use compiler diagnostics as the source of truth. Read the target, run `zigts_expert_verify_paths`, call `pi_repair_plan`, dry-run supported plans with `pi_apply_repair_plan` or `pi_goal_candidate`, and edit manually only for unsupported repair intents.
         ,
         .spec_goal =>
-        \\Drive proof work through the proof tools. Start with `pi_specs_status`, `pi_witnesses`, and `pi_repair_plan`; use `pi_goal_candidate` or `pi_apply_repair_plan` for supported repairs, then `pi_goal_check` to confirm the requested goals.
+        \\Drive proof work through the proof tools. Start with `pi_specs_status`, `pi_witnesses`, and `pi_repair_plan`; inspect `proof.proofTrace.durable_workflow_*` when durable retry/idempotency is involved, use `pi_goal_candidate` or `pi_apply_repair_plan` for supported repairs, then `pi_goal_check` to confirm the requested goals.
         ,
         .sql_feature =>
         \\Check SQL support before drafting. Read the handler and `zigttp.json`, verify the configured sqlite schema exists, use named parameters supported by the analyzer, and do not retry unchanged if the veto reports missing SQL schema configuration.
@@ -174,6 +174,14 @@ test "classify proof goals" {
     const hint = classify("prove this endpoint is injection_safe");
     try testing.expectEqual(TaskKind.spec_goal, hint.kind);
     try testing.expect(hint.injectsSystemNote());
+}
+
+test "classify durable workflow proof goals" {
+    const hint = classify("make this durable workflow retry safe");
+    try testing.expectEqual(TaskKind.spec_goal, hint.kind);
+    const note = (try renderSystemNote(testing.allocator, hint)) orelse return error.TestExpected;
+    defer testing.allocator.free(note);
+    try testing.expect(std.mem.indexOf(u8, note, "proof.proofTrace.durable_workflow_*") != null);
 }
 
 test "classify JWT auth before env secrets" {

@@ -29,6 +29,10 @@ pub const Claims = struct {
     signed_at_unix: i64,
     property_summary: []const u8,
     routes_count: u64,
+    durable_workflow_proof_level: []const u8 = "none",
+    durable_workflow_retry_safe: bool = false,
+    durable_workflow_idempotent: bool = false,
+    durable_workflow_fault_covered: bool = false,
 };
 
 pub const Envelope = struct {
@@ -240,6 +244,10 @@ const wire_key = struct {
     const signed_at = "signedAt";
     const property_summary = "propertySummary";
     const routes_count = "routesCount";
+    const durable_workflow_proof_level = "durableWorkflowProofLevel";
+    const durable_workflow_retry_safe = "durableWorkflowRetrySafe";
+    const durable_workflow_idempotent = "durableWorkflowIdempotent";
+    const durable_workflow_fault_covered = "durableWorkflowFaultCovered";
 };
 
 fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
@@ -253,7 +261,11 @@ fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
             "\"" ++ wire_key.compiler_version ++ "\":\"{s}\"," ++
             "\"" ++ wire_key.signed_at ++ "\":{d}," ++
             "\"" ++ wire_key.property_summary ++ "\":\"{s}\"," ++
-            "\"" ++ wire_key.routes_count ++ "\":{d}}}",
+            "\"" ++ wire_key.routes_count ++ "\":{d}," ++
+            "\"" ++ wire_key.durable_workflow_proof_level ++ "\":\"{s}\"," ++
+            "\"" ++ wire_key.durable_workflow_retry_safe ++ "\":{}," ++
+            "\"" ++ wire_key.durable_workflow_idempotent ++ "\":{}," ++
+            "\"" ++ wire_key.durable_workflow_fault_covered ++ "\":{}}}",
         .{
             version_tag,
             claims.contract_sha256,
@@ -264,6 +276,10 @@ fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
             claims.signed_at_unix,
             claims.property_summary,
             claims.routes_count,
+            claims.durable_workflow_proof_level,
+            claims.durable_workflow_retry_safe,
+            claims.durable_workflow_idempotent,
+            claims.durable_workflow_fault_covered,
         },
     );
 }
@@ -316,11 +332,21 @@ fn parseClaims(allocator: std.mem.Allocator, payload_bytes: []const u8) !Claims 
         .property_summary = try dupString(allocator, obj, wire_key.property_summary),
         .signed_at_unix = try readI64(obj, wire_key.signed_at),
         .routes_count = try readU64(obj, wire_key.routes_count),
+        .durable_workflow_proof_level = try dupStringDefault(allocator, obj, wire_key.durable_workflow_proof_level, "none"),
+        .durable_workflow_retry_safe = try readBoolDefault(obj, wire_key.durable_workflow_retry_safe, false),
+        .durable_workflow_idempotent = try readBoolDefault(obj, wire_key.durable_workflow_idempotent, false),
+        .durable_workflow_fault_covered = try readBoolDefault(obj, wire_key.durable_workflow_fault_covered, false),
     };
 }
 
 fn dupString(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const u8 {
     const val = obj.get(key) orelse return error.InvalidJson;
+    if (val != .string) return error.InvalidJson;
+    return try allocator.dupe(u8, val.string);
+}
+
+fn dupStringDefault(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8, default: []const u8) ![]const u8 {
+    const val = obj.get(key) orelse return try allocator.dupe(u8, default);
     if (val != .string) return error.InvalidJson;
     return try allocator.dupe(u8, val.string);
 }
@@ -335,6 +361,12 @@ fn readU64(obj: std.json.ObjectMap, key: []const u8) !u64 {
     const val = obj.get(key) orelse return error.InvalidJson;
     if (val != .integer or val.integer < 0) return error.InvalidJson;
     return @intCast(val.integer);
+}
+
+fn readBoolDefault(obj: std.json.ObjectMap, key: []const u8, default: bool) !bool {
+    const val = obj.get(key) orelse return default;
+    if (val != .bool) return error.InvalidJson;
+    return val.bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +390,10 @@ fn testClaims() Claims {
         .signed_at_unix = 1_700_000_000,
         .property_summary = "pure,read_only,injection_safe",
         .routes_count = 3,
+        .durable_workflow_proof_level = "complete",
+        .durable_workflow_retry_safe = true,
+        .durable_workflow_idempotent = true,
+        .durable_workflow_fault_covered = true,
     };
 }
 
@@ -378,7 +414,41 @@ test "sign then verify recovers the same claims" {
     try std.testing.expectEqualStrings("pure,read_only,injection_safe", result.claims.property_summary);
     try std.testing.expectEqual(@as(i64, 1_700_000_000), result.claims.signed_at_unix);
     try std.testing.expectEqual(@as(u64, 3), result.claims.routes_count);
+    try std.testing.expectEqualStrings("complete", result.claims.durable_workflow_proof_level);
+    try std.testing.expect(result.claims.durable_workflow_retry_safe);
+    try std.testing.expect(result.claims.durable_workflow_idempotent);
+    try std.testing.expect(result.claims.durable_workflow_fault_covered);
     try std.testing.expectEqualSlices(u8, &kp.public_key.bytes, &result.public_key);
+}
+
+test "parseClaims defaults missing durable workflow fields" {
+    const allocator = std.testing.allocator;
+    const payload =
+        "{\"v\":\"zigttp-attest-v1\"," ++
+        "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
+        "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
+        "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
+        "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
+        "\"compilerVersion\":\"0.0.0-test\"," ++
+        "\"signedAt\":1700000000," ++
+        "\"propertySummary\":\"pure\"," ++
+        "\"routesCount\":1}";
+
+    const claims = try parseClaims(allocator, payload);
+    defer {
+        allocator.free(claims.contract_sha256);
+        allocator.free(claims.bytecode_sha256);
+        allocator.free(claims.policy_sha256);
+        allocator.free(claims.capability_hash);
+        allocator.free(claims.compiler_version);
+        allocator.free(claims.property_summary);
+        allocator.free(claims.durable_workflow_proof_level);
+    }
+
+    try std.testing.expectEqualStrings("none", claims.durable_workflow_proof_level);
+    try std.testing.expect(!claims.durable_workflow_retry_safe);
+    try std.testing.expect(!claims.durable_workflow_idempotent);
+    try std.testing.expect(!claims.durable_workflow_fault_covered);
 }
 
 test "signing is deterministic for a fixed seed" {

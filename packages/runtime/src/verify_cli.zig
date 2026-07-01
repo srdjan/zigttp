@@ -205,6 +205,7 @@ fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void 
         \\  capability hash:  {s}
         \\  routes count:     {d}
         \\  proven chips:     {s}
+        \\  durable workflow: proof={s}, retrySafe={s}, idempotent={s}, faultCovered={s}
         \\
     ,
         .{
@@ -218,9 +219,17 @@ fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void 
             result.claims.capability_hash,
             result.claims.routes_count,
             if (result.claims.property_summary.len > 0) result.claims.property_summary else "(none)",
+            result.claims.durable_workflow_proof_level,
+            boolString(result.claims.durable_workflow_retry_safe),
+            boolString(result.claims.durable_workflow_idempotent),
+            boolString(result.claims.durable_workflow_fault_covered),
         },
     ) catch return;
     _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
+}
+
+fn boolString(value: bool) []const u8 {
+    return if (value) "true" else "false";
 }
 
 fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *const envelope.VerifyResult) ![]u8 {
@@ -249,6 +258,14 @@ fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *cons
     try json.write(result.claims.routes_count);
     try json.objectField("propertySummary");
     try json.write(result.claims.property_summary);
+    try json.objectField("durableWorkflowProofLevel");
+    try json.write(result.claims.durable_workflow_proof_level);
+    try json.objectField("durableWorkflowRetrySafe");
+    try json.write(result.claims.durable_workflow_retry_safe);
+    try json.objectField("durableWorkflowIdempotent");
+    try json.write(result.claims.durable_workflow_idempotent);
+    try json.objectField("durableWorkflowFaultCovered");
+    try json.write(result.claims.durable_workflow_fault_covered);
     try json.endObject();
     try aw.writer.writeByte('\n');
 
@@ -325,6 +342,10 @@ test "renderClaimsJson uses JSON string escaping" {
             .signed_at_unix = 1_700_000_000,
             .property_summary = "quote\" slash\\ newline\n",
             .routes_count = 2,
+            .durable_workflow_proof_level = "partial",
+            .durable_workflow_retry_safe = false,
+            .durable_workflow_idempotent = true,
+            .durable_workflow_fault_covered = false,
         },
         .public_key = [_]u8{0} ** std.crypto.sign.Ed25519.PublicKey.encoded_length,
         .fingerprint_hex = [_]u8{'f'} ** 64,
@@ -342,6 +363,10 @@ test "renderClaimsJson uses JSON string escaping" {
     try testing.expectEqualStrings("https://example.test/a?x=\"y\"", root.get("url").?.string);
     try testing.expectEqualStrings("zigttp\"dev\\test", root.get("compilerVersion").?.string);
     try testing.expectEqualStrings("quote\" slash\\ newline\n", root.get("propertySummary").?.string);
+    try testing.expectEqualStrings("partial", root.get("durableWorkflowProofLevel").?.string);
+    try testing.expect(!root.get("durableWorkflowRetrySafe").?.bool);
+    try testing.expect(root.get("durableWorkflowIdempotent").?.bool);
+    try testing.expect(!root.get("durableWorkflowFaultCovered").?.bool);
     try testing.expectEqual(@as(i64, 1_700_000_000), root.get("signedAt").?.integer);
     try testing.expectEqual(@as(i64, 2), root.get("routesCount").?.integer);
     try testing.expect(std.mem.indexOf(u8, out, "\\\"") != null);
