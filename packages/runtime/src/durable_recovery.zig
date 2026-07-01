@@ -155,7 +155,7 @@ pub fn recoverIncompleteOplogsTracked(
 
         // Read oplog file
         const source = readFile(allocator, full_path) catch |err| {
-            std.log.err("Failed to read oplog '{s}': {}", .{ full_path, err });
+            if (!builtin.is_test) std.log.err("Failed to read oplog '{s}': {}", .{ full_path, err });
             if (tracker) |t| t.recordFailure(filename, trace.unixMillis());
             continue;
         };
@@ -168,14 +168,14 @@ pub fn recoverIncompleteOplogsTracked(
 
         // Parse the incomplete oplog
         var parsed = trace.parseIncompleteOplog(allocator, source) catch |err| {
-            std.log.err("Failed to parse oplog '{s}': {}", .{ full_path, err });
+            if (!builtin.is_test) std.log.err("Failed to parse oplog '{s}': {}", .{ full_path, err });
             if (tracker) |t| t.recordFailure(filename, trace.unixMillis());
             continue;
         };
         defer parsed.deinit();
 
         const run_key = parsed.run_key orelse {
-            std.log.err("Skipping oplog without durable run key: {s}", .{full_path});
+            if (!builtin.is_test) std.log.err("Skipping oplog without durable run key: {s}", .{full_path});
             continue;
         };
 
@@ -207,7 +207,7 @@ pub fn recoverIncompleteOplogsTracked(
         });
 
         const outcome = recoverOne(allocator, config, &parsed, full_path) catch |err| blk: {
-            std.log.err("Recovery failed for '{s}': {}", .{ full_path, err });
+            if (!builtin.is_test) std.log.err("Recovery failed for '{s}': {}", .{ full_path, err });
             break :blk .failed;
         };
 
@@ -306,9 +306,11 @@ fn recoverOne(
     defer rt.deinit();
 
     const loaded = handler_loader.load(allocator, config.handler) catch |err| {
-        switch (err) {
-            error.UnsupportedHandlerSource => std.log.err("Durable recovery requires a file_path or inline_code handler source", .{}),
-            else => std.log.err("Durable recovery failed to load handler: {}", .{err}),
+        if (!builtin.is_test) {
+            switch (err) {
+                error.UnsupportedHandlerSource => std.log.err("Durable recovery requires a file_path or inline_code handler source", .{}),
+                else => std.log.err("Durable recovery failed to load handler: {}", .{err}),
+            }
         }
         return err;
     };
@@ -350,7 +352,7 @@ fn recoverOne(
 
     // Execute handler - durable wrappers will replay from oplog, then continue live
     var response = rt.executeHandler(request) catch |err| {
-        std.log.err("Recovery handler execution failed: {}", .{err});
+        if (!builtin.is_test) std.log.err("Recovery handler execution failed: {}", .{err});
         return .failed;
     };
     defer response.deinit();
@@ -497,6 +499,65 @@ test "durable recovery: RetryTracker backs off and quarantines persistent failur
     // Ten consecutive failures quarantine the run for good.
     for (0..RetryTracker.quarantine_threshold) |_| tracker.recordFailure(name, 0);
     try testing.expect(!tracker.shouldAttempt(name, std.math.maxInt(i64)));
+}
+
+test "durable recovery: attempts (rather than skips) a run whose waitSignal timeout has already expired" {
+    // Before the timeout_ms override, a wait_signal tail with no matching
+    // signal was always skipped (`continue`), forever, even once its own
+    // deadline had passed - the recovery scheduler would never re-enter a
+    // durable run stuck waiting on a signal that will never arrive once its
+    // stepWithTimeout budget expired.
+    //
+    // The handler source is deliberately a nonexistent file path so
+    // recoverOne fails at handler_loader.load(), before it ever touches the
+    // JS runtime - this isolates the scheduler-level branch under test
+    // (attempted vs skipped) from a separate, pre-existing bug: recoverOne
+    // double-frees nested function bytecode when a recovered run actually
+    // completes JS execution (reproduces even for a trivial run()+step()
+    // handler with no waitSignal/stepWithTimeout involved, so it is not
+    // specific to this branch - it needs its own dedicated fix).
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const durable_dir = try allocator.dupe(u8, dir_buf[0..dir_len]);
+    defer allocator.free(durable_dir);
+
+    const run_key = "timeout:recovery";
+    const filename = try std.fmt.allocPrint(allocator, "durable-{x}.jsonl", .{std.hash.Fnv1a_64.hash(run_key)});
+    defer allocator.free(filename);
+    const oplog_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ durable_dir, filename });
+    defer allocator.free(oplog_path);
+
+    // A suspended run whose last event is a wait_signal with an
+    // already-expired absolute timeout_ms deadline (1ms since epoch) and no
+    // matching signal anywhere in the durable dir.
+    const oplog =
+        "{\"type\":\"durable_run\",\"key\":\"timeout:recovery\"}\n" ++
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n" ++
+        "{\"type\":\"wait_signal\",\"name\":\"approved\",\"timeout_ms\":1}\n";
+    try zq.file_io.writeFile(allocator, oplog_path, oplog);
+
+    var tracker = RetryTracker.init(allocator);
+    defer tracker.deinit();
+    try testing.expect(tracker.shouldAttempt(filename, trace.unixMillis()));
+
+    const config = ServerConfig{
+        .handler = .{ .file_path = "/nonexistent/handler-for-recovery-attempt-test.ts" },
+        .runtime_config = .{ .durable_oplog_dir = durable_dir },
+    };
+    const recovered = try recoverIncompleteOplogsTracked(allocator, config, &tracker);
+    try testing.expectEqual(@as(u32, 0), recovered);
+
+    // Skipped (the pre-fix behavior) would leave the tracker untouched
+    // forever, since nothing else ever delivers the signal or advances the
+    // deadline. Attempted-but-failed (handler_loader.load rejects the
+    // nonexistent path) records a failure, proving recoverOne was actually
+    // invoked for this oplog instead of the branch falling through to
+    // `continue`.
+    try testing.expect(!tracker.shouldAttempt(filename, trace.unixMillis()));
 }
 
 test "durable recovery: a trailing un-resumed wait reads as pending, not failed" {
