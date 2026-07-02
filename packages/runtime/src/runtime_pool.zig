@@ -923,7 +923,23 @@ pub const HandlerPool = struct {
                     try rt.loadFromCachedBytecodeNoHandler(dep_data);
                 }
             }
-            try rt.loadFromCachedBytecode(entry_bytecode);
+            // Unlike the dev-cache path below, there is no handler source to
+            // recompile from here: for both build-time-embedded and
+            // self-extracting-binary bytecode, self.handler_code is a "" placeholder
+            // (see server.zig's ServerConfig.handler switch), not real source. A
+            // corrupted/version-skewed payload can only be failed cleanly, not
+            // recovered from. Log for operator visibility and let the error
+            // propagate; callers up the stack (executeHandler/executeHandlerBorrowed)
+            // already turn this into a clean per-request 500 instead of a crash.
+            rt.loadFromCachedBytecode(entry_bytecode) catch |err| {
+                if (!builtin.is_test) {
+                    std.log.err(
+                        "embedded bytecode deserialize failed for {s}: {}; no source available to recompile, failing handler load",
+                        .{ self.handler_filename, err },
+                    );
+                }
+                return err;
+            };
             return;
         }
 
@@ -1079,4 +1095,63 @@ test "acquireForRequest with timeout 0 fails fast and records exhaustion" {
 
     try testing.expectError(error.PoolExhausted, pool.acquireForRequest());
     try testing.expectEqual(@as(u64, 1), pool.getMetrics().exhausted);
+}
+
+test "loadHandlerCached embedded path fails cleanly on corrupted bytecode instead of crashing" {
+    if (builtin.os.tag == .linux) return error.SkipZigTest;
+
+    const allocator = std.heap.c_allocator;
+
+    // Build a minimal but valid handler FunctionBytecode with one int constant
+    // holding a rare marker value, so its ConstantTag byte can be located in
+    // the serialized blob and flipped to an out-of-range value.
+    var source_atoms = zq.context.AtomTable.init(allocator);
+    defer source_atoms.deinit();
+
+    const marker: i32 = 0x11223344;
+    var constants = [_]zq.JSValue{zq.JSValue.fromInt(marker)};
+    var code_buf = [_]u8{@intFromEnum(zq.bytecode.Opcode.ret)};
+
+    const func = try allocator.create(zq.bytecode.FunctionBytecode);
+    defer allocator.destroy(func);
+    func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = &.{},
+        .code = &code_buf,
+        .constants = &constants,
+        .source_map = null,
+    };
+
+    var buffer: [4096]u8 = undefined;
+    var writer = zq.bytecode_cache.SliceWriter{ .buffer = &buffer };
+    try zq.bytecode_cache.serializeBytecodeWithAtomsAndShapes(func, &source_atoms, &.{}, &writer, allocator);
+
+    const blob = try allocator.dupe(u8, writer.getWritten());
+    defer allocator.free(blob);
+
+    const marker_bytes = std.mem.asBytes(&marker);
+    const marker_pos = std.mem.indexOf(u8, blob, marker_bytes) orelse return error.MarkerNotFoundInSerializedBlob;
+    try testing.expect(marker_pos > 0);
+    blob[marker_pos - 1] = 0xFF; // corrupt the preceding ConstantTag byte (was .int = 0)
+
+    // Pre-fix, deserializing this corrupted payload panics inside the raw
+    // @enumFromInt in bytecode_cache.zig, taking down the whole process.
+    // Post-fix, constructing the pool (which prewarms through
+    // loadHandlerCached's embedded fast path) must fail cleanly instead.
+    const result = HandlerPool.initWithEmbedded(
+        allocator,
+        .{ .jit_policy = .disabled },
+        "",
+        "<embedded>",
+        1,
+        0,
+        blob,
+    );
+    try testing.expectError(error.InvalidTag, result);
 }
