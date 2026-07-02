@@ -4,6 +4,40 @@ Durable workflows combine `zigttp:durable` with optional `zigttp:workflow`
 dispatch. They give a handler a stable run key, an oplog for replay, and
 operator-visible artifacts that say which replay guarantees the compiler proved.
 
+## Plain Dispatch (No Durability)
+
+`zigttp:workflow`'s `call` works on its own, without `zigttp:durable`, when a
+handler just needs to compose a co-located sub-handler in-process. `call`
+dispatches to another handler named in `--system <file>`; it runs in its own
+isolated pooled runtime, and its `Response` is copied back before the caller
+continues. No HTTP hop, no oplog, no replay:
+
+```ts
+// orchestrator.ts
+import { call } from "zigttp:workflow";
+
+function handler(req: Request): Response {
+  const res = call("greet", { method: "GET", path: "/greet" });
+  return Response.json({ orchestrated: true, subStatus: res.status, sub: res.json() });
+}
+```
+
+```ts
+// greet.ts - the co-located sub-handler named "greet" in system.json
+function handler(req: Request): Response {
+  return Response.json({ from: "greet", method: req.method, path: req.url });
+}
+```
+
+```bash
+zigttp serve orchestrator.ts --system system.json
+```
+
+A sub-handler panic surfaces as a failed call (`subStatus 599`) rather than
+taking down the orchestrator. Reach for `zigttp:durable`'s `run()` (below)
+once a handler needs its dispatch to survive a crash instead of just failing
+cleanly.
+
 ## Runtime Model
 
 Enable the oplog with `--durable <dir>`:
@@ -191,6 +225,68 @@ zigttp workflow-queue discard --durable ./.durable <item-id>
 `saga()` is intentionally rejected with `--workflow-queue`. Saga step closures
 hide dispatch behind a nested callback, while the durable workflow queue tracks
 top-level `call`, `follow`, and `fanout` boundaries.
+
+## Fan-out, Follow, and Saga
+
+`fanout()` dispatches several co-located sub-handlers and aggregates their
+Responses in declaration order (see [Workflow Queue](#workflow-queue) above
+for why it is sequential, not concurrent):
+
+```ts
+import { fanout } from "zigttp:workflow";
+
+function handler(req) {
+  const rs = fanout([
+    { name: "greet", path: "/a" },
+    { name: "greet", path: "/b" },
+    { name: "greet", path: "/c" },
+  ]);
+  return Response.json({ n: rs.length, first: rs[0].json(), last: rs[2].json() });
+}
+```
+
+`follow()` resolves a HAL affordance by `rel` instead of hardcoding a target
+handler name. The affordance's `href` routes to a co-located sub-handler by
+the `"/<name>"` mount convention - `href: "/greet"` routes to the `greet`
+sub-handler:
+
+```ts
+import { follow } from "zigttp:workflow";
+
+function handler(req) {
+  const home = resource({ service: "orchestrator" }, {
+    self: { href: "/" },
+    greeting: { href: "/greet", method: "GET" },
+  });
+  return follow(home, "greeting");
+}
+```
+
+`saga()` makes a sequence of in-process calls atomic via reverse-order
+compensation. Each step's `run` records as durable step `do:<name>`; if a
+step fails (`Response.status >= 400`), the already-completed steps are rolled
+back in reverse via their `compensate` thunks (`undo:<name>`). The last step
+may omit `compensate` (see ZTS510 above):
+
+```ts
+import { run } from "zigttp:durable";
+import { call, saga } from "zigttp:workflow";
+
+function handler(req) {
+  const key = req.headers.get("idempotency-key") ?? "saga-demo";
+  return run(key, () =>
+    saga([
+      { name: "reserve", run: () => call("greet", { path: "/reserve" }), compensate: () => call("greet", { path: "/release" }) },
+      { name: "charge", run: () => call("greet", { path: "/charge" }), compensate: () => call("greet", { path: "/refund" }) },
+      { name: "ship", run: () => call("greet", { path: "/ship" }) },
+    ]),
+  );
+}
+```
+
+If a `compensate` thunk itself fails, there is no automatic retry: the
+rollback surfaces as a terminal `500` requiring manual intervention, since the
+runtime cannot prove which side effects were actually undone.
 
 ## Examples
 
