@@ -806,8 +806,9 @@ pub fn build(b: *std.Build) void {
     smoke_v1_step.dependOn(&smoke_v1_cmd.step);
 
     const panic_isolation_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/test-panic-isolation.sh", "--skip-build", "--zigttp" });
-    panic_isolation_cmd.addFileArg(cli_exe.getEmittedBin());
+    panic_isolation_cmd.addArg(b.getInstallPath(.bin, "zigttp"));
     panic_isolation_cmd.has_side_effects = true;
+    panic_isolation_cmd.step.dependOn(b.getInstallStep());
     const panic_isolation_step = b.step("test-panic-isolation", "Run handler panic isolation E2E test");
     panic_isolation_step.dependOn(&panic_isolation_cmd.step);
 
