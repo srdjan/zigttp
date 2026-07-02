@@ -222,6 +222,15 @@ A third layer of detection runs alongside the parser: the strict checker enforce
 
 The full reference with before/after pairs and rationale lives at `docs/canonical-profile.md`.
 
+## Workflow Proof Guardrails
+
+These diagnostics are not JavaScript feature cuts. They reject workflow shapes
+that would otherwise look durable while losing a runtime guarantee.
+
+| Code | Rule | Supported shape |
+|------|------|-----------------|
+| `ZTS509` | `workflow.call`, `saga`, `fanout`, or `follow` inside a `durable.step()` callback | move the workflow call to durable depth 0 inside `durable.run()` |
+
 ## Error Message Pattern
 
 All error messages follow a consistent format:

@@ -85,6 +85,37 @@ ship with a guarantee that only looks proven:
   reports this, and `sagas[].compensationProven` is only ever `true` for a
   fully static, fully covered saga.
 
+The most common ZTS509 mistake is putting a child dispatch behind a user
+`step()` boundary:
+
+```ts
+import { run, step } from "zigttp:durable";
+import { call } from "zigttp:workflow";
+
+function handler(req: Request): Response {
+  const key = req.headers.get("idempotency-key") ?? "bad";
+  return run(key, () =>
+    step("charge", () => call("greet", { path: "/charge" })),
+  );
+}
+```
+
+That is invalid because the workflow queue can only persist top-level child
+dispatch inside the `run()` body. Move the child call to durable depth 0:
+
+```ts
+import { run } from "zigttp:durable";
+import { call } from "zigttp:workflow";
+
+function handler(req: Request): Response {
+  const key = req.headers.get("idempotency-key") ?? "good";
+  return run(key, () => {
+    const res = call("greet", { path: "/charge" });
+    return Response.json({ status: res.status });
+  });
+}
+```
+
 ## Durable-Run Recovery and Dead-Letters
 
 `durable_recovery.zig`'s background scheduler retries an incomplete oplog
@@ -122,10 +153,19 @@ keeps the durable oplog boundary simple (the whole fan-out replays as one
 step) at the cost of wall-clock speedup; use `zigttp:io`'s `parallel()` for
 actual concurrent I/O outside a durable workflow context.
 
+There are two queue surfaces with different reliability models:
+
+- `--workflow-queue` persists workflow child dispatch under the durable
+  directory. Use it for durable `workflow.call`, `workflow.follow`, and
+  ordered `workflow.fanout` boundaries inside `run()`.
+- `zigttp:queue` is the opt-in actor mailbox module. It isolates handlers and
+  passes messages through process-local actor queues; it is not a durable
+  workflow queue substitute.
+
 Add `--workflow-queue` to persist top-level child dispatch before it runs:
 
 ```bash
-zigttp serve examples/workflow/queued-orchestrator.ts \
+zigttp serve examples/workflow/dsl-orchestrator.ts \
   --system examples/workflow/system.json \
   --durable ./.durable \
   --workflow-queue
@@ -166,6 +206,9 @@ Workflow fixtures live in `examples/workflow/`:
 - `fanout-orchestrator.ts` - declaration-order `fanout`.
 - `follow-orchestrator.ts` - HAL affordance `follow`.
 - `durable-orchestrator.ts` - durable child call replay.
+- `dsl-orchestrator.ts` - the canonical embedded workflow DSL path: proof
+  first, one `Idempotency-Key` run key, one queued child boundary, and one
+  inspectable recovery rail.
 - `queued-orchestrator.ts` - queued durable child dispatch.
 - `queued-fanout-orchestrator.ts` - `fanout()` inside a durable `run()` with
   `--workflow-queue`, so each child call is persisted before it runs, the

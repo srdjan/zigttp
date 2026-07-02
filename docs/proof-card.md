@@ -125,6 +125,26 @@ The trace is the same data on every surface. `zigttp check --json` emits it as
 a `proof.proofTrace` object keyed by property name, so agents and CI read the
 exact reasoning the HUD shows.
 
+Durable workflow checks add a second receipt shape when you ask for the
+contract:
+
+```bash
+zigttp check examples/workflow/dsl-orchestrator.ts --json
+zigttp check examples/workflow/dsl-orchestrator.ts --contract
+```
+
+The JSON proof card exposes `proofTrace.durable_workflow_*`. The contract file
+exposes `durable.workflow.proofLevel` and
+`durable.workflow.properties.retrySafe` / `idempotent` / `faultCovered`.
+Deploy and verify receipts expose the same result as `durableWorkflowProofLevel`,
+`durableWorkflowRetrySafe`, `durableWorkflowIdempotent`, and
+`durableWorkflowFaultCovered`.
+Those workflow-specific fields can remain partial even when a handler's
+narrower `Spec` passes; they gate durable replay claims, not generic handler
+properties.
+The proof tells you what the compiler proved; the durable directory tells you
+what the runtime persisted.
+
 ## The Three Lenses
 
 In the `zigttp dev` HUD, press `Tab` to rotate the card's left pane through

@@ -156,6 +156,11 @@ run_live_workflow() {
                 body=$(curl --max-time 5 -fsS -H 'Idempotency-Key: queued-demo' "http://127.0.0.1:$LIVE_PORT/" || true)
                 expect_contains "$body" '"queued":true' && expect_contains "$body" '"path":"/queued"' && ok=0
                 ;;
+            workflow/dsl-orchestrator.ts)
+                local body
+                body=$(curl --max-time 5 -fsS -H 'Idempotency-Key: workflow-dsl-demo' "http://127.0.0.1:$LIVE_PORT/" || true)
+                expect_contains "$body" '"workflowDsl":true' && expect_contains "$body" '"childBoundary":"workflow.call:greet"' && expect_contains "$body" '"path":"/workflow-dsl"' && ok=0
+                ;;
             workflow/wait-signal-orchestrator.ts)
                 local pending signaled resumed pending2 scheduled resumed2
                 pending=$(curl --max-time 5 -fsS -H 'Idempotency-Key: approval-demo' "http://127.0.0.1:$LIVE_PORT/wait" || true)
@@ -278,6 +283,7 @@ run_live_workflow "workflow/fanout-orchestrator.ts" "examples/workflow/fanout-or
 run_live_workflow "workflow/follow-orchestrator.ts" "examples/workflow/follow-orchestrator.ts" --system examples/workflow/system.json
 run_live_workflow "workflow/durable-orchestrator.ts" "examples/workflow/durable-orchestrator.ts" --system examples/workflow/system.json --durable "$TMP_ROOT/durable-call"
 run_live_workflow "workflow/queued-orchestrator.ts" "examples/workflow/queued-orchestrator.ts" --system examples/workflow/system.json --durable "$TMP_ROOT/durable-queued" --workflow-queue
+run_live_workflow "workflow/dsl-orchestrator.ts" "examples/workflow/dsl-orchestrator.ts" --system examples/workflow/system.json --durable "$TMP_ROOT/durable-dsl" --workflow-queue
 run_live_workflow "workflow/wait-signal-orchestrator.ts" "examples/workflow/wait-signal-orchestrator.ts" --durable "$TMP_ROOT/durable-signal"
 run_live_workflow "workflow/timeout-orchestrator.ts" "examples/workflow/timeout-orchestrator.ts" --durable "$TMP_ROOT/durable-timeout"
 run_live_workflow "workflow/scope-orchestrator.ts" "examples/workflow/scope-orchestrator.ts"

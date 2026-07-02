@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ideation: ZigTS Embedded Workflow DSL</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f5ef;
+      --surface: #fffdf8;
+      --surface-2: #f0f7f4;
+      --ink: #1d2623;
+      --muted: #5d6a65;
+      --line: #d8ddd6;
+      --accent: #1f6f68;
+      --accent-soft: #dcefed;
+      --accent-text: #164f4b;
+      --warn: #8a5c12;
+      --warn-soft: #f8ead0;
+      --code: #123b38;
+      --shadow: 0 18px 48px rgba(29, 38, 35, 0.08);
+      --radius: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.58 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a {
+      color: var(--accent);
+      text-underline-offset: 3px;
+    }
+
+    code {
+      color: var(--code);
+      background: rgba(31, 111, 104, 0.08);
+      border: 1px solid rgba(31, 111, 104, 0.13);
+      border-radius: 5px;
+      padding: 0.06rem 0.28rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+    }
+
+    .page {
+      width: min(100% - 32px, 980px);
+      margin: 0 auto;
+      padding: 42px 0 56px;
+    }
+
+    header.hero {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 28px;
+    }
+
+    .eyebrow {
+      margin: 0 0 9px;
+      color: var(--accent-text);
+      font-size: 0.76rem;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: 1.18;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      margin: 0 0 16px;
+      max-width: 13ch;
+      font-size: clamp(2.15rem, 7vw, 4.9rem);
+      font-weight: 800;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 1.58rem;
+    }
+
+    h3 {
+      margin: 0;
+      font-size: 1.18rem;
+    }
+
+    p {
+      max-width: 74ch;
+      margin: 0 0 12px;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 20px;
+      padding: 0;
+      list-style: none;
+    }
+
+    .meta li,
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 28px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 111, 104, 0.19);
+      background: var(--accent-soft);
+      color: var(--accent-text);
+      padding: 4px 10px;
+      font-size: 0.82rem;
+      font-weight: 690;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 22px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fbfaf6;
+      padding: 14px;
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 1.6rem;
+      line-height: 1;
+      color: inherit;
+    }
+
+    .metric span {
+      display: block;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    section {
+      margin-top: 28px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 24px;
+    }
+
+    .compact {
+      padding: 20px;
+    }
+
+    .axes {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 14px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .axes li {
+      border-radius: var(--radius);
+      border: 1px solid rgba(31, 111, 104, 0.16);
+      background: var(--surface-2);
+      color: var(--accent-text);
+      padding: 12px;
+      font-weight: 720;
+      font-size: 0.9rem;
+    }
+
+    .jump-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: 16px 0 22px;
+      padding: 0;
+      list-style: none;
+    }
+
+    .jump-list a {
+      display: block;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fbfaf6;
+      padding: 10px 12px;
+      color: var(--ink);
+      text-decoration: none;
+    }
+
+    .idea-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fffefb;
+      padding: 18px;
+      margin-top: 14px;
+    }
+
+    .idea-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .idea-head h3 {
+      max-width: 28ch;
+    }
+
+    .idea-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      justify-content: flex-end;
+    }
+
+    .field-list {
+      display: grid;
+      grid-template-columns: minmax(130px, 0.22fr) 1fr;
+      gap: 9px 14px;
+      margin: 14px 0 0;
+    }
+
+    .field-list dt {
+      color: var(--accent-text);
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .field-list dd {
+      margin: 0;
+      color: var(--ink);
+    }
+
+    .callout {
+      border: 1px solid rgba(138, 92, 18, 0.22);
+      border-radius: var(--radius);
+      background: var(--warn-soft);
+      color: #4f3409;
+      padding: 14px;
+      margin-top: 14px;
+    }
+
+    .callout .eyebrow {
+      color: var(--warn);
+      margin-bottom: 6px;
+    }
+
+    .diagram-wrap {
+      overflow-x: auto;
+      margin: 16px 0 6px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fbfaf6;
+      padding: 8px;
+    }
+
+    svg {
+      display: block;
+      width: 820px;
+      max-width: 100%;
+      height: auto;
+    }
+
+    .svg-label {
+      font: 700 14px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      fill: #1d2623;
+    }
+
+    .svg-sub {
+      font: 12px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      fill: #5d6a65;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 14px;
+      font-size: 0.92rem;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--accent-text);
+      font-size: 0.76rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .sources {
+      columns: 2;
+      column-gap: 34px;
+      margin: 12px 0 0;
+      padding-left: 18px;
+    }
+
+    .sources li {
+      break-inside: avoid;
+      margin: 0 0 8px;
+    }
+
+    footer.composition-signal {
+      margin-top: 24px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    @media (max-width: 760px) {
+      .page {
+        width: min(100% - 20px, 980px);
+        padding-top: 18px;
+      }
+
+      header.hero,
+      section {
+        padding: 18px;
+      }
+
+      h1 {
+        max-width: 11ch;
+      }
+
+      .summary-grid,
+      .axes,
+      .jump-list {
+        grid-template-columns: 1fr;
+      }
+
+      .idea-head {
+        display: block;
+      }
+
+      .idea-meta {
+        justify-content: flex-start;
+        margin-top: 10px;
+      }
+
+      .field-list {
+        grid-template-columns: 1fr;
+      }
+
+      .sources {
+        columns: 1;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <p class="eyebrow">ce-ideate artifact</p>
+      <h1>Ideation: ZigTS Embedded Workflow DSL</h1>
+      <ul class="meta" aria-label="Document metadata">
+        <li>Date: <time datetime="2026-07-02">2026-07-02</time></li>
+        <li>Topic: zigts-embedded-workflow-dsl</li>
+        <li>Focus: minimal durable, fault-tolerant workflow example and DX prose</li>
+        <li>Mode: repo-grounded</li>
+      </ul>
+      <p>
+        The strongest direction is not a new API. It is a tiny embedded workflow grammar built from names, durable boundaries,
+        proof receipts, and operator-visible artifacts. The example should let a user see one durable run key start, dispatch
+        one queued child, survive one fault, and produce one proof receipt.
+      </p>
+      <div class="summary-grid" aria-label="Ideation counts">
+        <div class="metric"><strong>14</strong><span>raw candidate clusters</span></div>
+        <div class="metric"><strong>7</strong><span>ranked survivors</span></div>
+        <div class="metric"><strong>4</strong><span>topic axes covered</span></div>
+      </div>
+    </header>
+
+    <section id="grounding-context">
+      <p class="eyebrow">Grounding Context</p>
+      <h2>Codebase Context</h2>
+      <p>
+        Zigttp already has the durable workflow runtime pieces: durable runs and steps, timeout and signal primitives,
+        top-level workflow dispatch, persisted queued child dispatch, dead letters, parent suspension and replay, and
+        compile-time diagnostics for invalid durable shapes. Existing docs and examples cover the primitives, but the
+        first-path mental model is scattered across tutorials, proof docs, queue docs, and separate workflow fixtures.
+      </p>
+      <p>
+        The example should stay inside today's ZigTS surface. That means no new workflow API, no implied async promises,
+        no hidden actor state, and no conflation between the persisted workflow queue and the separate actor mailbox queue.
+      </p>
+      <div class="diagram-wrap" aria-label="Conceptual minimal workflow shape">
+        <svg viewBox="0 0 820 180" role="img" aria-labelledby="shape-title shape-desc">
+          <title id="shape-title">Minimal durable workflow shape</title>
+          <desc id="shape-desc">A request enters a durable run, dispatches one queued child, records recovery, and produces a proof receipt.</desc>
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f6f68"></path>
+            </marker>
+          </defs>
+          <rect x="18" y="46" width="130" height="74" rx="8" fill="#fffdf8" stroke="#bfcac4"></rect>
+          <text x="83" y="77" text-anchor="middle" class="svg-label">HTTP request</text>
+          <text x="83" y="98" text-anchor="middle" class="svg-sub">Idempotency-Key</text>
+          <path d="M 156 83 L 208 83" stroke="#1f6f68" stroke-width="2" marker-end="url(#arrow)"></path>
+          <rect x="216" y="38" width="138" height="90" rx="8" fill="#dcefed" stroke="#8dbcb7"></rect>
+          <text x="285" y="74" text-anchor="middle" class="svg-label">durable.run(key)</text>
+          <text x="285" y="96" text-anchor="middle" class="svg-sub">stable boundary</text>
+          <path d="M 362 83 L 414 83" stroke="#1f6f68" stroke-width="2" marker-end="url(#arrow)"></path>
+          <rect x="422" y="38" width="142" height="90" rx="8" fill="#fffdf8" stroke="#bfcac4"></rect>
+          <text x="493" y="70" text-anchor="middle" class="svg-label">workflow.call</text>
+          <text x="493" y="93" text-anchor="middle" class="svg-sub">queued child</text>
+          <path d="M 572 83 L 624 83" stroke="#1f6f68" stroke-width="2" marker-end="url(#arrow)"></path>
+          <rect x="632" y="38" width="150" height="90" rx="8" fill="#f8ead0" stroke="#d5b06d"></rect>
+          <text x="707" y="68" text-anchor="middle" class="svg-label">recover or replay</text>
+          <text x="707" y="91" text-anchor="middle" class="svg-sub">artifact plus command</text>
+          <path d="M 285 132 L 285 152 L 707 152 L 707 136" fill="none" stroke="#78908a" stroke-width="1.5" stroke-dasharray="5 5"></path>
+          <text x="496" y="171" text-anchor="middle" class="svg-sub">proof receipt ties code boundaries to retry and fault coverage</text>
+        </svg>
+      </div>
+    </section>
+
+    <section id="topic-axes" class="compact">
+      <p class="eyebrow">Topic Axes</p>
+      <h2>Topic Axes</h2>
+      <ul class="axes">
+        <li>Runnable workflow story</li>
+        <li>Proof and DX feedback</li>
+        <li>Durability and fault semantics</li>
+        <li>Documentation/prose structure</li>
+      </ul>
+    </section>
+
+    <section id="ranked-ideas">
+      <p class="eyebrow">Survivors</p>
+      <h2>Ranked Ideas</h2>
+      <ul class="jump-list" aria-label="Ranked idea jump list">
+        <li><a href="#idea-1">1. One Run Key, One Child, One Recovery</a></li>
+        <li><a href="#idea-2">2. Proof Receipt First</a></li>
+        <li><a href="#idea-3">3. Deterministic Failure Drill</a></li>
+        <li><a href="#idea-4">4. ZTS509 Negative Twin</a></li>
+        <li><a href="#idea-5">5. Artifact Tree + Fault Matrix</a></li>
+        <li><a href="#idea-6">6. DSL As Naming Convention</a></li>
+        <li><a href="#idea-7">7. Queue Type Disambiguator</a></li>
+      </ul>
+
+      <article id="idea-1" class="idea-card">
+        <div class="idea-head">
+          <h3>1. One Run Key, One Child, One Recovery</h3>
+          <div class="idea-meta">
+            <span class="chip">Confidence 90%</span>
+            <span class="chip">Complexity Medium</span>
+          </div>
+        </div>
+        <dl class="field-list">
+          <dt>Description</dt>
+          <dd>Make the canonical example a small workflow: derive a run key from <code>Idempotency-Key</code>, enter <code>durable.run(key)</code>, dispatch exactly one top-level <code>workflow.call</code> through <code>--workflow-queue</code>, inspect one recovery artifact, and end with one proof receipt.</dd>
+          <dt>Axis</dt>
+          <dd>Runnable workflow story.</dd>
+          <dt>Basis</dt>
+          <dd>direct: <code>examples/workflow/queued-orchestrator.ts</code> already shows <code>run(key)</code> and top-level <code>call</code>; <code>docs/tutorials/first-durable-workflow.md</code> already teaches durable start, queued child dispatch, signal/crash drills, and proof checks.</dd>
+          <dt>Rationale</dt>
+          <dd>Users need one copyable shape before they need a catalog of primitives. This makes the embedded DSL feel real without adding syntax.</dd>
+          <dt>Downsides</dt>
+          <dd>It under-shows wait signals, saga, and fanout on purpose. Those should become second-step examples, not the first mental model.</dd>
+        </dl>
+      </article>
+
+      <article id="idea-2" class="idea-card">
+        <div class="idea-head">
+          <h3>2. Proof Receipt First</h3>
+          <div class="idea-meta">
+            <span class="chip">Confidence 88%</span>
+            <span class="chip">Complexity Low</span>
+          </div>
+        </div>
+        <dl class="field-list">
+          <dt>Description</dt>
+          <dd>Put <code>zigttp check --json</code> plus <code>zigttp check --contract</code>, or the verification receipt, before the live server drill. Annotate which line creates the durable run, which line creates queued child dispatch, and which proof field confirms or withholds the behavior.</dd>
+          <dt>Axis</dt>
+          <dd>Proof and DX feedback.</dd>
+          <dt>Basis</dt>
+          <dd>direct: <code>docs/proof-card.md</code>, <code>docs/verification.md</code>, and the contract builder already expose durable workflow proof fields and diagnostics.</dd>
+          <dt>Rationale</dt>
+          <dd>This differentiates ZigTS from generic durable workflow demos. The user sees the compiler's workflow verdict before trusting the runtime story.</dd>
+          <dt>Downsides</dt>
+          <dd>The receipt needs careful copy so it reads as actionable authoring feedback, not as a wall of JSON.</dd>
+        </dl>
+      </article>
+
+      <article id="idea-3" class="idea-card">
+        <div class="idea-head">
+          <h3>3. Deterministic Failure Drill</h3>
+          <div class="idea-meta">
+            <span class="chip">Confidence 85%</span>
+            <span class="chip">Complexity Medium</span>
+          </div>
+        </div>
+        <dl class="field-list">
+          <dt>Description</dt>
+          <dd>Make one repeatable fault path part of the example: force a queued child into dead letter or parent suspension, inspect it, replay it, and show the parent finishing without duplicating already-recorded work.</dd>
+          <dt>Axis</dt>
+          <dd>Durability and fault semantics.</dd>
+          <dt>Basis</dt>
+          <dd>direct: <code>packages/runtime/src/workflow_queue.zig</code> and <code>packages/runtime/src/zruntime.zig</code> implement persisted queue states, dead letters, replay/discard, and parent resolution.</dd>
+          <dt>Rationale</dt>
+          <dd>Durable behavior is most credible when failure is not abstract. The user should see the durable artifact and the recovery command in the same workflow story.</dd>
+          <dt>Downsides</dt>
+          <dd>A failure-first path can feel heavier than a hello-world flow. Keep the drill deterministic and one-screen small.</dd>
+        </dl>
+      </article>
+
+      <article id="idea-4" class="idea-card">
+        <div class="idea-head">
+          <h3>4. ZTS509 Negative Twin</h3>
+          <div class="idea-meta">
+            <span class="chip">Confidence 86%</span>
+            <span class="chip">Complexity Low</span>
+          </div>
+        </div>
+        <dl class="field-list">
+          <dt>Description</dt>
+          <dd>Add a tiny adjacent invalid snippet: <code>durable.step("charge", () =&gt; workflow.call("payment", ...))</code>. Show ZTS509, then the corrected version with <code>workflow.call</code> at durable depth 0 inside <code>run</code>.</dd>
+          <dt>Axis</dt>
+          <dd>Proof and DX feedback.</dd>
+          <dt>Basis</dt>
+          <dd>direct: <code>packages/zigts/src/contract_builder.zig</code> and <code>packages/zigts/src/rule_registry.zig</code> define and explain the durable-depth diagnostic.</dd>
+          <dt>Rationale</dt>
+          <dd>The most useful DX prose often names the forbidden shape before users discover it. The corrected twin teaches the workflow DSL boundary rule faster than prose warnings.</dd>
+          <dt>Downsides</dt>
+          <dd>Negative examples must stay visually subordinate so the docs do not lead users into copying the wrong file.</dd>
+        </dl>
+      </article>
+
+      <article id="idea-5" class="idea-card">
+        <div class="idea-head">
+          <h3>5. Artifact Tree + Fault Matrix</h3>
+          <div class="idea-meta">
+            <span class="chip">Confidence 83%</span>
+            <span class="chip">Complexity Low</span>
+          </div>
+        </div>
+        <dl class="field-list">
+          <dt>Description</dt>
+          <dd>Put a compact table next to the example: failure trigger, persisted artifact path, caller-facing response, operator command, and proof or idempotency condition. Use it to explain the durable directory as part of the DSL, not as internals trivia.</dd>
+          <dt>Axis</dt>
+          <dd>Durability and fault semantics.</dd>
+          <dt>Basis</dt>
+          <dd>direct: <code>docs/durable-workflows.md</code>, <code>docs/tutorials/first-durable-workflow.md</code>, and runtime queue/dead-run code already expose the artifact and operator model.</dd>
+          <dt>Rationale</dt>
+          <dd>Fault tolerance becomes easier to debug when each visible file or CLI command maps back to one workflow boundary.</dd>
+          <dt>Downsides</dt>
+          <dd>The table can drift if artifact paths or CLI names move. Keep it backed by examples or doc-link checks.</dd>
+        </dl>
+      </article>
+
+      <article id="idea-6" class="idea-card">
+        <div class="idea-head">
+          <h3>6. DSL As Naming Convention</h3>
+          <div class="idea-meta">
+            <span class="chip">Confidence 82%</span>
+            <span class="chip">Complexity Low</span>
+          </div>
+        </div>
+        <dl class="field-list">
+          <dt>Description</dt>
+          <dd>Define the embedded DSL as disciplined names and boundaries: run key, step names, child handler names, signal names, idempotency key, timeout names, and forbidden boundaries. This becomes a short pattern header above the example.</dd>
+          <dt>Axis</dt>
+          <dd>Documentation/prose structure.</dd>
+          <dt>Basis</dt>
+          <dd>reasoned: the current APIs already expose the durable contract through named boundaries, and adding a new DSL layer would increase surface area before the existing one is learned.</dd>
+          <dt>Rationale</dt>
+          <dd>This gives the feature a DSL feel while preserving ZigTS's explicit, inspectable style. It also gives humans and agents a small authoring checklist.</dd>
+          <dt>Downsides</dt>
+          <dd>Naming discipline is softer than compiler syntax. The prose must be crisp and backed by proof output to avoid feeling like convention-only advice.</dd>
+        </dl>
+      </article>
+
+      <article id="idea-7" class="idea-card">
+        <div class="idea-head">
+          <h3>7. Queue Type Disambiguator</h3>
+          <div class="idea-meta">
+            <span class="chip">Confidence 84%</span>
+            <span class="chip">Complexity Low</span>
+          </div>
+        </div>
+        <dl class="field-list">
+          <dt>Description</dt>
+          <dd>Add a small "which queue is this?" section. <code>--workflow-queue</code> is persisted child dispatch for durable workflows. <code>--actor-queue</code> and <code>zigttp:queue</code> are process-local actor mailboxes. <code>fanout</code> should be described as ordered durable batch grouping, not concurrency.</dd>
+          <dt>Axis</dt>
+          <dd>Documentation/prose structure.</dd>
+          <dt>Basis</dt>
+          <dd>direct: workflow docs and runtime code define the persisted workflow queue; actor queue notes identify <code>zigttp:queue</code> as a separate opt-in mailbox surface; <code>fanout</code> runtime behavior is declaration-ordered.</dd>
+          <dt>Rationale</dt>
+          <dd>This prevents users from picking the wrong reliability model and gives the prose a clearer embedded-workflow grammar.</dd>
+          <dt>Downsides</dt>
+          <dd>It is mostly prose leverage. It should be paired with code comments and fixture names so the distinction appears in commands, not only docs.</dd>
+        </dl>
+      </article>
+
+      <div class="callout">
+        <p class="eyebrow">Top Pick</p>
+        <p>
+          Start with idea 1, then fold ideas 2, 3, 4, 5, 6, and 7 into the same artifact as supporting rails:
+          proof first, one deterministic failure drill, one negative twin, one artifact matrix, and one queue-disambiguation note.
+        </p>
+      </div>
+    </section>
+
+    <section id="rejection-summary">
+      <p class="eyebrow">Cuts</p>
+      <h2>Rejection Summary</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Idea</th>
+            <th>Reason Rejected</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td>Golden Workflow Receipt Fixture / One-Button Failure Receipt</td>
+            <td>Good follow-on automation, but larger than the minimal example shape.</td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td>Canonical Loan Approval All-Primitives Fixture</td>
+            <td>Overpacked; it crams too many primitives into the first copyable workflow.</td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td>Saga / Transaction Ledger With Compensation</td>
+            <td>Valuable, but saga belongs in a separate example because of the <code>--workflow-queue</code> incompatibility.</td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td>Incident Command Runbook</td>
+            <td>The domain framing adds weight before the minimal DSL contract is clear.</td>
+          </tr>
+          <tr>
+            <td>5</td>
+            <td>Circuit Breaker Quarantine Drill</td>
+            <td>Combines queue dead letters and durable dead-runs too early, blurring separate mechanisms.</td>
+          </tr>
+          <tr>
+            <td>6</td>
+            <td>Standalone Fanout Durable Batch</td>
+            <td>Sound, but folded into the queue disambiguation idea.</td>
+          </tr>
+          <tr>
+            <td>7</td>
+            <td>Canonical Agent Prompt Snippet</td>
+            <td>Sound, but folded into the naming/header idea.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="sources-references">
+      <p class="eyebrow">Evidence</p>
+      <h2>Sources &amp; References</h2>
+      <ul class="sources">
+        <li><a href="https://github.com/srdjan/zigttp/blob/main/docs/durable-workflows.md">docs/durable-workflows.md</a></li>
+        <li><a href="https://github.com/srdjan/zigttp/blob/main/docs/tutorials/first-durable-workflow.md">docs/tutorials/first-durable-workflow.md</a></li>
+        <li><a href="https://github.com/srdjan/zigttp/blob/main/examples/workflow/queued-orchestrator.ts">examples/workflow/queued-orchestrator.ts</a></li>
+        <li><a href="https://github.com/srdjan/zigttp/blob/main/examples/workflow/saga-orchestrator.ts">examples/workflow/saga-orchestrator.ts</a></li>
+        <li><a href="https://github.com/srdjan/zigttp/blob/main/examples/workflow/wait-signal-orchestrator.ts">examples/workflow/wait-signal-orchestrator.ts</a></li>
+        <li><a href="https://github.com/srdjan/zigttp/blob/main/docs/proof-card.md">docs/proof-card.md</a></li>
+        <li><a href="https://github.com/srdjan/zigttp/blob/main/docs/verification.md">docs/verification.md</a></li>
+        <li><a href="https://github.com/srdjan/zigttp/blob/main/packages/runtime/src/workflow_queue.zig">packages/runtime/src/workflow_queue.zig</a></li>
+        <li><a href="https://github.com/srdjan/zigttp/blob/main/packages/runtime/src/zruntime.zig">packages/runtime/src/zruntime.zig</a></li>
+        <li><a href="https://github.com/srdjan/zigttp/blob/main/packages/zigts/src/contract_builder.zig">packages/zigts/src/contract_builder.zig</a></li>
+        <li><a href="https://github.com/srdjan/zigttp/blob/main/packages/zigts/src/rule_registry.zig">packages/zigts/src/rule_registry.zig</a></li>
+        <li><a href="https://www.inngest.com/docs/learn/inngest-steps">Inngest steps</a></li>
+        <li><a href="https://www.inngest.com/docs/features/inngest-functions/steps-workflows/wait-for-event">Inngest wait for event</a></li>
+        <li><a href="https://learn.microsoft.com/en-us/azure/durable-task/common/durable-task-fan-in-fan-out">Azure Durable Functions fan-out/fan-in</a></li>
+        <li><a href="https://docs.dbos.dev/typescript/tutorials/workflow-tutorial">DBOS workflow tutorial</a></li>
+        <li><a href="https://www.restate.dev/what-is-durable-execution">Restate durable execution guide</a></li>
+        <li><a href="https://docs.temporal.io/develop/typescript/workflows/message-passing">Temporal TypeScript message passing</a></li>
+      </ul>
+    </section>
+
+    <footer class="composition-signal">
+      Composed 2026-07-02T16:14:03Z by ce-ideate from user prompt context: minimal ZigTS durable workflow DSL example and DX prose improvements.
+    </footer>
+  </main>
+</body>
+</html>

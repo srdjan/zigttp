@@ -15,13 +15,40 @@ Use the built binary in the checkout:
 export ZIGTTP=./zig-out/bin/zigttp
 ```
 
-## Start A Durable Workflow
+## Read The Proof First
+
+Start with the compiler receipt before running the server:
+
+```bash
+$ZIGTTP check examples/workflow/dsl-orchestrator.ts --json
+$ZIGTTP check examples/workflow/dsl-orchestrator.ts --contract
+```
+
+The first command emits the proof receipt to stdout. The second command writes
+`contract.json`. Together they show the authoring receipt that the example
+creates. Because the run key comes from the request, the durable workflow graph
+can stay partial even when the handler's narrower `Spec` passes:
+
+- `durable.workflow.proofLevel` describes whether the workflow graph is complete.
+- `durable.workflow.properties.retrySafe` tracks whether automatic replay is safe.
+- `durable.workflow.properties.idempotent` tracks whether completed response reuse is safe.
+- `durable.workflow.properties.faultCovered` tracks whether the workflow has modeled recovery nodes.
+- `proofTrace.durable_workflow_*` explains why the durable workflow guarantees
+  are proven or still partial.
+
+The example's embedded DSL is just disciplined naming around existing ZigTS
+primitives: the `Idempotency-Key` becomes the run key, `durable.run()` owns the
+parent workflow, and one top-level `workflow.call()` owns the queued child
+boundary.
+
+## Run The Canonical Workflow
 
 ```bash
 rm -rf ./.durable-demo
-$ZIGTTP serve examples/workflow/durable-orchestrator.ts \
+$ZIGTTP serve examples/workflow/dsl-orchestrator.ts \
   --system examples/workflow/system.json \
   --durable ./.durable-demo \
+  --workflow-queue \
   -p 3000
 ```
 
@@ -32,7 +59,9 @@ curl -H 'Idempotency-Key: order-1' http://127.0.0.1:3000/
 curl -H 'Idempotency-Key: order-1' http://127.0.0.1:3000/
 ```
 
-The second request reuses the persisted completed response for `order-1`.
+The response names the child boundary (`workflow.call:greet`) and the child
+path (`/workflow-dsl`). The second request reuses the persisted completed
+response for `order-1`.
 
 Inspect the durable directory:
 
@@ -40,20 +69,9 @@ Inspect the durable directory:
 find ./.durable-demo -maxdepth 3 -type f | sort
 ```
 
-## Queue A Child Dispatch
+## Inspect The Queued Child
 
-Restart with the workflow queue:
-
-```bash
-rm -rf ./.durable-demo
-$ZIGTTP serve examples/workflow/queued-orchestrator.ts \
-  --system examples/workflow/system.json \
-  --durable ./.durable-demo \
-  --workflow-queue \
-  -p 3000
-```
-
-Trigger the parent:
+The canonical workflow already runs with the workflow queue. Trigger the parent:
 
 ```bash
 curl -H 'Idempotency-Key: queued-1' http://127.0.0.1:3000/
@@ -80,6 +98,14 @@ $ZIGTTP workflow-queue replay --durable ./.durable-demo <item-id>
 $ZIGTTP workflow-queue discard --durable ./.durable-demo <item-id>
 curl -H 'Idempotency-Key: queued-1' http://127.0.0.1:3000/
 ```
+
+## Artifact Matrix
+
+| State | Trigger | Artifact | Caller result | Operator action | Proof/idempotency condition |
+|---|---|---|---|---|---|
+| Completed run | Repeat the same request key | Durable oplog plus workflow queue `done/` entry | Completed response reuses the recorded result | None | `idempotent` proof or matching `Idempotency-Key` |
+| Queued child dead letter | Attempt cap or invalid queue envelope | `<durable>/workflow-queue/dead/<item-id>.json` | Parent stays suspended with `202` | `workflow-queue replay` or `discard`, then retry parent request | `retrySafe` proof or matching `Idempotency-Key` |
+| Durable run dead letter | Recovery fails repeatedly | `<durable>/dead-runs/<id>.json` | Run stays quarantined | `durable dead-runs replay` or `discard` | Operator action chooses retry or permanent discard |
 
 ## Signal Drill
 
@@ -118,7 +144,8 @@ operator replay/discard.
 Compile or deploy a durable handler, then inspect proof surfaces:
 
 ```bash
-$ZIGTTP check examples/workflow/queued-orchestrator.ts --contract --json
+$ZIGTTP check examples/workflow/dsl-orchestrator.ts --json
+$ZIGTTP check examples/workflow/dsl-orchestrator.ts --contract
 $ZIGTTP verify http://127.0.0.1:3000 --json
 ```
 

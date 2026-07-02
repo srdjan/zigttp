@@ -43,7 +43,10 @@ zigts modules
 zigts modules --json
 
 # Show proof report (env vars, hosts, sandbox contract)
-zigts check --json --contract handler.ts
+zigts check handler.ts --json
+
+# Emit contract.json in the current directory
+zigts check handler.ts --contract
 
 # Preview compiler-authored local canonical refactors
 zigts canonicalize handler.ts --json --simulate

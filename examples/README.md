@@ -17,6 +17,12 @@ These three handlers, in order, are the shortest path to seeing what makes zigtt
 
 3. **[handler/secret-leak.ts](handler/secret-leak.ts)** - see a proof reject your code. Reads `env("SECRET_KEY")` and tries to ship it back in the response body. The flow analyzer catches it before runtime and emits ZTS400. This is the most concrete demo of "the compiler proves what your code is."
 
+After those, the shortest durable workflow path is
+**[workflow/dsl-orchestrator.ts](workflow/dsl-orchestrator.ts)**. Read its
+proof receipt first, then run it with `--durable` and `--workflow-queue` to see
+one stable run key, one queued child boundary, and one inspectable recovery
+surface.
+
 ## By category
 
 ### handler/
@@ -65,7 +71,7 @@ with an explicit outbound host allow-list.
 ### Advanced surfaces
 
 - **durable/** - `run`, `step`, `waitSignal` from `zigttp:durable`. Replay-safe execution. See [approval.ts](durable/approval.ts).
-- **workflow/** - `call`, `fanout`, `follow`, durable workflow queue, signal resume, timeout, and dead-letter replay fixtures. See [../docs/durable-workflows.md](../docs/durable-workflows.md).
+- **workflow/** - start with [dsl-orchestrator.ts](workflow/dsl-orchestrator.ts) for the embedded workflow DSL path, then use the primitive fixtures for `call`, `fanout`, `follow`, durable workflow queue, signal resume, timeout, and dead-letter replay. See [../docs/durable-workflows.md](../docs/durable-workflows.md).
 - **parallel/** - `parallel` and `race` from `zigttp:io`.
 - **websocket/** - WebSocket events with `serializeAttachment` and rooms.
 - **sql/** - the `sql` tagged template from `zigttp:sql`.
