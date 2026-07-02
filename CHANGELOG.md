@@ -18,6 +18,8 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 - `zigttp durable dead-runs replay` no longer reports success when the on-disk record fails to delete; a failed delete now surfaces as an error instead of leaving the run permanently skipped while the operator was told it was cleared.
 - `zigttp durable dead-runs list` no longer aborts entirely when one record file is malformed; the corrupt entry is skipped so other quarantined runs still show.
 - `zigttp durable --help` now writes to stdout, matching every other help path in the CLI (it previously wrote to stderr).
+- A dead-run record write that fails to persist (disk full, permission error) no longer silently un-quarantines the run on the next poll; the retry tracker now tracks whether the write was actually confirmed and retries it instead of treating a missing record as an external `replay`.
+- `durable dead-runs replay`/`discard` now serialize against each other (and against the server's own quarantine writes) for the same run id, so two concurrent invocations can no longer interleave and silently reverse each other's reported success.
 
 ### Added
 
