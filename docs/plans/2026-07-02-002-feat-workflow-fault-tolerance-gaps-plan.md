@@ -7,10 +7,25 @@ artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
 execution: code
 date: 2026-07-02
+updated: 2026-07-02
+implementation_status: landed-through-9983f50-plus-phase5
 origin: docs/plans/2026-07-02-001-decision-workflow-fault-tolerance-gaps.md
 ---
 
 # Close Workflow & Fault-Tolerance Gaps - Plan
+
+## Implementation Status
+
+All 5 phases (U1-U14) are landed: Phase 1 `c92d304`, Phase 2 `b6d0351`,
+Phase 3 `a285cd8`, Phase 4 `9983f50`, Phase 5 in the commit immediately
+following this plan update. Every unit's Approach section carries an
+"Amendment" note where implementation diverged from the original plan text
+(4 of 5 phases needed one) — those notes are the accurate record of what
+shipped; the surrounding prose is what was originally proposed. This
+plan's own closing verification (`bash scripts/verify.sh`) is green,
+including a policy-hash/golden-fixture update that adding ZTS509/ZTS510
+mechanically required. Do not use the implementation units below as new
+work — this plan is closed.
 
 ## Goal Capsule
 
@@ -886,23 +901,25 @@ proof coverage ordinary links already get.
 
 **Approach**
 
-- Phases C2 (payload, `analyzePayloadProof`), D (cross-boundary/injection),
-  and E (failure cascade/retry-safety) currently iterate `links.items`
-  only. Add a parallel iteration over `affordance_links.items` in each
-  phase, reusing the same per-phase analysis functions rather than
-  duplicating their logic.
-- Sequence this after Phase 4 (U9-U12) since both touch
-  `system_linker.zig` — implementing U13 after U10 minimizes diff overlap
-  in the same file.
+Landed exactly as planned, plus one factoring decision the plan didn't
+specify: Phase D and Phase E's per-link bodies were inline (only Phase C2
+had a named `analyzePayloadProof` function to reuse directly), so they
+were extracted into `computeCrossBoundaryFlow` and `checkFailureCascade`
+before adding the `affordance_links.items` loops — "reusing the same
+per-phase analysis functions" from the Approach text required those
+functions to exist first. Also added a `linkKindLabel(LinkKind)` helper so
+warnings read "hypermedia affordance target" instead of misreporting
+affordance failures as "serviceCall target" (the two-way ternary that
+predated the `.affordance` link kind).
 
 **Tests**
 
-- A HATEOAS affordance link with an incompatible payload shape now fails
-  the same payload-proof check an equivalent ordinary link would.
-- A HATEOAS affordance link into a non-retry-safe target now fails the
-  same failure-cascade check an equivalent ordinary link would.
-- Existing `affordance_responses_covered` behavior (Phase A2b) is
-  unchanged.
+- `"linkSystem: a resolved affordance gets the same payload proof coverage
+  as an ordinary link"`, `"linkSystem: a durable source calling a
+  non-retry_safe affordance target is a failure cascade"` (both new).
+- `bash scripts/test-examples.sh`: all 35 pre-existing suites still pass
+  (system_linker.zig's existing affordance-resolution tests, unrelated to
+  proof coverage, were unaffected).
 
 #### U14 - Examples and documentation close-out
 
@@ -921,29 +938,49 @@ previously-identified example gaps.
 
 **Files**
 
-- `examples/workflow/` (new example files)
-- `docs/durable-workflows.md`
+- `examples/workflow/scope-orchestrator.ts` (new),
+  `examples/workflow/queued-fanout-orchestrator.ts` (new),
+  `examples/workflow/wait-signal-orchestrator.ts` (extended with a
+  `/schedule` route for `signalAt`), `examples/workflow/saga-orchestrator.ts`
+  (extended with a `/compensation-fails` route)
+- `docs/durable-workflows.md`, `docs/cli.md`
+- `scripts/test-examples.sh` (live-workflow coverage for all four)
+- `packages/tools/tests/fixtures/expert/*.golden.json`, `policy-hash.txt`
+  (not in the original Files list — see note below)
 
 **Approach**
 
-- Add example coverage for: `scope`/`using`/`ensure` usage, `signalAt`
-  (existing `wait-signal-orchestrator.ts` only uses `signal`), queued
-  `fanout` (the `--workflow-queue` + `fanout()` combination has no example
-  today), and a saga-compensation-failure path (an example where the
-  `compensate` thunk itself throws, distinct from the existing
-  `saga-orchestrator.ts` success-then-rollback path).
-- Document: the new `durable dead-runs` CLI (U5-U8), ZTS509 and ZTS510
-  (U3, U10), the `saga.compensationProven` contract property (U11), the
-  corrected `fanout()`/`race()` semantics (U1), and the restart-behavior
-  change from KTD1 (a restarted process now honors standing dead-run
-  records instead of silently forgetting quarantine state).
+Landed as planned, with every new/extended example actually served and
+curled live (not just reasoned through) before being counted done —
+`signalAt` in particular turned out to require an already-parked
+`waitSignal` the same way `signal()` does (confirmed by testing the wrong
+order first and seeing `{"scheduled":false}`), and `fanout()` only takes
+the queued dispatch path inside a durable `run()` at step depth 0, so
+`fanout-orchestrator.ts` itself could never demonstrate queued fanout
+regardless of `--workflow-queue` — both needed a real run to discover, not
+just reading the runtime source. `saga-orchestrator.ts` had zero
+`test-examples.sh` coverage before this unit despite already existing;
+closing that gap came for free alongside adding the compensation-failure
+route since both needed the same harness entry.
+
+**Discovered downstream effect, not in the original plan**: adding ZTS509
+(Phase 2) and ZTS510 (Phase 4) changed the rule registry's policy hash and
+`rule_count` (65→67, `verifier` category 43→45). This plan's own closing
+verification step (`bash scripts/verify.sh`) caught it via `test-expert-golden`'s
+hardcoded golden fixtures and the `policy-hash.txt` baseline — both are
+mechanical, expected consequences of adding any new diagnostic rule, not a
+bug, and both are regenerated by the exact commands `verify.sh` itself
+prints on failure.
 
 **Tests**
 
-- Test expectation: none for docs. New example files must pass
-  `bash scripts/test-examples.sh`, including the new saga-compensation-
-  failure example asserting the compensation failure surfaces as the
-  documented terminal 500.
+- Every new/extended example verified via `zig-out/bin/zigttp serve` +
+  `curl` directly, then wired into `scripts/test-examples.sh`'s
+  `run_live_workflow` harness. Final `bash scripts/test-examples.sh`: 38
+  suites, 38 passed, 0 failed.
+- Final `bash scripts/verify.sh` (this plan's full closing gate, not just
+  the focused per-phase commands used through Phases 1-4): all steps
+  green, including the regenerated policy hash and semantics spec gate.
 
 ---
 

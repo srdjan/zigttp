@@ -502,6 +502,57 @@ fn analyzePayloadProof(
     };
 }
 
+/// Human-readable label for a warning message, keyed on link kind. Used by
+/// every per-link phase (C2/D/E) so a HATEOAS affordance link's warnings
+/// read distinctly from a `fetchSync`/`serviceCall` link's.
+fn linkKindLabel(kind: LinkKind) []const u8 {
+    return switch (kind) {
+        .fetch_url => "fetchSync target",
+        .service_call => "serviceCall target",
+        .affordance => "hypermedia affordance target",
+    };
+}
+
+/// Phase D's cross-boundary data-flow check for one link, factored out so
+/// it runs identically over `links` and `affordance_links` (Phase 5 of the
+/// workflow/fault-tolerance gaps plan) instead of two copies drifting apart.
+fn computeCrossBoundaryFlow(contracts: []const HandlerContract, link: SystemLink) CrossBoundaryFlow {
+    const source_props = contracts[link.source_idx].properties;
+    const target_props = contracts[link.target_idx].properties;
+
+    // input_validated is false when user_input reaches egress without validation
+    const sends_user_input = if (source_props) |p| !p.input_validated else false;
+    const target_validates = if (target_props) |p| p.injection_safe else true;
+
+    return .{
+        .source_idx = link.source_idx,
+        .target_idx = link.target_idx,
+        .sends_user_input = sends_user_input,
+        .target_validates_input = target_validates,
+        .safe = !sends_user_input or target_validates,
+    };
+}
+
+/// Phase E's failure-cascade check for one link: does a durable source call
+/// a target that isn't `retry_safe`? Returns `null` when the link is safe
+/// (or the source isn't durable), so the caller only appends and warns on
+/// an actual finding. Factored out for the same reason as
+/// `computeCrossBoundaryFlow` above.
+fn checkFailureCascade(contracts: []const HandlerContract, link: SystemLink) ?FailureCascade {
+    const source = contracts[link.source_idx];
+    if (!source.durable.used) return null;
+
+    const target_props = contracts[link.target_idx].properties;
+    const target_retry_safe = if (target_props) |p| p.retry_safe else false;
+    if (target_retry_safe) return null;
+
+    return .{
+        .source_idx = link.source_idx,
+        .target_idx = link.target_idx,
+        .severity = .err,
+    };
+}
+
 fn pathParamProvided(call: handler_contract.ServiceCallInfo, name: []const u8) bool {
     return handler_contract.containsString(call.path_params.items(), name);
 }
@@ -943,7 +994,10 @@ pub fn linkSystem(
         try response_coverage.append(allocator, rc);
     }
 
-    // Phase C2: Payload proof for each resolved link
+    // Phase C2: Payload proof for each resolved link. Also runs over
+    // affordance_links (Phase 5 of the workflow/fault-tolerance gaps plan):
+    // a HATEOAS affordance is a real cross-handler call just like fetchSync/
+    // serviceCall, and previously got no payload-compatibility proof at all.
     for (links.items) |link| {
         const proof = try analyzePayloadProof(allocator, contracts, link);
         if (!proof.compatible) {
@@ -952,7 +1006,24 @@ pub fn linkSystem(
                 "{s}: {s} {s} payload proof gap: {s}",
                 .{
                     config.handlers[link.source_idx].path,
-                    if (link.kind == .fetch_url) "fetchSync target" else "serviceCall target",
+                    linkKindLabel(link.kind),
+                    config.handlers[link.target_idx].path,
+                    proof.detail orelse "unknown reason",
+                },
+            );
+            try warnings.append(allocator, msg);
+        }
+        try payload_proofs.append(allocator, proof);
+    }
+    for (affordance_links.items) |link| {
+        const proof = try analyzePayloadProof(allocator, contracts, link);
+        if (!proof.compatible) {
+            const msg = try std.fmt.allocPrint(
+                allocator,
+                "{s}: {s} {s} payload proof gap: {s}",
+                .{
+                    config.handlers[link.source_idx].path,
+                    linkKindLabel(link.kind),
                     config.handlers[link.target_idx].path,
                     proof.detail orelse "unknown reason",
                 },
@@ -962,48 +1033,45 @@ pub fn linkSystem(
         try payload_proofs.append(allocator, proof);
     }
 
-    // Phase D: Cross-boundary data flow analysis (property-based)
+    // Phase D: Cross-boundary data flow analysis (property-based). Also
+    // runs over affordance_links - see Phase C2's comment.
     for (links.items) |link| {
-        const source_props = contracts[link.source_idx].properties;
-        const target_props = contracts[link.target_idx].properties;
-
-        // input_validated is false when user_input reaches egress without validation
-        const sends_user_input = if (source_props) |p| !p.input_validated else false;
-        const target_validates = if (target_props) |p| p.injection_safe else true;
-
-        try cross_boundary_flows.append(allocator, .{
-            .source_idx = link.source_idx,
-            .target_idx = link.target_idx,
-            .sends_user_input = sends_user_input,
-            .target_validates_input = target_validates,
-            .safe = !sends_user_input or target_validates,
-        });
+        try cross_boundary_flows.append(allocator, computeCrossBoundaryFlow(contracts, link));
+    }
+    for (affordance_links.items) |link| {
+        try cross_boundary_flows.append(allocator, computeCrossBoundaryFlow(contracts, link));
     }
 
-    // Phase E: Failure cascade analysis
+    // Phase E: Failure cascade analysis. Also runs over affordance_links -
+    // see Phase C2's comment.
     for (links.items) |link| {
-        const source = contracts[link.source_idx];
-        const target_props = contracts[link.target_idx].properties;
-
-        // Check if source uses durable module
-        if (source.durable.used) {
-            const target_retry_safe = if (target_props) |p| p.retry_safe else false;
-            if (!target_retry_safe) {
-                try failure_cascades.append(allocator, .{
-                    .source_idx = link.source_idx,
-                    .target_idx = link.target_idx,
-                    .severity = .err,
-                });
-                const msg = try std.fmt.allocPrint(
-                    allocator,
-                    "{s} uses durable execution but calls {s} which is not retry_safe",
-                    .{
-                        config.handlers[link.source_idx].path,
-                        config.handlers[link.target_idx].path,
-                    },
-                );
-                try warnings.append(allocator, msg);
-            }
+        if (checkFailureCascade(contracts, link)) |cascade| {
+            try failure_cascades.append(allocator, cascade);
+            const msg = try std.fmt.allocPrint(
+                allocator,
+                "{s} uses durable execution but calls {s} {s} which is not retry_safe",
+                .{
+                    config.handlers[link.source_idx].path,
+                    linkKindLabel(link.kind),
+                    config.handlers[link.target_idx].path,
+                },
+            );
+            try warnings.append(allocator, msg);
+        }
+    }
+    for (affordance_links.items) |link| {
+        if (checkFailureCascade(contracts, link)) |cascade| {
+            try failure_cascades.append(allocator, cascade);
+            const msg = try std.fmt.allocPrint(
+                allocator,
+                "{s} uses durable execution but calls {s} {s} which is not retry_safe",
+                .{
+                    config.handlers[link.source_idx].path,
+                    linkKindLabel(link.kind),
+                    config.handlers[link.target_idx].path,
+                },
+            );
+            try warnings.append(allocator, msg);
         }
     }
 
@@ -1831,6 +1899,125 @@ test "linkSystem: a resource() affordance resolves to a bundle route (HATEOAS)" 
     try std.testing.expectEqual(@as(usize, 1), link.target_idx);
     try std.testing.expectEqualStrings("pay", link.service_name.?);
     try std.testing.expectEqualStrings("/payments/charge", link.matched_route);
+}
+
+test "linkSystem: a resolved affordance gets the same payload proof coverage as an ordinary link" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [2]HandlerContract = undefined;
+
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "orders.ts"));
+    var affordances: std.ArrayList(handler_contract.EmittedAffordance) = .empty;
+    try affordances.append(allocator, .{
+        .rel = try allocator.dupe(u8, "pay"),
+        .method = try allocator.dupe(u8, "POST"),
+        .href = try allocator.dupe(u8, "/payments/charge"),
+    });
+    contracts[0].affordances = affordances;
+
+    // Target serves the route (so the affordance resolves) but declares no
+    // API payload contract for it - the same "no declared responses" gap
+    // an ordinary fetchSync/serviceCall link to this route would also hit.
+    contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "payments.ts"));
+    var behaviors: std.ArrayList(BehaviorPath) = .empty;
+    try behaviors.append(allocator, .{
+        .route_method = try allocator.dupe(u8, "POST"),
+        .route_pattern = try allocator.dupe(u8, "/payments/charge"),
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 1,
+        .is_failure_path = false,
+    });
+    contracts[1].behaviors = behaviors;
+
+    var entries: [2]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://orders.internal") },
+        .{ .name = try allocator.dupe(u8, "payments"), .path = try allocator.dupe(u8, "payments.ts"), .base_url = try allocator.dupe(u8, "https://payments.internal") },
+    };
+    const config = SystemConfig{ .version = 1, .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries) };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+        contracts[1].deinit(allocator);
+    }
+
+    // Before Phase 5, affordance_links never reached analyzePayloadProof at
+    // all, so this list would be empty regardless of the target's payload
+    // contract - a HATEOAS link was a second-class citizen for this proof.
+    try std.testing.expectEqual(@as(usize, 1), analysis.payload_proofs.items.len);
+    try std.testing.expect(!analysis.payload_proofs.items[0].compatible);
+
+    var found_affordance_warning = false;
+    for (analysis.warnings.items) |w| {
+        if (std.mem.indexOf(u8, w, "hypermedia affordance target") != null) found_affordance_warning = true;
+    }
+    try std.testing.expect(found_affordance_warning);
+}
+
+test "linkSystem: a durable source calling a non-retry_safe affordance target is a failure cascade" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [2]HandlerContract = undefined;
+
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "orders.ts"));
+    contracts[0].durable.used = true;
+    var affordances: std.ArrayList(handler_contract.EmittedAffordance) = .empty;
+    try affordances.append(allocator, .{
+        .rel = try allocator.dupe(u8, "pay"),
+        .method = try allocator.dupe(u8, "POST"),
+        .href = try allocator.dupe(u8, "/payments/charge"),
+    });
+    contracts[0].affordances = affordances;
+
+    contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "payments.ts"));
+    var behaviors: std.ArrayList(BehaviorPath) = .empty;
+    try behaviors.append(allocator, .{
+        .route_method = try allocator.dupe(u8, "POST"),
+        .route_pattern = try allocator.dupe(u8, "/payments/charge"),
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 1,
+        .is_failure_path = false,
+    });
+    contracts[1].behaviors = behaviors;
+    contracts[1].properties = .{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = true,
+        .has_egress = true,
+    };
+
+    var entries: [2]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://orders.internal") },
+        .{ .name = try allocator.dupe(u8, "payments"), .path = try allocator.dupe(u8, "payments.ts"), .base_url = try allocator.dupe(u8, "https://payments.internal") },
+    };
+    const config = SystemConfig{ .version = 1, .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries) };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+        contracts[1].deinit(allocator);
+    }
+
+    // Before Phase 5, affordance_links never reached this check either - a
+    // durable handler could call a non-retry_safe target purely through a
+    // HATEOAS link with no failure-cascade warning at all.
+    try std.testing.expectEqual(@as(usize, 1), analysis.failure_cascades.items.len);
+    try std.testing.expectEqual(@as(usize, 0), analysis.failure_cascades.items[0].source_idx);
+    try std.testing.expectEqual(@as(usize, 1), analysis.failure_cascades.items[0].target_idx);
+
+    var found_cascade_warning = false;
+    for (analysis.warnings.items) |w| {
+        if (std.mem.indexOf(u8, w, "hypermedia affordance target") != null and std.mem.indexOf(u8, w, "not retry_safe") != null) found_cascade_warning = true;
+    }
+    try std.testing.expect(found_cascade_warning);
 }
 
 test "linkSystem: a dangling affordance fails the bundle proof" {

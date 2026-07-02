@@ -117,6 +117,19 @@ zigttp workflow-queue discard --durable <dir> <item-id>
 These commands inspect the persisted queue used by `--workflow-queue`; they do
 not operate on the in-memory actor queue from `zigttp:queue`.
 
+Durable-run dead-letter commands (a sibling surface: these inspect runs that
+permanently failed crash recovery, not queued child dispatch):
+
+```bash
+zigttp durable dead-runs list --durable <dir>
+zigttp durable dead-runs show --durable <dir> <id>
+zigttp durable dead-runs replay --durable <dir> <id>
+zigttp durable dead-runs discard --durable <dir> <id>
+```
+
+See [Durable Workflows](durable-workflows.md#durable-run-recovery-and-dead-letters)
+for the quarantine/restart/replay/discard semantics.
+
 ## Analyzer Commands
 
 These commands are listed by `zigttp help --all` from the shared `zigts`

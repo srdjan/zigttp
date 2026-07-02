@@ -8,19 +8,35 @@
 //   zigttp serve examples/workflow/saga-orchestrator.ts \
 //     --system examples/workflow/system.json --durable ./.durable
 //
-//   GET /      -> every step succeeds -> { ok: true }
-//   GET /fail  -> "charge" is declined (402) -> "reserve" is compensated
+//   GET /                  -> every step succeeds -> { ok: true }
+//   GET /fail              -> "charge" is declined (402) -> "reserve" is compensated
+//   GET /compensation-fails -> "charge" is declined AND "reserve"'s own
+//                              compensate call is declined too -> the
+//                              rollback itself fails. There is no automatic
+//                              retry for a failed compensation: it surfaces
+//                              as a terminal 500 requiring manual
+//                              intervention, since the runtime cannot prove
+//                              which side effects were actually undone.
 //
 // Notes: the handler is left without explicit return-type annotations because
 // the step thunks return zigttp:workflow.call results (typed `object`), which
 // the strict Response-return check would reject (strict-ZigTS is advisory). The
-// two branches inline literal charge paths rather than capturing a variable in
-// the step thunks, sidestepping a deep-closure upvalue limitation.
+// three branches inline literal charge paths rather than capturing a variable
+// in the step thunks, sidestepping a deep-closure upvalue limitation.
 import { run } from "zigttp:durable";
 import { call, saga } from "zigttp:workflow";
 
 function handler(req) {
   const key = req.headers.get("idempotency-key") ?? "saga-demo";
+  if (req.url === "/compensation-fails") {
+    return run(key, () =>
+      saga([
+        { name: "reserve", run: () => call("greet", { path: "/reserve" }), compensate: () => call("greet", { path: "/decline" }) },
+        { name: "charge", run: () => call("greet", { path: "/decline" }), compensate: () => call("greet", { path: "/refund" }) },
+        { name: "ship", run: () => call("greet", { path: "/ship" }) },
+      ]),
+    );
+  }
   if (req.url === "/fail") {
     return run(key, () =>
       saga([

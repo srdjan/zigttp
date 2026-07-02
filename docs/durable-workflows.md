@@ -66,6 +66,49 @@ Proof receipts and deploy manifests expose the same status:
   `proofTrace.durable_workflow_fault_covered` explain why a guarantee is
   present or absent.
 
+Two compile-time checks reject a handler outright rather than letting it
+ship with a guarantee that only looks proven:
+
+- **ZTS509** - `workflow.call`, `saga`, `fanout`, or `follow` used inside a
+  `durable.step()` callback. These exports only durably record at step
+  depth 0; nested inside a `step()` they would otherwise silently lose
+  durability at runtime with no error. Move the call to the same
+  `durable.run()` scope it's already recorded in.
+- **ZTS510** - a statically-analyzable `saga([...])` has a non-last step
+  with no `compensate`, the structural signature of a partial-rollback
+  hole: if a later step fails, that step's already-completed side effect
+  is never undone. The last step may omit `compensate` (it never completed
+  if it's the one that failed). A saga built from anything other than a
+  fully static array of step object literals (a spread, a computed step,
+  an externally-referenced step array) is not analyzable and stays
+  unproven rather than guessed at - `contract.json`'s `sagas[].dynamic`
+  reports this, and `sagas[].compensationProven` is only ever `true` for a
+  fully static, fully covered saga.
+
+## Durable-Run Recovery and Dead-Letters
+
+`durable_recovery.zig`'s background scheduler retries an incomplete oplog
+with jittered exponential backoff. A run that fails ten consecutive times is
+quarantined: it stops retrying, and a dead-run record is written next to the
+oplog (never inside it) at `<durable>/dead-runs/<id>.json`, with the run key,
+the last failure reason, and timestamps.
+
+```bash
+zigttp durable dead-runs list --durable ./.durable
+zigttp durable dead-runs show --durable ./.durable <id>
+zigttp durable dead-runs replay --durable ./.durable <id>
+zigttp durable dead-runs discard --durable ./.durable <id>
+```
+
+A restarted process honors a standing dead-run record instead of forgetting
+the quarantine: the in-memory retry count resets on every restart, but the
+persisted record does not, so a quarantined run stays quarantined across
+restarts until an operator acts on it. `replay` deletes the record so the
+next recovery poll retries the run from its untouched oplog; `discard`
+instead rewrites the record with `state: "discarded"` (kept on disk for
+`show`, excluded from `list`) so the run stays permanently unretried without
+silently becoming eligible again on the next poll.
+
 ## Workflow Queue
 
 `zigttp:workflow` dispatches to co-located handlers from `--system <file>`.
@@ -124,8 +167,17 @@ Workflow fixtures live in `examples/workflow/`:
 - `follow-orchestrator.ts` - HAL affordance `follow`.
 - `durable-orchestrator.ts` - durable child call replay.
 - `queued-orchestrator.ts` - queued durable child dispatch.
-- `wait-signal-orchestrator.ts` - signal park/resume.
+- `queued-fanout-orchestrator.ts` - `fanout()` inside a durable `run()` with
+  `--workflow-queue`, so each child call is persisted before it runs, the
+  same crash-tolerance a queued top-level `call()` already gets.
+- `wait-signal-orchestrator.ts` - signal park/resume, including `signalAt`'s
+  scheduled (rather than immediately-delivered) signal.
 - `timeout-orchestrator.ts` - deterministic `stepWithTimeout`.
+- `scope-orchestrator.ts` - `zigttp:scope`'s `using`/`ensure` resource
+  cleanup and `scope`'s named nested-scope unwind-before-continuing.
+- `saga-orchestrator.ts` - reverse-order saga compensation, including the
+  `/compensation-fails` path where the `compensate` thunk itself fails: a
+  terminal 500 requiring manual intervention, with no automatic retry.
 
 For a guided crash drill, see
 [First Durable Workflow](tutorials/first-durable-workflow.md).

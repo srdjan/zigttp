@@ -157,16 +157,37 @@ run_live_workflow() {
                 expect_contains "$body" '"queued":true' && expect_contains "$body" '"path":"/queued"' && ok=0
                 ;;
             workflow/wait-signal-orchestrator.ts)
-                local pending signaled resumed
+                local pending signaled resumed pending2 scheduled resumed2
                 pending=$(curl --max-time 5 -fsS -H 'Idempotency-Key: approval-demo' "http://127.0.0.1:$LIVE_PORT/wait" || true)
                 signaled=$(curl --max-time 5 -fsS -H 'Idempotency-Key: approval-demo' "http://127.0.0.1:$LIVE_PORT/signal" || true)
                 resumed=$(curl --max-time 5 -fsS -H 'Idempotency-Key: approval-demo' "http://127.0.0.1:$LIVE_PORT/wait" || true)
-                expect_contains "$pending" '"type":"signal"' && expect_contains "$signaled" '"delivered":true' && expect_contains "$resumed" '"approved":true' && ok=0
+                pending2=$(curl --max-time 5 -fsS -H 'Idempotency-Key: schedule-demo' "http://127.0.0.1:$LIVE_PORT/wait" || true)
+                scheduled=$(curl --max-time 5 -fsS -H 'Idempotency-Key: schedule-demo' "http://127.0.0.1:$LIVE_PORT/schedule" || true)
+                resumed2=$(curl --max-time 5 -fsS -H 'Idempotency-Key: schedule-demo' "http://127.0.0.1:$LIVE_PORT/wait" || true)
+                expect_contains "$pending" '"type":"signal"' && expect_contains "$signaled" '"delivered":true' && expect_contains "$resumed" '"approved":true' \
+                    && expect_contains "$pending2" '"type":"signal"' && expect_contains "$scheduled" '"scheduled":true' && expect_contains "$resumed2" '"approved":true' && ok=0
                 ;;
             workflow/timeout-orchestrator.ts)
                 local body
                 body=$(curl --max-time 5 -fsS -H 'Idempotency-Key: timeout-demo' "http://127.0.0.1:$LIVE_PORT/" || true)
                 expect_contains "$body" '"ok":false' && expect_contains "$body" '"error":"timeout"' && ok=0
+                ;;
+            workflow/scope-orchestrator.ts)
+                local body
+                body=$(curl --max-time 5 -fsS "http://127.0.0.1:$LIVE_PORT/" || true)
+                expect_contains "$body" '"name":"primary"' && expect_contains "$body" '"cached":"cache-entry"' && ok=0
+                ;;
+            workflow/queued-fanout-orchestrator.ts)
+                local body
+                body=$(curl --max-time 5 -fsS -H 'Idempotency-Key: queued-fanout-demo' "http://127.0.0.1:$LIVE_PORT/" || true)
+                expect_contains "$body" '"n":2' && expect_contains "$body" '"path":"/a"' && expect_contains "$body" '"path":"/b"' && ok=0
+                ;;
+            workflow/saga-orchestrator.ts)
+                local success failed compfail
+                success=$(curl --max-time 5 -fsS -H 'Idempotency-Key: saga-demo-ok' "http://127.0.0.1:$LIVE_PORT/" || true)
+                failed=$(curl --max-time 5 -sS -H 'Idempotency-Key: saga-demo-fail' "http://127.0.0.1:$LIVE_PORT/fail" || true)
+                compfail=$(curl --max-time 5 -sS -H 'Idempotency-Key: saga-demo-compfail' "http://127.0.0.1:$LIVE_PORT/compensation-fails" || true)
+                expect_contains "$success" '"ok":true' && expect_contains "$failed" '"compensated":true' && expect_contains "$compfail" '"compensationFailed":"reserve"' && ok=0
                 ;;
         esac
     fi
@@ -259,6 +280,9 @@ run_live_workflow "workflow/durable-orchestrator.ts" "examples/workflow/durable-
 run_live_workflow "workflow/queued-orchestrator.ts" "examples/workflow/queued-orchestrator.ts" --system examples/workflow/system.json --durable "$TMP_ROOT/durable-queued" --workflow-queue
 run_live_workflow "workflow/wait-signal-orchestrator.ts" "examples/workflow/wait-signal-orchestrator.ts" --durable "$TMP_ROOT/durable-signal"
 run_live_workflow "workflow/timeout-orchestrator.ts" "examples/workflow/timeout-orchestrator.ts" --durable "$TMP_ROOT/durable-timeout"
+run_live_workflow "workflow/scope-orchestrator.ts" "examples/workflow/scope-orchestrator.ts"
+run_live_workflow "workflow/queued-fanout-orchestrator.ts" "examples/workflow/queued-fanout-orchestrator.ts" --system examples/workflow/system.json --durable "$TMP_ROOT/durable-queued-fanout" --workflow-queue
+run_live_workflow "workflow/saga-orchestrator.ts" "examples/workflow/saga-orchestrator.ts" --system examples/workflow/system.json --durable "$TMP_ROOT/durable-saga"
 run_workflow_queue_dead_letter_fixture
 
 # `zigttp check` writes a zigttp.d.ts typings stub into the cwd; drop it.
