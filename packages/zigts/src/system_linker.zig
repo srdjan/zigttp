@@ -998,80 +998,51 @@ pub fn linkSystem(
     // affordance_links (Phase 5 of the workflow/fault-tolerance gaps plan):
     // a HATEOAS affordance is a real cross-handler call just like fetchSync/
     // serviceCall, and previously got no payload-compatibility proof at all.
-    for (links.items) |link| {
-        const proof = try analyzePayloadProof(allocator, contracts, link);
-        if (!proof.compatible) {
-            const msg = try std.fmt.allocPrint(
-                allocator,
-                "{s}: {s} {s} payload proof gap: {s}",
-                .{
-                    config.handlers[link.source_idx].path,
-                    linkKindLabel(link.kind),
-                    config.handlers[link.target_idx].path,
-                    proof.detail orelse "unknown reason",
-                },
-            );
-            try warnings.append(allocator, msg);
+    for ([_][]const SystemLink{ links.items, affordance_links.items }) |link_list| {
+        for (link_list) |link| {
+            const proof = try analyzePayloadProof(allocator, contracts, link);
+            if (!proof.compatible) {
+                const msg = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}: {s} {s} payload proof gap: {s}",
+                    .{
+                        config.handlers[link.source_idx].path,
+                        linkKindLabel(link.kind),
+                        config.handlers[link.target_idx].path,
+                        proof.detail orelse "unknown reason",
+                    },
+                );
+                try warnings.append(allocator, msg);
+            }
+            try payload_proofs.append(allocator, proof);
         }
-        try payload_proofs.append(allocator, proof);
-    }
-    for (affordance_links.items) |link| {
-        const proof = try analyzePayloadProof(allocator, contracts, link);
-        if (!proof.compatible) {
-            const msg = try std.fmt.allocPrint(
-                allocator,
-                "{s}: {s} {s} payload proof gap: {s}",
-                .{
-                    config.handlers[link.source_idx].path,
-                    linkKindLabel(link.kind),
-                    config.handlers[link.target_idx].path,
-                    proof.detail orelse "unknown reason",
-                },
-            );
-            try warnings.append(allocator, msg);
-        }
-        try payload_proofs.append(allocator, proof);
     }
 
     // Phase D: Cross-boundary data flow analysis (property-based). Also
     // runs over affordance_links - see Phase C2's comment.
-    for (links.items) |link| {
-        try cross_boundary_flows.append(allocator, computeCrossBoundaryFlow(contracts, link));
-    }
-    for (affordance_links.items) |link| {
-        try cross_boundary_flows.append(allocator, computeCrossBoundaryFlow(contracts, link));
+    for ([_][]const SystemLink{ links.items, affordance_links.items }) |link_list| {
+        for (link_list) |link| {
+            try cross_boundary_flows.append(allocator, computeCrossBoundaryFlow(contracts, link));
+        }
     }
 
     // Phase E: Failure cascade analysis. Also runs over affordance_links -
     // see Phase C2's comment.
-    for (links.items) |link| {
-        if (checkFailureCascade(contracts, link)) |cascade| {
-            try failure_cascades.append(allocator, cascade);
-            const msg = try std.fmt.allocPrint(
-                allocator,
-                "{s} uses durable execution but calls {s} {s} which is not retry_safe",
-                .{
-                    config.handlers[link.source_idx].path,
-                    linkKindLabel(link.kind),
-                    config.handlers[link.target_idx].path,
-                },
-            );
-            try warnings.append(allocator, msg);
-        }
-    }
-    for (affordance_links.items) |link| {
-        if (checkFailureCascade(contracts, link)) |cascade| {
-            try failure_cascades.append(allocator, cascade);
-            const msg = try std.fmt.allocPrint(
-                allocator,
-                "{s} uses durable execution but calls {s} {s} which is not retry_safe",
-                .{
-                    config.handlers[link.source_idx].path,
-                    linkKindLabel(link.kind),
-                    config.handlers[link.target_idx].path,
-                },
-            );
-            try warnings.append(allocator, msg);
+    for ([_][]const SystemLink{ links.items, affordance_links.items }) |link_list| {
+        for (link_list) |link| {
+            if (checkFailureCascade(contracts, link)) |cascade| {
+                try failure_cascades.append(allocator, cascade);
+                const msg = try std.fmt.allocPrint(
+                    allocator,
+                    "{s} uses durable execution but calls {s} {s} which is not retry_safe",
+                    .{
+                        config.handlers[link.source_idx].path,
+                        linkKindLabel(link.kind),
+                        config.handlers[link.target_idx].path,
+                    },
+                );
+                try warnings.append(allocator, msg);
+            }
         }
     }
 

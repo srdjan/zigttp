@@ -44,6 +44,12 @@ pub const RetryTracker = struct {
     const Entry = struct {
         consecutive_failures: u32 = 0,
         next_attempt_ms: i64 = 0,
+        /// True once a dead-run record write has succeeded for the current
+        /// quarantine event. Only then can a later "no record on disk" be
+        /// safely read as "an operator ran `durable dead-runs replay`"
+        /// rather than "the write failed and must be retried" - see
+        /// `hasConfirmedQuarantineRecord`.
+        record_confirmed: bool = false,
     };
 
     allocator: std.mem.Allocator,
@@ -74,6 +80,25 @@ pub const RetryTracker = struct {
     pub fn isQuarantined(self: *const RetryTracker, name: []const u8) bool {
         const entry = self.map.get(name) orelse return false;
         return entry.consecutive_failures >= quarantine_threshold;
+    }
+
+    /// True only when `name` is quarantined AND this process has confirmed
+    /// a successful dead-run record write for the *current* quarantine
+    /// event. `writeDeadRunRecord` is best-effort - an I/O error leaves no
+    /// record on disk - so without this distinction the gate cannot tell
+    /// "an operator replayed this externally" (record legitimately gone)
+    /// apart from "the write failed" (record never existed), and would
+    /// silently un-quarantine a run whose quarantine was never actually
+    /// persisted.
+    pub fn hasConfirmedQuarantineRecord(self: *const RetryTracker, name: []const u8) bool {
+        const entry = self.map.get(name) orelse return false;
+        return entry.consecutive_failures >= quarantine_threshold and entry.record_confirmed;
+    }
+
+    /// Marks that a dead-run record write for `name`'s current quarantine
+    /// event succeeded. No-op if `name` has no tracked entry.
+    pub fn markRecordConfirmed(self: *RetryTracker, name: []const u8) void {
+        if (self.map.getPtr(name)) |entry| entry.record_confirmed = true;
     }
 
     /// Records a failure. Returns `true` exactly on the call that first
@@ -186,12 +211,29 @@ pub fn recoverIncompleteOplogsTracked(
             if (is_dead) continue;
         }
         if (tracker) |t| {
-            // No persisted record, but this process's own map still thinks
-            // it's quarantined: an operator ran `durable dead-runs replay`
-            // in a separate process, which can only delete the file - it
-            // cannot reach into this process's in-memory RetryTracker.
-            // Resync now that the record backing that quarantine is gone.
-            if (t.isQuarantined(filename)) t.clear(filename);
+            if (t.isQuarantined(filename)) {
+                if (t.hasConfirmedQuarantineRecord(filename)) {
+                    // This process itself confirmed a successful write for
+                    // the current quarantine event, so "no record now" can
+                    // only mean an operator ran `durable dead-runs replay`
+                    // in a separate process (which can only delete the
+                    // file - it cannot reach into this process's in-memory
+                    // RetryTracker). Resync now that the record is gone.
+                    t.clear(filename);
+                } else {
+                    // No record, and this process never confirmed writing
+                    // one for the current quarantine event: the original
+                    // write failed (or hasn't happened yet). Retry the
+                    // write instead of treating "no record" as "replayed" -
+                    // silently un-quarantining a run whose quarantine was
+                    // never actually persisted would defeat the whole
+                    // point of this feature.
+                    if (writeDeadRunRecord(allocator, oplog_dir, filename, "", "requeued: dead-run record write retried after an earlier attempt failed")) {
+                        t.markRecordConfirmed(filename);
+                    }
+                    continue;
+                }
+            }
             if (!t.shouldAttempt(filename, trace.unixMillis())) continue;
         }
 
@@ -200,7 +242,7 @@ pub fn recoverIncompleteOplogsTracked(
             if (!builtin.is_test) std.log.err("Failed to read oplog '{s}': {}", .{ full_path, err });
             if (tracker) |t| {
                 if (t.recordFailure(filename, trace.unixMillis())) {
-                    writeDeadRunRecord(allocator, oplog_dir, filename, "", @errorName(err));
+                    if (writeDeadRunRecord(allocator, oplog_dir, filename, "", @errorName(err))) t.markRecordConfirmed(filename);
                 }
             }
             continue;
@@ -217,7 +259,7 @@ pub fn recoverIncompleteOplogsTracked(
             if (!builtin.is_test) std.log.err("Failed to parse oplog '{s}': {}", .{ full_path, err });
             if (tracker) |t| {
                 if (t.recordFailure(filename, trace.unixMillis())) {
-                    writeDeadRunRecord(allocator, oplog_dir, filename, "", @errorName(err));
+                    if (writeDeadRunRecord(allocator, oplog_dir, filename, "", @errorName(err))) t.markRecordConfirmed(filename);
                 }
             }
             continue;
@@ -272,7 +314,7 @@ pub fn recoverIncompleteOplogsTracked(
             .pending => {},
             .failed => if (tracker) |t| {
                 if (t.recordFailure(filename, trace.unixMillis())) {
-                    writeDeadRunRecord(allocator, oplog_dir, filename, run_key, recover_err_name);
+                    if (writeDeadRunRecord(allocator, oplog_dir, filename, run_key, recover_err_name)) t.markRecordConfirmed(filename);
                 }
             },
         }
@@ -293,13 +335,16 @@ pub fn recoverIncompleteOplogsTracked(
 /// already quarantined in memory, will not happen on its own; an operator
 /// would need to notice via logs instead). This is a narrower failure mode
 /// than the gap this feature closes, not a new one.
+/// Returns `true` when the record was actually persisted, so callers can
+/// track confirmation via `RetryTracker.markRecordConfirmed` - a swallowed
+/// failure here must not look like a successful quarantine to the gate.
 fn writeDeadRunRecord(
     allocator: std.mem.Allocator,
     oplog_dir: []const u8,
     filename: []const u8,
     run_key: []const u8,
     reason: []const u8,
-) void {
+) bool {
     const id = dead_runs.deadRunId(filename) orelse filename;
     dead_runs.writeDeadRun(
         allocator,
@@ -312,7 +357,9 @@ fn writeDeadRunRecord(
         RetryTracker.quarantine_threshold,
     ) catch |err| {
         if (!builtin.is_test) std.log.err("Failed to persist dead-run record for '{s}': {}", .{ filename, err });
+        return false;
     };
+    return true;
 }
 
 /// True only when a scan of the durable signal store succeeded and found no

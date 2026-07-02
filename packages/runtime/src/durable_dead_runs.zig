@@ -22,9 +22,9 @@
 const std = @import("std");
 const zq = @import("zigts");
 const durable_store = @import("durable_store.zig");
+const atomic_file = @import("atomic_file.zig");
 
 const Allocator = std.mem.Allocator;
-const writeAllChecked = zq.trace.writeAllChecked;
 const appendEscaped = durable_store.appendEscaped;
 
 const oplog_suffix = ".jsonl";
@@ -50,10 +50,12 @@ const DeadRunPaths = struct {
     allocator: Allocator,
     dir: []u8,
     file: []u8,
+    lock_file: []u8,
 
     fn deinit(self: *DeadRunPaths) void {
         self.allocator.free(self.dir);
         self.allocator.free(self.file);
+        self.allocator.free(self.lock_file);
         self.* = undefined;
     }
 };
@@ -66,17 +68,47 @@ fn deadRunPaths(allocator: Allocator, durable_dir: []const u8, id: []const u8) !
     defer allocator.free(file_name);
     const file = try std.fs.path.join(allocator, &.{ dir, file_name });
     errdefer allocator.free(file);
-    return .{ .allocator = allocator, .dir = dir, .file = file };
+    const lock_name = try std.fmt.allocPrint(allocator, "{s}.lock", .{id});
+    defer allocator.free(lock_name);
+    const lock_file = try std.fs.path.join(allocator, &.{ dir, lock_name });
+    errdefer allocator.free(lock_file);
+    return .{ .allocator = allocator, .dir = dir, .file = file, .lock_file = lock_file };
 }
 
-fn ensureDir(path: []const u8) !void {
-    const z = try std.heap.c_allocator.dupeZ(u8, path);
-    defer std.heap.c_allocator.free(z);
-    switch (std.posix.errno(std.posix.system.mkdir(z, 0o700))) {
-        .SUCCESS, .EXIST => {},
-        else => return error.MakeDirFailed,
+/// Serializes `writeDeadRun`/`replayDeadRun`/`discardDeadRun` against each
+/// other for the same id, across processes. Without this, two concurrent
+/// CLI invocations (or a CLI invocation racing the server's own write) each
+/// do an unlocked read-check-act sequence, so one operator's reported
+/// success can be silently reversed by the other. The lock lives in a
+/// stable sidecar file that replay/discard never rename or delete - an
+/// `flock` on the record file itself would have a gap here, since
+/// `discardDeadRun`'s atomic rename swaps in a new inode that a
+/// concurrently-held lock on the old fd would no longer protect.
+const RecordLock = struct {
+    fd: std.c.fd_t,
+
+    fn acquire(dir: []const u8, lock_path: []const u8) !RecordLock {
+        try atomic_file.ensureDir(dir);
+        const z = try std.heap.c_allocator.dupeZ(u8, lock_path);
+        defer std.heap.c_allocator.free(z);
+        const fd = std.posix.openatZ(
+            std.posix.AT.FDCWD,
+            z,
+            .{ .ACCMODE = .WRONLY, .CREAT = true },
+            0o600,
+        ) catch return error.LockOpenFailed;
+        if (std.c.flock(fd, std.posix.LOCK.EX) != 0) {
+            std.Io.Threaded.closeFd(fd);
+            return error.LockFailed;
+        }
+        return .{ .fd = fd };
     }
-}
+
+    fn release(self: *RecordLock) void {
+        _ = std.c.flock(self.fd, std.posix.LOCK.UN);
+        std.Io.Threaded.closeFd(self.fd);
+    }
+};
 
 fn fileExists(path: []const u8) bool {
     const z = std.heap.c_allocator.dupeZ(u8, path) catch return false;
@@ -84,52 +116,15 @@ fn fileExists(path: []const u8) bool {
     return std.c.access(z, std.c.F_OK) == 0;
 }
 
-fn renamePath(src: []const u8, dst: []const u8) !void {
-    const src_z = try std.heap.c_allocator.dupeZ(u8, src);
-    defer std.heap.c_allocator.free(src_z);
-    const dst_z = try std.heap.c_allocator.dupeZ(u8, dst);
-    defer std.heap.c_allocator.free(dst_z);
-    if (std.c.rename(src_z, dst_z) != 0) return error.RenameFailed;
-}
-
-fn deleteIfExists(path: []const u8) void {
-    const z = std.heap.c_allocator.dupeZ(u8, path) catch return;
-    defer std.heap.c_allocator.free(z);
-    _ = std.c.unlink(z);
-}
-
-/// Like `deleteIfExists`, but for callers (e.g. `replayDeadRun`) that must
-/// not report success while the record is still on disk - a swallowed
-/// unlink failure here would leave `hasDeadRun` seeing the file on the very
-/// next recovery poll even though the CLI already told the operator replay
-/// succeeded.
+/// Like `atomic_file.deleteIfExists`, but for callers (e.g. `replayDeadRun`)
+/// that must not report success while the record is still on disk - a
+/// swallowed unlink failure here would leave `hasDeadRun` seeing the file on
+/// the very next recovery poll even though the CLI already told the operator
+/// replay succeeded.
 fn deleteChecked(path: []const u8) !void {
     const z = try std.heap.c_allocator.dupeZ(u8, path);
     defer std.heap.c_allocator.free(z);
     if (std.c.unlink(z) != 0) return error.DeleteFailed;
-}
-
-fn writeFileAtomic(allocator: Allocator, final_path: []const u8, bytes: []const u8) !void {
-    const tmp_path = try std.fmt.allocPrint(
-        allocator,
-        "{s}.tmp-{d}-{x}",
-        .{ final_path, std.c.getpid(), @intFromPtr(bytes.ptr) },
-    );
-    defer allocator.free(tmp_path);
-    errdefer deleteIfExists(tmp_path);
-
-    const tmp_z = try allocator.dupeZ(u8, tmp_path);
-    defer allocator.free(tmp_z);
-    const fd = try std.posix.openatZ(
-        std.posix.AT.FDCWD,
-        tmp_z,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
-        0o600,
-    );
-    defer std.Io.Threaded.closeFd(fd);
-    try writeAllChecked(fd, bytes);
-    if (std.c.fsync(fd) != 0) return error.FileWriteFailed;
-    try renamePath(tmp_path, final_path);
 }
 
 /// True if a dead-run record exists for `id`, regardless of state
@@ -190,7 +185,8 @@ pub fn writeDeadRun(
 ) !void {
     var paths = try deadRunPaths(allocator, durable_dir, id);
     defer paths.deinit();
-    try ensureDir(paths.dir);
+    var lock = try RecordLock.acquire(paths.dir, paths.lock_file);
+    defer lock.release();
     const payload = try encodeRecord(
         allocator,
         "quarantined",
@@ -201,7 +197,7 @@ pub fn writeDeadRun(
         consecutive_failures,
     );
     defer allocator.free(payload);
-    try writeFileAtomic(allocator, paths.file, payload);
+    try atomic_file.writeFileAtomic(allocator, paths.file, payload);
 }
 
 /// Raw JSON for a dead-run record, or `null` if none exists. Used by `show`.
@@ -283,6 +279,8 @@ fn lessThanBytes(_: void, lhs: []u8, rhs: []u8) bool {
 pub fn replayDeadRun(allocator: Allocator, durable_dir: []const u8, id: []const u8) !void {
     var paths = try deadRunPaths(allocator, durable_dir, id);
     defer paths.deinit();
+    var lock = try RecordLock.acquire(paths.dir, paths.lock_file);
+    defer lock.release();
     const state = (try readState(allocator, paths.file)) orelse return error.DeadRunMissing;
     defer allocator.free(state);
     if (!std.mem.eql(u8, state, "quarantined")) return error.DeadRunAlreadyDiscarded;
@@ -295,6 +293,8 @@ pub fn replayDeadRun(allocator: Allocator, durable_dir: []const u8, id: []const 
 pub fn discardDeadRun(allocator: Allocator, durable_dir: []const u8, id: []const u8) !void {
     var paths = try deadRunPaths(allocator, durable_dir, id);
     defer paths.deinit();
+    var lock = try RecordLock.acquire(paths.dir, paths.lock_file);
+    defer lock.release();
     const source = if (fileExists(paths.file))
         try zq.file_io.readFile(allocator, paths.file, 64 * 1024)
     else
@@ -344,7 +344,7 @@ pub fn discardDeadRun(allocator: Allocator, durable_dir: []const u8, id: []const
         consecutive_failures,
     );
     defer allocator.free(payload);
-    try writeFileAtomic(allocator, paths.file, payload);
+    try atomic_file.writeFileAtomic(allocator, paths.file, payload);
 }
 
 test "deadRunId strips the .jsonl suffix" {
@@ -379,6 +379,47 @@ test "write, list, show, replay, discard round-trip" {
     try replayDeadRun(allocator, durable_dir, "durable-abc");
     try std.testing.expect(!(try hasDeadRun(allocator, durable_dir, "durable-abc")));
     try std.testing.expectError(error.DeadRunMissing, replayDeadRun(allocator, durable_dir, "durable-abc"));
+}
+
+test "RecordLock provides mutual exclusion for the same id across threads" {
+    // Regression for a bug caught in code review: replayDeadRun and
+    // discardDeadRun used to be plain unlocked read-check-act sequences, so
+    // two concurrent CLI invocations against the same id could interleave
+    // and silently reverse each other's reported success. This drives
+    // RecordLock directly (rather than replay/discard) so the assertion is
+    // about the lock's own mutual-exclusion property, not just a lucky
+    // non-interleaved outcome.
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const durable_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(durable_dir);
+
+    var paths = try deadRunPaths(allocator, durable_dir, "durable-lock-test");
+    defer paths.deinit();
+
+    var lock = try RecordLock.acquire(paths.dir, paths.lock_file);
+
+    var released = std.atomic.Value(bool).init(false);
+    var acquired_after_release = std.atomic.Value(bool).init(false);
+
+    const Waiter = struct {
+        fn run(dir: []const u8, lock_path: []const u8, released_flag: *std.atomic.Value(bool), result_flag: *std.atomic.Value(bool)) void {
+            var waiter_lock = RecordLock.acquire(dir, lock_path) catch return;
+            // If this blocking acquire returns before the holder released,
+            // the lock failed to serialize the two sides.
+            result_flag.store(released_flag.load(.seq_cst), .seq_cst);
+            waiter_lock.release();
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, Waiter.run, .{ paths.dir, paths.lock_file, &released, &acquired_after_release });
+    std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
+    released.store(true, .seq_cst);
+    lock.release();
+    thread.join();
+
+    try std.testing.expect(acquired_after_release.load(.seq_cst));
 }
 
 test "discard keeps the record but stops it from listing or replaying" {

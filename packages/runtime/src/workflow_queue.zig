@@ -2,12 +2,12 @@ const std = @import("std");
 const zq = @import("zigts");
 const http_types = @import("http_types.zig");
 const codec = @import("workflow_queue_envelope.zig");
+const atomic_file = @import("atomic_file.zig");
 
 const Allocator = std.mem.Allocator;
 const HttpHeader = http_types.HttpHeader;
 const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
-const writeAllChecked = zq.trace.writeAllChecked;
 
 /// Re-exported so external callers (e.g. runtime_workflow.zig) that already
 /// spell this as `workflow_queue.QueuedRequest` keep working unchanged.
@@ -116,7 +116,7 @@ pub fn enqueueRequest(
         .updated_at_ms = now_ms,
     });
     defer allocator.free(payload);
-    try writeFileAtomic(allocator, p.pending_file, payload);
+    try atomic_file.writeFileAtomic(allocator, p.pending_file, payload);
 }
 
 pub fn readResult(allocator: Allocator, durable_dir: []const u8, id: []const u8) !?[]u8 {
@@ -222,15 +222,15 @@ pub fn replayDead(allocator: Allocator, durable_dir: []const u8, id: []const u8)
     });
     defer allocator.free(pending_payload);
 
-    try writeFileAtomic(allocator, p.pending_file, pending_payload);
-    deleteIfExists(p.dead_file);
+    try atomic_file.writeFileAtomic(allocator, p.pending_file, pending_payload);
+    atomic_file.deleteIfExists(p.dead_file);
 }
 
 pub fn discardDead(allocator: Allocator, durable_dir: []const u8, id: []const u8) !void {
     var p = try queuePaths(allocator, durable_dir, id);
     defer p.deinit();
     if (!(try fileExists(p.dead_file))) return error.WorkflowQueueDeadLetterMissing;
-    deleteIfExists(p.dead_file);
+    atomic_file.deleteIfExists(p.dead_file);
 }
 
 pub fn tryClaim(
@@ -258,7 +258,7 @@ pub fn tryClaim(
             return .{ .dead = dead };
         }
         allocator.free(dead);
-        deleteIfExists(p.dead_file);
+        atomic_file.deleteIfExists(p.dead_file);
     }
 
     var owner_buf: [32]u8 = undefined;
@@ -326,7 +326,7 @@ fn handleLeasedFile(allocator: Allocator, p: *const QueuePaths, now_ms: i64, lea
         errdefer result.deinit(allocator);
         switch (result) {
             .claimed => try renamePath(reclaim_file, p.leased_file),
-            .dead => deleteIfExists(reclaim_file),
+            .dead => atomic_file.deleteIfExists(reclaim_file),
             .done, .busy => {},
         }
         return result;
@@ -388,9 +388,9 @@ pub fn completeResponse(
 
     const payload = try codec.responseEnvelopeJson(allocator, response);
     defer allocator.free(payload);
-    try writeFileAtomic(allocator, p.done_file, payload);
-    deleteIfExists(p.pending_file);
-    deleteIfExists(p.leased_file);
+    try atomic_file.writeFileAtomic(allocator, p.done_file, payload);
+    atomic_file.deleteIfExists(p.pending_file);
+    atomic_file.deleteIfExists(p.leased_file);
 }
 
 pub fn completeError(
@@ -406,9 +406,9 @@ pub fn completeError(
 
     const payload = try codec.errorEnvelopeJson(allocator, code, detail);
     defer allocator.free(payload);
-    try writeFileAtomic(allocator, p.done_file, payload);
-    deleteIfExists(p.pending_file);
-    deleteIfExists(p.leased_file);
+    try atomic_file.writeFileAtomic(allocator, p.done_file, payload);
+    atomic_file.deleteIfExists(p.pending_file);
+    atomic_file.deleteIfExists(p.leased_file);
 }
 
 pub fn markDead(
@@ -423,9 +423,9 @@ pub fn markDead(
 
     const payload = try codec.deadEnvelopeJson(allocator, reason, 0, reason, zq.trace.unixMillis(), "operator", null);
     defer allocator.free(payload);
-    try writeFileAtomic(allocator, p.dead_file, payload);
-    deleteIfExists(p.pending_file);
-    deleteIfExists(p.leased_file);
+    try atomic_file.writeFileAtomic(allocator, p.dead_file, payload);
+    atomic_file.deleteIfExists(p.pending_file);
+    atomic_file.deleteIfExists(p.leased_file);
 }
 
 fn claimLeasedFile(
@@ -449,7 +449,7 @@ fn claimLeasedFile(
             "leased",
             null,
         );
-        deleteIfExists(leased_file);
+        atomic_file.deleteIfExists(leased_file);
         return dead;
     };
     errdefer request.deinit();
@@ -468,7 +468,7 @@ fn claimLeasedFile(
             envelope,
         );
         request.deinit();
-        deleteIfExists(leased_file);
+        atomic_file.deleteIfExists(leased_file);
         return dead;
     }
 
@@ -481,7 +481,7 @@ fn claimLeasedFile(
         .last_error = request.last_error,
     });
     defer allocator.free(payload);
-    try writeFileAtomic(allocator, leased_file, payload);
+    try atomic_file.writeFileAtomic(allocator, leased_file, payload);
     request.attempts = next_attempts;
     request.lease_until_ms = lease_until_ms;
     if (request.lease_owner) |old_owner| {
@@ -505,7 +505,7 @@ fn writeDeadLetter(
 ) !ClaimResult {
     const payload = try codec.deadEnvelopeJson(allocator, reason, attempts, last_error, dead_at_ms, source, request_json);
     errdefer allocator.free(payload);
-    try writeFileAtomic(allocator, dead_file, payload);
+    try atomic_file.writeFileAtomic(allocator, dead_file, payload);
     return .{ .dead = payload };
 }
 
@@ -557,20 +557,11 @@ fn queuePaths(allocator: Allocator, durable_dir: []const u8, id: []const u8) !Qu
 }
 
 fn ensureQueueDirs(p: *const QueuePaths) !void {
-    try ensureDir(p.root);
-    try ensureDir(p.pending_dir);
-    try ensureDir(p.leased_dir);
-    try ensureDir(p.done_dir);
-    try ensureDir(p.dead_dir);
-}
-
-fn ensureDir(path: []const u8) !void {
-    const z = try std.heap.c_allocator.dupeZ(u8, path);
-    defer std.heap.c_allocator.free(z);
-    switch (std.posix.errno(std.posix.system.mkdir(z, 0o700))) {
-        .SUCCESS, .EXIST => {},
-        else => return error.MakeDirFailed,
-    }
+    try atomic_file.ensureDir(p.root);
+    try atomic_file.ensureDir(p.pending_dir);
+    try atomic_file.ensureDir(p.leased_dir);
+    try atomic_file.ensureDir(p.done_dir);
+    try atomic_file.ensureDir(p.dead_dir);
 }
 
 fn readDoneFile(allocator: Allocator, done_file: []const u8) !?[]u8 {
@@ -602,35 +593,6 @@ fn renamePath(src: []const u8, dst: []const u8) !void {
             else => return error.RenameFailed,
         }
     }
-}
-
-fn deleteIfExists(path: []const u8) void {
-    const z = std.heap.c_allocator.dupeZ(u8, path) catch return;
-    defer std.heap.c_allocator.free(z);
-    _ = std.c.unlink(z);
-}
-
-fn writeFileAtomic(allocator: Allocator, final_path: []const u8, bytes: []const u8) !void {
-    const tmp_path = try std.fmt.allocPrint(
-        allocator,
-        "{s}.tmp-{d}-{x}",
-        .{ final_path, std.c.getpid(), @intFromPtr(bytes.ptr) },
-    );
-    defer allocator.free(tmp_path);
-    errdefer deleteIfExists(tmp_path);
-
-    const tmp_z = try allocator.dupeZ(u8, tmp_path);
-    defer allocator.free(tmp_z);
-    const fd = try std.posix.openatZ(
-        std.posix.AT.FDCWD,
-        tmp_z,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
-        0o600,
-    );
-    defer std.Io.Threaded.closeFd(fd);
-    try writeAllChecked(fd, bytes);
-    if (std.c.fsync(fd) != 0) return error.FileWriteFailed;
-    try renamePath(tmp_path, final_path);
 }
 
 test "workflow queue claim completes with durable result" {
@@ -712,7 +674,7 @@ test "workflow queue files are private when created atomically" {
     var p = try queuePaths(allocator, durable_dir, "item-private");
     defer p.deinit();
     try ensureQueueDirs(&p);
-    try writeFileAtomic(allocator, p.pending_file, "{\"target\":\"worker\"}");
+    try atomic_file.writeFileAtomic(allocator, p.pending_file, "{\"target\":\"worker\"}");
 
     const path_z = try allocator.dupeZ(u8, p.pending_file);
     defer allocator.free(path_z);
@@ -842,7 +804,7 @@ test "workflow queue corrupt pending moves to non-replayable dead letter" {
     var p = try queuePaths(allocator, durable_dir, "item-corrupt-pending");
     defer p.deinit();
     try ensureQueueDirs(&p);
-    try writeFileAtomic(allocator, p.pending_file, "{\"target\":");
+    try atomic_file.writeFileAtomic(allocator, p.pending_file, "{\"target\":");
 
     var claim = try tryClaim(allocator, durable_dir, "item-corrupt-pending", 10, 100);
     defer claim.deinit(allocator);
@@ -870,7 +832,7 @@ test "workflow queue corrupt expired lease moves to visible dead letter" {
     var p = try queuePaths(allocator, durable_dir, "item-corrupt-leased");
     defer p.deinit();
     try ensureQueueDirs(&p);
-    try writeFileAtomic(allocator, p.leased_file, "{\"lease_until_ms\":1,\"target\":false}");
+    try atomic_file.writeFileAtomic(allocator, p.leased_file, "{\"lease_until_ms\":1,\"target\":false}");
 
     var claim = try tryClaim(allocator, durable_dir, "item-corrupt-leased", 10, 100);
     defer claim.deinit(allocator);
@@ -913,7 +875,7 @@ test "workflow queue max attempts dead letter can be replayed" {
         .last_error = "boom",
     });
     defer allocator.free(leased_payload);
-    try writeFileAtomic(allocator, p.leased_file, leased_payload);
+    try atomic_file.writeFileAtomic(allocator, p.leased_file, leased_payload);
 
     var claim = try tryClaim(allocator, durable_dir, "item-max-attempts", 10, 100);
     defer claim.deinit(allocator);
@@ -980,14 +942,14 @@ test "workflow queue claim recovers from a dead letter left behind by an interru
 
     const dead_payload = try codec.deadEnvelopeJson(allocator, "boom", 3, "boom", 1, "workflow-queue", null);
     defer allocator.free(dead_payload);
-    try writeFileAtomic(allocator, p.dead_file, dead_payload);
+    try atomic_file.writeFileAtomic(allocator, p.dead_file, dead_payload);
 
     const pending_payload = try codec.requestEnvelopeJson(allocator, "child", view, .{
         .created_at_ms = 2,
         .updated_at_ms = 2,
     });
     defer allocator.free(pending_payload);
-    try writeFileAtomic(allocator, p.pending_file, pending_payload);
+    try atomic_file.writeFileAtomic(allocator, p.pending_file, pending_payload);
 
     var claim = try tryClaim(allocator, durable_dir, "item-stuck-dead", 20, 100);
     defer claim.deinit(allocator);
