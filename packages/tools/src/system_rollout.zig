@@ -4,6 +4,7 @@ const zigts = @import("zigts");
 const contract_diff = zigts.contract_diff;
 const handler_contract = zigts.handler_contract;
 const system_linker = zigts.system_linker;
+const writeJsonString = zigts.json_utils.writeJsonString;
 
 const system_analysis = @import("system_analysis.zig");
 const upgrade_verifier = @import("upgrade_verifier.zig");
@@ -860,21 +861,6 @@ fn writeRolloutReport(plan: *const RolloutPlan, writer: anytype) !void {
     }
 }
 
-fn writeJsonString(writer: anytype, value: []const u8) !void {
-    try writer.writeByte('"');
-    for (value) |ch| {
-        switch (ch) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => try writer.writeByte(ch),
-        }
-    }
-    try writer.writeByte('"');
-}
-
 fn boolString(value: bool) []const u8 {
     return if (value) "true" else "false";
 }
@@ -1221,4 +1207,15 @@ test "rollout rejects dynamic internal edges at compile time" {
         error.SystemHandlerCompilationFailed,
         analyzeRollout(std.testing.allocator, old_system, new_system),
     );
+}
+
+test "writeJsonString escapes C0 control bytes" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+
+    try writeJsonString(&aw.writer, "a\x01b\x1fc");
+    buf = aw.toArrayList();
+
+    try std.testing.expectEqualStrings("\"a\\u0001b\\u001fc\"", buf.items);
 }
