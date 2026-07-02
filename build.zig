@@ -153,6 +153,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = zigttp_modules_dep.path("src/test_root.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "zigttp-sdk", .module = zigttp_sdk_dep.module("zigttp-sdk") },
                 .{ .name = "zigttp-sdk-test-shim", .module = sdk_test_shim_mod },

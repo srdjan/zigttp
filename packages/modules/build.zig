@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
         .imports = &.{
             .{ .name = "zigttp-sdk", .module = sdk_mod },
         },
@@ -31,6 +32,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/test_root.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "zigttp-sdk", .module = sdk_mod },
                 .{ .name = "zigttp-sdk-test-shim", .module = test_shim_mod },
