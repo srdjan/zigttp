@@ -442,43 +442,97 @@ const MAX_CHUNK_SIZE_LINE_BYTES: usize = 8 * 1024;
 const MAX_CHUNK_TRAILER_LINE_BYTES: usize = 8 * 1024;
 const MAX_CHUNK_TRAILER_BYTES: usize = 16 * 1024;
 
+/// Resume state for `chunkedBodyConsumedResumable`, letting a caller that
+/// sees the same logical body grow across repeated calls (e.g. one call per
+/// socket read) pick up where the previous call left off instead of
+/// rescanning already-validated bytes from the start. Zero-value default
+/// starts a fresh parse at offset 0. One state per in-flight request; a new
+/// request must use a fresh state.
+pub const ChunkedBodyParseState = struct {
+    pos: usize = 0,
+    decoded_len: usize = 0,
+    phase: Phase = .chunk_size,
+    /// Valid when `phase == .chunk_data`: size of the chunk currently
+    /// awaited (already validated against `max_body_size`).
+    pending_size: usize = 0,
+    /// Valid when `phase == .trailer`: offset where trailer scanning began.
+    trailer_start: usize = 0,
+
+    const Phase = enum { chunk_size, chunk_data, trailer };
+};
+
 /// Return the number of encoded body bytes consumed by a complete chunked
 /// transfer, including the terminating chunk and ignored trailers. Returns
 /// null when the caller needs to read more bytes.
 pub fn chunkedBodyConsumed(body: []const u8, max_body_size: usize) !?usize {
-    var pos: usize = 0;
-    var decoded_len: usize = 0;
+    var state: ChunkedBodyParseState = .{};
+    return chunkedBodyConsumedResumable(body, max_body_size, &state);
+}
+
+/// Same contract as `chunkedBodyConsumed`, but resumes from `state` instead
+/// of rescanning `body` from offset 0 on every call. `body` must always be
+/// the full body-so-far slice (not just newly appended bytes); only the
+/// portion before `state.pos` is skipped. Keeping `state` alive across
+/// repeated calls on a growing `body` turns an O(n^2) rescan (one full walk
+/// per call) into O(n) total work.
+pub fn chunkedBodyConsumedResumable(body: []const u8, max_body_size: usize, state: *ChunkedBodyParseState) !?usize {
+    var pos = state.pos;
+    var decoded_len = state.decoded_len;
 
     while (true) {
-        const line_rel = (try findCrlfWithin(body[pos..], MAX_CHUNK_SIZE_LINE_BYTES)) orelse return null;
-        const line_end = pos + line_rel;
-        const size = try parseChunkSizeLine(body[pos..line_end]);
-        pos = line_end + 2;
-
-        if (size == 0) {
-            const trailer_start = pos;
-            while (true) {
-                if (pos + 2 <= body.len and std.mem.eql(u8, body[pos..][0..2], "\r\n")) {
-                    return pos + 2;
-                }
-                if (pos - trailer_start > MAX_CHUNK_TRAILER_BYTES) return error.InvalidChunkedEncoding;
-                const trailer_rel = (try findCrlfWithin(body[pos..], MAX_CHUNK_TRAILER_LINE_BYTES)) orelse {
-                    if (body.len - trailer_start > MAX_CHUNK_TRAILER_BYTES) return error.InvalidChunkedEncoding;
+        switch (state.phase) {
+            .chunk_size => {
+                const line_rel = (try findCrlfWithin(body[pos..], MAX_CHUNK_SIZE_LINE_BYTES)) orelse {
+                    state.pos = pos;
+                    state.decoded_len = decoded_len;
                     return null;
                 };
-                pos += trailer_rel + 2;
-            }
-        }
+                const line_end = pos + line_rel;
+                const size = try parseChunkSizeLine(body[pos..line_end]);
+                pos = line_end + 2;
 
-        if (decoded_len > max_body_size or size > max_body_size - decoded_len) {
-            return error.FileTooBig;
-        }
-        decoded_len += size;
+                if (size == 0) {
+                    state.trailer_start = pos;
+                    state.phase = .trailer;
+                    continue;
+                }
 
-        if (body.len < pos + size + 2) return null;
-        pos += size;
-        if (!std.mem.eql(u8, body[pos..][0..2], "\r\n")) return error.InvalidChunkedEncoding;
-        pos += 2;
+                if (decoded_len > max_body_size or size > max_body_size - decoded_len) {
+                    return error.FileTooBig;
+                }
+                decoded_len += size;
+                state.pending_size = size;
+                state.phase = .chunk_data;
+            },
+            .chunk_data => {
+                const size = state.pending_size;
+                if (body.len < pos + size + 2) {
+                    state.pos = pos;
+                    state.decoded_len = decoded_len;
+                    return null;
+                }
+                pos += size;
+                if (!std.mem.eql(u8, body[pos..][0..2], "\r\n")) return error.InvalidChunkedEncoding;
+                pos += 2;
+                state.phase = .chunk_size;
+            },
+            .trailer => {
+                const trailer_start = state.trailer_start;
+                while (true) {
+                    if (pos + 2 <= body.len and std.mem.eql(u8, body[pos..][0..2], "\r\n")) {
+                        return pos + 2;
+                    }
+                    if (pos - trailer_start > MAX_CHUNK_TRAILER_BYTES) return error.InvalidChunkedEncoding;
+                    const trailer_rel = (try findCrlfWithin(body[pos..], MAX_CHUNK_TRAILER_LINE_BYTES)) orelse {
+                        if (body.len - trailer_start > MAX_CHUNK_TRAILER_BYTES) return error.InvalidChunkedEncoding;
+                        state.pos = pos;
+                        state.decoded_len = decoded_len;
+                        return null;
+                    };
+                    pos += trailer_rel + 2;
+                }
+            },
+        }
     }
 }
 
@@ -844,6 +898,92 @@ test "chunkedBodyConsumed rejects oversized trailer block" {
     }
 
     try testing.expectError(error.InvalidChunkedEncoding, chunkedBodyConsumed(body.items, 1024));
+}
+
+// -------------------------------------------------------------------------
+// Resumable incremental parse (ChunkedBodyParseState)
+//
+// Each test below feeds `chunkedBodyConsumedResumable` a first call that
+// stops partway through one of the three sub-phases (chunk-size line, chunk
+// data, trailer), asserts the state landed in the expected phase, then
+// resumes with a *second* buffer whose already-validated prefix (everything
+// before `state.pos`) has been overwritten with bytes that are guaranteed
+// to fail parsing ('Z' is not a valid hex digit and never forms "\r\n"). A
+// correct resumable implementation never looks at that prefix again and
+// still produces the right final result; an implementation that silently
+// reverted to rescanning from offset 0 would trip over the poisoned bytes
+// and fail these assertions (or fail to compile at all, since these tests
+// reference the resumable API directly).
+// -------------------------------------------------------------------------
+
+test "chunkedBodyConsumedResumable resumes mid chunk-size-line without rescanning" {
+    const chunk1 = "5\r\nhello\r\n";
+    const chunk2_size_line = "5\r\n";
+    const chunk2_data = "world\r\n";
+    const terminator = "0\r\n\r\n";
+    const full_valid_body = chunk1 ++ chunk2_size_line ++ chunk2_data ++ terminator;
+
+    // First call: chunk 1 fully arrives, plus only the leading digit of
+    // chunk 2's size line (its "\r\n" has not arrived yet).
+    const first_call_body = chunk1 ++ "5";
+    var state: ChunkedBodyParseState = .{};
+    try testing.expectEqual(@as(?usize, null), try chunkedBodyConsumedResumable(first_call_body, 1024, &state));
+    try testing.expectEqual(ChunkedBodyParseState.Phase.chunk_size, state.phase);
+    try testing.expectEqual(@as(usize, chunk1.len), state.pos);
+
+    const poison = "Z" ** chunk1.len;
+    const resumed_body = poison ++ chunk2_size_line ++ chunk2_data ++ terminator;
+    const result = try chunkedBodyConsumedResumable(resumed_body, 1024, &state);
+    try testing.expectEqual(@as(?usize, full_valid_body.len), result);
+}
+
+test "chunkedBodyConsumedResumable resumes mid chunk-data without rescanning" {
+    const chunk1 = "5\r\nhello\r\n";
+    const chunk2_size_line = "5\r\n";
+    const chunk2_data_partial = "wor";
+    const chunk2_data_rest = "ld\r\n";
+    const terminator = "0\r\n\r\n";
+    const full_valid_body = chunk1 ++ chunk2_size_line ++ chunk2_data_partial ++ chunk2_data_rest ++ terminator;
+
+    // First call: chunk 1 and chunk 2's size line are fully validated;
+    // chunk 2's data is split mid-way (its trailing CRLF has not arrived).
+    const first_call_body = chunk1 ++ chunk2_size_line ++ chunk2_data_partial;
+    var state: ChunkedBodyParseState = .{};
+    try testing.expectEqual(@as(?usize, null), try chunkedBodyConsumedResumable(first_call_body, 1024, &state));
+    try testing.expectEqual(ChunkedBodyParseState.Phase.chunk_data, state.phase);
+    const resume_offset = chunk1.len + chunk2_size_line.len;
+    try testing.expectEqual(@as(usize, resume_offset), state.pos);
+
+    const poison = "Z" ** resume_offset;
+    const resumed_body = poison ++ chunk2_data_partial ++ chunk2_data_rest ++ terminator;
+    const result = try chunkedBodyConsumedResumable(resumed_body, 1024, &state);
+    try testing.expectEqual(@as(?usize, full_valid_body.len), result);
+}
+
+test "chunkedBodyConsumedResumable resumes mid trailer without rescanning" {
+    const chunk1 = "3\r\nabc\r\n";
+    const terminal_size_line = "0\r\n";
+    const trailer1 = "X-A: 1\r\n";
+    const trailer2_partial = "X-B: 2";
+    const trailer2_rest = "2\r\n";
+    const final_crlf = "\r\n";
+    const full_valid_body = chunk1 ++ terminal_size_line ++ trailer1 ++ trailer2_partial ++ trailer2_rest ++ final_crlf;
+
+    // First call: the terminating zero-size chunk and one full trailer line
+    // are validated; a second trailer line is split mid-value.
+    const first_call_body = chunk1 ++ terminal_size_line ++ trailer1 ++ trailer2_partial;
+    var state: ChunkedBodyParseState = .{};
+    try testing.expectEqual(@as(?usize, null), try chunkedBodyConsumedResumable(first_call_body, 1024, &state));
+    try testing.expectEqual(ChunkedBodyParseState.Phase.trailer, state.phase);
+    const trailer_start = chunk1.len + terminal_size_line.len;
+    try testing.expectEqual(@as(usize, trailer_start), state.trailer_start);
+    const resume_offset = trailer_start + trailer1.len;
+    try testing.expectEqual(@as(usize, resume_offset), state.pos);
+
+    const poison = "Z" ** resume_offset;
+    const resumed_body = poison ++ trailer2_partial ++ trailer2_rest ++ final_crlf;
+    const result = try chunkedBodyConsumedResumable(resumed_body, 1024, &state);
+    try testing.expectEqual(@as(?usize, full_valid_body.len), result);
 }
 
 // -------------------------------------------------------------------------

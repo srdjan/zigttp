@@ -823,12 +823,16 @@ const ConnectionPool = struct {
     ) ![]u8 {
         var data: std.ArrayList(u8) = .empty;
         defer data.deinit(allocator);
+        // Chunked-body parse resume state for this request only: a fresh
+        // request always starts a new parse at offset 0, so this must not
+        // be shared across requests (see ChunkedBodyParseState doc comment).
+        var chunked_state: http_parser.ChunkedBodyParseState = .{};
 
         const pending_bytes = pending.take();
         defer if (pending_bytes.len > 0) self.allocator.free(pending_bytes);
         if (pending_bytes.len > 0) {
             try data.appendSlice(allocator, pending_bytes);
-            if (try self.completeRequestLength(data.items)) |request_len| {
+            if (try self.completeRequestLength(data.items, &chunked_state)) |request_len| {
                 return try self.splitRequestAndPending(allocator, pending, data.items, request_len);
             }
         }
@@ -853,7 +857,7 @@ const ConnectionPool = struct {
             if (n == 0) return error.EndOfStream;
             try data.appendSlice(allocator, read_buf[0..n]);
 
-            if (try self.completeRequestLength(data.items)) |request_len| {
+            if (try self.completeRequestLength(data.items, &chunked_state)) |request_len| {
                 return try self.splitRequestAndPending(allocator, pending, data.items, request_len);
             }
         }
@@ -871,7 +875,7 @@ const ConnectionPool = struct {
         return try allocator.dupe(u8, data[0..request_len]);
     }
 
-    fn completeRequestLength(self: *ConnectionPool, data: []const u8) !?usize {
+    fn completeRequestLength(self: *ConnectionPool, data: []const u8, chunked_state: *http_parser.ChunkedBodyParseState) !?usize {
         const max_header_bytes: usize = 32 * 1024;
         const header_end = findHeaderEnd(data) orelse {
             if (data.len > max_header_bytes) return error.InvalidRequest;
@@ -885,9 +889,10 @@ const ConnectionPool = struct {
         if (transfer_encoding == .chunked and content_length_opt != null) return error.InvalidRequest;
 
         if (transfer_encoding == .chunked) {
-            const encoded_len = (try http_parser.chunkedBodyConsumed(
+            const encoded_len = (try http_parser.chunkedBodyConsumedResumable(
                 data[body_start..],
                 self.server.config.max_body_size,
+                chunked_state,
             )) orelse {
                 const encoded_so_far = if (body_start <= data.len) data.len - body_start else 0;
                 if (encoded_so_far > maxChunkedEncodedBodyBytes(self.server.config.max_body_size)) {
@@ -2815,6 +2820,87 @@ test "threaded readRequestData handles chunked body across reads" {
     defer request.deinit(allocator);
     try std.testing.expect(request.body != null);
     try std.testing.expectEqualStrings("hello world", request.body.?);
+    try std.testing.expectEqual(@as(usize, 0), pending.bytes.len);
+}
+
+// Functional regression test, not a perf-timing test: readRequestData's
+// read_buf caps every posix.read() at 16 KiB, so a chunked body well past
+// that threshold forces several *real* socket reads, each re-entering
+// completeRequestLength with the same persisted ChunkedBodyParseState. This
+// proves the resumable state survives repeated genuine reads without
+// corrupting the assembled body. It cannot by itself distinguish a linear
+// resume from a reintroduced pos=0 rescan (both are functionally correct,
+// just one is quadratically slower) — that algorithmic property is covered
+// by the chunkedBodyConsumedResumable poisoned-prefix unit tests in
+// http_parser.zig.
+test "threaded readRequestData resumes chunked body parsing across many real socket reads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 64 * 1024, .max_headers = 64 };
+
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &server,
+        .allocator = allocator,
+    };
+
+    const fds = try createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+
+    // 1000 chunks of 20 bytes each ("14" is hex for 20): ~26 encoded bytes
+    // per chunk, ~26 KB total, well past the 16 KB read_buf.
+    const chunk_count = 1000;
+    const chunk_data_len = 20;
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(std.testing.allocator);
+    try request_bytes.appendSlice(std.testing.allocator, "POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n");
+
+    var expected_body: std.ArrayList(u8) = .empty;
+    defer expected_body.deinit(std.testing.allocator);
+
+    var i: usize = 0;
+    while (i < chunk_count) : (i += 1) {
+        const byte: u8 = 'a' + @as(u8, @intCast(i % 26));
+        try request_bytes.appendSlice(std.testing.allocator, "14\r\n");
+        try request_bytes.appendNTimes(std.testing.allocator, byte, chunk_data_len);
+        try request_bytes.appendSlice(std.testing.allocator, "\r\n");
+        try expected_body.appendNTimes(std.testing.allocator, byte, chunk_data_len);
+    }
+    try request_bytes.appendSlice(std.testing.allocator, "0\r\n\r\n");
+    try std.testing.expect(request_bytes.items.len > 16 * 1024);
+
+    // The payload exceeds the platform's default AF_UNIX stream socket
+    // buffer (8 KiB on macOS), so writing it in one shot before any reader
+    // runs would deadlock: the write blocks waiting for a reader that only
+    // starts once the write call returns. Write from a separate thread so
+    // the socket drains concurrently with readRequestData's read loop,
+    // same as a real client.
+    const WriteCtx = struct {
+        fd: std.posix.fd_t,
+        bytes: []const u8,
+    };
+    const writer_thread = try std.Thread.spawn(.{}, struct {
+        fn run(ctx: WriteCtx) void {
+            writeAllFd(ctx.fd, ctx.bytes) catch {};
+            std.Io.Threaded.closeFd(ctx.fd);
+        }
+    }.run, .{WriteCtx{ .fd = fds[1], .bytes = request_bytes.items }});
+    defer writer_thread.join();
+
+    var pending: ConnectionPool.PendingRequestBytes = .{};
+    defer pending.deinit(pool.allocator);
+
+    const data = try pool.readRequestData(fds[0], allocator, &pending);
+    var request = try server.parseRequestFromBuffer(allocator, data);
+    defer request.deinit(allocator);
+    try std.testing.expect(request.body != null);
+    try std.testing.expectEqualStrings(expected_body.items, request.body.?);
     try std.testing.expectEqual(@as(usize, 0), pending.bytes.len);
 }
 
