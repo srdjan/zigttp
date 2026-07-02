@@ -68,6 +68,7 @@ pub const PathCondition = contract_types.PathCondition;
 pub const PathIoCall = contract_types.PathIoCall;
 pub const BehaviorPath = contract_types.BehaviorPath;
 pub const ServiceCallInfo = contract_types.ServiceCallInfo;
+pub const WorkflowCallInfo = contract_types.WorkflowCallInfo;
 pub const EmittedAffordance = contract_types.EmittedAffordance;
 pub const CapabilityMatrix = contract_types.CapabilityMatrix;
 pub const computeCapabilityMatrix = contract_types.computeCapabilityMatrix;
@@ -220,6 +221,11 @@ test "parseFromJson roundtrip" {
         } },
         .body = .none,
     });
+    var workflow_calls: std.ArrayList(WorkflowCallInfo) = .empty;
+    try workflow_calls.append(allocator, .{
+        .target = try allocator.dupe(u8, "billing"),
+        .route_pattern = try allocator.dupe(u8, "POST /charge"),
+    });
 
     var original = HandlerContract{
         .handler = .{ .path = path, .line = 10, .column = 5 },
@@ -229,6 +235,7 @@ test "parseFromJson roundtrip" {
         .env = .{ .literal = env_lit, .dynamic = true },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .service_calls = service_calls,
+        .workflow_calls = workflow_calls,
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -274,6 +281,10 @@ test "parseFromJson roundtrip" {
     try std.testing.expectEqualStrings("GET /api/users/:id", parsed.service_calls.items[0].route_pattern);
     try std.testing.expectEqual(@as(usize, 1), parsed.service_calls.items[0].path_params.items().len);
     try std.testing.expectEqualStrings("id", parsed.service_calls.items[0].path_params.items()[0]);
+    try std.testing.expectEqual(@as(usize, 1), parsed.workflow_calls.items.len);
+    try std.testing.expectEqualStrings("billing", parsed.workflow_calls.items[0].target);
+    try std.testing.expectEqualStrings("POST /charge", parsed.workflow_calls.items[0].route_pattern);
+    try std.testing.expect(!parsed.workflow_calls.items[0].dynamic);
     try std.testing.expect(parsed.durable.used);
     try std.testing.expect(parsed.durable.keys.dynamic);
     try std.testing.expect(parsed.scope.used);
@@ -948,6 +959,7 @@ test "writeContractJson minimal" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"workflowCalls\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"affordances\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"scope\": {") != null);

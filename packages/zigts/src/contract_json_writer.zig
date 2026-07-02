@@ -165,6 +165,25 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     }
     try writer.writeAll("],\n");
 
+    // workflowCalls (zigttp:workflow call/saga/fanout targets resolved by the system linker)
+    try writer.writeAll("  \"workflowCalls\": [");
+    for (contract.workflow_calls.items, 0..) |wc, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n    {\n");
+        try writer.writeAll("      \"target\": ");
+        try writeJsonString(writer, wc.target);
+        try writer.writeAll(",\n");
+        try writer.writeAll("      \"route\": ");
+        try writeJsonString(writer, wc.route_pattern);
+        try writer.writeAll(",\n");
+        try writer.print("      \"dynamic\": {s}\n", .{if (wc.dynamic) "true" else "false"});
+        try writer.writeAll("    }");
+    }
+    if (contract.workflow_calls.items.len > 0) {
+        try writer.writeAll("\n  ");
+    }
+    try writer.writeAll("],\n");
+
     // affordances (hypermedia resource() links resolved by the system linker)
     try writer.writeAll("  \"affordances\": [");
     for (contract.affordances.items, 0..) |aff, i| {

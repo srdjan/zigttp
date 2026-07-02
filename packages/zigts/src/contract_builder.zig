@@ -29,6 +29,7 @@ const rule_registry = @import("rule_registry.zig");
 const spec_discharge = @import("spec_discharge.zig");
 const intent_extractor = @import("intent_extractor.zig");
 const saga_extractor = @import("saga_extractor.zig");
+const fanout_extractor = @import("fanout_extractor.zig");
 const effect_inference = @import("effect_inference.zig");
 const function_specs = @import("function_specs.zig");
 const JsParser = @import("parser/root.zig").JsParser;
@@ -101,6 +102,7 @@ pub const ContractBuilder = struct {
     egress_urls: std.ArrayList([]const u8),
     egress_dynamic: bool,
     service_calls: std.ArrayList(ServiceCallInfo),
+    workflow_calls: std.ArrayList(contract_types.WorkflowCallInfo),
     affordances: std.ArrayList(contract_types.EmittedAffordance),
     affordances_dynamic: bool,
     cache_namespaces: std.ArrayList([]const u8),
@@ -216,6 +218,7 @@ pub const ContractBuilder = struct {
             .egress_urls = .empty,
             .egress_dynamic = false,
             .service_calls = .empty,
+            .workflow_calls = .empty,
             .affordances = .empty,
             .affordances_dynamic = false,
             .cache_namespaces = .empty,
@@ -260,6 +263,8 @@ pub const ContractBuilder = struct {
         self.egress_urls.deinit(self.allocator);
         for (self.service_calls.items) |*call| call.deinit(self.allocator);
         self.service_calls.deinit(self.allocator);
+        for (self.workflow_calls.items) |*call| call.deinit(self.allocator);
+        self.workflow_calls.deinit(self.allocator);
         for (self.affordances.items) |*aff| aff.deinit(self.allocator);
         self.affordances.deinit(self.allocator);
         for (self.cache_namespaces.items) |s| self.allocator.free(s);
@@ -354,6 +359,10 @@ pub const ContractBuilder = struct {
             saga_calls.deinit(self.allocator);
         }
 
+        // Every fanout([...]) descriptor, appended into self.workflow_calls
+        // alongside call()'s own extractions from scanCallSites above.
+        try self.extractFanoutCalls();
+
         if (handler_fn) |hf| {
             try self.extractScopeUsage(hf);
             try self.extractDurableWorkflow(handler_path, hf);
@@ -439,6 +448,7 @@ pub const ContractBuilder = struct {
                 .dynamic = self.egress_dynamic,
             },
             .service_calls = self.service_calls,
+            .workflow_calls = self.workflow_calls,
             .affordances = self.affordances,
             .affordances_dynamic = self.affordances_dynamic,
             .cache = .{
@@ -542,6 +552,7 @@ pub const ContractBuilder = struct {
         self.egress_hosts = .empty;
         self.egress_urls = .empty;
         self.service_calls = .empty;
+        self.workflow_calls = .empty;
         self.affordances = .empty;
         self.cache_namespaces = .empty;
         self.sql_queries = .empty;
@@ -1282,6 +1293,7 @@ pub const ContractBuilder = struct {
                             .schema_compile => try self.extractSchemaCompile(call),
                             .route_pattern => try self.extractApiRoutesFromCall(call),
                             .service_call => try self.extractServiceCall(call),
+                            .workflow_call => try self.extractWorkflowCall(call),
                             // Generic: extract literal from arg N into category bucket
                             else => {
                                 if (self.getCategoryTarget(ext.category)) |target| {
@@ -1654,7 +1666,7 @@ pub const ContractBuilder = struct {
             .request_schema => .{ .list = &self.api_request_schema_refs, .dynamic = &self.api_request_schema_dynamic },
             .fetch_host => .{ .list = &self.egress_hosts, .dynamic = &self.egress_dynamic },
             // Custom categories are dispatched directly, not via generic target
-            .sql_registration, .schema_compile, .route_pattern, .service_call, .cookie_name, .cors_origin, .rate_limit_key => null,
+            .sql_registration, .schema_compile, .route_pattern, .service_call, .workflow_call, .cookie_name, .cors_origin, .rate_limit_key => null,
             // Partner-declared categories route through the extensions store, not the built-in target table.
             .extension_specific => null,
         };
@@ -2412,6 +2424,19 @@ pub const ContractBuilder = struct {
         });
     }
 
+    /// Append every `fanout([...])` descriptor's dispatch target into
+    /// `self.workflow_calls`, alongside `call(name, init)`'s own extractions
+    /// from `scanCallSites` above - the system linker resolves both through
+    /// the same `workflow_call` proof.
+    fn extractFanoutCalls(self: *ContractBuilder) !void {
+        try fanout_extractor.extract(.{
+            .allocator = self.allocator,
+            .ir_view = self.ir_view,
+            .resolver = intentAtomResolver,
+            .resolver_ctx = @ptrCast(self),
+        }, &self.workflow_calls);
+    }
+
     fn resolveAtomName(self: *const ContractBuilder, atom_idx: u16) ?[]const u8 {
         // Try predefined atoms first
         const atom: object.Atom = @enumFromInt(atom_idx);
@@ -2794,6 +2819,76 @@ pub const ContractBuilder = struct {
                 service_call.body = if (body_tag == .lit_string) .present else .dynamic;
             }
         }
+    }
+
+    /// Extract a `call(name, init?)` dispatch target for the system linker's
+    /// `workflow_call` resolution. Mirrors `extractServiceCall`'s
+    /// strict-literal-or-dynamic discipline but simpler: `init` has no
+    /// path-param-templating or required-query/header proof surface, so only
+    /// `method`/`path` feed the synthesized route pattern. Also used by
+    /// `fanout_extractor.zig` for each descriptor in a `fanout([...])` array,
+    /// and fires automatically for `call(...)` sites nested inside a
+    /// `saga([...])` step's `run`/`compensate` closures (the flat, non-nesting-
+    /// aware `scanCallSites` walk finds them independently of `saga_extractor`).
+    fn extractWorkflowCall(self: *ContractBuilder, call: Node.CallExpr) !void {
+        var wc = contract_types.WorkflowCallInfo{
+            .target = try self.allocator.dupe(u8, ""),
+            .route_pattern = try self.allocator.dupe(u8, ""),
+        };
+        errdefer wc.deinit(self.allocator);
+
+        if (call.args_count < 1) {
+            wc.dynamic = true;
+            try self.workflow_calls.append(self.allocator, wc);
+            return;
+        }
+
+        const name_idx = self.ir_view.getListIndex(call.args_start, 0);
+        if (self.getLiteralString(name_idx)) |name| {
+            self.allocator.free(wc.target);
+            wc.target = try self.allocator.dupe(u8, name);
+        } else {
+            wc.dynamic = true;
+        }
+
+        var method: []const u8 = "GET";
+        var path: []const u8 = "/";
+
+        if (call.args_count > 1) {
+            const init_idx = self.ir_view.getListIndex(call.args_start, 1);
+            const init_tag = self.ir_view.getTag(init_idx);
+            if (init_tag != null and init_tag != .lit_null and init_tag != .lit_undefined) {
+                if (self.resolveObjectLiteralNode(init_idx)) |init_obj| {
+                    if (self.ir_view.getObject(init_obj)) |obj| {
+                        var i: u16 = 0;
+                        while (i < obj.properties_count) : (i += 1) {
+                            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+                            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                            const key = self.getObjectPropertyKey(prop.key) orelse {
+                                wc.dynamic = true;
+                                continue;
+                            };
+                            if (std.mem.eql(u8, key, "method")) {
+                                if (self.getLiteralString(prop.value)) |m| method = m else wc.dynamic = true;
+                            } else if (std.mem.eql(u8, key, "path")) {
+                                if (self.getLiteralString(prop.value)) |p| path = p else wc.dynamic = true;
+                            }
+                        }
+                    } else {
+                        wc.dynamic = true;
+                    }
+                } else {
+                    wc.dynamic = true;
+                }
+            } else if (init_tag == null) {
+                wc.dynamic = true;
+            }
+        }
+
+        self.allocator.free(wc.route_pattern);
+        wc.route_pattern = try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ method, path });
+
+        try self.workflow_calls.append(self.allocator, wc);
     }
 
     fn extractKnownList(self: *ContractBuilder, node_idx: NodeIndex) !ServiceCallInfo.KnownList {
@@ -3989,6 +4084,18 @@ pub const ContractBuilder = struct {
         // would re-run them, violating at-most-once guarantees for resource cleanup.
         const retry_safe = !self.scope_used and (read_only or durable_only_writes);
 
+        // POST-only proof: the AOT route table (routerMatch({...}, req)) must
+        // be non-empty, statically enumerable, and every route's method POST.
+        var post_only = self.api_routes.items.len > 0 and !self.api_routes_dynamic;
+        if (post_only) {
+            for (self.api_routes.items) |route| {
+                if (!std.ascii.eqlIgnoreCase(route.method, "POST")) {
+                    post_only = false;
+                    break;
+                }
+            }
+        }
+
         // read_only here is the BEHAVIORAL fact (the handler performs no state
         // mutations). That is what deploy manifests, the proof report, and the
         // runtime pooling policy consume, so a SELECT-only zigttp:sql handler
@@ -4004,6 +4111,7 @@ pub const ContractBuilder = struct {
             .deterministic = deterministic,
             .has_egress = s.has_egress,
             .idempotent = deterministic and retry_safe,
+            .post_only = post_only,
             // The contract builder runs only after strict checking passed
             // (canonical-profile violations are hard `check` errors that block
             // contract construction upstream), so a built contract is always in
@@ -4889,6 +4997,13 @@ fn findAffordanceByRel(items: []const contract_types.EmittedAffordance, rel: []c
     return null;
 }
 
+fn findWorkflowCallByTarget(items: []const contract_types.WorkflowCallInfo, target: []const u8) ?contract_types.WorkflowCallInfo {
+    for (items) |call| {
+        if (std.mem.eql(u8, call.target, target)) return call;
+    }
+    return null;
+}
+
 test "resource() affordances are extracted strict-literal with method default and templating" {
     const allocator = std.testing.allocator;
 
@@ -5000,6 +5115,95 @@ test "resource() affordance with a non-literal href is recorded dynamic, not res
     try std.testing.expect(next.dynamic);
     const self_aff = findAffordanceByRel(builder.affordances.items, "self").?;
     try std.testing.expect(!self_aff.dynamic);
+}
+
+test "workflow call and fanout dispatch targets are extracted" {
+    const source =
+        \\import { call, fanout } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  call("payments", { method: "POST", path: "/charge" });
+        \\  fanout([
+        \\    { name: "inventory", path: "/reserve" },
+        \\    { name: "pricing", method: "POST", path: "/quote", headers: { accept: "json" } },
+        \\  ]);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), contract.workflow_calls.items.len);
+
+    const payments = findWorkflowCallByTarget(contract.workflow_calls.items, "payments").?;
+    try std.testing.expectEqualStrings("POST /charge", payments.route_pattern);
+    try std.testing.expect(!payments.dynamic);
+
+    const inventory = findWorkflowCallByTarget(contract.workflow_calls.items, "inventory").?;
+    try std.testing.expectEqualStrings("GET /reserve", inventory.route_pattern);
+    try std.testing.expect(!inventory.dynamic);
+
+    const pricing = findWorkflowCallByTarget(contract.workflow_calls.items, "pricing").?;
+    try std.testing.expectEqualStrings("POST /quote", pricing.route_pattern);
+    try std.testing.expect(!pricing.dynamic);
+}
+
+test "fanout descriptor with unknown sibling field fails closed" {
+    const source =
+        \\import { fanout } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  fanout([{ name: "inventory", path: "/reserve", timeoutMs: 50 }]);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.workflow_calls.items.len);
+    try std.testing.expect(contract.workflow_calls.items[0].dynamic);
+    try std.testing.expectEqualStrings("", contract.workflow_calls.items[0].target);
+    try std.testing.expectEqualStrings("", contract.workflow_calls.items[0].route_pattern);
+}
+
+test "post_only is proven for static POST-only routerMatch tables" {
+    const source =
+        \\import { routerMatch } from "zigttp:router";
+        \\function create(req) { return Response.json({ ok: true }); }
+        \\const routes = {
+        \\  "POST /orders": create,
+        \\  "POST /orders/:id": create,
+        \\};
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.json({ error: "not found" }, { status: 404 });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(props.post_only);
+}
+
+test "post_only is not proven when a static routerMatch table mixes methods" {
+    const source =
+        \\import { routerMatch } from "zigttp:router";
+        \\function create(req) { return Response.json({ ok: true }); }
+        \\const routes = {
+        \\  "POST /orders": create,
+        \\  "GET /orders/:id": create,
+        \\};
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.json({ error: "not found" }, { status: 404 });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.post_only);
 }
 
 test "missing manifest registry skips partner imports" {

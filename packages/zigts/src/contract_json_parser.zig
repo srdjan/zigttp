@@ -46,6 +46,7 @@ const VerificationInfo = handler_contract.VerificationInfo;
 const AotInfo = handler_contract.AotInfo;
 const CapabilityMatrix = handler_contract.CapabilityMatrix;
 const contract_types = @import("contract_types.zig");
+const WorkflowCallInfo = contract_types.WorkflowCallInfo;
 const SpecDiagnostic = contract_types.SpecDiagnostic;
 const ModuleCapability = module_binding.ModuleCapability;
 const capabilityHash = module_binding.capabilityHash;
@@ -128,6 +129,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseEgressSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "serviceCalls")) {
             try parseServiceCalls(&parser, allocator, &contract);
+        } else if (std.mem.eql(u8, key, "workflowCalls")) {
+            try parseWorkflowCalls(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "affordances")) {
             try parseAffordances(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "affordancesDynamic")) {
@@ -780,6 +783,69 @@ fn parseServiceCalls(parser: *JsonParser, allocator: std.mem.Allocator, contract
         path_params = .empty;
         query_keys = .empty;
         header_keys = .empty;
+    }
+}
+
+fn parseWorkflowCalls(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
+    parser.skipWhitespace();
+    if (!parser.consume('[')) return error.InvalidJson;
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var target: []const u8 = try allocator.dupe(u8, "");
+        var route_pattern: []const u8 = try allocator.dupe(u8, "");
+        var dynamic_flag = false;
+        errdefer {
+            allocator.free(target);
+            allocator.free(route_pattern);
+        }
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "target")) {
+                allocator.free(target);
+                target = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "route")) {
+                allocator.free(route_pattern);
+                route_pattern = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "dynamic")) {
+                dynamic_flag = parser.readBool() orelse false;
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try contract.workflow_calls.append(allocator, WorkflowCallInfo{
+            .target = target,
+            .route_pattern = route_pattern,
+            .dynamic = dynamic_flag,
+        });
+        target = "";
+        route_pattern = "";
     }
 }
 
@@ -1872,6 +1938,8 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
             props.result_safe = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "optionalSafe")) {
             props.optional_safe = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "postOnly")) {
+            props.post_only = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "canonical")) {
             props.canonical = parser.readBool() orelse false;
         } else {

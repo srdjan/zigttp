@@ -45,7 +45,7 @@ pub const binding = mb.ModuleBinding{
     .stateful = true,
     .self_managed_io = true,
     .exports = &.{
-        .{ .name = "call", .func = callNative, .arg_count = 2, .effect = .write, .returns = .object, .param_types = &.{ .string, .unknown }, .return_labels = .{ .external = true } },
+        .{ .name = "call", .func = callNative, .arg_count = 2, .effect = .write, .returns = .object, .param_types = &.{ .string, .unknown }, .return_labels = .{ .external = true }, .contract_extractions = &.{.{ .category = .workflow_call }} },
         .{ .name = "saga", .func = sagaNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{.unknown}, .return_labels = .{ .external = true } },
         // Named `fanout`, not `parallel`: module exports share one flat global
         // name namespace (resolver registers each via ctx.setGlobal by name), so

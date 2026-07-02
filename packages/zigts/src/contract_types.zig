@@ -613,6 +613,12 @@ pub const HandlerProperties = struct {
     /// Proven: every optional value from virtual modules is narrowed before use.
     /// False = unproven (verification not run). True = verified safe.
     optional_safe: bool = false,
+    /// The handler's AOT route table (`routerMatch({...}, req)`) is non-empty,
+    /// statically enumerable, and every route's method is POST. False when
+    /// the route table is empty, dynamic, or mixes in a non-POST method - a
+    /// handler using an ad hoc `if (req.method !== "POST")` guard without the
+    /// `routerMatch` convention does not earn this proof for free.
+    post_only: bool = false,
     // --- Canonical normal form (from the strict_checker ZTS6xx gate) ---
     /// The handler source is in Canonical Normal Form: zero canonical-profile
     /// (ZTS6xx) diagnostics. Because those diagnostics are hard `check` errors,
@@ -1126,6 +1132,29 @@ pub const ServiceCallInfo = struct {
     }
 };
 
+/// One `zigttp:workflow` `call(name, init?)`/`saga([...])`/`fanout([...])`
+/// dispatch target: a named co-located sub-handler reached in-process via a
+/// `--system` bundle. The system linker resolves `target` against the
+/// bundle's handler names and `route_pattern` against the target's own
+/// routes, the same way `ServiceCallInfo` is resolved - but simpler, since
+/// `init` has no path-param-templating or required-query/header convention
+/// to prove (the path is matched directly, like an `EmittedAffordance` href).
+pub const WorkflowCallInfo = struct {
+    target: []const u8, // owned
+    /// Synthesized "METHOD /path" (defaults: GET, /) from `init.method`/
+    /// `init.path` when present and literal.
+    route_pattern: []const u8, // owned
+    /// True when `target` or `init.method`/`init.path` is not a compile-time
+    /// literal. A dynamic call is counted, never resolved, and downgrades
+    /// the bundle proof - fail-closed exactly like `ServiceCallInfo`.
+    dynamic: bool = false,
+
+    pub fn deinit(self: *WorkflowCallInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.target);
+        allocator.free(self.route_pattern);
+    }
+};
+
 /// One hypermedia affordance emitted by a `resource(data, affordances)` call:
 /// the single source of truth the system linker resolves to a bundle route
 /// (Subsystem 4 in the workflow/hypermedia design). Extracted strict-literal
@@ -1380,6 +1409,10 @@ pub const HandlerContract = struct {
     env: EnvInfo,
     egress: EgressInfo,
     service_calls: std.ArrayList(ServiceCallInfo) = .empty,
+    /// Every `zigttp:workflow` `call`/`saga`/`fanout` dispatch target found in
+    /// the handler module. The system linker resolves each non-dynamic entry
+    /// against a `--system` bundle, mirroring `service_calls` resolution.
+    workflow_calls: std.ArrayList(WorkflowCallInfo) = .empty,
     /// Hypermedia affordances emitted by `resource(data, affordances)` calls.
     /// The system linker resolves each non-dynamic affordance to a bundle route
     /// (`all_affordances_resolved`). Owned; each entry's `deinit` runs at free.
@@ -1499,6 +1532,10 @@ pub const HandlerContract = struct {
             call.deinit(allocator);
         }
         self.service_calls.deinit(allocator);
+        for (self.workflow_calls.items) |*call| {
+            call.deinit(allocator);
+        }
+        self.workflow_calls.deinit(allocator);
         for (self.affordances.items) |*aff| {
             aff.deinit(allocator);
         }

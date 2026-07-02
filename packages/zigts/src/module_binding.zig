@@ -1368,6 +1368,9 @@ pub const ContractCategory = enum {
     rate_limit_key,
     service_call,
     fetch_host,
+    /// A `zigttp:workflow` `call`/`saga`/`fanout` target: a named co-located
+    /// sub-handler dispatched in-process. See `WorkflowCallInfo`.
+    workflow_call,
     /// Partner-declared category. The actual tag string lives on
     /// `ContractExtraction.extension_category` and is emitted under
     /// `contract.json` at `extensions.<specifier>.categories`.

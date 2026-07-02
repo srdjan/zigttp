@@ -236,6 +236,12 @@ const property_info = [_]PropertyInfo{
         .passing = "The handler is in Canonical Normal Form: zero ZTS6xx canonical-profile diagnostics.",
         .failing = "A non-canonical construct remains; run `zigts normalize` to rewrite it.",
     },
+    .{
+        .name = "post_only",
+        .family = .structural,
+        .passing = "The handler's AOT route table (routerMatch) is non-empty and every route's method is POST.",
+        .failing = "The route table is empty, dynamic, or contains a non-POST method.",
+    },
 };
 
 /// Fallback for a property with no `property_info` row. The comptime check

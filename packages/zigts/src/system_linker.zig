@@ -59,6 +59,11 @@ pub const LinkKind = enum {
     /// route by Phase A2 (HATEOAS link-following). `service_name` carries the
     /// affordance `rel`; `call_ref` carries its `href`.
     affordance,
+    /// A `zigttp:workflow` `call`/`saga`/`fanout` dispatch target, resolved
+    /// by name against the bundle the same way `service_call` is. Landed in
+    /// the same `links`/`unresolved` lists so response-coverage, payload,
+    /// cross-boundary-flow, and failure-cascade analysis cover it for free.
+    workflow_call,
 };
 
 pub const SystemLink = struct {
@@ -510,6 +515,7 @@ fn linkKindLabel(kind: LinkKind) []const u8 {
         .fetch_url => "fetchSync target",
         .service_call => "serviceCall target",
         .affordance => "hypermedia affordance target",
+        .workflow_call => "workflow call/saga/fanout target",
     };
 }
 
@@ -661,6 +667,11 @@ fn appendUnresolvedWarning(
         .affordance => try std.fmt.allocPrint(
             allocator,
             "{s}: affordance \"{s}\" -> {s} {s}",
+            .{ source_path, service_name orelse "?", call_ref, detail },
+        ),
+        .workflow_call => try std.fmt.allocPrint(
+            allocator,
+            "{s}: call/saga/fanout({s}, {s}) {s}",
             .{ source_path, service_name orelse "?", call_ref, detail },
         ),
     };
@@ -880,6 +891,92 @@ pub fn linkSystem(
                 .service_name = service_call.service,
                 .matched_route = resolved.matched_route,
                 .matched_method = resolved.matched_method,
+            });
+        }
+
+        // `zigttp:workflow` call()/saga()/fanout() targets, resolved by name
+        // exactly like service_calls above (minus validateServiceCallShape:
+        // `init` has no path-param/query/header proof surface to check).
+        for (contract.workflow_calls.items) |wc| {
+            if (wc.dynamic or wc.target.len == 0 or wc.route_pattern.len == 0) {
+                dynamic_links += 1;
+                continue;
+            }
+
+            const target_idx = findHandlerByName(config, wc.target) orelse {
+                try unresolved.append(allocator, .{
+                    .kind = .workflow_call,
+                    .source_idx = source_idx,
+                    .call_ref = wc.route_pattern,
+                    .service_name = wc.target,
+                    .host = wc.target,
+                    .status = .unlinked,
+                });
+                try appendUnresolvedWarning(
+                    allocator,
+                    &warnings,
+                    config.handlers[source_idx].path,
+                    .workflow_call,
+                    wc.target,
+                    wc.route_pattern,
+                    "references an unknown workflow target",
+                );
+                continue;
+            };
+
+            const parsed_route = parseServiceRoute(wc.route_pattern) orelse {
+                try unresolved.append(allocator, .{
+                    .kind = .workflow_call,
+                    .source_idx = source_idx,
+                    .call_ref = wc.route_pattern,
+                    .service_name = wc.target,
+                    .host = wc.target,
+                    .status = .unlinked,
+                });
+                try appendUnresolvedWarning(
+                    allocator,
+                    &warnings,
+                    config.handlers[source_idx].path,
+                    .workflow_call,
+                    wc.target,
+                    wc.route_pattern,
+                    "has an invalid route pattern",
+                );
+                continue;
+            };
+
+            const target_contract = &contracts[target_idx];
+            const resolved_wc = matchRoutePathWithMethod(target_contract, parsed_route.method, parsed_route.path) orelse {
+                const detail = try std.fmt.allocPrint(allocator, "matches no route in {s}", .{config.handlers[target_idx].path});
+                defer allocator.free(detail);
+                try unresolved.append(allocator, .{
+                    .kind = .workflow_call,
+                    .source_idx = source_idx,
+                    .call_ref = wc.route_pattern,
+                    .service_name = wc.target,
+                    .host = wc.target,
+                    .status = .unlinked,
+                });
+                try appendUnresolvedWarning(
+                    allocator,
+                    &warnings,
+                    config.handlers[source_idx].path,
+                    .workflow_call,
+                    wc.target,
+                    wc.route_pattern,
+                    detail,
+                );
+                continue;
+            };
+
+            try links.append(allocator, .{
+                .kind = .workflow_call,
+                .source_idx = source_idx,
+                .target_idx = target_idx,
+                .call_ref = wc.route_pattern,
+                .service_name = wc.target,
+                .matched_route = resolved_wc.matched_route,
+                .matched_method = resolved_wc.matched_method,
             });
         }
     }
@@ -2246,6 +2343,56 @@ test "linkSystem: serviceCall links named services" {
     try std.testing.expectEqual(@as(usize, 1), analysis.links.items.len);
     try std.testing.expectEqual(LinkKind.service_call, analysis.links.items[0].kind);
     try std.testing.expectEqualStrings("GET /api/users/:id", analysis.links.items[0].call_ref);
+    try std.testing.expectEqual(@as(usize, 0), analysis.unresolved.items.len);
+}
+
+test "linkSystem: workflow call links named handler route" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [2]HandlerContract = undefined;
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "orders.ts"));
+
+    var workflow_calls: std.ArrayList(handler_contract.WorkflowCallInfo) = .empty;
+    try workflow_calls.append(allocator, .{
+        .target = try allocator.dupe(u8, "payments"),
+        .route_pattern = try allocator.dupe(u8, "POST /charge"),
+    });
+    contracts[0].workflow_calls = workflow_calls;
+
+    contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "payments.ts"));
+    var behaviors: std.ArrayList(BehaviorPath) = .empty;
+    try behaviors.append(allocator, .{
+        .route_method = try allocator.dupe(u8, "POST"),
+        .route_pattern = try allocator.dupe(u8, "/charge"),
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 1,
+        .is_failure_path = false,
+    });
+    contracts[1].behaviors = behaviors;
+
+    var entries: [2]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://orders.internal") },
+        .{ .name = try allocator.dupe(u8, "payments"), .path = try allocator.dupe(u8, "payments.ts"), .base_url = try allocator.dupe(u8, "https://payments.internal") },
+    };
+    const config = SystemConfig{
+        .version = 1,
+        .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries),
+    };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+        contracts[1].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), analysis.links.items.len);
+    try std.testing.expectEqual(LinkKind.workflow_call, analysis.links.items[0].kind);
+    try std.testing.expectEqualStrings("payments", analysis.links.items[0].service_name.?);
+    try std.testing.expectEqualStrings("POST /charge", analysis.links.items[0].call_ref);
+    try std.testing.expectEqualStrings("/charge", analysis.links.items[0].matched_route);
     try std.testing.expectEqual(@as(usize, 0), analysis.unresolved.items.len);
 }
 
