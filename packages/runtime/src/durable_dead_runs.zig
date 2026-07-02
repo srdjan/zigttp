@@ -98,6 +98,17 @@ fn deleteIfExists(path: []const u8) void {
     _ = std.c.unlink(z);
 }
 
+/// Like `deleteIfExists`, but for callers (e.g. `replayDeadRun`) that must
+/// not report success while the record is still on disk - a swallowed
+/// unlink failure here would leave `hasDeadRun` seeing the file on the very
+/// next recovery poll even though the CLI already told the operator replay
+/// succeeded.
+fn deleteChecked(path: []const u8) !void {
+    const z = try std.heap.c_allocator.dupeZ(u8, path);
+    defer std.heap.c_allocator.free(z);
+    if (std.c.unlink(z) != 0) return error.DeleteFailed;
+}
+
 fn writeFileAtomic(allocator: Allocator, final_path: []const u8, bytes: []const u8) !void {
     const tmp_path = try std.fmt.allocPrint(
         allocator,
@@ -247,7 +258,10 @@ pub fn listDeadRunIds(allocator: Allocator, durable_dir: []const u8) ![][]u8 {
 
         const file_path = try std.fs.path.join(allocator, &.{ dir_path, name });
         defer allocator.free(file_path);
-        const state = (try readState(allocator, file_path)) orelse continue;
+        // A single malformed record must not hide every other quarantined
+        // run from the operator - skip it and keep scanning instead of
+        // letting the error propagate out of the whole directory listing.
+        const state = (readState(allocator, file_path) catch continue) orelse continue;
         defer allocator.free(state);
         if (!std.mem.eql(u8, state, "quarantined")) continue;
 
@@ -272,7 +286,7 @@ pub fn replayDeadRun(allocator: Allocator, durable_dir: []const u8, id: []const 
     const state = (try readState(allocator, paths.file)) orelse return error.DeadRunMissing;
     defer allocator.free(state);
     if (!std.mem.eql(u8, state, "quarantined")) return error.DeadRunAlreadyDiscarded;
-    deleteIfExists(paths.file);
+    try deleteChecked(paths.file);
 }
 
 /// Mark a dead-run record as permanently discarded. The record stays on

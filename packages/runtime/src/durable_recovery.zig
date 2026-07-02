@@ -170,14 +170,22 @@ pub fn recoverIncompleteOplogsTracked(
         // authoritative: it resets to empty on every process restart -
         // exactly the gap this record closes - so a restarted process must
         // not silently forget a standing quarantine just because its map is
-        // fresh. This costs one cheap stat-style check per oplog per poll
-        // (there is no cache-before-I/O shortcut that stays correct across
-        // restarts), but `hasDeadRun` on the common case (no record) is a
-        // single fast syscall, not a read.
-        if (tracker) |t| {
+        // fresh. This runs unconditionally, independent of `tracker`, because
+        // the untracked recovery pass used at server startup (`tracker ==
+        // null`) must also honor a standing dead-run record - a process
+        // restart is exactly the scenario this record exists to protect, and
+        // it must not re-run a quarantined or operator-discarded handler
+        // before the tracked scheduler poll even starts. This costs one
+        // cheap stat-style check per oplog per poll (there is no
+        // cache-before-I/O shortcut that stays correct across restarts), but
+        // `hasDeadRun` on the common case (no record) is a single fast
+        // syscall, not a read.
+        {
             const id = dead_runs.deadRunId(filename) orelse filename;
             const is_dead = dead_runs.hasDeadRun(allocator, oplog_dir, id) catch true; // fail closed: an I/O error looks like "still dead" rather than retrying blind
             if (is_dead) continue;
+        }
+        if (tracker) |t| {
             // No persisted record, but this process's own map still thinks
             // it's quarantined: an operator ran `durable dead-runs replay`
             // in a separate process, which can only delete the file - it
@@ -718,6 +726,53 @@ test "durable recovery: full dead-run lifecycle - quarantine writes a record, re
     // recoverOne fails again (handler still missing) - resynced from zero,
     // not simply left at the pre-replay count.
     try testing.expectEqual(@as(u32, 1), tracker.map.get(filename).?.consecutive_failures);
+}
+
+test "durable recovery: the untracked startup path honors a standing dead-run record" {
+    // Regression for a bug caught in code review: the null-tracker wrapper
+    // `recoverIncompleteOplogs` (the one `zigttp serve --durable <dir>`
+    // actually calls at process startup, before the scheduler's tracked
+    // poll loop even starts) must also skip a quarantined/discarded run.
+    // Every other dead-run test in this file drives `recoverIncompleteOplogsTracked`
+    // with an explicit `&tracker`, which never exercises this path.
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const durable_dir = try allocator.dupe(u8, dir_buf[0..dir_len]);
+    defer allocator.free(durable_dir);
+
+    const run_key = "startup-path:dead-run";
+    const filename = try std.fmt.allocPrint(allocator, "durable-{x}.jsonl", .{std.hash.Fnv1a_64.hash(run_key)});
+    defer allocator.free(filename);
+    const oplog_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ durable_dir, filename });
+    defer allocator.free(oplog_path);
+
+    const oplog =
+        "{\"type\":\"durable_run\",\"key\":\"startup-path:dead-run\"}\n" ++
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n";
+    try zq.file_io.writeFile(allocator, oplog_path, oplog);
+
+    const id = dead_runs.deadRunId(filename).?;
+    try dead_runs.writeDeadRun(allocator, durable_dir, id, run_key, filename, "handler error: boom", 1000, 10);
+    try testing.expect(try dead_runs.hasDeadRun(allocator, durable_dir, id));
+
+    const config = ServerConfig{
+        .handler = .{ .file_path = "/nonexistent/handler-for-startup-path-dead-run-test.ts" },
+        .runtime_config = .{ .durable_oplog_dir = durable_dir },
+    };
+    // The untracked wrapper - exactly what runtime_cli.zig calls at server
+    // startup, before any RetryTracker exists.
+    const recovered = try recoverIncompleteOplogs(allocator, config);
+    try testing.expectEqual(@as(u32, 0), recovered);
+
+    // The record and the oplog must both be untouched.
+    try testing.expect(try dead_runs.hasDeadRun(allocator, durable_dir, id));
+    const oplog_after = try zq.file_io.readFile(allocator, oplog_path, 4096);
+    defer allocator.free(oplog_after);
+    try testing.expectEqualStrings(oplog, oplog_after);
 }
 
 test "durable recovery: recoverOne completes real JS execution without double-freeing bytecode" {

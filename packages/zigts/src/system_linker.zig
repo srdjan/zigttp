@@ -1076,7 +1076,7 @@ pub fn linkSystem(
     }
 
     // Phase F: Compose system properties
-    var properties = composeSystemProperties(contracts, &links, &cross_boundary_flows);
+    var properties = composeSystemProperties(contracts, &links, &affordance_links, &cross_boundary_flows);
 
     // Compute all_links_resolved and all_responses_covered from analysis results
     const has_unlinked = blk: {
@@ -1236,6 +1236,7 @@ fn analyzeResponseCoverage(
 fn composeSystemProperties(
     contracts: []const HandlerContract,
     links: *const std.ArrayList(SystemLink),
+    affordance_links: *const std.ArrayList(SystemLink),
     flows: *const std.ArrayList(CrossBoundaryFlow),
 ) SystemProperties {
     var injection_safe = true;
@@ -1282,6 +1283,24 @@ fn composeSystemProperties(
 
             if (target.properties) |tp| {
                 handler_depth += tp.max_io_depth orelse 0;
+                if (c.durable.used and !tp.retry_safe) retry_safe = false;
+            } else if (c.durable.used) {
+                retry_safe = false;
+            }
+        }
+
+        // Affordance links get the same retry_safe coverage as ordinary
+        // links (R6): a durable handler reaching a non-retry_safe target
+        // only through a HATEOAS affordance must also flip the aggregate,
+        // not just the per-link failure_cascades entry. Excluded from the
+        // handler_depth/system_depth accumulation above deliberately - that
+        // I/O-depth accounting is a separate, untouched concern this fix
+        // does not change.
+        for (affordance_links.items) |link| {
+            if (link.source_idx != idx) continue;
+            const target = contracts[link.target_idx];
+
+            if (target.properties) |tp| {
                 if (c.durable.used and !tp.retry_safe) retry_safe = false;
             } else if (c.durable.used) {
                 retry_safe = false;
@@ -2018,6 +2037,14 @@ test "linkSystem: a durable source calling a non-retry_safe affordance target is
         if (std.mem.indexOf(u8, w, "hypermedia affordance target") != null and std.mem.indexOf(u8, w, "not retry_safe") != null) found_cascade_warning = true;
     }
     try std.testing.expect(found_cascade_warning);
+
+    // Regression for a bug caught in code review: the per-link
+    // failure_cascades entry above is not enough on its own - the single
+    // aggregate `retry_safe` boolean (serialized as "retrySafe" in
+    // contract.json and the plaintext report) must also reflect an
+    // affordance-only cascade, or a consumer trusting only the aggregate
+    // gets a false "safe" verdict for exactly this scenario.
+    try std.testing.expect(!analysis.properties.retry_safe);
 }
 
 test "linkSystem: a dangling affordance fails the bundle proof" {

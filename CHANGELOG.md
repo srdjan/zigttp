@@ -9,16 +9,25 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 ### Changed
 
 - **Breaking:** durable `run()` no longer trusts an automatic retry or a duplicate-response replay by default. Reusing a completed durable response, or retrying a run that a crash left incomplete, now requires either a workflow proof (`idempotent` for response reuse, `retry_safe` for retries) or a client-supplied `Idempotency-Key` header matching the `run()` key, recorded in an on-disk ledger keyed by that header. Without one of those, the handler gets a soft `599` JSON error (`DurableIdempotencyUnproven` / `DurableRetryUnproven`) instead of silently re-running or replaying a side effect. Enforcement is on by default for any handler with durable storage configured; unproven workflows should either declare `Spec<"idempotent" | "retry_safe">` or have callers send `Idempotency-Key`.
+- `zigttp link`/`zigttp rollout`: payload-compatibility, cross-boundary/injection, and failure-cascade/retry-safety checks now also run over HATEOAS affordance links (`resource()`/`follow()`), not just ordinary `fetchSync`/`serviceCall` links. An existing `system.json` whose affordance links were not previously proof-checked may see `zigttp rollout` report `needs_review`/`breaking` after upgrading, with no handler code change.
 
 ### Fixed
 
 - Durable crash recovery no longer double-frees nested function bytecode when `recoverOne` replays a run to completion. Every non-closure function value created at runtime (including the zero-upvalue arrow callbacks passed to `run()`/`step()`) shared its underlying bytecode with the enclosing function's constant pool, so both were freed independently on teardown; a durable run resuming after a crash and finishing successfully could corrupt memory. Fixed by deduplicating bytecode teardown against a single per-teardown-pass tracking set.
+- Durable-run dead-letter quarantine (`durable dead-runs`) now actually survives a server restart: the standing dead-run check previously lived only inside the scheduler's tracked poll path, so the untracked recovery pass run once at every `zigttp serve --durable` startup re-attempted every incomplete oplog unconditionally, including ones with a standing `quarantined` or operator-`discarded` record. The check now runs unconditionally for every recovery pass.
+- `zigttp durable dead-runs replay` no longer reports success when the on-disk record fails to delete; a failed delete now surfaces as an error instead of leaving the run permanently skipped while the operator was told it was cleared.
+- `zigttp durable dead-runs list` no longer aborts entirely when one record file is malformed; the corrupt entry is skipped so other quarantined runs still show.
+- `zigttp durable --help` now writes to stdout, matching every other help path in the CLI (it previously wrote to stderr).
 
 ### Added
 
 - `--workflow-queue`: recovery for `.reclaim-*` files left behind by a crashed lease-reclaim attempt (a stray reclaim is now surfaced via `zigttp` queue tooling and reclaimed automatically once it is older than the lease window, instead of being invisible to future claims).
 - `--workflow-queue`: a dead-lettered child request is now resolvable via `zigttp proof replay`/queue replay instead of returning a terminal error to the parent durable step.
 - Durable fetch (`zigttp:fetch`'s `fetch()`) now stops its retry/backoff loop as soon as the enclosing step's deadline passes, instead of continuing to retry past it.
+- `--workflow-queue`: lease-reclaim retry time is now jittered so items whose leases expire around the same wall-clock moment don't all become re-eligible in the same scheduler tick.
+- `durable dead-runs list|show|replay|discard`: operator CLI for durable-run dead-letter records, mirroring `workflow-queue`'s existing dead-letter surface for a permanently-failed crash-recovery run instead of queued child dispatch.
+- `ZTS509`: fails the build when `workflow.call`/`saga`/`fanout`/`follow` is used inside a `durable.step()` callback instead of silently losing durability at runtime.
+- `ZTS510`: proves that a statically-constructed `saga([...])` has a `compensate` on every step except possibly the last; dynamically-constructed sagas remain unproven.
 
 ## [0.1.1-beta] - 2026-06-29
 

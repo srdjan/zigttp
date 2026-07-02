@@ -128,7 +128,7 @@ pub fn workflowQueueCommand(allocator: std.mem.Allocator, argv: []const []const 
 /// natural home under `durable` later without a breaking rename.
 pub fn durableCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (argv.len == 0 or std.mem.eql(u8, argv[0], "--help") or std.mem.eql(u8, argv[0], "help")) {
-        std.debug.print(
+        const usage =
             \\zigttp durable - durable-run operator commands
             \\
             \\Usage:
@@ -137,7 +137,8 @@ pub fn durableCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
             \\  zigttp durable dead-runs replay --durable <DIR> <ID>
             \\  zigttp durable dead-runs discard --durable <DIR> <ID>
             \\
-        , .{});
+        ;
+        _ = std.c.write(std.c.STDOUT_FILENO, usage.ptr, usage.len);
         return;
     }
     if (std.mem.eql(u8, argv[0], "dead-runs")) {

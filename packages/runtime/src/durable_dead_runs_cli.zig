@@ -36,6 +36,7 @@ pub fn isExpectedUserError(err: anyerror) bool {
         error.DeadRunMissing,
         error.DeadRunAlreadyDiscarded,
         error.InvalidDeadRunRecord,
+        error.DeleteFailed,
         => true,
         else => false,
     };
