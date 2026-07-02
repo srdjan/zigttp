@@ -11,6 +11,7 @@ gates, and keep release notes user-facing.
 
 ## Validation
 
+- [ ] `zig fmt --check build.zig packages/`
 - [ ] `zig build test`
 - [ ] `zig build test-zruntime`
 - [ ] `zig build test-docs-drift test-doc-links` (docs registry and relative links)

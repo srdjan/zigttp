@@ -27,6 +27,12 @@ zig build bench
 zig build bench-check
 ```
 
+These commands cover the in-process benchmark suite and advisory threshold
+check. The public cold-start, RSS, and HTTP-throughput numbers above are pending
+receipt-backed measurement in this repo; until that lands, treat them as
+historical/manual benchmark evidence rather than output mechanically reproduced
+by `zig build bench`.
+
 For release readiness, treat `zig build bench-check` as an advisory confidence
 gate. If one benchmark misses the threshold once, rerun immediately on the same
 machine; a clean rerun clears the release, while two consecutive failures block

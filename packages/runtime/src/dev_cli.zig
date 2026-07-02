@@ -630,7 +630,7 @@ test "release doctor options parse json and out path" {
     try std.testing.expectError(error.InvalidArgument, cli_release_check.parseReleaseDoctorOptions(&.{"--bad"}));
 }
 
-test "release passport reports ready for a complete fixture" {
+test "release passport reports known issue for pending public measurement receipts" {
     const testing = std.testing;
 
     var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
@@ -647,11 +647,11 @@ test "release passport reports ready for a complete fixture" {
 
     var passport = try cli_release_check.collectReleasePassport(testing.allocator);
     defer passport.deinit(testing.allocator);
-    try testing.expectEqual(cli_release_check.ReleaseVerdict.ready, passport.verdict());
+    try testing.expectEqual(cli_release_check.ReleaseVerdict.ready_with_known_issues, passport.verdict());
 
     const json = try cli_release_check.renderReleasePassportJson(testing.allocator, &passport);
     defer testing.allocator.free(json);
-    try testing.expect(std.mem.indexOf(u8, json, "\"verdict\":\"ready\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"verdict\":\"ready_with_known_issues\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"release\":\"0.1.1-beta\"") != null);
 }
 
@@ -806,11 +806,23 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
     try tmp.dir.writeFile(io, .{ .sub_path = "scripts/check-semantics-spec.sh", .data = "#!/bin/sh\n" });
     try tmp.dir.writeFile(io, .{
         .sub_path = "scripts/verify.sh",
-        .data = "bash scripts/check-semantics-spec.sh\n",
+        .data =
+        \\zig build test
+        \\zig build test-zruntime
+        \\zig build test-docs-drift test-doc-links
+        \\zig build -Doptimize=ReleaseFast
+        \\zig build smoke-v1
+        \\zig build test-panic-isolation
+        \\bash scripts/test-examples.sh
+        \\bash scripts/test-install-archive-safety.sh
+        \\bash scripts/check-semantics-spec.sh
+        \\zigts meta --json
+        ,
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = ".github/workflows/ci.yml",
         .data =
+        \\zig fmt --check build.zig packages/
         \\zig build test
         \\zig build test-zruntime
         \\zig build test-docs-drift test-doc-links
@@ -825,6 +837,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
     try tmp.dir.writeFile(io, .{
         .sub_path = ".github/workflows/release.yml",
         .data =
+        \\zig fmt --check build.zig packages/
         \\zig build test
         \\zig build test-zruntime
         \\zig build test-docs-drift test-doc-links
@@ -876,11 +889,11 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .data = if (opts.stale_readme)
             "Numbers: 3ms runtime init. 1.2MB binary. 4MB memory baseline.\n"
         else
-            "Numbers: cold-start floor 3.5 ms, typical 7-15 ms, RSS 13 MB, throughput 112k req/s.\n",
+            "Numbers: cold-start floor 3.5 ms, typical 7-15 ms, RSS 13 MB, throughput 112k req/s. These numbers are pending receipt-backed measurement.\n",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "docs/performance.md",
-        .data = "Performance: 3.5 ms floor, 7-15 ms typical, 13 MB RSS, 112k req/s.\n",
+        .data = "Performance: 3.5 ms floor, 7-15 ms typical, 13 MB RSS, 112k req/s. These numbers are pending receipt-backed measurement.\n",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "docs/reliability.md",

@@ -119,9 +119,10 @@ exposing a binary publicly. Two boundaries are easy to miss:
 Benchmark claims are kept in [Performance](docs/performance.md). The measured
 baseline is roughly a 3.5 ms cold-start floor, 7-15 ms typical cold start
 depending on host load, about 13 MB RSS after first response, and about 112k
-req/s on the documented HTTP benchmark. Cold-start and RSS are reproducible with
-`zig build bench`; the throughput figure comes from the separate `zigttp-bench`
-harness and varies with hardware.
+req/s on the documented HTTP benchmark. These numbers are pending receipt-backed
+measurement in this repo; `zig build bench` covers the in-process benchmark
+suite, while cold-start/RSS/HTTP-throughput evidence still comes from the
+external/manual harness noted in the performance docs.
 
 ## Documentation
 

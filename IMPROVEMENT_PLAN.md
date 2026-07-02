@@ -1,10 +1,10 @@
-# zigttp Fresh-Eyes Implementation Plan
+# zigttp Fresh-Eyes Implementation Plan (Archived)
 
-Refreshed on 2026-06-18 against HEAD `aa14d66`.
+Archived on 2026-07-02. This file is no longer the current backlog.
 
-This plan is the current backlog after a whole-repo fresh-eyes pass. The
-previous checklist was reconciled against source first; items already landed are
-not carried forward as active work.
+Use [`plans/README.md`](plans/README.md) as the current plan index. The material
+below is retained as historical audit context only; several phase entries were
+later completed, rejected, or superseded.
 
 ## Audit Method
 

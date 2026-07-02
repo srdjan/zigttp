@@ -1,6 +1,7 @@
 ---
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: requirements-only
+implementation_status: landed
 product_contract_source: ce-brainstorm
 canonical_path: docs/plans/2026-06-28-002-feat-expert-clarifying-and-metrics-plan.md
 last_updated: 2026-06-28

@@ -31,8 +31,8 @@ zig build test
 step "zig build test-zruntime  (standalone runtime root)"
 zig build test-zruntime
 
-step "zig build test-doc-links  (docs link gate)"
-zig build test-doc-links
+step "zig build test-docs-drift test-doc-links  (docs drift and link gates)"
+zig build test-docs-drift test-doc-links
 
 step "zig build -Doptimize=ReleaseFast  (release binaries)"
 zig build -Doptimize=ReleaseFast

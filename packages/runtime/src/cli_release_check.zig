@@ -44,6 +44,7 @@ const build_gate_markers = [_][]const u8{
 };
 
 const ci_gate_markers = [_][]const u8{
+    "zig fmt --check build.zig packages/",
     "zig build test",
     "zig build test-zruntime",
     "zig build test-docs-drift test-doc-links",
@@ -53,6 +54,19 @@ const ci_gate_markers = [_][]const u8{
     "bash scripts/test-examples.sh",
     "bash scripts/test-install-archive-safety.sh",
     "bash scripts/check-semantics-spec.sh",
+};
+
+const verify_script_markers = [_][]const u8{
+    "zig build test",
+    "zig build test-zruntime",
+    "zig build test-docs-drift test-doc-links",
+    "zig build -Doptimize=ReleaseFast",
+    "zig build smoke-v1",
+    "zig build test-panic-isolation",
+    "bash scripts/test-examples.sh",
+    "bash scripts/test-install-archive-safety.sh",
+    "bash scripts/check-semantics-spec.sh",
+    "zigts meta --json",
 };
 
 const release_only_gate_markers = [_][]const u8{
@@ -354,11 +368,16 @@ fn addPublicClaimsCheck(allocator: std.mem.Allocator, passport: *ReleasePassport
         std.mem.indexOf(u8, perf.?, "7-15") != null and
         std.mem.indexOf(u8, perf.?, "13 MB") != null and
         std.mem.indexOf(u8, perf.?, "112k") != null;
+    const has_pending_receipt_note =
+        hasPendingReceiptBackedMeasurementNote(readme.?) and
+        hasPendingReceiptBackedMeasurementNote(perf.?);
 
     if (stale_readme or stale_perf or !has_measured_baseline) {
-        try passport.add(allocator, "public_claims", "Public performance claims", .fail, "public numbers are stale or missing from README/performance docs", "zig build bench -- --json");
+        try passport.add(allocator, "public_claims", "Public performance claims", .fail, "public numbers are stale or missing from README/performance docs", "zig build bench-check");
+    } else if (!has_pending_receipt_note) {
+        try passport.add(allocator, "public_claims", "Public performance claims", .fail, "public numbers must be marked pending receipt-backed measurement until the in-repo measurement path exists", "zig build bench-check");
     } else {
-        try passport.add(allocator, "public_claims", "Public performance claims", .ok, "README and performance docs carry the current public numbers", "zig build bench -- --json");
+        try passport.add(allocator, "public_claims", "Public performance claims", .warn, "README and performance docs carry current public numbers, explicitly marked pending receipt-backed measurement", "zig build bench-check");
     }
 }
 
@@ -498,12 +517,18 @@ fn containsAll(haystack: []const u8, needles: []const []const u8) bool {
     return true;
 }
 
+fn hasPendingReceiptBackedMeasurementNote(haystack: []const u8) bool {
+    return std.mem.indexOf(u8, haystack, "pending receipt-backed measurement") != null or
+        std.mem.indexOf(u8, haystack, "pending receipt-backed\nmeasurement") != null or
+        std.mem.indexOf(u8, haystack, "pending\nreceipt-backed measurement") != null;
+}
+
 fn releaseGateRequirementsPresent(build_zig: []const u8, ci_yml: []const u8, release_yml: []const u8, verify_sh: []const u8) bool {
     return containsAll(build_zig, &build_gate_markers) and
         containsAll(ci_yml, &ci_gate_markers) and
         containsAll(release_yml, &ci_gate_markers) and
         containsAll(release_yml, &release_only_gate_markers) and
-        std.mem.indexOf(u8, verify_sh, "bash scripts/check-semantics-spec.sh") != null;
+        containsAll(verify_sh, &verify_script_markers);
 }
 
 fn hasReleaseVerifyCommand(command: []const u8) bool {
@@ -523,12 +548,19 @@ test "release verify commands cover release gates" {
     try std.testing.expect(hasReleaseVerifyCommand("./zig-out/bin/zigttp doctor --release --json"));
 }
 
+test "pending receipt-backed measurement note tolerates markdown wrapping" {
+    try std.testing.expect(hasPendingReceiptBackedMeasurementNote("pending receipt-backed measurement"));
+    try std.testing.expect(hasPendingReceiptBackedMeasurementNote("pending receipt-backed\nmeasurement"));
+    try std.testing.expect(hasPendingReceiptBackedMeasurementNote("pending\nreceipt-backed measurement"));
+    try std.testing.expect(!hasPendingReceiptBackedMeasurementNote("pending manual benchmark measurement"));
+}
+
 test "release gate requirements require semantics and doctor wiring" {
     const build_zig =
         "smoke-v1 test-panic-isolation smoke-getting-started smoke-demo smoke-studio " ++
         "test-module-governance test-capability-audit test-docs-drift";
     const ci_yml =
-        "zig build test\nzig build test-zruntime\nzig build test-docs-drift test-doc-links\n" ++
+        "zig fmt --check build.zig packages/\nzig build test\nzig build test-zruntime\nzig build test-docs-drift test-doc-links\n" ++
         "zig build -Doptimize=ReleaseFast\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
         "bash scripts/test-examples.sh\nbash scripts/test-install-archive-safety.sh\n" ++
         "bash scripts/check-semantics-spec.sh\n";
@@ -536,7 +568,11 @@ test "release gate requirements require semantics and doctor wiring" {
         ci_yml ++
         "zig build smoke-getting-started\nzig build smoke-demo\nzig build smoke-studio\n" ++
         "./zig-out/bin/zigttp doctor --release --json\ncontents: write\n";
-    const verify_sh = "bash scripts/check-semantics-spec.sh\n";
+    const verify_sh =
+        "zig build test\nzig build test-zruntime\nzig build test-docs-drift test-doc-links\n" ++
+        "zig build -Doptimize=ReleaseFast\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
+        "bash scripts/test-examples.sh\nbash scripts/test-install-archive-safety.sh\n" ++
+        "bash scripts/check-semantics-spec.sh\nzigts meta --json\n";
 
     try std.testing.expect(releaseGateRequirementsPresent(build_zig, ci_yml, release_yml, verify_sh));
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, "zig build test\n", verify_sh));

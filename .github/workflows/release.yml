@@ -53,6 +53,9 @@ jobs:
             sudo apt-get install -y z3
           fi
 
+      - name: Check formatting
+        run: zig fmt --check build.zig packages/
+
       - name: Run aggregate tests
         run: zig build test
 
