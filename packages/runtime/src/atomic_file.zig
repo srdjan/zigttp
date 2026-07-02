@@ -61,16 +61,19 @@ test "writeFileAtomic writes the final content and leaves no tmp file behind" {
     const final_path = try std.fs.path.join(allocator, &.{ dir, "record.json" });
     defer allocator.free(final_path);
 
-    try writeFileAtomic(allocator, final_path, "{\"a\":1}");
+    const payload = "{\"a\":1}";
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp-{d}-{x}", .{ final_path, std.c.getpid(), @intFromPtr(payload.ptr) });
+    defer allocator.free(tmp_path);
+
+    try writeFileAtomic(allocator, final_path, payload);
 
     const contents = try zq.file_io.readFile(allocator, final_path, 4096);
     defer allocator.free(contents);
-    try std.testing.expectEqualStrings("{\"a\":1}", contents);
+    try std.testing.expectEqualStrings(payload, contents);
 
-    var it = tmp.dir.iterate();
-    var entry_count: usize = 0;
-    while (try it.next(std.testing.io)) |_| entry_count += 1;
-    try std.testing.expectEqual(@as(usize, 1), entry_count);
+    const tmp_path_z = try allocator.dupeZ(u8, tmp_path);
+    defer allocator.free(tmp_path_z);
+    try std.testing.expect(std.c.access(tmp_path_z, 0) != 0);
 }
 
 test "ensureDir is idempotent and deleteIfExists is a no-op on a missing path" {

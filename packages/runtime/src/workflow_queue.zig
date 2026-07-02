@@ -322,12 +322,33 @@ fn handleLeasedFile(allocator: Allocator, p: *const QueuePaths, now_ms: i64, lea
     const reclaim_file = try std.fmt.allocPrint(allocator, "{s}.reclaim-{d}-{d}-{x}", .{ p.leased_file, now_ms, std.c.getpid(), @intFromPtr(p) });
     defer allocator.free(reclaim_file);
     if (renamePath(p.leased_file, reclaim_file)) {
+        var reclaim_active = true;
+        errdefer if (reclaim_active) renamePath(reclaim_file, p.leased_file) catch {};
+
+        const locked_envelope = try zq.file_io.readFile(allocator, reclaim_file, MAX_QUEUE_FILE_BYTES);
+        defer allocator.free(locked_envelope);
+        const locked_lease_until_ms = codec.parseLeaseUntilMs(locked_envelope) catch 0;
+        if (locked_lease_until_ms > now_ms) {
+            try renamePath(reclaim_file, p.leased_file);
+            reclaim_active = false;
+            return .{ .busy = locked_lease_until_ms };
+        }
+
         var result = try claimLeasedFile(allocator, reclaim_file, p.dead_file, now_ms + lease_ms, now_ms, owner);
         errdefer result.deinit(allocator);
         switch (result) {
-            .claimed => try renamePath(reclaim_file, p.leased_file),
-            .dead => atomic_file.deleteIfExists(reclaim_file),
-            .done, .busy => {},
+            .claimed => {
+                try renamePath(reclaim_file, p.leased_file);
+                reclaim_active = false;
+            },
+            .dead => {
+                atomic_file.deleteIfExists(reclaim_file);
+                reclaim_active = false;
+            },
+            .done, .busy => {
+                try renamePath(reclaim_file, p.leased_file);
+                reclaim_active = false;
+            },
         }
         return result;
     } else |err| switch (err) {
