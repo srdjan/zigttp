@@ -2,8 +2,15 @@
 
 Originally planned at commit: `f2c637d` (`refactor(runtime): group self-extract payload params into PayloadInput`).
 Re-validated and extended at commit: `560239d` (`feat(expert,cli): inline approval diff, ...`) on 2026-06-20.
+Extended at commit: `a4a731bd` (`docs(changelog): note the recoverOne double-free fix`) on 2026-07-02.
 
 This directory contains source-backed remediation plans from read-only advisor passes. The advisor did not modify production source. Each plan is self-contained for a fresh-context executor.
+
+## Pass at `a4a731bd` (2026-07-02)
+
+A full architecture + low-level-implementation review of `packages/runtime/`, `packages/zigts/`, `packages/tools/`, `packages/modules/` (four parallel focused audits: architecture, performance/hot-path, Zig idioms, maintainability), followed by direct re-verification of every finding below against the live source at `a4a731bd` before writing plans. This pass did not re-open or re-verify plans 001-009 (their statuses below are carried over unchanged from the `560239d` pass) and did not run `scripts/verify.sh` (read-only vetting only — no code was changed, so there is nothing new to gate; each new plan's own verification commands must be run by its executor).
+
+Plans 010-014 are new this pass, each vetted by opening the cited files myself (not just trusting the sub-agent audit passes that first surfaced them).
 
 ## Reconciliation note (pass at `560239d`)
 
@@ -55,10 +62,33 @@ Status values below: TODO | IN PROGRESS | DONE | BLOCKED (<reason>) | REJECTED (
 | 008 | DONE (zigttp:io parallel/race return kind string->object in both io.zig binding and io.json spec; +registry assertion test in builtin_modules.zig; modules --json now reports object. Also regenerated meta.golden.json: module_registry_hash legitimately changed (it digests return kinds) - only that line. test-zigts/governance/modules + examples (27/27) + zig build test green) |
 | 009 | DONE (features/modules/meta/describe-rule/search now reject unknown flags with error.InvalidArgument, surfaced as the clean dev_cli "invalid arguments" message + exit 1; `--json`/`--help`/`-h`/positional still work. Added isHelpToken helper in zigts_cli; removed orphaned hasFlag in expert.zig. NECESSARY DEVIATION from the in-scope file list: tests are 10 `addExpertExitCheck` E2E assertions in build.zig (reject exit 1 + accept exit 0, run against the real `zigttp` binary in the test-expert-golden step, which is in `zig build test`), NOT unit tests - because zigts_cli.zig/describe_rule.zig/search_rules.zig are only reached via the `zigts_cli` named module and have NO test root, so their `test {}` blocks are collected by no suite (proven via an aggregate canary: `expect(false)` in zigts_cli.zig left `zig build test` green). Rooting zigts_cli.zig directly also fails to compile because describe_rule.zig has PRE-EXISTING dormant tests using the 0.16-removed `std.io.fixedBufferStream` (lines ~238/254) - left untouched as out-of-scope, see note below. The exit-check harness is the codebase's own pattern (build.zig:597-603). Red-proof: reverting modules' reject branch made `zigttp modules --josn` exit 0, failing the exit-1 check. zig build test + test-cli + test-zigts + full scripts/verify.sh green, fmt clean, policy hash unchanged.) |
 
+## Recommended Execution Order (pass at `a4a731bd`, 2026-07-02)
+
+Ordered by leverage (prerequisites and high-confidence availability/security issues float up). All five are independent of each other and of plans 001-009.
+
+| Order | Plan | Priority | Effort | Risk | Why here |
+| --- | --- | --- | --- | --- | --- |
+| 1 | [010-fix-chunked-body-quadratic-reparse.md](010-fix-chunked-body-quadratic-reparse.md) | P1 | M | LOW | Remotely triggerable O(n^2) CPU amplification on any chunked request split across reads; well-tested surface, low fix risk. |
+| 2 | [011-cap-reuse-unbounded-atom-growth.md](011-cap-reuse-unbounded-atom-growth.md) | P1 | M | LOW | The framework's own best-case pooling policy (`reuse_unbounded`, granted to pure/deterministic/state-isolated handlers) has no ceiling and eventually hard-fails `JSON.parse`/property access until process restart. |
+| 3 | [012-guard-bytecode-cache-enum-decode.md](012-guard-bytecode-cache-enum-decode.md) | P1 | S/M | LOW | Malformed/corrupted/version-skewed embedded bytecode panics the whole server with no fallback, unlike the sibling dev-cache path which already recovers gracefully from the same failure class. |
+| 4 | [013-dedupe-json-string-escaping.md](013-dedupe-json-string-escaping.md) | P1 | S | LOW | Two drifted local copies of JSON string escaping silently emit RFC-8259-invalid JSON on control-character input; small, mechanical, high-confidence fix. |
+| 5 | [014-fix-module-compiler-panicking-parser-init.md](014-fix-module-compiler-panicking-parser-init.md) | P2 | S | LOW | Contradicts the documented live-reload guarantee ("compilation failures keep the currently serving handler active") on OOM; smallest, most contained fix of the five. |
+
+## Status (pass at `a4a731bd`)
+
+| Plan | Status |
+| --- | --- |
+| 010 | TODO |
+| 011 | TODO |
+| 012 | TODO |
+| 013 | TODO |
+| 014 | TODO |
+
 ## Dependency notes
 
 - 002-005 each note `depends on 001` only so tests run against a clean format baseline; they are otherwise independent.
 - 006-009 are independent of each other. Doing 001 + 007 first makes every other plan's verification trustworthy.
+- 010-014 are independent of each other and of every plan above.
 
 ## Code-review follow-ups landed (uncommitted)
 
@@ -76,6 +106,23 @@ Status values below: TODO | IN PROGRESS | DONE | BLOCKED (<reason>) | REJECTED (
 - **`zruntime.zig` god-module (strategic)**: 7.5 KLOC, largest file in the repo, on the request hot path; continue the established alias-in-place sibling-extraction pattern (fetch/response construction, header KV). M-L effort, MED risk; ongoing.
 - **`type_pool.zig` truncation risks**: fixed parser buffers and `u16` casts. Needs a design decision (fail-closed on oversize types vs dynamic backing) before a plan. (Carried over from the `f2c637d` pass.)
 - **Server accept-path test coverage**: health/readiness/keep-alive/shutdown. Worth adding; the panic-isolation E2E is green so this is lower priority. (Carried over.)
+
+## Findings Surfaced This Pass, Not Planned (2026-07-02, verified but lower leverage)
+
+- **`JSObject.create` leaks the object if overflow-slot allocation fails** (`packages/zigts/src/object.zig:1373-1393`): no `errdefer` on the `allocator.create(JSObject)` at line 1374 before the fallible `ensureOverflowCapacity` call at line 1390. Real but low severity (leak only on the OOM path, for shapes with >8 properties); S effort, LOW risk. Small enough to fold into plan 011 or 012's executor's session as a drive-by if convenient, but not planned as its own item this batch.
+- **SQLite unconditionally linked into every deploy binary** (`packages/zigts/build.zig:29-39`; confirmed via `nm` on `zig-out/bin/zigttp-runtime`, ~270 `sqlite3_*` symbols, 22-23 MB binary): tension with the stated "small binary"/"zero dependencies" goals, but `zigttp:sql` is a documented first-class built-in, so this may be an accepted tradeoff rather than an oversight. Needs a product decision (gate by contract-derived SQL usage vs. accept as-is) before it's plannable; M effort, MED risk (touches build graph + deploy-artifact assembly).
+- **Global per-file inline-cache budget (512 slots, not reset per function)** (`packages/zigts/src/parser/codegen.zig:2801-2825`, `IC_CACHE_SIZE = 512` at `:116`): silent perf cliff for handler files with >512 property-access sites — falls back to uncached field access with no diagnostic. Mechanism confirmed; real-world trigger frequency on actual handler files not measured. M effort.
+- **Hidden-class shape rebuild is O(n) work repeated on every property added past 8** (`packages/zigts/src/object.zig:1155-1190`, `buildSortedProperties` re-sorts the full cumulative list on every transition once `new_prop_count >= 8`): confirmed mechanism; real trigger frequency on precompiled object-literal-shaped handlers (which bypass this via `set_slot`) uncertain. M effort, MED confidence on impact.
+- **`JSObject` field order wastes ~16 bytes/instance** (`packages/zigts/src/object.zig:1304-1315`, `extern struct`, pointers interleaved with `u8`/`u16` fields): structurally sound reorder (120 -> 104 bytes), not independently compiled/measured this pass. S effort, MED risk only because `extern struct` field order may be relied on by JIT-emitted fixed-offset code elsewhere — audit offset-dependent sites before reordering.
+- **`server.zig` god-module** (3325 lines; confirmed struct spans: `ConnectionPool` 295-1220, `Server` 1469-2313, `StaticFileCache` 2386-2610): `ConnectionPool` and `StaticFileCache` are already self-contained structs and close to a mechanical extraction. L effort given the file's centrality to the request path; worth a dedicated plan when there's appetite for a maintainability-only pass, not bundled here with the five availability/correctness fixes.
+- **`zruntime.zig` `Runtime` (6813 lines) and `precompile.zig` (4754 lines) god-files**: mix engine binding/HTTP lifecycle/durable-run state/WS-queue refs (zruntime), and orchestration/contract assembly/SQL validation/codegen (precompile) respectively. `zruntime.zig` specifically is already tracked as an ongoing target via the established alias-in-place sibling-extraction pattern (see "Surgical monolith split" history) — extend that effort rather than opening a competing plan. L effort each.
+- **`containsString`-style helper reimplemented ~5 times** across packages that already share a dependency graph: real duplication, trivial consolidation, but no drift/correctness bug found in any copy (unlike the JSON-escaping duplication in plan 013, which does have a drift bug) — pure tidiness. S effort, low urgency.
+- **Module-binding validator logic duplicated between SDK and internal registry** (`packages/zigttp-sdk/src/binding.zig:193` vs `packages/zigts/src/module_binding.zig:1619`, both independently implementing the same invariant checks over structurally-parallel types): a comptime assertion already keeps the two `ModuleBinding` *shapes* aligned; nothing keeps the two *validators* behaviorally aligned if a rule is added to one and forgotten in the other. S effort, LOW risk (comptime-only code). No evidence of current drift, only future-drift risk.
+- **Naming collisions: `proof_cli.zig`/`proofs_cli.zig`, and `Runtime` (zigts package vs. runtime package)**: purely cosmetic/DX, flagged independently by two separate audit passes (signal that it's a genuine live source of misreads). S effort, LOW risk, pure rename — good "if someone's already touching those files" opportunistic fix, not worth a dedicated plan/review cycle on its own.
+- **`zigttp:crypto` HMAC/base64 and `zigttp:sql` execution path effectively untested**: `hmacSha256`/`base64Decode` have no executing test (only a dead-code caller in `examples/modules/modules.ts`); `zigttp:sql`'s param binding/integer-precision guard/row conversion is only type-checked, never executed against a real query. Security-adjacent, so normally floats up, but this is a test-coverage gap rather than a demonstrated defect — recommend as the next test-writing pass rather than a remediation plan (nothing to "fix" besides adding tests, which doesn't fit this batch's bug-fix framing well). M effort.
+- **Registering one built-in module requires lockstep edits across up to 7 list sites** (`packages/modules/src/root.zig` + `packages/zigts/src/builtin_modules.zig`): already comptime-guarded against silent drift (a comptime block catches length/specifier mismatch), so this is pure maintenance friction, not a correctness risk. M effort to consolidate via `std.meta.fields` comptime iteration; low urgency given the existing guard.
+- **`zigts/src/http.zig` mixes HTTP Request/Response, JSX/SSR, generic JSON serialization, and HAL/hypermedia resource building in one 2025-line file**: a real second god-file beyond the already-known largest-files list, but a 3-way split (`http.zig`/`jsx.zig`/`hypermedia.zig`) needs care around existing `zigts.http.*` call sites; bundling with the `runtime_http.zig` naming-collision finding below into one future "naming + file-boundary cleanup" pass makes more sense than planning in isolation now.
+- **`runtime_http.zig` name collides conceptually with `zigts/src/http.zig`** (outbound fetch bridge vs. inbound JS-facing Request/Response — unrelated concerns sharing the "http" name across three packages): cosmetic, pairs naturally with the `http.zig` split above if that's ever planned.
 
 ## Findings Refuted This Pass (do not re-raise without new evidence)
 
