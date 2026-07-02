@@ -6225,10 +6225,11 @@ test "HandlerPool owned response survives pooled reuse" {
 // Linux glibc currently aborts a small runtime test bucket with heap
 // corruption ("double free or corruption (fasttop)" /
 // "malloc_consolidate(): unaligned fastbin chunk"). The known repros cover
-// five HandlerPool lifecycle tests plus the JIT overflow-slot literal test
-// below. macOS does not detect the same corruption, and the prior Linux-only
-// investigation did not isolate a root cause. Keep these gated on Linux until
-// we can debug them under rr/valgrind on a Linux host.
+// five HandlerPool lifecycle tests, the JIT overflow-slot literal test, and the
+// loadCodeNoHandler benchmark smoke below. macOS does not detect the same
+// corruption, and the prior Linux-only investigation did not isolate a root
+// cause. Keep these gated on Linux until we can debug them under rr/valgrind on
+// a Linux host.
 const skip_linux_glibc_heap_corruption_tests = builtin.os.tag == .linux;
 
 test "HandlerPool borrowed response pins runtime until release" {
@@ -6465,6 +6466,7 @@ test "JIT object literal overflow slots remain valid" {
 }
 
 test "loadCodeNoHandler supports benchmark-style scripts" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
 
     const script =

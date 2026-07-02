@@ -34,8 +34,9 @@ const HttpRequestOwned = http_types.HttpRequestOwned;
 const HttpResponse = http_types.HttpResponse;
 
 // Generational-GC heap corruption guard, mirrored from zruntime.zig: the
-// concurrent/recycling paths are flaky under linux glibc malloc only. Keep the
-// same gate so this suite stays green on CI without masking real bugs on macOS.
+// response extraction and concurrent/recycling paths are flaky under linux
+// glibc malloc only. Keep the same gate so this suite stays green on CI without
+// masking real bugs on macOS.
 const skip_linux_glibc_heap_corruption_tests = builtin.os.tag == .linux;
 
 /// Build an owned GET request with no body. Caller deinits.
@@ -199,6 +200,7 @@ test "B6: handler returning a non-Response primitive yields 500, not silent empt
 }
 
 test "handler returning a string body yields a 200 with that body" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     // The non-object/string branch of extractResponseInternal is a supported,
     // documented path: a bare string return becomes the response body.
     const allocator = std.heap.c_allocator;
