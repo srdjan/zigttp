@@ -20,6 +20,7 @@ const fault_cov = @import("fault_coverage.zig");
 const flow_checker_mod = @import("flow_checker.zig");
 const handler_verifier_mod = @import("handler_verifier.zig");
 const handler_contract = @import("handler_contract.zig");
+const json_utils = @import("json_utils.zig");
 
 const IrView = ir.IrView;
 const GeneratedTest = path_gen.GeneratedTest;
@@ -327,7 +328,7 @@ pub fn writeViolationsJsonl(
         try writer.writeByte('-');
         try writer.print("{d}", .{vi});
         try writer.writeAll(": ");
-        try writeJsonStringContent(writer, v.message);
+        try json_utils.writeJsonStringContent(writer, v.message);
         try writer.writeAll("\"}\n");
 
         // Request
@@ -367,19 +368,6 @@ fn violationKindTag(kind: ViolationKind) []const u8 {
         .result_unsafe => "result-unsafe",
         .optional_unchecked => "optional-unchecked",
     };
-}
-
-fn writeJsonStringContent(writer: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => try writer.writeByte(c),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -606,4 +594,16 @@ test "fillVerifierCounterexamples synthetic fallback when no failure path exists
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"ok\":false") != null);
     // Original success result must not appear
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"ok\":true") == null);
+}
+
+test "writeJsonStringContent escapes C0 control bytes" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    try json_utils.writeJsonStringContent(&aw.writer, "a\x01b\x1fc");
+    buf = aw.toArrayList();
+
+    try std.testing.expectEqualStrings("a\\u0001b\\u001fc", buf.items);
 }
