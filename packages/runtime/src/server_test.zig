@@ -265,6 +265,7 @@ test "coverage note: keep-alive socket path is exercised in server.zig" {
 // ===========================================================================
 
 test "B2: per-request timeout aborts a slow handler and returns RequestTimeout" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     // Verifies that request_timeout_ms is enforced via cooperative back-edge
     // checking in the interpreter. The infinite loop in the handler body triggers
     // error.RequestTimeout within 50ms, proving the deadline path is wired.
@@ -336,6 +337,7 @@ test "coverage note: health/readiness socket path is exercised in server.zig" {
 }
 
 test "B1: panic isolation: HandlerPanicked leaves pool reusable (needs test-root panic override)" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     // Full panic isolation requires the binary root to declare:
     //   pub const panic = std.debug.FullPanic(panic_recovery.handlePanic);
     // which is in main.zig and cli_main.zig but NOT in the test runner root.
