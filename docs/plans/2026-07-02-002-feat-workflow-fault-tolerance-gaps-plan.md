@@ -705,34 +705,50 @@ already established.
 - `packages/zigts/src/saga_extractor.zig` (new)
 - `packages/zigts/src/contract_types.zig`
 - `packages/zigts/src/handler_contract.zig`
+- `packages/zigts/src/contract_builder.zig` (wires the extractor into
+  `build()` and finds `saga`'s import binding slot; not in the original
+  Files list, but extraction needs a call site)
 
 **Approach**
 
-- Mirror `intent_extractor.zig`'s pattern: walk the `saga([...])` call
-  site's argument as a literal. The argument must be an array literal of
-  object literals, each with a literal `name` key and a `run` key present;
-  `compensate` is optional per step.
-- Any non-literal shape — spread, computed step, an identifier referencing
-  steps built elsewhere, a conditional/loop-constructed array, or a
-  non-literal `compensate` selection — immediately sets `dynamic = true`
-  and clears any partially-collected steps, mirroring
-  `intent_extractor.zig`'s `markDynamic` clear-then-flag invariant so a
-  caller never sees a half-populated proof used as if sound.
-- Add a `SagaInfo` struct (`steps: []{name: []const u8, has_compensate:
-  bool}`, `dynamic: bool`) to `contract_types.zig` alongside the existing
-  `IntentInfo`/`DurableInfo` fields, re-exported through
-  `handler_contract.zig`.
+- Mirrored `intent_extractor.zig`'s pattern exactly: a `Deps`/`AtomResolver`
+  struct, a linear scan over every IR node for `.call` tags whose callee
+  resolves (via a small self-contained import scan for `zigttp:workflow`'s
+  `saga`) to the tracked binding slot, then a literal walk of the first
+  argument as an array of object literals (`name` literal string required,
+  `run`/`compensate` presence-only, unknown sibling key or non-literal
+  shape marks the call dynamic).
+- Added `SagaStep {name, has_compensate}` and `SagaCallInfo {steps,
+  dynamic, source_line, source_column}` to `contract_types.zig`, plus a
+  `sagas: std.ArrayList(SagaCallInfo)` field on `HandlerContract` (bumped
+  `version` 15 → 16). `SagaCallInfo.compensationProven()` is a method on
+  the struct itself (not a separate derived field), computing "every
+  non-last step has `compensate`" on demand.
+- Reused `contract_builder.zig`'s existing `intentAtomResolver` as the
+  resolver callback (same function-pointer type as `intent_extractor`'s),
+  rather than writing a second identical resolver.
 
 **Tests**
 
-- A fully static saga (matching `saga-orchestrator.ts`'s shape) extracts
-  three steps with the correct `has_compensate` values.
-- A saga built from a spread (`saga([...base, extraStep])`) is marked
-  `dynamic = true` with an empty `steps` list.
-- A saga referencing a step array built in a separate `const` binding is
-  marked dynamic.
+- `"saga extractor collects steps and has_compensate flags from a static
+  saga"`, `"saga extractor marks a spread-constructed saga dynamic"` (both
+  in `contract_builder.zig`, via `buildTestContract`).
 
-#### U10 - ZTS510 rule and system_linker check
+#### U10 - ZTS510 rule (construction site amended: `contract_builder.zig`, not `system_linker.zig`)
+
+> **Amendment**: the plan called for `system_linker.zig` because saga
+> steps typically dispatch cross-handler via `call(name, ...)`. Once
+> `SagaCallInfo` actually existed (from U9), the check itself turned out to
+> need none of that: "does a non-last step have a `compensate` key" is
+> fully decidable from one handler's own `contract.sagas` — no cross-handler
+> resolution, no `system.json`, nothing `system_linker.zig` uniquely
+> provides. `system_linker.zig` remains genuinely necessary for Phase 5's
+> affordance-link proof extension (that one *does* need cross-handler
+> route resolution), so this correction doesn't erase its role — it just
+> means this particular check doesn't belong there. Implemented as a new
+> unconditional "Phase 4e" in `contract_builder.zig`, immediately following
+> ZTS509's "Phase 4d", for the same reason ZTS509 landed there: no
+> `Spec<...>`/`Effects<...>` gating.
 
 **Goal**
 
@@ -752,28 +768,30 @@ originally scoped.
 
 - `packages/zigts/src/rule_registry.zig`
 - `packages/zigts/src/contract_types.zig`
-- `packages/zigts/src/system_linker.zig`
+- `packages/zigts/src/contract_builder.zig` (not `system_linker.zig` — see
+  Amendment above)
+- `packages/tools/src/precompile_check.zig`,
+  `packages/proof-review/src/spec_diagnostic.zig` (exhaustive
+  `SpecDiagnostic.Kind` switches, same as ZTS509 in Phase 2)
 
 **Approach**
 
-- Add a ZTS510 `RuleEntry`/`SpecDiagnostic.Kind`, following the same
-  template used for ZTS509.
-- Place the actual check in `system_linker.zig`, not `fault_coverage.zig`
-  — saga steps' `run`/`compensate` typically dispatch cross-handler via
-  `call(name, ...)`, which `system_linker.zig` already resolves, and this
-  keeps saga-step linkage in the file that already understands
-  cross-handler edges.
-- The check: for each handler's `SagaInfo` where `dynamic == false`, flag
-  any step at index `< steps.len - 1` where `has_compensate == false`.
-  Skip entirely when `dynamic == true` (KTD6/R5 — unproven, not failed).
+- Added `SpecDiagnostic.Kind.saga_step_missing_compensate` (ZTS510) and a
+  matching `rule_registry.zig` entry.
+- `emitSagaCompensationDiagnostics` walks `contract.sagas`, skips
+  `dynamic` sagas and empty step lists entirely (KTD6/R5 — unproven, not
+  failed), and flags any non-last step where `has_compensate == false`.
 
 **Tests**
 
-- A static saga with a non-last step missing `compensate` fails ZTS510.
-- A static saga where only the *last* step omits `compensate` passes
-  (matches the existing `ship`-is-last pattern in `saga-orchestrator.ts`).
-- A fully-covered static saga passes with no diagnostic.
-- A dynamic saga (per U9) never fires ZTS510 regardless of shape.
+- `"ZTS510 fires for a non-last saga step missing compensate"`, `"ZTS510
+  does not fire when only the last saga step omits compensate"`, `"ZTS510
+  does not fire for a fully-covered static saga"`, `"ZTS510 never fires
+  for a dynamically-constructed saga"` (all in `contract_builder.zig`).
+- Zero `ZTS510` hits across every `examples/workflow/*.ts` file, confirmed
+  via `zigttp check --json` — `saga-orchestrator.ts`'s real
+  `ship`-is-last-with-no-compensate pattern is correctly proven, not
+  flagged.
 
 #### U11 - Saga compensation-coverage contract property
 
@@ -792,24 +810,25 @@ verify`, the same way existing durable-workflow properties are surfaced.
 
 **Files**
 
-- `packages/zigts/src/contract_types.zig`
-- `packages/zigts/src/handler_contract.zig`
+- `packages/zigts/src/contract_json_writer.zig`
+- `packages/zigts/src/contract_json_parser.zig`
+- `packages/zigts/src/handler_contract.zig` (test only)
 
 **Approach**
 
-- Add a `saga.compensationProven` (or equivalently-named) boolean property
-  to the contract, following the existing pattern documented in
-  `docs/durable-workflows.md`'s "Proofs Vs Runtime Guarantees" section for
-  `retrySafe`/`idempotent`/`faultCovered`: `true` only when `SagaInfo.dynamic
-  == false` and ZTS510 did not fire; `false`/absent otherwise, never a
-  guess.
+- `contract.json` gained a top-level `"sagas"` array (one entry per
+  `saga([...])` call site, not a single collapsed boolean — a handler can
+  have more than one saga), each with `dynamic`, `compensationProven`
+  (computed, not stored), `steps: [{name, hasCompensate}]`, `sourceLine`,
+  `sourceColumn`. `compensationProven` is written for convenience but not
+  parsed back on read (it's derived from `dynamic`+`steps`, which are).
+  Mirrors `intent`'s existing write/parse pair in both files.
 
 **Tests**
 
-- `contract.json` for a fully-covered static saga includes
-  `saga.compensationProven: true`.
-- `contract.json` for a dynamic saga omits the property or sets it
-  `false`, never `true`.
+- `"parseFromJson roundtrip preserves sagas"` (`handler_contract.zig`):
+  two saga call sites (one static + proven via the last-step exception,
+  one dynamic) survive a full write → parse round trip.
 
 #### U12 - Saga proof end-to-end tests
 
@@ -828,17 +847,23 @@ other across the full saga shape space.
 
 **Files**
 
-- Test blocks colocated with `saga_extractor.zig` and `system_linker.zig`.
+- Test blocks in `contract_builder.zig` (extraction + diagnostic, via
+  `buildTestContract` — not `saga_extractor.zig`/`system_linker.zig` as
+  originally planned; see U10's amendment for why the diagnostic moved)
+  and `handler_contract.zig` (JSON round-trip).
 
 **Approach**
 
-- End-to-end table test compiling small saga handlers through the full
-  pipeline (extract → link → contract) for: fully covered, non-last-step
-  gap, last-step-only gap (passes), and dynamic construction.
+- Table-style coverage across `contract_builder.zig`: fully covered static
+  saga, non-last-step gap (fails), last-step-only gap (passes, matches
+  `saga-orchestrator.ts`), and dynamic construction (never fires,
+  regardless of shape) — six tests total across U9/U10, plus U11's
+  round-trip test.
 
 **Tests**
 
-- See Approach — this unit *is* the end-to-end matrix.
+- See U9/U10/U11's Tests lists — this unit's matrix is the union of all
+  three, run together as `test-zigts` (1466 passed, 1 skipped, 0 failed).
 
 ---
 

@@ -28,6 +28,7 @@ const type_pool_mod = @import("type_pool.zig");
 const rule_registry = @import("rule_registry.zig");
 const spec_discharge = @import("spec_discharge.zig");
 const intent_extractor = @import("intent_extractor.zig");
+const saga_extractor = @import("saga_extractor.zig");
 const effect_inference = @import("effect_inference.zig");
 const function_specs = @import("function_specs.zig");
 const JsParser = @import("parser/root.zig").JsParser;
@@ -344,6 +345,15 @@ pub const ContractBuilder = struct {
         // than degrading, preserving the deterministic-extraction line.
         const intent_value = try self.extractIntentAssertions();
 
+        // Every saga([...]) call site, for ZTS510's compensation-coverage
+        // proof (system_linker.zig). Same strict-literal-or-dynamic
+        // discipline as intent extraction above.
+        var saga_calls = try self.extractSagaCalls();
+        errdefer {
+            for (saga_calls.items) |*s| s.deinit(self.allocator);
+            saga_calls.deinit(self.allocator);
+        }
+
         if (handler_fn) |hf| {
             try self.extractScopeUsage(hf);
             try self.extractDurableWorkflow(handler_path, hf);
@@ -484,6 +494,7 @@ pub const ContractBuilder = struct {
             .rate_limiting = rate_limiting,
             .properties = properties,
             .intent = intent_value,
+            .sagas = saga_calls,
             .property_provenance = .{
                 .deterministic = self.nondeterministic_cause,
             },
@@ -515,6 +526,14 @@ pub const ContractBuilder = struct {
         // the durability loss is silent and real regardless of what the
         // function claims about itself.
         try self.emitNestedWorkflowCallDiagnostics(&contract, &effects);
+
+        // Phase 4e: unconditional structural check (ZTS510) - a statically-
+        // analyzable saga([...]) with a non-last step missing `compensate`.
+        // Single-contract and purely structural (derived entirely from
+        // `contract.sagas`, already extracted above), so - unlike the
+        // affordance-link proofs in system_linker.zig - it needs no
+        // cross-handler resolution and belongs here, not there.
+        try self.emitSagaCompensationDiagnostics(&contract);
 
         // Clear moved lists so deinit() won't double-free
         self.modules_list = .empty;
@@ -994,6 +1013,46 @@ pub const ContractBuilder = struct {
             .spec_name = spec_name,
             .suggestion = suggestion,
             .function = owned_func,
+        };
+    }
+
+    /// Phase 4e: flag every non-last step missing `compensate` in each
+    /// statically-analyzable saga. Skips `dynamic` sagas entirely (KTD6 -
+    /// unproven, not failed) since their step set cannot be enumerated.
+    fn emitSagaCompensationDiagnostics(self: *ContractBuilder, contract: *HandlerContract) !void {
+        for (contract.sagas.items) |saga| {
+            if (saga.dynamic or saga.steps.items.len == 0) continue;
+            for (saga.steps.items[0 .. saga.steps.items.len - 1], 0..) |step, i| {
+                if (step.has_compensate) continue;
+                try contract.spec_diagnostics.append(
+                    self.allocator,
+                    try makeSagaStepMissingCompensate(self.allocator, step.name, i, saga.steps.items.len, saga.source_line),
+                );
+            }
+        }
+    }
+
+    /// Build a ZTS510 diagnostic: a non-last saga step declares no
+    /// `compensate`, so if a later step fails, this step's already-
+    /// completed side effect is never undone - a partial-rollback hole.
+    fn makeSagaStepMissingCompensate(
+        allocator: std.mem.Allocator,
+        step_name: []const u8,
+        index: usize,
+        total: usize,
+        source_line: u32,
+    ) !contract_types.SpecDiagnostic {
+        const spec_name = try allocator.dupe(u8, step_name);
+        errdefer allocator.free(spec_name);
+        const suggestion = try std.fmt.allocPrint(
+            allocator,
+            "saga step \"{s}\" ({d} of {d}, line {d}) has no `compensate` - if a later step fails, this step's completed effect is never undone. Add a `compensate` thunk, or move this step last if it has no side effect to undo.",
+            .{ step_name, index + 1, total, source_line },
+        );
+        return .{
+            .kind = .saga_step_missing_compensate,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
         };
     }
 
@@ -2342,6 +2401,15 @@ pub const ContractBuilder = struct {
     fn intentAtomResolver(atom_idx: u16, ctx: *const anyopaque) ?[]const u8 {
         const self: *const ContractBuilder = @ptrCast(@alignCast(ctx));
         return self.resolveAtomName(atom_idx);
+    }
+
+    fn extractSagaCalls(self: *ContractBuilder) !std.ArrayList(contract_types.SagaCallInfo) {
+        return saga_extractor.extract(.{
+            .allocator = self.allocator,
+            .ir_view = self.ir_view,
+            .resolver = intentAtomResolver,
+            .resolver_ctx = @ptrCast(self),
+        });
     }
 
     fn resolveAtomName(self: *const ContractBuilder, atom_idx: u16) ?[]const u8 {
@@ -4280,6 +4348,132 @@ test "contract builder preserves determinism for durable step callback" {
     const props = contract.properties orelse return error.MissingProperties;
     try std.testing.expect(props.deterministic);
     try std.testing.expect(props.idempotent);
+}
+
+test "saga extractor collects steps and has_compensate flags from a static saga" {
+    const source =
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return saga([
+        \\    { name: "reserve", run: () => 1, compensate: () => 2 },
+        \\    { name: "ship", run: () => 3 },
+        \\  ]);
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.sagas.items.len);
+    const info = contract.sagas.items[0];
+    try std.testing.expect(!info.dynamic);
+    try std.testing.expectEqual(@as(usize, 2), info.steps.items.len);
+    try std.testing.expectEqualStrings("reserve", info.steps.items[0].name);
+    try std.testing.expect(info.steps.items[0].has_compensate);
+    try std.testing.expectEqualStrings("ship", info.steps.items[1].name);
+    try std.testing.expect(!info.steps.items[1].has_compensate);
+    try std.testing.expect(info.compensationProven());
+}
+
+test "saga extractor marks a spread-constructed saga dynamic" {
+    const source =
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  const extra = [{ name: "x", run: () => 1 }];
+        \\  return saga([...extra, { name: "y", run: () => 2 }]);
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.sagas.items.len);
+    const info = contract.sagas.items[0];
+    try std.testing.expect(info.dynamic);
+    try std.testing.expectEqual(@as(usize, 0), info.steps.items.len);
+    try std.testing.expect(!info.compensationProven());
+}
+
+/// True if `contract.spec_diagnostics` contains a ZTS510 for `step_name`.
+fn hasSagaMissingCompensateDiagnostic(contract: *const HandlerContract, step_name: []const u8) bool {
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind != .saga_step_missing_compensate) continue;
+        if (std.mem.eql(u8, d.spec_name, step_name)) return true;
+    }
+    return false;
+}
+
+test "ZTS510 fires for a non-last saga step missing compensate" {
+    const source =
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return saga([
+        \\    { name: "reserve", run: () => 1 },
+        \\    { name: "charge", run: () => 2, compensate: () => 3 },
+        \\    { name: "ship", run: () => 4 },
+        \\  ]);
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expect(hasSagaMissingCompensateDiagnostic(&contract, "reserve"));
+    try std.testing.expect(!hasSagaMissingCompensateDiagnostic(&contract, "charge"));
+    try std.testing.expect(!hasSagaMissingCompensateDiagnostic(&contract, "ship"));
+    try std.testing.expect(!contract.sagas.items[0].compensationProven());
+}
+
+test "ZTS510 does not fire when only the last saga step omits compensate" {
+    const source =
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return saga([
+        \\    { name: "reserve", run: () => 1, compensate: () => 2 },
+        \\    { name: "charge", run: () => 3, compensate: () => 4 },
+        \\    { name: "ship", run: () => 5 },
+        \\  ]);
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expect(!hasSagaMissingCompensateDiagnostic(&contract, "reserve"));
+    try std.testing.expect(!hasSagaMissingCompensateDiagnostic(&contract, "charge"));
+    try std.testing.expect(!hasSagaMissingCompensateDiagnostic(&contract, "ship"));
+    try std.testing.expect(contract.sagas.items[0].compensationProven());
+}
+
+test "ZTS510 does not fire for a fully-covered static saga" {
+    const source =
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return saga([
+        \\    { name: "reserve", run: () => 1, compensate: () => 2 },
+        \\    { name: "ship", run: () => 3, compensate: () => 4 },
+        \\  ]);
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expect(!hasSagaMissingCompensateDiagnostic(&contract, "reserve"));
+    try std.testing.expect(!hasSagaMissingCompensateDiagnostic(&contract, "ship"));
+    try std.testing.expect(contract.sagas.items[0].compensationProven());
+}
+
+test "ZTS510 never fires for a dynamically-constructed saga" {
+    const source =
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  const extra = [{ name: "reserve", run: () => 1 }];
+        \\  return saga([...extra, { name: "ship", run: () => 2 }]);
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expect(!hasSagaMissingCompensateDiagnostic(&contract, "reserve"));
+    try std.testing.expect(!hasSagaMissingCompensateDiagnostic(&contract, "ship"));
+    try std.testing.expect(contract.sagas.items[0].dynamic);
+    try std.testing.expect(!contract.sagas.items[0].compensationProven());
 }
 
 test "contract builder does not exempt eager durable step argument" {

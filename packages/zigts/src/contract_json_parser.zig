@@ -29,6 +29,8 @@ const RateLimitInfo = handler_contract.RateLimitInfo;
 const IntentInfo = handler_contract.IntentInfo;
 const IntentAssertion = handler_contract.IntentAssertion;
 const IntentExpectedHeader = handler_contract.IntentExpectedHeader;
+const SagaCallInfo = handler_contract.SagaCallInfo;
+const SagaStep = handler_contract.SagaStep;
 const PathCondition = handler_contract.PathCondition;
 const PathIoCall = handler_contract.PathIoCall;
 const BehaviorPath = handler_contract.BehaviorPath;
@@ -166,6 +168,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             } else {
                 contract.intent = try parseIntent(&parser, allocator);
             }
+        } else if (std.mem.eql(u8, key, "sagas")) {
+            try parseSagas(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "behaviors")) {
             try parseBehaviors(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "behaviorsExhaustive")) {
@@ -2411,6 +2415,97 @@ fn parseIntentHeaders(parser: *JsonParser, allocator: std.mem.Allocator, asserti
         };
         errdefer header.deinit(allocator);
         try assertion.expected_headers.append(allocator, header);
+    }
+}
+
+fn parseSagas(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        var info = SagaCallInfo{};
+        errdefer info.deinit(allocator);
+
+        if (!parser.consume('{')) return error.InvalidJson;
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "dynamic")) {
+                info.dynamic = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "steps")) {
+                try parseSagaSteps(parser, allocator, &info);
+            } else if (std.mem.eql(u8, key, "sourceLine")) {
+                info.source_line = parser.readU32() orelse 0;
+            } else if (std.mem.eql(u8, key, "sourceColumn")) {
+                info.source_column = parser.readU32() orelse 0;
+            } else {
+                // "compensationProven" is derived (SagaCallInfo.compensationProven())
+                // and any other unknown key skips here.
+                parser.skipValue();
+            }
+        }
+
+        try contract.sagas.append(allocator, info);
+    }
+}
+
+fn parseSagaSteps(parser: *JsonParser, allocator: std.mem.Allocator, info: *SagaCallInfo) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        var name_buf: []const u8 = "";
+        var has_compensate = false;
+
+        if (!parser.consume('{')) return error.InvalidJson;
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+            if (std.mem.eql(u8, key, "name")) {
+                name_buf = parser.readString() orelse "";
+            } else if (std.mem.eql(u8, key, "hasCompensate")) {
+                has_compensate = parser.readBool() orelse false;
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        var step = SagaStep{
+            .name = try allocator.dupe(u8, name_buf),
+            .has_compensate = has_compensate,
+        };
+        errdefer step.deinit(allocator);
+        try info.steps.append(allocator, step);
     }
 }
 

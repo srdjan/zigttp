@@ -61,6 +61,8 @@ pub const RateLimitInfo = contract_types.RateLimitInfo;
 pub const IntentInfo = contract_types.IntentInfo;
 pub const IntentAssertion = contract_types.IntentAssertion;
 pub const IntentExpectedHeader = contract_types.IntentExpectedHeader;
+pub const SagaStep = contract_types.SagaStep;
+pub const SagaCallInfo = contract_types.SagaCallInfo;
 pub const SpecDiagnostic = contract_types.SpecDiagnostic;
 pub const PathCondition = contract_types.PathCondition;
 pub const PathIoCall = contract_types.PathIoCall;
@@ -363,6 +365,83 @@ test "parseFromJson roundtrip preserves declared specs and diagnostics" {
     try std.testing.expectEqual(SpecDiagnostic.Kind.missing_capsule, parsed.spec_diagnostics.items[3].kind);
     try std.testing.expectEqualStrings("deterministic", parsed.spec_diagnostics.items[3].spec_name);
     try std.testing.expectEqualStrings("stamp", parsed.spec_diagnostics.items[3].function.?);
+}
+
+test "parseFromJson roundtrip preserves sagas" {
+    const allocator = std.testing.allocator;
+
+    var static_steps: std.ArrayList(SagaStep) = .empty;
+    try static_steps.append(allocator, .{ .name = try allocator.dupe(u8, "reserve"), .has_compensate = true });
+    try static_steps.append(allocator, .{ .name = try allocator.dupe(u8, "ship"), .has_compensate = false });
+
+    var sagas: std.ArrayList(SagaCallInfo) = .empty;
+    try sagas.append(allocator, .{
+        .steps = static_steps,
+        .dynamic = false,
+        .source_line = 7,
+        .source_column = 10,
+    });
+    try sagas.append(allocator, .{
+        .steps = .empty,
+        .dynamic = true,
+        .source_line = 20,
+        .source_column = 3,
+    });
+
+    var original = HandlerContract{
+        .handler = .{ .path = try allocator.dupe(u8, "saga.ts"), .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
+        .api = emptyApiInfo(),
+        .verification = null,
+        .aot = null,
+        .sagas = sagas,
+    };
+    defer original.deinit(allocator);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try writeContractJson(&original, &aw.writer);
+    output = aw.toArrayList();
+
+    var parsed = try parseFromJson(allocator, output.items);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), parsed.sagas.items.len);
+
+    const first = parsed.sagas.items[0];
+    try std.testing.expect(!first.dynamic);
+    try std.testing.expectEqual(@as(u32, 7), first.source_line);
+    try std.testing.expectEqual(@as(u32, 10), first.source_column);
+    try std.testing.expectEqual(@as(usize, 2), first.steps.items.len);
+    try std.testing.expectEqualStrings("reserve", first.steps.items[0].name);
+    try std.testing.expect(first.steps.items[0].has_compensate);
+    try std.testing.expectEqualStrings("ship", first.steps.items[1].name);
+    try std.testing.expect(!first.steps.items[1].has_compensate);
+    // "ship" is the last step, so it's allowed to omit compensate.
+    try std.testing.expect(first.compensationProven());
+
+    const second = parsed.sagas.items[1];
+    try std.testing.expect(second.dynamic);
+    try std.testing.expectEqual(@as(usize, 0), second.steps.items.len);
+    try std.testing.expect(!second.compensationProven());
 }
 
 test "parseFromJson roundtrip preserves partner extensions section" {
@@ -865,7 +944,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 15") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 16") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);

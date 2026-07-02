@@ -566,6 +566,14 @@ const capsule_meta = [_]struct {
         .help = "Move the workflow.call/saga/fanout/follow invocation outside the step() callback, to the same durable.run() scope it's already recorded in.",
         .repair = null,
     },
+    .{
+        .name = "saga_step_missing_compensate",
+        .code = "ZTS510",
+        .description = "A statically-analyzable saga([...]) has a non-last step with no compensate, leaving a partial-rollback hole if a later step fails.",
+        .example = "saga([{ name: \"reserve\", run: () => call(\"inv\", {}) }, { name: \"ship\", run: () => call(\"ship\", {}) }]) // \"reserve\" has no compensate",
+        .help = "Add a compensate thunk to the step, or move it last if it has no side effect that needs undoing.",
+        .repair = null,
+    },
 };
 
 // ---------------------------------------------------------------------------

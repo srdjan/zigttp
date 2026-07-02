@@ -853,6 +853,14 @@ pub const SpecDiagnostic = struct {
         /// `step()` they silently lose durability at runtime. Unconditional:
         /// fires regardless of any declared `Spec<...>`/`Effects<...>`.
         workflow_call_in_step,
+        /// ZTS510: a statically-analyzable `saga([...])` has a non-last step
+        /// with no `compensate`, leaving a partial-rollback hole - if a
+        /// later step fails, this step's completed side effect is never
+        /// undone. The last step may omit `compensate` (it never completed
+        /// if it's the one that failed, and nothing runs after it to
+        /// trigger a rollback). Only fires for statically-analyzable sagas;
+        /// see `SagaCallInfo.dynamic`.
+        saga_step_missing_compensate,
 
         pub fn code(self: Kind) []const u8 {
             return switch (self) {
@@ -868,6 +876,7 @@ pub const SpecDiagnostic = struct {
                 .missing_effects_capsule => "ZTS507",
                 .missing_proof_capsule_export => "ZTS508",
                 .workflow_call_in_step => "ZTS509",
+                .saga_step_missing_compensate => "ZTS510",
             };
         }
 
@@ -1259,6 +1268,47 @@ pub const IntentInfo = struct {
     }
 };
 
+/// One step of a `saga([...])` call, as extracted by `saga_extractor.zig`.
+pub const SagaStep = struct {
+    /// Owned copy of the step's literal `name`.
+    name: []const u8,
+    /// True when the step object carries a `compensate` key (any value
+    /// shape - only presence is checked, not whether it correctly undoes
+    /// `run`; see ZTS510's scope note).
+    has_compensate: bool,
+
+    pub fn deinit(self: *SagaStep, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+    }
+};
+
+/// One `saga([...])` call site, as extracted by `saga_extractor.zig`.
+/// `dynamic = true` means the argument was not a fully static array of
+/// object literals (spread, computed step, identifier reference, unknown
+/// sibling key, etc.) - `steps` is then empty and no proof is attempted,
+/// mirroring `IntentInfo`'s dynamic-implies-empty invariant.
+pub const SagaCallInfo = struct {
+    steps: std.ArrayList(SagaStep) = .empty,
+    dynamic: bool = false,
+    source_line: u32 = 0,
+    source_column: u32 = 0,
+
+    pub fn deinit(self: *SagaCallInfo, allocator: std.mem.Allocator) void {
+        for (self.steps.items) |*s| s.deinit(allocator);
+        self.steps.deinit(allocator);
+    }
+
+    /// True when every step but possibly the last declares `compensate`
+    /// (KTD6's scope: structural presence, static sagas only).
+    pub fn compensationProven(self: SagaCallInfo) bool {
+        if (self.dynamic or self.steps.items.len == 0) return false;
+        for (self.steps.items[0 .. self.steps.items.len - 1]) |step| {
+            if (!step.has_compensate) return false;
+        }
+        return true;
+    }
+};
+
 /// One helper function's proof capsule, projected for the `proofCapsules`
 /// JSON envelope. Plain data so it carries no import dependency on the
 /// capsule discharge driver. Transient: populated during build, consumed by
@@ -1322,7 +1372,7 @@ pub const EffectCapsuleSummary = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 15,
+    version: u32 = 16,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -1352,6 +1402,9 @@ pub const HandlerContract = struct {
     /// Author-declared intent assertions. Null when the handler module
     /// has no `export const intent` literal. See `IntentInfo` for shape.
     intent: ?IntentInfo = null,
+    /// Every `saga([...])` call site found in the handler module. See
+    /// `SagaCallInfo` for shape and `saga_extractor.zig` for extraction.
+    sagas: std.ArrayList(SagaCallInfo) = .empty,
     /// In-memory provenance for demoted properties. Not serialized; populated
     /// during build for the live-reload HUD's "Why" line. Snippets are
     /// borrowed static strings, so deinit is a no-op.
@@ -1485,5 +1538,7 @@ pub const HandlerContract = struct {
         }
         self.extensions.deinit(allocator);
         if (self.intent) |*i| i.deinit(allocator);
+        for (self.sagas.items) |*s| s.deinit(allocator);
+        self.sagas.deinit(allocator);
     }
 };

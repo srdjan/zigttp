@@ -634,6 +634,30 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("  \"intent\": null,\n");
     }
 
+    // sagas - every saga([...]) call site found, with its compensation-
+    // coverage proof verdict (ZTS510). Empty array when the handler never
+    // imports zigttp:workflow's saga.
+    try writer.writeAll("  \"sagas\": [");
+    for (contract.sagas.items, 0..) |saga, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.writeAll("\n    {\n");
+        try writer.print("      \"dynamic\": {s},\n", .{if (saga.dynamic) "true" else "false"});
+        try writer.print("      \"compensationProven\": {s},\n", .{if (saga.compensationProven()) "true" else "false"});
+        try writer.writeAll("      \"steps\": [");
+        for (saga.steps.items, 0..) |step, j| {
+            if (j > 0) try writer.writeAll(", ");
+            try writer.writeAll("{\"name\": ");
+            try writeJsonString(writer, step.name);
+            try writer.print(", \"hasCompensate\": {s}}}", .{if (step.has_compensate) "true" else "false"});
+        }
+        try writer.writeAll("],\n");
+        try writer.print("      \"sourceLine\": {d},\n", .{saga.source_line});
+        try writer.print("      \"sourceColumn\": {d}\n", .{saga.source_column});
+        try writer.writeAll("    }");
+    }
+    if (contract.sagas.items.len > 0) try writer.writeByte('\n');
+    try writer.writeAll("  ],\n");
+
     // behaviors (optional)
     if (contract.behaviors.items.len > 0) {
         try writer.writeAll("  \"behaviors\": [\n");
