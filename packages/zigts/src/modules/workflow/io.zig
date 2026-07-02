@@ -13,7 +13,12 @@
 //!   race(thunks: Array<() => T>) -> T
 //!     Execute an array of zero-arg functions concurrently.
 //!     All I/O effects run and are waited on; returns the first successful
-//!     result in declaration order (lowest-latency winner in a future version).
+//!     result in declaration order, NOT by latency: every thunk's threads are
+//!     joined before results are scanned, so "first" means first in the
+//!     caller's array, not first-to-finish on the wall clock. A genuinely
+//!     lowest-latency winner would need per-thunk completion signaling
+//!     instead of join-all-then-scan, and is deferred - see the
+//!     workflow/fault-tolerance gaps plan (Scope Boundaries).
 
 const std = @import("std");
 const context = @import("../../context.zig");
@@ -24,6 +29,10 @@ const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
 /// Maximum number of concurrent operations in a single parallel/race call.
+/// This bounds actual concurrent OS threads/fetches, unlike
+/// `zigttp:workflow`'s `MAX_PARALLEL_CALLS` (runtime_workflow.zig), which
+/// bounds a sequential dispatch loop's array size - the two are not required
+/// to match.
 pub const MAX_PARALLEL: u32 = 8;
 
 pub const MODULE_STATE_SLOT = @intFromEnum(@import("../../module_slots.zig").Slot.io);

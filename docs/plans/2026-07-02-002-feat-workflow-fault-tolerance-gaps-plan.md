@@ -262,13 +262,26 @@ caps, without changing runtime behavior in this unit.
 - Test expectation: none — documentation and comment changes only, no
   behavior change.
 
-#### U2 - Workflow-queue lease-reclaim backoff and jitter
+#### U2 - Workflow-queue reclaim jitter (scope corrected during implementation)
+
+> **Amendment**: this unit's original framing — "lease reclaim retries
+> immediately with no delay/backoff" — turned out to be inaccurate. Tracing
+> the full path before writing code showed `handleLeasedFile`'s `.busy`
+> result is already durably persisted as a `wait_timer` event
+> (`suspendQueuedWorkflowDispatch` in `runtime_workflow.zig`) and cheaply
+> gated on each 1-second `DurableScheduler` tick
+> (`durable_recovery.zig:186-187`) — there is no tight retry loop on the
+> reachable path. The real, smaller gap: the computed retry time is a
+> deterministic `lease_until_ms` with no jitter, so items whose leases
+> expire in the same second all become re-eligible in the same tick. The
+> goal, files, and approach below reflect what was actually implemented.
 
 **Goal**
 
-Give `workflow_queue.zig`'s lease-reclaim retries the same bounded,
-jittered backoff `durable_recovery.zig` already uses for recovery retries,
-instead of retrying immediately with no delay.
+Add bounded jitter to the workflow-queue reclaim retry time so items whose
+leases expire around the same wall-clock moment don't all become
+re-eligible in the same scheduler tick, without ever retrying before the
+lease has actually expired.
 
 **Requirements**
 
@@ -276,28 +289,35 @@ instead of retrying immediately with no delay.
 
 **Files**
 
-- `packages/runtime/src/workflow_queue.zig`
-- `packages/runtime/src/retry_backoff.zig`
+- `packages/runtime/src/runtime_workflow.zig` (not `workflow_queue.zig` —
+  the retry-time computation lives in the caller,
+  `workflowQueuedDispatchParts`'s `.busy` branch, not in
+  `handleLeasedFile`)
+- `packages/runtime/src/retry_backoff.zig` (reused unchanged)
 
 **Approach**
 
-- In `handleLeasedFile` (~lines 299-333), replace the immediate
-  `error.FileNotFound`-triggered retry with a delay computed via
-  `retry_backoff.retryDelayMs(base_ms, max_ms, attempt, seed)`, the same
-  helper `durable_recovery.zig` already calls.
-- Size `base_ms`/`max_ms` for the 30-second lease window rather than
-  reusing `durable_recovery`'s 1s-60s parameters verbatim — the reclaim
-  race is expected to resolve in well under one lease period. Pick small,
-  explicit constants (for example a sub-second base capped well below the
-  lease duration) and document the choice in a comment next to the call.
-- Reuse `retry_backoff.seedBytes` the same way `durable_recovery.zig` does
-  for jitter seeding.
+- Added a `jitteredRetryAtMs(base_retry_ms, item_id)` helper that adds
+  `retry_backoff.boundedJitterMs(WORKFLOW_QUEUE_RETRY_JITTER_CAP_MS, seed)`
+  on top of the existing `base_retry_ms` computation, seeded via
+  `retry_backoff.seedBytes(item_id, ...)` so different items jitter
+  differently. Jitter is strictly additive, so the result is never earlier
+  than `base_retry_ms`/`lease_until_ms`.
+- Used `boundedJitterMs` directly (not the full exponential
+  `retryDelayMs`) since there is no failure/attempt count here — just a
+  fixed lease deadline that needs spreading out, not exponential growth.
+- `WORKFLOW_QUEUE_RETRY_JITTER_CAP_MS` is a small, separate constant
+  (1000ms) from `WORKFLOW_QUEUE_RETRY_DELAY_MS` — it only needs to spread
+  items apart, not delay them meaningfully.
 
 **Tests**
 
-- Two workers racing to reclaim the same expired lease back off instead of
-  spinning; the eventual claimant still succeeds within the lease window.
-- Backoff delay never exceeds the configured cap.
+- `jitteredRetryAtMs never retries before base_retry_ms`
+- `jitteredRetryAtMs stays within the bounded jitter ceiling`
+- `jitteredRetryAtMs spreads distinct item ids apart`
+
+All three colocated with `runtime_workflow.zig`'s existing test blocks;
+full `test-zruntime` suite (392 tests) passes with zero failures.
 
 ---
 

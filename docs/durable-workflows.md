@@ -72,6 +72,13 @@ Proof receipts and deploy manifests expose the same status:
 Inside durable `run()`, completed `call`, `follow`, and `fanout` child
 responses are recorded so replay does not re-dispatch completed children.
 
+`fanout()` dispatches its calls one at a time, not concurrently - the name
+describes the shape of the request (many targets), not parallel execution.
+Results are ordered by declaration index regardless of dispatch order. This
+keeps the durable oplog boundary simple (the whole fan-out replays as one
+step) at the cost of wall-clock speedup; use `zigttp:io`'s `parallel()` for
+actual concurrent I/O outside a durable workflow context.
+
 Add `--workflow-queue` to persist top-level child dispatch before it runs:
 
 ```bash

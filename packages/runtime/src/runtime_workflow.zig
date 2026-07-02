@@ -40,8 +40,17 @@ const getHeaderAtom = natives.getHeaderAtom;
 const statusTextFor = natives.statusTextFor;
 const getStringDataCtx = zq.builtins.helpers.getStringDataCtx;
 const appendEscapedJson = @import("durable_store.zig").appendEscaped;
+const retry_backoff = @import("retry_backoff.zig");
 
 const WORKFLOW_QUEUE_RETRY_DELAY_MS: i64 = 1_000;
+/// Additive jitter ceiling applied on top of a lease-expiry retry time (see
+/// the `.busy` branch below). `lease_until_ms` is a deterministic wall-clock
+/// deadline, so without jitter, every item whose lease expires within the
+/// same second becomes re-eligible in the same 1s scheduler tick
+/// (durable_scheduler.zig). This is deliberately small relative to
+/// `workflow_queue.defaultLeaseMs()` - it only needs to spread items apart,
+/// not delay them meaningfully.
+const WORKFLOW_QUEUE_RETRY_JITTER_CAP_MS: i64 = 1_000;
 
 /// Runtime side of `zigttp:workflow.call(name, init)`. Builds an
 /// `HttpRequestView` from the `init` object, dispatches it to a co-located
@@ -263,7 +272,8 @@ fn workflowQueuedDispatchParts(
             // Wake close to the real lease expiry rather than polling on a
             // fixed interval, but never sooner than the minimum delay so a
             // near-expired lease can't cause a tight retry loop.
-            const retry_at_ms = @max(lease_until_ms, saturatingAddMs(now_ms, WORKFLOW_QUEUE_RETRY_DELAY_MS));
+            const base_retry_ms = @max(lease_until_ms, saturatingAddMs(now_ms, WORKFLOW_QUEUE_RETRY_DELAY_MS));
+            const retry_at_ms = jitteredRetryAtMs(base_retry_ms, item_id);
             try suspendQueuedWorkflowDispatch(rt, retry_at_ms);
             return error.DurableSuspended;
         },
@@ -310,6 +320,40 @@ fn completeQueuedDispatch(
 
 fn saturatingAddMs(now_ms: i64, delay_ms: i64) i64 {
     return std.math.add(i64, now_ms, delay_ms) catch std.math.maxInt(i64);
+}
+
+/// Adds bounded jitter to a computed retry time, keyed on the queue item's
+/// id, so items whose leases expire around the same wall-clock moment don't
+/// all become re-eligible in the same `DurableScheduler` tick. Jitter is
+/// strictly additive (`boundedJitterMs` never returns negative), so the
+/// result is never earlier than `base_retry_ms`.
+fn jitteredRetryAtMs(base_retry_ms: i64, item_id: []const u8) i64 {
+    const seed = retry_backoff.seedBytes(item_id, 0x51554555_4a495454);
+    const jitter_ms = retry_backoff.boundedJitterMs(WORKFLOW_QUEUE_RETRY_JITTER_CAP_MS, seed);
+    return saturatingAddMs(base_retry_ms, jitter_ms);
+}
+
+test "jitteredRetryAtMs never retries before base_retry_ms" {
+    const base_retry_ms: i64 = 1_000;
+    try std.testing.expect(jitteredRetryAtMs(base_retry_ms, "item-a") >= base_retry_ms);
+    try std.testing.expect(jitteredRetryAtMs(base_retry_ms, "item-b") >= base_retry_ms);
+    try std.testing.expect(jitteredRetryAtMs(base_retry_ms, "") >= base_retry_ms);
+}
+
+test "jitteredRetryAtMs stays within the bounded jitter ceiling" {
+    const base_retry_ms: i64 = 1_000;
+    const retry_at_ms = jitteredRetryAtMs(base_retry_ms, "some-item-id");
+    try std.testing.expect(retry_at_ms <= base_retry_ms + WORKFLOW_QUEUE_RETRY_JITTER_CAP_MS);
+}
+
+test "jitteredRetryAtMs spreads distinct item ids apart" {
+    // Same base retry time (as if two items' leases expire in the same
+    // second) but different item ids must not collapse to identical retry
+    // times - that would defeat the point of jittering.
+    const base_retry_ms: i64 = 5_000;
+    const retry_a = jitteredRetryAtMs(base_retry_ms, "queue-item-alpha");
+    const retry_b = jitteredRetryAtMs(base_retry_ms, "queue-item-beta");
+    try std.testing.expect(retry_a != retry_b);
 }
 
 fn suspendQueuedWorkflowDispatch(rt: *Runtime, retry_at_ms: i64) !void {
@@ -777,6 +821,11 @@ fn buildSagaResponse(rt: *Runtime, status: u16, ok: bool, failed: ?[]const u8, c
     return created.value;
 }
 
+/// Bounds the size of a `fanout()` call array. `dispatchAllToPartsArray` below
+/// dispatches these sequentially (no concurrent OS threads), so this measures
+/// array size, not concurrency load - it is not required to match
+/// `zigttp:io`'s `MAX_PARALLEL` (io.zig), which bounds actual concurrent
+/// fetches for `parallel()`/`race()`.
 const MAX_PARALLEL_CALLS: u32 = 16;
 
 /// Runtime side of zigttp:workflow.fanout(calls). Dispatches N co-located
@@ -832,8 +881,16 @@ pub fn workflowFanoutCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, calls_v
 
 /// Dispatch every call descriptor and collect a JS array of `{status,headers,
 /// body}` parts in declaration order. A per-call failure becomes a 599 parts
-/// entry rather than aborting the whole fan-out. (Sequential dispatch; the
-/// aggregate is order-deterministic regardless of execution order.)
+/// entry rather than aborting the whole fan-out.
+///
+/// Despite the name, `fanout()` does not run calls concurrently: each call is
+/// dispatched one at a time on this thread, and the result array is ordered
+/// by declaration index, not by completion order. Callers should not expect
+/// a wall-clock speedup from adding more calls. Genuine concurrent dispatch
+/// is deferred - see the workflow/fault-tolerance gaps plan (Scope
+/// Boundaries) for why: each nested dispatch swaps shared runtime/
+/// interpreter globals (see below), which is not safe to do across
+/// concurrently-running calls without a larger runtime change.
 fn dispatchAllToPartsArray(rt: *Runtime, ctx: *zq.Context, registry: *SystemRuntime, arr: *zq.JSObject, count: u32) !zq.JSValue {
     var view_arena = std.heap.ArenaAllocator.init(rt.allocator);
     defer view_arena.deinit();
