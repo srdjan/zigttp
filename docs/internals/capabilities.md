@@ -68,7 +68,7 @@ This pattern is visible in `id.zig`, `env.zig`, `sql.zig`, `service.zig`, `cache
 | `zigttp:log` | `clock`, `stderr` | Timestamped log emission. |
 | `zigttp:ratelimit` | `clock` | Token bucket expiry. |
 | `zigttp:scope` | `runtime_callback` | Request-scoped lifecycle hooks call back into the runtime at request end. |
-| `zigttp:service` | `filesystem`, `runtime_callback` | Reads cross-handler service contracts from disk and dispatches via the runtime. |
+| `zigttp:service` | `network`, `filesystem`, `runtime_callback` | Reads cross-handler service contracts from disk and dispatches via the runtime. |
 | `zigttp:sql` | `sqlite`, `policy_check` | SQLite connection plus query-name allowlist check. |
 | `zigttp:websocket` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` | Sends frames, manages rooms, and serializes hibernated attachment state through the gateway. |
 

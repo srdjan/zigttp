@@ -247,16 +247,14 @@ test "executeHandlerBorrowed releases the runtime even when the handler errors" 
 }
 
 // ===========================================================================
-// Keep-alive (placeholder: needs a public raw-request seam)
+// Keep-alive coverage note
 // ===========================================================================
 
-test "keep-alive: two sequential requests reuse one connection" {
-    // PLACEHOLDER. End-to-end keep-alive lives in ConnectionPool
-    // (handleSingleRequestSync -> RequestOutcome.keep_alive), which is
-    // file-private in server.zig. To test it from this module without surface
-    // creep, B1 must expose a public test seam, e.g.
-    //   pub fn Server.handleRawRequestForTest(fd, request_num) !RequestOutcome
-    // (or a buffer-in/buffer-out variant). Fill in once that lands.
+test "coverage note: keep-alive socket path is exercised in server.zig" {
+    // Cross-module server_test cannot call ConnectionPool.handleConnection
+    // without widening the public surface. The real socket coverage lives in
+    // server.zig's `threaded keep-alive connection serves two sequential
+    // requests` test, which runs under the same `test-server` root.
     return error.SkipZigTest;
 }
 
@@ -315,12 +313,11 @@ test "B3: Server.shutdown() stops the server and drains in-flight requests" {
     try std.testing.expect(!srv.running);
 }
 
-test "B4: /_health and /_readiness are dispatched via HandlerPool" {
+test "coverage note: health/readiness socket path is exercised in server.zig" {
     // The health/readiness probes intercept in server.zig before the JS handler.
-    // This test verifies them through the pool path indirectly: the pool itself
-    // always succeeds; the route intercept is structural in server.zig and
-    // exercised by integration tests. This placeholder asserts pool init succeeds,
-    // confirming the health-check infra (getInUse, max_size) is accessible.
+    // The real accept-path coverage lives in server.zig's socket-level probe
+    // test. This local note keeps the pool field expectations visible without
+    // pretending to dispatch an HTTP request from this module.
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,

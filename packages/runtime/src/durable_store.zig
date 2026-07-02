@@ -640,7 +640,7 @@ const FsDurableStore = struct {
     fn ensureDir(self: *Self, path: []const u8) !void {
         const path_z = try self.allocator.dupeZ(u8, path);
         defer self.allocator.free(path_z);
-        switch (std.posix.errno(std.posix.system.mkdir(path_z, 0o755))) {
+        switch (std.posix.errno(std.posix.system.mkdir(path_z, 0o700))) {
             .SUCCESS, .EXIST => {},
             else => return error.MakeDirFailed,
         }
@@ -738,16 +738,26 @@ fn writeSignalEnvelope(
         try buf.appendSlice(allocator, "\"}");
     }
 
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
+    const tmp_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}.tmp-{d}-{x}",
+        .{ path, std.c.getpid(), @intFromPtr(buf.items.ptr) },
+    );
+    defer allocator.free(tmp_path);
+    errdefer deletePath(tmp_path);
+
+    const tmp_z = try allocator.dupeZ(u8, tmp_path);
+    defer allocator.free(tmp_z);
     const fd = try std.posix.openatZ(
         std.posix.AT.FDCWD,
-        path_z,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
-        0o644,
+        tmp_z,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true },
+        0o600,
     );
     defer std.Io.Threaded.closeFd(fd);
-    writeAll(fd, buf.items);
+    try trace.writeAllChecked(fd, buf.items);
+    if (std.c.fsync(fd) != 0) return error.FileWriteFailed;
+    if (!(try renamePath(tmp_path, path))) return error.RenameFailed;
 }
 
 pub fn appendEscaped(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) !void {
@@ -825,6 +835,29 @@ test "durable store enqueue and consume immediate signal" {
     try std.testing.expectEqualStrings("{\"ok\":true}", consumed.payload_json);
 
     try std.testing.expect((try store.tryConsumeSignal("order:123", "approved", unixMillis())) == null);
+}
+
+test "durable signal files are private when created atomically" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = DurableStore.initFs(allocator, durable_dir);
+    try store.enqueueSignal("order:private", "approved", "{\"ok\":true}");
+
+    var consumed = (try store.tryConsumeSignal("order:private", "approved", unixMillis())).?;
+    defer consumed.deinit();
+
+    const path_z = try allocator.dupeZ(u8, consumed.path);
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(fd);
+    const stat = try zq.file_io.fstatFd(fd);
+    try std.testing.expectEqual(@as(u32, 0o600), stat.mode & 0o777);
 }
 
 test "subtreeDir creates a namespaced directory under the durable root" {

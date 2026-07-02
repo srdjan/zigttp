@@ -9,6 +9,7 @@ const http_types = @import("http_types.zig");
 const contract_runtime = @import("contract_runtime.zig");
 const response_mod = @import("server_response.zig");
 const io_mod = @import("server_io.zig");
+const runtime_natives = @import("runtime_natives.zig");
 
 const Io = std.Io;
 const net = std.Io.net;
@@ -889,17 +890,7 @@ fn isHopByHopHeader(key: []const u8) bool {
 }
 
 fn statusText(status: u16) []const u8 {
-    return switch (status) {
-        200 => "OK",
-        400 => "Bad Request",
-        404 => "Not Found",
-        408 => "Request Timeout",
-        413 => "Payload Too Large",
-        500 => "Internal Server Error",
-        503 => "Service Unavailable",
-        504 => "Gateway Timeout",
-        else => "OK",
-    };
+    return runtime_natives.statusTextFor(status);
 }
 
 fn defaultPoolSize() usize {
@@ -939,6 +930,10 @@ test "edge handler timeout maps to gateway timeout" {
     try std.testing.expectEqual(@as(u16, 500), statusForHandlerError(error.HandlerPanic));
     try std.testing.expectEqualStrings("Gateway Timeout", messageForHandlerError(504));
     try std.testing.expectEqualStrings("Gateway Timeout", statusText(504));
+    try std.testing.expectEqualStrings("Not Implemented", statusText(501));
+    try std.testing.expectEqualStrings("Method Not Allowed", statusText(405));
+    try std.testing.expectEqualStrings("Too Many Requests", statusText(429));
+    try std.testing.expectEqualStrings("Request Header Fields Too Large", statusText(431));
 }
 
 test "route selection prefers specific host and longest prefix" {

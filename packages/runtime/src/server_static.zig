@@ -37,7 +37,11 @@ pub fn resolveStaticFile(
     if (!isPathSafe(path)) return .forbidden;
 
     const full_path = std.fmt.bufPrint(path_buf, "{s}/{s}", .{ static_dir, path }) catch return error.PathTooLong;
-    if (!isCanonicalPathInsideRoot(allocator, io, static_dir, full_path)) return .forbidden;
+    switch (canonicalPathStatusInsideRoot(allocator, io, static_dir, full_path)) {
+        .inside => {},
+        .missing => return .not_found,
+        .outside => return .forbidden,
+    }
 
     const file = Dir.openFile(Dir.cwd(), io, full_path, .{ .follow_symlinks = false }) catch return .not_found;
     errdefer file.close(io);
@@ -103,19 +107,32 @@ pub fn getContentType(path: []const u8) []const u8 {
     return "application/octet-stream";
 }
 
-pub fn isCanonicalPathInsideRoot(allocator: std.mem.Allocator, io: Io, static_root: []const u8, full_path: []const u8) bool {
-    const root_path = Dir.realPathFileAlloc(Dir.cwd(), io, static_root, allocator) catch return false;
+const CanonicalPathStatus = enum {
+    inside,
+    missing,
+    outside,
+};
+
+fn canonicalPathStatusInsideRoot(allocator: std.mem.Allocator, io: Io, static_root: []const u8, full_path: []const u8) CanonicalPathStatus {
+    const root_path = Dir.realPathFileAlloc(Dir.cwd(), io, static_root, allocator) catch return .outside;
     defer allocator.free(root_path);
-    const candidate_path = Dir.realPathFileAlloc(Dir.cwd(), io, full_path, allocator) catch return false;
+    const candidate_path = Dir.realPathFileAlloc(Dir.cwd(), io, full_path, allocator) catch |err| switch (err) {
+        error.FileNotFound => return .missing,
+        else => return .outside,
+    };
     defer allocator.free(candidate_path);
 
     const root: []const u8 = root_path;
     const candidate: []const u8 = candidate_path;
     const root_norm = if (root.len > 1) std.mem.trimEnd(u8, root, "/\\") else root;
-    if (!std.mem.startsWith(u8, candidate, root_norm)) return false;
-    if (candidate.len == root_norm.len) return true;
+    if (!std.mem.startsWith(u8, candidate, root_norm)) return .outside;
+    if (candidate.len == root_norm.len) return .inside;
     const boundary = candidate[root_norm.len];
-    return boundary == '/' or boundary == '\\';
+    return if (boundary == '/' or boundary == '\\') .inside else .outside;
+}
+
+pub fn isCanonicalPathInsideRoot(allocator: std.mem.Allocator, io: Io, static_root: []const u8, full_path: []const u8) bool {
+    return canonicalPathStatusInsideRoot(allocator, io, static_root, full_path) == .inside;
 }
 
 // -------------------------------------------------------------------------
@@ -175,4 +192,26 @@ test "path safety validation" {
     // the current contract: pre-decoded traversal must be caught here,
     // post-decoded traversal relies on the filesystem layer.
     try std.testing.expect(isPathSafe("..%2fetc/passwd"));
+}
+
+test "resolveStaticFile returns not_found for safe missing paths" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const static_dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const static_dir = dir_buf[0..static_dir_len];
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var etag_buf: [34]u8 = undefined;
+
+    const resolved = try resolveStaticFile(
+        allocator,
+        std.testing.io,
+        static_dir,
+        "missing.css",
+        &path_buf,
+        &etag_buf,
+    );
+    try std.testing.expectEqual(StaticFileLookup.not_found, resolved);
 }

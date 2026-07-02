@@ -94,7 +94,7 @@ fn openOplogWritable(allocator: std.mem.Allocator, path: []const u8, truncate: b
         std.posix.AT.FDCWD,
         path_z,
         .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = truncate },
-        0o644,
+        0o600,
     ) catch return error.FileOpenFailed;
 
     return fd;
@@ -181,4 +181,23 @@ pub fn applyEmbeddedCapabilityPolicy(ctx: *zq.Context, config: RuntimeConfig) vo
     if (config.dev_capability_policy) |policy| {
         ctx.capability_policy = policy;
     }
+}
+
+test "durable oplog files are private when created" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+    const path = try std.fmt.allocPrint(allocator, "{s}/durable-test.jsonl", .{dir});
+    defer allocator.free(path);
+
+    const fd = try openOplogFile(allocator, path);
+    defer std.Io.Threaded.closeFd(fd);
+
+    const stat = try zq.file_io.fstatFd(fd);
+    try std.testing.expectEqual(@as(u32, 0o600), stat.mode & 0o777);
 }

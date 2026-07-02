@@ -567,7 +567,7 @@ fn ensureQueueDirs(p: *const QueuePaths) !void {
 fn ensureDir(path: []const u8) !void {
     const z = try std.heap.c_allocator.dupeZ(u8, path);
     defer std.heap.c_allocator.free(z);
-    switch (std.posix.errno(std.posix.system.mkdir(z, 0o755))) {
+    switch (std.posix.errno(std.posix.system.mkdir(z, 0o700))) {
         .SUCCESS, .EXIST => {},
         else => return error.MakeDirFailed,
     }
@@ -625,7 +625,7 @@ fn writeFileAtomic(allocator: Allocator, final_path: []const u8, bytes: []const 
         std.posix.AT.FDCWD,
         tmp_z,
         .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
-        0o644,
+        0o600,
     );
     defer std.Io.Threaded.closeFd(fd);
     try writeAllChecked(fd, bytes);
@@ -697,6 +697,29 @@ test "workflow queue claim completes with durable result" {
     defer allocator.free(result);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"status\":202") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"body\":\"queued\"") != null);
+}
+
+test "workflow queue files are private when created atomically" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const durable_dir = try allocator.dupe(u8, dir_buf[0..dir_len]);
+    defer allocator.free(durable_dir);
+
+    var p = try queuePaths(allocator, durable_dir, "item-private");
+    defer p.deinit();
+    try ensureQueueDirs(&p);
+    try writeFileAtomic(allocator, p.pending_file, "{\"target\":\"worker\"}");
+
+    const path_z = try allocator.dupeZ(u8, p.pending_file);
+    defer allocator.free(path_z);
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(fd);
+    const stat = try zq.file_io.fstatFd(fd);
+    try std.testing.expectEqual(@as(u32, 0o600), stat.mode & 0o777);
 }
 
 test "workflow queue lease remains busy until expiry" {

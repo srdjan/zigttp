@@ -1898,13 +1898,11 @@ pub const Server = struct {
         }
 
         if (self.config.security_log_path) |path| {
-            self.security_logger = SecurityLogger.start(self.allocator, path) catch |err| blk: {
+            self.security_logger = SecurityLogger.start(self.allocator, path) catch |err| {
                 std.log.err("Failed to start security logger at '{s}': {}", .{ path, err });
-                break :blk null;
+                return err;
             };
-            if (self.security_logger != null) {
-                std.log.info("Security events -> {s}", .{path});
-            }
+            std.log.info("Security events -> {s}", .{path});
         }
 
         if (self.config.runtime_config.workflow_queue_enabled) {
@@ -3108,6 +3106,55 @@ test "threaded keep-alive connection serves two sequential requests" {
         }
         try std.testing.expect(std.mem.startsWith(u8, buf[0..len], "HTTP/1.1 200 OK\r\n"));
     }
+}
+
+test "threaded health and readiness probes return over socket accept path" {
+    const Runner = struct {
+        fn expectProbe(path: []const u8) !void {
+            var server: Server = undefined;
+            server.config = .{
+                .handler = .{ .inline_code = "" },
+                .timeout_ms = 2_000,
+                .keep_alive = false,
+            };
+            server.reload_active = false;
+            server.contract = null;
+            server.well_known_doc = null;
+            server.pool = null;
+
+            var pool = ConnectionPool{
+                .workers = &[_]std.Thread{},
+                .queue = ConnectionPool.BoundedQueue.init(),
+                .running = std.atomic.Value(bool).init(true),
+                .server = &server,
+                .allocator = std.testing.allocator,
+            };
+
+            const fds = try createUnixSocketPair();
+            var server_fd_owned = true;
+            defer if (server_fd_owned) std.Io.Threaded.closeFd(fds[0]);
+
+            const worker = try std.Thread.spawn(.{}, ConnectionPool.handleConnection, .{ &pool, fds[0] });
+            server_fd_owned = false;
+            defer worker.join();
+            defer std.Io.Threaded.closeFd(fds[1]);
+
+            var request_buf: [128]u8 = undefined;
+            const request = try std.fmt.bufPrint(
+                &request_buf,
+                "GET {s} HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
+                .{path},
+            );
+            try writeAllFd(fds[1], request);
+
+            var response_buf: [512]u8 = undefined;
+            const n = try std.posix.read(fds[1], &response_buf);
+            try std.testing.expect(std.mem.startsWith(u8, response_buf[0..n], "HTTP/1.1 200 OK\r\n"));
+        }
+    };
+
+    try Runner.expectProbe("/_health");
+    try Runner.expectProbe("/_readiness");
 }
 
 test "parseRequestFromBuffer rejects duplicate content length" {
