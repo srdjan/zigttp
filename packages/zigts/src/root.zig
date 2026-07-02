@@ -267,6 +267,13 @@ test {
     _ = @import("tests/opcode_parity.zig");
 }
 
+// modules/internal/compiler.zig is only reached via the `modules` re-export
+// above, which container-level laziness never forces the compiler to
+// analyze on its own, so its test blocks go uncollected without this anchor.
+test {
+    _ = @import("modules/internal/compiler.zig");
+}
+
 test "version" {
     try std.testing.expectEqualStrings("0.1.1-beta", version.string);
 }
