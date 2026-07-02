@@ -847,6 +847,12 @@ pub const SpecDiagnostic = struct {
         /// ZTS508 (warning): an exported helper carries no `Proof<...>`
         /// capsule. Emitted only under the opt-in docs mode.
         missing_proof_capsule_export,
+        /// ZTS509: `workflow.call`/`saga`/`fanout`/`follow` is used inside a
+        /// `durable.step()` callback. These exports only durably record at
+        /// step depth 0 (runtime_workflow.zig); nested inside a user
+        /// `step()` they silently lose durability at runtime. Unconditional:
+        /// fires regardless of any declared `Spec<...>`/`Effects<...>`.
+        workflow_call_in_step,
 
         pub fn code(self: Kind) []const u8 {
             return switch (self) {
@@ -861,6 +867,7 @@ pub const SpecDiagnostic = struct {
                 .helper_budget_exceeded => "ZTS607",
                 .missing_effects_capsule => "ZTS507",
                 .missing_proof_capsule_export => "ZTS508",
+                .workflow_call_in_step => "ZTS509",
             };
         }
 

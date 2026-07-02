@@ -465,6 +465,7 @@ fn specDiagnosticMessage(diag: handler_contract.SpecDiagnostic) []const u8 {
         .helper_budget_exceeded => "helper reaches a capability outside the handler's Effects<...> budget",
         .missing_effects_capsule => "exported helper carries no Effects<...> capsule",
         .missing_proof_capsule_export => "exported helper carries no Proof<...> capsule",
+        .workflow_call_in_step => "workflow.call/saga/fanout/follow used inside a step() callback silently loses durability",
     };
 }
 

@@ -558,6 +558,14 @@ const capsule_meta = [_]struct {
         .help = "Add the capability to the handler's Effects<...> budget, or remove the call from the reachable helper.",
         .repair = .add_capability_declaration,
     },
+    .{
+        .name = "workflow_call_in_step",
+        .code = "ZTS509",
+        .description = "workflow.call/saga/fanout/follow is used inside a durable.step() callback, which silently loses durability at runtime instead of failing.",
+        .example = "step(() => call(\"billing\", { path: \"/charge\" })); // call() only durably records at step depth 0",
+        .help = "Move the workflow.call/saga/fanout/follow invocation outside the step() callback, to the same durable.run() scope it's already recorded in.",
+        .repair = null,
+    },
 };
 
 // ---------------------------------------------------------------------------

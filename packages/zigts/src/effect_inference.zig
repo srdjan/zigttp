@@ -26,6 +26,22 @@ const Capability = module_binding.ModuleCapability;
 
 pub const CapabilitySet = std.EnumSet(Capability);
 
+/// A `zigttp:workflow` call (`call`, `saga`, `fanout`, or `follow`) found
+/// while `durable_callback_depth > 0` - i.e. lexically nested inside a
+/// `durable.step()` callback. `workflow.call` is only durable-recorded at
+/// step depth 0 (see runtime_workflow.zig); nested inside a user `step()`
+/// it silently loses durability at runtime with no error. This is an
+/// unconditional structural fact, not gated behind a declared `Spec<...>`
+/// or `Effects<...>` capsule - ZTS509 fires for every function regardless
+/// of what it claims about itself.
+pub const NestedWorkflowCall = struct {
+    /// Index into `Analyzer.functions` for the function the call sits in.
+    owner: usize,
+    /// Static name of the offending export: "call", "saga", "fanout", or
+    /// "follow". Borrowed from `imported.name`; never allocated.
+    workflow_fn: []const u8,
+};
+
 pub const EffectRow = struct {
     capabilities: CapabilitySet = CapabilitySet.initEmpty(),
     deterministic: bool = true,
@@ -115,6 +131,11 @@ pub const Analyzer = struct {
     callee_starts: std.ArrayListUnmanaged(u32),
     callee_storage: std.ArrayListUnmanaged(usize),
     durable_callback_depth: u32,
+    /// Every `zigttp:workflow` call found nested inside a `step()` callback.
+    /// See `NestedWorkflowCall` - this is collected unconditionally during
+    /// the same walk that computes effect rows, regardless of any declared
+    /// `Spec<...>`/`Effects<...>` capsule.
+    nested_workflow_calls: std.ArrayListUnmanaged(NestedWorkflowCall),
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) Analyzer {
         return initWithManifestRegistry(allocator, ir_view, atoms, null);
@@ -137,6 +158,7 @@ pub const Analyzer = struct {
             .callee_starts = .empty,
             .callee_storage = .empty,
             .durable_callback_depth = 0,
+            .nested_workflow_calls = .empty,
         };
     }
 
@@ -146,6 +168,7 @@ pub const Analyzer = struct {
         self.user_fn_by_slot.deinit(self.allocator);
         self.callee_starts.deinit(self.allocator);
         self.callee_storage.deinit(self.allocator);
+        self.nested_workflow_calls.deinit(self.allocator);
     }
 
     pub fn analyze(self: *Analyzer, root: NodeIndex) !void {
@@ -447,6 +470,15 @@ pub const Analyzer = struct {
             {
                 row.has_egress = true;
             }
+            if (self.durable_callback_depth > 0 and
+                std.mem.eql(u8, imported.module, "zigttp:workflow") and
+                isNestedWorkflowExport(imported.name))
+            {
+                try self.nested_workflow_calls.append(self.allocator, .{
+                    .owner = owner,
+                    .workflow_fn = imported.name,
+                });
+            }
             return;
         }
 
@@ -467,6 +499,16 @@ pub const Analyzer = struct {
         const imported = self.imports.get(binding.slot) orelse return false;
         return std.mem.eql(u8, imported.module, "zigttp:durable") and
             std.mem.eql(u8, imported.name, "step");
+    }
+
+    /// ZTS509's export allow-list: the four `zigttp:workflow` exports that
+    /// only durably record at step depth 0 (runtime_workflow.zig). Nested
+    /// inside a `step()` callback, each one silently loses durability.
+    fn isNestedWorkflowExport(name: []const u8) bool {
+        return std.mem.eql(u8, name, "call") or
+            std.mem.eql(u8, name, "saga") or
+            std.mem.eql(u8, name, "fanout") or
+            std.mem.eql(u8, name, "follow");
     }
 
     fn importEffect(self: *const Analyzer, module: []const u8, name: []const u8) module_binding.EffectClass {

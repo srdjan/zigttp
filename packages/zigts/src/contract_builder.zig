@@ -509,6 +509,13 @@ pub const ContractBuilder = struct {
         // attribute every over-budget capability (ZTS506 / ZTS607).
         try self.dischargeCapabilityBudget(&contract, &effects, handler_loc);
 
+        // Phase 4d: unconditional structural check (ZTS509) - workflow.call/
+        // saga/fanout/follow nested inside a durable.step() callback. Unlike
+        // 4b/4c, this does not depend on any declared Spec<...>/Effects<...>:
+        // the durability loss is silent and real regardless of what the
+        // function claims about itself.
+        try self.emitNestedWorkflowCallDiagnostics(&contract, &effects);
+
         // Clear moved lists so deinit() won't double-free
         self.modules_list = .empty;
         self.functions_map = .empty;
@@ -942,6 +949,48 @@ pub const ContractBuilder = struct {
         );
         return .{
             .kind = .helper_budget_exceeded,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+            .function = owned_func,
+        };
+    }
+
+    /// Phase 4d: turn every `effects.nested_workflow_calls` entry into a
+    /// ZTS509 diagnostic. Unconditional - runs for every function the
+    /// analyzer collected, regardless of any declared capsule.
+    fn emitNestedWorkflowCallDiagnostics(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        effects: *const effect_inference.Analyzer,
+    ) !void {
+        for (effects.nested_workflow_calls.items) |violation| {
+            const func_name = effects.functions.items[violation.owner].name;
+            try contract.spec_diagnostics.append(
+                self.allocator,
+                try makeWorkflowCallInStep(self.allocator, violation.workflow_fn, func_name),
+            );
+        }
+    }
+
+    /// Build a ZTS509 diagnostic: `workflow.call`/`saga`/`fanout`/`follow`
+    /// used inside a `durable.step()` callback, where it silently loses
+    /// durability instead of failing.
+    fn makeWorkflowCallInStep(
+        allocator: std.mem.Allocator,
+        workflow_fn: []const u8,
+        func: []const u8,
+    ) !contract_types.SpecDiagnostic {
+        const spec_name = try allocator.dupe(u8, workflow_fn);
+        errdefer allocator.free(spec_name);
+        const owned_func = try allocator.dupe(u8, func);
+        errdefer allocator.free(owned_func);
+        const suggestion = try std.fmt.allocPrint(
+            allocator,
+            "`{s}()` only durably records at step depth 0; move it outside the enclosing step() callback in `{s}`.",
+            .{ workflow_fn, func },
+        );
+        return .{
+            .kind = .workflow_call_in_step,
             .spec_name = spec_name,
             .suggestion = suggestion,
             .function = owned_func,
@@ -4244,6 +4293,95 @@ test "contract builder does not exempt eager durable step argument" {
     const props = contract.properties orelse return error.MissingProperties;
     try std.testing.expect(!props.deterministic);
     try std.testing.expect(!props.idempotent);
+}
+
+/// True if `contract.spec_diagnostics` contains a ZTS509 for `workflow_fn`.
+fn hasWorkflowCallInStepDiagnostic(contract: *const HandlerContract, workflow_fn: []const u8) bool {
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind != .workflow_call_in_step) continue;
+        if (std.mem.eql(u8, d.spec_name, workflow_fn)) return true;
+    }
+    return false;
+}
+
+test "ZTS509 fires for call/saga/fanout/follow nested inside step()" {
+    const cases = [_]struct { fn_name: []const u8, call_expr: []const u8 }{
+        .{ .fn_name = "call", .call_expr = "call(\"billing\", {})" },
+        .{ .fn_name = "saga", .call_expr = "saga([])" },
+        .{ .fn_name = "fanout", .call_expr = "fanout([])" },
+        .{ .fn_name = "follow", .call_expr = "follow(\"/next\")" },
+    };
+    for (cases) |case| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\import {{ step }} from "zigttp:durable";
+            \\import {{ call, saga, fanout, follow }} from "zigttp:workflow";
+            \\function handler(req) {{
+            \\  return step("s", () => {s});
+            \\}}
+        , .{case.call_expr});
+        defer std.testing.allocator.free(source);
+
+        var contract = try buildTestContract(source);
+        defer contract.deinit(std.testing.allocator);
+
+        try std.testing.expect(hasWorkflowCallInStepDiagnostic(&contract, case.fn_name));
+    }
+}
+
+test "ZTS509 does not fire for top-level workflow.call" {
+    const source =
+        \\import { call } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return call("billing", {});
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expect(!hasWorkflowCallInStepDiagnostic(&contract, "call"));
+}
+
+test "ZTS509 fires through an inline closure nested in step()" {
+    // Anonymous closures passed as arguments (e.g. a `.map()` callback)
+    // inherit their enclosing function's effect row (see the comment on
+    // `.function_expr, .arrow_function` in effect_inference.zig's
+    // walkBaseExpr) - depth survives this kind of nesting. A *named local*
+    // closure invoked later by identifier does not: that call resolves as
+    // neither an import nor a collected top-level function, so its body is
+    // never walked. This is an existing limitation of the depth-tracking
+    // this diagnostic reuses (the sibling non-determinism check at
+    // effect_inference.zig has the same blind spot), not something ZTS509
+    // introduces - this test asserts the pattern that is actually covered.
+    const source =
+        \\import { step } from "zigttp:durable";
+        \\import { call } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return step("s", () => {
+        \\    return [1].map(() => call("billing", {}))[0];
+        \\  });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expect(hasWorkflowCallInStepDiagnostic(&contract, "call"));
+}
+
+test "ZTS509 does not fire for workflow.call in a function never reached from step()" {
+    const source =
+        \\import { step } from "zigttp:durable";
+        \\import { call } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return step("s", () => 1);
+        \\}
+        \\function unrelated() {
+        \\  return call("billing", {});
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expect(!hasWorkflowCallInStepDiagnostic(&contract, "call"));
 }
 
 test "durable workflow properties prove stable step workflow" {

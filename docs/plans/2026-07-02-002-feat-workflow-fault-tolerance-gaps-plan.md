@@ -323,7 +323,22 @@ full `test-zruntime` suite (392 tests) passes with zero failures.
 
 ### Phase 2: Compile-Time Rejection of Nested Workflow Calls
 
-#### U3 - ZTS509 rule definition and detection
+#### U3 - ZTS509 rule definition and detection (construction site amended)
+
+> **Amendment**: the plan called for `spec_discharge.zig`'s existing
+> two-pass pipeline (an `EffectRow` flag consumed by a second pass) to
+> construct the diagnostic. Reading that pipeline before writing code
+> showed it is specifically the *opt-in Effects<...> ceiling diff*
+> mechanism: `dischargeEffects` explicitly skips any function with no
+> `Effects<...>` annotation ("no declared ceiling, so no check").
+> `workflow.call`/`saga`/`fanout`/`follow` nested in `step()` must be
+> flagged unconditionally, regardless of whether the function carries any
+> capsule annotation — routing it through the opt-in pipeline would have
+> silently limited the check to annotated functions only. Construction was
+> implemented in `contract_builder.zig` instead, alongside the (also
+> unconditional) `dischargeCapabilityBudget` handler-budget check, as a new
+> "Phase 4d". Detection itself landed exactly as planned, reusing
+> `effect_inference.zig`'s existing `durable_callback_depth` counter.
 
 **Goal**
 
@@ -340,39 +355,66 @@ at runtime.
 - `packages/zigts/src/rule_registry.zig`
 - `packages/zigts/src/contract_types.zig`
 - `packages/zigts/src/effect_inference.zig`
-- `packages/zigts/src/spec_discharge.zig`
+- `packages/zigts/src/contract_builder.zig` (not `spec_discharge.zig` — see
+  Amendment above)
+- `packages/tools/src/precompile_check.zig`,
+  `packages/proof-review/src/spec_diagnostic.zig` (exhaustive switches over
+  `SpecDiagnostic.Kind` that needed a new arm; caught immediately by the
+  compiler, not discovered by inspection)
 
 **Approach**
 
-- Add a `SpecDiagnostic.Kind` variant (`contract_types.zig`) and matching
-  `RuleEntry` (`rule_registry.zig`) for ZTS509, following the exact shape
-  of the existing ZTS500 (`spec_not_discharged`) entry: code, description,
-  example (`step(() => call("x", {}))`), help text pointing at moving the
-  call outside `step()`, and a repair hint.
-- In `effect_inference.zig`'s callee-resolution path (the same place
-  `isDurableStepCall` already resolves `zigttp:durable`/`step`), add a
-  check for `imported.module == "zigttp:workflow"` and `imported.name` in
-  `{call, saga, fanout, follow}`. When `self.durable_callback_depth > 0` at
-  that point, record the violation.
-- Follow the existing ZTS5xx convention of a two-pass pipeline: have
-  `effect_inference.zig` set a new `EffectRow` flag rather than emitting
-  the diagnostic directly, then have `spec_discharge.zig` turn that flag
-  into the ZTS509 `SpecDiagnostic` in its existing second pass — keeps
-  `effect_inference.zig` a pure effect-computation pass, consistent with
-  its current role.
+- Added a `SpecDiagnostic.Kind.workflow_call_in_step` variant
+  (`contract_types.zig`, code `ZTS509`) and a matching `capsule_meta` entry
+  (`rule_registry.zig`, `.category = .verifier` like every other ZTS5xx/
+  ZTS6xx rule) — description, example, help pointing at moving the call
+  outside `step()`, no automatic `repair` (restructuring requires developer
+  intent).
+- `effect_inference.Analyzer` gained a new unconditional collection field,
+  `nested_workflow_calls: std.ArrayListUnmanaged(NestedWorkflowCall)`
+  (`owner` function index + borrowed `workflow_fn` name), populated in
+  `handleCall` right where the existing import-resolution branch already
+  checks `imported.module`/`imported.name` — when
+  `durable_callback_depth > 0` and the callee is `zigttp:workflow`'s
+  `call`/`saga`/`fanout`/`follow`, append a violation. No new "inside
+  step()" tracking was needed, as planned.
+- `contract_builder.zig`'s `build()` gained a new unconditional "Phase 4d"
+  (`emitNestedWorkflowCallDiagnostics`) right after the existing budget
+  discharge phase, walking `effects.nested_workflow_calls` and appending a
+  ZTS509 `SpecDiagnostic` per violation — unconditionally, for every
+  function the analyzer collected, matching the severity default (`.err`).
 
 **Tests**
 
-- `step(() => call(...))`, `step(() => saga(...))`,
-  `step(() => fanout(...))`, and `step(() => follow(...))` each produce
-  ZTS509.
-- Top-level (non-nested) `call()`/`saga()`/`fanout()`/`follow()` usage
-  continues to pass unchanged — regression-test against every existing
-  `examples/workflow/*.ts` file.
-- `workflow.call` nested inside a plain, non-durable helper function (not a
-  `step()` callback) does not trigger ZTS509.
+- `contract_builder.zig`: `"ZTS509 fires for call/saga/fanout/follow nested
+  inside step()"` (table-driven over all four exports), `"ZTS509 does not
+  fire for top-level workflow.call"`, `"ZTS509 fires through an inline
+  closure nested in step()"`, `"ZTS509 does not fire for workflow.call in a
+  function never reached from step()"`.
+- Zero `ZTS509` hits across every `examples/workflow/*.ts` file, confirmed
+  via `zigttp check --json` (no false positives on legitimate top-level
+  usage).
 
-#### U4 - ZTS509 negative/positive test matrix
+#### U4 - ZTS509 negative/positive test matrix (scope corrected)
+
+> **Amendment**: the planned "nested two levels deep inside a `step()`
+> whose callback itself contains a nested non-durable helper" scenario
+> turned out not to be a real boundary of this check — it's a boundary of
+> the *existing* `durable_callback_depth` mechanism ZTS509 reuses. A call
+> to a **named** local/helper function (`const wrapped = () => call(...);
+> wrapped()`, or a separately-declared function) resolves as neither an
+> import nor a tracked top-level function at that call site, so its body is
+> never walked with the caller's depth — the exact same blind spot the
+> pre-existing non-determinism suppression check
+> (`effect_inference.zig`'s sibling `durable_callback_depth == 0` check)
+> already has. Extending depth-tracking across named-function calls would
+> be interprocedural analysis, well beyond this unit's S-M scope, and
+> would make ZTS509 inconsistently stricter than the mechanism it reuses.
+> The test matrix instead asserts the boundary that genuinely holds:
+> depth survives nesting through **inline anonymous closures** (e.g. a
+> `.map()` callback), which effect_inference.zig's walk does inline by
+> design ("anonymous closures inherit their enclosing function's effect
+> row").
 
 **Goal**
 
@@ -389,21 +431,23 @@ cannot silently widen or narrow it.
 
 **Files**
 
-- Test blocks colocated with `effect_inference.zig` and `spec_discharge.zig`
-  (per this repo's `test "..."`-block convention).
+- Test blocks colocated with `contract_builder.zig` (not
+  `effect_inference.zig`/`spec_discharge.zig` as originally planned — see
+  U3's amendment on where construction actually landed; testing at the
+  `HandlerContract` level via the existing `buildTestContract` helper
+  exercises detection, construction, and the diagnostic list together).
 
 **Approach**
 
-- Table-driven test covering: each of the four nested-call forms (fails),
-  each at top level (passes), nested two levels deep inside a `step()`
-  whose callback itself contains a nested non-durable helper that calls
-  `workflow.call` (still fails — depth tracking must survive intermediate
-  function boundaries the same way it already does for the existing
-  non-determinism suppression check).
+- Table-driven test covering: each of the four nested-call forms fails;
+  top-level usage passes; nesting through an inline closure (`.map()`
+  callback) still fails; a `workflow.call` inside a function never reached
+  from a `step()` callback does not fire.
 
 **Tests**
 
-- See Approach — this unit *is* the test matrix.
+- See U3's Tests list — the two units share one test group in
+  `contract_builder.zig`.
 
 ---
 

@@ -66,5 +66,6 @@ fn specDiagnosticMessage(d: zigts.SpecDiagnostic) []const u8 {
         .helper_budget_exceeded => d.suggestion orelse "helper reaches a capability outside the handler's budget",
         .missing_effects_capsule => d.suggestion orelse "exported helper has no Effects<...> capsule",
         .missing_proof_capsule_export => d.suggestion orelse "exported helper has no Proof<...> capsule",
+        .workflow_call_in_step => d.suggestion orelse "workflow.call/saga/fanout/follow used inside step() silently loses durability",
     };
 }
