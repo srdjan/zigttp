@@ -29,14 +29,14 @@ base64Decode(data: string): string
 import { parseBearer, jwtVerify, jwtSign, verifyWebhookSignature, timingSafeEqual } from "zigttp:auth";
 
 parseBearer(header: string): string | undefined
-jwtVerify(token: string, secret: string, options?: { clockTolerance?: number }):
+jwtVerify(token: string, secret: string, alg?: "HS256"):
     { ok: true, value: object } | { ok: false, error: string }
 jwtSign(claims: string, secret: string): string
 verifyWebhookSignature(payload: string, secret: string, signature: string): boolean
 timingSafeEqual(a: string, b: string): boolean
 ```
 
-Always check `.ok` before accessing `.value` - the verifier enforces this. `jwtSign` takes JSON-stringified claims and always returns a string (not optional). `jwtVerify` accepts an optional third argument for clock tolerance in seconds.
+Always check `.ok` before accessing `.value` - the verifier enforces this. `jwtSign` takes JSON-stringified claims and always returns a string (not optional). `jwtVerify` accepts an optional third argument for the signing algorithm; only `"HS256"` is supported.
 
 ## zigttp:validate (effect: read)
 
@@ -236,7 +236,7 @@ import { sql, sqlOne, sqlMany, sqlExec } from "zigttp:sql";
 sql(name: string, statement: string): boolean                              // register a named query
 sqlOne(name: string, params?: object): object | undefined                  // single row or undefined
 sqlMany(name: string, params?: object): object[]                           // array of rows
-sqlExec(name: string, params?: object): { rowsAffected: number, lastRowId?: number }  // write op
+sqlExec(name: string, params?: object): { rowsAffected: number, lastInsertRowId?: number }  // write op
 ```
 
 Register queries at module scope (runs once), execute in handler (runs per request):

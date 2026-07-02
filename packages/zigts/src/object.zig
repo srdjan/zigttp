@@ -1372,6 +1372,7 @@ pub const JSObject = extern struct {
     /// When pool is provided, pre-allocates overflow_slots if the hidden class has >8 properties.
     pub fn create(allocator: std.mem.Allocator, class_idx: HiddenClassIndex, prototype: ?*JSObject, pool: ?*const HiddenClassPool) !*JSObject {
         const obj = try allocator.create(JSObject);
+        errdefer allocator.destroy(obj);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
             .hidden_class_idx = class_idx,
@@ -2968,4 +2969,28 @@ test "JSObject overflow slots pre-allocation for >8 properties" {
     try std.testing.expectEqual(@as(i32, 107), obj.getSlot(7).getInt());
     try std.testing.expectEqual(@as(i32, 108), obj.getSlot(8).getInt());
     try std.testing.expectEqual(@as(i32, 109), obj.getSlot(9).getInt());
+}
+
+test "JSObject create cleans up object when overflow allocation fails" {
+    const allocator = std.testing.allocator;
+
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
+
+    var class_idx = pool.getEmptyClass();
+    class_idx = try pool.addProperty(class_idx, .length);
+    class_idx = try pool.addProperty(class_idx, .prototype);
+    class_idx = try pool.addProperty(class_idx, .constructor);
+    class_idx = try pool.addProperty(class_idx, .name);
+    class_idx = try pool.addProperty(class_idx, .message);
+    class_idx = try pool.addProperty(class_idx, .valueOf);
+    class_idx = try pool.addProperty(class_idx, .toString);
+    class_idx = try pool.addProperty(class_idx, .toJSON);
+    class_idx = try pool.addProperty(class_idx, .caller);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        JSObject.create(failing.allocator(), class_idx, null, pool),
+    );
 }

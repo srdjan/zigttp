@@ -192,6 +192,23 @@ test "populateModuleTypes keeps jwtVerify algorithm optional" {
     try std.testing.expectEqual(pool.idx_string, sig.param_types[2]);
 }
 
+test "populateModuleTypes declares validateObject payload as object" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    populateModuleTypes(&env, &pool, allocator);
+
+    const sig = env.getFnSigByName("validateObject") orelse return error.MissingValidateObject;
+    try std.testing.expectEqual(@as(u8, 2), sig.param_count);
+    try std.testing.expectEqual(pool.idx_string, sig.param_types[0]);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, pool.getTag(sig.param_types[1]).?);
+    try std.testing.expectEqualStrings("object", pool.getRefName(sig.param_types[1]));
+}
+
 test "populateModuleTypes keeps fetchWithRetry options optional" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);

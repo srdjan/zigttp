@@ -36,9 +36,6 @@ const null_type_idx = type_pool_mod.null_type_idx;
 const TypeEnv = type_env_mod.TypeEnv;
 const ServiceTypeContext = service_types_mod.ServiceTypeContext;
 
-/// Max fields/enum members tracked per schema type. Schemas with more are silently truncated.
-const MAX_SCHEMA_FIELDS = 32;
-
 /// Max union members tracked during type inference (member access, return types, etc.).
 const MAX_UNION_MEMBERS = 16;
 
@@ -612,10 +609,9 @@ pub const TypeChecker = struct {
 
         if (obj.get("enum")) |enum_val| {
             if (enum_val == .array and enum_val.array.items.len > 0) {
-                var members: [MAX_SCHEMA_FIELDS]TypeIndex = undefined;
-                var count: usize = 0;
+                var members: std.ArrayListUnmanaged(TypeIndex) = .empty;
+                defer members.deinit(self.allocator);
                 for (enum_val.array.items) |item| {
-                    if (count >= members.len) break;
                     const member = switch (item) {
                         .string => |s| pool.addLiteralString(self.allocator, s),
                         .integer => |i| blk: {
@@ -626,10 +622,9 @@ pub const TypeChecker = struct {
                         .bool => |b| pool.addLiteralBool(self.allocator, b),
                         else => pool.idx_unknown,
                     };
-                    members[count] = member;
-                    count += 1;
+                    members.append(self.allocator, member) catch return pool.idx_unknown;
                 }
-                if (count > 0) return pool.addUnion(self.allocator, members[0..count]);
+                if (members.items.len > 0) return pool.addUnion(self.allocator, members.items);
             }
         }
 
@@ -668,23 +663,21 @@ pub const TypeChecker = struct {
                 }
             }
 
-            var fields: [MAX_SCHEMA_FIELDS]type_pool_mod.RecordField = undefined;
-            var count: usize = 0;
+            var fields: std.ArrayListUnmanaged(type_pool_mod.RecordField) = .empty;
+            defer fields.deinit(self.allocator);
             var it = props.object.iterator();
             while (it.next()) |entry| {
-                if (count >= fields.len) break;
                 const prop_type = self.schemaValueToType(entry.value_ptr.*);
                 const name = pool.addName(self.allocator, entry.key_ptr.*);
-                fields[count] = .{
+                fields.append(self.allocator, .{
                     .name_start = name.start,
                     .name_len = name.len,
                     .type_idx = if (prop_type == null_type_idx) pool.idx_unknown else prop_type,
                     .optional = !json_utils.containsString(required.items, entry.key_ptr.*),
-                };
-                count += 1;
+                }) catch return pool.idx_unknown;
             }
-            if (count == 0) return pool.idx_unknown;
-            return pool.addRecord(self.allocator, fields[0..count]);
+            if (fields.items.len == 0) return pool.idx_unknown;
+            return pool.addRecord(self.allocator, fields.items);
         }
 
         return pool.idx_unknown;
@@ -1354,11 +1347,10 @@ pub const TypeChecker = struct {
         const obj = self.ir_view.getObject(node) orelse return null_type_idx;
         if (obj.properties_count == 0) return null_type_idx;
 
-        var fields_buf: [32]type_pool_mod.RecordField = undefined;
-        var count: usize = 0;
+        var fields_buf: std.ArrayListUnmanaged(type_pool_mod.RecordField) = .empty;
+        defer fields_buf.deinit(self.allocator);
 
         for (0..obj.properties_count) |i| {
-            if (count >= 32) break;
             const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
             const prop = self.ir_view.getProperty(prop_idx) orelse continue;
             // The key is a node index (identifier, string, or computed); extract atom from it
@@ -1372,17 +1364,16 @@ pub const TypeChecker = struct {
             const prop_name_str = prop_name orelse continue;
             const val_type = self.inferType(prop.value);
             const n = self.env.pool.addName(self.allocator, prop_name_str);
-            fields_buf[count] = .{
+            fields_buf.append(self.allocator, .{
                 .name_start = n.start,
                 .name_len = n.len,
                 .type_idx = val_type,
                 .optional = false,
-            };
-            count += 1;
+            }) catch return null_type_idx;
         }
 
-        if (count == 0) return null_type_idx;
-        return self.env.pool.addRecord(self.allocator, fields_buf[0..count]);
+        if (fields_buf.items.len == 0) return null_type_idx;
+        return self.env.pool.addRecord(self.allocator, fields_buf.items);
     }
 
     fn inferArrayLiteralType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
@@ -2304,6 +2295,91 @@ test "TypeChecker: jwtVerify algorithm parameter is type-checked when present" {
         \\import { jwtVerify } from "zigttp:auth";
         \\const result = jwtVerify("token", "secret", 123);
     , 1, 0);
+}
+
+test "TypeChecker tracks object literal fields beyond 32 properties" {
+    const allocator = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try aw.writer.writeAll("const obj = {");
+    for (0..33) |i| {
+        if (i > 0) try aw.writer.writeAll(",");
+        try aw.writer.print("p{d}: \"{d}\"", .{ i, i });
+    }
+    try aw.writer.writeAll("};\nconst last: string = obj.p32;\n");
+
+    try checkTypedSource(aw.writer.buffered(), 0, 0);
+}
+
+test "TypeChecker tracks schema object fields beyond 32 properties" {
+    const allocator = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try aw.writer.writeAll(
+        \\import { schemaCompile, validateJson } from "zigttp:validate";
+        \\schemaCompile("big", '{"type":"object","properties":{
+    );
+    for (0..33) |i| {
+        if (i > 0) try aw.writer.writeAll(",");
+        try aw.writer.print("\"p{d}\":{{\"type\":\"string\"}}", .{i});
+    }
+    try aw.writer.writeAll(
+        \\}}');
+        \\const result = validateJson("big", "{}");
+        \\const last: string = result.value.p32;
+        \\
+    );
+
+    try checkTypedSource(aw.writer.buffered(), 0, 0);
+}
+
+test "TypeChecker tracks schema enum members beyond 32 values" {
+    const allocator = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try aw.writer.writeAll(
+        \\import { schemaCompile, validateJson } from "zigttp:validate";
+        \\schemaCompile("choice", '{"enum":[
+    );
+    for (0..33) |i| {
+        if (i > 0) try aw.writer.writeAll(",");
+        try aw.writer.print("\"v{d}\"", .{i});
+    }
+    try aw.writer.writeAll(
+        \\]}');
+        \\
+    );
+
+    var strip_result = try @import("stripper.zig").strip(allocator, aw.writer.buffered(), .{});
+    defer strip_result.deinit();
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    defer checker.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), try checker.check(root));
+    try std.testing.expectEqual(@as(usize, 1), checker.compiled_schemas.items.len);
+    const schema_type = checker.compiled_schemas.items[0].type_idx;
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_union, pool.getTag(schema_type).?);
+    const members = pool.getUnionMembers(schema_type);
+    try std.testing.expectEqual(@as(usize, 33), members.len);
+    try std.testing.expectEqualStrings("v32", pool.getLiteralStringValue(members[32]).?);
 }
 
 test "TypeChecker: toSorted with no comparator type-checks clean" {

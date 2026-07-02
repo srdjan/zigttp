@@ -272,7 +272,9 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize, depth: 
         // Parse value
         const val = try parseJsonValueAt(ctx, text, pos, depth + 1);
 
-        if (prop_count < JSON_SHAPE_MAX_PROPS) {
+        if (findAtomIndex(atoms[0..prop_count], atom)) |existing| {
+            values[existing] = val;
+        } else if (prop_count < JSON_SHAPE_MAX_PROPS) {
             atoms[prop_count] = atom;
             values[prop_count] = val;
             prop_count += 1;
@@ -352,6 +354,13 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize, depth: 
     }
 
     return obj.toValue();
+}
+
+fn findAtomIndex(atoms: []const object.Atom, needle: object.Atom) ?usize {
+    for (atoms, 0..) |atom, i| {
+        if (atom == needle) return i;
+    }
+    return null;
 }
 
 /// Parse JSON array
@@ -449,22 +458,7 @@ fn parseJsonKeyWithEscapes(ctx: *context.Context, text: []const u8, pos: *usize,
                 't' => buffer.append(ctx.allocator, '\t') catch return error.OutOfMemory,
                 'b' => buffer.append(ctx.allocator, 0x08) catch return error.OutOfMemory,
                 'f' => buffer.append(ctx.allocator, 0x0C) catch return error.OutOfMemory,
-                'u' => {
-                    if (pos.* + 4 > text.len) return error.InvalidJson;
-                    const hex = text[pos.*..][0..4];
-                    pos.* += 4;
-                    const code = std.fmt.parseInt(u16, hex, 16) catch return error.InvalidJson;
-                    if (code < 0x80) {
-                        buffer.append(ctx.allocator, @intCast(code)) catch return error.OutOfMemory;
-                    } else if (code < 0x800) {
-                        buffer.append(ctx.allocator, @intCast(0xC0 | (code >> 6))) catch return error.OutOfMemory;
-                        buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F))) catch return error.OutOfMemory;
-                    } else {
-                        buffer.append(ctx.allocator, @intCast(0xE0 | (code >> 12))) catch return error.OutOfMemory;
-                        buffer.append(ctx.allocator, @intCast(0x80 | ((code >> 6) & 0x3F))) catch return error.OutOfMemory;
-                        buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F))) catch return error.OutOfMemory;
-                    }
-                },
+                'u' => try appendJsonUnicodeEscape(ctx.allocator, &buffer, text, pos),
                 else => return error.InvalidJson,
             }
         } else {
@@ -530,24 +524,7 @@ fn parseJsonStringWithEscapes(ctx: *context.Context, text: []const u8, pos: *usi
                 't' => try buffer.append(ctx.allocator, '\t'),
                 'b' => try buffer.append(ctx.allocator, 0x08),
                 'f' => try buffer.append(ctx.allocator, 0x0C),
-                'u' => {
-                    // Unicode escape \uXXXX
-                    if (pos.* + 4 > text.len) return error.InvalidJson;
-                    const hex = text[pos.*..][0..4];
-                    pos.* += 4;
-                    const code = std.fmt.parseInt(u16, hex, 16) catch return error.InvalidJson;
-                    // UTF-8 encoding
-                    if (code < 0x80) {
-                        try buffer.append(ctx.allocator, @intCast(code));
-                    } else if (code < 0x800) {
-                        try buffer.append(ctx.allocator, @intCast(0xC0 | (code >> 6)));
-                        try buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F)));
-                    } else {
-                        try buffer.append(ctx.allocator, @intCast(0xE0 | (code >> 12)));
-                        try buffer.append(ctx.allocator, @intCast(0x80 | ((code >> 6) & 0x3F)));
-                        try buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F)));
-                    }
-                },
+                'u' => try appendJsonUnicodeEscape(ctx.allocator, &buffer, text, pos),
                 else => return error.InvalidJson,
             }
         } else {
@@ -558,6 +535,39 @@ fn parseJsonStringWithEscapes(ctx: *context.Context, text: []const u8, pos: *usi
     }
 
     return error.InvalidJson;
+}
+
+fn readJsonUnicodeEscape(text: []const u8, pos: *usize) JsonError!u16 {
+    if (pos.* + 4 > text.len) return error.InvalidJson;
+    const hex = text[pos.*..][0..4];
+    pos.* += 4;
+    return std.fmt.parseInt(u16, hex, 16) catch return error.InvalidJson;
+}
+
+fn appendCodepointUtf8(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), codepoint: u21) JsonError!void {
+    var encoded: [4]u8 = undefined;
+    const len = std.unicode.utf8Encode(codepoint, &encoded) catch return error.InvalidJson;
+    try buffer.appendSlice(allocator, encoded[0..len]);
+}
+
+fn appendJsonUnicodeEscape(
+    allocator: std.mem.Allocator,
+    buffer: *std.ArrayList(u8),
+    text: []const u8,
+    pos: *usize,
+) JsonError!void {
+    const code = try readJsonUnicodeEscape(text, pos);
+    if (code >= 0xD800 and code <= 0xDBFF) {
+        if (pos.* + 6 > text.len or text[pos.*] != '\\' or text[pos.* + 1] != 'u') return error.InvalidJson;
+        pos.* += 2;
+        const low = try readJsonUnicodeEscape(text, pos);
+        if (low < 0xDC00 or low > 0xDFFF) return error.InvalidJson;
+        const high_part: u21 = @as(u21, code) - 0xD800;
+        const low_part: u21 = @as(u21, low) - 0xDC00;
+        return appendCodepointUtf8(allocator, buffer, 0x10000 + (high_part << 10) + low_part);
+    }
+    if (code >= 0xDC00 and code <= 0xDFFF) return error.InvalidJson;
+    try appendCodepointUtf8(allocator, buffer, @intCast(code));
 }
 
 /// Parse JSON number
@@ -697,4 +707,59 @@ test "JSON.parse is strict and preserves negative zero" {
 
     const neg_zero_exp = try parseJsonValue(ctx, "-0e0");
     try std.testing.expectEqual(value.JSValue.fromFloat(-0.0).raw, neg_zero_exp.raw);
+}
+
+test "JSON.parse object duplicate keys use the last value" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const parsed = try parseJsonValue(ctx, "{\"a\":1,\"a\":2}");
+    try std.testing.expect(parsed.isObject());
+    const obj = parsed.toPtr(object.JSObject);
+    defer obj.destroy(allocator);
+
+    const atom = try ctx.atoms.intern("a");
+    const stored = obj.getProperty(ctx.hidden_class_pool.?, atom) orelse return error.MissingParsedProperty;
+    try std.testing.expectEqual(@as(i32, 2), stored.getInt());
+}
+
+test "JSON.parse unicode escapes combine surrogate pairs and reject lone surrogates" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const grin = try parseJsonValue(ctx, "\"\\uD83D\\uDE00\"");
+    defer string.freeString(allocator, grin.toPtr(string.JSString));
+    try std.testing.expectEqualStrings("\xF0\x9F\x98\x80", getStringDataCtx(grin, ctx).?);
+
+    const keyed = try parseJsonValue(ctx, "{\"\\uD83D\\uDE00\":1}");
+    const key_obj = keyed.toPtr(object.JSObject);
+    defer key_obj.destroy(allocator);
+
+    const key_atom = try ctx.atoms.intern("\xF0\x9F\x98\x80");
+    try std.testing.expectEqual(@as(i32, 1), key_obj.getProperty(ctx.hidden_class_pool.?, key_atom).?.getInt());
+
+    try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "\"\\uD83D\""));
+    try std.testing.expectError(error.InvalidJson, parseJsonValue(ctx, "\"\\uDE00\""));
 }

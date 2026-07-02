@@ -32,7 +32,7 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 2,
             .effect = .none,
             .returns = .result,
-            .param_types = &.{ .string, .string },
+            .param_types = &.{ .string, .object },
             .failure_severity = .critical,
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
