@@ -695,7 +695,7 @@ pub const HandlerPool = struct {
         // one when comparing against the policy threshold.
         const request_count_after: u64 = rt.request_count + 1;
         const policy_recycle = switch (self.pooling_policy) {
-            .reuse_unbounded => false,
+            .reuse_unbounded => rt.ctx.atoms.count() >= self.pooling_thresholds.max_dynamic_atoms,
             .ephemeral => true,
             .reuse_bounded_by_count => request_count_after >= self.pooling_thresholds.max_requests,
             .reuse_bounded_by_ttl => blk: {
@@ -1079,4 +1079,65 @@ test "acquireForRequest with timeout 0 fails fast and records exhaustion" {
 
     try testing.expectError(error.PoolExhausted, pool.acquireForRequest());
     try testing.expectEqual(@as(u64, 1), pool.getMetrics().exhausted);
+}
+
+test "reuse_unbounded runtime recycles once its dynamic atom count reaches the threshold" {
+    if (builtin.os.tag == .linux) return error.SkipZigTest;
+
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled },
+        "function handler(req) { return Response.text('ok'); }",
+        "<runtime-pool-test>",
+        1,
+        0,
+    );
+    defer pool.deinit();
+    pool.pooling_policy = .reuse_unbounded;
+
+    const rt1 = try pool.acquireForRequest();
+    const baseline = rt1.ctx.atoms.count();
+    // Force a low ceiling so the test only has to intern a handful of atoms
+    // (not the full 65,534 hard cap) to cross it.
+    pool.pooling_thresholds.max_dynamic_atoms = @intCast(baseline + 3);
+
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        const name = try std.fmt.allocPrint(allocator, "dyn_atom_{d}", .{i});
+        defer allocator.free(name);
+        _ = try rt1.ctx.atoms.intern(name);
+    }
+    try testing.expect(rt1.ctx.atoms.count() >= pool.pooling_thresholds.max_dynamic_atoms);
+
+    pool.releaseForRequest(rt1);
+    try testing.expectEqual(@as(u64, 1), pool.getMetrics().recycles);
+}
+
+test "reuse_unbounded runtime under the atom threshold is not recycled" {
+    if (builtin.os.tag == .linux) return error.SkipZigTest;
+
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled },
+        "function handler(req) { return Response.text('ok'); }",
+        "<runtime-pool-test>",
+        1,
+        0,
+    );
+    defer pool.deinit();
+    pool.pooling_policy = .reuse_unbounded;
+
+    const rt1 = try pool.acquireForRequest();
+    const baseline = rt1.ctx.atoms.count();
+    pool.pooling_thresholds.max_dynamic_atoms = @intCast(baseline + 100);
+
+    const name = try allocator.dupe(u8, "dyn_atom_under_threshold");
+    defer allocator.free(name);
+    _ = try rt1.ctx.atoms.intern(name);
+    try testing.expect(rt1.ctx.atoms.count() < pool.pooling_thresholds.max_dynamic_atoms);
+
+    pool.releaseForRequest(rt1);
+    try testing.expectEqual(@as(u64, 0), pool.getMetrics().recycles);
 }

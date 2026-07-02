@@ -54,6 +54,14 @@ pub const PoolingPolicy = enum {
 pub const PoolingThresholds = struct {
     max_requests: u32 = 64,
     ttl_ns: u64 = 30 * std.time.ns_per_s,
+    /// `reuse_unbounded` runtimes are otherwise never recycled by count/TTL,
+    /// so their Context's AtomTable can grow toward the hard 0xFFFE (65,534)
+    /// interned-atom cap (see context.zig's `intern`) over a long process
+    /// lifetime. 32,768 is half that cap: real headroom for legitimately
+    /// shape-diverse handlers (varied JSON payloads, dynamic property keys)
+    /// while still forcing a recycle well before the fail-closed OOM guard
+    /// would turn into a standing per-slot outage.
+    max_dynamic_atoms: u32 = 32_768,
 };
 
 /// Map proven contract properties to a lifecycle policy. Null falls back to
