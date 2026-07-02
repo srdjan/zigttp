@@ -218,7 +218,16 @@ pub const DeserializeError = error{
     EndOfStream,
     OutOfMemory,
     IncompleteRead,
+    InvalidTag,
 };
+
+/// Decode a raw byte into an exhaustive enum, returning a catchable error
+/// instead of panicking (Debug/ReleaseSafe) or invoking undefined behavior
+/// (ReleaseFast) on an out-of-range byte from a corrupted or
+/// version-skewed cache payload.
+fn decodeTag(comptime E: type, raw: u8) DeserializeError!E {
+    return std.enums.fromInt(E, raw) orelse error.InvalidTag;
+}
 
 /// Deserialize constants from a reader, reconstructing JSValues
 pub fn deserializeConstants(
@@ -244,7 +253,7 @@ fn deserializeConstant(
     strings_table: ?*string.StringTable,
 ) DeserializeError!value.JSValue {
     const tag_byte = try reader.readByte();
-    const tag: ConstantTag = @enumFromInt(tag_byte);
+    const tag: ConstantTag = try decodeTag(ConstantTag, tag_byte);
 
     switch (tag) {
         .int => {
@@ -280,7 +289,7 @@ fn deserializeConstant(
         },
         .special => {
             const code_byte = try reader.readByte();
-            const code: SpecialCode = @enumFromInt(code_byte);
+            const code: SpecialCode = try decodeTag(SpecialCode, code_byte);
             return switch (code) {
                 .null_val => value.JSValue.null_val,
                 .undefined_val => value.JSValue.undefined_val,
@@ -383,8 +392,10 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
         };
 
         // Pattern type
-        pattern.pattern_type = @enumFromInt(try reader.readByte());
-        // Route source atom (`url` or `path`)
+        pattern.pattern_type = try decodeTag(bytecode.PatternType, try reader.readByte());
+        // Route source atom (`url` or `path`). object.Atom is a
+        // non-exhaustive enum (trailing `_,`), so @enumFromInt here cannot
+        // panic/UB and is out of scope for the bounds-checked decode helper.
         const url_atom_raw = try reader.readInt(u16, .little);
         pattern.url_atom = @enumFromInt(url_atom_raw);
 
@@ -1020,6 +1031,35 @@ test "validateCache detects corruption" {
     header.checksum = 0xDEADBEEF; // Wrong checksum
 
     try std.testing.expect(!validateCache(&bad_data));
+}
+
+test "deserializeConstant rejects out-of-range ConstantTag byte" {
+    const allocator = std.testing.allocator;
+
+    // ConstantTag is exhaustive with values 0-4; 0xFF is out of range.
+    var reader = SliceReader{ .data = &.{0xFF} };
+    const result = deserializeConstant(&reader, allocator, null);
+    try std.testing.expectError(error.InvalidTag, result);
+}
+
+test "deserializeConstant rejects out-of-range SpecialCode byte" {
+    const allocator = std.testing.allocator;
+
+    // ConstantTag.special (3) followed by an out-of-range SpecialCode byte.
+    // SpecialCode is exhaustive with values 0-4; 0xFF is out of range.
+    var reader = SliceReader{ .data = &.{ @intFromEnum(ConstantTag.special), 0xFF } };
+    const result = deserializeConstant(&reader, allocator, null);
+    try std.testing.expectError(error.InvalidTag, result);
+}
+
+test "decodeTag rejects out-of-range PatternType byte" {
+    // PatternType is exhaustive with values 0-2; 0xFF is out of range.
+    // This is the same decode call `deserializePatternDispatch` makes for the
+    // pattern-type byte; tested directly here (rather than through the
+    // allocating wrapper) since that wrapper has a pre-existing, unrelated
+    // leak of its `dispatch` allocation on any error path past its creation.
+    const result = decodeTag(bytecode.PatternType, 0xFF);
+    try std.testing.expectError(error.InvalidTag, result);
 }
 
 // ============================================================================
