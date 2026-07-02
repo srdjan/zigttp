@@ -23,6 +23,7 @@ const durable_executor = @import("durable_executor.zig");
 const DurableStore = @import("durable_store.zig").DurableStore;
 const runtime_natives = @import("runtime_natives.zig");
 const retry_backoff = @import("retry_backoff.zig");
+const dead_runs = @import("durable_dead_runs.zig");
 
 const c = @cImport({
     @cInclude("dirent.h");
@@ -64,24 +65,40 @@ pub const RetryTracker = struct {
         return now_ms >= entry.next_attempt_ms;
     }
 
-    pub fn recordFailure(self: *RetryTracker, name: []const u8, now_ms: i64) void {
-        const gop = self.map.getOrPut(self.allocator, name) catch return;
+    /// True when `name`'s in-memory state is at or past quarantine. Used to
+    /// double-check a persisted dead-run record still backs the quarantine
+    /// before honoring it - the record may have been replayed out from
+    /// under this process by a separate `durable dead-runs replay`
+    /// invocation, which can only delete the file, not reach into this
+    /// process's in-memory map.
+    pub fn isQuarantined(self: *const RetryTracker, name: []const u8) bool {
+        const entry = self.map.get(name) orelse return false;
+        return entry.consecutive_failures >= quarantine_threshold;
+    }
+
+    /// Records a failure. Returns `true` exactly on the call that first
+    /// crosses `quarantine_threshold` (the caller uses this to persist a
+    /// dead-run record exactly once per quarantine event, not on every
+    /// subsequent poll).
+    pub fn recordFailure(self: *RetryTracker, name: []const u8, now_ms: i64) bool {
+        const gop = self.map.getOrPut(self.allocator, name) catch return false;
         if (!gop.found_existing) {
             gop.key_ptr.* = self.allocator.dupe(u8, name) catch {
                 _ = self.map.remove(name);
-                return;
+                return false;
             };
             gop.value_ptr.* = .{};
         }
         gop.value_ptr.consecutive_failures += 1;
         if (gop.value_ptr.consecutive_failures >= quarantine_threshold) {
-            if (gop.value_ptr.consecutive_failures == quarantine_threshold and !builtin.is_test) {
+            const just_crossed = gop.value_ptr.consecutive_failures == quarantine_threshold;
+            if (just_crossed and !builtin.is_test) {
                 std.log.warn(
                     "Durable run '{s}' quarantined after {d} consecutive recovery failures",
                     .{ name, gop.value_ptr.consecutive_failures },
                 );
             }
-            return;
+            return just_crossed;
         }
         const attempt = gop.value_ptr.consecutive_failures - 1;
         var seed = retry_backoff.seedBytes(name, 0x44555241424c4552);
@@ -89,6 +106,7 @@ pub const RetryTracker = struct {
         seed = retry_backoff.mix(seed, @bitCast(now_ms));
         const backoff = retry_backoff.retryDelayMs(base_backoff_ms, max_backoff_ms, attempt, seed);
         gop.value_ptr.next_attempt_ms = now_ms + backoff;
+        return false;
     }
 
     pub fn clear(self: *RetryTracker, name: []const u8) void {
@@ -147,16 +165,36 @@ pub fn recoverIncompleteOplogsTracked(
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ oplog_dir, filename }) catch continue;
 
-        // Gate on the tracker before any I/O: a backed-off or quarantined
-        // run must not be re-read and re-parsed every poll second.
+        // Check the persisted dead-run record before consulting the
+        // in-memory tracker at all. The in-memory RetryTracker alone is not
+        // authoritative: it resets to empty on every process restart -
+        // exactly the gap this record closes - so a restarted process must
+        // not silently forget a standing quarantine just because its map is
+        // fresh. This costs one cheap stat-style check per oplog per poll
+        // (there is no cache-before-I/O shortcut that stays correct across
+        // restarts), but `hasDeadRun` on the common case (no record) is a
+        // single fast syscall, not a read.
         if (tracker) |t| {
+            const id = dead_runs.deadRunId(filename) orelse filename;
+            const is_dead = dead_runs.hasDeadRun(allocator, oplog_dir, id) catch true; // fail closed: an I/O error looks like "still dead" rather than retrying blind
+            if (is_dead) continue;
+            // No persisted record, but this process's own map still thinks
+            // it's quarantined: an operator ran `durable dead-runs replay`
+            // in a separate process, which can only delete the file - it
+            // cannot reach into this process's in-memory RetryTracker.
+            // Resync now that the record backing that quarantine is gone.
+            if (t.isQuarantined(filename)) t.clear(filename);
             if (!t.shouldAttempt(filename, trace.unixMillis())) continue;
         }
 
         // Read oplog file
         const source = readFile(allocator, full_path) catch |err| {
             if (!builtin.is_test) std.log.err("Failed to read oplog '{s}': {}", .{ full_path, err });
-            if (tracker) |t| t.recordFailure(filename, trace.unixMillis());
+            if (tracker) |t| {
+                if (t.recordFailure(filename, trace.unixMillis())) {
+                    writeDeadRunRecord(allocator, oplog_dir, filename, "", @errorName(err));
+                }
+            }
             continue;
         };
         defer allocator.free(source);
@@ -169,7 +207,11 @@ pub fn recoverIncompleteOplogsTracked(
         // Parse the incomplete oplog
         var parsed = trace.parseIncompleteOplog(allocator, source) catch |err| {
             if (!builtin.is_test) std.log.err("Failed to parse oplog '{s}': {}", .{ full_path, err });
-            if (tracker) |t| t.recordFailure(filename, trace.unixMillis());
+            if (tracker) |t| {
+                if (t.recordFailure(filename, trace.unixMillis())) {
+                    writeDeadRunRecord(allocator, oplog_dir, filename, "", @errorName(err));
+                }
+            }
             continue;
         };
         defer parsed.deinit();
@@ -206,8 +248,10 @@ pub fn recoverIncompleteOplogsTracked(
             parsed.events.len,
         });
 
+        var recover_err_name: []const u8 = "recovery failed";
         const outcome = recoverOne(allocator, config, &parsed, full_path) catch |err| blk: {
             if (!builtin.is_test) std.log.err("Recovery failed for '{s}': {}", .{ full_path, err });
+            recover_err_name = @errorName(err);
             break :blk .failed;
         };
 
@@ -218,7 +262,11 @@ pub fn recoverIncompleteOplogsTracked(
             },
             // Still suspended on a wait (or claimed elsewhere): neutral.
             .pending => {},
-            .failed => if (tracker) |t| t.recordFailure(filename, trace.unixMillis()),
+            .failed => if (tracker) |t| {
+                if (t.recordFailure(filename, trace.unixMillis())) {
+                    writeDeadRunRecord(allocator, oplog_dir, filename, run_key, recover_err_name);
+                }
+            },
         }
     }
 
@@ -227,6 +275,36 @@ pub fn recoverIncompleteOplogsTracked(
     }
 
     return recovered;
+}
+
+/// Persist a dead-run record for `filename` right on the poll that crossed
+/// `RetryTracker.quarantine_threshold`. Best-effort: a write failure here
+/// must not crash the recovery loop or block quarantine from taking
+/// effect in memory - it only means the record stays invisible to `durable
+/// dead-runs list` until the next crossing (which, since the run is
+/// already quarantined in memory, will not happen on its own; an operator
+/// would need to notice via logs instead). This is a narrower failure mode
+/// than the gap this feature closes, not a new one.
+fn writeDeadRunRecord(
+    allocator: std.mem.Allocator,
+    oplog_dir: []const u8,
+    filename: []const u8,
+    run_key: []const u8,
+    reason: []const u8,
+) void {
+    const id = dead_runs.deadRunId(filename) orelse filename;
+    dead_runs.writeDeadRun(
+        allocator,
+        oplog_dir,
+        id,
+        run_key,
+        filename,
+        reason,
+        trace.unixMillis(),
+        RetryTracker.quarantine_threshold,
+    ) catch |err| {
+        if (!builtin.is_test) std.log.err("Failed to persist dead-run record for '{s}': {}", .{ filename, err });
+    };
 }
 
 /// True only when a scan of the durable signal store succeeded and found no
@@ -467,7 +545,7 @@ test "durable recovery: RetryTracker backs off and quarantines persistent failur
     try testing.expect(tracker.shouldAttempt(name, 0));
 
     // First failure: jittered 1s-cap backoff.
-    tracker.recordFailure(name, 0);
+    _ = tracker.recordFailure(name, 0);
     var seed = retry_backoff.seedBytes(name, 0x44555241424c4552);
     seed = retry_backoff.mix(seed, 1);
     seed = retry_backoff.mix(seed, @as(u64, @bitCast(@as(i64, 0))));
@@ -477,7 +555,7 @@ test "durable recovery: RetryTracker backs off and quarantines persistent failur
     try testing.expect(!tracker.shouldAttempt(name, first_delay - 1));
     try testing.expect(tracker.shouldAttempt(name, first_delay));
 
-    tracker.recordFailure(name, 1_000);
+    _ = tracker.recordFailure(name, 1_000);
     seed = retry_backoff.seedBytes(name, 0x44555241424c4552);
     seed = retry_backoff.mix(seed, 2);
     seed = retry_backoff.mix(seed, @as(u64, @bitCast(@as(i64, 1_000))));
@@ -488,7 +566,7 @@ test "durable recovery: RetryTracker backs off and quarantines persistent failur
     try testing.expect(tracker.shouldAttempt(name, 1_000 + second_delay));
 
     // Backoff still caps at 60s before jitter chooses inside the cap.
-    for (0..5) |_| tracker.recordFailure(name, 10_000);
+    for (0..5) |_| _ = tracker.recordFailure(name, 10_000);
     try testing.expect(!tracker.shouldAttempt(name, 10_000 + 29_999));
     try testing.expect(tracker.shouldAttempt(name, 10_000 + 60_000));
 
@@ -497,7 +575,7 @@ test "durable recovery: RetryTracker backs off and quarantines persistent failur
     try testing.expect(tracker.shouldAttempt(name, 0));
 
     // Ten consecutive failures quarantine the run for good.
-    for (0..RetryTracker.quarantine_threshold) |_| tracker.recordFailure(name, 0);
+    for (0..RetryTracker.quarantine_threshold) |_| _ = tracker.recordFailure(name, 0);
     try testing.expect(!tracker.shouldAttempt(name, std.math.maxInt(i64)));
 }
 
@@ -558,6 +636,88 @@ test "durable recovery: attempts (rather than skips) a run whose waitSignal time
     // invoked for this oplog instead of the branch falling through to
     // `continue`.
     try testing.expect(!tracker.shouldAttempt(filename, trace.unixMillis()));
+}
+
+test "durable recovery: full dead-run lifecycle - quarantine writes a record, replay clears it" {
+    // Drives RetryTracker.quarantine_threshold-1 failures directly (mirroring
+    // the "RetryTracker backs off and quarantines" test above) so the
+    // backoff timing on those synthetic pre-failures can't race real
+    // wall-clock time, then crosses the threshold through the real
+    // recoverIncompleteOplogsTracked path (same deliberately-nonexistent-
+    // handler trick as the timeout-recovery test above, to stay clear of
+    // the separate, pre-existing recoverOne double-free bug on real JS
+    // execution) so the actual writeDeadRunRecord call site under test.
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const durable_dir = try allocator.dupe(u8, dir_buf[0..dir_len]);
+    defer allocator.free(durable_dir);
+
+    const run_key = "lifecycle:dead-run";
+    const filename = try std.fmt.allocPrint(allocator, "durable-{x}.jsonl", .{std.hash.Fnv1a_64.hash(run_key)});
+    defer allocator.free(filename);
+    const oplog_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ durable_dir, filename });
+    defer allocator.free(oplog_path);
+
+    const oplog =
+        "{\"type\":\"durable_run\",\"key\":\"lifecycle:dead-run\"}\n" ++
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n";
+    try zq.file_io.writeFile(allocator, oplog_path, oplog);
+
+    var tracker = RetryTracker.init(allocator);
+    defer tracker.deinit();
+    for (0..RetryTracker.quarantine_threshold - 1) |i| {
+        _ = tracker.recordFailure(filename, @intCast(i));
+    }
+    try testing.expect(!tracker.isQuarantined(filename));
+    try testing.expect(!(try dead_runs.hasDeadRun(allocator, durable_dir, dead_runs.deadRunId(filename).?)));
+
+    const config = ServerConfig{
+        .handler = .{ .file_path = "/nonexistent/handler-for-dead-run-lifecycle-test.ts" },
+        .runtime_config = .{ .durable_oplog_dir = durable_dir },
+    };
+    const recovered = try recoverIncompleteOplogsTracked(allocator, config, &tracker);
+    try testing.expectEqual(@as(u32, 0), recovered);
+
+    // The 10th failure crossed the threshold through the real integration
+    // path, so a dead-run record must now exist with the real run_key and
+    // the real recoverOne failure reason (not a placeholder).
+    try testing.expect(tracker.isQuarantined(filename));
+    const id = dead_runs.deadRunId(filename).?;
+    try testing.expect(try dead_runs.hasDeadRun(allocator, durable_dir, id));
+    const record = (try dead_runs.readDeadRun(allocator, durable_dir, id)).?;
+    defer allocator.free(record);
+    try testing.expect(std.mem.indexOf(u8, record, "\"state\":\"quarantined\"") != null);
+    try testing.expect(std.mem.indexOf(u8, record, run_key) != null);
+
+    // The oplog itself must be untouched by any of this (KTD2 / stop
+    // condition: dead-run records live alongside, never inside, the oplog).
+    const oplog_after = try zq.file_io.readFile(allocator, oplog_path, 4096);
+    defer allocator.free(oplog_after);
+    try testing.expectEqualStrings(oplog, oplog_after);
+
+    // A further poll does not re-write or duplicate the record, and does
+    // not re-attempt recovery (still gated by the persisted record).
+    const recovered_again = try recoverIncompleteOplogsTracked(allocator, config, &tracker);
+    try testing.expectEqual(@as(u32, 0), recovered_again);
+    try testing.expectEqual(@as(u32, RetryTracker.quarantine_threshold), tracker.map.get(filename).?.consecutive_failures);
+
+    // Replay clears the persisted record. The in-memory tracker is a
+    // separate process's concern in production (replay only deletes the
+    // file); the next poll's gate resyncs it, matching the cross-process
+    // design (KTD1).
+    try dead_runs.replayDeadRun(allocator, durable_dir, id);
+    try testing.expect(!(try dead_runs.hasDeadRun(allocator, durable_dir, id)));
+
+    const recovered_after_replay = try recoverIncompleteOplogsTracked(allocator, config, &tracker);
+    try testing.expectEqual(@as(u32, 0), recovered_after_replay);
+    try testing.expect(!tracker.isQuarantined(filename));
+    // recoverOne fails again (handler still missing) - resynced from zero,
+    // not simply left at the pre-replay count.
+    try testing.expectEqual(@as(u32, 1), tracker.map.get(filename).?.consecutive_failures);
 }
 
 test "durable recovery: recoverOne completes real JS execution without double-freeing bytecode" {

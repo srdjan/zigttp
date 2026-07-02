@@ -2710,6 +2710,8 @@ test {
     _ = @import("durable_fetch.zig");
     _ = @import("retry_backoff.zig");
     _ = @import("benchmark.zig");
+    _ = @import("durable_dead_runs.zig");
+    _ = @import("durable_dead_runs_cli.zig");
 }
 
 test "Runtime creation" {

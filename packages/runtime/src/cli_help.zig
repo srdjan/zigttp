@@ -67,6 +67,8 @@ const help_all_mid =
     \\  zigttp edge [--config FILE]            Optional in-process edge runtime (-Dedge)
     \\  zigttp workflow-queue [list|show|replay|discard] --durable <DIR>
     \\                                            Inspect workflow queue dead letters
+    \\  zigttp durable dead-runs [list|show|replay|discard] --durable <DIR>
+    \\                                            Inspect durable runs that permanently failed recovery
     \\
     \\Package:
     \\  zigttp build [-o <bin>]                Emit a self-contained binary
@@ -203,6 +205,7 @@ test "help --all surfaces the advanced commands" {
         "zigttp restrictions", "zigttp meta",           "zigttp describe-rule",
         "zigttp verify-paths", "zigttp verify-modules", "zigttp edit-simulate",
         "zigttp review-patch", "zigttp rollout",        "zigttp workflow-queue",
+        "zigttp durable",
     }) |cmd| {
         try std.testing.expect(has(help_all, cmd));
     }

@@ -15,6 +15,7 @@ const self_extract = @import("self_extract.zig");
 const live_reload_mod = @import("runtime_features.zig").live_reload;
 const shared = @import("cli_shared.zig");
 const workflow_queue_cli = @import("workflow_queue_cli.zig");
+const durable_dead_runs_cli = @import("durable_dead_runs_cli.zig");
 
 const embedded_handler = @import("embedded_handler");
 
@@ -40,6 +41,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (std.mem.eql(u8, command, "workflow-queue")) {
         try workflowQueueCommand(allocator, user_args[1..]);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "durable")) {
+        try durableCommand(allocator, user_args[1..]);
         return;
     }
 
@@ -114,6 +120,35 @@ pub fn workflowQueueCommand(allocator: std.mem.Allocator, argv: []const []const 
         if (workflow_queue_cli.isExpectedUserError(err)) std.process.exit(1);
         return err;
     };
+}
+
+/// Dispatches `zigttp durable <sub-verb> ...`. Only `dead-runs` exists today;
+/// structured as its own top-level command (rather than folding straight
+/// into `dead-runs` verbs) so other durable-run operator surfaces have a
+/// natural home under `durable` later without a breaking rename.
+pub fn durableCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    if (argv.len == 0 or std.mem.eql(u8, argv[0], "--help") or std.mem.eql(u8, argv[0], "help")) {
+        std.debug.print(
+            \\zigttp durable - durable-run operator commands
+            \\
+            \\Usage:
+            \\  zigttp durable dead-runs list --durable <DIR>
+            \\  zigttp durable dead-runs show --durable <DIR> <ID>
+            \\  zigttp durable dead-runs replay --durable <DIR> <ID>
+            \\  zigttp durable dead-runs discard --durable <DIR> <ID>
+            \\
+        , .{});
+        return;
+    }
+    if (std.mem.eql(u8, argv[0], "dead-runs")) {
+        durable_dead_runs_cli.run(allocator, argv[1..]) catch |err| {
+            if (durable_dead_runs_cli.isExpectedUserError(err)) std.process.exit(1);
+            return err;
+        };
+        return;
+    }
+    std.debug.print("zigttp durable: unknown subcommand '{s}'. Run `zigttp durable --help` for usage.\n", .{argv[0]});
+    std.process.exit(1);
 }
 
 pub fn edgeCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {

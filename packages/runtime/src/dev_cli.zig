@@ -54,6 +54,7 @@ test {
     _ = @import("ratchet_command.zig");
     _ = @import("cli_help.zig");
     _ = @import("workflow_queue_cli.zig");
+    _ = @import("durable_dead_runs_cli.zig");
     // cli_auth and verify_cli are likewise only reached via main's dispatch;
     // reference them so their tests (API-key store 0600 perms/masking, and the
     // Ed25519 verifier arg parsing incl. trust-key validation) actually run.
@@ -294,6 +295,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (std.mem.eql(u8, command, "workflow-queue")) {
         try runtime_cli.workflowQueueCommand(allocator, user_args[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "durable")) {
+        try runtime_cli.durableCommand(allocator, user_args[1..]);
         return;
     }
     if (std.mem.eql(u8, command, "doctor")) {

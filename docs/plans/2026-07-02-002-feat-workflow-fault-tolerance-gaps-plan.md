@@ -455,6 +455,46 @@ cannot silently widen or narrow it.
 
 #### U5 - Dead-run record persistence and quarantine hook
 
+> **Amendment (spans U5-U8)**: three real corrections surfaced during
+> implementation, all kept since they make the feature's core promise
+> (surviving a restart, and surviving a separate-process `replay`) actually
+> true rather than assumed:
+>
+> 1. **The gate logic must check the persisted record unconditionally, not
+>    only when the in-memory tracker already suspects quarantine.** The
+>    first implementation only re-checked `hasDeadRun` when
+>    `RetryTracker.isQuarantined` was already true — which is never true
+>    right after a restart (the map is empty), so it silently skipped the
+>    exact scenario (KTD1) this feature exists to fix. Fixed by checking
+>    `hasDeadRun` first, every poll, for every oplog — one cheap `access()`
+>    syscall on the common (no-record) case, not a read.
+> 2. **`discardDeadRun` rewrites the record (`state: "discarded"`) instead
+>    of deleting it.** The plan's original text ("deletes the persisted
+>    record only") would have made a discarded run eligible for retry again
+>    on the very next poll (no record → gate lets it through), contradicting
+>    the plan's own Definition of Done ("discard... run stays permanently
+>    unretried"). The record now stays on disk permanently (still
+>    inspectable via `show`, excluded from `list`), and `replay` on an
+>    already-discarded record fails closed (`error.DeadRunAlreadyDiscarded`)
+>    rather than silently un-discarding it.
+> 3. **`replayDeadRun` cannot call `tracker.clear()` directly** — it has no
+>    reference to a live `RetryTracker`, and in the real cross-process case
+>    (operator CLI vs. running server) there is no such reference to have.
+>    It only deletes the file; the running server's in-memory tracker
+>    resyncs itself on its next poll tick when it sees the record is gone
+>    (point 1's unconditional check, plus a new `RetryTracker.isQuarantined`
+>    used only to decide whether a resync is needed).
+>
+> A fourth, process-level finding: this repo's Zig test builds do not
+> transitively discover `test` blocks in every `@import`ed file — files
+> reached only through a used-but-not-otherwise-referenced import need an
+> explicit `test { _ = @import(...); }` hook (an established pattern already
+> used for `retry_backoff.zig` in `zruntime.zig`, and for `workflow_queue_cli.zig`
+> in `dev_cli.zig`). `durable_dead_runs.zig` and `durable_dead_runs_cli.zig`
+> needed the same treatment in both files, or their tests silently never ran
+> despite the build succeeding — caught by injecting a deliberately-failing
+> assertion and observing the test count not move.
+
 **Goal**
 
 Persist a durable run's terminal failure state the moment it crosses
@@ -563,8 +603,13 @@ mirroring `workflow-queue`'s existing dead-letter CLI exactly.
 **Files**
 
 - `packages/runtime/src/durable_dead_runs_cli.zig` (new)
-- `packages/runtime/src/dev_cli.zig`
+- `packages/runtime/src/dev_cli.zig` (dispatch + test-collection hook — see
+  U5's amendment)
 - `packages/runtime/src/runtime_cli.zig`
+- `packages/runtime/src/cli_help.zig` (added `durable dead-runs` to
+  `help --all` and its anti-drift test, matching `workflow-queue`'s
+  existing entry — not in the original Files list, but the two dead-letter
+  CLIs would otherwise have inconsistent discoverability)
 
 **Approach**
 
@@ -610,20 +655,34 @@ fixture — the latter is documented to mask a double-free as a silent no-op.
 
 **Files**
 
-- Test blocks reachable from `packages/runtime/src/runtime_cli.zig`'s
-  `test-cli` root (per the existing `durable_recovery.zig` precedent).
+- Test blocks in `durable_recovery.zig`, `durable_dead_runs.zig`, and
+  `durable_dead_runs_cli.zig` — reachable from `test-cli` via the
+  `zruntime.zig`/`dev_cli.zig` explicit test-collection hooks (U5's
+  amendment), not merely "reachable from the runtime_cli.zig root" as
+  originally assumed.
 
 **Approach**
 
-- Reuse the existing crash-recovery test fixture shape from
-  `durable_recovery.zig`, extended to assert on dead-run record presence
-  and content after simulated repeated failures.
+- Reused the existing crash-recovery test fixture shape from the
+  `durable_recovery.zig` timeout-recovery test (deliberately-nonexistent
+  handler path, so `recoverOne` fails before ever touching the JS
+  runtime — staying clear of the separate, pre-existing recoverOne
+  double-free bug on real JS execution). Drove 9 failures directly via
+  `RetryTracker.recordFailure` (mirroring the pre-existing quarantine
+  test) to avoid racing real wall-clock backoff timing, then crossed the
+  10th through the real `recoverIncompleteOplogsTracked` path so the
+  actual `writeDeadRunRecord` call site is what's under test.
 
 **Tests**
 
-- Full lifecycle under `test-cli`: 10 consecutive failures → record
-  written → `replayDeadRun` → recovery succeeds → record gone; no
-  allocator errors reported.
+- `"durable recovery: full dead-run lifecycle - quarantine writes a
+  record, replay clears it"`: 10 consecutive failures → record written
+  with the real run key and failure reason → oplog byte-for-byte
+  unchanged → a further poll does not duplicate the record →
+  `replayDeadRun` → next poll resyncs the in-memory tracker and retries.
+- `test-cli` run: 654 passed, 0 failed, **0 leaked** — the leak count is
+  the actual signal this unit exists to produce, given the documented
+  double-free history in this file.
 
 ---
 
