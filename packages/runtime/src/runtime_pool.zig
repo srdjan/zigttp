@@ -346,7 +346,8 @@ pub const HandlerPool = struct {
                 if (err == error.RequestTimeout) {
                     _ = self.timeouts.fetchAdd(1, .monotonic);
                     std.log.warn("Handler timed out after {d}ms, invalidating runtime", .{self.config.request_timeout_ms});
-                    self.invalidateRuntime(base_rt);
+                    slot_disposed = true;
+                    self.recycleSlot(base_rt);
                     return err;
                 }
                 if (isHandlerInvalid(err)) {
@@ -393,7 +394,8 @@ pub const HandlerPool = struct {
                 if (err == error.RequestTimeout) {
                     _ = self.timeouts.fetchAdd(1, .monotonic);
                     std.log.warn("Handler timed out after {d}ms, invalidating runtime", .{self.config.request_timeout_ms});
-                    self.invalidateRuntime(base_rt);
+                    slot_disposed = true;
+                    self.recycleSlot(base_rt);
                     return err;
                 }
                 if (isHandlerInvalid(err)) {
@@ -439,8 +441,7 @@ pub const HandlerPool = struct {
                 if (err == error.RequestTimeout) {
                     _ = self.timeouts.fetchAdd(1, .monotonic);
                     std.log.warn("Leased handler timed out after {d}ms, invalidating runtime", .{self.config.request_timeout_ms});
-                    self.invalidateRuntime(lease.base_rt);
-                    lease.runtime = try self.ensureRuntime(lease.base_rt);
+                    self.recycleLeasedRuntime(lease);
                     return err;
                 }
                 if (isHandlerInvalid(err)) {
@@ -797,15 +798,25 @@ pub const HandlerPool = struct {
     /// builds a fresh runtime via ensureRuntime.
     fn quarantineSlot(self: *Self, base_rt: *zq.LockFreePool.Runtime) void {
         _ = self.panics.fetchAdd(1, .monotonic);
+        self.recycleSlot(base_rt);
+    }
+
+    fn recycleSlot(self: *Self, base_rt: *zq.LockFreePool.Runtime) void {
         _ = self.recycles.fetchAdd(1, .monotonic);
         self.pool.dropRuntime(base_rt);
         _ = self.in_use.fetchSub(1, .monotonic);
     }
 
+    fn recycleLeasedRuntime(self: *Self, lease: *WorkerRuntimeLease) void {
+        if (!lease.active) return;
+        self.recycleSlot(lease.base_rt);
+        lease.active = false;
+    }
+
     fn quarantineLeasedRuntime(self: *Self, lease: *WorkerRuntimeLease) void {
         if (!lease.active) return;
-        self.quarantineSlot(lease.base_rt);
-        lease.active = false;
+        _ = self.panics.fetchAdd(1, .monotonic);
+        self.recycleLeasedRuntime(lease);
     }
 
     /// Run one handler invocation under panic recovery and the per-request
