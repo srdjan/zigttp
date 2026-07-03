@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "entry": "entry-orchestrator",
+  "handlers": [
+    { "name": "entry-orchestrator", "path": "entry-orchestrator.ts" },
+    { "name": "inventory", "path": "inventory.ts" }
+  ]
+}

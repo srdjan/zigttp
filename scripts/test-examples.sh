@@ -194,6 +194,11 @@ run_live_workflow() {
                 compfail=$(curl --max-time 5 -sS -H 'Idempotency-Key: saga-demo-compfail' "http://127.0.0.1:$LIVE_PORT/compensation-fails" || true)
                 expect_contains "$success" '"ok":true' && expect_contains "$failed" '"compensated":true' && expect_contains "$compfail" '"compensationFailed":"reserve"' && ok=0
                 ;;
+            workflow/entry-orchestrator.ts)
+                local body
+                body=$(curl --max-time 5 -fsS -X POST "http://127.0.0.1:$LIVE_PORT/orders" || true)
+                expect_contains "$body" '"reservedStatus":200' && expect_contains "$body" '"shippedStatus":200' && ok=0
+                ;;
         esac
     fi
     stop_live_server
@@ -289,6 +294,7 @@ run_live_workflow "workflow/timeout-orchestrator.ts" "examples/workflow/timeout-
 run_live_workflow "workflow/scope-orchestrator.ts" "examples/workflow/scope-orchestrator.ts"
 run_live_workflow "workflow/queued-fanout-orchestrator.ts" "examples/workflow/queued-fanout-orchestrator.ts" --system examples/workflow/system.json --durable "$TMP_ROOT/durable-queued-fanout" --workflow-queue
 run_live_workflow "workflow/saga-orchestrator.ts" "examples/workflow/saga-orchestrator.ts" --system examples/workflow/system.json --durable "$TMP_ROOT/durable-saga"
+run_live_workflow "workflow/entry-orchestrator.ts" "examples/workflow/entry-orchestrator.ts" --system examples/workflow/entry-system.json
 run_workflow_queue_dead_letter_fixture
 
 # `zigttp check` writes a zigttp.d.ts typings stub into the cwd; drop it.
