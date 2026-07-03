@@ -2865,10 +2865,13 @@ pub const ContractBuilder = struct {
         try self.workflow_calls.append(self.allocator, wc);
     }
 
-    /// Parse a `call(name, init)` init object for `method`/`path` literals.
-    /// Marks `wc.dynamic` on a malformed init node, a non-object init, an
-    /// unresolvable property key, or a non-literal `method`/`path` value. A
-    /// `null`/`undefined` init keeps the defaults and stays static. Mirrors
+    /// Parse a `call(name, init)` init object. Recognizes `method`/`path`
+    /// (literal strings) and `body`/`headers` (presence only, no proof
+    /// surface). Marks `wc.dynamic` on a malformed init node, a non-object
+    /// init, an unresolvable property key, a non-literal `method`/`path`
+    /// value, or an unrecognized init key - failing closed on unknown keys
+    /// exactly like `fanout_extractor.parseDescriptor`. A `null`/`undefined`
+    /// init keeps the defaults and stays static. Mirrors
     /// `extractServiceCallInit`'s guard-clause shape.
     fn extractWorkflowCallInit(
         self: *ContractBuilder,
@@ -2904,6 +2907,12 @@ pub const ContractBuilder = struct {
                 if (self.getLiteralString(prop.value)) |m| method.* = m else wc.dynamic = true;
             } else if (std.mem.eql(u8, key, "path")) {
                 if (self.getLiteralString(prop.value)) |p| path.* = p else wc.dynamic = true;
+            } else if (std.mem.eql(u8, key, "body") or std.mem.eql(u8, key, "headers")) {
+                // Presence only; no proof surface (mirrors fanout descriptors).
+            } else {
+                // Unknown init key: fail closed to dynamic, exactly like
+                // fanout_extractor.parseDescriptor rejects unknown siblings.
+                wc.dynamic = true;
             }
         }
     }
@@ -5211,6 +5220,39 @@ test "workflow call with undefined init keeps GET / defaults and stays static" {
     try std.testing.expect(!contract.workflow_calls.items[0].dynamic);
     try std.testing.expectEqualStrings("payments", contract.workflow_calls.items[0].target);
     try std.testing.expectEqualStrings("GET /", contract.workflow_calls.items[0].route_pattern);
+}
+
+test "workflow call init with an unknown key fails closed to dynamic" {
+    const source =
+        \\import { call } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  call("inventory", { path: "/reserve", timeoutMs: 50 });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.workflow_calls.items.len);
+    // Mirrors fanout's unknown-sibling-field fail-closed behavior: an
+    // unrecognized init key marks the call dynamic, not silently ignored.
+    try std.testing.expect(contract.workflow_calls.items[0].dynamic);
+}
+
+test "workflow call init recognizes body and headers as presence-only" {
+    const source =
+        \\import { call } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  call("inventory", { method: "POST", path: "/reserve", body: { qty: 1 }, headers: { accept: "json" } });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.workflow_calls.items.len);
+    try std.testing.expect(!contract.workflow_calls.items[0].dynamic);
+    try std.testing.expectEqualStrings("POST /reserve", contract.workflow_calls.items[0].route_pattern);
 }
 
 test "post_only is proven for static POST-only routerMatch tables" {
