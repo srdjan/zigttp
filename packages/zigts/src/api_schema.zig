@@ -21,21 +21,21 @@ pub fn schemaFromType(
     env: *const TypeEnv,
     type_idx: TypeIndex,
 ) !?[]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
     var seen: SeenSet = .empty;
     defer seen.deinit(allocator);
 
+    // `aw` owns its buffer through every exit: a thrown error or an
+    // unsupported type (`!ok`) frees it via the defer, and success copies the
+    // written bytes into a caller-owned slice before the defer runs. The old
+    // fromArrayList/toArrayList split freed a stale handle on the `!ok` path
+    // and leaked the buffer writeRecordSchema had already grown.
     const ok = try writeSchema(&aw.writer, allocator, env, type_idx, &seen);
-    if (!ok) {
-        output.deinit(allocator);
-        return null;
-    }
+    if (!ok) return null;
 
-    output = aw.toArrayList();
-    return try output.toOwnedSlice(allocator);
+    return try allocator.dupe(u8, aw.writer.buffered());
 }
 
 fn writeSchema(
@@ -308,4 +308,25 @@ test "schemaFromType rejects nullable" {
 
     const nullable = pool.addNullable(allocator, pool.idx_string);
     try std.testing.expect((try schemaFromType(allocator, &env, nullable)) == null);
+}
+
+test "schemaFromType frees the output buffer when a record field is unsupported" {
+    const allocator = std.testing.allocator;
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // writeRecordSchema allocates the output buffer for `{"type":"object"` and
+    // then bails out false on the nullable field. The buffer must still be
+    // freed; under std.testing.allocator a leak here fails the test.
+    const name = pool.addName(allocator, "maybe");
+    const nullable = pool.addNullable(allocator, pool.idx_string);
+    const rec = pool.addRecord(allocator, &.{
+        .{ .name_start = name.start, .name_len = name.len, .type_idx = nullable, .optional = false },
+    });
+
+    try std.testing.expect((try schemaFromType(allocator, &env, rec)) == null);
 }
