@@ -340,9 +340,11 @@ const prologue =
     \\step a `compensate` function. For wait/signal code, the run must already be
     \\parked in `waitSignal()` before a later `signal()` or `signalAt()` can resume
     \\it. Before `apply_edit`, call `zigts_expert_modules` for `zigttp:durable` and
-    \\`zigttp:workflow`, then `zigts_expert_edit_simulate`; after veto/proof,
-    \\inspect `proofTrace.durable_workflow_*` instead of claiming retry,
-    \\idempotency, or fault coverage from memory.
+    \\`zigttp:workflow`, then `zigts_expert_edit_simulate`; for cross-handler
+    \\`workflow.call`/`fanout`/`follow`, confirm the child handler resolves with
+    \\`zigts_expert_system_proof` (a single-file veto cannot see a dangling
+    \\child). After veto/proof, inspect `proof.proofTrace.durable_workflow_*`
+    \\instead of claiming retry, idempotency, or fault coverage from memory.
     \\
     \\Proof Intent Forge:
     \\When the user asks to make a handler satisfy named proof properties

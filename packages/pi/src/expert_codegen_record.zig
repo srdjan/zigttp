@@ -75,7 +75,12 @@ fn readCaseSteps(allocator: std.mem.Allocator, dir_abs: []const u8) ![][]u8 {
     while (true) : (i += 1) {
         const path = try std.fmt.allocPrint(allocator, "{s}/step_{d}.jsonl", .{ dir_abs, i });
         defer allocator.free(path);
-        const bytes = zigts.file_io.readFile(allocator, path, 4 * 1024 * 1024) catch break;
+        // An absent step ends the sequence (and an absent step_0 means no
+        // cassette); any other read error must surface, not masquerade as "missing".
+        const bytes = zigts.file_io.readFile(allocator, path, 4 * 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound => break,
+            else => return err,
+        };
         try list.append(allocator, bytes);
     }
     return list.toOwnedSlice(allocator);
@@ -375,17 +380,20 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     var registry = try app.buildRegistry(a);
     defer registry.deinit(a);
 
-    var with_cassettes: usize = 0;
     var passes: usize = 0;
+    var missing: std.ArrayList([]const u8) = .empty;
+    defer missing.deinit(a);
     for (record_corpus) |rc| {
         const dir_abs = try std.fmt.allocPrint(a, "{s}/{s}", .{ codegen_dir, rc.name });
-        // Read the cassette steps from the repo (absolute) BEFORE chdir.
-        const steps = readCaseSteps(a, dir_abs) catch &.{};
+        // Read the cassette steps from the repo (absolute) BEFORE chdir. A real
+        // read error propagates; an absent cassette yields no steps and is
+        // collected so the whole set is reported at once instead of aborting
+        // on the first missing case.
+        const steps = try readCaseSteps(a, dir_abs);
         if (steps.len == 0) {
-            std.debug.print("[codegen-replay] {s}: missing committed cassette in {s}\n", .{ rc.name, dir_abs });
-            return error.MissingCodegenCassette;
+            try missing.append(a, rc.name);
+            continue;
         }
-        with_cassettes += 1;
 
         var tmp = try IsolatedTmp.init(a, "codegen-replay");
         defer tmp.cleanup(a);
@@ -425,6 +433,14 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         passes += 1;
     }
 
-    try testing.expect(with_cassettes > 0);
-    try testing.expectEqual(with_cassettes, passes);
+    if (missing.items.len > 0) {
+        std.debug.print("[codegen-replay] missing committed cassette(s) for {d} case(s):\n", .{missing.items.len});
+        for (missing.items) |name| std.debug.print("  - {s}\n", .{name});
+        std.debug.print(
+            "  record with: ZIGTTP_CODEGEN_RECORD=1 zig build test-expert-app -- --test-filter \"record codegen baseline corpus\"\n",
+            .{},
+        );
+        return error.MissingCodegenCassette;
+    }
+    try testing.expectEqual(record_corpus.len, passes);
 }

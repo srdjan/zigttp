@@ -242,7 +242,7 @@ In-process multi-handler orchestration. Requires a `--system <file>` handler bun
 Authoring rules:
 
 - Use `req.headers.get("idempotency-key")` for durable run keys when the client supplies one.
-- Put `workflow.call`, `fanout`, and `follow` at durable depth 0 inside `run()`, not inside `step()`.
+- Put `workflow.call`, `fanout`, and `follow` at step depth 0 inside `run()`, not inside `step()`.
 - ZTS509 rejects `workflow.call`, `saga`, `fanout`, or `follow` inside a durable `step()` callback.
 - ZTS510 rejects statically analyzable saga steps when a non-last step lacks `compensate`.
 - `fanout()` returns results in declaration order; it is ordered durable batch grouping, not true concurrency.
