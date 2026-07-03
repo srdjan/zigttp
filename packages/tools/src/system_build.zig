@@ -155,7 +155,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
 
     // Write system-contract.json
     {
-        const json_path = try std.fmt.allocPrint(allocator, "{s}system-contract.json", .{output_dir});
+        const json_path = try std.fs.path.join(allocator, &.{ output_dir, "system-contract.json" });
         defer allocator.free(json_path);
 
         var json_output: std.ArrayList(u8) = .empty;
@@ -181,7 +181,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
 
     // Write system-report.txt
     {
-        const report_path = try std.fmt.allocPrint(allocator, "{s}system-report.txt", .{output_dir});
+        const report_path = try std.fs.path.join(allocator, &.{ output_dir, "system-report.txt" });
         defer allocator.free(report_path);
 
         var report_output: std.ArrayList(u8) = .empty;
