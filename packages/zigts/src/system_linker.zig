@@ -699,6 +699,41 @@ fn appendUnresolvedWarning(
     try warnings.append(allocator, msg);
 }
 
+/// Record a failed name-resolution: append one `UnresolvedLink` (status
+/// `.unlinked`, `host` mirroring `service_name` as both resolution loops do)
+/// plus one human-readable warning. Shared by the `service_call` and
+/// `workflow_call` loops, whose failure branches are otherwise identical.
+/// `detail` is borrowed - the caller keeps ownership of any allocated string.
+fn appendUnresolved(
+    allocator: std.mem.Allocator,
+    unresolved: *std.ArrayList(UnresolvedLink),
+    warnings: *std.ArrayList([]const u8),
+    config: SystemConfig,
+    kind: LinkKind,
+    source_idx: usize,
+    service_name: []const u8,
+    call_ref: []const u8,
+    detail: []const u8,
+) !void {
+    try unresolved.append(allocator, .{
+        .kind = kind,
+        .source_idx = source_idx,
+        .call_ref = call_ref,
+        .service_name = service_name,
+        .host = service_name,
+        .status = .unlinked,
+    });
+    try appendUnresolvedWarning(
+        allocator,
+        warnings,
+        config.handlers[source_idx].path,
+        kind,
+        service_name,
+        call_ref,
+        detail,
+    );
+}
+
 // -------------------------------------------------------------------------
 // Core linking
 // -------------------------------------------------------------------------
@@ -815,44 +850,12 @@ pub fn linkSystem(
             }
 
             const target_idx = findHandlerByName(config, service_call.service) orelse {
-                try unresolved.append(allocator, .{
-                    .kind = .service_call,
-                    .source_idx = source_idx,
-                    .call_ref = service_call.route_pattern,
-                    .service_name = service_call.service,
-                    .host = service_call.service,
-                    .status = .unlinked,
-                });
-                try appendUnresolvedWarning(
-                    allocator,
-                    &warnings,
-                    config.handlers[source_idx].path,
-                    .service_call,
-                    service_call.service,
-                    service_call.route_pattern,
-                    "references an unknown service",
-                );
+                try appendUnresolved(allocator, &unresolved, &warnings, config, .service_call, source_idx, service_call.service, service_call.route_pattern, "references an unknown service");
                 continue;
             };
 
             const parsed_route = parseServiceRoute(service_call.route_pattern) orelse {
-                try unresolved.append(allocator, .{
-                    .kind = .service_call,
-                    .source_idx = source_idx,
-                    .call_ref = service_call.route_pattern,
-                    .service_name = service_call.service,
-                    .host = service_call.service,
-                    .status = .unlinked,
-                });
-                try appendUnresolvedWarning(
-                    allocator,
-                    &warnings,
-                    config.handlers[source_idx].path,
-                    .service_call,
-                    service_call.service,
-                    service_call.route_pattern,
-                    "has an invalid route pattern",
-                );
+                try appendUnresolved(allocator, &unresolved, &warnings, config, .service_call, source_idx, service_call.service, service_call.route_pattern, "has an invalid route pattern");
                 continue;
             };
 
@@ -860,46 +863,14 @@ pub fn linkSystem(
             const resolved = matchRoutePathWithMethod(target_contract, parsed_route.method, parsed_route.path) orelse {
                 const detail = try std.fmt.allocPrint(allocator, "matches no route in {s}", .{config.handlers[target_idx].path});
                 defer allocator.free(detail);
-                try unresolved.append(allocator, .{
-                    .kind = .service_call,
-                    .source_idx = source_idx,
-                    .call_ref = service_call.route_pattern,
-                    .service_name = service_call.service,
-                    .host = service_call.service,
-                    .status = .unlinked,
-                });
-                try appendUnresolvedWarning(
-                    allocator,
-                    &warnings,
-                    config.handlers[source_idx].path,
-                    .service_call,
-                    service_call.service,
-                    service_call.route_pattern,
-                    detail,
-                );
+                try appendUnresolved(allocator, &unresolved, &warnings, config, .service_call, source_idx, service_call.service, service_call.route_pattern, detail);
                 continue;
             };
 
             if (findApiRoute(target_contract, parsed_route.method, parsed_route.path)) |api_route| {
                 if (try validateServiceCallShape(allocator, service_call, api_route)) |detail| {
                     defer allocator.free(detail);
-                    try unresolved.append(allocator, .{
-                        .kind = .service_call,
-                        .source_idx = source_idx,
-                        .call_ref = service_call.route_pattern,
-                        .service_name = service_call.service,
-                        .host = service_call.service,
-                        .status = .unlinked,
-                    });
-                    try appendUnresolvedWarning(
-                        allocator,
-                        &warnings,
-                        config.handlers[source_idx].path,
-                        .service_call,
-                        service_call.service,
-                        service_call.route_pattern,
-                        detail,
-                    );
+                    try appendUnresolved(allocator, &unresolved, &warnings, config, .service_call, source_idx, service_call.service, service_call.route_pattern, detail);
                     continue;
                 }
             }
@@ -925,44 +896,12 @@ pub fn linkSystem(
             }
 
             const target_idx = findHandlerByName(config, wc.target) orelse {
-                try unresolved.append(allocator, .{
-                    .kind = .workflow_call,
-                    .source_idx = source_idx,
-                    .call_ref = wc.route_pattern,
-                    .service_name = wc.target,
-                    .host = wc.target,
-                    .status = .unlinked,
-                });
-                try appendUnresolvedWarning(
-                    allocator,
-                    &warnings,
-                    config.handlers[source_idx].path,
-                    .workflow_call,
-                    wc.target,
-                    wc.route_pattern,
-                    "references an unknown workflow target",
-                );
+                try appendUnresolved(allocator, &unresolved, &warnings, config, .workflow_call, source_idx, wc.target, wc.route_pattern, "references an unknown workflow target");
                 continue;
             };
 
             const parsed_route = parseServiceRoute(wc.route_pattern) orelse {
-                try unresolved.append(allocator, .{
-                    .kind = .workflow_call,
-                    .source_idx = source_idx,
-                    .call_ref = wc.route_pattern,
-                    .service_name = wc.target,
-                    .host = wc.target,
-                    .status = .unlinked,
-                });
-                try appendUnresolvedWarning(
-                    allocator,
-                    &warnings,
-                    config.handlers[source_idx].path,
-                    .workflow_call,
-                    wc.target,
-                    wc.route_pattern,
-                    "has an invalid route pattern",
-                );
+                try appendUnresolved(allocator, &unresolved, &warnings, config, .workflow_call, source_idx, wc.target, wc.route_pattern, "has an invalid route pattern");
                 continue;
             };
 
@@ -970,23 +909,7 @@ pub fn linkSystem(
             const resolved_wc = matchRoutePathWithMethod(target_contract, parsed_route.method, parsed_route.path) orelse {
                 const detail = try std.fmt.allocPrint(allocator, "matches no route in {s}", .{config.handlers[target_idx].path});
                 defer allocator.free(detail);
-                try unresolved.append(allocator, .{
-                    .kind = .workflow_call,
-                    .source_idx = source_idx,
-                    .call_ref = wc.route_pattern,
-                    .service_name = wc.target,
-                    .host = wc.target,
-                    .status = .unlinked,
-                });
-                try appendUnresolvedWarning(
-                    allocator,
-                    &warnings,
-                    config.handlers[source_idx].path,
-                    .workflow_call,
-                    wc.target,
-                    wc.route_pattern,
-                    detail,
-                );
+                try appendUnresolved(allocator, &unresolved, &warnings, config, .workflow_call, source_idx, wc.target, wc.route_pattern, detail);
                 continue;
             };
 
