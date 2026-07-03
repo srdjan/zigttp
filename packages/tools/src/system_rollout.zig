@@ -417,8 +417,7 @@ pub fn analyzeRollout(
         );
         defer manifest.deinit(allocator);
 
-        const base_url_changed = !std.mem.eql(
-            u8,
+        const base_url_changed = !optionalStringEql(
             old_system.analysis.config.handlers[old_idx].base_url,
             new_system.analysis.config.handlers[new_idx].base_url,
         );
@@ -611,14 +610,20 @@ fn cloneEntry(
     return .{
         .name = try allocator.dupe(u8, entry.name),
         .path = try allocator.dupe(u8, entry.path),
-        .base_url = try allocator.dupe(u8, entry.base_url),
+        .base_url = if (entry.base_url) |b| try allocator.dupe(u8, b) else null,
     };
 }
 
 fn freeEntry(allocator: std.mem.Allocator, entry: system_linker.SystemConfig.HandlerEntry) void {
     allocator.free(entry.name);
     allocator.free(entry.path);
-    allocator.free(entry.base_url);
+    if (entry.base_url) |b| allocator.free(b);
+}
+
+fn optionalStringEql(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, a.?, b.?);
 }
 
 fn proofLevelString(level: system_linker.ProofLevel) []const u8 {
@@ -645,7 +650,11 @@ fn buildUpdateSummary(
         try parts.append(allocator, try std.fmt.allocPrint(allocator, "path changed from {s} to {s}", .{ old_entry.path, new_entry.path }));
     }
     if (base_url_changed) {
-        try parts.append(allocator, try std.fmt.allocPrint(allocator, "baseUrl changed from {s} to {s}", .{ old_entry.base_url, new_entry.base_url }));
+        try parts.append(allocator, try std.fmt.allocPrint(
+            allocator,
+            "baseUrl changed from {s} to {s}",
+            .{ old_entry.base_url orelse "(in-process only)", new_entry.base_url orelse "(in-process only)" },
+        ));
     }
 
     var buffer: std.ArrayList(u8) = .empty;

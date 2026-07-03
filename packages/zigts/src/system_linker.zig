@@ -25,19 +25,30 @@ const JsonParser = handler_contract.JsonParser;
 
 pub const SystemConfig = struct {
     version: u32,
+    /// The bundle's single external HTTP entry point, naming one of
+    /// `handlers[].name`. Optional for backward compatibility with manifests
+    /// predating this field. When set, `zigttp link` validates it names an
+    /// existing handler and the signed `kind=workflow` receipt attests to it.
+    entry: ?[]const u8 = null, // owned
     handlers: []HandlerEntry,
 
     pub const HandlerEntry = struct {
         name: []const u8, // owned
         path: []const u8, // owned
-        base_url: []const u8, // owned
+        /// Real-HTTP base URL, consumed only by `zigttp:service`'s
+        /// `serviceCall` and raw `fetchSync` egress resolution. Optional: a
+        /// handler reached only via `zigttp:workflow`'s in-process
+        /// `call`/`saga`/`fanout`/`follow` (resolved by name, never by URL)
+        /// genuinely never needs one.
+        base_url: ?[]const u8 = null, // owned
     };
 
     pub fn deinit(self: *SystemConfig, allocator: std.mem.Allocator) void {
+        if (self.entry) |e| allocator.free(e);
         for (self.handlers) |entry| {
             allocator.free(entry.name);
             allocator.free(entry.path);
-            allocator.free(entry.base_url);
+            if (entry.base_url) |base_url| allocator.free(base_url);
         }
         allocator.free(self.handlers);
     }
@@ -144,6 +155,15 @@ pub const SystemProperties = struct {
     fault_covered: bool,
     state_isolated: bool,
     max_system_io_depth: ?u32,
+    /// `config.entry`, echoed here so a proof consumer reading only
+    /// `SystemProperties` (not the full config) can see the declared entry.
+    /// Null when the manifest declares no entry.
+    entry_handler: ?[]const u8 = null, // borrowed from config
+    /// True when an entry is declared, resolves to a handler in the bundle,
+    /// and that handler's own `HandlerProperties.post_only` proof holds.
+    /// False (not "unproven") when no entry is declared, so a bundle that
+    /// never opts in never claims a POST-only door it didn't ask for.
+    entry_post_only: bool = false,
 };
 
 pub const ProofLevel = enum {
@@ -264,10 +284,11 @@ fn findHandlerForUrl(config: SystemConfig, url: []const u8) HandlerLookup {
     var best_base_path: []const u8 = "/";
 
     for (config.handlers, 0..) |entry, idx| {
-        if (!std.mem.eql(u8, host, extractHost(entry.base_url))) continue;
+        const entry_base_url = entry.base_url orelse continue;
+        if (!std.mem.eql(u8, host, extractHost(entry_base_url))) continue;
         matched_host = true;
 
-        const base_path = basePathFromUrl(entry.base_url);
+        const base_path = basePathFromUrl(entry_base_url);
         if (!pathMatchesBaseUrl(path, base_path)) continue;
 
         if (best_idx == null or base_path.len > best_base_path.len) {
@@ -1170,6 +1191,19 @@ pub fn linkSystem(
         }
     }
 
+    // The declared entry's own post_only proof, echoed here so a receipt
+    // consumer reading only SystemProperties sees it. No entry declared ->
+    // entry_post_only stays false (not "unproven"): an opt-in fact, not a
+    // penalty for bundles that don't declare one.
+    properties.entry_handler = config.entry;
+    if (config.entry) |entry_name| {
+        if (findHandlerByName(config, entry_name)) |entry_idx| {
+            if (contracts[entry_idx].properties) |p| {
+                properties.entry_post_only = p.post_only;
+            }
+        }
+    }
+
     const all_verified = blk: {
         for (contracts) |c| {
             if (c.verification == null) break :blk false;
@@ -1419,11 +1453,13 @@ fn formatStatusList(allocator: std.mem.Allocator, statuses: []const u16) ![]cons
 
 pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !SystemConfig {
     var entries: std.ArrayList(SystemConfig.HandlerEntry) = .empty;
+    var entry_name: ?[]const u8 = null;
     errdefer {
+        if (entry_name) |e| allocator.free(e);
         for (entries.items) |entry| {
             allocator.free(entry.name);
             allocator.free(entry.path);
-            allocator.free(entry.base_url);
+            if (entry.base_url) |base_url| allocator.free(base_url);
         }
         entries.deinit(allocator);
     }
@@ -1447,6 +1483,11 @@ pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !
 
         if (std.mem.eql(u8, key, "version")) {
             version = parser.readU32() orelse 1;
+        } else if (std.mem.eql(u8, key, "entry")) {
+            if (parser.readString()) |e| {
+                if (entry_name) |old| allocator.free(old);
+                entry_name = try allocator.dupe(u8, e);
+            }
         } else if (std.mem.eql(u8, key, "handlers")) {
             if (!parser.consume('[')) return error.InvalidJson;
 
@@ -1489,16 +1530,18 @@ pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !
                     }
                 }
 
-                // Fail closed: a handler entry missing any required field (e.g.
-                // a misspelled key) must error rather than be silently dropped,
-                // which would weaken the cross-handler proofs without any signal.
-                if (name == null or path == null or base_url == null) {
+                // Fail closed: a handler entry missing name/path (e.g. a
+                // misspelled key) must error rather than be silently dropped,
+                // which would weaken the cross-handler proofs without any
+                // signal. baseUrl is optional: only zigttp:service's real-HTTP
+                // resolution and raw fetchSync egress matching consume it.
+                if (name == null or path == null) {
                     return error.InvalidJson;
                 }
                 try entries.append(allocator, .{
                     .name = try allocator.dupe(u8, name.?),
                     .path = try allocator.dupe(u8, path.?),
-                    .base_url = try allocator.dupe(u8, base_url.?),
+                    .base_url = if (base_url) |b| try allocator.dupe(u8, b) else null,
                 });
             }
         } else {
@@ -1507,7 +1550,7 @@ pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !
     }
 
     const handlers = try entries.toOwnedSlice(allocator);
-    return .{ .version = version, .handlers = handlers };
+    return .{ .version = version, .entry = entry_name, .handlers = handlers };
 }
 
 // -------------------------------------------------------------------------
@@ -1521,6 +1564,13 @@ pub fn writeSystemContractJson(
     const config_handlers = analysis.config.handlers;
     try writer.writeAll("{\n");
     try writer.writeAll("  \"version\": 1,\n");
+    try writer.writeAll("  \"entry\": ");
+    if (analysis.config.entry) |e| {
+        try json_utils.writeJsonString(writer, e);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\n");
 
     // handlers
     try writer.writeAll("  \"handlers\": [\n");
@@ -1531,7 +1581,11 @@ pub fn writeSystemContractJson(
         try writer.writeAll(", \"name\": ");
         try json_utils.writeJsonString(writer, h.name);
         try writer.writeAll(", \"baseUrl\": ");
-        try json_utils.writeJsonString(writer, h.base_url);
+        if (h.base_url) |base_url| {
+            try json_utils.writeJsonString(writer, base_url);
+        } else {
+            try writer.writeAll("null");
+        }
         try writer.writeAll(" }");
     }
     try writer.writeAll("\n  ],\n");
@@ -1622,6 +1676,14 @@ pub fn writeSystemContractJson(
     try writer.print("    \"retrySafe\": {s},\n", .{boolStr(p.retry_safe)});
     try writer.print("    \"faultCovered\": {s},\n", .{boolStr(p.fault_covered)});
     try writer.print("    \"stateIsolated\": {s},\n", .{boolStr(p.state_isolated)});
+    try writer.writeAll("    \"entryHandler\": ");
+    if (p.entry_handler) |e| {
+        try json_utils.writeJsonString(writer, e);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\n");
+    try writer.print("    \"entryPostOnly\": {s},\n", .{boolStr(p.entry_post_only)});
     if (p.max_system_io_depth) |d| {
         try writer.print("    \"maxSystemIoDepth\": {d}\n", .{d});
     } else {
@@ -1681,10 +1743,17 @@ pub fn writeSystemReport(
     const config_handlers = analysis.config.handlers;
     try writer.writeAll("=== SYSTEM CONTRACT REPORT ===\n\n");
 
+    // Entry
+    if (analysis.properties.entry_handler) |e| {
+        try writer.print("Entry: {s} (postOnly: {s})\n", .{ e, boolStr(analysis.properties.entry_post_only) });
+    } else {
+        try writer.writeAll("Entry: (none declared)\n");
+    }
+
     // Handlers
     try writer.print("Handlers: {d}\n", .{config_handlers.len});
     for (config_handlers) |h| {
-        try writer.print("  {s} -> {s}\n", .{ h.path, h.base_url });
+        try writer.print("  {s} -> {s}\n", .{ h.path, h.base_url orelse "(in-process only)" });
     }
     try writer.writeAll("\n");
 
@@ -1869,8 +1938,28 @@ test "parseSystemConfig" {
     try std.testing.expectEqual(@as(usize, 2), config.handlers.len);
     try std.testing.expectEqualStrings("gateway", config.handlers[0].name);
     try std.testing.expectEqualStrings("gateway.ts", config.handlers[0].path);
-    try std.testing.expectEqualStrings("https://gateway.internal", config.handlers[0].base_url);
+    try std.testing.expectEqualStrings("https://gateway.internal", config.handlers[0].base_url.?);
     try std.testing.expectEqualStrings("users.ts", config.handlers[1].path);
+}
+
+test "parseSystemConfig: baseUrl and entry are optional" {
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "entry": "orchestrator",
+        \\  "handlers": [
+        \\    { "name": "orchestrator", "path": "orchestrator.ts" },
+        \\    { "name": "inventory", "path": "inventory.ts" }
+        \\  ]
+        \\}
+    ;
+    var config = try parseSystemConfig(std.testing.allocator, json);
+    defer config.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("orchestrator", config.entry.?);
+    try std.testing.expectEqual(@as(usize, 2), config.handlers.len);
+    try std.testing.expectEqual(@as(?[]const u8, null), config.handlers[0].base_url);
+    try std.testing.expectEqual(@as(?[]const u8, null), config.handlers[1].base_url);
 }
 
 test "linkSystem: linked and external" {

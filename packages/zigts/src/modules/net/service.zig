@@ -94,7 +94,12 @@ fn populateServices(
     defer config.deinit(allocator);
 
     for (config.handlers) |entry| {
-        try state.register(entry.name, entry.base_url);
+        // A handler with no baseUrl is workflow-only (reached in-process via
+        // zigttp:workflow's call/saga/fanout/follow, resolved by name, never
+        // by URL); serviceCall has no way to dispatch to it, so it is not
+        // registered as a named service.
+        const base_url = entry.base_url orelse continue;
+        try state.register(entry.name, base_url);
     }
 }
 

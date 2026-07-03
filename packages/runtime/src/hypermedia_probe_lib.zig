@@ -60,6 +60,8 @@ pub fn recordWorkflowReceiptWithKey(
         .dangling_affordances = analysis.dangling_affordances,
         .dynamic_affordances = analysis.dynamic_affordances,
         .handler_count = @intCast(analysis.config.handlers.len),
+        .entry_handler = analysis.properties.entry_handler,
+        .entry_post_only = analysis.properties.entry_post_only,
     };
 
     var envelope = try hypermedia_receipt.sign(allocator, verdict, key_pair);
@@ -69,9 +71,11 @@ pub fn recordWorkflowReceiptWithKey(
     defer allocator.free(receipt_path);
 
     try precompile.writeFilePosix(receipt_path, envelope.compact, allocator);
-    std.debug.print("Wrote {s} (kind=workflow, allAffordancesResolved={s})\n", .{
+    std.debug.print("Wrote {s} (kind=workflow, allAffordancesResolved={s}, entry={s}, entryPostOnly={s})\n", .{
         receipt_path,
         if (verdict.all_affordances_resolved) "true" else "false",
+        verdict.entry_handler orelse "(none)",
+        if (verdict.entry_post_only) "true" else "false",
     });
 }
 

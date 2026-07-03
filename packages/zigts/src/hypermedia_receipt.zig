@@ -35,6 +35,15 @@ pub const Verdict = struct {
     dangling_affordances: u32 = 0,
     dynamic_affordances: u32 = 0,
     handler_count: u32 = 0,
+    /// The bundle's declared external entry point (system.json's `entry`
+    /// field), or null when the manifest declares none. Signed, so a receipt
+    /// cannot be replayed against a bundle whose declared entry changed.
+    entry_handler: ?[]const u8 = null,
+    /// True when `entry_handler` is set and that handler's own route table is
+    /// proven POST-only (`HandlerProperties.post_only`). False - not
+    /// "unproven" - when no entry is declared: an opt-in fact, not a default
+    /// penalty for bundles that never asked for this proof.
+    entry_post_only: bool = false,
 };
 
 /// Compact-JWS envelope. `compact` is owned and freed by `deinit`.
@@ -53,7 +62,7 @@ fn boolStr(b: bool) []const u8 {
 fn buildSigningInput(allocator: std.mem.Allocator, v: Verdict) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "zigttp-workflow-v1\n{s}\n{s}\n{s}\n{s}\n{d}\n{d}\n{d}\n{d}",
+        "zigttp-workflow-v1\n{s}\n{s}\n{s}\n{s}\n{d}\n{d}\n{d}\n{d}\n{s}\n{s}",
         .{
             v.system_hash,
             v.proof_level,
@@ -63,6 +72,8 @@ fn buildSigningInput(allocator: std.mem.Allocator, v: Verdict) ![]u8 {
             v.dangling_affordances,
             v.dynamic_affordances,
             v.handler_count,
+            v.entry_handler orelse "",
+            boolStr(v.entry_post_only),
         },
     );
 }
@@ -165,6 +176,38 @@ test "signing input ignores local system path and binds bundle hash" {
     var changed = base;
     changed.system_hash = "hash-b";
     const c = try buildSigningInput(std.testing.allocator, changed);
+    defer std.testing.allocator.free(c);
+    try std.testing.expect(!std.mem.eql(u8, a, c));
+}
+
+test "signing input binds the declared entry and its post-only proof" {
+    const base: Verdict = .{
+        .system_path = "s.json",
+        .system_hash = "x",
+        .proof_level = "complete",
+        .all_affordances_resolved = true,
+        .affordance_responses_covered = true,
+        .resolved_affordances = 1,
+    };
+    const no_entry = try buildSigningInput(std.testing.allocator, base);
+    defer std.testing.allocator.free(no_entry);
+
+    var with_entry = base;
+    with_entry.entry_handler = "orchestrator";
+    with_entry.entry_post_only = true;
+    const a = try buildSigningInput(std.testing.allocator, with_entry);
+    defer std.testing.allocator.free(a);
+    try std.testing.expect(!std.mem.eql(u8, no_entry, a));
+
+    var renamed_entry = with_entry;
+    renamed_entry.entry_handler = "gateway";
+    const b = try buildSigningInput(std.testing.allocator, renamed_entry);
+    defer std.testing.allocator.free(b);
+    try std.testing.expect(!std.mem.eql(u8, a, b));
+
+    var not_post_only = with_entry;
+    not_post_only.entry_post_only = false;
+    const c = try buildSigningInput(std.testing.allocator, not_post_only);
     defer std.testing.allocator.free(c);
     try std.testing.expect(!std.mem.eql(u8, a, c));
 }
