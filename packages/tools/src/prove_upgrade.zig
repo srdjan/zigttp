@@ -115,7 +115,7 @@ pub fn writeProofOutputs(
         try contract_diff.writeProofJson(&result.certificate, &aw.writer);
         json_output = aw.toArrayList();
 
-        const json_path = try std.fmt.allocPrint(allocator, "{s}proof.json", .{output_dir});
+        const json_path = try std.fs.path.join(allocator, &.{ output_dir, "proof.json" });
         defer allocator.free(json_path);
 
         try precompile.writeFilePosix(json_path, json_output.items, allocator);
@@ -131,7 +131,7 @@ pub fn writeProofOutputs(
         try contract_diff.writeProofReport(&aw.writer, &result.certificate);
         report_output = aw.toArrayList();
 
-        const report_path = try std.fmt.allocPrint(allocator, "{s}proof-report.txt", .{output_dir});
+        const report_path = try std.fs.path.join(allocator, &.{ output_dir, "proof-report.txt" });
         defer allocator.free(report_path);
 
         try precompile.writeFilePosix(report_path, report_output.items, allocator);
@@ -148,7 +148,7 @@ pub fn writeProofOutputs(
             try upgrade_verifier.writeUpgradeManifestJson(manifest, &aw.writer);
             json_output = aw.toArrayList();
 
-            const json_path = try std.fmt.allocPrint(allocator, "{s}upgrade-manifest.json", .{output_dir});
+            const json_path = try std.fs.path.join(allocator, &.{ output_dir, "upgrade-manifest.json" });
             defer allocator.free(json_path);
 
             try precompile.writeFilePosix(json_path, json_output.items, allocator);
@@ -164,7 +164,7 @@ pub fn writeProofOutputs(
             try upgrade_verifier.writeUpgradeReport(manifest, &aw.writer);
             report_output = aw.toArrayList();
 
-            const report_path = try std.fmt.allocPrint(allocator, "{s}upgrade-report.txt", .{output_dir});
+            const report_path = try std.fs.path.join(allocator, &.{ output_dir, "upgrade-report.txt" });
             defer allocator.free(report_path);
 
             try precompile.writeFilePosix(report_path, report_output.items, allocator);

@@ -715,7 +715,7 @@ fn appendOwnedMessages(
 
 fn writeOutputs(allocator: std.mem.Allocator, plan: *const RolloutPlan, output_dir: []const u8) !void {
     {
-        const json_path = try std.fmt.allocPrint(allocator, "{s}rollout-plan.json", .{output_dir});
+        const json_path = try std.fs.path.join(allocator, &.{ output_dir, "rollout-plan.json" });
         defer allocator.free(json_path);
 
         var buf: std.ArrayList(u8) = .empty;
@@ -728,7 +728,7 @@ fn writeOutputs(allocator: std.mem.Allocator, plan: *const RolloutPlan, output_d
     }
 
     {
-        const report_path = try std.fmt.allocPrint(allocator, "{s}rollout-report.txt", .{output_dir});
+        const report_path = try std.fs.path.join(allocator, &.{ output_dir, "rollout-report.txt" });
         defer allocator.free(report_path);
 
         var buf: std.ArrayList(u8) = .empty;

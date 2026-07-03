@@ -102,7 +102,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         try contract_diff.writeProofJson(&cert, &aw.writer);
         buf = aw.toArrayList();
 
-        const path = try std.fmt.allocPrint(allocator, "{s}proof.json", .{output_dir});
+        const path = try std.fs.path.join(allocator, &.{ output_dir, "proof.json" });
         defer allocator.free(path);
         try zigts.file_io.writeFile(allocator, path, buf.items);
         std.debug.print("Wrote {s}\n", .{path});
@@ -116,7 +116,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         try contract_diff.writeProofReport(&aw.writer, &cert);
         buf = aw.toArrayList();
 
-        const path = try std.fmt.allocPrint(allocator, "{s}proof-report.txt", .{output_dir});
+        const path = try std.fs.path.join(allocator, &.{ output_dir, "proof-report.txt" });
         defer allocator.free(path);
         try zigts.file_io.writeFile(allocator, path, buf.items);
         std.debug.print("Wrote {s}\n", .{path});
@@ -132,7 +132,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         try upgrade_verifier.writeUpgradeManifestJson(&manifest, &aw.writer);
         buf = aw.toArrayList();
 
-        const path = try std.fmt.allocPrint(allocator, "{s}upgrade-manifest.json", .{output_dir});
+        const path = try std.fs.path.join(allocator, &.{ output_dir, "upgrade-manifest.json" });
         defer allocator.free(path);
         try zigts.file_io.writeFile(allocator, path, buf.items);
         std.debug.print("Wrote {s}\n", .{path});
