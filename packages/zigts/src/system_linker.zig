@@ -2473,6 +2473,113 @@ test "linkSystem: workflow call links named handler route" {
     try std.testing.expectEqual(@as(usize, 0), analysis.unresolved.items.len);
 }
 
+test "linkSystem: workflow call to an unknown target is unresolved" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [1]HandlerContract = undefined;
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "orders.ts"));
+
+    var workflow_calls: std.ArrayList(handler_contract.WorkflowCallInfo) = .empty;
+    try workflow_calls.append(allocator, .{
+        .target = try allocator.dupe(u8, "ghost"),
+        .route_pattern = try allocator.dupe(u8, "POST /charge"),
+    });
+    contracts[0].workflow_calls = workflow_calls;
+
+    var entries: [1]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://orders.internal") },
+    };
+    const config = SystemConfig{ .version = 1, .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries) };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), analysis.links.items.len);
+    try std.testing.expectEqual(@as(usize, 1), analysis.unresolved.items.len);
+    try std.testing.expectEqual(LinkKind.workflow_call, analysis.unresolved.items[0].kind);
+    try std.testing.expectEqual(LinkStatus.unlinked, analysis.unresolved.items[0].status);
+    try std.testing.expectEqualStrings("ghost", analysis.unresolved.items[0].service_name.?);
+}
+
+test "linkSystem: workflow call to a non-matching route is unresolved" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [2]HandlerContract = undefined;
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "orders.ts"));
+
+    var workflow_calls: std.ArrayList(handler_contract.WorkflowCallInfo) = .empty;
+    try workflow_calls.append(allocator, .{
+        .target = try allocator.dupe(u8, "payments"),
+        .route_pattern = try allocator.dupe(u8, "POST /nope"),
+    });
+    contracts[0].workflow_calls = workflow_calls;
+
+    contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "payments.ts"));
+    var behaviors: std.ArrayList(BehaviorPath) = .empty;
+    try behaviors.append(allocator, .{
+        .route_method = try allocator.dupe(u8, "POST"),
+        .route_pattern = try allocator.dupe(u8, "/charge"),
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 1,
+        .is_failure_path = false,
+    });
+    contracts[1].behaviors = behaviors;
+
+    var entries: [2]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://orders.internal") },
+        .{ .name = try allocator.dupe(u8, "payments"), .path = try allocator.dupe(u8, "payments.ts"), .base_url = try allocator.dupe(u8, "https://payments.internal") },
+    };
+    const config = SystemConfig{ .version = 1, .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries) };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+        contracts[1].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), analysis.links.items.len);
+    try std.testing.expectEqual(@as(usize, 1), analysis.unresolved.items.len);
+    try std.testing.expectEqual(LinkKind.workflow_call, analysis.unresolved.items[0].kind);
+    try std.testing.expectEqualStrings("payments", analysis.unresolved.items[0].service_name.?);
+}
+
+test "linkSystem: workflow call with an invalid route pattern is unresolved" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [1]HandlerContract = undefined;
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "orders.ts"));
+
+    // Resolvable target, but a route pattern whose path lacks a leading slash:
+    // parseServiceRoute rejects it as malformed before any route matching.
+    var workflow_calls: std.ArrayList(handler_contract.WorkflowCallInfo) = .empty;
+    try workflow_calls.append(allocator, .{
+        .target = try allocator.dupe(u8, "orders"),
+        .route_pattern = try allocator.dupe(u8, "POST charge"),
+    });
+    contracts[0].workflow_calls = workflow_calls;
+
+    var entries: [1]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://orders.internal") },
+    };
+    const config = SystemConfig{ .version = 1, .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries) };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), analysis.links.items.len);
+    try std.testing.expectEqual(@as(usize, 1), analysis.unresolved.items.len);
+    try std.testing.expectEqual(LinkKind.workflow_call, analysis.unresolved.items[0].kind);
+}
+
 test "linkSystem: payload proof is reported for JSON service responses" {
     const allocator = std.testing.allocator;
 

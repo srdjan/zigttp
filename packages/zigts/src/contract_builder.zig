@@ -5181,6 +5181,38 @@ test "fanout descriptor with unknown sibling field fails closed" {
     try std.testing.expectEqualStrings("", contract.workflow_calls.items[0].route_pattern);
 }
 
+test "workflow call with a non-literal target is recorded dynamic" {
+    const source =
+        \\import { call } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  call(req.url, { method: "POST", path: "/charge" });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.workflow_calls.items.len);
+    try std.testing.expect(contract.workflow_calls.items[0].dynamic);
+}
+
+test "workflow call with undefined init keeps GET / defaults and stays static" {
+    const source =
+        \\import { call } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  call("payments", undefined);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.workflow_calls.items.len);
+    try std.testing.expect(!contract.workflow_calls.items[0].dynamic);
+    try std.testing.expectEqualStrings("payments", contract.workflow_calls.items[0].target);
+    try std.testing.expectEqualStrings("GET /", contract.workflow_calls.items[0].route_pattern);
+}
+
 test "post_only is proven for static POST-only routerMatch tables" {
     const source =
         \\import { routerMatch } from "zigttp:router";
