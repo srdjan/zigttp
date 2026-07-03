@@ -111,22 +111,23 @@ fn dynamicSentinel(deps: Deps) !WorkflowCallInfo {
 /// Collect every descriptor from a `fanout([...])` array into a function-
 /// local batch, transferring the whole batch into `out` on full success, or
 /// discarding it and appending one dynamic sentinel on any structural
-/// failure. Scoping the batch to this function keeps ownership transfer
-/// (batch -> out) a single, function-local step - no long-lived errdefer
-/// survives past the point where the batch's backing memory is freed.
+/// failure. A single `defer` owns the batch for the entire function: on
+/// success the batch is emptied after its payloads move to `out`, so the
+/// defer frees only the backing buffer; on failure (or any error return) the
+/// defer frees every partially-collected descriptor.
 fn collectDescriptors(deps: Deps, array_idx: NodeIndex, out: *std.ArrayList(WorkflowCallInfo)) !void {
     var batch: std.ArrayList(WorkflowCallInfo) = .empty;
-    errdefer {
+    defer {
         for (batch.items) |*info| info.deinit(deps.allocator);
         batch.deinit(deps.allocator);
     }
 
     if (try collectDescriptorsInto(deps, array_idx, &batch)) {
         try out.appendSlice(deps.allocator, batch.items);
-        batch.deinit(deps.allocator);
+        // Ownership of each descriptor's slices moved to `out`; empty the batch
+        // so the defer frees only the backing buffer, not the moved payloads.
+        batch.clearRetainingCapacity();
     } else {
-        for (batch.items) |*info| info.deinit(deps.allocator);
-        batch.deinit(deps.allocator);
         try out.append(deps.allocator, try dynamicSentinel(deps));
     }
 }

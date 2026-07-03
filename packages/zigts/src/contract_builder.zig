@@ -2856,39 +2856,56 @@ pub const ContractBuilder = struct {
 
         if (call.args_count > 1) {
             const init_idx = self.ir_view.getListIndex(call.args_start, 1);
-            const init_tag = self.ir_view.getTag(init_idx);
-            if (init_tag != null and init_tag != .lit_null and init_tag != .lit_undefined) {
-                if (self.resolveObjectLiteralNode(init_idx)) |init_obj| {
-                    if (self.ir_view.getObject(init_obj)) |obj| {
-                        var i: u16 = 0;
-                        while (i < obj.properties_count) : (i += 1) {
-                            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-                            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-                            const key = self.getObjectPropertyKey(prop.key) orelse {
-                                wc.dynamic = true;
-                                continue;
-                            };
-                            if (std.mem.eql(u8, key, "method")) {
-                                if (self.getLiteralString(prop.value)) |m| method = m else wc.dynamic = true;
-                            } else if (std.mem.eql(u8, key, "path")) {
-                                if (self.getLiteralString(prop.value)) |p| path = p else wc.dynamic = true;
-                            }
-                        }
-                    } else {
-                        wc.dynamic = true;
-                    }
-                } else {
-                    wc.dynamic = true;
-                }
-            } else if (init_tag == null) {
-                wc.dynamic = true;
-            }
+            self.extractWorkflowCallInit(init_idx, &wc, &method, &path);
         }
 
         self.allocator.free(wc.route_pattern);
         wc.route_pattern = try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ method, path });
 
         try self.workflow_calls.append(self.allocator, wc);
+    }
+
+    /// Parse a `call(name, init)` init object for `method`/`path` literals.
+    /// Marks `wc.dynamic` on a malformed init node, a non-object init, an
+    /// unresolvable property key, or a non-literal `method`/`path` value. A
+    /// `null`/`undefined` init keeps the defaults and stays static. Mirrors
+    /// `extractServiceCallInit`'s guard-clause shape.
+    fn extractWorkflowCallInit(
+        self: *ContractBuilder,
+        init_idx: NodeIndex,
+        wc: *contract_types.WorkflowCallInfo,
+        method: *[]const u8,
+        path: *[]const u8,
+    ) void {
+        const init_tag = self.ir_view.getTag(init_idx) orelse {
+            wc.dynamic = true;
+            return;
+        };
+        if (init_tag == .lit_null or init_tag == .lit_undefined) return;
+
+        const init_obj = self.resolveObjectLiteralNode(init_idx) orelse {
+            wc.dynamic = true;
+            return;
+        };
+        const obj = self.ir_view.getObject(init_obj) orelse {
+            wc.dynamic = true;
+            return;
+        };
+
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+            const key = self.getObjectPropertyKey(prop.key) orelse {
+                wc.dynamic = true;
+                continue;
+            };
+            if (std.mem.eql(u8, key, "method")) {
+                if (self.getLiteralString(prop.value)) |m| method.* = m else wc.dynamic = true;
+            } else if (std.mem.eql(u8, key, "path")) {
+                if (self.getLiteralString(prop.value)) |p| path.* = p else wc.dynamic = true;
+            }
+        }
     }
 
     fn extractKnownList(self: *ContractBuilder, node_idx: NodeIndex) !ServiceCallInfo.KnownList {

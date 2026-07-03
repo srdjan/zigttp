@@ -304,7 +304,7 @@ fn findHandlerForUrl(config: SystemConfig, url: []const u8) HandlerLookup {
     };
 }
 
-fn findHandlerByName(config: SystemConfig, service_name: []const u8) ?usize {
+pub fn findHandlerByName(config: SystemConfig, service_name: []const u8) ?usize {
     for (config.handlers, 0..) |entry, idx| {
         if (std.mem.eql(u8, entry.name, service_name)) return idx;
     }
@@ -1565,11 +1565,7 @@ pub fn writeSystemContractJson(
     try writer.writeAll("{\n");
     try writer.writeAll("  \"version\": 1,\n");
     try writer.writeAll("  \"entry\": ");
-    if (analysis.config.entry) |e| {
-        try json_utils.writeJsonString(writer, e);
-    } else {
-        try writer.writeAll("null");
-    }
+    try json_utils.writeJsonStringOrNull(writer, analysis.config.entry);
     try writer.writeAll(",\n");
 
     // handlers
@@ -1581,11 +1577,7 @@ pub fn writeSystemContractJson(
         try writer.writeAll(", \"name\": ");
         try json_utils.writeJsonString(writer, h.name);
         try writer.writeAll(", \"baseUrl\": ");
-        if (h.base_url) |base_url| {
-            try json_utils.writeJsonString(writer, base_url);
-        } else {
-            try writer.writeAll("null");
-        }
+        try json_utils.writeJsonStringOrNull(writer, h.base_url);
         try writer.writeAll(" }");
     }
     try writer.writeAll("\n  ],\n");
@@ -1677,11 +1669,7 @@ pub fn writeSystemContractJson(
     try writer.print("    \"faultCovered\": {s},\n", .{boolStr(p.fault_covered)});
     try writer.print("    \"stateIsolated\": {s},\n", .{boolStr(p.state_isolated)});
     try writer.writeAll("    \"entryHandler\": ");
-    if (p.entry_handler) |e| {
-        try json_utils.writeJsonString(writer, e);
-    } else {
-        try writer.writeAll("null");
-    }
+    try json_utils.writeJsonStringOrNull(writer, p.entry_handler);
     try writer.writeAll(",\n");
     try writer.print("    \"entryPostOnly\": {s},\n", .{boolStr(p.entry_post_only)});
     if (p.max_system_io_depth) |d| {

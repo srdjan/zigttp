@@ -25,6 +25,15 @@ pub fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
 }
 
+/// Write an optional string as a quoted JSON string, or the literal `null`.
+pub fn writeJsonStringOrNull(writer: anytype, s: ?[]const u8) !void {
+    if (s) |v| {
+        try writeJsonString(writer, v);
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
 /// Write a fixed-size byte array as a quoted lowercase-hex JSON string.
 pub fn writeJsonHex(writer: anytype, bytes: anytype) !void {
     try writer.writeByte('"');

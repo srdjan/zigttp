@@ -84,14 +84,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
     // A declared entry must name a real bundle member - a typo here would
     // otherwise sign a receipt attesting to a door that doesn't exist.
     if (config.entry) |entry_name| {
-        var found = false;
-        for (config.handlers) |h| {
-            if (std.mem.eql(u8, h.name, entry_name)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
+        if (system_linker.findHandlerByName(config, entry_name) == null) {
             std.debug.print("Error: entry \"{s}\" does not match any handler name in system.json\n", .{entry_name});
             config.deinit(allocator);
             std.process.exit(1);

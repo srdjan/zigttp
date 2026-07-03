@@ -417,7 +417,7 @@ pub fn analyzeRollout(
         );
         defer manifest.deinit(allocator);
 
-        const base_url_changed = !optionalStringEql(
+        const base_url_changed = !eqlOptionalString(
             old_system.analysis.config.handlers[old_idx].base_url,
             new_system.analysis.config.handlers[new_idx].base_url,
         );
@@ -620,7 +620,7 @@ fn freeEntry(allocator: std.mem.Allocator, entry: system_linker.SystemConfig.Han
     if (entry.base_url) |b| allocator.free(b);
 }
 
-fn optionalStringEql(a: ?[]const u8, b: ?[]const u8) bool {
+fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {
     if (a == null and b == null) return true;
     if (a == null or b == null) return false;
     return std.mem.eql(u8, a.?, b.?);
