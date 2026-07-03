@@ -38,6 +38,60 @@ taking down the orchestrator. Reach for `zigttp:durable`'s `run()` (below)
 once a handler needs its dispatch to survive a crash instead of just failing
 cleanly.
 
+## Proving Dispatch Links (`zigttp link`)
+
+Plain dispatch resolves sub-handler names at runtime, so a typo like
+`call("inventroy", ...)` only surfaces as a `599` when that path executes.
+`zigttp link <system.json>` closes that gap at compile time. It resolves
+every `zigttp:workflow` `call`, `saga`, and `fanout` target against the
+bundle by name - the same resolution `serviceCall` targets get - and reports
+any target that names no handler or matches no route in the target's own
+route table. A bundle whose targets all resolve signs a `kind=workflow`
+receipt.
+
+```bash
+zigttp link examples/workflow/entry-system.json
+```
+
+Targets are extracted strict-literal. `call` and `fanout` read the literal
+`method` and `path` from the init object (defaulting to `GET` and `/`) and
+synthesize a `METHOD /path` route to match against. A non-literal target, a
+non-literal `method`/`path`, or an unrecognized init key keeps the dispatch
+dynamic: it is counted but never resolved, downgrading the bundle proof
+rather than being guessed at. Only `method`, `path`, `body`, and `headers`
+are recognized init keys, and `body`/`headers` carry no proof surface.
+
+### Declaring an entry point
+
+A manifest may name one external HTTP entry point - the single door the
+outside reaches, with every other handler reachable only through in-process
+dispatch:
+
+```json
+{
+  "version": 1,
+  "entry": "entry-orchestrator",
+  "handlers": [
+    { "name": "entry-orchestrator", "path": "entry-orchestrator.ts" },
+    { "name": "inventory", "path": "inventory.ts" }
+  ]
+}
+```
+
+`zigttp link` checks that `entry` names a real bundle handler, and the
+`kind=workflow` receipt attests to it. When the entry handler's own routes
+are proven POST-only - a non-empty, statically enumerable
+`routerMatch({...}, req)` table whose every route is `POST` - the receipt
+records `entryPostOnly: true`. An ad hoc `if (req.method !== "POST")` guard
+does not earn that proof; the `routerMatch` convention does. A bundle that
+declares no `entry` reports `entryPostOnly: false` instead of being
+penalized for a door it never opened.
+
+Both fields are optional and backward-compatible. Manifests without `entry`
+link as before. A handler's `baseUrl` is optional too: it feeds only
+`zigttp:service`'s real-HTTP `serviceCall` and raw `fetchSync` egress, so a
+handler reached only by name through `zigttp:workflow` never needs one.
+
 ## Runtime Model
 
 Enable the oplog with `--durable <dir>`:

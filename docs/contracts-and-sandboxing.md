@@ -18,6 +18,10 @@ Every precompilation extracts a contract from the handler's IR. Add
 - **Internal service calls** made via `serviceCall("name", "METHOD
   /path", init)`; service names, route signatures, and statically
   proven params/query/header/body keys are captured
+- **Workflow dispatch targets** made via `zigttp:workflow`'s `call`,
+  `saga`, and `fanout`; target handler names and synthesized `METHOD
+  /path` routes are captured (strict-literal - a non-literal target or
+  init, or an unrecognized init key, is flagged dynamic)
 - **System-linked payload facts** for named internal edges; target
   response statuses, JSON payload proof, and payload-proof gaps
 - **Cache namespaces** used by `cacheGet`/`cacheSet`/etc.

@@ -61,7 +61,7 @@ Common `dev` and `serve` flags:
 | `--test <file>` | Run JSONL handler tests. |
 | `--sqlite <file>` | SQLite database for `zigttp:sql`. |
 | `--durable <dir>` | Durable workflow oplog directory. |
-| `--system <file>` | Handler bundle manifest: the `zigttp:service` HTTP registry and the `zigttp:workflow` in-process sub-handler registry. Workflow startup fails if a local handler path is unreadable. |
+| `--system <file>` | Handler bundle manifest: the `zigttp:service` HTTP registry and the `zigttp:workflow` in-process sub-handler registry. An optional `entry` field names the bundle's single external HTTP entry point, validated by `zigttp link`. Workflow startup fails if a local handler path is unreadable. |
 | `--workflow-queue` | Persist durable workflow `call`, `follow`, and `fanout` child dispatch through the workflow queue. Requires `--durable <dir>` and `--system <file>`. |
 | `--actor-queue` | Enable process-local in-memory mailboxes for `zigttp:queue`. |
 | `--outbound-http` / `--outbound-host <host>` | Enable outbound HTTP. The host allowlist matches on host only, not port. |
