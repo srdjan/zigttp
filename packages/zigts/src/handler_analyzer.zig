@@ -319,6 +319,8 @@ pub const HandlerAnalyzer = struct {
         const pattern = self.ir.getMatchPattern(pattern_node) orelse return;
         var path_str: ?[]const u8 = null;
 
+        // Scan every property (no early break): a `method` constraint may follow
+        // the `path` key and must still veto the pattern.
         var j: u8 = 0;
         while (j < pattern.props_count) : (j += 1) {
             const prop_idx = self.ir.getListIndex(pattern.props_start, j);
@@ -326,7 +328,17 @@ pub const HandlerAnalyzer = struct {
             const key_str_idx = self.ir.getStringIdx(prop.key) orelse continue;
             const key_str = self.ir.getString(key_str_idx) orelse continue;
 
-            if (std.mem.eql(u8, key_str, "path") or std.mem.eql(u8, key_str, "url")) {
+            if (std.mem.eql(u8, key_str, "method")) {
+                // The native fast path matches on URL only. When an arm pins the
+                // method (`{ method: "POST", ... }`), turning it into a URL-only
+                // pattern would serve that arm's response to any method, diverging
+                // from the interpreter which enforces the method. Decline to
+                // fast-path it and let the bytecode path run the match.
+                if (prop.value != null_node) {
+                    const method_tag = self.ir.getTag(prop.value) orelse continue;
+                    if (method_tag == .lit_string) return;
+                }
+            } else if (std.mem.eql(u8, key_str, "path") or std.mem.eql(u8, key_str, "url")) {
                 if (prop.value != null_node) {
                     const val_tag = self.ir.getTag(prop.value) orelse continue;
                     if (val_tag == .lit_string) {
@@ -334,7 +346,6 @@ pub const HandlerAnalyzer = struct {
                         path_str = self.ir.getString(val_str_idx);
                     }
                 }
-                break;
             }
         }
 
@@ -1064,6 +1075,49 @@ test "HandlerAnalyzer extracts match route patterns" {
     try std.testing.expectEqual(PatternType.exact, dispatch.patterns[1].pattern_type);
     try std.testing.expectEqualStrings("/api/b", dispatch.patterns[1].url_bytes);
     try std.testing.expectEqualStrings("plain", dispatch.patterns[1].static_body);
+}
+
+test "HandlerAnalyzer does not fast-path match-object arms that constrain method" {
+    const allocator = std.testing.allocator;
+
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    // The native fast path matches on URL only. A `{ method: "POST", path: ... }`
+    // arm dispatches on method too, so turning it into a URL-only exact pattern
+    // would serve the POST body to a GET, diverging from the interpreter which
+    // enforces the method. No pattern may be built for that path.
+    const source =
+        \\function handler(request) {
+        \\  const url = request.url;
+        \\  return match (request) {
+        \\    when { method: "POST", path: "/echo" }: Response.json({ ok: true }),
+        \\    default: Response.json({ error: "nf" }, { status: 404 }),
+        \\  };
+        \\}
+    ;
+
+    var js_parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+
+    const root = try js_parser.parse();
+    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const handler_fn = findHandlerFunctionForTest(ir_view, root) orelse return error.InvalidRequest;
+
+    var analyzer = HandlerAnalyzer.init(allocator, ir_view, &atoms);
+    defer analyzer.deinit();
+
+    const dispatch_opt = try analyzer.analyze(handler_fn);
+    if (dispatch_opt) |dispatch| {
+        defer {
+            dispatch.deinit();
+            allocator.destroy(dispatch);
+        }
+        for (dispatch.patterns) |p| {
+            try std.testing.expect(!std.mem.eql(u8, p.url_bytes, "/echo"));
+        }
+    }
 }
 
 test "HandlerAnalyzer detects Response.json(JSON.parse(request.body))" {
