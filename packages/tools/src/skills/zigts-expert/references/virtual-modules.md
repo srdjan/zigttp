@@ -226,6 +226,54 @@ function handler(req: Request): Response {
 }
 ```
 
+## zigttp:workflow (effect: write)
+
+```typescript
+import { call, saga, fanout, follow } from "zigttp:workflow";
+
+call(name: string, init?: { method?: string, path?: string, body?: unknown, headers?: object }): Response
+saga(steps: { name: string, run: () => unknown, compensate?: () => unknown }[]): object
+fanout(calls: { name: string, method?: string, path?: string, body?: unknown, headers?: object }[]): object
+follow(resource: object, rel: string, init?: { body?: unknown, headers?: object }): object
+```
+
+In-process multi-handler orchestration. Requires a `--system <file>` handler bundle. Inside `durable.run()`, top-level `call`, `follow`, and `fanout` boundaries can be persisted through `--workflow-queue`; saga dispatch is intentionally rejected in queue mode.
+
+Authoring rules:
+
+- Use `req.headers.get("idempotency-key")` for durable run keys when the client supplies one.
+- Put `workflow.call`, `fanout`, and `follow` at durable depth 0 inside `run()`, not inside `step()`.
+- ZTS509 rejects `workflow.call`, `saga`, `fanout`, or `follow` inside a durable `step()` callback.
+- ZTS510 rejects statically analyzable saga steps when a non-last step lacks `compensate`.
+- `fanout()` returns results in declaration order; it is ordered durable batch grouping, not true concurrency.
+
+```typescript
+import { run } from "zigttp:durable";
+import { call } from "zigttp:workflow";
+import type { Spec } from "zigttp:types";
+
+type WorkflowGuarantees = Spec<
+    | "deterministic"
+    | "state_isolated"
+    | "result_safe"
+    | "optional_safe"
+    | "no_secret_leakage"
+    | "no_credential_leakage"
+    | "input_validated"
+    | "pii_contained"
+    | "injection_safe"
+    | "canonical"
+>;
+
+function handler(req: Request): Response & WorkflowGuarantees {
+    const key = req.headers.get("idempotency-key") ?? "workflow-demo";
+    return run(key, () => {
+        const child = call("greet", { method: "GET", path: "/workflow" });
+        return Response.json({ childStatus: child.status });
+    });
+}
+```
+
 ## zigttp:sql (effect: io)
 
 Registered SQL queries backed by SQLite. Queries are registered by name at module scope, then executed by name in the handler. All queries use parameter binding - never string interpolation.

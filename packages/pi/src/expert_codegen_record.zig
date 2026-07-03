@@ -198,6 +198,34 @@ const record_corpus = [_]RecordCase{
         .expect_first_draft_pass = true,
     },
     .{
+        .name = "workflow-queued-call",
+        .prompt = "Create a durable workflow handler in handler.ts using zigttp:durable and " ++
+            "zigttp:workflow. It should read the Idempotency-Key header, enter run(key), " ++
+            "and dispatch a greet child handler with workflow.call at durable depth 0.",
+        .expect_first_draft_pass = true,
+    },
+    .{
+        .name = "workflow-nested-dispatch-avoidance",
+        .prompt = "Create a durable order workflow in handler.ts. Reserve inventory with a " ++
+            "durable step, then dispatch a notify child handler with workflow.call after the " ++
+            "step completes. Keep the child dispatch outside the step callback.",
+        .expect_first_draft_pass = true,
+    },
+    .{
+        .name = "workflow-saga-compensation",
+        .prompt = "Create a handler in handler.ts using zigttp:workflow saga() for reserve, " ++
+            "charge, and ship steps. Include compensate functions for every non-last static " ++
+            "saga step so the saga compensation proof can pass.",
+        .expect_first_draft_pass = true,
+    },
+    .{
+        .name = "workflow-wait-signal",
+        .prompt = "Create a durable approval workflow in handler.ts using waitSignal and " ++
+            "signal. The /wait path should park a run using the Idempotency-Key header, and " ++
+            "the /signal path should resume the same key with an approved payload.",
+        .expect_first_draft_pass = true,
+    },
+    .{
         .name = "sql-users",
         .prompt = "Create a handler in handler.ts that returns all users (id and name) from " ++
             "the sqlite database using zigttp:sql. The users table has columns id (integer) " ++
@@ -353,7 +381,10 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         const dir_abs = try std.fmt.allocPrint(a, "{s}/{s}", .{ codegen_dir, rc.name });
         // Read the cassette steps from the repo (absolute) BEFORE chdir.
         const steps = readCaseSteps(a, dir_abs) catch &.{};
-        if (steps.len == 0) continue; // case not recorded yet
+        if (steps.len == 0) {
+            std.debug.print("[codegen-replay] {s}: missing committed cassette in {s}\n", .{ rc.name, dir_abs });
+            return error.MissingCodegenCassette;
+        }
         with_cassettes += 1;
 
         var tmp = try IsolatedTmp.init(a, "codegen-replay");

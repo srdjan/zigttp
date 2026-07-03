@@ -46,6 +46,13 @@ pub const cases = [_]EvalCase{
         .note_must_contain = "pi_goal_candidate",
     },
     .{
+        .name = "workflow-authoring",
+        .prompt = "Create a durable workflow handler that dispatches a greet child handler with workflow.call",
+        .expected_kind = .workflow_authoring,
+        .expected_confidence = .high,
+        .note_must_contain = "ZTS509",
+    },
+    .{
         .name = "violation-fix",
         .prompt = "Fix the ZTS300 compiler error",
         .expected_kind = .violation_fix,

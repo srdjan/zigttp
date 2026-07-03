@@ -18,3 +18,4 @@ pub const jsx_patterns_md: []const u8 = @embedFile("references/jsx-patterns.md")
 pub const basic_handler: []const u8 = @embedFile("examples/handler/handler.ts");
 pub const routing_router: []const u8 = @embedFile("examples/routing/router.ts");
 pub const system_users: []const u8 = @embedFile("examples/system/users.ts");
+pub const workflow_dsl_orchestrator: []const u8 = @embedFile("examples/workflow/dsl-orchestrator.ts");

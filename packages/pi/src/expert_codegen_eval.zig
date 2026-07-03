@@ -254,6 +254,40 @@ test "runCase scores a clean first draft as a veto pass" {
     try testing.expect(r.failingCode() == null);
 }
 
+test "runCase scores a clean workflow first draft as a veto pass" {
+    const workflow_handler =
+        \\import { run } from "zigttp:durable";
+        \\import { call } from "zigttp:workflow";
+        \\import type { Spec } from "zigttp:types";
+        \\
+        \\function handler(req: Request): Response & Spec<"deterministic" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical"> {
+        \\  const key = req.headers.get("idempotency-key") ?? "workflow-demo";
+        \\  return run(key, () => {
+        \\    const res = call("greet", { method: "GET", path: "/workflow" });
+        \\    return Response.json({ ok: true, childStatus: res.status });
+        \\  });
+        \\}
+    ;
+    var client: ScriptedClient = .{ .reply = .{ .response = .{ .edit = .{
+        .file = "handler.ts",
+        .content = workflow_handler,
+        .before = null,
+    } } } };
+    const case: CodegenCase = .{
+        .name = "queued-workflow",
+        .prompt = "Create a durable workflow handler that calls a greet child handler via workflow.call",
+        .expected_kind = .workflow_authoring,
+        .criterion = .passes_veto,
+    };
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    const r = try runCase(testing.allocator, case, client.asClient(), &registry);
+    try testing.expect(r.routed);
+    try testing.expect(r.first_draft_pass);
+    try testing.expect(r.applied);
+    try testing.expect(r.failingCode() == null);
+}
+
 test "runCase records the failing ZTS code for a bad first draft" {
     // A forbidden `var` is a hard parse error (ZTS001) that the repair lane
     // cannot author a fix for, so it stays failed and the histogram records its

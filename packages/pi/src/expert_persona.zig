@@ -327,6 +327,23 @@ const prologue =
     \\`pi_apply_feature_plan`, which reruns the compiler veto and records a
     \\proof-carrying `verified_patch`.
     \\
+    \\Workflow authoring playbook:
+    \\When the user asks for durable workflow code, start from the smallest
+    \\shipped grammar instead of inventing a new DSL: derive the run key from the
+    \\`Idempotency-Key` header with `req.headers.get("idempotency-key")`, enter
+    \\`run(key, () => ...)`, and put
+    \\top-level `workflow.call`, `fanout`, or `follow` boundaries directly inside
+    \\that `run()` body. Use `step()` only for JSON-snapshot work such as reserve
+    \\or charge; never hide `workflow.call`, `saga`, `fanout`, or `follow` inside
+    \\a `step()` callback (ZTS509). For saga drafts, call
+    \\`zigts_expert_describe_rule` for ZTS510 and give every non-last static saga
+    \\step a `compensate` function. For wait/signal code, the run must already be
+    \\parked in `waitSignal()` before a later `signal()` or `signalAt()` can resume
+    \\it. Before `apply_edit`, call `zigts_expert_modules` for `zigttp:durable` and
+    \\`zigttp:workflow`, then `zigts_expert_edit_simulate`; after veto/proof,
+    \\inspect `proofTrace.durable_workflow_*` instead of claiming retry,
+    \\idempotency, or fault coverage from memory.
+    \\
     \\Proof Intent Forge:
     \\When the user asks to make a handler satisfy named proof properties
     \\("make this deterministic", "prove idempotent", "add a Spec<...>
@@ -433,7 +450,7 @@ const prologue =
     \\  2. Three reference documents - virtual modules, testing, JSX.
     \\  3. A live snapshot of the current compiler's rule set, feature
     \\     matrix, and virtual module catalog.
-    \\  4. Three canonical example handlers - pattern-match your drafts
+    \\  4. Four canonical example handlers - pattern-match your drafts
     \\     against these, not against JavaScript idioms from your training.
     \\  5. Policy metadata - compiler version, policy version, policy hash.
     \\
@@ -539,6 +556,7 @@ pub fn buildSystemPromptFull(
     try writeExample(w, "basic handler (examples/handler/handler.ts)", skill.basic_handler);
     try writeExample(w, "routing with virtual modules (examples/routing/router.ts)", skill.routing_router);
     try writeExample(w, "cache + service + routing (examples/system/users.ts)", skill.system_users);
+    try writeExample(w, "durable workflow DSL (examples/workflow/dsl-orchestrator.ts)", skill.workflow_dsl_orchestrator);
 
     try writeBanner(w, "POLICY METADATA");
     const info = expert_meta.compute();
@@ -852,13 +870,15 @@ test "persona includes canonical profile guidance" {
     try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
 }
 
-test "persona embeds the three canonical example handlers" {
+test "persona embeds the four canonical example handlers" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
     try testing.expect(std.mem.indexOf(u8, prompt, "CANONICAL EXAMPLES") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "examples/handler/handler.ts") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "examples/routing/router.ts") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "examples/system/users.ts") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "examples/workflow/dsl-orchestrator.ts") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "workflow.call:greet") != null);
     // Prove the file contents flowed through @embedFile, not just the labels.
     // Every canonical handler must contain `function handler` at minimum.
     const handler_needle = "function handler";
@@ -868,7 +888,17 @@ test "persona embeds the three canonical example handlers" {
         count += 1;
         search_from = pos + handler_needle.len;
     }
-    try testing.expect(count >= 3);
+    try testing.expect(count >= 4);
+}
+
+test "persona teaches workflow authoring guardrails" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Workflow authoring playbook") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "workflow.call") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS509") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Idempotency-Key") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "proofTrace.durable_workflow_*") != null);
 }
 
 test "persona includes tool dispatch guidance" {

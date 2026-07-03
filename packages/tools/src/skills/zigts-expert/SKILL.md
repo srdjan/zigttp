@@ -447,6 +447,21 @@ The BoolChecker enforces type-directed safety rules at compile time:
 - `-Dverify`: proves exhaustive returns, Result checking, optional narrowing, state isolation
 - `-Dcontract`: extracts sandbox contract (env vars, hosts, modules, properties)
 
+### Workflow Authoring
+
+Durable workflow code is a disciplined composition of existing modules, not a
+new DSL. For the copyable first shape, import `run` from `zigttp:durable` and
+`call` from `zigttp:workflow`, derive the run key from
+`req.headers.get("idempotency-key")`, and put the top-level `workflow.call`
+inside `run()`. Use `step()` for replayable JSON-snapshot work only. Because
+workflow modules are write-effect modules, declare a narrow `Spec<...>` with
+only the properties `zigts check --json` proves.
+
+Never put `workflow.call`, `saga`, `fanout`, or `follow` inside a durable
+`step()` callback; ZTS509 rejects that shape. For `saga([...])`, every non-last
+static step needs a `compensate` function or ZTS510 rejects it. `fanout()` is
+ordered durable batch grouping, not true concurrency.
+
 ## Writing Good zigts Code
 
 1. Start with the handler signature: `function handler(req: Request): Response`

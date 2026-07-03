@@ -13,6 +13,7 @@ pub const TaskKind = enum {
     handler_scaffold,
     violation_fix,
     spec_goal,
+    workflow_authoring,
     sql_feature,
     auth_jwt,
     env_feature,
@@ -50,18 +51,22 @@ pub fn classify(user_text: []const u8) WorkflowHint {
         return .{ .kind = .auth_jwt, .confidence = .high };
     }
 
+    if (containsAny(user_text, &.{ "zts", "violation", "diagnostic", "compiler error" }) and
+        containsAny(user_text, &.{ "fix", "repair", "clean", "resolve" }))
+    {
+        return .{ .kind = .violation_fix, .confidence = .high };
+    }
+
+    if (isWorkflowAuthoring(user_text)) {
+        return .{ .kind = .workflow_authoring, .confidence = .high };
+    }
+
     if (containsAny(user_text, &.{ "sql", "sqlite", "database", "query", "select ", "insert ", "update ", "delete " })) {
         return .{ .kind = .sql_feature, .confidence = .high };
     }
 
     if (containsAny(user_text, &.{ "spec<", "proof", "prove", "property goal", "injection_safe", "no_secret_leakage", "no_credential_leakage", "deterministic", "idempotent", "retry_safe", "retry safe", "fault_covered", "fault covered", "durable workflow", "zigttp:durable", "at-least-once", "safe to cache" })) {
         return .{ .kind = .spec_goal, .confidence = .high };
-    }
-
-    if (containsAny(user_text, &.{ "zts", "violation", "diagnostic", "compiler error" }) and
-        containsAny(user_text, &.{ "fix", "repair", "clean", "resolve" }))
-    {
-        return .{ .kind = .violation_fix, .confidence = .high };
     }
 
     if (containsAny(user_text, &.{ "add route", "new route", "create route", "route table", "router", "get /", "post /", "put /", "patch /", "delete /" }) or
@@ -117,6 +122,9 @@ fn workflowRoute(kind: TaskKind) []const u8 {
         .spec_goal =>
         \\Drive proof work through the proof tools. Start with `pi_specs_status`, `pi_witnesses`, and `pi_repair_plan`; inspect `proof.proofTrace.durable_workflow_*` when durable retry/idempotency is involved, use `pi_goal_candidate` or `pi_apply_repair_plan` for supported repairs, then `pi_goal_check` to confirm the requested goals.
         ,
+        .workflow_authoring =>
+        \\Author workflow code from the shipped ZigTS grammar. Call `zigts_expert_modules` for `zigttp:durable`/`zigttp:workflow`, use `req.headers.get("idempotency-key")` for durable run keys, keep `workflow.call`/`fanout`/`follow` at durable depth 0 inside `run()` and never inside `step()` (ZTS509), check ZTS510 before saga drafts, dry-run with `zigts_expert_edit_simulate`, then inspect `proofTrace.durable_workflow_*` after the veto/proof card.
+        ,
         .sql_feature =>
         \\Check SQL support before drafting. Read the handler and `zigttp.json`, verify the configured sqlite schema exists, use named parameters supported by the analyzer, and do not retry unchanged if the veto reports missing SQL schema configuration.
         ,
@@ -134,6 +142,56 @@ fn workflowRoute(kind: TaskKind) []const u8 {
         ,
         .unknown => "",
     };
+}
+
+fn isWorkflowAuthoring(user_text: []const u8) bool {
+    const has_workflow_surface = containsAny(user_text, &.{
+        "zigttp:workflow",
+        "workflow.call",
+        "workflow call",
+        "workflow queue",
+        "--workflow-queue",
+        "queued child",
+        "child dispatch",
+        "child handler",
+        "orchestrator",
+        "orchestrate",
+        "durable handler",
+        "durable workflow",
+        "zigttp:durable",
+        "run()",
+        "step()",
+        "waitsignal",
+        "signalat",
+        "saga",
+        "fanout",
+        "follow",
+    });
+    if (!has_workflow_surface) return false;
+
+    const authoring = containsAny(user_text, &.{
+        "add",
+        "build",
+        "create",
+        "dispatch",
+        "generate",
+        "handler",
+        "implement",
+        "orchestrate",
+        "orchestrator",
+        "scaffold",
+        "use ",
+        "using",
+        "write",
+    });
+    if (!authoring) return false;
+
+    const explicit_write = containsAny(user_text, &.{ "add", "build", "create", "generate", "implement", "scaffold", "write" });
+    const proof_intent = containsAny(user_text, &.{ "proof", "prove", "property goal", "deterministic", "idempotent", "retry_safe", "retry safe", "fault_covered", "fault covered" });
+    if (proof_intent and !explicit_write) return false;
+
+    const explanation_only = containsAny(user_text, &.{ "explain", "review", "what does", "how does" });
+    return !explanation_only or explicit_write;
 }
 
 fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
@@ -182,6 +240,36 @@ test "classify durable workflow proof goals" {
     const note = (try renderSystemNote(testing.allocator, hint)) orelse return error.TestExpected;
     defer testing.allocator.free(note);
     try testing.expect(std.mem.indexOf(u8, note, "proof.proofTrace.durable_workflow_*") != null);
+}
+
+test "classify workflow handler proof requests as proof goals" {
+    const hint = classify("prove this durable workflow handler is deterministic");
+    try testing.expectEqual(TaskKind.spec_goal, hint.kind);
+}
+
+test "classify workflow authoring requests separately from proof goals" {
+    const hint = classify("Create a durable workflow handler that calls a greet child handler via workflow.call");
+    try testing.expectEqual(TaskKind.workflow_authoring, hint.kind);
+    try testing.expectEqual(Confidence.high, hint.confidence);
+    const note = (try renderSystemNote(testing.allocator, hint)) orelse return error.TestExpected;
+    defer testing.allocator.free(note);
+    try testing.expect(std.mem.indexOf(u8, note, "workflow.call") != null);
+    try testing.expect(std.mem.indexOf(u8, note, "ZTS509") != null);
+    try testing.expect(std.mem.indexOf(u8, note, "proofTrace.durable_workflow_*") != null);
+}
+
+test "classify workflow diagnostic repairs before authoring prompts" {
+    const hint = classify("Fix the ZTS510 error in this saga handler");
+    try testing.expectEqual(TaskKind.violation_fix, hint.kind);
+    try testing.expectEqual(Confidence.high, hint.confidence);
+    const note = (try renderSystemNote(testing.allocator, hint)) orelse return error.TestExpected;
+    defer testing.allocator.free(note);
+    try testing.expect(std.mem.indexOf(u8, note, "pi_repair_plan") != null);
+}
+
+test "explain workflow prompts remain review tasks" {
+    const hint = classify("explain how workflow.call works");
+    try testing.expectEqual(TaskKind.review_explain, hint.kind);
 }
 
 test "classify JWT auth before env secrets" {
