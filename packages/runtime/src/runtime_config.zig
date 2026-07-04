@@ -5,6 +5,7 @@
 const std = @import("std");
 const zq = @import("zigts");
 const embedded_handler = @import("embedded_handler");
+const fault_explain = @import("fault_explain.zig");
 
 pub const DurableWorkflowProperties = struct {
     /// Runtime proof gates are off for direct/no-contract runtime use. The
@@ -40,6 +41,11 @@ pub const RuntimeConfig = struct {
     durable_oplog_dir: ?[]const u8 = null,
     /// Proof snapshot for durable workflow retry/idempotency gates.
     durable_workflow_properties: DurableWorkflowProperties = .{},
+    /// Proof facts the server derives from the contract, read at the runtime's
+    /// own 500 sites (Path A / Path B) to proof-explain a fault. Defaults to all
+    /// false so a no-contract runtime reports faults as predicted, never as a
+    /// (false) soundness incident.
+    handler_proof: fault_explain.Proof = .{},
     system_config_path: ?[]const u8 = null,
     /// Route durable `zigttp:workflow` child dispatch through a persisted
     /// workflow queue. Requires both `durable_oplog_dir` and `system_config_path`.

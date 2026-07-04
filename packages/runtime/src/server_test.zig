@@ -201,7 +201,9 @@ test "B6: handler returning a non-Response primitive yields 500, not silent empt
     var resp = try pool.executeHandler(req.asView());
     defer resp.deinit();
     try std.testing.expectEqual(@as(u16, 500), resp.status);
-    try std.testing.expectEqualStrings("handler did not return a Response object", resp.body);
+    // The non-Response 500 is now proof-explained against the exhaustive_returns
+    // chip instead of a bare "did not return a Response object" string.
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "exhaustive_returns") != null);
 }
 
 test "handler returning a string body yields a 200 with that body" {

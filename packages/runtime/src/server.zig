@@ -1971,6 +1971,11 @@ pub const Server = struct {
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
         if (self.contract) |*contract| {
             pool_rt_config.durable_workflow_properties = enforcedDurableWorkflowProperties(contract);
+            const props = contract.properties();
+            pool_rt_config.handler_proof = .{
+                .optional_safe = props.optional_safe,
+                .result_safe = props.result_safe,
+            };
         }
 
         if (pool_rt_config.queue_actor_enabled and pool_rt_config.queue_system == null) {

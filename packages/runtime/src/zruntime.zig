@@ -20,6 +20,7 @@ const trace_request_recorder = @import("trace_request_recorder.zig");
 const http_parser = @import("http_parser.zig");
 const server_io = @import("server_io.zig");
 const contract_runtime = @import("contract_runtime.zig");
+const fault_explain = @import("fault_explain.zig");
 const runtime_builtins = @import("runtime_builtins.zig");
 const console = @import("runtime_console.zig");
 const workflow = @import("runtime_workflow.zig");
@@ -1595,9 +1596,17 @@ pub const Runtime = struct {
                 exc.toPtr(zq.JSString).data()
             else
                 "handler aborted without returning a Response";
-            const body_owned = try self.allocator.dupe(u8, exc_msg);
+            // Proof-explain the exception: a pending exception that is not a
+            // Response is an engine-raised type fault (throw is not in the subset).
+            var fault_buf: [256]u8 = undefined;
+            const diag = fault_explain.diagnose(self.config.handler_proof, .type_fault);
+            const explained = fault_explain.formatMessage(&fault_buf, diag);
+            const body_owned = try std.fmt.allocPrint(self.allocator, "{s} ({s})", .{ explained, exc_msg });
             err_response.setBodyOwned(body_owned);
             try err_response.putHeader("Content-Type", "text/plain; charset=utf-8");
+            if (diag.verdict == .soundness_incident and !builtin.is_test) {
+                std.log.err("SOUNDNESS INCIDENT (exception path): {s}", .{exc_msg});
+            }
             trace_request_recorder.recordResponse(self, &err_response);
             return err_response;
         }
@@ -2021,9 +2030,12 @@ pub const Runtime = struct {
                 return response;
             }
             // Non-string, non-object: handler returned a primitive (number, bool, undefined).
-            // Return 500 instead of a silent empty 200.
+            // Return 500 instead of a silent empty 200, proof-explained against
+            // exhaustive_returns (the chip that proves every path returns a Response).
             response.status = 500;
-            const body_owned = try self.allocator.dupe(u8, "handler did not return a Response object");
+            var fault_buf: [256]u8 = undefined;
+            const diag = fault_explain.diagnose(self.config.handler_proof, .non_response_return);
+            const body_owned = try self.allocator.dupe(u8, fault_explain.formatMessage(&fault_buf, diag));
             response.setBodyOwned(body_owned);
             try response.putHeader("Content-Type", "text/plain; charset=utf-8");
             return response;
@@ -2999,6 +3011,29 @@ test "runtime type fault is preserved as HandlerTypeFault for proof-explained 50
     defer request.deinit(allocator);
 
     try std.testing.expectError(error.HandlerTypeFault, rt.executeHandler(request.asView()));
+}
+
+test "non-Response return 500 is proof-explained against exhaustive_returns" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{ .jit_policy = .disabled });
+    defer rt.deinit();
+
+    // Returns a primitive, not a Response -> extractResponseInternal's Path B
+    // builds a 500. handler_proof defaults to unproven, so the body names the
+    // exhaustive_returns chip as the predicted cause.
+    try rt.loadHandler("function handler(req) { return 42; }", "<non-response>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 500), response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "exhaustive_returns") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "not proven") != null);
 }
 
 test "proof-gated durable retry blocks unproven workflow replay" {
