@@ -57,18 +57,66 @@ pub fn build(
 }
 
 fn appendEscaped(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
-    for (s) |c| switch (c) {
-        '"' => try out.appendSlice(allocator, "\\\""),
-        '\\' => try out.appendSlice(allocator, "\\\\"),
-        '\n' => try out.appendSlice(allocator, "\\n"),
-        '\r' => try out.appendSlice(allocator, "\\r"),
-        '\t' => try out.appendSlice(allocator, "\\t"),
-        else => if (c < 0x20) {
-            var b: [8]u8 = undefined;
-            const esc = std.fmt.bufPrint(&b, "\\u{x:0>4}", .{c}) catch continue;
-            try out.appendSlice(allocator, esc);
-        } else try out.append(allocator, c),
-    };
+    // Index-based so a multi-byte UTF-8 sequence can be consumed as a unit. The
+    // dynamic fields (method, path) come from an unvalidated request line, so a
+    // lone high byte must never be emitted raw: that would make the JSONL line
+    // invalid UTF-8 and rejected by strict RFC 8259 parsers.
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        switch (c) {
+            '"' => {
+                try out.appendSlice(allocator, "\\\"");
+                i += 1;
+            },
+            '\\' => {
+                try out.appendSlice(allocator, "\\\\");
+                i += 1;
+            },
+            '\n' => {
+                try out.appendSlice(allocator, "\\n");
+                i += 1;
+            },
+            '\r' => {
+                try out.appendSlice(allocator, "\\r");
+                i += 1;
+            },
+            '\t' => {
+                try out.appendSlice(allocator, "\\t");
+                i += 1;
+            },
+            else => {
+                if (c < 0x20) {
+                    var b: [8]u8 = undefined;
+                    const esc = std.fmt.bufPrint(&b, "\\u{x:0>4}", .{c}) catch {
+                        i += 1;
+                        continue;
+                    };
+                    try out.appendSlice(allocator, esc);
+                    i += 1;
+                } else if (c < 0x80) {
+                    try out.append(allocator, c);
+                    i += 1;
+                } else {
+                    // Copy a complete, valid multi-byte sequence through verbatim;
+                    // substitute U+FFFD for an invalid/truncated one and advance a
+                    // single byte, keeping the emitted line valid UTF-8.
+                    const seq_len = std.unicode.utf8ByteSequenceLength(c) catch {
+                        try out.appendSlice(allocator, "\u{FFFD}");
+                        i += 1;
+                        continue;
+                    };
+                    if (i + seq_len <= s.len and std.unicode.utf8ValidateSlice(s[i .. i + seq_len])) {
+                        try out.appendSlice(allocator, s[i .. i + seq_len]);
+                        i += seq_len;
+                    } else {
+                        try out.appendSlice(allocator, "\u{FFFD}");
+                        i += 1;
+                    }
+                }
+            },
+        }
+    }
 }
 
 test "build emits one JSON line with the incident fields" {
@@ -96,6 +144,25 @@ test "build escapes quotes and control characters in dynamic fields" {
     try std.testing.expect(std.mem.indexOf(u8, s, "/a\\\"b") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "line1\\nq\\\"uote") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"proven\":[]") != null);
+}
+
+test "appendEscaped sanitizes invalid UTF-8 and preserves valid multibyte" {
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    // A lone high byte (as an unvalidated request path could carry) must be
+    // replaced by U+FFFD, never emitted raw, so the JSONL line stays valid UTF-8.
+    try appendEscaped(allocator, &out, "a\xE9b");
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\u{FFFD}") != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, out.items, 0xE9) == null);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(out.items));
+
+    // A complete, valid multibyte sequence (café; é = 0xC3 0xA9) passes through.
+    out.clearRetainingCapacity();
+    try appendEscaped(allocator, &out, "caf\xC3\xA9");
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\xC3\xA9") != null);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(out.items));
 }
 
 test "write appends one line per incident to an O_APPEND fd" {
