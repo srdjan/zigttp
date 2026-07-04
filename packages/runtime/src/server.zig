@@ -731,6 +731,7 @@ const ConnectionPool = struct {
             }) catch |err| {
                 const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else 500;
                 var fault_buf: [256]u8 = undefined;
+                var fault_loc_buf: [320]u8 = undefined;
                 const message: []const u8 = blk: {
                     if (err == error.PoolExhausted) break :blk "Service Unavailable";
                     if (err == error.RequestTimeout) break :blk "Gateway Timeout";
@@ -743,9 +744,18 @@ const ConnectionPool = struct {
                         } else .{};
                         // The runtime already detected and recorded any soundness
                         // incident (it holds handler_proof and the incident log);
-                        // here we only render the explained 500 body.
+                        // here we render the explained 500 body and append the
+                        // faulting source line the runtime resolved (feature A).
                         const diag = fault_explain.diagnose(proof, .type_fault);
-                        break :blk fault_explain.formatMessage(&fault_buf, diag);
+                        const base = fault_explain.formatMessage(&fault_buf, diag);
+                        if (engine.takeFaultLocation()) |loc| {
+                            break :blk std.fmt.bufPrint(
+                                &fault_loc_buf,
+                                "{s} at {d}:{d}",
+                                .{ base, loc.line, loc.column },
+                            ) catch base;
+                        }
+                        break :blk base;
                     }
                     break :blk "Internal Server Error";
                 };

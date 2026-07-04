@@ -135,6 +135,12 @@ const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
 /// (e.g., renderToString needs to call component functions)
 pub threadlocal var current_runtime: ?*Runtime = null;
 
+/// Source location of the most recent handler type fault on this worker thread,
+/// resolved from the bytecode line table (feature A). Set at the fault catch and
+/// read-and-cleared by the server's 500 site, which builds the response after the
+/// runtime is released. Same-thread handoff only.
+pub threadlocal var last_fault_location: ?zq.bytecode.LineEntry = null;
+
 /// Clear thread-local interpreter state after a handler panic.
 /// Called from the setjmp recovery branch before returning error.HandlerPanicked.
 /// Must only touch thread-locals - the runtime heap may be mid-mutation.
@@ -1612,6 +1618,10 @@ pub const Runtime = struct {
                     if (diag.verdict == .soundness_incident) {
                         self.recordSoundnessIncident(diag.namedChips(), @errorName(err));
                     }
+                    // Hand the resolved source line to the server's 500 site, which
+                    // builds the body after this runtime is released (same worker
+                    // thread, so the threadlocal is a safe read-and-cleared channel).
+                    last_fault_location = self.interpreter.last_error_location;
                     return error.HandlerTypeFault;
                 },
                 else => return error.HandlerError,
@@ -1637,7 +1647,12 @@ pub const Runtime = struct {
             var fault_buf: [256]u8 = undefined;
             const diag = fault_explain.diagnose(self.config.handler_proof, .type_fault);
             const explained = fault_explain.formatMessage(&fault_buf, diag);
-            const body_owned = try std.fmt.allocPrint(self.allocator, "{s} ({s})", .{ explained, exc_msg });
+            // Append the source line when the trap resolved one (feature A). A
+            // JS-thrown exception often has none, so this is best-effort.
+            const body_owned = if (self.interpreter.last_error_location) |loc|
+                try std.fmt.allocPrint(self.allocator, "{s} ({s}) at {d}:{d}", .{ explained, exc_msg, loc.line, loc.column })
+            else
+                try std.fmt.allocPrint(self.allocator, "{s} ({s})", .{ explained, exc_msg });
             err_response.setBodyOwned(body_owned);
             try err_response.putHeader("Content-Type", "text/plain; charset=utf-8");
             if (diag.verdict == .soundness_incident) {

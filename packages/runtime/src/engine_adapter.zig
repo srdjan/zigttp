@@ -67,6 +67,16 @@ pub fn setActiveWebSocketConnection(id: ?u64) void {
     zruntime.active_ws_connection = id;
 }
 
+/// Read-and-clear the source line of the most recent handler type fault on this
+/// worker thread (set by the runtime at the fault catch). The server's 500 site
+/// uses it to include `line:column` in the response body after the runtime is
+/// released.
+pub fn takeFaultLocation() ?zq.bytecode.LineEntry {
+    const loc = zruntime.last_fault_location;
+    zruntime.last_fault_location = null;
+    return loc;
+}
+
 pub fn initHandlerPool(
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
@@ -99,4 +109,14 @@ pub fn poolInUse(pool: *const HandlerPool) usize {
 
 pub fn poolCapacity(pool: *const HandlerPool) usize {
     return pool.max_size;
+}
+
+test "takeFaultLocation reads and clears the thread-local fault location" {
+    zruntime.last_fault_location = .{ .offset = 5, .line = 12, .column = 3 };
+    const taken = takeFaultLocation();
+    try std.testing.expect(taken != null);
+    try std.testing.expectEqual(@as(u32, 12), taken.?.line);
+    try std.testing.expectEqual(@as(u32, 3), taken.?.column);
+    // A second take returns null: the location was cleared.
+    try std.testing.expect(takeFaultLocation() == null);
 }
