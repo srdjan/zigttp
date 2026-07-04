@@ -1166,6 +1166,9 @@ pub const CodeVersion = struct {
             if (self.bytecode.upvalue_info.len > 0) {
                 self.allocator.free(self.bytecode.upvalue_info);
             }
+            if (self.bytecode.line_table) |lt| {
+                if (lt.len > 0) self.allocator.free(lt);
+            }
             self.allocator.destroy(self.bytecode);
         }
         self.allocator.destroy(self);
