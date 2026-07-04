@@ -34,6 +34,12 @@ pub const RuntimeConfig = struct {
     outbound_timeout_ms: u32 = 10_000,
     sqlite_path: ?[]const u8 = null,
     trace_file_path: ?[]const u8 = null,
+    /// Opt-in JSONL sink for runtime soundness incidents (`--incident-log`).
+    /// `incident_log_path` is the CLI-supplied path; the server opens it once at
+    /// startup and shares the resulting O_APPEND fd through `incident_log_fd`, so
+    /// every pooled runtime writes to the same fd (atomic for small lines).
+    incident_log_path: ?[]const u8 = null,
+    incident_log_fd: ?std.c.fd_t = null,
     replay_file_path: ?[]const u8 = null,
     test_file_path: ?[]const u8 = null,
     /// Per-request durable oplog directory. Incomplete oplogs are

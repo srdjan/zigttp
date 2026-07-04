@@ -21,6 +21,7 @@ const http_parser = @import("http_parser.zig");
 const server_io = @import("server_io.zig");
 const contract_runtime = @import("contract_runtime.zig");
 const fault_explain = @import("fault_explain.zig");
+const incident_log = @import("incident_log.zig");
 const runtime_builtins = @import("runtime_builtins.zig");
 const console = @import("runtime_console.zig");
 const workflow = @import("runtime_workflow.zig");
@@ -1462,6 +1463,26 @@ pub const Runtime = struct {
         return self.executeHandlerInternal(request, request_id, true);
     }
 
+    /// Record a soundness incident: a runtime fault on a path the compiler proved
+    /// safe (every guarding chip discharged, yet the handler faulted). Loud log
+    /// always (outside tests); JSONL append when --incident-log is configured.
+    /// Best-effort — never disturbs the response path.
+    fn recordSoundnessIncident(self: *Self, chips: []const []const u8, detail: []const u8) void {
+        const method: []const u8 = if (self.active_request) |r| r.method else "";
+        // Prefer the parsed route path; fall back to the full request URL when a
+        // caller only populated url (e.g. the fast-path / test request builders).
+        const path: []const u8 = if (self.active_request) |r|
+            (if (r.path.len > 0) r.path else r.url)
+        else
+            "";
+        if (!builtin.is_test) {
+            std.log.err("SOUNDNESS INCIDENT: {s} {s} faulted on a proven path ({s})", .{ method, path, detail });
+        }
+        if (self.config.incident_log_fd) |fd| {
+            incident_log.write(self.allocator, fd, method, path, chips, detail);
+        }
+    }
+
     fn executeHandlerInternal(self: *Self, request: HttpRequestView, request_id: u64, borrow_body: bool) !HttpResponse {
         self.last_request_body_len = if (request.body) |b| b.len else 0;
         self.active_request = request;
@@ -1576,10 +1597,16 @@ pub const Runtime = struct {
             // Preserve the fault class in the error value so the 500 site can
             // map it to the proof chip that guards it (see fault_explain.zig).
             // TypeError/NotCallable are what optional_safe/result_safe guard.
-            return switch (err) {
-                error.TypeError, error.NotCallable => error.HandlerTypeFault,
-                else => error.HandlerError,
-            };
+            switch (err) {
+                error.TypeError, error.NotCallable => {
+                    const diag = fault_explain.diagnose(self.config.handler_proof, .type_fault);
+                    if (diag.verdict == .soundness_incident) {
+                        self.recordSoundnessIncident(diag.namedChips(), @errorName(err));
+                    }
+                    return error.HandlerTypeFault;
+                },
+                else => return error.HandlerError,
+            }
         };
 
         // If the bytecode path set an exception but didn't propagate a Zig error
@@ -1604,8 +1631,8 @@ pub const Runtime = struct {
             const body_owned = try std.fmt.allocPrint(self.allocator, "{s} ({s})", .{ explained, exc_msg });
             err_response.setBodyOwned(body_owned);
             try err_response.putHeader("Content-Type", "text/plain; charset=utf-8");
-            if (diag.verdict == .soundness_incident and !builtin.is_test) {
-                std.log.err("SOUNDNESS INCIDENT (exception path): {s}", .{exc_msg});
+            if (diag.verdict == .soundness_incident) {
+                self.recordSoundnessIncident(diag.namedChips(), exc_msg);
             }
             trace_request_recorder.recordResponse(self, &err_response);
             return err_response;
@@ -2731,6 +2758,7 @@ test {
     _ = @import("durable_dead_runs.zig");
     _ = @import("durable_dead_runs_cli.zig");
     _ = @import("fault_explain.zig");
+    _ = @import("incident_log.zig");
 }
 
 test "Runtime creation" {
@@ -3034,6 +3062,38 @@ test "non-Response return 500 is proof-explained against exhaustive_returns" {
     try std.testing.expectEqual(@as(u16, 500), response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "exhaustive_returns") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "not proven") != null);
+}
+
+test "soundness incident on a proven path is written to the incident log" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const log_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/incidents.jsonl", .{tmp.sub_path});
+
+    const fd = try incident_log.open(allocator, log_path);
+    defer std.Io.Threaded.closeFd(fd);
+
+    // handler_proof claims both guarding chips proven, so a runtime type fault is
+    // a soundness incident that must be recorded to the log.
+    const rt = try Runtime.init(allocator, .{
+        .jit_policy = .disabled,
+        .handler_proof = .{ .optional_safe = true, .result_safe = true },
+        .incident_log_fd = fd,
+    });
+    defer rt.deinit();
+
+    try rt.loadHandler("function handler(req) { const o = { a: 1 }; const f = o.missing; return f(); }", "<incident>");
+    var request = try makeTestRequest(allocator, "GET", "/boom", null);
+    defer request.deinit(allocator);
+    try std.testing.expectError(error.HandlerTypeFault, rt.executeHandler(request.asView()));
+
+    const contents = try zq.file_io.readFile(allocator, log_path, 64 * 1024);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "soundness_incident") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "/boom") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "optional_safe") != null);
 }
 
 test "proof-gated durable retry blocks unproven workflow replay" {

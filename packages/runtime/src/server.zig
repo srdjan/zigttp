@@ -23,6 +23,7 @@ const QueryParam = http_types.QueryParam;
 
 const contract_runtime = @import("contract_runtime.zig");
 const fault_explain = @import("fault_explain.zig");
+const incident_log = @import("incident_log.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
 const ValidatedRuntimeContract = contract_runtime.ValidatedRuntimeContract;
 const ws_gateway = @import("ws_gateway.zig");
@@ -740,13 +741,10 @@ const ConnectionPool = struct {
                             const props = c.properties();
                             break :p .{ .optional_safe = props.optional_safe, .result_safe = props.result_safe };
                         } else .{};
+                        // The runtime already detected and recorded any soundness
+                        // incident (it holds handler_proof and the incident log);
+                        // here we only render the explained 500 body.
                         const diag = fault_explain.diagnose(proof, .type_fault);
-                        if (diag.verdict == .soundness_incident) {
-                            std.log.err(
-                                "SOUNDNESS INCIDENT: type fault on a path proven optional_safe/result_safe ({s} {s})",
-                                .{ request.method, request.path },
-                            );
-                        }
                         break :blk fault_explain.formatMessage(&fault_buf, diag);
                     }
                     break :blk "Internal Server Error";
@@ -1518,6 +1516,10 @@ pub const Server = struct {
     /// True once live reload (`--watch`) is wired up and may call
     /// `updateContract` concurrently with request handling.
     reload_active: bool = false,
+    /// Opt-in soundness-incident log fd, opened once at startup from
+    /// `config.runtime_config.incident_log_path` and shared with pooled runtimes
+    /// through their config. Server-lifetime; closed in deinit after the pool drains.
+    incident_log_fd: ?std.c.fd_t = null,
     security_logger: ?*SecurityLogger,
     studio: ?studio_mod.State,
     /// Precomputed `Zigttp-Proofs` and `Zigttp-Attest` header strings, built
@@ -1631,6 +1633,8 @@ pub const Server = struct {
         if (self.conn_pool) |cp| cp.deinit();
 
         if (self.pool) |*p| p.deinit();
+        // Pool drained: no runtime can still be writing to the incident log fd.
+        if (self.incident_log_fd) |fd| std.Io.Threaded.closeFd(fd);
         // After the main pool: in-flight orchestrators (which dispatch into the
         // registry) are gone, so its sub-pools are safe to tear down.
         if (self.system_runtime) |*sr| sr.deinit();
@@ -1976,6 +1980,17 @@ pub const Server = struct {
                 .optional_safe = props.optional_safe,
                 .result_safe = props.result_safe,
             };
+        }
+
+        // Open the opt-in soundness-incident log and share the fd with every
+        // pooled runtime (they write to it directly; O_APPEND keeps small lines
+        // atomic). Failure is non-fatal: incidents still reach the error log.
+        if (self.config.runtime_config.incident_log_path) |ilp| {
+            self.incident_log_fd = incident_log.open(self.allocator, ilp) catch |err| fd_blk: {
+                std.log.warn("Failed to open incident log '{s}': {}", .{ ilp, err });
+                break :fd_blk null;
+            };
+            pool_rt_config.incident_log_fd = self.incident_log_fd;
         }
 
         if (pool_rt_config.queue_actor_enabled and pool_rt_config.queue_system == null) {

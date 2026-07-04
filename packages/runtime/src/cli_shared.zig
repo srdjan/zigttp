@@ -152,6 +152,7 @@ pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
             std.mem.eql(u8, arg, "--lifecycle") or
             std.mem.eql(u8, arg, "--sqlite") or
             std.mem.eql(u8, arg, "--trace") or
+            std.mem.eql(u8, arg, "--incident-log") or
             std.mem.eql(u8, arg, "--replay") or
             std.mem.eql(u8, arg, "--test") or
             std.mem.eql(u8, arg, "--durable") or

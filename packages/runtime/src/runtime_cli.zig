@@ -641,6 +641,8 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             config.runtime_config.sqlite_path = try shared.takeArg(&i, argv, error.MissingSqlitePath);
         } else if (std.mem.eql(u8, arg, "--trace")) {
             config.runtime_config.trace_file_path = try shared.takeArg(&i, argv, error.MissingTraceFile);
+        } else if (std.mem.eql(u8, arg, "--incident-log")) {
+            config.runtime_config.incident_log_path = try shared.takeArg(&i, argv, error.MissingIncidentLog);
         } else if (std.mem.eql(u8, arg, "--_debug-panic-path")) {
             config.runtime_config.debug_panic_path = try shared.takeArg(&i, argv, error.MissingDebugPanicPath);
         } else if (std.mem.eql(u8, arg, "--replay")) {
@@ -841,6 +843,7 @@ fn printServeHelp() void {
         \\  --outbound-max-response <SIZE>
         \\  --sqlite <FILE>       SQLite database path for zigttp:sql
         \\  --trace <FILE>        Record handler I/O traces to JSONL file
+        \\  --incident-log <FILE> Append runtime soundness incidents as JSONL
         \\  --replay <FILE>       Replay recorded traces and verify handler output
         \\  --test <FILE>         Run declarative handler tests from JSONL file
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog

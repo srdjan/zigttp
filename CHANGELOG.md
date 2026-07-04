@@ -23,6 +23,8 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Added
 
+- Proof-explained failures: a runtime handler fault no longer returns a bare `500 Internal Server Error`. The runtime maps the fault to the proof chip that guards its class (a type error to `optional_safe`/`result_safe`, a non-Response return to `exhaustive_returns`) and attributes it against what the handler actually proved: the body names the *unproven* guarding chip as the predicted cause, and a fault on a path where every guarding chip was proven is flagged as a (possible) soundness incident. Covers all three runtime 500 paths (handler-error, pending-exception, non-Response return).
+- `--incident-log <FILE>`: opt-in JSONL sink for soundness incidents. Each confirmed incident (a runtime fault on a path the compiler proved safe) is appended as one JSON line (`{kind, method, path, proven, detail}`) through a shared O_APPEND fd, alongside the always-on error log. Off by default.
 - `--workflow-queue`: recovery for `.reclaim-*` files left behind by a crashed lease-reclaim attempt (a stray reclaim is now surfaced via `zigttp` queue tooling and reclaimed automatically once it is older than the lease window, instead of being invisible to future claims).
 - `--workflow-queue`: a dead-lettered child request is now resolvable via `zigttp proof replay`/queue replay instead of returning a terminal error to the parent durable step.
 - Durable fetch (`zigttp:fetch`'s `fetch()`) now stops its retry/backoff loop as soon as the enclosing step's deadline passes, instead of continuing to retry past it.
