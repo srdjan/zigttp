@@ -767,7 +767,9 @@ pub fn validateBytecode(func: *const bytecode.FunctionBytecodeCompact, total_siz
     const line_table = func.getLineTable();
     var last_line_offset: u32 = 0;
     for (line_table, 0..) |entry, idx| {
-        if (entry.offset >= func.code_len and func.code_len > 0) return error.InvalidBytecode;
+        // Reject only offsets past the end; `offset == code_len` is a legitimate
+        // trailing end-boundary marker the codegen can emit.
+        if (entry.offset > func.code_len) return error.InvalidBytecode;
         if (idx > 0 and entry.offset < last_line_offset) return error.InvalidBytecode;
         last_line_offset = entry.offset;
     }
