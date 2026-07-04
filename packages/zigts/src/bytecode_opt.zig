@@ -405,7 +405,15 @@ pub const BytecodeOptimizer = struct {
 
         if (line_table) |entries| {
             for (entries) |*entry| {
-                entry.offset = offset_map.get(entry.offset) orelse entry.offset;
+                // A line entry can sit at an offset interior to an instruction that
+                // fusion collapsed (offset_map only keys post-fusion instruction
+                // boundaries). Walk back to the nearest boundary that IS a key so the
+                // entry attaches to the surviving instruction and the table stays
+                // monotonic; a direct hit is the common case, and offset 0 is always
+                // a key so the walk terminates.
+                var off = entry.offset;
+                while (off > 0 and !offset_map.contains(off)) : (off -= 1) {}
+                entry.offset = offset_map.get(off) orelse entry.offset;
             }
         }
 
@@ -648,6 +656,42 @@ test "BytecodeOptimizer: compact removes NOPs" {
     try std.testing.expectEqual(@intFromEnum(Opcode.push_0), code[0]);
     try std.testing.expectEqual(@intFromEnum(Opcode.push_1), code[1]);
     try std.testing.expectEqual(@intFromEnum(Opcode.ret), code[2]);
+}
+
+test "BytecodeOptimizer: compactWithLineTable remaps interior offsets to their instruction" {
+    const allocator = std.testing.allocator;
+
+    // push_i16 (3 bytes) occupies [0,3); a line entry recorded at offset 1 is
+    // interior to it. Two NOPs are removed, shifting later boundaries down.
+    var code = [_]u8{
+        @intFromEnum(Opcode.push_i16), 0x00,                     0x00,
+        @intFromEnum(Opcode.nop),      @intFromEnum(Opcode.nop), @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.ret),
+    };
+    var line_table = [_]bytecode.LineEntry{
+        .{ .offset = 0, .line = 10, .column = 1 }, // instruction boundary
+        .{ .offset = 1, .line = 10, .column = 5 }, // interior to push_i16
+        .{ .offset = 5, .line = 11, .column = 3 }, // boundary after the NOPs
+    };
+
+    var optimizer = BytecodeOptimizer.init(allocator);
+    defer optimizer.deinit();
+
+    const new_len = try optimizer.compactWithLineTable(&code, &line_table);
+
+    // The interior entry attaches to its containing instruction's new start (0),
+    // not its stale pre-compaction offset (1); the trailing boundary shifts to 3.
+    try std.testing.expectEqual(@as(u32, 0), line_table[0].offset);
+    try std.testing.expectEqual(@as(u32, 0), line_table[1].offset);
+    try std.testing.expectEqual(@as(u32, 3), line_table[2].offset);
+
+    // The table stays monotonic non-decreasing and within the compacted code.
+    var prev: u32 = 0;
+    for (line_table) |e| {
+        try std.testing.expect(e.offset >= prev);
+        try std.testing.expect(e.offset <= @as(u32, @intCast(new_len)));
+        prev = e.offset;
+    }
 }
 
 test "BytecodeOptimizer: compact updates jump offsets" {
