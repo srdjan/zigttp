@@ -734,21 +734,20 @@ const ConnectionPool = struct {
                     if (err == error.PoolExhausted) break :blk "Service Unavailable";
                     if (err == error.RequestTimeout) break :blk "Gateway Timeout";
                     if (err == error.HandlerTypeFault) {
-                        // Proof-explained failure: classify the fault against the
+                        // Proof-explained failure: attribute the fault against the
                         // handler's proven contract, in hand here under contract_lock.
-                        const props: ?contract_runtime.Properties =
-                            if (self.server.contract) |*c| c.properties() else null;
-                        const verdict = if (props) |p|
-                            fault_explain.classify(p, .type_fault)
-                        else
-                            fault_explain.Verdict.predicted;
-                        if (verdict == .soundness_incident) {
+                        const proof: fault_explain.Proof = if (self.server.contract) |*c| p: {
+                            const props = c.properties();
+                            break :p .{ .optional_safe = props.optional_safe, .result_safe = props.result_safe };
+                        } else .{};
+                        const diag = fault_explain.diagnose(proof, .type_fault);
+                        if (diag.verdict == .soundness_incident) {
                             std.log.err(
                                 "SOUNDNESS INCIDENT: type fault on a path proven optional_safe/result_safe ({s} {s})",
                                 .{ request.method, request.path },
                             );
                         }
-                        break :blk fault_explain.formatMessage(&fault_buf, .type_fault, verdict);
+                        break :blk fault_explain.formatMessage(&fault_buf, diag);
                     }
                     break :blk "Internal Server Error";
                 };
