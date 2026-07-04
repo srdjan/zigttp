@@ -1476,11 +1476,19 @@ pub const Runtime = struct {
             (if (r.path.len > 0) r.path else r.url)
         else
             "";
+        // A Zig-level type fault ran through the interpreter's trace catch, which
+        // resolves the faulting bytecode offset to a source line via the line
+        // table (feature A). Append it to the detail when available.
+        var detail_buf: [192]u8 = undefined;
+        const full_detail: []const u8 = if (self.interpreter.last_error_location) |loc|
+            (std.fmt.bufPrint(&detail_buf, "{s} at {d}:{d}", .{ detail, loc.line, loc.column }) catch detail)
+        else
+            detail;
         if (!builtin.is_test) {
-            std.log.err("SOUNDNESS INCIDENT: {s} {s} faulted on a proven path ({s})", .{ method, path, detail });
+            std.log.err("SOUNDNESS INCIDENT: {s} {s} faulted on a proven path ({s})", .{ method, path, full_detail });
         }
         if (self.config.incident_log_fd) |fd| {
-            incident_log.write(self.allocator, fd, method, path, chips, detail);
+            incident_log.write(self.allocator, fd, method, path, chips, full_detail);
         }
     }
 
@@ -3095,6 +3103,9 @@ test "soundness incident on a proven path is written to the incident log" {
     try std.testing.expect(std.mem.indexOf(u8, contents, "soundness_incident") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "/boom") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "optional_safe") != null);
+    // The single-line handler faults on line 1; the source map (feature A) must
+    // surface that line into the incident detail.
+    try std.testing.expect(std.mem.indexOf(u8, contents, "NotCallable at 1:") != null);
 }
 
 test "proof-gated durable retry blocks unproven workflow replay" {

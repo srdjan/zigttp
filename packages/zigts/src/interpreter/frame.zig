@@ -220,7 +220,7 @@ pub fn callBytecodeFunction(
     self.last_error_location = null;
 
     const result = self.dispatch() catch |err| {
-        if (err == error.TypeError) trace.traceLastOp(self, "dispatch");
+        if (err == error.TypeError or err == error.NotCallable) trace.traceLastOp(self, "dispatch");
         return err;
     };
 
@@ -271,7 +271,7 @@ pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) Interpret
     self.last_error_location = null;
 
     return self.dispatch() catch |err| {
-        if (err == error.TypeError) trace.traceLastOp(self, "run");
+        if (err == error.TypeError or err == error.NotCallable) trace.traceLastOp(self, "run");
         return err;
     };
 }
