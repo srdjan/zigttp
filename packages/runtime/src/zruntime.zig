@@ -1571,8 +1571,14 @@ pub const Runtime = struct {
 
         const result = self.callFunction(handler_obj, args) catch |err| {
             if (err == error.RequestTimeout) return error.RequestTimeout;
-            std.log.err("Handler execution failed: {}", .{err});
-            return error.HandlerError;
+            if (!builtin.is_test) std.log.err("Handler execution failed: {}", .{err});
+            // Preserve the fault class in the error value so the 500 site can
+            // map it to the proof chip that guards it (see fault_explain.zig).
+            // TypeError/NotCallable are what optional_safe/result_safe guard.
+            return switch (err) {
+                error.TypeError, error.NotCallable => error.HandlerTypeFault,
+                else => error.HandlerError,
+            };
         };
 
         // If the bytecode path set an exception but didn't propagate a Zig error
@@ -2712,6 +2718,7 @@ test {
     _ = @import("benchmark.zig");
     _ = @import("durable_dead_runs.zig");
     _ = @import("durable_dead_runs_cli.zig");
+    _ = @import("fault_explain.zig");
 }
 
 test "Runtime creation" {
@@ -2970,6 +2977,28 @@ test "proof-gated durable retry allows proven workflow replay" {
 
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"seed\":0.75") != null);
+}
+
+test "runtime type fault is preserved as HandlerTypeFault for proof-explained 500" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{ .jit_policy = .disabled });
+    defer rt.deinit();
+
+    // `o.missing` is undefined at runtime; calling it raises NotCallable in the
+    // interpreter. The bytecode compiles on this path (no analyzer veto), so the
+    // fault reaches executeHandlerInternal's catch, which must preserve the fault
+    // class as error.HandlerTypeFault (not the opaque error.HandlerError) so the
+    // 500 site can name the proof chip that guards it. See fault_explain.zig.
+    const handler_code = "function handler(req) { const o = { a: 1 }; const f = o.missing; return f(); }";
+    try rt.loadHandler(handler_code, "<type-fault>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+
+    try std.testing.expectError(error.HandlerTypeFault, rt.executeHandler(request.asView()));
 }
 
 test "proof-gated durable retry blocks unproven workflow replay" {

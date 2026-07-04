@@ -22,6 +22,7 @@ const HttpHeader = http_types.HttpHeader;
 const QueryParam = http_types.QueryParam;
 
 const contract_runtime = @import("contract_runtime.zig");
+const fault_explain = @import("fault_explain.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
 const ValidatedRuntimeContract = contract_runtime.ValidatedRuntimeContract;
 const ws_gateway = @import("ws_gateway.zig");
@@ -728,7 +729,29 @@ const ConnectionPool = struct {
                 .body = request.body,
             }) catch |err| {
                 const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else 500;
-                const message = if (err == error.PoolExhausted) "Service Unavailable" else if (err == error.RequestTimeout) "Gateway Timeout" else "Internal Server Error";
+                var fault_buf: [256]u8 = undefined;
+                const message: []const u8 = blk: {
+                    if (err == error.PoolExhausted) break :blk "Service Unavailable";
+                    if (err == error.RequestTimeout) break :blk "Gateway Timeout";
+                    if (err == error.HandlerTypeFault) {
+                        // Proof-explained failure: classify the fault against the
+                        // handler's proven contract, in hand here under contract_lock.
+                        const props: ?contract_runtime.Properties =
+                            if (self.server.contract) |*c| c.properties() else null;
+                        const verdict = if (props) |p|
+                            fault_explain.classify(p, .type_fault)
+                        else
+                            fault_explain.Verdict.predicted;
+                        if (verdict == .soundness_incident) {
+                            std.log.err(
+                                "SOUNDNESS INCIDENT: type fault on a path proven optional_safe/result_safe ({s} {s})",
+                                .{ request.method, request.path },
+                            );
+                        }
+                        break :blk fault_explain.formatMessage(&fault_buf, .type_fault, verdict);
+                    }
+                    break :blk "Internal Server Error";
+                };
                 access_status = status;
                 self.sendErrorSync(fd, status, message) catch |send_err| {
                     std.log.warn("failed to send error response: {}", .{send_err});
