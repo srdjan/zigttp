@@ -1557,6 +1557,9 @@ pub const JSObject = extern struct {
         if (func.constants.len > 0) allocator.free(@constCast(func.constants));
         if (func.upvalue_info.len > 0) allocator.free(@constCast(func.upvalue_info));
         if (func.source_map) |sm| allocator.free(@constCast(sm));
+        if (func.line_table) |line_table| {
+            if (line_table.len > 0) allocator.free(@constCast(line_table));
+        }
         allocator.destroy(func);
     }
 

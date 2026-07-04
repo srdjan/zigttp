@@ -217,6 +217,7 @@ pub fn callBytecodeFunction(
     self.code_end = func_bc.code.ptr + func_bc.code.len;
     self.constants = func_bc.constants;
     self.current_func = func_bc;
+    self.last_error_location = null;
 
     const result = self.dispatch() catch |err| {
         if (err == error.TypeError) trace.traceLastOp(self, "dispatch");
@@ -267,6 +268,7 @@ pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) Interpret
     self.code_end = func.code.ptr + func.code.len;
     self.constants = func.constants;
     self.current_func = func;
+    self.last_error_location = null;
 
     return self.dispatch() catch |err| {
         if (err == error.TypeError) trace.traceLastOp(self, "run");

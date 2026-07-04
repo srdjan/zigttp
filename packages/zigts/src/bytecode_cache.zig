@@ -166,6 +166,14 @@ pub fn serializeFunctionBytecode(func: *const bytecode.FunctionBytecode, writer:
         try writer.writeByte(info.index);
     }
 
+    const line_table = func.line_table orelse &.{};
+    try writer.writeInt(u32, @intCast(line_table.len), .little);
+    for (line_table) |entry| {
+        try writer.writeInt(u32, entry.offset, .little);
+        try writer.writeInt(u32, entry.line, .little);
+        try writer.writeInt(u32, entry.column, .little);
+    }
+
     // Recursively serialize constants
     try serializeConstants(func.constants, writer, allocator);
 
@@ -338,6 +346,21 @@ pub fn deserializeFunctionBytecode(
         };
     }
 
+    const line_count = try reader.readInt(u32, .little);
+    const line_table = if (line_count > 0) blk: {
+        const entries = try allocator.alloc(bytecode.LineEntry, line_count);
+        errdefer allocator.free(entries);
+        for (entries) |*entry| {
+            entry.* = .{
+                .offset = try reader.readInt(u32, .little),
+                .line = try reader.readInt(u32, .little),
+                .column = try reader.readInt(u32, .little),
+            };
+        }
+        break :blk entries;
+    } else &.{};
+    errdefer if (line_table.len > 0) allocator.free(line_table);
+
     // Recursively deserialize constants
     const constants = try deserializeConstants(reader, allocator, strings_table);
     errdefer allocator.free(constants);
@@ -360,6 +383,7 @@ pub fn deserializeFunctionBytecode(
         .code = code,
         .constants = constants,
         .source_map = null,
+        .line_table = line_table,
         .handler_flags = handler_flags,
         .pattern_dispatch = pattern_dispatch,
     };
@@ -469,7 +493,7 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
 }
 
 /// Bytecode serialization format version
-pub const CACHE_VERSION: u32 = 3;
+pub const CACHE_VERSION: u32 = 4;
 
 /// Cache file magic bytes "ZTSC" (zts cache)
 pub const CACHE_MAGIC: u32 = 0x5A545343;
@@ -737,8 +761,16 @@ pub fn deserialize(reader: anytype, allocator: std.mem.Allocator) !*bytecode.Fun
 /// Called after CRC verification to reject malformed or tampered cache files.
 pub fn validateBytecode(func: *const bytecode.FunctionBytecodeCompact, total_size: usize) !void {
     // Structural: header fields must produce a size within the allocation
-    const min_size = bytecode.FunctionBytecodeCompact.calcSize(func.code_len, func.const_count, func.upvalue_count);
+    const min_size = bytecode.FunctionBytecodeCompact.calcSizeWithLineTable(func.code_len, func.const_count, func.upvalue_count, func.line_count);
     if (min_size > total_size) return error.InvalidBytecode;
+
+    const line_table = func.getLineTable();
+    var last_line_offset: u32 = 0;
+    for (line_table, 0..) |entry, idx| {
+        if (entry.offset >= func.code_len and func.code_len > 0) return error.InvalidBytecode;
+        if (idx > 0 and entry.offset < last_line_offset) return error.InvalidBytecode;
+        last_line_offset = entry.offset;
+    }
 
     // Walk opcodes: every byte must decode to a known opcode with valid size
     const code = func.getCode();
@@ -1647,6 +1679,9 @@ pub const DeserializedBytecode = struct {
         // Free function
         self.allocator.free(self.func.code);
         self.allocator.free(self.func.upvalue_info);
+        if (self.func.line_table) |line_table| {
+            if (line_table.len > 0) self.allocator.free(line_table);
+        }
         for (self.func.constants) |c| {
             if (c.isFloat64()) {
                 self.allocator.destroy(c.toPtr(value.JSValue.Float64Box));
@@ -1678,6 +1713,9 @@ pub fn deserializeBytecodeWithAtomsAndShapes(
     errdefer {
         allocator.free(func.code);
         allocator.free(func.upvalue_info);
+        if (func.line_table) |line_table| {
+            if (line_table.len > 0) allocator.free(line_table);
+        }
         allocator.free(func.constants);
         allocator.destroy(func);
     }
@@ -1712,6 +1750,9 @@ pub fn deserializeBytecodeWithAtoms(
     errdefer {
         allocator.free(func.code);
         allocator.free(func.upvalue_info);
+        if (func.line_table) |line_table| {
+            if (line_table.len > 0) allocator.free(line_table);
+        }
         allocator.free(func.constants);
         allocator.destroy(func);
     }
@@ -1749,6 +1790,7 @@ test "atom collection - basic" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const atoms = try collectAtoms(&func, allocator);
@@ -1854,6 +1896,7 @@ test "atom remapping in bytecode" {
         .code = code_owned,
         .constants = constants,
         .source_map = null,
+        .line_table = null,
     };
     defer allocator.free(code_owned);
 
@@ -1902,6 +1945,9 @@ test "full bytecode with atoms roundtrip" {
     const constants = try allocator.alloc(value.JSValue, 0);
     const code = try allocator.dupe(u8, &code_buf);
     const upvalue_info = try allocator.alloc(bytecode.UpvalueInfo, 0);
+    const line_table = [_]bytecode.LineEntry{
+        .{ .offset = 0, .line = 7, .column = 3 },
+    };
 
     const func = try allocator.create(bytecode.FunctionBytecode);
     func.* = .{
@@ -1916,6 +1962,7 @@ test "full bytecode with atoms roundtrip" {
         .code = code,
         .constants = constants,
         .source_map = null,
+        .line_table = &line_table,
     };
     defer {
         allocator.free(func.code);
@@ -1936,6 +1983,9 @@ test "full bytecode with atoms roundtrip" {
         allocator.free(restored.code);
         allocator.free(restored.constants);
         allocator.free(restored.upvalue_info);
+        if (restored.line_table) |restored_lines| {
+            if (restored_lines.len > 0) allocator.free(restored_lines);
+        }
         allocator.destroy(restored);
     }
 
@@ -1946,4 +1996,6 @@ test "full bytecode with atoms roundtrip" {
     // Verify bytecode atom was remapped
     const restored_atom = std.mem.readInt(u16, restored.code[1..3], .little);
     try std.testing.expectEqual(@as(u16, @truncate(tgt_global_id)), restored_atom);
+    try std.testing.expect(restored.line_table != null);
+    try std.testing.expectEqualSlices(bytecode.LineEntry, &line_table, restored.line_table.?);
 }

@@ -407,6 +407,7 @@ test "verify: empty bytecode rejected" {
         .code = &.{},
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(!result.valid);
@@ -424,6 +425,7 @@ test "verify: simple ret_undefined passes" {
         .code = &.{@intFromEnum(Opcode.ret_undefined)},
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(result.valid);
@@ -443,6 +445,7 @@ test "verify: push_true + ret passes" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(result.valid);
@@ -463,6 +466,7 @@ test "verify: truncated operand rejected" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(!result.valid);
@@ -484,6 +488,7 @@ test "verify: constant index out of bounds rejected" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(!result.valid);
@@ -504,6 +509,7 @@ test "verify: stack underflow rejected" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(!result.valid);
@@ -525,6 +531,7 @@ test "verify: local index out of bounds rejected" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(!result.valid);
@@ -547,6 +554,7 @@ test "verify: inline-cache index out of bounds rejected" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(!result.valid);
@@ -567,6 +575,7 @@ test "verify: valid local access passes" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(result.valid);
@@ -589,6 +598,7 @@ test "verify: jump within bounds passes" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(result.valid);
@@ -608,6 +618,7 @@ test "verify: jump to end of bytecode is rejected" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(!result.valid);
@@ -629,6 +640,7 @@ test "verify: conditional jump to end of bytecode is rejected" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(!result.valid);
@@ -650,6 +662,7 @@ test "verify: drop_goto jump to end of bytecode is rejected" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(!result.valid);
@@ -671,6 +684,7 @@ test "verify: jump target inside an operand is rejected" {
         },
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(!result.valid);
@@ -697,6 +711,7 @@ test "verify: large bytecode receives full jump validation" {
         .code = code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(!result.valid);
@@ -721,6 +736,7 @@ test "verify: push_const_call accounts for fused argument" {
         },
         .constants = &.{value.JSValue.fromInt(1)},
         .source_map = null,
+        .line_table = null,
     };
     const result = verify(&func);
     try std.testing.expect(result.valid);

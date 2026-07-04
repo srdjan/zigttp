@@ -2074,6 +2074,7 @@ test "Context enforces JIT code budget by clearing compiled functions" {
         .code = code_bytes,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
         .tier = .baseline,
     };
 
@@ -2121,6 +2122,7 @@ test "Context defers JIT code eviction while native frames are active" {
         .code = code_bytes,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
         .tier = .baseline,
     };
 

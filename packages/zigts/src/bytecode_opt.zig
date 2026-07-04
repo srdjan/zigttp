@@ -380,6 +380,10 @@ pub const BytecodeOptimizer = struct {
     /// Returns new length after compaction
     /// Also updates jump offsets to account for removed NOPs
     pub fn compact(self: *BytecodeOptimizer, code: []u8) !usize {
+        return self.compactWithLineTable(code, null);
+    }
+
+    pub fn compactWithLineTable(self: *BytecodeOptimizer, code: []u8, line_table: ?[]bytecode.LineEntry) !usize {
         // Build offset mapping: old position -> new position
         var offset_map: std.AutoHashMapUnmanaged(u32, u32) = .empty;
         defer offset_map.deinit(self.allocator);
@@ -398,6 +402,12 @@ pub const BytecodeOptimizer = struct {
         }
         // Map end position too
         try offset_map.put(self.allocator, read_pos, write_pos);
+
+        if (line_table) |entries| {
+            for (entries) |*entry| {
+                entry.offset = offset_map.get(entry.offset) orelse entry.offset;
+            }
+        }
 
         // Second pass: update jump offsets
         read_pos = 0;

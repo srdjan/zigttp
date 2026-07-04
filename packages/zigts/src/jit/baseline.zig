@@ -6434,6 +6434,7 @@ test "baseline: compile simple return" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -6463,6 +6464,7 @@ test "baseline: compile arithmetic" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -6491,6 +6493,7 @@ test "baseline: inline call stack check label patching" {
         .code = &callee_code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const caller_code = [_]u8{
@@ -6531,6 +6534,7 @@ test "baseline: inline call stack check label patching" {
         .code = &caller_code,
         .constants = &consts,
         .source_map = null,
+        .line_table = null,
         .type_feedback_ptr = tf,
         .feedback_site_map = site_map,
     };
@@ -6564,6 +6568,7 @@ test "baseline: compile div/mod/pow/inc/dec" {
             .code = &code,
             .constants = &.{},
             .source_map = null,
+            .line_table = null,
         };
 
         var code_alloc = CodeAllocator.init(testing.allocator);
@@ -6591,6 +6596,7 @@ test "baseline: compile div/mod/pow/inc/dec" {
             .code = &code,
             .constants = &.{},
             .source_map = null,
+            .line_table = null,
         };
 
         var code_alloc = CodeAllocator.init(testing.allocator);
@@ -6623,6 +6629,7 @@ test "baseline: compile call opcodes" {
             .code = &code,
             .constants = &.{},
             .source_map = null,
+            .line_table = null,
         };
 
         var code_alloc = CodeAllocator.init(testing.allocator);
@@ -6693,6 +6700,7 @@ test "baseline: compile property access opcodes" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -6725,6 +6733,7 @@ test "baseline: compile get_field_call opcode" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -6765,6 +6774,7 @@ test "baseline: compile globals and object creation" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -6889,6 +6899,7 @@ test "baseline: compile superinstructions and const ops" {
         .code = &code,
         .constants = &constants,
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -6915,6 +6926,7 @@ test "baseline: unsupported opcode returns error" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -6941,6 +6953,7 @@ test "baseline: verify generated code size" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -6983,6 +6996,7 @@ test "baseline: compile local variable access" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -7015,6 +7029,7 @@ test "baseline: compile get_loc with index" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -7048,6 +7063,7 @@ test "baseline: compile comparison opcodes" {
             .code = &code,
             .constants = &.{},
             .source_map = null,
+            .line_table = null,
         };
 
         var code_alloc = CodeAllocator.init(testing.allocator);
@@ -7080,6 +7096,7 @@ test "baseline: compile loop opcode" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -7116,6 +7133,7 @@ test "baseline: compile comparison with conditional jump" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -7149,6 +7167,7 @@ test "baseline: compile bitwise operations" {
             .code = &code,
             .constants = &.{},
             .source_map = null,
+            .line_table = null,
         };
 
         var code_alloc = CodeAllocator.init(testing.allocator);
@@ -7178,6 +7197,7 @@ test "baseline: compile bitwise NOT" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -7212,6 +7232,7 @@ test "baseline: compile shift operations" {
             .code = &code,
             .constants = &.{},
             .source_map = null,
+            .line_table = null,
         };
 
         var code_alloc = CodeAllocator.init(testing.allocator);
@@ -7242,6 +7263,7 @@ test "baseline: compile typeof operation" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -7280,6 +7302,7 @@ test "baseline: compile typeof with different values" {
             .code = &code,
             .constants = &.{},
             .source_map = null,
+            .line_table = null,
         };
 
         var code_alloc = CodeAllocator.init(testing.allocator);
@@ -7310,6 +7333,7 @@ test "baseline: compile logical NOT operation" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var code_alloc = CodeAllocator.init(testing.allocator);
@@ -7347,6 +7371,7 @@ test "baseline: compile logical NOT with falsy values" {
             .code = &code,
             .constants = &.{},
             .source_map = null,
+            .line_table = null,
         };
 
         var code_alloc = CodeAllocator.init(testing.allocator);

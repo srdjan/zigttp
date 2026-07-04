@@ -89,6 +89,7 @@ pub const Interpreter = struct {
     promotion_rejected_deopt_storm: u32 = 0, // Phase 6: optimized_candidate promotions blocked by deopt storm
     opcode_histogram: [256]u32 = [_]u32{0} ** 256,
     last_op: bytecode.Opcode = .nop,
+    last_error_location: ?bytecode.LineEntry = null,
 
     pub fn init(ctx: *context.Context) Interpreter {
         return lifecycle.init(ctx);
@@ -2429,6 +2430,7 @@ test "Interpreter basic arithmetic" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -2467,6 +2469,7 @@ test "Interpreter local variables" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -2503,6 +2506,7 @@ test "Interpreter bitwise operations" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -2541,6 +2545,7 @@ test "Interpreter shift operations" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -2577,6 +2582,7 @@ test "Interpreter comparison" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -2613,6 +2619,7 @@ test "Interpreter conditional jump" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -2651,6 +2658,7 @@ test "Interpreter superinstruction get_loc_get_loc_add" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -2687,6 +2695,7 @@ test "Interpreter division produces float" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -2723,6 +2732,7 @@ test "Interpreter modulo" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -2762,6 +2772,7 @@ test "Interpreter modulo INT_MIN % -1 does not panic" {
         .code = &code,
         .constants = &consts,
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -2811,6 +2822,7 @@ test "End-to-end: parse and execute JS" {
         .code = code,
         .constants = p.constants.items,
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -2871,6 +2883,7 @@ test "Hybrid: reject arena escape to global" {
         .code = code,
         .constants = p.constants.items,
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -2916,6 +2929,7 @@ test "End-to-end: closure captures local" {
         .code = code,
         .constants = p.constants.items,
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -2976,6 +2990,7 @@ test "End-to-end: JSX parse, compile, and execute" {
         .code = code,
         .constants = p.constants.items,
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -3045,6 +3060,7 @@ test "Interpreter property access" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -3090,6 +3106,7 @@ test "Interpreter global access" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -3141,6 +3158,7 @@ test "Interpreter native function call" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -3199,6 +3217,7 @@ test "Interpreter native function with arguments" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -3237,6 +3256,7 @@ test "Interpreter bytecode function call" {
         .code = inner_code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     // Create function object
@@ -3275,6 +3295,7 @@ test "Interpreter bytecode function call" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -3327,6 +3348,7 @@ test "JIT: inlined call deopts on callee change" {
         .code = add_code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const add_obj_ptr = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, add_func, .length);
@@ -3351,6 +3373,7 @@ test "JIT: inlined call deopts on callee change" {
         .code = sub_code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const sub_obj_ptr = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, sub_func, .length);
     // destroyFull handles bytecode cleanup including TypeFeedback, no separate cleanupTypeFeedback needed
@@ -3389,6 +3412,7 @@ test "JIT: inlined call deopts on callee change" {
         .code = &caller_code,
         .constants = &holder_const,
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &caller_func);
     defer jit_compile.cleanupCompiledCode(allocator, &caller_func);
@@ -3459,6 +3483,7 @@ test "call_ic: operational parity with .call and feedback is recorded" {
         .code = callee_code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const callee_obj_ptr = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, callee_func, .length);
     defer callee_obj_ptr.destroyFull(allocator);
@@ -3482,6 +3507,7 @@ test "call_ic: operational parity with .call and feedback is recorded" {
         .code = &caller_code,
         .constants = &callee_const,
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &caller_func);
     defer jit_compile.cleanupCompiledCode(allocator, &caller_func);
@@ -3544,6 +3570,7 @@ test "JIT: deopt on type mismatch in specialized add" {
         .code = add_code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const add_obj = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, add_func, .length);
@@ -3673,6 +3700,7 @@ test "JIT: Math int fast paths" {
         .code = &code_abs,
         .constants = &abs_consts,
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_abs);
     defer jit_compile.cleanupCompiledCode(allocator, &func_abs);
@@ -3702,6 +3730,7 @@ test "JIT: Math int fast paths" {
         .code = &code_floor,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_floor);
     defer jit_compile.cleanupCompiledCode(allocator, &func_floor);
@@ -3731,6 +3760,7 @@ test "JIT: Math int fast paths" {
         .code = &code_ceil,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_ceil);
     defer jit_compile.cleanupCompiledCode(allocator, &func_ceil);
@@ -3760,6 +3790,7 @@ test "JIT: Math int fast paths" {
         .code = &code_round,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_round);
     defer jit_compile.cleanupCompiledCode(allocator, &func_round);
@@ -3791,6 +3822,7 @@ test "JIT: Math int fast paths" {
         .code = &code_min,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_min);
     defer jit_compile.cleanupCompiledCode(allocator, &func_min);
@@ -3822,6 +3854,7 @@ test "JIT: Math int fast paths" {
         .code = &code_max,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_max);
     defer jit_compile.cleanupCompiledCode(allocator, &func_max);
@@ -3862,6 +3895,7 @@ test "JIT: Math int fast paths" {
         .code = &code_absf,
         .constants = &absf_consts,
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_absf);
     defer jit_compile.cleanupCompiledCode(allocator, &func_absf);
@@ -3893,6 +3927,7 @@ test "JIT: Math int fast paths" {
         .code = &code_floorf,
         .constants = &floorf_consts,
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_floorf);
     defer jit_compile.cleanupCompiledCode(allocator, &func_floorf);
@@ -3924,6 +3959,7 @@ test "JIT: Math int fast paths" {
         .code = &code_ceilf,
         .constants = &ceilf_consts,
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_ceilf);
     defer jit_compile.cleanupCompiledCode(allocator, &func_ceilf);
@@ -3955,6 +3991,7 @@ test "JIT: Math int fast paths" {
         .code = &code_roundf,
         .constants = &roundf_consts,
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_roundf);
     defer jit_compile.cleanupCompiledCode(allocator, &func_roundf);
@@ -3988,6 +4025,7 @@ test "JIT: Math int fast paths" {
         .code = &code_minf,
         .constants = &minf_consts,
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_minf);
     defer jit_compile.cleanupCompiledCode(allocator, &func_minf);
@@ -4021,6 +4059,7 @@ test "JIT: Math int fast paths" {
         .code = &code_maxf,
         .constants = &maxf_consts,
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func_maxf);
     defer jit_compile.cleanupCompiledCode(allocator, &func_maxf);
@@ -4063,6 +4102,7 @@ test "End-to-end: function declaration" {
         .code = code,
         .constants = p.constants.items,
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4114,6 +4154,7 @@ test "Interpreter string concatenation" {
         .code = &code,
         .constants = &constants,
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -4157,6 +4198,7 @@ test "Interpreter typeof" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const result = try interp.run(&func);
@@ -4203,6 +4245,7 @@ test "End-to-end: default parameters" {
         .code = code,
         .constants = p.constants.items,
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4246,6 +4289,7 @@ test "End-to-end: optional method call short-circuits on nullish receiver" {
         .code = code,
         .constants = p.constants.items,
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4280,6 +4324,7 @@ test "Interpreter unary negation" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4314,6 +4359,7 @@ test "Interpreter increment and decrement" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4349,6 +4395,7 @@ test "Interpreter logical not" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4383,6 +4430,7 @@ test "Interpreter bitwise not" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4420,6 +4468,7 @@ test "Interpreter power operator" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4457,6 +4506,7 @@ test "Interpreter new_object" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4492,6 +4542,7 @@ test "Interpreter strict equality edge cases" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4526,6 +4577,7 @@ test "Interpreter local variable get and put" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4562,6 +4614,7 @@ test "Interpreter multiple locals" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4597,6 +4650,7 @@ test "Interpreter undefined equals undefined" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4632,6 +4686,7 @@ test "Interpreter null vs undefined strict not equal" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4667,6 +4722,7 @@ test "Interpreter typeof operations" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4702,6 +4758,7 @@ test "Interpreter modulo operation" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4736,6 +4793,7 @@ test "Interpreter inc dec roundtrip" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4769,6 +4827,7 @@ test "Interpreter negation" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4803,6 +4862,7 @@ test "Interpreter dup operation" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4837,6 +4897,7 @@ test "Interpreter drop operation" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4871,6 +4932,7 @@ test "Interpreter swap operation" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4906,6 +4968,7 @@ test "Interpreter not operator inverts false" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4941,6 +5004,7 @@ test "Interpreter new_array" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -4997,6 +5061,7 @@ test "End-to-end: computed compound assignment evaluates key once (object)" {
         .code = code,
         .constants = p.constants.items,
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -5051,6 +5116,7 @@ test "End-to-end: computed compound assignment evaluates key once (array)" {
         .code = code,
         .constants = p.constants.items,
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -5128,6 +5194,7 @@ test "JIT: baseline put_elem_keep stores and keeps value" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     defer jit_compile.cleanupTypeFeedback(allocator, &func);
     defer jit_compile.cleanupCompiledCode(allocator, &func);
@@ -5168,6 +5235,7 @@ test "Interpreter ret_undefined" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -5203,6 +5271,7 @@ test "Interpreter push_i16" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -5374,6 +5443,7 @@ test "End-to-end: polymorphic property access" {
         .code = code,
         .constants = p.constants.items,
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -5443,6 +5513,7 @@ test "End-to-end: object destructuring binds property values" {
         .code = code,
         .constants = p.constants.items,
         .source_map = null,
+        .line_table = null,
     };
 
     var interp = Interpreter.init(ctx);
@@ -5477,6 +5548,7 @@ test "JIT profiling: execution counting" {
         .code = &.{},
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     // Initially at tier interpreted with zero count
@@ -5531,6 +5603,7 @@ test "tiering: deopt storm suppresses optimized promotion when enabled" {
         .code = &.{},
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     // Simulate a function that already reached .baseline and has just deopted
@@ -5577,6 +5650,7 @@ test "tiering: deopt storm does not suppress when feature is disabled" {
         .code = &.{},
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     func.tier = bytecode.CompilationTier.baseline;
@@ -5734,6 +5808,7 @@ test "JIT integration: tryCompileBaseline triggers on threshold" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
         .execution_count = 0,
         .tier = .interpreted,
         .compiled_code = null,
@@ -5792,6 +5867,7 @@ test "JIT integration: unsupported opcodes stay interpreted" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
         .execution_count = bytecode.JIT_THRESHOLD - 1,
         .tier = .baseline_candidate,
         .compiled_code = null,

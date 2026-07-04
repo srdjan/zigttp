@@ -1206,6 +1206,7 @@ test "loadHandlerCached embedded path fails cleanly on corrupted bytecode instea
         .code = &code_buf,
         .constants = &constants,
         .source_map = null,
+        .line_table = null,
     };
 
     var buffer: [4096]u8 = undefined;

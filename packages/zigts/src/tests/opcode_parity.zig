@@ -309,6 +309,7 @@ fn buildFunc(case: Case) bytecode.FunctionBytecode {
         .code = case.code,
         .constants = case.constants,
         .source_map = null,
+        .line_table = null,
     };
 }
 
@@ -486,6 +487,7 @@ test "opcode parity: call returns identical value across tiers" {
         .code = callee_code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const callee_obj = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, callee_func, .length);
     defer callee_obj.destroyFull(allocator); // frees callee_code + the FunctionBytecode
@@ -714,6 +716,7 @@ fn faultFunc(case: FaultCase) bytecode.FunctionBytecode {
         .code = case.code,
         .constants = case.constants,
         .source_map = null,
+        .line_table = null,
     };
 }
 
@@ -1089,6 +1092,7 @@ test "opcode parity: compiled code does not invoke callees past a fault" {
         .code = callee_code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const callee_obj = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, callee_func, .length);
     defer callee_obj.destroyFull(allocator); // frees callee_code + the FunctionBytecode

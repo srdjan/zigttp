@@ -251,6 +251,14 @@ pub const Parser = struct {
         return &[_][]const object.Atom{};
     }
 
+    /// Must be called after parse(). The returned slice is owned by CodeGen.
+    pub fn getLineTable(self: *const Parser) []const bytecode.LineEntry {
+        if (self.code_gen) |*cg| {
+            return cg.line_table.items;
+        }
+        return &.{};
+    }
+
     /// Import declaration info extracted from the IR after parsing.
     pub const ImportInfo = struct {
         module_specifier: []const u8,

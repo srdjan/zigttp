@@ -1289,6 +1289,7 @@ pub const Runtime = struct {
             .code = bytecode_data,
             .constants = p.constants.items,
             .source_map = null,
+            .line_table = p.getLineTable(),
         };
 
         // Bytecode verification: reject malformed bytecode before execution.
@@ -5758,6 +5759,7 @@ test "Runtime rejects malformed cached bytecode before execution" {
         .code = &code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const no_shapes: []const []const zq.object.Atom = &.{};
@@ -5821,6 +5823,7 @@ test "Runtime rejects malformed nested cached bytecode before execution" {
         .code = &child_code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const constants = [_]zq.JSValue{
         zq.JSValue.fromExternPtr(&child),
@@ -5838,6 +5841,7 @@ test "Runtime rejects malformed nested cached bytecode before execution" {
         .code = &parent_code,
         .constants = &constants,
         .source_map = null,
+        .line_table = null,
     };
 
     const no_shapes: []const []const zq.object.Atom = &.{};

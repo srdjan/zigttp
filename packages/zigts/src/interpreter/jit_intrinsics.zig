@@ -420,6 +420,7 @@ test "effectful jit intrinsics refuse work while a fault is pending" {
         .code = &dummy_code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     try ctx.push(value.JSValue.fromInt(1));
     try testing.expect(jitCallBytecode(ctx, &dummy, 0, 0).isException());

@@ -47,6 +47,31 @@ fn pcOffset(self: *const Interpreter, cur: *const bytecode.FunctionBytecode) usi
     return @intCast(@intFromPtr(self.pc) - @intFromPtr(cur.code.ptr));
 }
 
+pub fn sourceLocationForOffset(func: *const bytecode.FunctionBytecode, offset: usize) ?bytecode.LineEntry {
+    const entries = func.line_table orelse return null;
+    if (entries.len == 0) return null;
+
+    var lo: usize = 0;
+    var hi: usize = entries.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (entries[mid].offset <= offset) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo == 0) return null;
+    return entries[lo - 1];
+}
+
+pub fn lastOpSourceLocation(self: *const Interpreter) ?bytecode.LineEntry {
+    const cur = self.current_func orelse return null;
+    const pc_off = pcOffset(self, cur);
+    const op_off = if (pc_off > 0) pc_off - 1 else 0;
+    return sourceLocationForOffset(cur, op_off);
+}
+
 pub fn traceTypeError(self: *Interpreter, label: []const u8, a: value.JSValue, b: value.JSValue) void {
     if (!callTraceEnabled()) return;
     std.debug.print(
@@ -62,13 +87,23 @@ pub fn traceTypeError(self: *Interpreter, label: []const u8, a: value.JSValue, b
 }
 
 pub fn traceLastOp(self: *Interpreter, label: []const u8) void {
+    if (self.last_error_location == null) {
+        self.last_error_location = lastOpSourceLocation(self);
+    }
     if (!callTraceEnabled()) return;
     if (self.current_func) |cur| {
         const pc_off = pcOffset(self, cur);
-        std.debug.print(
-            "[typeerror] {s} op={s} pc_off={} depth={} sp={} fp={}\n",
-            .{ label, @tagName(self.last_op), pc_off, self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
-        );
+        if (lastOpSourceLocation(self)) |loc| {
+            std.debug.print(
+                "[typeerror] {s} op={s} pc_off={} source={}:{} depth={} sp={} fp={}\n",
+                .{ label, @tagName(self.last_op), pc_off, loc.line, loc.column, self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
+            );
+        } else {
+            std.debug.print(
+                "[typeerror] {s} op={s} pc_off={} depth={} sp={} fp={}\n",
+                .{ label, @tagName(self.last_op), pc_off, self.ctx.call_depth, self.ctx.sp, self.ctx.fp },
+            );
+        }
         const op_off = if (pc_off > 0) pc_off - 1 else 0;
         traceBytecodeWindow(self, op_off);
     } else {
@@ -119,4 +154,61 @@ pub fn traceBytecodeWindow(self: *Interpreter, center_off: usize) void {
         if (info.size == 0) break;
         pos += info.size;
     }
+}
+
+test "interpreter TypeError records source line" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+    const context_mod = @import("../context.zig");
+    const parser_mod = @import("../parser/root.zig");
+    const string_mod = @import("../string.zig");
+
+    const prev_policy = interpreter.getJitPolicy();
+    defer interpreter.setJitPolicy(prev_policy);
+    interpreter.setJitPolicy(.disabled);
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context_mod.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source =
+        \\function handler(req) {
+        \\  const u = undefined;
+        \\  return u + 1;
+        \\}
+        \\handler(undefined);
+    ;
+
+    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try p.parse();
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+        .line_table = p.getLineTable(),
+    };
+
+    var interp = Interpreter.init(ctx);
+    try std.testing.expectError(error.TypeError, interp.run(&func));
+
+    const loc = interp.last_error_location orelse return error.MissingSourceLocation;
+    try std.testing.expectEqual(@as(u32, 3), loc.line);
 }

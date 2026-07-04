@@ -80,6 +80,7 @@ pub const CodeGen = struct {
     code: std.ArrayList(u8),
     constants: std.ArrayList(JSValue),
     upvalue_info: std.ArrayList(UpvalueInfo),
+    line_table: std.ArrayList(bytecode.LineEntry),
 
     // State
     labels: std.ArrayList(Label),
@@ -142,6 +143,7 @@ pub const CodeGen = struct {
             .code = std.ArrayList(u8).empty,
             .constants = std.ArrayList(JSValue).empty,
             .upvalue_info = std.ArrayList(UpvalueInfo).empty,
+            .line_table = std.ArrayList(bytecode.LineEntry).empty,
             .labels = std.ArrayList(Label).empty,
             .pending_jumps = std.ArrayList(PendingJump).empty,
             .loop_stack = std.ArrayList(LoopContext).empty,
@@ -173,6 +175,7 @@ pub const CodeGen = struct {
             .code = std.ArrayList(u8).empty,
             .constants = std.ArrayList(JSValue).empty,
             .upvalue_info = std.ArrayList(UpvalueInfo).empty,
+            .line_table = std.ArrayList(bytecode.LineEntry).empty,
             .labels = std.ArrayList(Label).empty,
             .pending_jumps = std.ArrayList(PendingJump).empty,
             .loop_stack = std.ArrayList(LoopContext).empty,
@@ -202,6 +205,7 @@ pub const CodeGen = struct {
         self.code.deinit(self.allocator);
         self.constants.deinit(self.allocator);
         self.upvalue_info.deinit(self.allocator);
+        self.line_table.deinit(self.allocator);
         self.labels.deinit(self.allocator);
         self.pending_jumps.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
@@ -239,6 +243,9 @@ pub const CodeGen = struct {
                 if (func_bc.upvalue_info.len > 0) {
                     self.allocator.free(func_bc.upvalue_info);
                 }
+                if (func_bc.line_table) |line_table| {
+                    if (line_table.len > 0) self.allocator.free(line_table);
+                }
                 // Free the FunctionBytecode struct itself
                 self.allocator.destroy(func_bc);
             } else if (val.isFloat64()) {
@@ -262,6 +269,7 @@ pub const CodeGen = struct {
 
         try self.code.ensureTotalCapacity(self.allocator, @max(32, node_count));
         try self.constants.ensureTotalCapacity(self.allocator, @max(8, node_count / 16));
+        try self.line_table.ensureTotalCapacity(self.allocator, @max(8, node_count / 4));
         try self.labels.ensureTotalCapacity(self.allocator, @max(4, node_count / 24));
         try self.pending_jumps.ensureTotalCapacity(self.allocator, @max(4, node_count / 24));
     }
@@ -293,6 +301,7 @@ pub const CodeGen = struct {
             .code = self.code.items,
             .constants = self.constants.items,
             .source_map = null,
+            .line_table = self.line_table.items,
         };
     }
 
@@ -347,6 +356,7 @@ pub const CodeGen = struct {
             .code = self.code.items,
             .constants = self.constants.items,
             .source_map = null,
+            .line_table = self.line_table.items,
         };
     }
 
@@ -359,7 +369,7 @@ pub const CodeGen = struct {
         const stats = try optimizer.optimize(self.code.items);
 
         // Compact to remove NOPs
-        const new_len = try optimizer.compact(self.code.items);
+        const new_len = try optimizer.compactWithLineTable(self.code.items, self.line_table.items);
 
         // Resize the code array to the compacted length
         self.code.shrinkRetainingCapacity(new_len);
@@ -377,10 +387,32 @@ pub const CodeGen = struct {
 
     // ============ Node Emission ============
 
+    fn recordNodeLocation(self: *CodeGen, index: NodeIndex) !void {
+        const loc = self.ir.getLoc(index) orelse return;
+        const offset: u32 = @intCast(self.code.items.len);
+        if (self.line_table.items.len > 0) {
+            const last = &self.line_table.items[self.line_table.items.len - 1];
+            if (last.offset == offset) {
+                last.* = .{
+                    .offset = offset,
+                    .line = loc.line,
+                    .column = loc.column,
+                };
+                return;
+            }
+        }
+        try self.line_table.append(self.allocator, .{
+            .offset = offset,
+            .line = loc.line,
+            .column = loc.column,
+        });
+    }
+
     fn emitNode(self: *CodeGen, index: NodeIndex) anyerror!void {
         if (index == null_node) return;
 
         const tag = self.ir.getTag(index) orelse return;
+        try self.recordNodeLocation(index);
 
         switch (tag) {
             // Literals
@@ -1772,6 +1804,7 @@ pub const CodeGen = struct {
         const saved_code = self.code;
         const saved_constants = self.constants;
         const saved_upvalue_info = self.upvalue_info;
+        const saved_line_table = self.line_table;
         const saved_labels = self.labels;
         const saved_pending_jumps = self.pending_jumps;
         const saved_loop_stack = self.loop_stack;
@@ -1785,6 +1818,7 @@ pub const CodeGen = struct {
         self.code = std.ArrayList(u8).empty;
         self.constants = std.ArrayList(JSValue).empty;
         self.upvalue_info = std.ArrayList(UpvalueInfo).empty;
+        self.line_table = std.ArrayList(bytecode.LineEntry).empty;
         self.labels = std.ArrayList(Label).empty;
         self.pending_jumps = std.ArrayList(PendingJump).empty;
         self.loop_stack = std.ArrayList(LoopContext).empty;
@@ -1828,6 +1862,9 @@ pub const CodeGen = struct {
         const upvalue_copy = try upvalue_info_list.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(upvalue_copy);
 
+        const line_table_copy = try self.line_table.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(line_table_copy);
+
         func_bc.* = .{
             .header = .{},
             .name_atom = func.name_atom,
@@ -1844,6 +1881,7 @@ pub const CodeGen = struct {
             .code = code_copy,
             .constants = consts_copy,
             .source_map = null,
+            .line_table = line_table_copy,
         };
 
         // Check if this is a handler function candidate and analyze for fast path
@@ -1859,6 +1897,7 @@ pub const CodeGen = struct {
         self.code.deinit(self.allocator);
         self.constants.deinit(self.allocator);
         self.upvalue_info.deinit(self.allocator);
+        self.line_table.deinit(self.allocator);
         self.labels.deinit(self.allocator);
         self.pending_jumps.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
@@ -1869,6 +1908,7 @@ pub const CodeGen = struct {
         self.code = saved_code;
         self.constants = saved_constants;
         self.upvalue_info = saved_upvalue_info;
+        self.line_table = saved_line_table;
         self.labels = saved_labels;
         self.pending_jumps = saved_pending_jumps;
         self.loop_stack = saved_loop_stack;

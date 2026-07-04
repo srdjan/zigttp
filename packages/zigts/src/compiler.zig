@@ -245,6 +245,7 @@ pub const Compiler = struct {
             .code = code,
             .constants = p.constants.items,
             .source_map = null,
+            .line_table = p.getLineTable(),
         };
 
         result.bytecode = func;
@@ -276,6 +277,9 @@ pub fn compile(
     const constants_copy = try allocator.dupe(value.JSValue, p.constants.items);
     errdefer allocator.free(constants_copy);
 
+    const line_table_copy = try allocator.dupe(bytecode.LineEntry, p.getLineTable());
+    errdefer allocator.free(line_table_copy);
+
     const func = try allocator.create(bytecode.FunctionBytecode);
     func.* = .{
         .header = .{},
@@ -289,6 +293,7 @@ pub fn compile(
         .code = code_copy,
         .constants = constants_copy,
         .source_map = null,
+        .line_table = line_table_copy,
     };
 
     return func;
@@ -327,6 +332,9 @@ pub fn compileWithOptions(
     const constants_copy = try allocator.dupe(value.JSValue, p.constants.items);
     errdefer allocator.free(constants_copy);
 
+    const line_table_copy = try allocator.dupe(bytecode.LineEntry, p.getLineTable());
+    errdefer allocator.free(line_table_copy);
+
     const func = try allocator.create(bytecode.FunctionBytecode);
     func.* = .{
         .header = .{},
@@ -340,6 +348,7 @@ pub fn compileWithOptions(
         .code = code_copy,
         .constants = constants_copy,
         .source_map = null,
+        .line_table = line_table_copy,
     };
 
     return func;
@@ -472,6 +481,9 @@ test "simple compile API" {
     defer {
         allocator.free(func.code);
         allocator.free(func.constants);
+        if (func.line_table) |line_table| {
+            if (line_table.len > 0) allocator.free(line_table);
+        }
         allocator.destroy(func);
     }
 

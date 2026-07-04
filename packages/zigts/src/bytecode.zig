@@ -33,6 +33,14 @@ pub const BytecodeFlags = packed struct(u8) {
     _reserved: u4 = 0,
 };
 
+/// Source location for a bytecode offset.
+/// Offsets point at instruction starts and entries are sorted in ascending order.
+pub const LineEntry = struct {
+    offset: u32,
+    line: u32,
+    column: u32,
+};
+
 /// Opcode definitions
 pub const Opcode = enum(u8) {
     // Stack operations
@@ -495,6 +503,7 @@ pub const FunctionBytecode = struct {
     code: []const u8,
     constants: []const value.JSValue,
     source_map: ?[]const u8,
+    line_table: ?[]const LineEntry = null,
 
     // JIT profiling fields (Phase 11)
     execution_count: u32 = 0, // Incremented on each call
@@ -716,7 +725,7 @@ pub const PatternDispatchTable = struct {
 
 /// Compact function bytecode with single allocation
 /// All variable-length data is stored inline after the header
-/// Memory layout: [Header | code bytes | constant indices | upvalue info]
+/// Memory layout: [Header | code bytes | constant indices | upvalue info | line table]
 pub const FunctionBytecodeCompact = struct {
     /// Fixed header (always present)
     header: BytecodeHeader,
@@ -732,22 +741,30 @@ pub const FunctionBytecodeCompact = struct {
     code_len: u32,
     const_count: u16,
     _pad2: u16 = 0,
+    line_count: u32 = 0,
 
     // Variable-length data follows in memory:
     // - code: [code_len]u8
     // - constants: [const_count]u32 (indices into InternPool or raw values)
     // - upvalue_info: [upvalue_count]UpvalueInfo
+    // - line_table: [line_count]LineEntry
 
     pub const HEADER_SIZE = @sizeOf(FunctionBytecodeCompact);
 
     /// Calculate total size needed for allocation
     pub fn calcSize(code_len: u32, const_count: u16, upvalue_count: u8) usize {
+        return calcSizeWithLineTable(code_len, const_count, upvalue_count, 0);
+    }
+
+    pub fn calcSizeWithLineTable(code_len: u32, const_count: u16, upvalue_count: u8, line_count: u32) usize {
         var size: usize = HEADER_SIZE;
         size += code_len; // code bytes
         size = std.mem.alignForward(usize, size, @alignOf(u32)); // align for constants
         size += @as(usize, const_count) * @sizeOf(u32);
         size = std.mem.alignForward(usize, size, @alignOf(UpvalueInfo)); // align for upvalue info
         size += @as(usize, upvalue_count) * @sizeOf(UpvalueInfo);
+        size = std.mem.alignForward(usize, size, @alignOf(LineEntry)); // align for line table
+        size += @as(usize, line_count) * @sizeOf(LineEntry);
         return size;
     }
 
@@ -777,6 +794,18 @@ pub const FunctionBytecodeCompact = struct {
         return upval_ptr[0..self.upvalue_count];
     }
 
+    pub fn getLineTable(self: *const FunctionBytecodeCompact) []const LineEntry {
+        const base = @as([*]const u8, @ptrCast(self));
+        const code_end = HEADER_SIZE + self.code_len;
+        const const_start = std.mem.alignForward(usize, code_end, @alignOf(u32));
+        const const_end = const_start + @as(usize, self.const_count) * @sizeOf(u32);
+        const upval_start = std.mem.alignForward(usize, const_end, @alignOf(UpvalueInfo));
+        const upval_end = upval_start + @as(usize, self.upvalue_count) * @sizeOf(UpvalueInfo);
+        const line_start = std.mem.alignForward(usize, upval_end, @alignOf(LineEntry));
+        const line_ptr: [*]const LineEntry = @ptrCast(@alignCast(base + line_start));
+        return line_ptr[0..self.line_count];
+    }
+
     /// Create a compact bytecode from components
     pub fn create(
         allocator: std.mem.Allocator,
@@ -790,11 +819,40 @@ pub const FunctionBytecodeCompact = struct {
         constants: []const u32,
         upvalues: []const UpvalueInfo,
     ) !*FunctionBytecodeCompact {
+        return createWithLineTable(
+            allocator,
+            header,
+            name_atom,
+            arg_count,
+            local_count,
+            stack_size,
+            flags,
+            code,
+            constants,
+            upvalues,
+            &.{},
+        );
+    }
+
+    pub fn createWithLineTable(
+        allocator: std.mem.Allocator,
+        header: BytecodeHeader,
+        name_atom: u32,
+        arg_count: u16,
+        local_count: u16,
+        stack_size: u16,
+        flags: FunctionFlags,
+        code: []const u8,
+        constants: []const u32,
+        upvalues: []const UpvalueInfo,
+        line_table: []const LineEntry,
+    ) !*FunctionBytecodeCompact {
         const upvalue_count: u8 = @intCast(@min(upvalues.len, 255));
         const code_len: u32 = @intCast(code.len);
         const const_count: u16 = @intCast(@min(constants.len, 65535));
+        const line_count: u32 = @intCast(line_table.len);
 
-        const total_size = calcSize(code_len, const_count, upvalue_count);
+        const total_size = calcSizeWithLineTable(code_len, const_count, upvalue_count, line_count);
         const bytes = try allocator.alignedAlloc(u8, .@"8", total_size);
         errdefer allocator.free(bytes);
 
@@ -810,6 +868,7 @@ pub const FunctionBytecodeCompact = struct {
             .upvalue_count = upvalue_count,
             .code_len = code_len,
             .const_count = const_count,
+            .line_count = line_count,
         };
 
         // Copy code
@@ -828,19 +887,24 @@ pub const FunctionBytecodeCompact = struct {
         const upval_dest: [*]UpvalueInfo = @ptrCast(@alignCast(bytes.ptr + upval_start));
         @memcpy(upval_dest[0..upvalue_count], upvalues);
 
+        const upval_end = upval_start + @as(usize, upvalue_count) * @sizeOf(UpvalueInfo);
+        const line_start = std.mem.alignForward(usize, upval_end, @alignOf(LineEntry));
+        const line_dest: [*]LineEntry = @ptrCast(@alignCast(bytes.ptr + line_start));
+        @memcpy(line_dest[0..line_count], line_table);
+
         return self;
     }
 
     /// Free the compact bytecode
     pub fn destroy(self: *FunctionBytecodeCompact, allocator: std.mem.Allocator) void {
-        const total_size = calcSize(self.code_len, self.const_count, self.upvalue_count);
+        const total_size = calcSizeWithLineTable(self.code_len, self.const_count, self.upvalue_count, self.line_count);
         const bytes: [*]align(8) u8 = @ptrCast(self);
         allocator.free(bytes[0..total_size]);
     }
 
     /// Get raw bytes for serialization
     pub fn asBytes(self: *const FunctionBytecodeCompact) []const u8 {
-        const total_size = calcSize(self.code_len, self.const_count, self.upvalue_count);
+        const total_size = calcSizeWithLineTable(self.code_len, self.const_count, self.upvalue_count, self.line_count);
         const base = @as([*]const u8, @ptrCast(self));
         return base[0..total_size];
     }
@@ -907,6 +971,7 @@ test "guard_id stored in FUNC_GUARD_ID slot is GC-safe under isPtr" {
         .code = &.{},
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     bc.ensureGuardId();
 
@@ -992,10 +1057,37 @@ test "FunctionBytecodeCompact serialization" {
     try std.testing.expectEqual(func.const_count, deserialized.const_count);
 }
 
+test "FunctionBytecodeCompact preserves line table" {
+    const allocator = std.testing.allocator;
+
+    const code = [_]u8{ 0x09, 0x53 }; // push_undefined, ret
+    const lines = [_]LineEntry{
+        .{ .offset = 0, .line = 2, .column = 3 },
+        .{ .offset = 1, .line = 3, .column = 10 },
+    };
+
+    const func = try FunctionBytecodeCompact.createWithLineTable(
+        allocator,
+        .{},
+        0,
+        0,
+        0,
+        1,
+        .{},
+        &code,
+        &.{},
+        &.{},
+        &lines,
+    );
+    defer func.destroy(allocator);
+
+    try std.testing.expectEqual(@as(u32, 2), func.line_count);
+    try std.testing.expectEqualSlices(LineEntry, &lines, func.getLineTable());
+}
+
 test "FunctionBytecodeCompact size calculation" {
     // Verify header size is reasonable (includes padding)
-    // BytecodeHeader(12) + name_atom(4) + arg/local/stack(6) + flags(1) + upvalue(1) + pad(1) + code_len(4) + const_count(2) + pad2(2) = 33, but struct alignment adds padding
-    try std.testing.expect(FunctionBytecodeCompact.HEADER_SIZE <= 48);
+    try std.testing.expect(FunctionBytecodeCompact.HEADER_SIZE <= 64);
 
     // Small function
     const small_size = FunctionBytecodeCompact.calcSize(10, 2, 0);
@@ -1241,6 +1333,7 @@ test "CodeVersion reference counting" {
         .code = code,
         .constants = constants,
         .source_map = null,
+        .line_table = null,
     };
 
     // Create code version (owns bytecode)
@@ -1282,6 +1375,7 @@ test "VersionedFunction atomic update" {
         .code = code1,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const cv1 = try CodeVersion.create(allocator, bc1, 1, true);
     defer cv1.release();
@@ -1303,6 +1397,7 @@ test "VersionedFunction atomic update" {
         .code = code2,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
     const cv2 = try CodeVersion.create(allocator, bc2, 2, true);
     defer cv2.release();
@@ -1350,6 +1445,7 @@ test "HotReloadManager epoch tracking" {
         .code = code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     const cv = try manager.createVersion(bc, true);
@@ -1384,6 +1480,7 @@ test "CodeVersion concurrent retain/release" {
         .code = code,
         .constants = &.{},
         .source_map = null,
+        .line_table = null,
     };
 
     // Create CodeVersion with initial ref_count = 1
