@@ -3,6 +3,8 @@
 This file provides local guidance to Claude Code when working with this
 repository. Keep changes simple, explicit, and easy to review.
 
+@AGENTS.md
+
 ## General Rules
 
 ### 1. Think Before Coding
