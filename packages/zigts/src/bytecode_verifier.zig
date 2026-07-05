@@ -41,6 +41,12 @@ pub const VerifyResult = struct {
 
 /// Maximum stack depth we consider sane
 const MAX_STACK_DEPTH: i32 = 4096;
+const UNREACHED_STACK_HEIGHT: i32 = std.math.minInt(i32);
+
+const StackEffect = struct {
+    pop: i32,
+    push: i32,
+};
 
 /// Verify a FunctionBytecode is well-formed. Returns a VerifyResult indicating
 /// whether the bytecode is valid and, if not, where the first error occurs.
@@ -314,38 +320,52 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
         pc += info.size;
     }
 
-    // Phase 4: stack discipline verification
-    // Abstract interpretation: track minimum stack height through linear scan.
-    // For conditional branches, we verify both the fall-through and the target path
-    // don't cause underflow. This is conservative (doesn't track all paths through
-    // the control flow graph) but catches obvious violations.
-    var stack_height: i32 = 0;
-    pc = 0;
-    while (pc < code.len) {
+    // Phase 4: stack discipline verification over the reachable control-flow graph.
+    const allocator = std.heap.smp_allocator;
+    const stack_heights = allocator.alloc(i32, code.len) catch {
+        return .{
+            .valid = false,
+            .err = VerifyError.StackOverflow,
+            .message = "stack verifier metadata allocation failed",
+        };
+    };
+    defer allocator.free(stack_heights);
+    @memset(stack_heights, UNREACHED_STACK_HEIGHT);
+
+    const worklist = allocator.alloc(usize, code.len) catch {
+        return .{
+            .valid = false,
+            .err = VerifyError.StackOverflow,
+            .message = "stack verifier worklist allocation failed",
+        };
+    };
+    defer allocator.free(worklist);
+
+    const queued = allocator.alloc(bool, code.len) catch {
+        return .{
+            .valid = false,
+            .err = VerifyError.StackOverflow,
+            .message = "stack verifier queue metadata allocation failed",
+        };
+    };
+    defer allocator.free(queued);
+    @memset(queued, false);
+
+    stack_heights[0] = 0;
+    worklist[0] = 0;
+    queued[0] = true;
+    var worklist_len: usize = 1;
+
+    while (worklist_len > 0) {
+        worklist_len -= 1;
+        pc = worklist[worklist_len];
+        queued[pc] = false;
+        const stack_height = stack_heights[pc];
         const op: Opcode = @enumFromInt(code[pc]);
         const info = bytecode.getOpcodeInfo(op);
 
-        // Handle dynamic stack effects
-        const pop: i32 = switch (op) {
-            // call/call_method/tail_call: pop argc + 1 (function) args from stack
-            .call, .call_method, .tail_call => @as(i32, code[pc + 1]) + 1,
-            // call_ic: pop argc + 1
-            .call_ic => @as(i32, code[pc + 1]) + 1,
-            // concat_n: pop N values
-            .concat_n => @as(i32, code[pc + 1]),
-            // push_const_call fuses `push_const` of the final argument with `call`.
-            // The opcode contributes one argument itself, so the pre-op stack only
-            // contains the callee plus argc-1 already-pushed arguments.
-            .push_const_call => @as(i32, code[pc + 3]),
-            // get_field_call: pop argc (operand at pc+3)
-            .get_field_call => @as(i32, code[pc + 3]) + 2,
-            else => @as(i32, info.n_pop),
-        };
-
-        const push: i32 = @as(i32, info.n_push);
-
-        stack_height -= pop;
-        if (stack_height < 0) {
+        const effect = stackEffect(code, pc, op, info);
+        if (stack_height < effect.pop) {
             return .{
                 .valid = false,
                 .err = VerifyError.StackUnderflow,
@@ -353,9 +373,11 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
                 .message = "stack underflow",
             };
         }
-        stack_height += push;
 
-        if (stack_height > MAX_STACK_DEPTH) {
+        const after_pop = stack_height - effect.pop;
+        const after_op = after_pop + effect.push;
+
+        if (after_op > MAX_STACK_DEPTH) {
             return .{
                 .valid = false,
                 .err = VerifyError.StackOverflow,
@@ -364,10 +386,109 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
             };
         }
 
-        pc += info.size;
+        const next_pc = pc + info.size;
+        const branch_target = switch (op) {
+            .goto, .if_true, .if_false, .if_false_goto, .drop_goto, .for_of_next => @as(usize, @intCast(forwardTarget(pc, info.size, readI16(code, pc + 1)))),
+            .loop => @as(usize, @intCast(loopTarget(pc, info.size, readI16(code, pc + 1)))),
+            .for_of_next_put_loc => @as(usize, @intCast(forwardTarget(pc, info.size, readI16(code, pc + 2)))),
+            else => null,
+        };
+
+        switch (op) {
+            .halt, .ret, .ret_undefined => {},
+            .goto, .loop, .drop_goto => {
+                if (propagateStackHeight(code, stack_heights, queued, worklist, &worklist_len, branch_target.?, after_op, pc)) |failure| return failure;
+            },
+            .if_true, .if_false, .if_false_goto => {
+                if (propagateStackHeight(code, stack_heights, queued, worklist, &worklist_len, next_pc, after_op, pc)) |failure| return failure;
+                if (propagateStackHeight(code, stack_heights, queued, worklist, &worklist_len, branch_target.?, after_op, pc)) |failure| return failure;
+            },
+            .for_of_next => {
+                if (propagateStackHeight(code, stack_heights, queued, worklist, &worklist_len, next_pc, after_op, pc)) |failure| return failure;
+                if (propagateStackHeight(code, stack_heights, queued, worklist, &worklist_len, branch_target.?, after_pop, pc)) |failure| return failure;
+            },
+            .for_of_next_put_loc => {
+                if (propagateStackHeight(code, stack_heights, queued, worklist, &worklist_len, next_pc, after_op, pc)) |failure| return failure;
+                if (propagateStackHeight(code, stack_heights, queued, worklist, &worklist_len, branch_target.?, after_op, pc)) |failure| return failure;
+            },
+            else => {
+                if (propagateStackHeight(code, stack_heights, queued, worklist, &worklist_len, next_pc, after_op, pc)) |failure| return failure;
+            },
+        }
     }
 
     return .{ .valid = true };
+}
+
+fn stackEffect(code: []const u8, pc: usize, op: Opcode, info: bytecode.OpcodeInfo) StackEffect {
+    const pop: i32 = switch (op) {
+        // call/call_method/tail_call: pop argc + 1 (function) args from stack
+        .call, .call_method, .tail_call => @as(i32, code[pc + 1]) + 1,
+        // call_ic: pop argc + 1
+        .call_ic => @as(i32, code[pc + 1]) + 1,
+        // concat_n: pop N values
+        .concat_n => @as(i32, code[pc + 1]),
+        // push_const_call fuses `push_const` of the final argument with `call`.
+        // The opcode contributes one argument itself, so the pre-op stack only
+        // contains the callee plus argc-1 already-pushed arguments.
+        .push_const_call => @as(i32, code[pc + 3]),
+        // get_field_call: pop argc (operand at pc+3)
+        .get_field_call => @as(i32, code[pc + 3]) + 2,
+        else => @as(i32, info.n_pop),
+    };
+
+    return .{
+        .pop = pop,
+        .push = @as(i32, info.n_push),
+    };
+}
+
+fn forwardTarget(pc: usize, instruction_size: usize, offset: i16) i64 {
+    return @as(i64, @intCast(pc)) + @as(i64, @intCast(instruction_size)) + @as(i64, offset);
+}
+
+fn loopTarget(pc: usize, instruction_size: usize, offset: i16) i64 {
+    return @as(i64, @intCast(pc)) + @as(i64, @intCast(instruction_size)) - @as(i64, offset);
+}
+
+fn propagateStackHeight(
+    code: []const u8,
+    stack_heights: []i32,
+    queued: []bool,
+    worklist: []usize,
+    worklist_len: *usize,
+    target: usize,
+    stack_height: i32,
+    source_pc: usize,
+) ?VerifyResult {
+    if (target >= code.len) {
+        return .{
+            .valid = false,
+            .err = VerifyError.JumpOutOfBounds,
+            .offset = source_pc,
+            .message = "control flow leaves bytecode",
+        };
+    }
+    if (stack_height > MAX_STACK_DEPTH) {
+        return .{
+            .valid = false,
+            .err = VerifyError.StackOverflow,
+            .offset = source_pc,
+            .message = "stack height exceeds maximum",
+        };
+    }
+
+    const previous = stack_heights[target];
+    if (previous == UNREACHED_STACK_HEIGHT or stack_height < previous) {
+        stack_heights[target] = stack_height;
+        if (!queued[target]) {
+            worklist[worklist_len.*] = target;
+            worklist_len.* += 1;
+            queued[target] = true;
+        }
+    }
+
+    return null;
 }
 
 fn isInstructionBoundary(code: []const u8, target: usize) bool {
@@ -514,6 +635,56 @@ test "verify: stack underflow rejected" {
     const result = verify(&func);
     try std.testing.expect(!result.valid);
     try std.testing.expectEqual(VerifyError.StackUnderflow, result.err.?);
+}
+
+test "verify: taken conditional branch underflow rejected" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.push_true), // offset 0
+            @intFromEnum(Opcode.if_true), // offset 1
+            0x01, 0x00, // target = offset 5
+            @intFromEnum(Opcode.push_0), // offset 4, skipped by taken branch
+            @intFromEnum(Opcode.ret), // offset 5
+        },
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.StackUnderflow, result.err.?);
+}
+
+test "verify: balanced forward conditional branch passes" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.push_true), // offset 0
+            @intFromEnum(Opcode.if_true), // offset 1
+            0x04, 0x00, // true path target = offset 8
+            @intFromEnum(Opcode.push_0), // offset 4, false path value
+            @intFromEnum(Opcode.goto), // offset 5
+            0x01, 0x00, // target = offset 9
+            @intFromEnum(Opcode.push_1), // offset 8, true path value
+            @intFromEnum(Opcode.ret), // offset 9
+        },
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(result.valid);
 }
 
 test "verify: local index out of bounds rejected" {
