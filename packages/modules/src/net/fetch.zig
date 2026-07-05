@@ -16,9 +16,15 @@ pub const FetchCallFn = *const fn (
     args: []const sdk.JSValue,
 ) anyerror!sdk.JSValue;
 
+pub const FetchDeadlinePassedFn = *const fn (
+    runtime_ptr: *anyopaque,
+    handle: *sdk.ModuleHandle,
+) bool;
+
 pub const FetchState = struct {
     runtime_ptr: *anyopaque,
     call_fn: FetchCallFn,
+    deadline_passed_fn: ?FetchDeadlinePassedFn = null,
 };
 
 pub const binding = sdk.ModuleBinding{
@@ -85,8 +91,8 @@ const MAX_ALLOWED_DELAY_MS: i64 = 30000;
 /// Negative retry/delay values are normalized to 0.
 ///
 /// Backoff formula: delay = min(baseDelayMs * 2^attempt, maxDelayMs)
-/// Delays are implemented with std.time.sleep; this is safe because the JS
-/// runtime is single-threaded and handlers are fully synchronous.
+/// Delays are skipped once the runtime request deadline has passed, because
+/// this synchronous native loop is not interrupted by interpreter backedges.
 fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
     const state = sdk.getModuleState(handle, FetchState, MODULE_STATE_SLOT) orelse {
         return sdk.throwError(handle, "Error", "fetchWithRetry() requires runtime installation (no runtime callback wired)");
@@ -128,6 +134,7 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
     var attempt: i32 = 0;
     while (true) {
         last_response = try state.call_fn(state.runtime_ptr, handle, fetch_args);
+        const deadline_passed = requestDeadlinePassed(state, handle);
 
         // Inside a parallel()/race() thunk the underlying fetch is only RECORDED
         // (a descriptor) and returns the `undefined` placeholder, not a real
@@ -169,6 +176,7 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
         }
 
         if (attempt >= max_retries) return last_response;
+        if (shouldStopBeforeBackoff(deadline_passed, attempt, max_retries)) return last_response;
 
         // Compute exponential delay: base * 2^attempt, capped at max.
         const shift: u6 = @intCast(@min(attempt, 62));
@@ -184,6 +192,15 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
         }
         attempt += 1;
     }
+}
+
+fn requestDeadlinePassed(state: *const FetchState, handle: *sdk.ModuleHandle) bool {
+    const deadline_passed_fn = state.deadline_passed_fn orelse return false;
+    return deadline_passed_fn(state.runtime_ptr, handle);
+}
+
+fn shouldStopBeforeBackoff(deadline_passed: bool, attempt: i32, max_retries: i32) bool {
+    return deadline_passed or attempt >= max_retries;
 }
 
 fn normalizeRetryOptions(max_retries: *i32, base_delay_ms: *i64, max_delay_ms: *i64) ?[]const u8 {
@@ -225,4 +242,10 @@ test "fetchWithRetry retry options normalize negative values" {
     try testing.expectEqual(@as(i32, 0), retries);
     try testing.expectEqual(@as(i64, 0), base_delay_ms);
     try testing.expectEqual(@as(i64, 0), max_delay_ms);
+}
+
+test "fetchWithRetry deadline short-circuits before backoff" {
+    try testing.expect(shouldStopBeforeBackoff(true, 0, MAX_ALLOWED_RETRIES));
+    try testing.expect(!shouldStopBeforeBackoff(false, 0, MAX_ALLOWED_RETRIES));
+    try testing.expect(shouldStopBeforeBackoff(false, MAX_ALLOWED_RETRIES, MAX_ALLOWED_RETRIES));
 }

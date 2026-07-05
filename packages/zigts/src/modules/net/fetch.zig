@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../../compat.zig");
 const context = @import("../../context.zig");
 const value = @import("../../value.zig");
 const adapter = @import("../../module_binding_adapter.zig");
@@ -31,6 +32,16 @@ const InstalledState = struct {
         const result = try self.call_fn(self.runtime_ptr, adapter.contextFromHandle(handle), adapter.internalArgs(args));
         return adapter.sdkValue(result);
     }
+
+    fn sdkDeadlinePassed(_: *anyopaque, handle: *sdk.ModuleHandle) bool {
+        const ctx = adapter.contextFromHandle(handle);
+        const deadline = ctx.deadline_ns;
+        if (deadline == 0) return false;
+        const now = compat.monotonicNowNs() catch return false;
+        if (now < deadline) return false;
+        ctx.interrupt_requested.store(true, .monotonic);
+        return true;
+    }
 };
 
 pub fn installState(
@@ -52,6 +63,7 @@ pub fn installState(
         .base = .{
             .runtime_ptr = @ptrCast(installed),
             .call_fn = InstalledState.sdkCall,
+            .deadline_passed_fn = InstalledState.sdkDeadlinePassed,
         },
     };
     ctx.setModuleState(MODULE_STATE_SLOT, @ptrCast(&installed.base), &stateDeinitAdapter);
