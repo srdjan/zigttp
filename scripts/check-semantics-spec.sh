@@ -45,11 +45,20 @@ else
     }
 fi
 
-printf '%s' "$AUDIT_JSON" | jq -e '.smt.available == true and .smt.proved == .smt.total and .smt.unproven == 0' >/dev/null 2>&1 ||
-  {
-    echo "error: SMT equivalence check incomplete or unavailable." >&2
+if printf '%s' "$AUDIT_JSON" | jq -e '.smt.available == false' >/dev/null 2>&1; then
+  if z3_explicitly_disabled; then
+    echo "NOTE: ZIGTTP_Z3 disables z3 -> SMT equivalence check SKIPPED (soundness boundary unchecked, explicit opt-out)"
+  else
+    echo "error: z3 not found, so the SMT equivalence check did not run. Install z3 or set ZIGTTP_Z3=off to skip it explicitly." >&2
     exit 1
-  }
+  fi
+else
+  printf '%s' "$AUDIT_JSON" | jq -e '.smt.available == true and .smt.proved == .smt.total and .smt.unproven == 0' >/dev/null 2>&1 ||
+    {
+      echo "error: SMT equivalence check incomplete or unavailable." >&2
+      exit 1
+    }
+fi
 
 ./zig-out/bin/zigts spec-render --check docs/spec/semantics.spec.ts
 echo "semantics spec gate OK"
