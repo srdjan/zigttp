@@ -175,8 +175,16 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a handler in handler.ts that requires a bearer JWT using zigttp:auth " ++
             "with the secret from env JWT_SECRET, returns 401 when the token is missing or invalid, " ++
             "and otherwise returns the verified claims as JSON. Never use a fallback secret.",
-        // Was ZTS401 (credential in response); closed by the strict-mode traps
-        // teaching (return only non-sensitive fields).
+        // Was ZTS401 (credential in response). The recorded handler had
+        // evaded it by round-tripping the claims through
+        // JSON.stringify/JSON.parse, which the taint tracker used to treat as
+        // laundering the `credential` label. That laundering hole was closed
+        // (flow_checker now propagates labels through member/JSON calls), so
+        // returning the raw claims correctly flags ZTS401 again. The cassette's
+        // applied handler was hand-corrected to return a non-sensitive
+        // confirmation (`{ authenticated: true }`) instead of the raw claims;
+        // returning any claim field (even `result.value.sub`) stays credential
+        // labelled and would leak. Re-record from a live model to refresh.
         .expect_first_draft_pass = true,
     },
     .{
