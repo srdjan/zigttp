@@ -174,6 +174,17 @@ pub fn readSmallMessage(ws: *std.http.Server.WebSocket) ReadSmallMessageError!Re
         if (!h0.fin) return error.MessageOversize;
         if (!h1.mask) return error.MissingMaskBit;
 
+        // RFC 6455 §5.5: control frames (ping/pong/close) MUST carry their
+        // length in the 7-bit field. A control frame that uses the 126
+        // (.len16) or 127 (.len64) extended encoding is malformed even when
+        // the decoded length is <= 125, so reject the encoding form here,
+        // before decoding the length.
+        if (isControlOpcode(h0.opcode) and
+            (h1.payload_len == .len16 or h1.payload_len == .len64))
+        {
+            return error.MessageOversize;
+        }
+
         const len: usize = switch (h1.payload_len) {
             .len16 => try in.takeInt(u16, .big),
             .len64 => std.math.cast(usize, try in.takeInt(u64, .big)) orelse return error.MessageOversize,
@@ -338,6 +349,42 @@ test "server frame header carries lengths past the inbound ceiling" {
     try testing.expectEqual(@as(usize, 10), large.len);
     try testing.expectEqual(@as(u8, 127), large[1]);
     try testing.expectEqual(@as(u64, 71680), std.mem.readInt(u64, large[2..10], .big));
+}
+
+test "control frame using the extended length encoding is rejected" {
+    // RFC 6455 §5.5: a ping carrying its length in the 16-bit extended field
+    // (126) is malformed even though the decoded length (4) is <= 125.
+    // Masked ping: FIN+ping (0x89), MASK + len-field 126 (0xFE), u16 len = 4,
+    // zero mask key, 4 payload bytes.
+    const malformed = [_]u8{
+        0x89, 0xFE, 0x00, 0x04,
+        0x00, 0x00, 0x00, 0x00,
+        0x01, 0x02, 0x03, 0x04,
+    };
+    var in = std.Io.Reader.fixed(&malformed);
+    var out_buf: [8]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+    var ws: std.http.Server.WebSocket = .{ .key = "", .input = &in, .output = &out };
+    try testing.expectError(error.MessageOversize, readSmallMessage(&ws));
+}
+
+test "control frame using the 7-bit length is accepted" {
+    // The same ping with its length inline in the 7-bit field is well-formed
+    // and must not be swept up by the extended-encoding rejection above.
+    // Masked ping: FIN+ping (0x89), MASK + len 4 (0x84), zero mask key, payload.
+    // Mutable backing: readSmallMessage unmasks the payload in place.
+    var wellformed = [_]u8{
+        0x89, 0x84, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x02,
+        0x03, 0x04,
+    };
+    var in = std.Io.Reader.fixed(wellformed[0..]);
+    var out_buf: [8]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+    var ws: std.http.Server.WebSocket = .{ .key = "", .input = &in, .output = &out };
+    const result = try readSmallMessage(&ws);
+    try testing.expectEqual(Opcode.ping, result.message.opcode);
+    try testing.expectEqualSlices(u8, &.{ 0x01, 0x02, 0x03, 0x04 }, result.message.data);
 }
 
 test "close payload packs the code ahead of the reason" {
