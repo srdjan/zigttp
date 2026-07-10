@@ -73,6 +73,9 @@ jobs:
       - name: Run panic isolation smoke
         run: zig build test-panic-isolation
 
+      - name: Run studio workbench unit tests
+        run: zig build test-cli -Dstudio
+
       - name: Run example handler tests
         run: bash scripts/test-examples.sh
 
