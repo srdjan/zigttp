@@ -1179,6 +1179,37 @@ pub const FlowChecker = struct {
                 return labels;
             },
 
+            .jsx_element, .jsx_fragment => {
+                // A JSX tree carries the union of every taint interpolated into
+                // its attribute values and children. renderToString embeds these
+                // verbatim into the HTML body, so a secret in a prop or child
+                // leaks even though the markup HTML-escapes it.
+                const el = self.ir_view.getJsxElement(node) orelse return LabelSet.empty;
+                var labels = LabelSet.empty;
+                var p: u16 = 0;
+                while (p < el.props_count) : (p += 1) {
+                    const prop_idx = self.ir_view.getListIndex(el.props_start, p);
+                    const prop_tag = self.ir_view.getTag(prop_idx) orelse continue;
+                    if (prop_tag == .jsx_attribute or prop_tag == .jsx_spread_attribute) {
+                        const attr = self.ir_view.getJsxAttr(prop_idx) orelse continue;
+                        if (attr.value != null_node) {
+                            labels = LabelSet.merge(labels, self.inferLabels(attr.value));
+                        }
+                    }
+                }
+                var c: u16 = 0;
+                while (c < el.children_count) : (c += 1) {
+                    const child_idx = self.ir_view.getListIndex(el.children_start, c);
+                    labels = LabelSet.merge(labels, self.inferLabels(child_idx));
+                }
+                return labels;
+            },
+
+            .jsx_expr_container => {
+                if (self.ir_view.getOptValue(node)) |expr| return self.inferLabels(expr);
+                return LabelSet.empty;
+            },
+
             else => return LabelSet.empty,
         }
     }
@@ -1196,6 +1227,20 @@ pub const FlowChecker = struct {
                     return self.refineEnvLabels(arg, base_labels);
                 }
                 return base_labels;
+            }
+
+            // renderToString(jsx) auto-escapes its output, so a user_input value
+            // interpolated into the JSX and sent via Response.html is HTML-safe
+            // (defended). Model it as `.validated` so the XSS check does not warn.
+            // Escaping does NOT hide a secret/credential, so those labels still
+            // propagate through the argument union and fire their sink diagnostics.
+            if (self.isRenderToStringCall(call_data.callee)) {
+                var labels = LabelSet{ .validated = true };
+                for (0..call_data.args_count) |i| {
+                    const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+                    labels = LabelSet.merge(labels, self.inferLabels(arg));
+                }
+                return labels;
             }
 
             // User-defined function call: summarize the callee body when its
@@ -1779,6 +1824,17 @@ pub const FlowChecker = struct {
         if (binding.kind != .undeclared_global) return false;
         const name = self.resolveAtomName(binding.slot) orelse return false;
         return std.mem.eql(u8, name, "fetchSync");
+    }
+
+    /// True if the callee is the bare global `renderToString`, the JSX-to-HTML
+    /// serializer that auto-escapes interpolated values.
+    fn isRenderToStringCall(self: *const FlowChecker, callee: NodeIndex) bool {
+        const tag = self.ir_view.getTag(callee) orelse return false;
+        if (tag != .identifier) return false;
+        const binding = self.ir_view.getBinding(callee) orelse return false;
+        if (binding.kind != .undeclared_global) return false;
+        const name = self.resolveAtomName(binding.slot) orelse return false;
+        return std.mem.eql(u8, name, "renderToString");
     }
 
     fn isReqProperty(self: *const FlowChecker, node: NodeIndex, expected_prop: []const u8) bool {
@@ -3480,4 +3536,57 @@ test "FlowChecker proves no_secret_leakage for benign method calls on untainted 
         \\}
     ;
     try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+const JsxCheckResult = struct { no_secret_leakage: bool, injection_safe: bool };
+
+/// JSX-enabled harness: parse `source` with JSX on, run the FlowChecker, and
+/// return the two properties the JSX-laundering tests assert on.
+fn runJsxCheck(allocator: std.mem.Allocator, source: []const u8) !JsxCheckResult {
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    parser.enableJsx();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+    return .{
+        .no_secret_leakage = checker.getProperties().no_secret_leakage,
+        .injection_safe = checker.getProperties().injection_safe,
+    };
+}
+
+test "FlowChecker flags a secret interpolated into JSX reaching an HTML response" {
+    // A JSX expression container `{secret}` carries taint; renderToString
+    // embeds it verbatim into the body. HTML-escaping does not hide a secret.
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  return Response.html(renderToString(<p>{secret}</p>));
+        \\}
+    ;
+    const r = try runJsxCheck(std.testing.allocator, source);
+    try std.testing.expect(!r.no_secret_leakage);
+}
+
+test "FlowChecker keeps injection_safe for request data escaped through renderToString" {
+    // renderToString auto-escapes, so user input interpolated into JSX and sent
+    // via Response.html is defended -- no XSS warning, injection_safe stays true.
+    const source =
+        \\function handler(req) {
+        \\  return Response.html(renderToString(<p>Method: {req.method}</p>));
+        \\}
+    ;
+    const r = try runJsxCheck(std.testing.allocator, source);
+    try std.testing.expect(r.injection_safe);
 }
