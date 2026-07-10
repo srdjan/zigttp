@@ -6,10 +6,13 @@ under `[Unreleased]`.
 
 ## Highlights
 
-Durable workflows now fail closed on unproven automatic retry or reuse. The
-workflow queue also has operator-visible recovery paths for dead-lettered
-children and interrupted lease reclaim, and durable fetch stops retrying once
-the enclosing step deadline passes.
+A runtime fault no longer returns a bare 500: the body names the proof chip that
+guards the fault's class, plus the faulting source line, and a fault on a fully
+proven path is flagged as a soundness incident. Durable workflows now fail closed
+on unproven automatic retry or reuse. The workflow queue also has
+operator-visible recovery paths for dead-lettered children and interrupted lease
+reclaim, and durable fetch stops retrying once the enclosing step deadline
+passes.
 
 ## Changed
 
@@ -30,6 +33,20 @@ the enclosing step deadline passes.
 
 ## Added
 
+- Proof-explained failures: the runtime maps a fault to the proof chip that
+  guards its class (type error to `optional_safe`/`result_safe`, non-Response
+  return to `exhaustive_returns`) and names the unproven chip as the predicted
+  cause. A fault on a path where every guarding chip was proven is reported as a
+  possible soundness incident.
+- Source-mapped runtime traps: the engine carries a per-function line table from
+  IR through bytecode and the bytecode cache (format v4), so an interpreter-tier
+  type fault reports the faulting `line:column` in the 500 body and in the
+  soundness-incident record.
+- `--incident-log <FILE>`: opt-in JSONL sink for soundness incidents, appended
+  through a shared `O_APPEND` fd. Off by default.
+- `--max-websocket-connections <N>`: caps live WebSocket connections (default
+  1024; `0` disables upgrades). Upgrades past the cap get a `503` before
+  protocol ownership transfers.
 - `--workflow-queue` recovers `.reclaim-*` files left by a crashed lease-reclaim
   attempt instead of leaving them invisible to future claims.
 - A dead-lettered workflow-queue child request now suspends the parent durable

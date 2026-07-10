@@ -29,8 +29,9 @@ key, user, or route.
 
 ## Failure Behavior
 
-- Handler exceptions and engine runtime errors return `500 Internal Server
-  Error`; the server process and other workers keep running.
+- Handler exceptions and engine runtime errors return `500`; the server process
+  and other workers keep running. The body is proof-explained rather than a bare
+  `Internal Server Error` (see [Proof-Explained 500s](#proof-explained-500s)).
 - Allocation failure under an explicit `-m` ceiling returns `500`.
 - Stack overflow and call-depth overflow return typed engine errors that fold
   into `500`.
@@ -50,6 +51,44 @@ key, user, or route.
   invocation, returns `500`, and quarantines the pool slot. The server and other
   workers keep running. A panic in server infrastructure outside that boundary
   still aborts the process.
+
+## Proof-Explained 500s
+
+The runtime maps a fault to the proof chip that guards its class, then attributes
+it against what the handler proved.
+
+| Fault class | Trigger | Guarding chips |
+|---|---|---|
+| Type fault | `TypeError` / `NotCallable`: an un-narrowed optional dereferenced or called, or `.value` read off an unchecked `Result`. | `optional_safe`, `result_safe` |
+| Non-Response return | The handler returned something that is not a `Response`. | `exhaustive_returns` |
+| Unmapped | Everything else. | none |
+
+When a guarding chip was not proven, that chip is the predicted cause:
+
+```text
+This response path was not proven optional_safe. A value was used without narrowing its type. at 12:9
+```
+
+When every guarding chip was proven and the handler still faulted, the fault
+contradicts the proof, and the body says so:
+
+```text
+Possible soundness incident: the handler faulted on a path proven optional_safe/result_safe. This should be impossible — please report it.
+```
+
+An unmapped fault returns the plain `Internal Server Error` body. The trailing
+`line:column` is appended only when the interpreter resolved a source location;
+JIT-tier faults and JS-thrown exceptions often carry none.
+
+`--incident-log <file>` is an opt-in JSONL sink for confirmed soundness
+incidents. Each is appended as one line through a shared `O_APPEND` fd:
+
+```json
+{"kind":"soundness_incident","method":"GET","path":"/users/1","proven":["optional_safe","result_safe"],"detail":"TypeError"}
+```
+
+Writing is best-effort and never fails the request path. The always-on error log
+is unaffected.
 
 ## Durable Replay And Workflow Queue
 

@@ -468,8 +468,11 @@ for the reason and supported replacement.
 
 **A request returns 500.**
 
-The process stays up. Check stderr, memory limits, stack depth, and any
-virtual-module runtime requirements. See [Reliability](reliability.md).
+The process stays up. Read the response body first: a type fault or a
+non-Response return names the proof chip that guards it and, when the
+interpreter resolved one, the faulting `line:column`. If no chip is named, check
+stderr, memory limits, stack depth, and any virtual-module runtime requirements.
+See [Reliability](reliability.md#proof-explained-500s).
 
 **A port is already in use.**
 

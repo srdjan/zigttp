@@ -91,7 +91,8 @@ workflows, WebSocket, and proof examples.
   `class`, or `try/catch`; unsupported constructs fail at compile time.
 - Proofs: response-path verification, Result/optional checks, state-isolation
   checks, active `Spec<...>` obligations, flow checks, proof traces, witnesses,
-  and proof receipts.
+  and proof receipts. A runtime fault that slips through names the proof chip
+  that guards it and the faulting source line, instead of a bare 500.
 - Virtual modules: native modules under `zigttp:*` for env, crypto, auth,
   validation, cache, SQL, fetch, service calls, WebSocket, routing, durable and
   multi-handler workflows, structured I/O, logging, IDs, time, text, and more.

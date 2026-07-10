@@ -58,6 +58,7 @@ Common `dev` and `serve` flags:
 | `--watch` | Watch handler files. |
 | `--prove` | Diff contracts before hot-swap when watching. |
 | `--trace <file>` | Record request/response traces. |
+| `--incident-log <file>` | Append runtime soundness incidents as JSONL. Off by default. |
 | `--replay <file>` | Replay recorded traces. |
 | `--test <file>` | Run JSONL handler tests. |
 | `--sqlite <file>` | SQLite database for `zigttp:sql`. |
@@ -68,6 +69,11 @@ Common `dev` and `serve` flags:
 | `--outbound-http` / `--outbound-host <host>` | Enable outbound HTTP. The host allowlist matches on host only, not port. |
 | `--static <dir>` | Serve static files. |
 | `--no-env-check` | Skip startup env validation. |
+
+`dev` adds `--no-prove` (watch and reload without contract gating) and
+`--record-proof`, which captures the session's requests into a replayable proof
+capsule at `.zigttp/capsules/default/`. `serve --watch` takes `--prove` and
+`--force-swap` instead.
 
 Observability: per-request access logging is on by default (method, path,
 status, duration, request id; disable with `-q`), and pool/latency metrics are
@@ -97,9 +103,12 @@ zigttp proofs badge
 zigttp proofs gate --base origin/main --head HEAD
 ```
 
-`zigttp proof replay <capsule>` replays a recorded proof capsule. `zigttp
-verify <url>` verifies a live endpoint's attestation. `zigttp proofs verify
-<bundle-dir>` re-hashes a local proof bundle.
+`zigttp proof replay <capsule>` replays a capsule recorded by `zigttp dev
+--record-proof` against the current handler: exit 0 reproduced, 1 regression. It
+fails closed when the capsule's pinned handler, contract, or policy hash no
+longer matches (`--allow-version-mismatch` overrides). `zigttp verify <url>`
+verifies a live endpoint's attestation. `zigttp proofs verify <bundle-dir>`
+re-hashes a local proof bundle.
 
 `zigttp verify --json` includes durable workflow receipt fields when a build was
 attested with a workflow contract: `durableWorkflowProofLevel`,
