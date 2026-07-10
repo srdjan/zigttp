@@ -18,6 +18,7 @@ const name = "pi_repair_plan";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "repair-plan",
+    .effect = .persist_agent_state,
     .description =
     \\Generate compiler-native typed repair plans for a handler.
     \\The tool runs handler verification and property witness analysis,

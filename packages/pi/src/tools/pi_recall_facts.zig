@@ -33,6 +33,7 @@ const default_limit: usize = 20;
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "recall-facts",
+    .effect = .read_workspace,
     .description =
     \\Read back the persisted project memory corpus from
     \\.zigttp/memory.jsonl. Pinned facts come first (chronological), then

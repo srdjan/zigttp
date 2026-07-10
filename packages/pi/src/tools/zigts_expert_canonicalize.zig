@@ -10,6 +10,7 @@ const name = "zigts_expert_canonicalize";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "canonicalize preview",
+    .effect = .analyze,
     .description = "Preview local canonical ZigTS refactor intents. Set simulate=true to apply previews in memory through edit_simulate.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\",\"description\":\"Handler file to analyze.\"},\"simulate\":{\"type\":\"boolean\",\"description\":\"Apply previews in memory and run edit_simulate.\"}},\"required\":[\"file\"]}",
     .decode_json = decodeJson,

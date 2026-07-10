@@ -26,6 +26,7 @@ const name = "pi_remember_fact";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "remember-fact",
+    .effect = .persist_agent_state,
     .description =
     \\Persist a project-scoped fact to .zigttp/memory.jsonl so it survives
     \\across expert sessions. Use this for load-bearing observations the

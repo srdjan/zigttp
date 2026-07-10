@@ -18,6 +18,7 @@ const registry_mod = @import("../../registry/registry.zig");
 const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");
 const http_errors = @import("../http_errors.zig");
+const apply_edit = @import("../anthropic/apply_edit.zig");
 
 const default_base_url = "https://api.openai.com/v1/responses";
 pub const default_model = "gpt-4o-mini";
@@ -67,11 +68,16 @@ pub const Client = struct {
     ) !loop.ModelCallResult {
         const body = try buildRequestBody(arena, self.config, transcript, extra_user_text);
         const response_body = try post(arena, self.config, body);
-        const event_list = try sse_parser.parseAll(arena, response_body);
-        const outcome = try response_assembler.assemble(arena, event_list);
-        return .{ .reply = outcome.reply, .usage = outcome.usage };
+        return assembleTurn(arena, response_body);
     }
 };
+
+fn assembleTurn(arena: std.mem.Allocator, response_body: []const u8) !loop.ModelCallResult {
+    const event_list = try sse_parser.parseAll(arena, response_body);
+    const outcome = try response_assembler.assemble(arena, event_list);
+    const reply = try apply_edit.maybeRemap(arena, outcome.reply);
+    return .{ .reply = reply, .usage = outcome.usage };
+}
 
 // -----------------------------------------------------------------------
 // Request body
@@ -197,8 +203,16 @@ fn writeTranscriptEntry(
 
 pub fn writeToolsArray(writer: anytype, registry: *const registry_mod.Registry) !void {
     try writer.writeByte('[');
-    for (registry.list(), 0..) |entry, i| {
-        if (i > 0) try writer.writeByte(',');
+    try writer.writeAll("{\"type\":\"function\",\"name\":");
+    try writeJsonString(writer, apply_edit.tool_name);
+    try writer.writeAll(",\"description\":");
+    try writeJsonString(writer, apply_edit.tool_description);
+    try writer.writeAll(",\"parameters\":");
+    try writer.writeAll(apply_edit.input_schema_literal);
+    try writer.writeByte('}');
+    for (registry.list()) |entry| {
+        if (!entry.allowedOn(.model)) continue;
+        try writer.writeByte(',');
         try writer.writeAll("{\"type\":\"function\",\"name\":");
         try writeJsonString(writer, entry.name);
         try writer.writeAll(",\"description\":");
@@ -343,6 +357,39 @@ fn writeJsonString(writer: anytype, s: []const u8) !void {
 
 const testing = std.testing;
 
+const apply_edit_sse =
+    \\event: response.created
+    \\data: {"type":"response.created","response":{"id":"resp_edit","status":"in_progress"}}
+    \\
+    \\event: response.output_item.added
+    \\data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"apply_edit","arguments":""}}
+    \\
+    \\event: response.function_call_arguments.delta
+    \\data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"file\":\"handler.ts\",\"content\":\"function handler() {}\"}"}
+    \\
+    \\event: response.output_item.done
+    \\data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"apply_edit","arguments":"{\"file\":\"handler.ts\",\"content\":\"function handler() {}\"}"}}
+    \\
+    \\event: response.completed
+    \\data: {"type":"response.completed","response":{"id":"resp_edit","status":"completed","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}
+    \\
+    \\data: [DONE]
+;
+
+test "OpenAI response pipeline remaps apply_edit into an edit reply" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const result = try assembleTurn(arena.allocator(), apply_edit_sse);
+    switch (result.reply.response) {
+        .edit => |edit| {
+            try testing.expectEqualStrings("handler.ts", edit.file);
+            try testing.expectEqualStrings("function handler() {}", edit.content);
+        },
+        else => return error.TestFailed,
+    }
+}
+
 test "buildRequestBody: first turn carries instructions + one user input item and no tools" {
     var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(testing.allocator);
@@ -444,6 +491,7 @@ test "writeToolsArray: wraps registry entries in flat Responses-API tool shape" 
     const echo_tool: registry_mod.ToolDef = .{
         .name = "echo",
         .label = "Echo",
+        .effect = .analyze,
         .description = "Concatenate args with spaces",
         .input_schema = "{\"type\":\"object\",\"properties\":{}}",
         .decode_json = registry_mod.helpers.decodeNoArgs,
@@ -462,12 +510,39 @@ test "writeToolsArray: wraps registry entries in flat Responses-API tool shape" 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
     defer parsed.deinit();
     const items = parsed.value.array.items;
-    try testing.expectEqual(@as(usize, 1), items.len);
+    try testing.expectEqual(@as(usize, 2), items.len);
     try testing.expectEqualStrings("function", items[0].object.get("type").?.string);
-    try testing.expectEqualStrings("echo", items[0].object.get("name").?.string);
-    try testing.expectEqualStrings("Concatenate args with spaces", items[0].object.get("description").?.string);
+    try testing.expectEqualStrings(apply_edit.tool_name, items[0].object.get("name").?.string);
+    try testing.expectEqualStrings("echo", items[1].object.get("name").?.string);
+    try testing.expectEqualStrings("Concatenate args with spaces", items[1].object.get("description").?.string);
     // The schema is inlined as-is.
-    try testing.expect(items[0].object.get("parameters").? == .object);
+    try testing.expect(items[1].object.get("parameters").? == .object);
+}
+
+test "writeToolsArray: omits registry workspace writers" {
+    const writer_tool: registry_mod.ToolDef = .{
+        .name = "writer",
+        .label = "Writer",
+        .description = "Test writer",
+        .effect = .write_workspace,
+        .input_schema = "{\"type\":\"object\",\"properties\":{}}",
+        .decode_json = registry_mod.helpers.decodeNoArgs,
+        .execute = stubExecute,
+    };
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, writer_tool);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
+    try writeToolsArray(&aw.writer, &registry);
+    buf = aw.toArrayList();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    try testing.expectEqualStrings(apply_edit.tool_name, parsed.value.array.items[0].object.get("name").?.string);
 }
 
 fn stubExecute(_: std.mem.Allocator, _: []const []const u8) anyerror!registry_mod.ToolResult {

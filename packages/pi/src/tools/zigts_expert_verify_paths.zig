@@ -11,6 +11,7 @@ const name = "zigts_expert_verify_paths";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "verify handler(s)",
+    .effect = .analyze,
     .description = "Run full analysis on one or more handler files and emit the v1 envelope.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"One or more handler paths.\"}},\"required\":[\"paths\"]}",
     .decode_json = decodeJson,

@@ -26,6 +26,7 @@ const name = "zigts_expert_ast_rewrite";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "ast-rewrite",
+    .effect = .analyze,
     .description =
     \\Dispatch a typed RepairIntent into a verified in-memory canonical
     \\rewrite. Supported canonicalize refactors:

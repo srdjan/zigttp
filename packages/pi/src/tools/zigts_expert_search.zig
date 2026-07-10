@@ -12,6 +12,7 @@ const name = "zigts_expert_search";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "search rules",
+    .effect = .analyze,
     .description = "Search diagnostic rules by keyword substring across name, description, and help.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Keyword substring to search for.\"}},\"required\":[\"query\"]}",
     .decode_json = decodeJson,

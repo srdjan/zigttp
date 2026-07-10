@@ -22,6 +22,7 @@ const name = "zigts_expert_narrow";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "narrow",
+    .effect = .analyze,
     .description =
     \\Report per-path label flow for a handler. Each diagnostic carries the
     \\path constraints (request method comparisons, stub truthiness checks,

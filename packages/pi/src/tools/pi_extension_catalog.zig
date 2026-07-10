@@ -36,6 +36,7 @@ const name = "pi_extension_catalog";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "extension-catalog",
+    .effect = .read_workspace,
     .description =
     \\Confirm whether a partner specifier (`zigttp-ext:*`) is registered for
     \\this session via one or more `zigttp-module.json` manifests. Pass the

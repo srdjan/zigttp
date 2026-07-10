@@ -11,6 +11,7 @@ const name = "zigts_expert_features";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "language features",
+    .effect = .analyze,
     .description = "List allowed and blocked JS/TS features with suggested alternatives. Takes no arguments.",
     .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
     .decode_json = registry_mod.helpers.decodeNoArgs,

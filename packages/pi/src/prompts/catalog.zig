@@ -136,7 +136,8 @@ test "findByName returns a pointer for a known template" {
 test "coding templates point at compiler-native Pi workflows" {
     const route = findByName("add-route") orelse return error.TestFailed;
     try testing.expect(std.mem.indexOf(u8, route.body, "pi_forge_route") != null);
-    try testing.expect(std.mem.indexOf(u8, route.body, "pi_apply_feature_plan") != null);
+    try testing.expect(std.mem.indexOf(u8, route.body, "pi_apply_feature_plan") == null);
+    try testing.expect(std.mem.indexOf(u8, route.body, "one `apply_edit` call") != null);
 
     const fix = findByName("fix") orelse return error.TestFailed;
     try testing.expect(std.mem.indexOf(u8, fix.body, "zigts_expert_verify_paths") != null);

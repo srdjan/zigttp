@@ -21,6 +21,7 @@ const name = "zigts_expert_ratchet";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "ratchet",
+    .effect = .analyze,
     .description =
     \\Report the property set the compiler currently proves for a handler.
     \\The set comes from contract.json under provenSpecs (also signed inside

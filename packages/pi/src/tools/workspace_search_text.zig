@@ -9,6 +9,7 @@ const name = "workspace_search_text";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "search text",
+    .effect = .execute_process,
     .description = "Search the workspace for a text substring and return path/line matches.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\",\"minimum\":1}},\"required\":[\"query\"]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

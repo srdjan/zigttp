@@ -16,6 +16,7 @@ const name = "pi_apply_repair_plan";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "apply-repair-plan",
+    .effect = .analyze,
     .description =
     \\Dry-run a single pi_repair_plan entry into proposed source and
     \\compiler-verify the candidate. This tool never writes files. v1 only

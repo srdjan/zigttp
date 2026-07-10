@@ -119,7 +119,6 @@ loop:
 | Tool | Purpose |
 |---|---|
 | `pi_forge_route` | Synthesize and prove a route candidate without hand-writing the route first. |
-| `pi_apply_feature_plan` | Write an approved route/feature candidate after rerunning the compiler veto. |
 | `pi_repair_plan` | Convert verifier/property failures into typed repair intents. |
 | `pi_apply_repair_plan` | Dry-run one repair intent into verified proposed source; never writes. |
 | `pi_goal_candidate` | Compose repair planning and supported repair dry-runs in memory; returns verified `proposed_content` and `applied:false`; never writes. |
@@ -134,7 +133,9 @@ Edits in RPC mode are proposed only through the model-mediated `turn` method:
 the model emits an `apply_edit`, the compiler veto runs, and a `verified_patch`
 event is returned. `apply_edit` is not a directly invocable entry in
 `tools.list` / `tools.invoke` (those expose the read-only analyzer tools); a
-client cannot apply an unverified edit out of band.
+client cannot apply an unverified edit out of band. Generic `tools.invoke`
+exposes only tools classified as `analyze` or `read_workspace`; process,
+agent-state persistence, and workspace-write effects are not invocable there.
 
 ## Compatibility
 

@@ -11,6 +11,7 @@ const name = "zigts_expert_modules";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "virtual modules",
+    .effect = .analyze,
     .description = "List built-in zigttp:* virtual modules and their exports. Takes no arguments.",
     .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
     .decode_json = registry_mod.helpers.decodeNoArgs,

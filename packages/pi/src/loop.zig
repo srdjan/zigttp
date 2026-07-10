@@ -697,7 +697,7 @@ fn invokeToolRecovering(
     registry: *const registry_mod.Registry,
     call: turn.ToolCall,
 ) !registry_mod.ToolResult {
-    return registry.invokeJson(allocator, call.name, call.args_json) catch |err| switch (err) {
+    return registry.invokeJsonOn(allocator, .model, call.name, call.args_json) catch |err| switch (err) {
         registry_mod.RegistryError.ToolNotFound => registry_mod.ToolResult.errFmt(
             allocator,
             "unknown tool: {s}",
@@ -706,6 +706,11 @@ fn invokeToolRecovering(
         error.InvalidToolArgsJson => registry_mod.ToolResult.errFmt(
             allocator,
             "{s}: invalid structured tool arguments",
+            .{call.name},
+        ),
+        registry_mod.RegistryError.ToolNotAllowed => registry_mod.ToolResult.errFmt(
+            allocator,
+            "tool is not available to the model: {s}",
             .{call.name},
         ),
         else => registry_mod.ToolResult.errFmt(
@@ -1194,6 +1199,7 @@ fn stubDecodeJson(
 const stub_tool: registry_mod.ToolDef = .{
     .name = "stub",
     .label = "stub",
+    .effect = .analyze,
     .description = "Test stub",
     .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
     .decode_json = stubDecodeJson,

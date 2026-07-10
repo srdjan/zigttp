@@ -16,6 +16,7 @@ const name = "zigts_expert_verify_modules";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "verify module(s)",
+    .effect = .analyze,
     .description = "Audit built-in virtual module files for capability and effect discipline.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"builtins\":{\"type\":\"boolean\"},\"strict\":{\"type\":\"boolean\"}},\"required\":[]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

@@ -235,7 +235,8 @@ pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResul
             if (!cassette.header.stream) return CassetteError.NonStreamingOpenAINotSupported;
             const event_list = try openai_sse_parser.parseAll(arena, cassette.body);
             const outcome = try openai_response_assembler.assemble(arena, event_list);
-            return .{ .reply = outcome.reply, .usage = outcome.usage };
+            const reply = try anthropic_apply_edit.maybeRemap(arena, outcome.reply);
+            return .{ .reply = reply, .usage = outcome.usage };
         },
     };
 }
@@ -248,6 +249,25 @@ const testing = std.testing;
 
 const cassette_anthropic_text_simple = @embedFile("testdata/anthropic/text_simple.sse.txt");
 const cassette_openai_chat_completion = @embedFile("testdata/openai/chat_completion.jsonl");
+
+const cassette_openai_apply_edit =
+    \\event: response.created
+    \\data: {"type":"response.created","response":{"id":"resp_edit","status":"in_progress"}}
+    \\
+    \\event: response.output_item.added
+    \\data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"apply_edit","arguments":""}}
+    \\
+    \\event: response.function_call_arguments.delta
+    \\data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"file\":\"handler.ts\",\"content\":\"ok\"}"}
+    \\
+    \\event: response.output_item.done
+    \\data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"apply_edit","arguments":"{\"file\":\"handler.ts\",\"content\":\"ok\"}"}}
+    \\
+    \\event: response.completed
+    \\data: {"type":"response.completed","response":{"id":"resp_edit","status":"completed","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}
+    \\
+    \\data: [DONE]
+;
 
 test "loadCassetteFromBytes resolves an inline openai cassette" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -271,6 +291,23 @@ test "replay: openai cassette produces final_text reply" {
     }
     try testing.expectEqual(@as(u64, 12), result.usage.input_tokens);
     try testing.expectEqual(@as(u64, 3), result.usage.output_tokens);
+}
+
+test "replay: openai cassette remaps apply_edit into an edit reply" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const result = try replay(arena.allocator(), .{
+        .header = .{ .provider = .openai, .stream = true },
+        .body = cassette_openai_apply_edit,
+    });
+    switch (result.reply.response) {
+        .edit => |edit| {
+            try testing.expectEqualStrings("handler.ts", edit.file);
+            try testing.expectEqualStrings("ok", edit.content);
+        },
+        else => return error.TestFailed,
+    }
 }
 
 test "replay: anthropic cassette streams SSE bytes through the live parser" {

@@ -41,7 +41,6 @@ const pi_repair_plan_tool = @import("tools/pi_repair_plan.zig");
 const pi_apply_repair_plan_tool = @import("tools/pi_apply_repair_plan.zig");
 const ast_rewrite_tool = @import("tools/zigts_expert_ast_rewrite.zig");
 const pi_feature_plan_tool = @import("tools/pi_feature_plan.zig");
-const pi_apply_feature_plan_tool = @import("tools/pi_apply_feature_plan.zig");
 const pi_forge_route_tool = @import("tools/pi_forge_route.zig");
 const pi_forge_spec_tool = @import("tools/pi_forge_spec.zig");
 const pi_specs_status_tool = @import("tools/pi_specs_status.zig");
@@ -118,7 +117,6 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, pi_apply_repair_plan_tool.tool);
     try reg.register(allocator, ast_rewrite_tool.tool);
     try reg.register(allocator, pi_feature_plan_tool.tool);
-    try reg.register(allocator, pi_apply_feature_plan_tool.tool);
     try reg.register(allocator, pi_forge_route_tool.tool);
     try reg.register(allocator, pi_forge_spec_tool.tool);
     try reg.register(allocator, pi_specs_status_tool.tool);
@@ -560,7 +558,6 @@ test "buildRegistry registers every first-party compiler primitive" {
         "pi_apply_repair_plan",
         "zigts_expert_ast_rewrite",
         "pi_feature_plan",
-        "pi_apply_feature_plan",
         "pi_forge_route",
         "pi_forge_spec",
         "pi_specs_status",
@@ -580,6 +577,30 @@ test "buildRegistry registers every first-party compiler primitive" {
         }
     }
     try testing.expect(reg.count() >= expected_names.len);
+}
+
+test "buildRegistry omits the direct feature-plan writer from model tools" {
+    var reg = try buildRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+
+    try testing.expect(reg.findByName("pi_apply_feature_plan") == null);
+    for (reg.list()) |registered| {
+        if (registered.effect == .write_workspace) {
+            try testing.expect(!registered.allowedOn(.model));
+        }
+    }
+
+    const process_tools = [_][]const u8{
+        "workspace_search_text",
+        "zigts_check",
+        "pi_specs_status",
+    };
+    for (process_tools) |process_tool_name| {
+        const registered = reg.findByName(process_tool_name) orelse return error.TestFailed;
+        try testing.expectEqual(registry_mod.ToolEffect.execute_process, registered.effect);
+        try testing.expect(registered.allowedOn(.model));
+        try testing.expect(!registered.allowedOn(.rpc));
+    }
 }
 
 fn expectOkContains(outcome: *repl.DispatchOutcome, allocator: std.mem.Allocator, needle: []const u8) !void {

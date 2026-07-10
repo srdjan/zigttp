@@ -385,7 +385,7 @@ import { parallel, race } from "zigttp:io";
 import { guard, pipe } from "zigttp:compose";
 import { logInfo, logError } from "zigttp:log";
 import { serviceCall } from "zigttp:service";
-import { send, close, getWebSockets, serializeAttachment, deserializeAttachment } from "zigttp:websocket";
+import { send, close, getWebSockets, setAutoResponse, serializeAttachment, deserializeAttachment } from "zigttp:websocket";
 ```
 
 ### Pattern Matching

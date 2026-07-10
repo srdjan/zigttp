@@ -271,11 +271,16 @@ Add a skill:
 Add a tool:
 
 1. Write `packages/pi/src/tools/<name>.zig` exporting `pub const tool: ToolDef = .{ ... }`.
+   Set its mandatory `effect` to the strongest effect it can perform:
+   `analyze`, `read_workspace`, `execute_process`, `persist_agent_state`,
+   or `write_workspace`.
 2. `try reg.register(allocator, <name>.tool)` in `app.zig:buildRegistry`.
 3. Add a `"<name>"` line to the `expected_names` array in the
    `buildRegistry` test, and the prompt dispatch guide at the top of
    `expert_persona.zig`.
-4. Rebuild.
+4. Rebuild. Model calls reject `write_workspace`; RPC calls allow only
+   `analyze` and `read_workspace`. Model-mediated source writes must use the
+   synthetic `apply_edit` tool so the compiler veto and approval policy run.
 
 ## Deferred
 

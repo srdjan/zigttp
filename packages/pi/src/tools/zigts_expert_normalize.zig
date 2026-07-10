@@ -15,6 +15,7 @@ const name = "zigts_expert_normalize";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "normalize",
+    .effect = .analyze,
     .description = "Reduce a handler file to its unique Canonical Normal Form and return the canonical source, fullyCanonical, residualDiagnostics, and the rewrite trace. Read-only: never writes the file. Use it to canonicalize a draft before applying, so the compiler veto never rejects it on a ZTS6xx canonical-form violation.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\",\"description\":\"Handler file to normalize.\"}},\"required\":[\"file\"]}",
     .decode_json = decodeJson,

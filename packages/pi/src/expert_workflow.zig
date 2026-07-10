@@ -137,7 +137,7 @@ pub fn renderSystemNote(
 fn workflowRoute(kind: TaskKind) []const u8 {
     return switch (kind) {
         .route_add =>
-        \\Use the compiler-native Route Forge path before manual code. First read the target file or list files if the target is unknown, capture `zigts_expert_verify_paths`, call `pi_forge_route`, and apply only an approved candidate through `pi_apply_feature_plan`.
+        \\Use the compiler-native Route Forge path before manual code. First read the target file or list files if the target is unknown, capture `zigts_expert_verify_paths`, and call `pi_forge_route`. Submit its returned `proposed_content` as one `apply_edit` call so the host veto and approval gate own the write.
         ,
         .handler_scaffold =>
         \\Create the smallest canonical handler that satisfies the request. Read nearby handlers first, use live module/rule tools for imports and syntax, then let the compiler veto verify the complete scaffold before apply.
@@ -161,7 +161,7 @@ fn workflowRoute(kind: TaskKind) []const u8 {
         \\Treat environment values as toxic. Check `zigttp:env` with live module tools, avoid fallback secrets, redact in output, and verify no secret leakage before applying the edit.
         ,
         .test_generation =>
-        \\Use the existing test shape. Read adjacent tests and handler proofs first, then use `workspace_gen_tests` when a proven handler path exists; keep tests aligned with compiler-proven behavior.
+        \\Use the existing test shape. Read adjacent tests and handler proofs first, draft JSONL from compiler-proven behavior, then submit the complete test file through one `apply_edit` call.
         ,
         .review_explain =>
         \\Do not edit unless the user asks for a change. Use live rule/module tools for ZigTS facts and cite compiler diagnostics or proof output rather than relying on memory.

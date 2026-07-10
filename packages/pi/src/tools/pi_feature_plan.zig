@@ -15,6 +15,7 @@ const name = "pi_feature_plan";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "feature-plan",
+    .effect = .analyze,
     .description =
     \\Generate a compiler-native feature plan for a handler route.
     \\Input is a structured mini-spec, not prose. v1 supports route

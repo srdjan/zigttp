@@ -114,13 +114,59 @@ const DecodeJsonFn = *const fn (
     args_json: []const u8,
 ) anyerror![]const []const u8;
 
+/// Strongest externally-observable effect of a tool invocation. Keeping this
+/// mandatory makes newly registered tools choose an authorization boundary at
+/// compile time instead of inheriting a permissive default.
+pub const ToolEffect = enum {
+    analyze,
+    read_workspace,
+    execute_process,
+    persist_agent_state,
+    write_workspace,
+
+    pub fn label(self: ToolEffect) []const u8 {
+        return switch (self) {
+            .analyze => "analyze",
+            .read_workspace => "read_workspace",
+            .execute_process => "execute_process",
+            .persist_agent_state => "persist_agent_state",
+            .write_workspace => "write_workspace",
+        };
+    }
+};
+
+pub const InvocationSurface = enum {
+    /// Human-owned in-process dispatch, including slash commands and the
+    /// deterministic autoloop.
+    trusted,
+    /// Provider/model tool calls inside the compiler-veto turn loop.
+    model,
+    /// Generic JSON-RPC `tools.invoke` calls.
+    rpc,
+};
+
 pub const ToolDef = struct {
     name: []const u8,
     label: []const u8,
     description: []const u8,
+    effect: ToolEffect,
     input_schema: []const u8,
     decode_json: DecodeJsonFn,
     execute: ExecuteFn,
+
+    pub fn allowedOn(self: ToolDef, surface: InvocationSurface) bool {
+        return switch (surface) {
+            .trusted => true,
+            .model => switch (self.effect) {
+                .analyze, .read_workspace, .execute_process, .persist_agent_state => true,
+                .write_workspace => false,
+            },
+            .rpc => switch (self.effect) {
+                .analyze, .read_workspace => true,
+                .execute_process, .persist_agent_state, .write_workspace => false,
+            },
+        };
+    }
 };
 
 /// Heap-allocate a one-element argv slice. `&.{x}` with a *runtime* `x` returns

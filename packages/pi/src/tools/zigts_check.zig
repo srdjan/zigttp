@@ -7,6 +7,7 @@ const name = "zigts_check";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "zigts check",
+    .effect = .execute_process,
     .description =
     \\Run `zigts check --json` for a handler path. On success the output
     \\includes a "proof.properties" object with compiler-proven behavioral

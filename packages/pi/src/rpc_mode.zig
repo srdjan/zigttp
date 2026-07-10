@@ -447,15 +447,20 @@ fn handleToolsList(
     const w = &aw.writer;
 
     try w.writeByte('[');
-    for (registry.entries.items, 0..) |tool, i| {
-        if (i > 0) try w.writeByte(',');
+    var emitted: usize = 0;
+    for (registry.entries.items) |tool| {
+        if (!tool.allowedOn(.rpc)) continue;
+        if (emitted > 0) try w.writeByte(',');
         try w.writeAll("{\"name\":");
         try json_writer.writeString(w, tool.name);
         try w.writeAll(",\"label\":");
         try json_writer.writeString(w, tool.label);
         try w.writeAll(",\"description\":");
         try json_writer.writeString(w, tool.description);
+        try w.writeAll(",\"effect\":");
+        try json_writer.writeString(w, tool.effect.label());
         try w.writeByte('}');
+        emitted += 1;
     }
     try w.writeByte(']');
 
@@ -487,9 +492,13 @@ fn handleToolsInvoke(
     const args_owned = try allocator.dupe(u8, args_json);
     defer allocator.free(args_owned);
 
-    var result = registry.invokeJson(allocator, tool_name, args_owned) catch |err| switch (err) {
+    var result = registry.invokeJsonOn(allocator, .rpc, tool_name, args_owned) catch |err| switch (err) {
         registry_mod.RegistryError.ToolNotFound => {
             try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "unknown tool: {s}", .{tool_name});
+            return;
+        },
+        registry_mod.RegistryError.ToolNotAllowed => {
+            try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "tool not available over rpc: {s}", .{tool_name});
             return;
         },
         else => {
@@ -767,6 +776,38 @@ fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
     errdefer reg.deinit(allocator);
     try reg.register(allocator, meta_tool.tool);
+    try reg.register(allocator, .{
+        .name = "test_workspace_writer",
+        .label = "test writer",
+        .description = "Must never be exposed or invoked over RPC.",
+        .effect = .write_workspace,
+        .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .decode_json = registry_mod.helpers.decodeNoArgs,
+        .execute = struct {
+            fn run(
+                _: std.mem.Allocator,
+                _: []const []const u8,
+            ) anyerror!registry_mod.ToolResult {
+                return error.TestUnexpectedCall;
+            }
+        }.run,
+    });
+    try reg.register(allocator, .{
+        .name = "test_process_runner",
+        .label = "test process runner",
+        .description = "Must never be exposed or invoked over RPC.",
+        .effect = .execute_process,
+        .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .decode_json = registry_mod.helpers.decodeNoArgs,
+        .execute = struct {
+            fn run(
+                _: std.mem.Allocator,
+                _: []const []const u8,
+            ) anyerror!registry_mod.ToolResult {
+                return error.TestUnexpectedCall;
+            }
+        }.run,
+    });
     return reg;
 }
 
@@ -920,6 +961,9 @@ test "rpc: tools.list returns registered tool names" {
 
     buf = aw.toArrayList();
     try testing.expect(std.mem.indexOf(u8, buf.items, "zigts_expert_meta") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"effect\":\"analyze\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "test_workspace_writer") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "test_process_runner") == null);
 }
 
 test "rpc: session.info reports stub session fields" {
@@ -1030,6 +1074,40 @@ test "rpc: tools.invoke with unknown tool name surfaces as INVALID_PARAMS" {
     const out = aw.writer.buffered();
     try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
     try testing.expect(std.mem.indexOf(u8, out, "unknown tool: no_such_tool") != null);
+}
+
+test "rpc: tools.invoke rejects workspace writers before execution" {
+    const allocator = testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try driveWith(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"test_workspace_writer\"}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
+        &aw,
+    );
+
+    const out = aw.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "tool not available over rpc: test_workspace_writer") != null);
+}
+
+test "rpc: tools.invoke rejects process runners before execution" {
+    const allocator = testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try driveWith(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"test_process_runner\"}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
+        &aw,
+    );
+
+    const out = aw.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "tool not available over rpc: test_process_runner") != null);
 }
 
 test "rpc: tools.invoke with known tool returns {ok, body}" {

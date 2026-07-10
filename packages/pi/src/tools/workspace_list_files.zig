@@ -8,6 +8,7 @@ const name = "workspace_list_files";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "list files",
+    .effect = .read_workspace,
     .description = "List workspace files relative to the repo root.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\",\"minimum\":1}},\"required\":[]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

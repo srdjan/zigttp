@@ -7,6 +7,7 @@ const name = "zig_test_step";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "zig test",
+    .effect = .execute_process,
     .description = "Run a safe `zig build <test-step>` invocation in the repo root.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"step\":{\"type\":\"string\"}},\"required\":[]}",
     .decode_json = decodeJson,

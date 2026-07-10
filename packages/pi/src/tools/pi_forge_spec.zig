@@ -18,6 +18,7 @@ const name = "pi_forge_spec";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "forge-spec",
+    .effect = .analyze,
     .description =
     \\Run a compiler-native proof intent forge. Input is a handler file,
     \\a v1 Spec<...> set, optional Effects<...> capability budget, and

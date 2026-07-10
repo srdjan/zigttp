@@ -8,6 +8,7 @@ const name = "zigts_expert_prove_patch";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "prove patch",
+    .effect = .analyze,
     .description = "Classify a before/after handler contract pair as equivalent, additive, or breaking and surface any counterexample.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},\"before\":{\"type\":\"string\"},\"after\":{\"type\":\"string\"}},\"required\":[\"file\",\"after\"]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

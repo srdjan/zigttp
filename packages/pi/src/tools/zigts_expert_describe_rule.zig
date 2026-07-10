@@ -12,6 +12,7 @@ const name = "zigts_expert_describe_rule";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "describe rule",
+    .effect = .analyze,
     .description = "Describe a rule by name or code, or list all rules when called with no args.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"rule\":{\"type\":\"string\",\"description\":\"Optional rule code or name.\"}},\"required\":[]}",
     .decode_json = decodeJson,

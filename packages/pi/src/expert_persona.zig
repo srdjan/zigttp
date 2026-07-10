@@ -182,9 +182,6 @@ const prologue =
     \\  workspace_list_files        - list workspace files
     \\  workspace_read_file         - read a file or line range
     \\  workspace_search_text       - search across the workspace
-    \\  workspace_gen_tests         - generate JSONL tests from proven behavioral
-    \\                                paths; call after editing a handler to keep
-    \\                                the test suite in sync with the proof
     \\  zigts_check                 - run `zigts check --json`; on success
     \\                                returns on-disk proof.properties for
     \\                                behavioral and data-flow guarantees
@@ -215,9 +212,6 @@ const prologue =
     \\  pi_forge_route              - synthesize and compiler-prove a route
     \\                                candidate; returns an approved-for-apply
     \\                                preview when no new violations remain
-    \\  pi_apply_feature_plan       - write an approved feature/forge candidate
-    \\                                after rerunning the compiler veto against
-    \\                                the current file contents
     \\  pi_specs_status             - read the active spec set the author
     \\                                declared on the handler return type and
     \\                                each spec's current discharge state
@@ -263,7 +257,8 @@ const prologue =
     \\  Preview a new route without writing    -> pi_feature_plan
     \\  Add/prove a new route candidate         -> pi_forge_route
     \\  Add/prove handler proof intent          -> pi_forge_spec
-    \\  Apply an approved route candidate       -> pi_apply_feature_plan
+    \\  Apply an approved route candidate       -> one apply_edit call with
+    \\                                                returned proposed_content
     \\  Read author-declared specs + status    -> pi_specs_status
     \\  Inspect persisted witness corpus       -> pi_witnesses
     \\  Record a cross-session project fact    -> pi_remember_fact
@@ -272,7 +267,7 @@ const prologue =
     \\  List files in workspace                -> workspace_list_files
     \\  Read a source file                     -> workspace_read_file
     \\  Text search across workspace           -> workspace_search_text
-    \\  Generate tests after editing handler   -> workspace_gen_tests
+    \\  Write or update handler tests           -> one apply_edit call
     \\  Build steps                            -> zig_build_step
     \\  Run tests                              -> zig_test_step
     \\
@@ -323,9 +318,9 @@ const prologue =
     \\`body_schema`, optional `status`) and call `pi_forge_route`. If the
     \\user asks only to preview or plan, call `pi_feature_plan` instead.
     \\Treat the returned diff as the candidate source of truth. Do not write
-    \\the candidate yourself; approved candidates must flow through
-    \\`pi_apply_feature_plan`, which reruns the compiler veto and records a
-    \\proof-carrying `verified_patch`.
+    \\the candidate yourself; submit its returned `proposed_content` as one
+    \\`apply_edit` call. The host reruns the compiler veto, applies the active
+    \\approval policy, and records a proof-carrying `verified_patch`.
     \\
     \\Workflow authoring playbook:
     \\When the user asks for durable workflow code, start from the smallest
@@ -924,7 +919,8 @@ test "persona routes new route requests through Route Forge" {
     defer testing.allocator.free(prompt);
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_feature_plan") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_forge_route") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pi_apply_feature_plan") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pi_apply_feature_plan") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "returned `proposed_content` as one") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Proof-first route authoring") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "verified_patch") != null);
 }

@@ -19,6 +19,7 @@ const name = "pi_goal_candidate";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "goal-candidate",
+    .effect = .analyze,
     .description =
     \\Run the compiler-native repair lane in memory and return a verified
     \\candidate source snapshot for one or more property goals. This tool

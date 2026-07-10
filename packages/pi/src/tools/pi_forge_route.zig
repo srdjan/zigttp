@@ -2,7 +2,8 @@
 //!
 //! The forge composes route synthesis and compiler proof into a single
 //! inspectable run graph. It does not write files; approved candidates flow
-//! through `pi_apply_feature_plan`, which reruns the compiler veto.
+//! through the host-owned `apply_edit` path, which reruns the compiler veto
+//! and enforces the configured approval policy.
 
 const std = @import("std");
 const zigts = @import("zigts");
@@ -24,6 +25,7 @@ const name = "pi_forge_route";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "forge-route",
+    .effect = .analyze,
     .description =
     \\Run a compiler-native route forge loop. Input matches /feature route:
     \\file, method, path, optional body_schema, response_schema, and status.

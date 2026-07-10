@@ -9,6 +9,7 @@ const name = "workspace_read_file";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "read file",
+    .effect = .read_workspace,
     .description = "Read a workspace file, optionally clipped to a line range.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"start_line\":{\"type\":\"integer\",\"minimum\":1},\"end_line\":{\"type\":\"integer\",\"minimum\":1}},\"required\":[\"path\"]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

@@ -8,11 +8,14 @@ const tool_mod = @import("tool.zig");
 
 pub const ToolDef = tool_mod.ToolDef;
 pub const ToolResult = tool_mod.ToolResult;
+pub const ToolEffect = tool_mod.ToolEffect;
+pub const InvocationSurface = tool_mod.InvocationSurface;
 pub const helpers = tool_mod;
 
 pub const RegistryError = error{
     DuplicateTool,
     ToolNotFound,
+    ToolNotAllowed,
 };
 
 pub const Registry = struct {
@@ -69,6 +72,21 @@ pub const Registry = struct {
         const args = try tool.decode_json(arena.allocator(), args_json);
         return try tool.execute(allocator, args);
     }
+
+    pub fn invokeJsonOn(
+        self: *const Registry,
+        allocator: std.mem.Allocator,
+        surface: InvocationSurface,
+        name: []const u8,
+        args_json: []const u8,
+    ) !ToolResult {
+        const tool = self.findByName(name) orelse return RegistryError.ToolNotFound;
+        if (!tool.allowedOn(surface)) return RegistryError.ToolNotAllowed;
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const args = try tool.decode_json(arena.allocator(), args_json);
+        return try tool.execute(allocator, args);
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -93,10 +111,21 @@ const echo_tool: ToolDef = .{
     .name = "echo",
     .label = "Echo",
     .description = "Concatenate args with spaces",
+    .effect = .analyze,
     .input_schema =
     \\{"type":"object","properties":{"parts":{"type":"array","items":{"type":"string"}}},"required":["parts"]}
     ,
     .decode_json = decodeEchoJson,
+    .execute = echoExecute,
+};
+
+const writer_tool: ToolDef = .{
+    .name = "writer",
+    .label = "Writer",
+    .description = "Test-only workspace writer",
+    .effect = .write_workspace,
+    .input_schema = "{}",
+    .decode_json = tool_mod.decodeNoArgs,
     .execute = echoExecute,
 };
 
@@ -133,6 +162,21 @@ test "invokeJson decodes structured args before calling execute" {
     defer result.deinit(testing.allocator);
     try testing.expect(result.ok);
     try testing.expectEqualStrings("hello json", result.llm_text);
+}
+
+test "model and rpc surfaces reject workspace writers" {
+    var reg: Registry = .{};
+    defer reg.deinit(testing.allocator);
+    try reg.register(testing.allocator, writer_tool);
+
+    try testing.expectError(
+        RegistryError.ToolNotAllowed,
+        reg.invokeJsonOn(testing.allocator, .model, "writer", "{}"),
+    );
+    try testing.expectError(
+        RegistryError.ToolNotAllowed,
+        reg.invokeJsonOn(testing.allocator, .rpc, "writer", "{}"),
+    );
 }
 
 test "duplicate registration fails" {
