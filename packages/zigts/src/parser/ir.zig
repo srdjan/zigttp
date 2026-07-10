@@ -1012,9 +1012,15 @@ pub const IRStore = struct {
     pub fn getCallData(self: *const IRStore, idx: NodeIndex) ?Node.CallExpr {
         if (idx >= self.data.items.len) return null;
         const d = self.data.items[idx];
+        // args_start is packed as 16 bits at bit 8 (see the .call/.method_call/
+        // .optional_call encoders), with is_optional at bit 24. Mask to 16 bits
+        // so the is_optional bit (which shifts into bit 16 after `>> 8`) does not
+        // corrupt args_start. Without the mask, every optional call
+        // (is_optional == 1) reads args_start + 0x10000, pointing out of bounds
+        // so its arguments are silently dropped from every IRStore consumer.
         return .{
             .callee = d.a,
-            .args_start = @truncate(d.b >> 8),
+            .args_start = @as(u16, @truncate(d.b >> 8)),
             .args_count = @truncate(d.b),
             .is_optional = (d.b >> 24) != 0,
         };
