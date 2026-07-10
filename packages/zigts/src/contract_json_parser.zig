@@ -147,6 +147,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseApiSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "verification")) {
             try parseVerification(&parser, &contract);
+        } else if (std.mem.eql(u8, key, "websocket")) {
+            contract.websocket = try parseWebSocketSection(&parser);
         } else if (std.mem.eql(u8, key, "faultCoverage")) {
             contract.fault_coverage = try parseFaultCoverage(&parser);
         } else if (std.mem.eql(u8, key, "rateLimiting")) {
@@ -2297,6 +2299,41 @@ fn parseBehaviorIoSequence(parser: *JsonParser, allocator: std.mem.Allocator, io
 
         try io_seq.append(allocator, io_call);
     }
+}
+
+fn parseWebSocketSection(parser: *JsonParser) !contract_types.WebSocketInfo {
+    parser.skipWhitespace();
+    var info = contract_types.WebSocketInfo{};
+    if (parser.readNull()) return info;
+    if (!parser.consume('{')) return error.InvalidJson;
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "onOpen")) {
+            info.on_open = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "onMessage")) {
+            info.on_message = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "onClose")) {
+            info.on_close = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "onError")) {
+            info.on_error = parser.readBool() orelse false;
+        } else {
+            parser.skipValue();
+        }
+    }
+
+    return info;
 }
 
 fn parseFaultCoverage(parser: *JsonParser) !?FaultCoverageInfo {

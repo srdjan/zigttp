@@ -213,6 +213,11 @@ pub const ContractDiff = struct {
     /// going dynamic, an enumerated surface that becomes runtime-computed can no
     /// longer be certified equivalent, so `classifyStructural` fails closed.
     routes_became_dynamic: bool = false,
+    /// A WebSocket event export (onOpen/onMessage/onClose/onError) was removed:
+    /// a live capability disappeared, which is breaking. Added exports are
+    /// additive (tracked separately).
+    websocket_capability_removed: bool = false,
+    websocket_capability_added: bool = false,
 
     pub fn deinit(self: *ContractDiff, allocator: std.mem.Allocator) void {
         self.routes.deinit(allocator);
@@ -289,6 +294,9 @@ pub const ContractDiff = struct {
         // A route/schema surface that lost provability (became runtime-computed)
         // can no longer be trusted as complete; fail closed like a dynamic response.
         if (self.routes_became_dynamic) return .breaking;
+        // A removed WebSocket event export is a removed live capability.
+        if (self.websocket_capability_removed) return .breaking;
+        if (self.websocket_capability_added) has_added = true;
 
         for (self.routes.items) |r| {
             if (r.status == .removed) return .breaking;
@@ -646,6 +654,14 @@ pub fn diffContracts(
         .behavior_diff = behavior_diff,
         .routes_became_dynamic = (new.api.routes_dynamic and !old.api.routes_dynamic) or
             (new.api.schemas_dynamic and !old.api.schemas_dynamic),
+        .websocket_capability_removed = (old.websocket.on_open and !new.websocket.on_open) or
+            (old.websocket.on_message and !new.websocket.on_message) or
+            (old.websocket.on_close and !new.websocket.on_close) or
+            (old.websocket.on_error and !new.websocket.on_error),
+        .websocket_capability_added = (new.websocket.on_open and !old.websocket.on_open) or
+            (new.websocket.on_message and !old.websocket.on_message) or
+            (new.websocket.on_close and !old.websocket.on_close) or
+            (new.websocket.on_error and !old.websocket.on_error),
     };
     errdefer diff.deinit(allocator);
 
@@ -2205,6 +2221,39 @@ test "diffContracts route surface going dynamic is breaking" {
     defer diff.deinit(allocator);
 
     try std.testing.expectEqual(Classification.breaking, diff.classify());
+}
+
+test "diffContracts removing a WebSocket event export is breaking" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    old.websocket.on_message = true;
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    new.websocket.on_message = false;
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.breaking, diff.classify());
+}
+
+test "diffContracts adding a WebSocket event export is additive" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    new.websocket.on_message = true;
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.additive, diff.classify());
 }
 
 test "diffContracts api response going dynamic is breaking" {
