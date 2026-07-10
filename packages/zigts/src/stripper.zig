@@ -1673,11 +1673,12 @@ const Stripper = struct {
     }
 
     fn looksLikeComparison(self: *Self) bool {
-        // Look at what comes before - if it's an expression end, this is comparison
-        // This is a heuristic - we look at the output buffer
-        if (self.output.items.len == 0) return false;
-
-        const last = self.output.items[self.output.items.len - 1];
+        // Look at what comes before - if it's an expression end, this is comparison.
+        // Skip trailing whitespace: idiomatic `a < b` has a space before `<`, and
+        // reading only the raw last byte (the space) misclassified it as "not a
+        // comparison", which bypassed the type-argument safety check and blanked
+        // the `<...>` span, silently miscompiling `a < b && c > (x)` into `a(x)`.
+        const last = self.lastSignificantOutputChar() orelse return false;
         // If last char is identifier/number end, or ), ], this could be comparison
         if (std.ascii.isAlphanumeric(last) or last == ')' or last == ']' or last == '_' or last == '$') {
             // Could be comparison like `a < b` or `foo() < bar`
@@ -3612,6 +3613,43 @@ test "comparison whose right operand is not a call is unchanged" {
     const result = try strip(std.testing.allocator, source, .{});
     defer @constCast(&result).deinit();
     try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "spaced comparison with logical operator is not treated as type arguments" {
+    // Idiomatic spacing: `i < j && k > (l)` is (i < j) && (k > (l)). The `<`
+    // is preceded by a space, so the comparison heuristic must skip whitespace
+    // when looking at the previous token; otherwise the `<...>` span is blanked
+    // and the expression silently miscompiles into the call `i(l)`.
+    const source = "const ok = i < j && k > (l);";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "spaced ternary between comparisons is not treated as type arguments" {
+    const source = "const v = t ? a < b : c > (d);";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "spaced bound check with parenthesized right operand is unchanged" {
+    const source = "const ok = page < total && offset > (limit - 1);";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "spaced generic call is still stripped" {
+    // The fix must not stop stripping a genuine explicit type-argument list:
+    // `foo<number>(y)` still has its `<number>` type arguments removed.
+    const source = "const x = foo<number>(y);";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "foo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "(y)") != null);
+    try std.testing.expectEqual(source.len, result.code.len);
 }
 
 test "block comment inside call type arguments stripped" {
