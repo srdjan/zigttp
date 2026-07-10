@@ -46,6 +46,11 @@ const UNREACHED_STACK_HEIGHT: i32 = std.math.minInt(i32);
 const StackEffect = struct {
     pop: i32,
     push: i32,
+    // Minimum stack height the op requires before it executes. Equals `pop`
+    // for ordinary opcodes, but is higher for opcodes that PEEK slots they do
+    // not pop (dup/dup2/for_of_next), so the underflow check catches an
+    // OOB stack read that `pop` alone would miss.
+    min_height: i32,
 };
 
 /// Verify a FunctionBytecode is well-formed. Returns a VerifyResult indicating
@@ -365,7 +370,7 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
         const info = bytecode.getOpcodeInfo(op);
 
         const effect = stackEffect(code, pc, op, info);
-        if (stack_height < effect.pop) {
+        if (stack_height < effect.min_height) {
             return .{
                 .valid = false,
                 .err = VerifyError.StackUnderflow,
@@ -422,8 +427,13 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
 
 fn stackEffect(code: []const u8, pc: usize, op: Opcode, info: bytecode.OpcodeInfo) StackEffect {
     const pop: i32 = switch (op) {
-        // call/call_method/tail_call: pop argc + 1 (function) args from stack
-        .call, .call_method, .tail_call => @as(i32, code[pc + 1]) + 1,
+        // call/tail_call: pop argc args + the callee = argc + 1.
+        .call, .tail_call => @as(i32, code[pc + 1]) + 1,
+        // call_method additionally pops the `this` receiver beneath the callee,
+        // so it consumes argc args + callee + this = argc + 2 (interpreter
+        // doCall(argc, is_method=true)). Modelling it as argc + 1 under-requires
+        // the stack by one and accepts bytecode that underflows on the this pop.
+        .call_method => @as(i32, code[pc + 1]) + 2,
         // call_ic: pop argc + 1
         .call_ic => @as(i32, code[pc + 1]) + 1,
         // concat_n: pop N values
@@ -437,9 +447,21 @@ fn stackEffect(code: []const u8, pc: usize, op: Opcode, info: bytecode.OpcodeInf
         else => @as(i32, info.n_pop),
     };
 
+    // Opcodes that PEEK slots without popping them carry n_pop == 0 yet still
+    // read the operand stack, so the underflow check must require their read
+    // floor, not the pop count. Without this a `dup` at height 0 or a
+    // `for_of_next` at height < 2 passes verification and OOB-reads the stack
+    // at runtime (Context.peek/peekAt are assert-only, elided in ReleaseFast).
+    const read_floor: i32 = switch (op) {
+        .dup => 1, // reads stack[sp-1]
+        .dup2, .for_of_next, .for_of_next_put_loc => 2, // read stack[sp-1] and stack[sp-2]
+        else => 0,
+    };
+
     return .{
         .pop = pop,
         .push = @as(i32, info.n_push),
+        .min_height = @max(pop, read_floor),
     };
 }
 
@@ -906,6 +928,102 @@ test "verify: push_const_call accounts for fused argument" {
             @intFromEnum(Opcode.ret_undefined),
         },
         .constants = &.{value.JSValue.fromInt(1)},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(result.valid);
+}
+
+test "verify: call_method underflow on the this receiver rejected" {
+    // call_method pops argc args + callee + the `this` receiver = argc + 2.
+    // Two pushes leave height 2; a call_method with argc=1 needs 3, so the
+    // `this` pop underflows. The verifier must require argc + 2, not argc + 1.
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.push_true), // offset 0 -> height 1
+            @intFromEnum(Opcode.push_true), // offset 1 -> height 2
+            @intFromEnum(Opcode.call_method), // offset 2, pops argc+2 = 3
+            0x01, // argc = 1
+            @intFromEnum(Opcode.ret),
+        },
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.StackUnderflow, result.err.?);
+}
+
+test "verify: dup on an empty stack rejected" {
+    // dup peeks stack[sp-1] without popping (n_pop == 0), so it requires a
+    // non-empty stack. The verifier must enforce that read floor.
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.dup), // reads stack[sp-1] at height 0
+            @intFromEnum(Opcode.ret),
+        },
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.StackUnderflow, result.err.?);
+}
+
+test "verify: dup2 below its read floor rejected" {
+    // dup2 peeks stack[sp-1] and stack[sp-2]; it needs height >= 2.
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.push_true), // height 1
+            @intFromEnum(Opcode.dup2), // reads stack[sp-1] and stack[sp-2] at height 1
+            @intFromEnum(Opcode.ret),
+        },
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.StackUnderflow, result.err.?);
+}
+
+test "verify: valid dup passes" {
+    // Read floor must not reject a dup with a value on the stack.
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.push_true),
+            @intFromEnum(Opcode.dup),
+            @intFromEnum(Opcode.drop),
+            @intFromEnum(Opcode.ret),
+        },
+        .constants = &.{},
         .source_map = null,
         .line_table = null,
     };
