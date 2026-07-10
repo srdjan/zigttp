@@ -711,6 +711,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_expert_tests.step);
     test_step.dependOn(&run_zigts_cli_tests.step);
     test_step.dependOn(&run_pi_tests.step);
+    test_step.dependOn(&run_cassette_tests.step);
     test_step.dependOn(&run_deploy_manifest_tests.step);
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&docs_drift.step);
