@@ -67,13 +67,33 @@ Common `dev` and `serve` flags:
 | `--workflow-queue` | Persist durable workflow `call`, `follow`, and `fanout` child dispatch through the workflow queue. Requires `--durable <dir>` and `--system <file>`. |
 | `--actor-queue` | Enable process-local in-memory mailboxes for `zigttp:queue`. |
 | `--outbound-http` / `--outbound-host <host>` | Enable outbound HTTP. The host allowlist matches on host only, not port. |
+| `--outbound-timeout-ms <ms>` | Outbound connect timeout (default 10000). Implies `--outbound-http`. |
+| `--outbound-max-response <size>` | Outbound response body cap (default 1m). Implies `--outbound-http`. |
+| `--security-log <file>` | Append security events as JSONL: policy denials, arena audit failures, persistent-string escapes. |
+| `--lifecycle <mode>` | Override the contract-derived runtime lifecycle: `ephemeral`, `bounded`, `ttl`, or `reuse`. |
 | `--static <dir>` | Serve static files. |
 | `--no-env-check` | Skip startup env validation. |
 
-`dev` adds `--no-prove` (watch and reload without contract gating) and
-`--record-proof`, which captures the session's requests into a replayable proof
-capsule at `.zigttp/capsules/default/`. `serve --watch` takes `--prove` and
-`--force-swap` instead.
+`dev` adds `--no-prove` (watch and reload without contract gating), `--quest` /
+`--no-quest` (replay or skip the first-run proof tour), and `--record-proof`,
+which captures the session's requests into a replayable proof capsule at
+`.zigttp/capsules/default/`. `serve --watch` takes `--prove` and `--force-swap`
+(apply a breaking swap anyway) instead. Both take `--studio` when the binary was
+built with `-Dstudio`.
+
+Without `--lifecycle`, the runtime derives the pool's recycling policy from the
+proven contract: `reuse` when the handler is pure, deterministic, and
+state-isolated; `ttl` when it is read-only and state-isolated; `bounded`
+otherwise. `bounded` recycles a runtime after 64 requests, `ttl` after 30
+seconds, and `ephemeral` gives each request a fresh runtime. A hot swap
+re-derives the policy unless the override is set.
+
+`--security-log` writes one JSON object per line. A capability denial from a new
+gate site is `{"event":"policy_denied","ts":...,"service":...,"action":...,"resource":{"kind":...,"id":...},"reason":...}`;
+the per-module kinds (`policy_denied_env`, `policy_denied_cache`,
+`policy_denied_sql`, `arena_audit_failure`, `persistent_string_escape`) are
+`{"kind":...,"ts":...,"module":...,"detail":...}`. A background thread drains
+the event queue and flushes it at shutdown.
 
 Observability: per-request access logging is on by default (method, path,
 status, duration, request id; disable with `-q`), and pool/latency metrics are
