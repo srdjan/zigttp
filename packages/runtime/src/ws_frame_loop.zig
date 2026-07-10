@@ -103,6 +103,24 @@ fn remainingShutdownGraceMs(cfg: Config) ?u32 {
 /// Run the frame loop until the connection closes. Owns the fd: on
 /// return, the fd is closed and the pool entry for `id` is removed.
 pub fn run(cfg: Config) void {
+    // The HTTP connection loop installed SO_RCVTIMEO/SO_SNDTIMEO
+    // (config.timeout_ms, default 30s) on this fd as an idle/slowloris bound
+    // before the upgrade. The upgraded socket transfers to this frame loop
+    // unchanged, and WebSockets have no server-side ping/keepalive, so any
+    // connection idle past that timeout would be dropped mid-session. Clear
+    // both timeouts (a zero timeval blocks indefinitely) on the fd this loop
+    // reads and writes; the options are socket-level, so the outbound dup sees
+    // the clear too.
+    //
+    // Raw syscall, result discarded (mirrors the TCP_NODELAY call in
+    // server.zig's handleConnection): a shutdown racing in on the worker's
+    // duplicated control fd makes setsockopt return EINVAL, which the
+    // std.posix.setsockopt wrapper marks `unreachable`. The clear is a
+    // best-effort optimisation, so a benign errno must not panic the loop.
+    const clear_timeout = std.posix.timeval{ .sec = 0, .usec = 0 };
+    _ = std.posix.system.setsockopt(cfg.fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&clear_timeout), @sizeOf(std.posix.timeval));
+    _ = std.posix.system.setsockopt(cfg.fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&clear_timeout), @sizeOf(std.posix.timeval));
+
     var input_buf: [max_message_bytes]u8 = undefined;
     var output_buf: [max_message_bytes + 64]u8 = undefined;
 
