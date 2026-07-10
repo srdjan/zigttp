@@ -208,6 +208,11 @@ pub const ContractDiff = struct {
     /// but cannot reclassify. Owned. null when canonicalization succeeds
     /// or when it was never attempted.
     canonical_counterexample: ?[]const u8 = null,
+    /// True when the route or schema surface lost provability across the edit
+    /// (routesDynamic / schemasDynamic went false -> true). Like a response
+    /// going dynamic, an enumerated surface that becomes runtime-computed can no
+    /// longer be certified equivalent, so `classifyStructural` fails closed.
+    routes_became_dynamic: bool = false,
 
     pub fn deinit(self: *ContractDiff, allocator: std.mem.Allocator) void {
         self.routes.deinit(allocator);
@@ -280,6 +285,10 @@ pub const ContractDiff = struct {
     /// upgrade. Exposed for tests and for callers that want the raw answer.
     pub fn classifyStructural(self: *const ContractDiff) Classification {
         var has_added = false;
+
+        // A route/schema surface that lost provability (became runtime-computed)
+        // can no longer be trusted as complete; fail closed like a dynamic response.
+        if (self.routes_became_dynamic) return .breaking;
 
         for (self.routes.items) |r| {
             if (r.status == .removed) return .breaking;
@@ -635,6 +644,8 @@ pub fn diffContracts(
         .dynamic_changes = dynamic_changes,
         .effect_changes = effect_changes,
         .behavior_diff = behavior_diff,
+        .routes_became_dynamic = (new.api.routes_dynamic and !old.api.routes_dynamic) or
+            (new.api.schemas_dynamic and !old.api.schemas_dynamic),
     };
     errdefer diff.deinit(allocator);
 
@@ -2174,6 +2185,26 @@ test "diffContracts tightening a path-param schema is not equivalent" {
     defer diff.deinit(allocator);
 
     try std.testing.expect(diff.api_route_changes.items[0].response != .unchanged);
+}
+
+test "diffContracts route surface going dynamic is breaking" {
+    // A route table that becomes computed-at-runtime (routesDynamic false->true)
+    // can no longer be trusted as a complete enumeration; the same lost-provability
+    // rule the code applies to a dynamic response applies to the route surface.
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    old.api.routes_dynamic = false;
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    new.api.routes_dynamic = true;
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.breaking, diff.classify());
 }
 
 test "diffContracts api response going dynamic is breaking" {
