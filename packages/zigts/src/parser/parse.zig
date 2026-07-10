@@ -448,6 +448,12 @@ pub const Parser = struct {
             if (self.check(.lbrace)) {
                 const nested = try self.parseObjectPattern();
 
+                // A nested pattern may carry a default: `{ data: { x } = {} }`.
+                var nested_default: NodeIndex = null_node;
+                if (self.match(.assign)) {
+                    nested_default = try self.parseExpression(.assignment);
+                }
+
                 return try self.nodes.add(.{
                     .tag = .pattern_element,
                     .loc = loc,
@@ -457,12 +463,17 @@ pub const Parser = struct {
                             .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
                             .key = nested, // Nested pattern
                             .key_atom = key_atom_for_binding, // property-name atom for get_field
-                            .default_value = null_node,
+                            .default_value = nested_default,
                         },
                     },
                 });
             } else if (self.check(.lbracket)) {
                 const nested = try self.parseArrayPattern();
+
+                var nested_default: NodeIndex = null_node;
+                if (self.match(.assign)) {
+                    nested_default = try self.parseExpression(.assignment);
+                }
 
                 return try self.nodes.add(.{
                     .tag = .pattern_element,
@@ -473,7 +484,7 @@ pub const Parser = struct {
                             .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
                             .key = nested, // Nested pattern
                             .key_atom = key_atom_for_binding, // property-name atom for get_field
-                            .default_value = null_node,
+                            .default_value = nested_default,
                         },
                     },
                 });

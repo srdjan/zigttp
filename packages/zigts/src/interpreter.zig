@@ -5527,6 +5527,71 @@ test "End-to-end: object destructuring binds property values" {
     try std.testing.expectEqual(@as(i32, 44), result_opt.?.getInt());
 }
 
+test "End-to-end: nested destructuring with a default binds from the default" {
+    // Regression: `{ a: { b } = { b: 5 } }` once failed to parse because the
+    // nested-pattern branch never consumed the `= default`. The property `a` is
+    // absent, so the nested pattern must destructure the default value.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const heap_mod = @import("heap.zig");
+    const parser_mod = @import("parser/root.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source =
+        \\let obj = { };
+        \\let { a: { b } = { b: 5 } } = obj;
+        \\let result = b;
+    ;
+
+    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try p.parse();
+    try std.testing.expect(code.len > 0);
+
+    const shapes = p.getShapes();
+    if (shapes.len > 0) {
+        try ctx.materializeShapes(shapes);
+    }
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+        .line_table = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    _ = try interp.run(&func);
+
+    const result_atom = try ctx.atoms.intern("result");
+    const result_opt = ctx.getGlobal(result_atom);
+    try std.testing.expect(result_opt != null);
+    try std.testing.expect(result_opt.?.isInt());
+    try std.testing.expectEqual(@as(i32, 5), result_opt.?.getInt());
+}
+
 test "JIT profiling: execution counting" {
     const allocator = std.testing.allocator;
     const gc = @import("gc.zig");
