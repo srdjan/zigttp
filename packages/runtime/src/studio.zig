@@ -1461,6 +1461,30 @@ test "studio HTML exposes the proof-lens tab bar and three lens panes" {
     try std.testing.expect(std.mem.indexOf(u8, index_html, "proof substrate for humans and AI agents") != null);
 }
 
+test "studio TRADE_TABLE stays in sync with review.proof_to_restrictions" {
+    // Drift gate for the hand-mirrored JS TRADE_TABLE: it must carry one entry
+    // per source-of-truth row, and every row's earned tagline and each of its
+    // restrictions must appear verbatim inside the table literal (scoped so a
+    // common word like "class" cannot false-pass against unrelated HTML).
+    const start = std.mem.indexOf(u8, index_html, "const TRADE_TABLE=[") orelse
+        return error.TradeTableMissing;
+    const end = (std.mem.indexOfPos(u8, index_html, start, "}];") orelse
+        return error.TradeTableUnterminated) + 3;
+    const table = index_html[start..end];
+
+    var entries: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, table, idx, "{prop:\"")) |pos| : (idx = pos + 1) entries += 1;
+    try std.testing.expectEqual(review.proof_to_restrictions.len, entries);
+
+    for (review.proof_to_restrictions) |row| {
+        try std.testing.expect(std.mem.indexOf(u8, table, row.earned) != null);
+        for (row.restrictions) |restriction| {
+            try std.testing.expect(std.mem.indexOf(u8, table, restriction) != null);
+        }
+    }
+}
+
 test "factsJson emits proofCertificate field with substrate paragraph" {
     const allocator = std.testing.allocator;
     const facts = review.ReviewFacts{
