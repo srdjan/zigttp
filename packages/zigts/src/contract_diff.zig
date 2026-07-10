@@ -549,7 +549,7 @@ pub fn diffContracts(
                 .method = old_route.method,
                 .path = old_route.path,
                 .status = .unchanged,
-                .response = try compareApiRouteResponse(allocator, &old_route, new_route),
+                .response = try compareApiRouteResponse(allocator, &old_route, new_route, old.api.schemas.items, new.api.schemas.items),
             });
         } else {
             try api_route_changes.append(allocator, .{
@@ -1365,14 +1365,16 @@ fn compareApiRouteResponse(
     allocator: std.mem.Allocator,
     old: *const ApiRouteInfo,
     new: *const ApiRouteInfo,
+    old_schemas: []const handler_contract.ApiSchemaInfo,
+    new_schemas: []const handler_contract.ApiSchemaInfo,
 ) !ApiResponseChange {
     var change = try compareApiParams(allocator, old.query_params.items, new.query_params.items);
     change = mergeApiChange(change, try compareApiParams(allocator, old.header_params.items, new.header_params.items));
     // path_params were never compared, so a path parameter's validation schema
     // could change (or a path param be added/removed) and read as unchanged.
     change = mergeApiChange(change, try compareApiParams(allocator, old.path_params.items, new.path_params.items));
-    change = mergeApiChange(change, try compareRequestBodies(allocator, old, new));
-    change = mergeApiChange(change, try compareResponses(allocator, old, new));
+    change = mergeApiChange(change, try compareRequestBodies(allocator, old, new, old_schemas, new_schemas));
+    change = mergeApiChange(change, try compareResponses(allocator, old, new, old_schemas, new_schemas));
     // An auth guard change is unambiguously breaking in both directions: dropping
     // requiresBearer/requiresJwt lets previously-401 requests through, and adding
     // one 401s existing callers. These were never compared, so an auth guard
@@ -1431,6 +1433,8 @@ fn compareRequestBodies(
     allocator: std.mem.Allocator,
     old: *const ApiRouteInfo,
     new: *const ApiRouteInfo,
+    old_schemas: []const handler_contract.ApiSchemaInfo,
+    new_schemas: []const handler_contract.ApiSchemaInfo,
 ) !ApiResponseChange {
     {
         // Same lost-provability rule as compareResponses: only a request body
@@ -1447,6 +1451,15 @@ fn compareRequestBodies(
         if (old.request_schema_refs.items.len != new.request_schema_refs.items.len) return .breaking;
         for (old.request_schema_refs.items) |schema_ref| {
             if (!containsString(new.request_schema_refs.items, schema_ref)) return .breaking;
+            // The ref name still matches; also resolve both to their schema
+            // definitions and deep-compare the shape, so a mutated shared
+            // schema (e.g. a newly-required field) is not missed.
+            const old_def = resolveRefSchema(old_schemas, schema_ref);
+            const new_def = resolveRefSchema(new_schemas, schema_ref);
+            if (old_def != null and new_def != null) {
+                const shape = try compareSchemaJson(allocator, old_def.?, new_def.?);
+                if (shape == .breaking or shape == .dynamic) return .breaking;
+            }
         }
         return .unchanged;
     }
@@ -1457,12 +1470,20 @@ fn compareRequestBodies(
     for (old.request_bodies.items) |old_body| {
         const new_body = findRequestBody(new.request_bodies.items, old_body.content_type) orelse return .breaking;
         if (!eqlOptionalString(old_body.content_type, new_body.content_type)) return .breaking;
-        const schema_change = try compareSchemaSpecs(allocator, old_body.schema, new_body.schema);
+        const schema_change = try compareSchemaSpecs(allocator, old_body.schema, new_body.schema, old_schemas, new_schemas);
         if (schema_change == .dynamic) return .dynamic;
         if (schema_change != .unchanged) return .breaking;
     }
 
     return .unchanged;
+}
+
+/// Resolve a schema ref name to its JSON definition in `schemas`, or null.
+fn resolveRefSchema(schemas: []const handler_contract.ApiSchemaInfo, ref: []const u8) ?[]const u8 {
+    for (schemas) |s| {
+        if (std.mem.eql(u8, s.name, ref)) return s.schema_json;
+    }
+    return null;
 }
 
 fn findRequestBody(items: []const handler_contract.ApiBodyInfo, content_type: ?[]const u8) ?*const handler_contract.ApiBodyInfo {
@@ -1476,6 +1497,8 @@ fn compareResponses(
     allocator: std.mem.Allocator,
     old: *const ApiRouteInfo,
     new: *const ApiRouteInfo,
+    old_schemas: []const handler_contract.ApiSchemaInfo,
+    new_schemas: []const handler_contract.ApiSchemaInfo,
 ) !ApiResponseChange {
     if (old.responses.items.len == 0 and new.responses.items.len == 0) {
         if (old.response_status != new.response_status) return .breaking;
@@ -1485,6 +1508,8 @@ fn compareResponses(
             allocator,
             schemaSpecView(old.response_schema_ref, old.response_schema_json, old.response_schema_dynamic),
             schemaSpecView(new.response_schema_ref, new.response_schema_json, new.response_schema_dynamic),
+            old_schemas,
+            new_schemas,
         );
     }
 
@@ -1507,7 +1532,7 @@ fn compareResponses(
     var has_addition = false;
     for (old.responses.items) |old_response| {
         const new_response = findResponse(new.responses.items, old_response.status, old_response.content_type) orelse return .breaking;
-        const schema_change = try compareSchemaSpecs(allocator, old_response.schema, new_response.schema);
+        const schema_change = try compareSchemaSpecs(allocator, old_response.schema, new_response.schema, old_schemas, new_schemas);
         if (schema_change == .breaking) return .breaking;
         if (schema_change == .dynamic) return .dynamic;
         if (schema_change == .additive) has_addition = true;
@@ -1549,6 +1574,8 @@ fn compareSchemaSpecs(
     allocator: std.mem.Allocator,
     old_schema: handler_contract.SchemaSpec,
     new_schema: handler_contract.SchemaSpec,
+    old_schemas: []const handler_contract.ApiSchemaInfo,
+    new_schemas: []const handler_contract.ApiSchemaInfo,
 ) !ApiResponseChange {
     return switch (old_schema) {
         // Old schema was already unprovable: comparing against it can never
@@ -1563,7 +1590,18 @@ fn compareSchemaSpecs(
             .dynamic => .dynamic,
         },
         .ref => |old_ref| switch (new_schema) {
-            .ref => |new_ref| if (std.mem.eql(u8, old_ref, new_ref)) .unchanged else .breaking,
+            .ref => |new_ref| blk: {
+                // Resolve both refs to their schema definitions and deep-compare
+                // the shape; comparing ref names alone misses a mutated shared
+                // schema definition (a false-safe on the equivalence receipt).
+                const old_def = resolveRefSchema(old_schemas, old_ref);
+                const new_def = resolveRefSchema(new_schemas, new_ref);
+                if (old_def != null and new_def != null) {
+                    break :blk try compareSchemaJson(allocator, old_def.?, new_def.?);
+                }
+                // A ref that cannot be resolved falls back to name equality.
+                break :blk if (std.mem.eql(u8, old_ref, new_ref)) .unchanged else .breaking;
+            },
             .none, .inline_json => .dynamic,
             .dynamic => .dynamic,
         },
@@ -2216,6 +2254,58 @@ test "diffContracts route surface going dynamic is breaking" {
     var new = try makeTestContract(allocator);
     defer new.deinit(allocator);
     new.api.routes_dynamic = true;
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.breaking, diff.classify());
+}
+
+test "diffContracts changing a shared ref schema shape is breaking" {
+    // Both routes reference the same named schema; the schema DEFINITION changes
+    // a field's type. Comparing ref names alone reads this as unchanged, so the
+    // ref must be resolved against api.schemas and its shape deep-compared.
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    try old.api.schemas.append(allocator, .{
+        .name = try allocator.dupe(u8, "CreateUser"),
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"email\":{\"type\":\"string\"}},\"required\":[\"email\"]}"),
+    });
+    var old_refs: std.ArrayList([]const u8) = .empty;
+    try old_refs.append(allocator, try allocator.dupe(u8, "CreateUser"));
+    try old.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "POST"),
+        .path = try allocator.dupe(u8, "/users"),
+        .request_schema_refs = old_refs,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+    });
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    try new.api.schemas.append(allocator, .{
+        .name = try allocator.dupe(u8, "CreateUser"),
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"email\":{\"type\":\"number\"}},\"required\":[\"email\"]}"),
+    });
+    var new_refs: std.ArrayList([]const u8) = .empty;
+    try new_refs.append(allocator, try allocator.dupe(u8, "CreateUser"));
+    try new.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "POST"),
+        .path = try allocator.dupe(u8, "/users"),
+        .request_schema_refs = new_refs,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+    });
 
     var diff = try diffContracts(allocator, &old, &new);
     defer diff.deinit(allocator);
