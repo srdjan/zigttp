@@ -317,6 +317,7 @@ pub const ContractBuilder = struct {
         default_response: bool,
         verification: ?VerificationInfo,
     ) !HandlerContract {
+        if (self.type_checker) |tc| try tc.ensureHealthy();
         // Proof-carrying functions: infer per-function effect rows across the
         // call graph. The handler's composed row tightens computeProperties;
         // the full table drives capsule discharge after the contract is built.
@@ -334,6 +335,7 @@ pub const ContractBuilder = struct {
 
         // Phase 2: Scan all call sites for env/fetchSync/cache usage
         try self.scanCallSites();
+        if (self.type_checker) |tc| try tc.ensureHealthy();
 
         // Phase 2b: Scan top-level function declarations for WebSocket event
         // exports (onOpen/onMessage/onClose/onError).

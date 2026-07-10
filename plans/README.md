@@ -38,7 +38,7 @@ Plans 015, 016, and 018 are independent. Plan 017 can execute before 016 only if
 | 015 | DONE (mandatory strongest-effect metadata; model/RPC policy gates; single compiler-veto edit path; provider and RPC regressions) |
 | 016 | DONE (joinable server-owned workers; pre-upgrade admission cap; race-safe fd handoff; graceful live-socket shutdown) |
 | 017 | DONE (retained per-peer outbound writer; complete-frame serialization; unregister safety; close validation and concurrency regressions) |
-| 018 | DONE (sticky allocation failure across all five proof passes and pipeline; contract construction propagates type-check OOM) |
+| 018 | DONE (sticky allocation failure across all five proof passes and pipeline; separately approved follow-up splits `TypePool` operational failure from semantic `null_type_idx`) |
 | 019 | DONE (removed `roomFromPath`; aligned three-argument auto-response contract; complete room snapshots; real two-peer chat gateway gate) |
 
 ### Verified findings not planned in this batch

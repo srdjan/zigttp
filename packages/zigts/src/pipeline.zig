@@ -172,6 +172,7 @@ pub fn resolve(
         );
         errdefer sc.deinit();
         strict_errors = try sc.check(parsed.root);
+        if (type_checker_opt) |*tc| try tc.ensureHealthy();
         // The borrowed TypeEnv/TypeChecker pointers were stack-local; releasing
         // them via seal() before the ResolvedModule is moved out keeps any
         // stray future use a clean nullopt instead of UB.
@@ -237,6 +238,7 @@ pub fn check(
     );
     errdefer verifier.deinit();
     const verifier_errors = try verifier.verify(handler_func);
+    if (tc_ptr) |tc| try tc.ensureHealthy();
 
     var flow = FlowChecker.init(
         allocator,
@@ -272,11 +274,21 @@ pub const TypeEnvStorage = struct {
         self: *TypeEnvStorage,
         allocator: std.mem.Allocator,
         type_map: *const TypeMap,
-    ) void {
+    ) !void {
         self.pool = TypePool.init(allocator);
+        errdefer self.pool.deinit(allocator);
+        try self.pool.ensureHealthy();
         self.env = TypeEnv.init(allocator, &self.pool);
+        errdefer self.env.deinit();
+        try self.pool.ensureHealthy();
         modules_mod.populateModuleTypes(&self.env, &self.pool, allocator);
+        try self.pool.ensureHealthy();
         self.env.populateFromTypeMap(type_map);
+        try self.finishInitialization();
+    }
+
+    fn finishInitialization(self: *TypeEnvStorage) !void {
+        try self.pool.ensureHealthy();
         self.initialized = true;
     }
 
@@ -330,6 +342,50 @@ test "pipeline.resolve does not emit a module after analysis allocation failure"
     try testing.expectError(error.OutOfMemory, resolve(failing.allocator(), parsed, .{ .strict = false }));
 }
 
+test "TypeEnvStorage rejects a poisoned TypePool" {
+    const allocator = testing.allocator;
+    var type_map = TypeMap.init("");
+    defer type_map.deinit(allocator);
+
+    var storage: TypeEnvStorage = .{};
+    defer storage.deinit(allocator);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+
+    try testing.expectError(error.OutOfMemory, storage.init(failing.allocator(), &type_map));
+    try testing.expect(storage.envPtr() == null);
+}
+
+test "TypeEnvStorage rejects a late poisoned TypePool" {
+    const allocator = testing.allocator;
+    var type_map = TypeMap.init("");
+    defer type_map.deinit(allocator);
+
+    var storage: TypeEnvStorage = .{};
+    storage.pool = TypePool.init(allocator);
+    defer storage.pool.deinit(allocator);
+    try storage.pool.ensureHealthy();
+    storage.env = TypeEnv.init(allocator, &storage.pool);
+    defer storage.env.deinit();
+    try storage.pool.ensureHealthy();
+    modules_mod.populateModuleTypes(&storage.env, &storage.pool, allocator);
+    try storage.pool.ensureHealthy();
+    storage.env.populateFromTypeMap(&type_map);
+    try storage.pool.ensureHealthy();
+
+    const record = storage.pool.addRecord(allocator, &.{.{
+        .name_start = 0,
+        .name_len = 0,
+        .type_idx = storage.pool.idx_string,
+        .optional = false,
+    }});
+    try storage.pool.ensureHealthy();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    _ = storage.pool.makeReadonly(failing.allocator(), record);
+
+    try testing.expectError(error.OutOfMemory, storage.finishInitialization());
+    try testing.expect(storage.envPtr() == null);
+}
+
 test "pipeline.check does not emit a module after verifier allocation failure" {
     const allocator = testing.allocator;
     var parsed_state = try parseSourceForTest(allocator, "function handler(req) {}\n");
@@ -343,6 +399,37 @@ test "pipeline.check does not emit a module after verifier allocation failure" {
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, check(failing.allocator(), &resolved, handler_func));
+}
+
+test "pipeline.check rejects a TypePool poisoned after resolve" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(allocator, "function handler(req) { return Response.text('ok'); }\n");
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var type_map = TypeMap.init("");
+    defer type_map.deinit(allocator);
+    var storage: TypeEnvStorage = .{};
+    try storage.init(allocator, &type_map);
+    defer storage.deinit(allocator);
+
+    var resolved = try resolve(allocator, parsed, .{ .type_env = storage.envPtr(), .strict = false });
+    defer resolved.deinit();
+    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root) orelse
+        return error.HandlerNotFound;
+
+    const record = storage.pool.addRecord(allocator, &.{.{
+        .name_start = 0,
+        .name_len = 0,
+        .type_idx = storage.pool.idx_string,
+        .optional = false,
+    }});
+    try storage.pool.ensureHealthy();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    _ = storage.pool.makeReadonly(failing.allocator(), record);
+
+    try testing.expectError(error.OutOfMemory, check(allocator, &resolved, handler_func));
 }
 
 test "pipeline.resolve runs BoolChecker on clean source" {

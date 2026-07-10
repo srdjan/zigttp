@@ -1220,7 +1220,7 @@ pub const Runtime = struct {
             var type_env_storage: zq.pipeline.TypeEnvStorage = .{};
             defer type_env_storage.deinit(self.allocator);
             if (strip_result) |sr| {
-                type_env_storage.init(self.allocator, &sr.type_map);
+                try type_env_storage.init(self.allocator, &sr.type_map);
             }
 
             var resolved = try zq.pipeline.resolve(

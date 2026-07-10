@@ -360,6 +360,7 @@ pub const HandlerVerifier = struct {
     /// Run all verification checks on a handler function node.
     /// Returns the number of error-severity diagnostics.
     pub fn verify(self: *HandlerVerifier, handler_func: NodeIndex) !u32 {
+        if (self.type_checker) |tc| try tc.ensureHealthy();
         // Phase 1: Scan imports for result-producing function bindings
         self.scanImports();
 
@@ -388,6 +389,7 @@ pub const HandlerVerifier = struct {
 
         // Phase 5: Report unused variables (scope-aware tracking)
         self.reportUnusedVariables();
+        if (self.type_checker) |tc| try tc.ensureHealthy();
         if (self.allocation_failed) return error.OutOfMemory;
 
         // Count errors

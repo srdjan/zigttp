@@ -1062,7 +1062,7 @@ pub fn runCheckOnlyFromSourceWithOptions(
     var type_env_storage: zigts.pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
     if (strip_result) |sr| {
-        type_env_storage.init(allocator, &sr.type_map);
+        try type_env_storage.init(allocator, &sr.type_map);
     }
 
     var resolved = try zigts.pipeline.resolve(
@@ -1586,7 +1586,7 @@ pub fn compileHandler(
     var type_env_storage: zigts.pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
     if (strip_result) |sr| {
-        type_env_storage.init(allocator, &sr.type_map);
+        try type_env_storage.init(allocator, &sr.type_map);
     }
 
     var resolved = try zigts.pipeline.resolve(
@@ -2390,7 +2390,7 @@ fn buildContractChecking(
     const dispatch = if (aot) |a| a.dispatch else null;
     const has_default = if (aot) |a| a.default_response != null else false;
 
-    return builder.build(
+    var contract = try builder.build(
         filename,
         handler_loc,
         handler_fn,
@@ -2399,6 +2399,9 @@ fn buildContractChecking(
         has_default,
         verify_info,
     );
+    errdefer contract.deinit(allocator);
+    try type_checker.ensureHealthy();
+    return contract;
 }
 
 fn buildContractWithPolicy(

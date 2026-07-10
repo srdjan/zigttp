@@ -188,6 +188,7 @@ pub const TypeMap = type_map.TypeMap;
 pub const TypeMapEntry = type_map.TypeMapEntry;
 pub const TypeMapKind = type_map.TypeMapKind;
 pub const TypePool = type_pool.TypePool;
+pub const TypePoolError = type_pool.TypePoolError;
 pub const TypeIndex = type_pool.TypeIndex;
 pub const null_type_idx = type_pool.null_type_idx;
 pub const parseTypeExpr = type_pool.parseTypeExpr;

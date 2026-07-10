@@ -18,8 +18,22 @@ const std = @import("std");
 /// Index into the TypePool node array.
 pub const TypeIndex = u16;
 
-/// Sentinel for "no type" / "unknown".
+/// Sentinel for semantic absence: no annotation, unresolved inference, or an
+/// invalid type expression. Operational failures are recorded separately on
+/// `TypePool` and must be checked with `ensureHealthy` before consuming types.
 pub const null_type_idx: TypeIndex = std.math.maxInt(TypeIndex);
+
+/// A poisoned pool cannot safely support type or proof decisions. The first
+/// failure is sticky because compound constructors may already have appended
+/// partial backing storage by the time the failure becomes observable.
+pub const TypePoolError = error{
+    TypePoolCapacityExceeded,
+} || std.mem.Allocator.Error;
+
+pub const NameRef = struct {
+    start: u16,
+    len: u8,
+};
 
 // ---------------------------------------------------------------------------
 // Type tags
@@ -120,6 +134,9 @@ pub const TypePool = struct {
     names: std.ArrayListUnmanaged(u8),
     /// Template literal type parts storage
     template_parts: std.ArrayListUnmanaged(TemplatePart),
+    /// Operational failure is separate from `null_type_idx`, which remains a
+    /// semantic absence sentinel. Once poisoned, the pool must be discarded.
+    failure: ?TypePoolError = null,
 
     // Pre-allocated primitive indices (populated during init)
     idx_boolean: TypeIndex = null_type_idx,
@@ -161,18 +178,45 @@ pub const TypePool = struct {
         self.template_parts.deinit(allocator);
     }
 
+    /// Reject any type/proof result produced after the pool failed to allocate
+    /// or outgrew its compact representation.
+    pub fn ensureHealthy(self: *const TypePool) TypePoolError!void {
+        if (self.failure) |failure| return failure;
+    }
+
+    fn recordFailure(self: *TypePool, failure: TypePoolError) void {
+        if (self.failure == null) self.failure = failure;
+    }
+
+    fn isPoisoned(self: *const TypePool) bool {
+        return self.failure != null;
+    }
+
+    fn failIndex(self: *TypePool, failure: TypePoolError) TypeIndex {
+        self.recordFailure(failure);
+        return null_type_idx;
+    }
+
+    fn failName(self: *TypePool, failure: TypePoolError) NameRef {
+        self.recordFailure(failure);
+        return .{ .start = 0, .len = 0 };
+    }
+
     // -------------------------------------------------------------------
     // Node creation
     // -------------------------------------------------------------------
 
     fn addNode(self: *TypePool, allocator: std.mem.Allocator, node: TypeNode) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         // TypeIndex is u16 and null_type_idx == maxInt(u16). Fail closed before
         // the cast can either truncate (silent wrong-node aliasing in ReleaseFast)
         // or produce an index that collides with null_type_idx. This guards every
         // producer below, since they all route through addNode.
-        if (self.nodes.items.len >= std.math.maxInt(u16)) return null_type_idx;
+        if (self.nodes.items.len >= std.math.maxInt(u16)) {
+            return self.failIndex(error.TypePoolCapacityExceeded);
+        }
         const idx: TypeIndex = @intCast(self.nodes.items.len);
-        self.nodes.append(allocator, node) catch return null_type_idx;
+        self.nodes.append(allocator, node) catch return self.failIndex(error.OutOfMemory);
         return idx;
     }
 
@@ -189,14 +233,17 @@ pub const TypePool = struct {
     }
 
     /// Store a name string and return (start, len).
-    pub fn addName(self: *TypePool, allocator: std.mem.Allocator, name: []const u8) struct { start: u16, len: u8 } {
+    pub fn addName(self: *TypePool, allocator: std.mem.Allocator, name: []const u8) NameRef {
+        if (self.isPoisoned()) return .{ .start = 0, .len = 0 };
         // The names arena offset is stored as u16; once it exceeds u16 range a
         // further @intCast would truncate (mis-identifying a field/param/ref name
         // -> unsound compares) or panic. Fail closed with an empty (unknown) name.
-        if (self.names.items.len > std.math.maxInt(u16)) return .{ .start = 0, .len = 0 };
+        if (self.names.items.len > std.math.maxInt(u16)) {
+            return self.failName(error.TypePoolCapacityExceeded);
+        }
         const start: u16 = @intCast(self.names.items.len);
         const len: u8 = @intCast(@min(name.len, 255));
-        self.names.appendSlice(allocator, name[0..len]) catch {};
+        self.names.appendSlice(allocator, name[0..len]) catch return self.failName(error.OutOfMemory);
         return .{ .start = start, .len = len };
     }
 
@@ -267,9 +314,12 @@ pub const TypePool = struct {
 
     /// Create a record type with the given fields.
     pub fn addRecord(self: *TypePool, allocator: std.mem.Allocator, record_fields: []const RecordField) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         const start = self.fields.items.len;
-        if (!fitsU16Range(start, record_fields.len)) return null_type_idx;
-        self.fields.appendSlice(allocator, record_fields) catch return null_type_idx;
+        if (!fitsU16Range(start, record_fields.len)) {
+            return self.failIndex(error.TypePoolCapacityExceeded);
+        }
+        self.fields.appendSlice(allocator, record_fields) catch return self.failIndex(error.OutOfMemory);
         return self.addNode(allocator, .{
             .tag = .t_record,
             .data = .{ .a = @intCast(start), .b = @intCast(record_fields.len) },
@@ -278,11 +328,14 @@ pub const TypePool = struct {
 
     /// Create a union type from members.
     pub fn addUnion(self: *TypePool, allocator: std.mem.Allocator, union_members: []const TypeIndex) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         // Flatten single-member unions
         if (union_members.len == 1) return union_members[0];
         const start = self.members.items.len;
-        if (!fitsU16Range(start, union_members.len)) return null_type_idx;
-        self.members.appendSlice(allocator, union_members) catch return null_type_idx;
+        if (!fitsU16Range(start, union_members.len)) {
+            return self.failIndex(error.TypePoolCapacityExceeded);
+        }
+        self.members.appendSlice(allocator, union_members) catch return self.failIndex(error.OutOfMemory);
         return self.addNode(allocator, .{
             .tag = .t_union,
             .data = .{ .a = @intCast(start), .b = @intCast(union_members.len) },
@@ -293,6 +346,7 @@ pub const TypePool = struct {
     /// collapse to that member; consecutive duplicate TypeIndexes are dropped.
     /// Empty input returns null_type_idx.
     pub fn addIntersection(self: *TypePool, allocator: std.mem.Allocator, intersection_members: []const TypeIndex) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         if (intersection_members.len == 0) return null_type_idx;
 
         // When the input has more distinct members than the dedup buffer can
@@ -314,10 +368,12 @@ pub const TypePool = struct {
             }
 
             const start_raw = self.members.items.len;
-            if (!fitsU16Range(start_raw, raw_count)) return null_type_idx;
+            if (!fitsU16Range(start_raw, raw_count)) {
+                return self.failIndex(error.TypePoolCapacityExceeded);
+            }
             for (intersection_members) |m| {
                 if (m == null_type_idx) continue;
-                self.members.append(allocator, m) catch return null_type_idx;
+                self.members.append(allocator, m) catch return self.failIndex(error.OutOfMemory);
             }
             return self.addNode(allocator, .{
                 .tag = .t_intersection,
@@ -345,8 +401,10 @@ pub const TypePool = struct {
         if (count == 1) return deduped[0];
 
         const start = self.members.items.len;
-        if (!fitsU16Range(start, count)) return null_type_idx;
-        self.members.appendSlice(allocator, deduped[0..count]) catch return null_type_idx;
+        if (!fitsU16Range(start, count)) {
+            return self.failIndex(error.TypePoolCapacityExceeded);
+        }
+        self.members.appendSlice(allocator, deduped[0..count]) catch return self.failIndex(error.OutOfMemory);
         return self.addNode(allocator, .{
             .tag = .t_intersection,
             .data = .{ .a = @intCast(start), .b = @intCast(count) },
@@ -368,9 +426,12 @@ pub const TypePool = struct {
 
     /// Create a tuple type.
     pub fn addTuple(self: *TypePool, allocator: std.mem.Allocator, elements: []const TypeIndex) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         const start = self.members.items.len;
-        if (!fitsU16Range(start, elements.len)) return null_type_idx;
-        self.members.appendSlice(allocator, elements) catch return null_type_idx;
+        if (!fitsU16Range(start, elements.len)) {
+            return self.failIndex(error.TypePoolCapacityExceeded);
+        }
+        self.members.appendSlice(allocator, elements) catch return self.failIndex(error.OutOfMemory);
         return self.addNode(allocator, .{
             .tag = .t_tuple,
             .data = .{ .a = @intCast(start), .b = @intCast(elements.len) },
@@ -441,6 +502,7 @@ pub const TypePool = struct {
         param_types: []const TypeIndex,
         depth: u8,
     ) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         if (idx == null_type_idx or depth > 8) return idx;
         const tag = self.getTag(idx) orelse return idx;
 
@@ -460,7 +522,9 @@ pub const TypePool = struct {
                 // (addRecord -> appendSlice) may reallocate, dangling the slice
                 // mid-loop (UAF / garbage TypeIndex).
                 const live = self.getRecordFields(idx);
-                const new_fields = allocator.alloc(RecordField, live.len) catch return null_type_idx;
+                const new_fields = allocator.alloc(RecordField, live.len) catch {
+                    return self.failIndex(error.OutOfMemory);
+                };
                 defer allocator.free(new_fields);
                 @memcpy(new_fields, live);
                 for (0..new_fields.len) |i| {
@@ -477,7 +541,9 @@ pub const TypePool = struct {
             .t_union => {
                 // Copy members before the loop (shared members list may realloc).
                 const live = self.getUnionMembers(idx);
-                const new_members = allocator.alloc(TypeIndex, live.len) catch return null_type_idx;
+                const new_members = allocator.alloc(TypeIndex, live.len) catch {
+                    return self.failIndex(error.OutOfMemory);
+                };
                 defer allocator.free(new_members);
                 @memcpy(new_members, live);
                 var changed = false;
@@ -492,7 +558,9 @@ pub const TypePool = struct {
             .t_intersection => {
                 // Copy members before the loop (shared members list may realloc).
                 const live = self.getIntersectionMembers(idx);
-                const new_members = allocator.alloc(TypeIndex, live.len) catch return null_type_idx;
+                const new_members = allocator.alloc(TypeIndex, live.len) catch {
+                    return self.failIndex(error.OutOfMemory);
+                };
                 defer allocator.free(new_members);
                 @memcpy(new_members, live);
                 var changed = false;
@@ -514,7 +582,9 @@ pub const TypePool = struct {
                 // Copy args before the loop (shared members list may realloc on
                 // a nested instantiate -> addGenericApp/addArray).
                 const info = self.getGenericAppInfo(idx);
-                const new_args = allocator.alloc(TypeIndex, info.args.len) catch return null_type_idx;
+                const new_args = allocator.alloc(TypeIndex, info.args.len) catch {
+                    return self.failIndex(error.OutOfMemory);
+                };
                 defer allocator.free(new_args);
                 @memcpy(new_args, info.args);
                 var changed = false;
@@ -532,12 +602,15 @@ pub const TypePool = struct {
 
     /// Create a generic application (e.g., Array<number>).
     pub fn addGenericApp(self: *TypePool, allocator: std.mem.Allocator, base: TypeIndex, type_args: []const TypeIndex) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         // Layout: members[start] = count, members[start+1..start+1+count] = type args.
         // Storing count inline avoids the 8-bit truncation of the previous (start&0xFF)|(count<<8) scheme.
         const start = self.members.items.len;
-        if (!fitsU16(start) or !fitsU16(type_args.len)) return null_type_idx;
-        self.members.append(allocator, @intCast(type_args.len)) catch return null_type_idx;
-        self.members.appendSlice(allocator, type_args) catch return null_type_idx;
+        if (!fitsU16(start) or !fitsU16(type_args.len)) {
+            return self.failIndex(error.TypePoolCapacityExceeded);
+        }
+        self.members.append(allocator, @intCast(type_args.len)) catch return self.failIndex(error.OutOfMemory);
+        self.members.appendSlice(allocator, type_args) catch return self.failIndex(error.OutOfMemory);
         return self.addNode(allocator, .{
             .tag = .t_generic_app,
             .data = .{ .a = base, .b = @intCast(start) },
@@ -605,9 +678,12 @@ pub const TypePool = struct {
 
     /// Create a new record type with all fields marked readonly (Readonly<T> utility).
     pub fn makeReadonly(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         const fields = self.getRecordFields(idx);
         if (fields.len == 0) return idx;
-        const ro_fields = allocator.alloc(RecordField, fields.len) catch return null_type_idx;
+        const ro_fields = allocator.alloc(RecordField, fields.len) catch {
+            return self.failIndex(error.OutOfMemory);
+        };
         defer allocator.free(ro_fields);
         @memcpy(ro_fields, fields);
         for (ro_fields) |*field| {
@@ -618,9 +694,12 @@ pub const TypePool = struct {
 
     /// Create a new record type with all fields optional (Partial<T> utility).
     pub fn makePartial(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         const fields = self.getRecordFields(idx);
         if (fields.len == 0) return idx;
-        const out = allocator.alloc(RecordField, fields.len) catch return null_type_idx;
+        const out = allocator.alloc(RecordField, fields.len) catch {
+            return self.failIndex(error.OutOfMemory);
+        };
         defer allocator.free(out);
         @memcpy(out, fields);
         for (out) |*field| {
@@ -631,9 +710,12 @@ pub const TypePool = struct {
 
     /// Create a new record type with all fields required (Required<T> utility).
     pub fn makeRequired(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         const fields = self.getRecordFields(idx);
         if (fields.len == 0) return idx;
-        const out = allocator.alloc(RecordField, fields.len) catch return null_type_idx;
+        const out = allocator.alloc(RecordField, fields.len) catch {
+            return self.failIndex(error.OutOfMemory);
+        };
         defer allocator.free(out);
         @memcpy(out, fields);
         for (out) |*field| {
@@ -647,6 +729,7 @@ pub const TypePool = struct {
     /// non-literal key argument or non-record source returns the source
     /// unchanged.
     pub fn pickFields(self: *TypePool, allocator: std.mem.Allocator, record_idx: TypeIndex, keys_idx: TypeIndex) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         const fields = self.getRecordFields(record_idx);
         if (fields.len == 0) return record_idx;
 
@@ -657,7 +740,7 @@ pub const TypePool = struct {
         for (fields) |field| {
             const name = self.getName(field.name_start, field.name_len);
             if (self.stringKeySetContains(keys_idx, name, &saw_literal_key)) {
-                out.append(allocator, field) catch return null_type_idx;
+                out.append(allocator, field) catch return self.failIndex(error.OutOfMemory);
             }
         }
 
@@ -670,6 +753,7 @@ pub const TypePool = struct {
     /// non-literal key argument or non-record source returns the source
     /// unchanged.
     pub fn omitFields(self: *TypePool, allocator: std.mem.Allocator, record_idx: TypeIndex, keys_idx: TypeIndex) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         const fields = self.getRecordFields(record_idx);
         if (fields.len == 0) return record_idx;
 
@@ -680,7 +764,7 @@ pub const TypePool = struct {
         for (fields) |field| {
             const name = self.getName(field.name_start, field.name_len);
             if (!self.stringKeySetContains(keys_idx, name, &saw_literal_key)) {
-                out.append(allocator, field) catch return null_type_idx;
+                out.append(allocator, field) catch return self.failIndex(error.OutOfMemory);
             }
         }
 
@@ -718,9 +802,12 @@ pub const TypePool = struct {
     /// Create a template literal type from parts.
     /// TypeData: a = parts_start, b = parts_count.
     pub fn addTemplateLiteral(self: *TypePool, allocator: std.mem.Allocator, parts: []const TemplatePart) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         const start = self.template_parts.items.len;
-        if (!fitsU16Range(start, parts.len)) return null_type_idx;
-        self.template_parts.appendSlice(allocator, parts) catch return null_type_idx;
+        if (!fitsU16Range(start, parts.len)) {
+            return self.failIndex(error.TypePoolCapacityExceeded);
+        }
+        self.template_parts.appendSlice(allocator, parts) catch return self.failIndex(error.OutOfMemory);
         return self.addNode(allocator, .{
             .tag = .t_template_literal,
             .data = .{ .a = @intCast(start), .b = @intCast(parts.len) },
@@ -806,9 +893,12 @@ pub const TypePool = struct {
         union_idx: TypeIndex,
         exclude: TypeIndex,
     ) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         const members = self.getUnionMembers(union_idx);
         if (members.len == 0) return union_idx;
-        const remaining = allocator.alloc(TypeIndex, members.len) catch return null_type_idx;
+        const remaining = allocator.alloc(TypeIndex, members.len) catch {
+            return self.failIndex(error.OutOfMemory);
+        };
         defer allocator.free(remaining);
         var count: usize = 0;
         for (members) |member| {
@@ -839,14 +929,17 @@ pub const TypePool = struct {
 
     /// Create a function type with params and return type.
     pub fn addFunctionWithReturn(self: *TypePool, allocator: std.mem.Allocator, func_params: []const FuncParam, ret: TypeIndex) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
         // param_start (12 bits) and count (4 bits) are packed into data.a. If the
         // shared params list has grown past 0x0FFF, a clamped param_start would
         // mis-slice into another function's params, and count > 15 cannot be
         // represented. Fail closed rather than creating a callable-looking
         // function with silently dropped parameters.
         const param_start = self.params.items.len;
-        if (!fitsPackedFunction(param_start, func_params.len)) return null_type_idx;
-        self.params.appendSlice(allocator, func_params) catch return null_type_idx;
+        if (!fitsPackedFunction(param_start, func_params.len)) {
+            return self.failIndex(error.TypePoolCapacityExceeded);
+        }
+        self.params.appendSlice(allocator, func_params) catch return self.failIndex(error.OutOfMemory);
         return self.addNode(allocator, .{
             .tag = .t_function,
             .data = .{
@@ -1322,6 +1415,7 @@ pub const TypePool = struct {
 /// Parse a type expression string into the TypePool.
 /// Returns the TypeIndex of the parsed type, or null_type_idx on failure.
 pub fn parseTypeExpr(pool: *TypePool, allocator: std.mem.Allocator, source: []const u8) TypeIndex {
+    if (pool.isPoisoned()) return null_type_idx;
     var parser = TypeExprParser{
         .pool = pool,
         .allocator = allocator,
@@ -1354,13 +1448,13 @@ const TypeExprParser = struct {
 
         var members: std.ArrayListUnmanaged(TypeIndex) = .empty;
         defer members.deinit(self.allocator);
-        members.append(self.allocator, first) catch return null_type_idx;
+        members.append(self.allocator, first) catch return self.pool.failIndex(error.OutOfMemory);
 
         while (true) {
             self.skipWs();
             const member = self.parseIntersection();
             if (member == null_type_idx) break;
-            members.append(self.allocator, member) catch return null_type_idx;
+            members.append(self.allocator, member) catch return self.pool.failIndex(error.OutOfMemory);
             self.skipWs();
             if (!self.match('|')) break;
         }
@@ -1401,13 +1495,13 @@ const TypeExprParser = struct {
 
         var members: std.ArrayListUnmanaged(TypeIndex) = .empty;
         defer members.deinit(self.allocator);
-        members.append(self.allocator, first) catch return null_type_idx;
+        members.append(self.allocator, first) catch return self.pool.failIndex(error.OutOfMemory);
 
         while (true) {
             self.skipWs();
             const member = self.parsePrimary();
             if (member == null_type_idx) break;
-            members.append(self.allocator, member) catch return null_type_idx;
+            members.append(self.allocator, member) catch return self.pool.failIndex(error.OutOfMemory);
             self.skipWs();
             if (!self.match('&')) break;
         }
@@ -1504,7 +1598,7 @@ const TypeExprParser = struct {
                 .type_idx = field_type,
                 .optional = optional,
                 .readonly = is_readonly,
-            }) catch return null_type_idx;
+            }) catch return self.pool.failIndex(error.OutOfMemory);
 
             self.skipWs();
             // Skip separator (; or ,)
@@ -1527,7 +1621,7 @@ const TypeExprParser = struct {
             self.skipWs();
             const elem = self.parseUnion();
             if (elem == null_type_idx) break;
-            elements.append(self.allocator, elem) catch return null_type_idx;
+            elements.append(self.allocator, elem) catch return self.pool.failIndex(error.OutOfMemory);
             self.skipWs();
             _ = self.match(',');
         }
@@ -1576,7 +1670,7 @@ const TypeExprParser = struct {
                 .name_len = n.len,
                 .type_idx = param_type,
                 .optional = optional,
-            }) catch return null_type_idx;
+            }) catch return self.pool.failIndex(error.OutOfMemory);
             self.skipWs();
             _ = self.match(',');
         }
@@ -1653,7 +1747,7 @@ const TypeExprParser = struct {
                 const slot_type = self.parseUnion();
                 self.skipWs();
                 _ = self.match('}');
-                parts.append(self.allocator, .{ .kind = .type_slot, .type_idx = slot_type }) catch return null_type_idx;
+                parts.append(self.allocator, .{ .kind = .type_slot, .type_idx = slot_type }) catch return self.pool.failIndex(error.OutOfMemory);
             } else {
                 // Literal segment: read until ` or ${
                 const seg_start = self.pos;
@@ -1663,7 +1757,7 @@ const TypeExprParser = struct {
                 }
                 if (self.pos > seg_start) {
                     const n = self.pool.addName(self.allocator, self.source[seg_start..self.pos]);
-                    parts.append(self.allocator, .{ .kind = .literal, .name_start = n.start, .name_len = n.len }) catch return null_type_idx;
+                    parts.append(self.allocator, .{ .kind = .literal, .name_start = n.start, .name_len = n.len }) catch return self.pool.failIndex(error.OutOfMemory);
                 }
             }
         }
@@ -1749,7 +1843,7 @@ const TypeExprParser = struct {
             self.skipWs();
             const arg = self.parseUnion();
             if (arg == null_type_idx) break;
-            args.append(self.allocator, arg) catch return null_type_idx;
+            args.append(self.allocator, arg) catch return self.pool.failIndex(error.OutOfMemory);
             self.skipWs();
             _ = self.match(',');
         }
@@ -1833,6 +1927,65 @@ test "TypePool primitives" {
     try std.testing.expect(pool.idx_string != null_type_idx);
     try std.testing.expectEqual(TypeTag.t_boolean, pool.getTag(pool.idx_boolean).?);
     try std.testing.expectEqual(TypeTag.t_number, pool.getTag(pool.idx_number).?);
+}
+
+test "TypePool records primitive initialization allocation failure" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var pool = TypePool.init(failing.allocator());
+    defer pool.deinit(failing.allocator());
+
+    try std.testing.expectError(error.OutOfMemory, pool.ensureHealthy());
+}
+
+test "TypePool records constructor allocation failure separately from missing type" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const idx = pool.addRecord(failing.allocator(), &.{.{
+        .name_start = 0,
+        .name_len = 0,
+        .type_idx = pool.idx_string,
+        .optional = false,
+    }});
+
+    try std.testing.expectEqual(null_type_idx, idx);
+    try std.testing.expectError(error.OutOfMemory, pool.ensureHealthy());
+}
+
+test "TypePool records type parser scratch allocation failure" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const idx = parseTypeExpr(&pool, failing.allocator(), "string | number");
+
+    try std.testing.expectEqual(null_type_idx, idx);
+    try std.testing.expectError(error.OutOfMemory, pool.ensureHealthy());
+}
+
+test "TypePool records name storage allocation failure" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const name = pool.addName(failing.allocator(), "field");
+
+    try std.testing.expectEqual(@as(u8, 0), name.len);
+    try std.testing.expectError(error.OutOfMemory, pool.ensureHealthy());
+}
+
+test "TypePool semantic absence does not poison the pool" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    try std.testing.expectEqual(null_type_idx, parseTypeExpr(&pool, allocator, ""));
+    try pool.ensureHealthy();
 }
 
 test "TypePool record" {
@@ -2519,6 +2672,7 @@ test "addRecord fails closed when field start cannot fit" {
         .optional = false,
     }});
     try std.testing.expectEqual(null_type_idx, idx);
+    try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
 }
 
 test "addFunctionWithReturn fails closed when params cannot be packed" {
@@ -2541,6 +2695,7 @@ test "addFunctionWithReturn fails closed when params cannot be packed" {
 
     const idx = pool.addFunctionWithReturn(allocator, params[0..], pool.idx_void);
     try std.testing.expectEqual(null_type_idx, idx);
+    try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
 }
 
 test "instantiate preserves records wider than old stack buffers" {

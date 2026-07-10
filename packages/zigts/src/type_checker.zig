@@ -150,13 +150,21 @@ pub const TypeChecker = struct {
 
     /// Run the checker on the given root node. Returns the number of errors.
     pub fn check(self: *TypeChecker, root: NodeIndex) !u32 {
+        try self.ensureHealthy();
         self.walkStmt(root);
-        if (self.allocation_failed) return error.OutOfMemory;
+        try self.ensureHealthy();
         var error_count: u32 = 0;
         for (self.diagnostics.items) |diag| {
             if (diag.severity == .err) error_count += 1;
         }
         return error_count;
+    }
+
+    /// Reject proof/type results after either the checker or its shared pool
+    /// encounters an operational allocation or compact-capacity failure.
+    pub fn ensureHealthy(self: *const TypeChecker) type_pool_mod.TypePoolError!void {
+        try self.env.pool.ensureHealthy();
+        if (self.allocation_failed) return error.OutOfMemory;
     }
 
     pub fn getDiagnostics(self: *const TypeChecker) []const Diagnostic {
@@ -201,6 +209,8 @@ pub const TypeChecker = struct {
     // -------------------------------------------------------------------
 
     fn walkStmt(self: *TypeChecker, node: NodeIndex) void {
+        if (self.allocation_failed) return;
+        self.env.pool.ensureHealthy() catch return;
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
 
@@ -425,6 +435,8 @@ pub const TypeChecker = struct {
     // -------------------------------------------------------------------
 
     fn walkExpr(self: *TypeChecker, node: NodeIndex) void {
+        if (self.allocation_failed) return;
+        self.env.pool.ensureHealthy() catch return;
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
 
@@ -1103,6 +1115,7 @@ pub const TypeChecker = struct {
 
     /// Infer the TypeIndex of an expression. Returns null_type_idx for unknown.
     pub fn inferType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+        self.env.pool.ensureHealthy() catch return null_type_idx;
         if (node == null_node) return null_type_idx;
         const tag = self.ir_view.getTag(node) orelse return null_type_idx;
         const pool = self.env.pool;
@@ -1998,6 +2011,56 @@ test "TypeChecker fails closed when diagnostic storage cannot allocate" {
         .help = null,
     });
     try std.testing.expectError(error.OutOfMemory, checker.check(root));
+}
+
+test "TypeChecker ensureHealthy rejects a TypePool poisoned after check" {
+    const allocator = std.testing.allocator;
+    var parser = @import("parser/parse.zig").Parser.init(allocator, "");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    var checker = TypeChecker.init(allocator, view, null, &env, null);
+    defer checker.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), try checker.check(root));
+
+    const record = pool.addRecord(allocator, &.{.{
+        .name_start = 0,
+        .name_len = 0,
+        .type_idx = pool.idx_string,
+        .optional = false,
+    }});
+    try pool.ensureHealthy();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    _ = pool.makeReadonly(failing.allocator(), record);
+
+    try std.testing.expectError(error.OutOfMemory, checker.ensureHealthy());
+}
+
+test "TypeChecker ensureHealthy propagates TypePool capacity exhaustion" {
+    const allocator = std.testing.allocator;
+    var parser = @import("parser/parse.zig").Parser.init(allocator, "");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    var checker = TypeChecker.init(allocator, view, null, &env, null);
+    defer checker.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), try checker.check(root));
+    try pool.fields.resize(allocator, @as(usize, std.math.maxInt(u16)) + 1);
+    _ = pool.addRecord(allocator, &.{});
+
+    try std.testing.expectError(error.TypePoolCapacityExceeded, checker.ensureHealthy());
 }
 
 fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {

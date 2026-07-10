@@ -154,12 +154,14 @@ pub const StrictChecker = struct {
     }
 
     pub fn check(self: *StrictChecker, root: NodeIndex) !u32 {
+        if (self.type_checker) |tc| try tc.ensureHealthy();
         self.scanImports();
         self.collectAnnotatedFunctions(root);
         self.collectStaticLiterals(root);
         self.collectAssignments(root);
         self.collectCallCounts(root);
         self.walkStmt(root);
+        if (self.type_checker) |tc| try tc.ensureHealthy();
         if (self.allocation_failed) return error.OutOfMemory;
 
         var error_count: u32 = 0;

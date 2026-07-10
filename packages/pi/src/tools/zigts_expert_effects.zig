@@ -107,9 +107,12 @@ fn execute(
     // so the expert can surface declared-vs-inferred drift.
     var type_pool = zigts.TypePool.init(allocator);
     defer type_pool.deinit(allocator);
+    try type_pool.ensureHealthy();
     var type_env = zigts.TypeEnv.init(allocator, &type_pool);
     defer type_env.deinit();
+    try type_pool.ensureHealthy();
     type_env.populateFromTypeMap(&strip_result.type_map);
+    try type_pool.ensureHealthy();
 
     const ctx: WriteContext = .{ .allocator = allocator, .env = &type_env, .ir_view = ir_view };
     var buf: std.ArrayList(u8) = .empty;
