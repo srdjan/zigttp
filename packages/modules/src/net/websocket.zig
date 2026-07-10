@@ -1,6 +1,6 @@
 //! zigttp:websocket - bidirectional connections with hibernation.
 //!
-//! Seven exports. All dispatch through runtime-owned callbacks installed
+//! Six exports. All dispatch through runtime-owned callbacks installed
 //! by the zigts-side shim. Until installed, each call throws the same
 //! "runtime not installed" error.
 
@@ -22,7 +22,6 @@ pub const WebSocketCallbacks = struct {
     serialize_attachment_fn: WsCallFn,
     deserialize_attachment_fn: WsCallFn,
     get_web_sockets_fn: WsCallFn,
-    room_from_path_fn: WsCallFn,
     set_auto_response_fn: WsCallFn,
 };
 
@@ -35,14 +34,27 @@ pub const binding = sdk.ModuleBinding{
     .stateful = true,
     .exports = &.{
         .{ .name = "send", .module_func = sendImpl, .arg_count = 2, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .string } },
-        .{ .name = "close", .module_func = closeImpl, .arg_count = 3, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .number, .string } },
-        .{ .name = "serializeAttachment", .module_func = serializeAttachmentImpl, .arg_count = 2, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .object } },
-        .{ .name = "deserializeAttachment", .module_func = deserializeAttachmentImpl, .arg_count = 1, .effect = .read, .returns = .optional_object, .param_types = &.{.object} },
+        .{ .name = "close", .module_func = closeImpl, .arg_count = 3, .required_arg_count = 1, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .number, .string } },
+        .{ .name = "serializeAttachment", .module_func = serializeAttachmentImpl, .arg_count = 2, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .string } },
+        .{ .name = "deserializeAttachment", .module_func = deserializeAttachmentImpl, .arg_count = 1, .effect = .read, .returns = .optional_string, .param_types = &.{.object} },
         .{ .name = "getWebSockets", .module_func = getWebSocketsImpl, .arg_count = 1, .effect = .read, .returns = .object, .param_types = &.{.string} },
-        .{ .name = "roomFromPath", .module_func = roomFromPathImpl, .arg_count = 2, .effect = .read, .returns = .string, .param_types = &.{ .object, .string } },
-        .{ .name = "setAutoResponse", .module_func = setAutoResponseImpl, .arg_count = 2, .effect = .write, .returns = .undefined, .param_types = &.{ .string, .string } },
+        .{ .name = "setAutoResponse", .module_func = setAutoResponseImpl, .arg_count = 3, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .string, .string } },
     },
 };
+
+test "public binding matches the executable WebSocket callback contract" {
+    try std.testing.expectEqual(@as(usize, 6), binding.exports.len);
+    for (binding.exports) |exp| {
+        try std.testing.expect(!std.mem.eql(u8, exp.name, "roomFromPath"));
+        if (std.mem.eql(u8, exp.name, "setAutoResponse")) {
+            try std.testing.expectEqual(@as(u8, 3), exp.arg_count);
+            try std.testing.expectEqual(@as(usize, 3), exp.param_types.len);
+            try std.testing.expectEqual(sdk.ReturnKind.object, exp.param_types[0]);
+            try std.testing.expectEqual(sdk.ReturnKind.string, exp.param_types[1]);
+            try std.testing.expectEqual(sdk.ReturnKind.string, exp.param_types[2]);
+        }
+    }
+}
 
 fn dispatch(handle: *sdk.ModuleHandle, args: []const sdk.JSValue, comptime field: []const u8) anyerror!sdk.JSValue {
     const state = sdk.getModuleState(handle, WebSocketCallbacks, MODULE_STATE_SLOT) orelse {
@@ -66,9 +78,6 @@ fn deserializeAttachmentImpl(h: *sdk.ModuleHandle, _: sdk.JSValue, a: []const sd
 }
 fn getWebSocketsImpl(h: *sdk.ModuleHandle, _: sdk.JSValue, a: []const sdk.JSValue) anyerror!sdk.JSValue {
     return dispatch(h, a, "get_web_sockets_fn");
-}
-fn roomFromPathImpl(h: *sdk.ModuleHandle, _: sdk.JSValue, a: []const sdk.JSValue) anyerror!sdk.JSValue {
-    return dispatch(h, a, "room_from_path_fn");
 }
 fn setAutoResponseImpl(h: *sdk.ModuleHandle, _: sdk.JSValue, a: []const sdk.JSValue) anyerror!sdk.JSValue {
     return dispatch(h, a, "set_auto_response_fn");

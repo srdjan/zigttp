@@ -13,6 +13,12 @@ the enclosing step deadline passes.
 
 ## Changed
 
+- **Breaking:** `zigttp:websocket` removes `roomFromPath`. Use the normalized
+  room passed to WebSocket callbacks and pass that value to
+  `getWebSockets(room)`; there is no beta compatibility stub.
+- **Breaking:** generic `tools.invoke` RPC calls can discover and invoke only
+  analysis and workspace-read tools. Process execution, agent-state
+  persistence, and workspace writes require their trusted/model surfaces.
 - **Breaking:** durable `run()` no longer trusts automatic retry or
   duplicate-response replay by default. Reusing a completed durable response, or
   retrying a run that a crash left incomplete, now requires either a workflow
@@ -34,4 +40,5 @@ the enclosing step deadline passes.
 
 ## Breaking changes
 
-- See the breaking durable `run()` retry/reuse entry under Changed.
+- See the WebSocket, agent RPC policy, and durable `run()` entries under
+  Changed.

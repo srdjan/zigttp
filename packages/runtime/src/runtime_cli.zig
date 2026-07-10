@@ -520,6 +520,11 @@ fn parseCommonServeFlag(
         config.log_requests = false;
         return true;
     }
+    if (std.mem.eql(u8, arg, "--max-websocket-connections")) {
+        const value = try shared.takeArg(i, argv, error.MissingMaxWebSocketConnections);
+        config.max_websocket_connections = std.fmt.parseInt(usize, value, 10) catch return error.InvalidMaxWebSocketConnections;
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--system")) {
         config.runtime_config.system_config_path = try shared.takeArg(i, argv, error.MissingSystemFile);
         return true;
@@ -772,6 +777,7 @@ fn printAppendedHelp() void {
         \\  -p, --port <PORT>     Port to listen on
         \\  -h, --host <HOST>     Host to bind to
         \\  -q, --quiet           Disable request logging
+        \\  --max-websocket-connections <N> Live WebSocket limit (default 1024; 0 disables)
         \\  --no-env-check        Skip required environment checks
         \\  --security-log <FILE> Write security decisions to FILE
         \\  --lifecycle <MODE>    ephemeral, bounded, ttl, or reuse
@@ -834,6 +840,7 @@ fn printServeHelp() void {
         \\  -e, --eval <CODE>     Evaluate inline JavaScript handler
         \\  -m, --memory <SIZE>   JS runtime memory limit
         \\  --max-body-size <SIZE> Request body limit (default 1m); oversize returns 413
+        \\  --max-websocket-connections <N> Live WebSocket limit (default 1024; 0 disables)
         \\  -n, --pool <N>        Runtime pool size
         \\  -q, --quiet           Disable request logging
         \\  --static <DIR>        Serve static files from directory
@@ -889,6 +896,14 @@ test "parseCommonServeFlag: -p consumes next arg as port" {
     try std.testing.expect(try parseCommonServeFlag(argv[0], &i, &argv, &config));
     try std.testing.expectEqual(@as(u16, 4242), config.port);
     try std.testing.expectEqual(@as(usize, 1), i);
+}
+
+test "parseCommonServeFlag: WebSocket capacity has explicit zero semantics" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    const argv = [_][]const u8{ "--max-websocket-connections", "0" };
+    var i: usize = 0;
+    try std.testing.expect(try parseCommonServeFlag(argv[0], &i, &argv, &config));
+    try std.testing.expectEqual(@as(usize, 0), config.max_websocket_connections);
 }
 
 test "parseServeFeatureFlags: quest implies watch and prove" {

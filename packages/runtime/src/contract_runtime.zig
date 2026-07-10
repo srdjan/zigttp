@@ -683,6 +683,12 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
             .idempotent = hc.durable.workflow.properties.idempotent,
             .fault_covered = hc.durable.workflow.properties.fault_covered,
         },
+        .websocket = .{
+            .on_open = hc.websocket.on_open,
+            .on_message = hc.websocket.on_message,
+            .on_close = hc.websocket.on_close,
+            .on_error = hc.websocket.on_error,
+        },
         .capabilities = hc.capabilities,
         .artifact_sha256 = hc.artifact_sha256,
         .policy_hash = hc.policy_hash,
@@ -1151,6 +1157,11 @@ test "fromHandlerContract converts properties and env vars" {
     hc.durable.workflow.properties.retry_safe = true;
     hc.durable.workflow.properties.idempotent = true;
     hc.durable.workflow.properties.fault_covered = true;
+    hc.websocket = .{
+        .on_open = true,
+        .on_message = true,
+        .on_close = true,
+    };
 
     var raw = try fromHandlerContract(allocator, &hc);
     defer raw.deinit();
@@ -1166,6 +1177,10 @@ test "fromHandlerContract converts properties and env vars" {
     try std.testing.expect(rc.durable_workflow_properties.retry_safe);
     try std.testing.expect(rc.durable_workflow_properties.idempotent);
     try std.testing.expect(rc.durable_workflow_properties.fault_covered);
+    try std.testing.expect(rc.websocket.on_open);
+    try std.testing.expect(rc.websocket.on_message);
+    try std.testing.expect(rc.websocket.on_close);
+    try std.testing.expect(!rc.websocket.on_error);
 }
 
 // Drift guard: parseContractJson is a second, hand-rolled reader of the contract

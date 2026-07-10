@@ -29,6 +29,7 @@ const ValidatedRuntimeContract = contract_runtime.ValidatedRuntimeContract;
 const ws_gateway = @import("ws_gateway.zig");
 const ws_frame_loop = @import("ws_frame_loop.zig");
 const websocket_pool = @import("websocket_pool.zig");
+const websocket_workers = @import("websocket_workers.zig");
 const in_process_dispatch = @import("in_process_dispatch.zig");
 const SystemRuntime = in_process_dispatch.SystemRuntime;
 const actor_queue = @import("actor_queue.zig");
@@ -1042,16 +1043,10 @@ const ConnectionPool = struct {
         try writeAllFd(fd, response);
     }
 
-    /// Drive ws_gateway.upgrade for a single request. On a successful
-    /// upgrade, writes the 101 response and hands the fd off to a
-    /// dedicated frame-loop thread (see `ws_frame_loop`). Returns
-    /// `.transferred` so `handleConnection` skips the fd close.
-    ///
-    /// W1-d.4-a lifecycle: the spawned thread is detached. On server
-    /// shutdown the fd is closed when the process exits; per-connection
-    /// clean join lands alongside the hibernation scheduler in W3. On
-    /// rejection, the fd stays in the outer loop's ownership and the
-    /// defer-close fires normally.
+    /// Drive ws_gateway.upgrade for a single request. Capacity and a joinable
+    /// worker are secured before the 101 response is written. The worker stays
+    /// gated until that write succeeds, preventing onOpen/frame output from
+    /// racing ahead of the HTTP handshake.
     fn handleWebSocketUpgradeSync(
         self: *ConnectionPool,
         fd: std.posix.fd_t,
@@ -1059,6 +1054,16 @@ const ConnectionPool = struct {
         req_allocator: std.mem.Allocator,
         status_out: *u16,
     ) !RequestOutcome {
+        var reservation = self.server.ws_workers.reserve() catch |err| switch (err) {
+            error.AtCapacity, error.Stopping => {
+                status_out.* = 503;
+                try self.sendErrorSync(fd, 503, "WebSocket Capacity Reached");
+                return .close;
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        defer reservation.cancel();
+
         const pool = try self.ensureWebSocketPool();
 
         var buf: std.ArrayList(u8) = .empty;
@@ -1070,22 +1075,25 @@ const ConnectionPool = struct {
 
         switch (upgrade_outcome) {
             .ok => |id| {
-                // ws_gateway.upgrade registered the connection in the pool
-                // before the 101 handshake bytes hit the real fd. If the write
-                // fails (slow / half-open client with SO_SNDTIMEO), unregister
-                // so the Connection struct, room dup, and map/room entries are
-                // not leaked, mirroring the spawnFrameLoop failure path below.
-                writeAllFd(fd, buf.items) catch |err| {
-                    std.log.warn("ws upgrade handshake write failed: {}", .{err});
-                    pool.unregister(id);
-                    return .close;
-                };
-                status_out.* = 101;
-                self.spawnFrameLoop(pool, fd, id) catch |err| {
+                // ws_gateway has validated and registered the fd but only wrote
+                // the handshake into the staging buffer. Spawn the gated worker
+                // now so thread creation failure still leaves the real socket in
+                // HTTP ownership and no 101 has reached the peer.
+                const worker = self.spawnFrameLoop(&reservation, pool, fd, id) catch |err| {
                     std.log.warn("ws frame-loop spawn failed: {}", .{err});
                     pool.unregister(id);
                     return .close;
                 };
+
+                writeAllFd(fd, buf.items) catch |err| {
+                    std.log.warn("ws upgrade handshake write failed: {}", .{err});
+                    self.server.ws_workers.cancel(worker);
+                    // The joinable worker owns and will close the fd; returning
+                    // transferred prevents the HTTP defer from closing it twice.
+                    return .transferred;
+                };
+                status_out.* = 101;
+                if (!self.server.ws_workers.start(worker)) return .transferred;
                 return .transferred;
             },
             .reject => |reason| {
@@ -1106,18 +1114,16 @@ const ConnectionPool = struct {
         }
     }
 
-    /// Spawn a detached frame-loop thread that owns the fd and pool
-    /// entry. Returns after the thread is running; the caller must not
-    /// touch either resource afterwards. Inbound frames are routed to
-    /// the handler's JS `onMessage` export when the handler pool is
-    /// live; if it isn't (tests, degraded boot), the frame loop falls
-    /// back to codec-level echo so the socket stays responsive.
+    /// Spawn a server-owned, joinable frame-loop worker in its gated state.
+    /// Inbound frames are routed to the handler's JS `onMessage` export when
+    /// the handler pool is live; tests/degraded boot retain codec-level echo.
     fn spawnFrameLoop(
         self: *ConnectionPool,
+        reservation: *websocket_workers.Reservation,
         pool: *websocket_pool.Pool,
         fd: std.posix.fd_t,
         id: websocket_pool.ConnectionId,
-    ) !void {
+    ) !websocket_workers.WorkerHandle {
         const handler_pool_ptr: ?*HandlerPool = if (self.server.pool) |*p| p else null;
         const cfg = ws_frame_loop.Config{
             .pool = pool,
@@ -1132,9 +1138,9 @@ const ConnectionPool = struct {
             // onMessage still borrows (SR1).
             .contract_lock = &self.server.contract_lock,
             .reload_active = &self.server.reload_active,
+            .shutdown_deadline_ns = &self.server.ws_shutdown_deadline_ns,
         };
-        const thread = try std.Thread.spawn(.{}, ws_frame_loop.run, .{cfg});
-        thread.detach();
+        return self.server.ws_workers.spawn(reservation, cfg);
     }
 
     /// Get (or lazily initialise) the server's WebSocket connection
@@ -1147,7 +1153,10 @@ const ConnectionPool = struct {
         self.server.ws_pool_mutex.lock();
         defer self.server.ws_pool_mutex.unlock();
         if (self.server.ws_pool == null) {
-            var pool = websocket_pool.Pool.init(self.server.allocator);
+            var pool = websocket_pool.Pool.initWithLimit(
+                self.server.allocator,
+                self.server.config.max_websocket_connections,
+            );
             errdefer pool.deinit();
             if (self.server.config.runtime_config.durable_oplog_dir) |dir| {
                 var store = durable_store_mod.DurableStore.initFs(self.server.allocator, dir);
@@ -1287,6 +1296,9 @@ pub const ServerConfig = struct {
 
     /// Number of runtime instances in pool (0 = auto)
     pool_size: usize = 0,
+
+    /// Maximum live WebSocket connections. Zero disables WebSocket upgrades.
+    max_websocket_connections: usize = 1024,
 
     /// Log requests to stdout
     log_requests: bool = true,
@@ -1488,10 +1500,9 @@ fn sigShutdownHandler(_: std.c.SIG) callconv(.c) void {
 
 fn installShutdownSignals() void {
     if (comptime builtin.os.tag == .windows) return;
-    // SA_RESETHAND: the first signal sets the shutdown flag (graceful intent);
-    // the handler is then reset to default disposition so a second SIGINT/SIGTERM
-    // terminates the process. Without this, a blocked accept() never observes
-    // the flag on an idle server and Ctrl+C appears dead.
+    // SA_RESETHAND: the first signal sets the graceful-shutdown flag. The
+    // accept-loop wake thread opens a loopback connection so a blocked accept
+    // observes it; a second SIGINT/SIGTERM retains the usual hard-stop escape.
     var act = std.posix.Sigaction{
         .handler = .{ .handler = sigShutdownHandler },
         .mask = std.posix.sigemptyset(),
@@ -1550,6 +1561,11 @@ pub const Server = struct {
     ws_pool: ?websocket_pool.Pool = null,
     /// Guards ws_pool lazy initialisation against concurrent upgrade attempts.
     ws_pool_mutex: engine.Mutex = .{},
+    /// Joinable WebSocket worker ownership and admission accounting.
+    ws_workers: websocket_workers.Registry,
+    /// Absolute monotonic deadline for WebSocket callbacks that begin while
+    /// graceful shutdown is joining frame-loop workers. Zero while serving.
+    ws_shutdown_deadline_ns: std.atomic.Value(u64) = .init(0),
     /// Co-located sub-handler registry for in-process `zigttp:workflow.call`,
     /// built from `--system <manifest>` in `start()`. Each pooled orchestrator
     /// runtime references it via `RuntimeConfig.system_registry`. Null when no
@@ -1635,12 +1651,20 @@ pub const Server = struct {
             .well_known_doc = null,
             .signer_fingerprint_hex = null,
             .ws_pool = null,
+            .ws_workers = websocket_workers.Registry.init(allocator, cfg.max_websocket_connections),
+            .ws_shutdown_deadline_ns = .init(0),
         };
     }
 
     pub fn deinit(self: *Self) void {
+        // Prevent new upgrade reservations before connection workers finish.
+        self.ws_workers.stopAccepting();
         // Stop connection pool first (if using thread pool mode)
         if (self.conn_pool) |cp| cp.deinit();
+
+        // Frame loops borrow handler/ws pools, reload state, and io_backend.
+        // Join every loop before any of those objects are destroyed.
+        self.ws_workers.deinit();
 
         if (self.pool) |*p| p.deinit();
         // Pool drained: no runtime can still be writing to the incident log fd.
@@ -2184,6 +2208,7 @@ pub const Server = struct {
         self.listener = try address.listen(io, .{
             .reuse_address = true,
         });
+        g_shutdown_requested.store(false, .monotonic);
 
         // Threaded backend: a fixed connection pool avoids per-connection
         // thread spawning while keeping the HTTP request path synchronous.
@@ -2223,9 +2248,39 @@ pub const Server = struct {
         self.shutdown(self.config.timeout_ms);
     }
 
+    const AcceptWakeContext = struct {
+        server: *Self,
+        done: std.atomic.Value(bool) = .init(false),
+    };
+
+    fn wakeAcceptOnShutdown(context: *AcceptWakeContext) void {
+        while (!context.done.load(.acquire) and !g_shutdown_requested.load(.monotonic)) {
+            const ts = std.c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+            _ = std.c.nanosleep(&ts, null);
+        }
+        if (context.done.load(.acquire)) return;
+        const host = if (std.mem.eql(u8, context.server.config.host, "0.0.0.0"))
+            "127.0.0.1"
+        else
+            context.server.config.host;
+        const address = net.IpAddress.parseIp4(host, context.server.config.port) catch return;
+        const io = context.server.io_backend.io();
+        var stream = address.connect(io, .{ .mode = .stream }) catch return;
+        stream.close(io);
+    }
+
     fn acceptLoop(self: *Self) !void {
         const io = self.io_backend.io();
         var listener = self.listener orelse return error.NotStarted;
+        var wake_context = AcceptWakeContext{ .server = self };
+        var wake_thread: ?std.Thread = null;
+        if (comptime builtin.os.tag != .windows) {
+            wake_thread = try std.Thread.spawn(.{}, wakeAcceptOnShutdown, .{&wake_context});
+        }
+        defer if (wake_thread) |thread| {
+            wake_context.done.store(true, .release);
+            thread.join();
+        };
 
         while (self.running and !g_shutdown_requested.load(.monotonic)) {
             const stream = listener.accept(io) catch |err| switch (err) {
@@ -2248,6 +2303,11 @@ pub const Server = struct {
                 else => return err,
             };
 
+            if (g_shutdown_requested.load(.monotonic)) {
+                stream.close(io);
+                return;
+            }
+
             const fd = stream.socket.handle;
             if (self.conn_pool) |cp| {
                 if (!cp.submit(fd)) std.Io.Threaded.closeFd(fd);
@@ -2264,8 +2324,16 @@ pub const Server = struct {
     /// complete or the grace period expires. Call from the server's control
     /// thread/signal path; this method does not make `running` or listener
     /// ownership thread-safe for arbitrary cross-thread callers.
+    ///
+    /// `grace_ms` does not bound the WebSocket worker join: a callback already
+    /// executing when shutdown begins runs to completion, so only a non-zero
+    /// `request_timeout_ms` bounds it.
     pub fn shutdown(self: *Self, grace_ms: u32) void {
         self.running = false;
+        const now_ns = engine.monotonicNowNs() catch 0;
+        const grace_ns = @as(u64, grace_ms) * std.time.ns_per_ms;
+        const deadline_ns = std.math.add(u64, now_ns, grace_ns) catch std.math.maxInt(u64);
+        self.ws_shutdown_deadline_ns.store(deadline_ns, .release);
         // Close listener so a blocked accept() wakes immediately.
         if (self.evented_ready) {
             const io = self.io_backend.io();
@@ -2274,6 +2342,7 @@ pub const Server = struct {
                 self.listener = null;
             }
         }
+        self.ws_workers.stopAndJoin();
         // Drain: wait up to grace_ms for active JS executions to finish.
         // std.time.sleep/milliTimestamp do not exist in Zig 0.16; poll with
         // std.c.nanosleep (same pattern as fetchWithRetry in modules/net/fetch.zig).
@@ -2285,6 +2354,11 @@ pub const Server = struct {
                 waited_ms += 5;
             }
         }
+    }
+
+    /// Snapshot WebSocket admission pressure for tests and embedding hosts.
+    pub fn websocketWorkerStats(self: *Self) websocket_workers.Stats {
+        return self.ws_workers.stats();
     }
 
     /// Parse HTTP request from a pre-read buffer (synchronous path for thread pool).

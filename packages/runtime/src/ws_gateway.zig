@@ -92,10 +92,8 @@ pub fn releaseConnection(pool: *Pool, id: ConnectionId) void {
 
 /// Default room-key derivation: use the request path minus the query
 /// string. The path slice already excludes the query in
-/// `HttpRequestView`, so this is just the path itself. A handler can
-/// later override the room assignment via the `roomFromPath` /
-/// attachment path, but that plumbing lands with the
-/// `onOpen`/`onMessage` dispatch sub-slice.
+/// `HttpRequestView`, so this is just the path itself. Handlers receive the
+/// same key in `onMessage(ws, data, room)`.
 fn deriveRoomKey(path: []const u8) []const u8 {
     if (path.len == 0) return "/";
     return path;

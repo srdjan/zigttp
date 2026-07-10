@@ -14,37 +14,38 @@
     {
       "name": "send",
       "effect": "write",
-      "returns": "undefined"
+      "returns": "undefined",
+      "params": ["object", "string"]
     },
     {
       "name": "close",
       "effect": "write",
-      "returns": "undefined"
+      "returns": "undefined",
+      "params": ["object", "number", "string"]
     },
     {
       "name": "serializeAttachment",
       "effect": "write",
-      "returns": "undefined"
+      "returns": "undefined",
+      "params": ["object", "string"]
     },
     {
       "name": "deserializeAttachment",
       "effect": "read",
-      "returns": "optional_object"
+      "returns": "optional_string",
+      "params": ["object"]
     },
     {
       "name": "getWebSockets",
       "effect": "read",
-      "returns": "object"
-    },
-    {
-      "name": "roomFromPath",
-      "effect": "read",
-      "returns": "string"
+      "returns": "object",
+      "params": ["string"]
     },
     {
       "name": "setAutoResponse",
       "effect": "write",
-      "returns": "undefined"
+      "returns": "undefined",
+      "params": ["object", "string", "string"]
     }
   ]
 }

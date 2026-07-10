@@ -32,7 +32,7 @@ Use `zigttp modules --json` for the live export list from the built binary.
 | `zigttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | none |
 | `zigttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | none |
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | none |
-| `zigttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `roomFromPath`, `setAutoResponse` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` |
+| `zigttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `setAutoResponse` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` |
 | `zigttp:workflow` | `call`, `saga`, `fanout`, `follow` | `runtime_callback` |
 
 ## Common Usage
@@ -69,7 +69,7 @@ durability boundary need configuration:
 | `zigttp:workflow` | Run with `--system <file>`: the orchestrator dispatches to co-located sub-handlers in-process. Every local handler path in the manifest must be readable at startup. Durable `call`/`saga`/`fanout`/`follow` replay also needs `--durable <dir>`. Add `--workflow-queue` to force durable top-level `call`, `follow`, and `fanout` child dispatch through the persisted queue; `saga()` is rejected in that mode because step closures would hide direct dispatch inside the flat oplog. Dead letters stay under `<durable>/workflow-queue/dead` until `zigttp workflow-queue replay` or `discard`. |
 | `zigttp:queue` | Run with `--actor-queue` for server-owned in-memory actor mailboxes. Exports `send`, `request`, `receive`, `ack`, `nack`, and `reply`; all return `Result` objects. Messages own JSON snapshots of payloads and remain retained until ack, requeue, or dead-lettering, but the current backend is not durable across process restart. This is separate from the persisted workflow queue used by `--workflow-queue`. |
 | `zigttp:durable` | Run with `--durable <dir>`. Durable workflow proof properties appear under `durable.workflow.properties` in `contract.json` and under `durableWorkflow*` fields in proof receipts. |
-| `zigttp:websocket` | Run through the server WebSocket gateway. Peer closes dispatch `onClose(ws, code, reason)` with parsed close metadata. |
+| `zigttp:websocket` | Run through the server WebSocket gateway. `setAutoResponse(ws, request, response)` installs a codec-level reply; room keys are request paths, and `getWebSockets(room)` returns every live peer in that room. Peer closes dispatch `onClose(ws, code, reason)` with parsed close metadata. |
 | `zigttp:log` | Writes structured lines to stderr. Do not log raw secrets, tokens, or PII. |
 
 ## Effects

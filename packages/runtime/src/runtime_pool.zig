@@ -123,6 +123,19 @@ pub const HandlerPool = struct {
             self.active = false;
             self.pool.releaseForRequest(self.base_rt);
         }
+
+        /// Drop a runtime whose WebSocket callback exceeded the request
+        /// deadline. Timed-out contexts may retain interrupted VM state and
+        /// must never return to the reusable pool.
+        pub fn recycleAfterTimeout(self: *WorkerRuntimeLease) void {
+            if (!self.active) return;
+            _ = self.pool.timeouts.fetchAdd(1, .monotonic);
+            std.log.warn(
+                "WebSocket callback timed out, invalidating runtime (configured maximum {d}ms)",
+                .{self.pool.config.request_timeout_ms},
+            );
+            self.pool.recycleLeasedRuntime(self);
+        }
     };
 
     pub fn init(

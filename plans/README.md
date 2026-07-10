@@ -3,8 +3,57 @@
 Originally planned at commit: `f2c637d` (`refactor(runtime): group self-extract payload params into PayloadInput`).
 Re-validated and extended at commit: `560239d` (`feat(expert,cli): inline approval diff, ...`) on 2026-06-20.
 Extended at commit: `a4a731bd` (`docs(changelog): note the recoverOne double-free fix`) on 2026-07-02.
+Extended at commit: `b00eae29` (`fix(modules): stop fetchWithRetry sleeping past the request deadline`) on 2026-07-10.
 
 This directory contains source-backed remediation plans from read-only advisor passes. The advisor did not modify production source. Each plan is self-contained for a fresh-context executor.
+
+## Pass at `b00eae29` (2026-07-10)
+
+A fresh, repository-wide review of the threaded runtime, ZigTS compiler/VM and proof passes, virtual-module boundary, and embedded Pi agent. Every finding below was re-opened against the live source; earlier advisory notes were used only as hypotheses. No production source changed in this pass.
+
+### Verification snapshot
+
+```sh
+bash scripts/verify.sh
+```
+
+The full local CI mirror passed: aggregate/unit roots, runtime purity, docs and module governance, ReleaseFast build, v1 deploy smoke, panic isolation, all 41 example suites, policy-hash guard, semantics/Z3 gate, and expert-subsystem verification.
+
+### Recommended execution order
+
+| Order | Plan | Priority | Effort | Risk | Why here |
+| --- | --- | --- | --- | --- | --- |
+| 1 | [015-enforce-agent-tool-effect-boundaries.md](015-enforce-agent-tool-effect-boundaries.md) | P0 | M | MED | Restores the agent's documented authorization invariant: no model/RPC tool can write around approval. |
+| 2 | [016-own-and-bound-websocket-workers.md](016-own-and-bound-websocket-workers.md) | P0 | M-L | MED-HIGH | Removes detached-worker use-after-free risk and caps remotely created kernel threads. |
+| 3 | [018-fail-closed-on-analysis-allocation-errors.md](018-fail-closed-on-analysis-allocation-errors.md) | P0 | L | MED | Prevents partial proof state from becoming a clean compiler result under allocation failure. |
+| 4 | [017-serialize-websocket-outbound-frames.md](017-serialize-websocket-outbound-frames.md) | P1 | M | MED | Makes concurrent game broadcasts protocol-correct and shares outbound close validation. |
+| 5 | [019-align-websocket-module-contract.md](019-align-websocket-module-contract.md) | P1 | M | MED | Removes advertised-but-throwing API, fixes signature drift, and stops silently omitting room peers. |
+
+Plans 015, 016, and 018 are independent. Plan 017 can execute before 016 only if it proves outbound-state lifetime independently. Plan 019 should follow 016 so complete room snapshots inherit a finite connection bound.
+
+### Status (executed 2026-07-10)
+
+| Plan | Status |
+| --- | --- |
+| 015 | DONE (mandatory strongest-effect metadata; model/RPC policy gates; single compiler-veto edit path; provider and RPC regressions) |
+| 016 | DONE (joinable server-owned workers; pre-upgrade admission cap; race-safe fd handoff; graceful live-socket shutdown) |
+| 017 | DONE (retained per-peer outbound writer; complete-frame serialization; unregister safety; close validation and concurrency regressions) |
+| 018 | DONE (sticky allocation failure across all five proof passes and pipeline; contract construction propagates type-check OOM) |
+| 019 | DONE (removed `roomFromPath`; aligned three-argument auto-response contract; complete room snapshots; real two-peer chat gateway gate) |
+
+### Verified findings not planned in this batch
+
+- **Sensitive workspace reads are unrestricted inside the repo**: `workspace_read_file` enforces containment but no secret-path policy; `workspace_list_files` excludes build noise only; tool output persists by default. This is a real privacy/least-privilege gap, but the correct default-deny/approval/persistence policy needs a product decision before an executable plan.
+- **OpenAI model selection and Pi documentation drift**: the active backend supports OpenAI, but the model registry contains only Claude ids; `/model` and `--model` can therefore send a Claude id to OpenAI, while the OpenAI default cannot be selected from the registry. `packages/pi/README.md` still calls OpenAI deferred. Small, high-confidence follow-up.
+- **WebSocket runtime callbacks have almost no direct execution coverage**: pool/codec units exist, but send/close/module-callback behavior and the shipped chat example are not exercised end to end. Plan 019 absorbs the game-facing portion.
+- **Crypto/SQL wrapper execution coverage remains thin**: compiler/governance and lower SDK helpers are tested, but `zigttp:crypto` base64/HMAC wrapper behavior and `zigttp:sql` parameter/row conversion are not run through their module callbacks against known vectors/a temporary database.
+- **Contract JSON serialization in `build_command.zig` swallows writer failure**: a partial/empty contract can reach later artifact assembly instead of returning the allocation/write error. Small fail-closed cleanup; lower leverage than plan 018's proof-pass issue.
+- **Provider-neutral model metadata is absent**: this is the root architectural cause of the OpenAI selection bug; model ids need a provider tag and backend-filtered listing/validation.
+
+### Strategic findings already tracked elsewhere
+
+- Continue the roadmap's strict engine/runtime facade and incremental `zruntime.zig`/`server.zig` concern extraction; do not bundle it with lifecycle fixes.
+- Keep JIT loop/tier deduplication in `DEFERRED_VM_LOOP_DEDUPE_PLAN.md`; the current interpreter/baseline/optimized parity gate is the correct prerequisite.
 
 ## Pass at `a4a731bd` (2026-07-02)
 

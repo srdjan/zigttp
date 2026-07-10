@@ -38,7 +38,7 @@ const HandlerPool = engine.HandlerPool;
 /// covers chat, telemetry, and JSON messaging without pushing us into
 /// fragmentation/stream handling (which `readSmallMessage` doesn't
 /// support anyway — it rejects fragmented frames as `MessageOversize`).
-const max_message_bytes: usize = 64 * 1024;
+const max_message_bytes: usize = websocket_codec.max_message_bytes;
 
 pub const Config = struct {
     pool: *Pool,
@@ -68,6 +68,9 @@ pub const Config = struct {
     /// Pointer to the server's `reload_active` flag; the shared lock is taken
     /// only while it is set, matching the HTTP path's per-request gate.
     reload_active: ?*const bool = null,
+    /// Absolute monotonic deadline installed when graceful shutdown starts.
+    /// Zero means normal request-timeout behavior.
+    shutdown_deadline_ns: ?*const std.atomic.Value(u64) = null,
 };
 
 /// Take the contract lock shared when live reload is active. Returns whether
@@ -84,6 +87,17 @@ fn unlockReloadShared(cfg: Config, locked: bool) void {
     if (locked) {
         if (cfg.contract_lock) |cl| cl.unlockShared();
     }
+}
+
+fn remainingShutdownGraceMs(cfg: Config) ?u32 {
+    const deadline_ptr = cfg.shutdown_deadline_ns orelse return null;
+    const deadline_ns = deadline_ptr.load(.acquire);
+    if (deadline_ns == 0) return null;
+    const now_ns = engine.monotonicNowNs() catch return 1;
+    if (now_ns >= deadline_ns) return 1;
+    const remaining_ns = deadline_ns - now_ns;
+    const rounded_ms = (remaining_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
+    return @intCast(@min(rounded_ms, std.math.maxInt(u32)));
 }
 
 /// Run the frame loop until the connection closes. Owns the fd: on
@@ -112,7 +126,7 @@ pub fn run(cfg: Config) void {
         if (cfg.pool.snapshot(cfg.id)) |snap| {
             const locked = lockReloadShared(cfg);
             defer unlockReloadShared(cfg, locked);
-            dispatchOnOpen(hp, cfg.pool, cfg.id, snap.room) catch |err| {
+            dispatchOnOpen(hp, cfg.pool, cfg.id, snap.room, remainingShutdownGraceMs(cfg)) catch |err| {
                 std.log.warn("ws onOpen dispatch failed (id={d}): {}", .{ cfg.id, err });
             };
         }
@@ -122,7 +136,7 @@ pub fn run(cfg: Config) void {
         if (cfg.handler_pool) |hp| {
             const locked = lockReloadShared(cfg);
             defer unlockReloadShared(cfg, locked);
-            dispatchOnClose(hp, cfg.pool, cfg.id, close_metadata.code, close_metadata.reason) catch |err| {
+            dispatchOnClose(hp, cfg.pool, cfg.id, close_metadata.code, close_metadata.reason, remainingShutdownGraceMs(cfg)) catch |err| {
                 std.log.warn("ws onClose dispatch failed (id={d}): {}", .{ cfg.id, err });
             };
         }
@@ -139,15 +153,15 @@ pub fn run(cfg: Config) void {
             // intentionally ignore send errors — the socket may already
             // be half-broken.
             error.MessageOversize => {
-                sendCloseSilently(&ws, 1009);
+                sendCloseSilently(cfg.pool, cfg.id, 1009);
                 return;
             },
             error.MissingMaskBit, error.UnexpectedOpCode, error.InvalidCloseFrame, error.InvalidCloseCode => {
-                sendCloseSilently(&ws, 1002);
+                sendCloseSilently(cfg.pool, cfg.id, 1002);
                 return;
             },
             error.InvalidCloseReason => {
-                sendCloseSilently(&ws, 1007);
+                sendCloseSilently(cfg.pool, cfg.id, 1007);
                 return;
             },
             error.ReadFailed => return,
@@ -158,8 +172,9 @@ pub fn run(cfg: Config) void {
             .close => |metadata| {
                 close_metadata = metadata;
                 // RFC 6455 §5.5.1: echo the close frame before terminating.
-                const echo_code: u16 = if (metadata.had_code) metadata.code else 1000;
-                sendCloseSilently(&ws, echo_code);
+                var echo_buf: [125]u8 = undefined;
+                const echo_payload = closeEchoPayload(&echo_buf, metadata);
+                cfg.pool.sendFrameAndShutdown(cfg.id, .connection_close, echo_payload) catch {};
                 return;
             },
         };
@@ -169,11 +184,11 @@ pub fn run(cfg: Config) void {
         switch (msg.opcode) {
             .ping => {
                 // RFC 6455 §5.5.3: pong must echo the ping payload.
-                ws.writeMessage(msg.data, .pong) catch return;
+                cfg.pool.sendFrame(cfg.id, .pong, msg.data) catch return;
             },
             .text, .binary => {
                 if (cfg.echo) {
-                    ws.writeMessage(msg.data, msg.opcode) catch return;
+                    cfg.pool.sendFrame(cfg.id, msg.opcode, msg.data) catch return;
                 } else if (cfg.handler_pool) |pool| {
                     // Codec-level short-circuit: if the handler registered
                     // a canned response for exactly these bytes, write it
@@ -183,7 +198,7 @@ pub fn run(cfg: Config) void {
                     const auto = cfg.pool.tryAutoResponse(cfg.id, msg.data, cfg.alloc) catch null;
                     if (auto) |response_bytes| {
                         defer cfg.alloc.free(response_bytes);
-                        ws.writeMessage(response_bytes, msg.opcode) catch return;
+                        cfg.pool.sendFrame(cfg.id, msg.opcode, response_bytes) catch return;
                     } else {
                         // Hold the contract lock shared across the JS dispatch so
                         // a concurrent live-reload swap drains this in-flight
@@ -191,7 +206,7 @@ pub fn run(cfg: Config) void {
                         // borrows (mirrors the HTTP request path).
                         const locked = lockReloadShared(cfg);
                         defer unlockReloadShared(cfg, locked);
-                        dispatchOnMessage(pool, cfg.pool, cfg.id, msg.data) catch |err| {
+                        dispatchOnMessage(pool, cfg.pool, cfg.id, msg.data, remainingShutdownGraceMs(cfg)) catch |err| {
                             std.log.warn("ws onMessage dispatch failed (id={d}): {}", .{ cfg.id, err });
                         };
                     }
@@ -205,11 +220,11 @@ pub fn run(cfg: Config) void {
             .continuation => {
                 // Unreachable via readSmallMessage, which rejects
                 // continuation frames. Keep for exhaustiveness.
-                sendCloseSilently(&ws, 1002);
+                sendCloseSilently(cfg.pool, cfg.id, 1002);
                 return;
             },
             _ => {
-                sendCloseSilently(&ws, 1002);
+                sendCloseSilently(cfg.pool, cfg.id, 1002);
                 return;
             },
         }
@@ -229,10 +244,33 @@ fn makeStream(fd: std.posix.fd_t) Io.net.Stream {
 /// Best-effort close-frame write. The WebSocket close frame carries a
 /// two-byte big-endian status code followed by an optional UTF-8
 /// reason; we only send the code for W1.
-fn sendCloseSilently(ws: *std.http.Server.WebSocket, code: u16) void {
+fn sendCloseSilently(pool: *Pool, id: ConnectionId, code: u16) void {
     var payload: [2]u8 = undefined;
     std.mem.writeInt(u16, &payload, code, .big);
-    ws.writeMessage(&payload, .connection_close) catch {};
+    pool.sendFrameAndShutdown(id, .connection_close, &payload) catch {};
+}
+
+fn closeEchoPayload(buffer: *[125]u8, metadata: websocket_codec.CloseMetadata) []const u8 {
+    if (!metadata.had_code) return buffer[0..0];
+    return websocket_codec.writeClosePayload(buffer, metadata.code, metadata.reason);
+}
+
+fn callWebSocketHandler(
+    lease: *HandlerPool.WorkerRuntimeLease,
+    name: []const u8,
+    args: []const engine.JSValue,
+    max_duration_ms: ?u32,
+) !void {
+    if (max_duration_ms) |limit_ms|
+        lease.runtime.armRequestDeadlineWithin(limit_ms)
+    else
+        lease.runtime.armRequestDeadline();
+    const result = lease.runtime.callGlobalFunction(name, args);
+    lease.runtime.clearRequestDeadline();
+    _ = result catch |err| {
+        if (err == error.RequestTimeout) lease.recycleAfterTimeout();
+        return err;
+    };
 }
 
 /// Borrow a runtime, install the WS callback table, and invoke the
@@ -248,6 +286,7 @@ fn dispatchOnMessage(
     ws_pool: *Pool,
     id: ConnectionId,
     data: []const u8,
+    max_duration_ms: ?u32,
 ) !void {
     _ = ws_pool.beginDispatch(id);
     defer _ = ws_pool.endDispatch(id);
@@ -273,7 +312,7 @@ fn dispatchOnMessage(
     else
         try lease.runtime.ctx.createString("");
 
-    _ = lease.runtime.callGlobalFunction("onMessage", &.{ ws_val, data_val, room_val }) catch |err| {
+    callWebSocketHandler(&lease, "onMessage", &.{ ws_val, data_val, room_val }, max_duration_ms) catch |err| {
         std.log.warn("onMessage handler raised: {}", .{err});
         return err;
     };
@@ -287,6 +326,7 @@ fn dispatchOnOpen(
     ws_pool: *Pool,
     id: ConnectionId,
     url: []const u8,
+    max_duration_ms: ?u32,
 ) !void {
     _ = ws_pool.beginDispatch(id);
     defer _ = ws_pool.endDispatch(id);
@@ -304,7 +344,7 @@ fn dispatchOnOpen(
     const ws_val = engine.jsInt(id_i32);
     const url_val = try lease.runtime.ctx.createString(url);
 
-    _ = lease.runtime.callGlobalFunction("onOpen", &.{ ws_val, url_val }) catch |err| switch (err) {
+    callWebSocketHandler(&lease, "onOpen", &.{ ws_val, url_val }, max_duration_ms) catch |err| switch (err) {
         error.NotCallable => return,
         else => return err,
     };
@@ -318,6 +358,7 @@ fn dispatchOnClose(
     id: ConnectionId,
     code: u16,
     reason: []const u8,
+    max_duration_ms: ?u32,
 ) !void {
     _ = ws_pool.beginDispatch(id);
     // Intentionally skip endDispatch on close — `unregister` is about
@@ -337,7 +378,7 @@ fn dispatchOnClose(
     const code_val = engine.jsInt(@as(i32, code));
     const reason_val = try lease.runtime.ctx.createString(reason);
 
-    _ = lease.runtime.callGlobalFunction("onClose", &.{ ws_val, code_val, reason_val }) catch |err| switch (err) {
+    callWebSocketHandler(&lease, "onClose", &.{ ws_val, code_val, reason_val }, max_duration_ms) catch |err| switch (err) {
         error.NotCallable => return,
         else => return err,
     };
@@ -355,4 +396,81 @@ test "max_message_bytes fits the default read buffer" {
     // other the loop silently starts rejecting 64 KiB frames.
     try testing.expect(max_message_bytes <= 64 * 1024);
     try testing.expect(max_message_bytes + 64 <= (max_message_bytes + 128));
+}
+
+test "close echo preserves code and UTF-8 reason" {
+    var buffer: [125]u8 = undefined;
+    const payload = closeEchoPayload(&buffer, .{
+        .code = 4001,
+        .reason = "bye",
+        .had_code = true,
+    });
+
+    try testing.expectEqualSlices(u8, &.{ 0x0f, 0xa1, 'b', 'y', 'e' }, payload);
+}
+
+test "close echo preserves an empty client payload" {
+    var buffer: [125]u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), closeEchoPayload(&buffer, .{}).len);
+}
+
+test "onClose receives the parsed close code and reason" {
+    const allocator = std.heap.c_allocator;
+    const source =
+        \\import { serializeAttachment } from "zigttp:websocket";
+        \\export function onClose(ws, code, reason) {
+        \\  serializeAttachment(ws, code === 4001 && reason === "bye" ? "matched" : "wrong");
+        \\}
+        \\function handler(req) { return Response.text("ok"); }
+    ;
+    var handler_pool = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled },
+        source,
+        "<ws-close-test>",
+        1,
+        0,
+    );
+    defer handler_pool.deinit();
+
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    const id = try pool.register(100, "/close", 0);
+
+    try dispatchOnClose(&handler_pool, &pool, id, 4001, "bye", null);
+    const attachment = (try pool.copyAttachment(id, testing.allocator)) orelse
+        return error.MissingCloseMetadata;
+    defer testing.allocator.free(attachment);
+    try testing.expectEqualStrings("matched", attachment);
+}
+
+test "graceful shutdown budget shortens the WebSocket callback deadline" {
+    const allocator = std.heap.c_allocator;
+    const source =
+        \\export function onClose(ws, code, reason) {
+        \\  let x = 0;
+        \\  for (let i of range(1000000000)) { x = x + 1; }
+        \\}
+        \\function handler(req) { return Response.text("ok"); }
+    ;
+    var handler_pool = try HandlerPool.init(
+        allocator,
+        .{ .jit_policy = .disabled, .request_timeout_ms = 5000 },
+        source,
+        "<ws-timeout-test>",
+        1,
+        0,
+    );
+    defer handler_pool.deinit();
+
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    const id = try pool.register(100, "/timeout", 0);
+
+    var timer = try engine.Timer.start();
+    try testing.expectError(
+        error.RequestTimeout,
+        dispatchOnClose(&handler_pool, &pool, id, 1000, "", 20),
+    );
+    try testing.expect(timer.read() < std.time.ns_per_s);
 }

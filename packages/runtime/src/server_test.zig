@@ -78,6 +78,21 @@ test "Server.init auto-sizes the pool when pool_size is zero" {
     try std.testing.expect(srv.config.pool_size > 0);
 }
 
+test "Server owns a finite WebSocket worker budget by default" {
+    const allocator = std.testing.allocator;
+    var srv = try Server.init(allocator, .{
+        .handler = .{ .inline_code = "function handler(req) { return Response.text('ok'); }" },
+        .log_requests = false,
+        .pool_size = 1,
+    });
+    defer srv.deinit();
+
+    try std.testing.expect(srv.config.max_websocket_connections > 0);
+    const stats = srv.websocketWorkerStats();
+    try std.testing.expectEqual(@as(usize, 0), stats.live);
+    try std.testing.expectEqual(@as(usize, 0), stats.peak_live);
+}
+
 // ===========================================================================
 // Handler execution: happy path (HandlerPool public surface)
 // ===========================================================================

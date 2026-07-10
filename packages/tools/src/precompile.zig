@@ -2311,6 +2311,11 @@ fn countAotPatterns(dispatch: *const zigts.PatternDispatchTable) usize {
 
 // findHandlerFunction is defined in handler_verifier.zig and exported via zigts.
 const findHandlerFunction = zigts.handler_verifier.findHandlerFunction;
+const ContractTypeCheckFn = *const fn (*zigts.TypeChecker, ir.NodeIndex) anyerror!u32;
+
+fn runContractTypeCheck(type_checker: *zigts.TypeChecker, root: ir.NodeIndex) anyerror!u32 {
+    return type_checker.check(root);
+}
 
 /// Build a contract manifest from the parsed IR.
 fn buildContract(
@@ -2324,6 +2329,34 @@ fn buildContract(
     type_map: ?*const zigts.TypeMap,
     service_type_context: ?*const ServiceTypeContext,
     manifest_registry: ?*const zigts.manifest_registry.Registry,
+) !HandlerContract {
+    return buildContractChecking(
+        allocator,
+        js_parser,
+        atoms,
+        filename,
+        root,
+        aot,
+        verify_info,
+        type_map,
+        service_type_context,
+        manifest_registry,
+        runContractTypeCheck,
+    );
+}
+
+fn buildContractChecking(
+    allocator: std.mem.Allocator,
+    js_parser: *zigts.parser.JsParser,
+    atoms: *zigts.context.AtomTable,
+    filename: []const u8,
+    root: ir.NodeIndex,
+    aot: ?AotAnalysis,
+    verify_info: ?VerificationInfo,
+    type_map: ?*const zigts.TypeMap,
+    service_type_context: ?*const ServiceTypeContext,
+    manifest_registry: ?*const zigts.manifest_registry.Registry,
+    type_check: ContractTypeCheckFn,
 ) !HandlerContract {
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
@@ -2348,7 +2381,7 @@ fn buildContract(
 
     var type_checker = zigts.TypeChecker.init(allocator, ir_view, atoms, &type_env, service_type_context);
     defer type_checker.deinit();
-    _ = type_checker.check(root) catch 0;
+    _ = try type_check(&type_checker, root);
 
     var builder = ContractBuilder.init(allocator, ir_view, atoms, &type_env, &type_checker);
     builder.manifest_registry = manifest_registry;
@@ -3545,6 +3578,39 @@ fn buildTestContractForSource(
         null,
         null,
         null,
+    );
+}
+
+fn failContractTypeCheck(_: *zigts.TypeChecker, _: ir.NodeIndex) anyerror!u32 {
+    return error.OutOfMemory;
+}
+
+test "contract construction propagates type-check allocation failure" {
+    const allocator = std.testing.allocator;
+    var atoms = zigts.context.AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    const source = "function handler(req) { return Response.text('ok'); }";
+    var js_parser = zigts.parser.JsParser.init(allocator, source);
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+    const root = try js_parser.parse();
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        buildContractChecking(
+            allocator,
+            &js_parser,
+            &atoms,
+            "<contract-type-oom>",
+            root,
+            null,
+            null,
+            null,
+            null,
+            null,
+            failContractTypeCheck,
+        ),
     );
 }
 
@@ -4746,6 +4812,24 @@ test "writeCapabilityPolicy emits zig-fmt stable empty allowlists" {
 
     try std.testing.expect(std.mem.indexOf(u8, output.items, ".values = &[_][]const u8{},") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, ".values = &[_][]const u8{\n        },") == null);
+}
+
+test "generated types expose the executable WebSocket contract" {
+    const allocator = std.testing.allocator;
+
+    var output = std.ArrayList(u8).empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+
+    generateTypeDefs(&aw.writer);
+    output = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output.items,
+        "export function setAutoResponse(arg0: Record<string, unknown>, arg1: string, arg2: string): void;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "roomFromPath") == null);
 }
 
 test {

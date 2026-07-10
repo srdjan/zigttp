@@ -1,6 +1,6 @@
 //! WebSocket runtime callbacks: the native implementations behind the
 //! `zigttp:websocket` module exports (send / close / serializeAttachment /
-//! deserializeAttachment / getWebSockets / roomFromPath / setAutoResponse).
+//! deserializeAttachment / getWebSockets / setAutoResponse).
 //!
 //! Extracted from zruntime.zig to keep the request-lifecycle struct focused.
 //! These are registered by `Runtime.installWebSocketModuleState`; each callback
@@ -11,8 +11,8 @@
 
 const std = @import("std");
 const zq = @import("zigts");
+const websocket_codec = @import("websocket_codec.zig");
 const websocket_pool = @import("websocket_pool.zig");
-const server_io = @import("server_io.zig");
 const zruntime = @import("zruntime.zig");
 
 const Runtime = zruntime.Runtime;
@@ -30,56 +30,6 @@ pub fn wsConnectionIdFromArg(arg: zq.JSValue) ?u64 {
 pub fn wsPoolFromRuntime(runtime_ptr: *anyopaque) ?*websocket_pool.Pool {
     const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
     return rt.ws_pool_ref;
-}
-
-/// Raw RFC 6455 frame write for server→client messages (unmasked).
-/// Used by the `send` callback; symmetric with what the frame loop
-/// reads. Payload size is capped at 64 KiB to match the inbound cap.
-pub fn writeWebSocketFrame(fd: std.posix.fd_t, opcode: u4, payload: []const u8) !void {
-    var header_buf: [10]u8 = undefined;
-    header_buf[0] = 0x80 | @as(u8, opcode); // FIN = 1
-    var header_len: usize = 2;
-    if (payload.len < 126) {
-        header_buf[1] = @as(u8, @intCast(payload.len));
-    } else if (payload.len <= 0xFFFF) {
-        header_buf[1] = 126;
-        std.mem.writeInt(u16, header_buf[2..4], @as(u16, @intCast(payload.len)), .big);
-        header_len = 4;
-    } else {
-        header_buf[1] = 127;
-        std.mem.writeInt(u64, header_buf[2..10], payload.len, .big);
-        header_len = 10;
-    }
-
-    // Gather-write the header and payload in a single writev syscall. Under the
-    // thread-per-connection model two frame-loop threads can call this on the
-    // same peer socket concurrently (broadcast); two separate write() calls
-    // (header, then payload) gave a guaranteed interleave window between them.
-    // One writev delivers a frame to the socket buffer atomically whenever it
-    // fits (the common case under the 64 KiB cap). A short write on a frame
-    // larger than the send buffer can still interleave; the fully-robust fix is
-    // a per-connection send lock, deferred as it requires reworking the pool's
-    // value-copied Connection storage.
-    if (payload.len > 0) {
-        var iovecs: [2]std.posix.iovec_const = .{
-            .{ .base = header_buf[0..header_len].ptr, .len = header_len },
-            .{ .base = payload.ptr, .len = payload.len },
-        };
-        try server_io.writevAllFd(fd, &iovecs);
-    } else {
-        try writeAllPosix(fd, header_buf[0..header_len]);
-    }
-}
-
-pub fn writeAllPosix(fd: std.posix.fd_t, data: []const u8) !void {
-    var remaining = data;
-    while (remaining.len > 0) {
-        const result = std.c.write(fd, remaining.ptr, remaining.len);
-        if (result < 0) return error.WriteFailed;
-        const n: usize = @intCast(result);
-        if (n == 0) return error.WriteFailed;
-        remaining = remaining[n..];
-    }
 }
 
 pub fn wsSendCallback(
@@ -102,14 +52,7 @@ pub fn wsSendCallback(
     const bytes = getStringDataCtx(args[1], ctx) orelse {
         return zq.modules.util.throwError(ctx, "TypeError", "data must be a string (binary frames land in W2)");
     };
-    // dup the fd under the pool lock rather than reading snapshot().fd and
-    // writing outside the lock: the latter races the frame loop's
-    // unregister-then-close and can write into a recycled fd (another peer).
-    const fd = pool.dupFd(id) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
-    };
-    defer _ = std.c.close(fd);
-    writeWebSocketFrame(fd, 0x1, bytes) catch |err| {
+    pool.sendFrame(id, .text, bytes) catch |err| {
         std.log.warn("ws send failed (id={d}): {}", .{ id, err });
         return zq.modules.util.throwError(ctx, "Error", "ws send failed");
     };
@@ -134,43 +77,29 @@ pub fn wsCloseCallback(
         if (args.len < 2) break :blk 1000;
         if (args[1].isInt()) {
             const raw = args[1].getInt();
-            if (raw < 1000 or raw > 4999) {
-                return zq.modules.util.throwError(ctx, "RangeError", "close code must be in [1000, 4999]");
-            }
-            break :blk @as(u16, @intCast(raw));
+            const parsed: u16 = std.math.cast(u16, raw) orelse
+                return zq.modules.util.throwError(ctx, "RangeError", "close code is not valid on the wire");
+            if (!websocket_codec.validCloseCode(parsed))
+                return zq.modules.util.throwError(ctx, "RangeError", "close code is reserved or not valid on the wire");
+            break :blk parsed;
         }
         return zq.modules.util.throwError(ctx, "TypeError", "close code must be a number");
     };
-    const reason: []const u8 = if (args.len >= 3)
-        getStringDataCtx(args[2], ctx) orelse ""
+    const raw_reason: []const u8 = if (args.len >= 3)
+        getStringDataCtx(args[2], ctx) orelse
+            return zq.modules.util.throwError(ctx, "TypeError", "close reason must be a string")
     else
         "";
+    const reason = websocket_codec.truncateCloseReason(raw_reason) catch
+        return zq.modules.util.throwError(ctx, "TypeError", "close reason must be valid UTF-8");
 
-    // dup under the lock (see wsSendCallback) so the close frame and shutdown
-    // never land on a recycled fd belonging to another connection.
-    const fd = pool.dupFd(id) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
-    };
-    defer _ = std.c.close(fd);
-
-    // RFC 6455 §5.5.1: close payload is [status_u16_be][reason_utf8].
-    // Reason length is capped at 123 so total payload fits in a 125-byte
-    // short frame (126+ would force extended-length headers the peer
-    // has to honour).
+    // `truncateCloseReason` already capped the reason at 123 bytes so the
+    // packed payload fits a 125-byte short frame.
     var payload_buf: [125]u8 = undefined;
-    std.mem.writeInt(u16, payload_buf[0..2], code, .big);
-    const reason_len = @min(reason.len, 123);
-    if (reason_len > 0) {
-        @memcpy(payload_buf[2..][0..reason_len], reason[0..reason_len]);
-    }
-    writeWebSocketFrame(fd, 0x8, payload_buf[0 .. 2 + reason_len]) catch |err| {
+    const payload = websocket_codec.writeClosePayload(&payload_buf, code, reason);
+    pool.sendFrameAndShutdown(id, .connection_close, payload) catch |err| {
         std.log.warn("ws close write failed (id={d}): {}", .{ id, err });
     };
-    // Shutting down the write half (of the shared socket) lets the peer's read
-    // return EOS promptly; the frame loop will then exit and clean up. Ignoring
-    // the shutdown error here is intentional — the connection is already being
-    // torn down. SHUT_WR == 1 on every supported platform.
-    _ = std.c.shutdown(fd, 1);
     return zq.JSValue.undefined_val;
 }
 
@@ -245,11 +174,11 @@ pub fn wsGetWebSocketsCallback(
         return zq.modules.util.throwError(ctx, "TypeError", "roomKey must be a string");
     };
 
-    // Room membership snapshot: 256 peers is the W1 ceiling (see
-    // max_room_peers in ws_frame_loop). Overflow returns the first N,
-    // which W2 replaces with an iterator that doesn't cap.
-    var ids_buf: [256]websocket_pool.ConnectionId = undefined;
-    const ids = pool.collectRoom(room_key, &ids_buf);
+    const ids = pool.snapshotRoom(room_key, ctx.allocator) catch |err| {
+        std.log.warn("ws room snapshot failed: {}", .{err});
+        return zq.modules.util.throwError(ctx, "Error", "room snapshot failed");
+    };
+    defer ctx.allocator.free(ids);
 
     const arr = try ctx.createArray();
     arr.prototype = ctx.array_prototype;
@@ -259,16 +188,6 @@ pub fn wsGetWebSocketsCallback(
     }
     arr.setArrayLength(@as(u32, @intCast(ids.len)));
     return arr.toValue();
-}
-
-pub fn wsRoomFromPathCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    args: []const zq.JSValue,
-) anyerror!zq.JSValue {
-    _ = runtime_ptr;
-    _ = args;
-    return zq.modules.util.throwError(ctx, "Error", "roomFromPath lands in W2");
 }
 
 pub fn wsSetAutoResponseCallback(
@@ -299,4 +218,101 @@ pub fn wsSetAutoResponseCallback(
         return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
     }
     return zq.JSValue.undefined_val;
+}
+
+test "setAutoResponse callback registers a three-argument codec reply" {
+    const allocator = std.testing.allocator;
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+    var pool = websocket_pool.Pool.init(allocator);
+    defer pool.deinit();
+    const id = try pool.register(100, "/test", 0);
+    rt.ws_pool_ref = &pool;
+
+    const args = [_]zq.JSValue{
+        zq.JSValue.fromInt(@intCast(id)),
+        try rt.ctx.createString("ping"),
+        try rt.ctx.createString("pong"),
+    };
+    _ = try wsSetAutoResponseCallback(rt, rt.ctx, &args);
+    const response = (try pool.tryAutoResponse(id, "ping", allocator)) orelse
+        return error.MissingAutoResponse;
+    defer allocator.free(response);
+    try std.testing.expectEqualStrings("pong", response);
+}
+
+test "close callback writes one valid boundary-truncated close frame and shuts down" {
+    const allocator = std.testing.allocator;
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const fds = try @import("server_io.zig").createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    var pool = websocket_pool.Pool.init(allocator);
+    defer pool.deinit();
+    const id = try pool.register(fds[0], "/close", 0);
+    rt.ws_pool_ref = &pool;
+
+    var reason: [124]u8 = undefined;
+    @memset(reason[0..122], 'a');
+    reason[122] = 0xc3;
+    reason[123] = 0xa9;
+    const args = [_]zq.JSValue{
+        zq.JSValue.fromInt(@intCast(id)),
+        zq.JSValue.fromInt(4001),
+        try rt.ctx.createString(&reason),
+    };
+    const result = try wsCloseCallback(rt, rt.ctx, &args);
+    try std.testing.expect(result.isUndefined());
+
+    var frame: [126]u8 = undefined;
+    try websocket_pool.readExactFd(fds[1], &frame);
+    try std.testing.expectEqual(@as(u8, 0x88), frame[0]);
+    try std.testing.expectEqual(@as(u8, 124), frame[1]);
+    try std.testing.expectEqual(@as(u8, 0x0f), frame[2]);
+    try std.testing.expectEqual(@as(u8, 0xa1), frame[3]);
+    try std.testing.expectEqualSlices(u8, reason[0..122], frame[4..]);
+
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), std.c.read(fds[1], &byte, 1));
+}
+
+test "close callback rejects reserved codes and non-string reasons without writing" {
+    const allocator = std.testing.allocator;
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const fds = try @import("server_io.zig").createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    var pool = websocket_pool.Pool.init(allocator);
+    defer pool.deinit();
+    const id = try pool.register(fds[0], "/close-invalid", 0);
+    rt.ws_pool_ref = &pool;
+
+    const reserved_args = [_]zq.JSValue{
+        zq.JSValue.fromInt(@intCast(id)),
+        zq.JSValue.fromInt(1005),
+    };
+    const reserved_result = try wsCloseCallback(rt, rt.ctx, &reserved_args);
+    try std.testing.expect(reserved_result.isException());
+    try std.testing.expect(rt.ctx.hasException());
+    rt.ctx.clearException();
+
+    const non_string_args = [_]zq.JSValue{
+        zq.JSValue.fromInt(@intCast(id)),
+        zq.JSValue.fromInt(1000),
+        zq.JSValue.fromInt(42),
+    };
+    const non_string_result = try wsCloseCallback(rt, rt.ctx, &non_string_args);
+    try std.testing.expect(non_string_result.isException());
+    try std.testing.expect(rt.ctx.hasException());
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = fds[1],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 0));
 }

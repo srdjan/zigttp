@@ -28,12 +28,17 @@
 const std = @import("std");
 const ascii = std.ascii;
 const http_types = @import("http_types.zig");
+const server_io = @import("server_io.zig");
 
 /// Re-exports so downstream callers don't need to import std.http.Server
 /// directly and can swap this module's adapters in and out uniformly.
 pub const Opcode = std.http.Server.WebSocket.Opcode;
 pub const Header0 = std.http.Server.WebSocket.Header0;
 pub const Header1 = std.http.Server.WebSocket.Header1;
+
+/// Inbound data-frame ceiling. Bounds the frame loop's read buffer; outbound
+/// frames are framed at their true length.
+pub const max_message_bytes: usize = 64 * 1024;
 
 pub const CloseMetadata = struct {
     /// RFC 6455 "No Status Received" sentinel. This value is never valid on
@@ -202,12 +207,69 @@ pub fn parseClosePayload(payload: []const u8) ReadSmallMessageError!CloseMetadat
     return .{ .code = code, .reason = reason, .had_code = true };
 }
 
-fn validCloseCode(code: u16) bool {
+/// Codes that RFC 6455 permits an endpoint to transmit on the wire.
+pub fn validCloseCode(code: u16) bool {
     return switch (code) {
         1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014 => true,
         3000...4999 => true,
         else => false,
     };
+}
+
+/// Validate the complete supplied reason, then cap it to the largest UTF-8
+/// code-point boundary whose encoded size fits the 123-byte close-reason limit.
+pub fn truncateCloseReason(reason: []const u8) error{InvalidCloseReason}![]const u8 {
+    if (!std.unicode.utf8ValidateSlice(reason)) return error.InvalidCloseReason;
+    var end = @min(reason.len, 123);
+    while (end > 0 and !std.unicode.utf8ValidateSlice(reason[0..end])) : (end -= 1) {}
+    return reason[0..end];
+}
+
+/// Pack the RFC 6455 close payload `[status_u16_be][reason_utf8]` into
+/// `buffer`. `reason` must already be truncated to the 123-byte limit that
+/// keeps the payload inside a 125-byte control frame.
+pub fn writeClosePayload(buffer: *[125]u8, code: u16, reason: []const u8) []const u8 {
+    std.debug.assert(reason.len <= buffer.len - @sizeOf(u16));
+    std.mem.writeInt(u16, buffer[0..2], code, .big);
+    @memcpy(buffer[2..][0..reason.len], reason);
+    return buffer[0 .. 2 + reason.len];
+}
+
+/// Encode the FIN-set unmasked server frame header for `payload_len` into
+/// `buffer`, returning the used prefix.
+fn writeFrameHeader(buffer: *[10]u8, opcode: Opcode, payload_len: usize) []const u8 {
+    buffer[0] = 0x80 | @as(u8, @intCast(@intFromEnum(opcode)));
+    if (payload_len < 126) {
+        buffer[1] = @intCast(payload_len);
+        return buffer[0..2];
+    }
+    if (payload_len <= std.math.maxInt(u16)) {
+        buffer[1] = 126;
+        std.mem.writeInt(u16, buffer[2..4], @intCast(payload_len), .big);
+        return buffer[0..4];
+    }
+    buffer[1] = 127;
+    std.mem.writeInt(u64, buffer[2..10], payload_len, .big);
+    return buffer[0..10];
+}
+
+/// Write one complete unmasked server-to-client frame. Callers provide the
+/// connection-local serialization boundary; this helper owns byte framing and
+/// every short-write retry from the first header byte through the last payload
+/// byte. Data frames carry any length the handler produced; only control
+/// frames are bounded, at the 125 bytes RFC 6455 allows them.
+pub fn writeServerFrame(fd: std.posix.fd_t, opcode: Opcode, payload: []const u8) !void {
+    if (isControlOpcode(opcode) and payload.len > 125) return error.MessageOversize;
+
+    var header_buf: [10]u8 = undefined;
+    const header = writeFrameHeader(&header_buf, opcode, payload.len);
+
+    if (payload.len == 0) return server_io.writeAllFd(fd, header);
+    var iovecs: [2]std.posix.iovec_const = .{
+        .{ .base = header.ptr, .len = header.len },
+        .{ .base = payload.ptr, .len = payload.len },
+    };
+    try server_io.writevAllFd(fd, &iovecs);
 }
 
 fn isControlOpcode(opcode: Opcode) bool {
@@ -243,6 +305,50 @@ fn tokenListContains(header_value: []const u8, needle: []const u8) bool {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "outbound close validation rejects reserved wire codes" {
+    try testing.expect(validCloseCode(1000));
+    try testing.expect(validCloseCode(1014));
+    try testing.expect(validCloseCode(3000));
+    try testing.expect(!validCloseCode(1004));
+    try testing.expect(!validCloseCode(1005));
+    try testing.expect(!validCloseCode(1006));
+    try testing.expect(!validCloseCode(1015));
+    try testing.expect(!validCloseCode(2000));
+}
+
+test "outbound close reason truncates on a UTF-8 boundary" {
+    const reason = ("a" ** 122) ++ "€tail";
+    const truncated = try truncateCloseReason(reason);
+    try testing.expect(truncated.len <= 123);
+    try testing.expect(std.unicode.utf8ValidateSlice(truncated));
+    try testing.expectEqual(@as(usize, 122), truncated.len);
+    try testing.expectError(error.InvalidCloseReason, truncateCloseReason("bad\xffreason"));
+}
+
+test "server frame header carries lengths past the inbound ceiling" {
+    var buffer: [10]u8 = undefined;
+
+    try testing.expectEqualSlices(u8, &.{ 0x81, 5 }, writeFrameHeader(&buffer, .text, 5));
+    try testing.expectEqualSlices(u8, &.{ 0x81, 126, 0x01, 0x00 }, writeFrameHeader(&buffer, .text, 256));
+
+    // Outbound data frames are not capped at max_message_bytes; a 70 KiB
+    // broadcast must reach the peer under a 127 extended-length header.
+    const large = writeFrameHeader(&buffer, .binary, max_message_bytes + 6 * 1024);
+    try testing.expectEqual(@as(usize, 10), large.len);
+    try testing.expectEqual(@as(u8, 127), large[1]);
+    try testing.expectEqual(@as(u64, 71680), std.mem.readInt(u64, large[2..10], .big));
+}
+
+test "close payload packs the code ahead of the reason" {
+    var buffer: [125]u8 = undefined;
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0x0f, 0xa1, 'b', 'y', 'e' },
+        writeClosePayload(&buffer, 4001, "bye"),
+    );
+    try testing.expectEqualSlices(u8, &.{ 0x03, 0xe8 }, writeClosePayload(&buffer, 1000, ""));
+}
 
 test "computeAcceptKey matches the RFC 6455 test vector" {
     // RFC 6455 §1.3: client key "dGhlIHNhbXBsZSBub25jZQ==" produces

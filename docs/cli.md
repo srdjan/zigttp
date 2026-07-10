@@ -52,6 +52,7 @@ Common `dev` and `serve` flags:
 | `-e`, `--eval <code>` | Inline handler source. |
 | `-m`, `--memory <size>` | Per-runtime JS memory ceiling. |
 | `--max-body-size <size>` | Request body limit (default 1m); oversize returns 413. |
+| `--max-websocket-connections <count>` | Live WebSocket limit (default 1024; `0` disables upgrades). |
 | `-n`, `--pool <count>` | Runtime pool size. |
 | `-q`, `--quiet` | Disable request access logging. |
 | `--watch` | Watch handler files. |

@@ -40,6 +40,10 @@ pub fn unixMillis() i64 {
     return zq.trace.unixMillis();
 }
 
+pub fn monotonicNowNs() !u64 {
+    return zq.compat.monotonicNowNs();
+}
+
 pub fn jsInt(value: i32) JSValue {
     return JSValue.fromInt(value);
 }

@@ -3,9 +3,9 @@
 //! W1-d's first building block. The pool owns per-connection metadata
 //! (fd, room membership, lifecycle state, last-frame timestamp) and
 //! exposes room-scoped iteration so handlers can broadcast via
-//! `getWebSockets(roomKey)`. Connection state and I/O continue to live
-//! on the gateway and codec layers respectively — this module is a pure
-//! index.
+//! `getWebSockets(roomKey)`. It also owns the retained per-connection
+//! outbound state that serializes complete frame writes. The gateway and
+//! frame loop own protocol flow; websocket_codec owns wire encoding.
 //!
 //! Concurrency: a single coarse mutex guards all mutations. Accept-path
 //! registration, per-frame state updates, and broadcast-path reads all
@@ -20,12 +20,67 @@
 
 const std = @import("std");
 const zq = @import("zigts");
+const websocket_codec = @import("websocket_codec.zig");
 
 const c = @cImport({
     @cInclude("dirent.h");
 });
 
 pub const ConnectionId = u64;
+
+/// Refcounted connection-local send boundary. The pool owns one reference
+/// while a connection is registered; each OutboundLease pins another while it
+/// waits for or holds the mutex. This lets unregister remove and destroy the
+/// Connection immediately without freeing the lock under a concurrent sender.
+const OutboundState = struct {
+    allocator: std.mem.Allocator,
+    refs: std.atomic.Value(usize) = .init(1),
+    mutex: std.Io.Mutex = .init,
+
+    fn retain(self: *OutboundState) void {
+        _ = self.refs.fetchAdd(1, .monotonic);
+    }
+
+    fn release(self: *OutboundState) void {
+        if (self.refs.fetchSub(1, .acq_rel) == 1) self.allocator.destroy(self);
+    }
+
+    fn lock(self: *OutboundState) void {
+        self.mutex.lockUncancelable(std.Options.debug_io);
+    }
+
+    fn unlock(self: *OutboundState) void {
+        self.mutex.unlock(std.Options.debug_io);
+    }
+};
+
+pub const OutboundLease = struct {
+    state: ?*OutboundState,
+    fd: std.posix.fd_t,
+
+    pub fn deinit(self: *OutboundLease) void {
+        const state = self.state orelse return;
+        self.state = null;
+        std.Io.Threaded.closeFd(self.fd);
+        state.release();
+    }
+
+    pub fn writeFrame(self: *OutboundLease, opcode: websocket_codec.Opcode, payload: []const u8) !void {
+        const state = self.state orelse return error.LeaseReleased;
+        state.lock();
+        defer state.unlock();
+        try websocket_codec.writeServerFrame(self.fd, opcode, payload);
+    }
+
+    pub fn writeFrameAndShutdown(self: *OutboundLease, opcode: websocket_codec.Opcode, payload: []const u8) !void {
+        const state = self.state orelse return error.LeaseReleased;
+        state.lock();
+        defer state.unlock();
+        const result = websocket_codec.writeServerFrame(self.fd, opcode, payload);
+        _ = std.c.shutdown(self.fd, std.c.SHUT.WR);
+        return result;
+    }
+};
 
 /// Cap on a single attachment's bytes when reading from disk. Attachments
 /// are per-connection scratch space, not blob storage; 1 MiB is already
@@ -64,10 +119,20 @@ pub const Connection = struct {
     /// JS handler. Both are allocator-owned; null when unset.
     auto_request: ?[]u8 = null,
     auto_response: ?[]u8 = null,
+    outbound: *OutboundState,
+};
+
+pub const ConnectionSnapshot = struct {
+    id: ConnectionId,
+    fd: std.posix.fd_t,
+    room: []const u8,
+    state: ConnectionState,
+    last_frame_at_ms: i64,
 };
 
 pub const Pool = struct {
     allocator: std.mem.Allocator,
+    max_connections: usize,
     mutex: std.atomic.Mutex = .unlocked,
     by_id: std.AutoHashMapUnmanaged(ConnectionId, *Connection) = .empty,
     by_room: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(ConnectionId)) = .empty,
@@ -77,7 +142,11 @@ pub const Pool = struct {
     attachments_dir: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) Pool {
-        return .{ .allocator = allocator };
+        return initWithLimit(allocator, 1024);
+    }
+
+    pub fn initWithLimit(allocator: std.mem.Allocator, max_connections: usize) Pool {
+        return .{ .allocator = allocator, .max_connections = max_connections };
     }
 
     /// Enable disk persistence of attachments under `dir`. The pool
@@ -88,6 +157,7 @@ pub const Pool = struct {
     pub fn setAttachmentsDir(self: *Pool, dir: []const u8) !void {
         self.lock();
         defer self.unlock();
+
         const owned = try self.allocator.dupe(u8, dir);
         if (self.attachments_dir) |prev| self.allocator.free(prev);
         self.attachments_dir = owned;
@@ -116,6 +186,7 @@ pub const Pool = struct {
             if (conn.attachment) |bytes| self.allocator.free(bytes);
             if (conn.auto_request) |bytes| self.allocator.free(bytes);
             if (conn.auto_response) |bytes| self.allocator.free(bytes);
+            conn.outbound.release();
             self.allocator.destroy(conn);
         }
         self.by_id.deinit(self.allocator);
@@ -144,11 +215,17 @@ pub const Pool = struct {
         self.lock();
         defer self.unlock();
 
+        if (self.by_id.count() >= self.max_connections) return error.CapacityReached;
+
         const room_owned = try self.allocator.dupe(u8, room_key);
         errdefer self.allocator.free(room_owned);
 
         const conn = try self.allocator.create(Connection);
         errdefer self.allocator.destroy(conn);
+
+        const outbound = try self.allocator.create(OutboundState);
+        outbound.* = .{ .allocator = self.allocator };
+        errdefer outbound.release();
 
         const id = self.next_id.fetchAdd(1, .monotonic);
         conn.* = .{
@@ -160,6 +237,7 @@ pub const Pool = struct {
             .attachment = null,
             .auto_request = null,
             .auto_response = null,
+            .outbound = outbound,
         };
 
         try self.by_id.put(self.allocator, id, conn);
@@ -186,6 +264,7 @@ pub const Pool = struct {
         if (conn.attachment) |bytes| self.allocator.free(bytes);
         if (conn.auto_request) |bytes| self.allocator.free(bytes);
         if (conn.auto_response) |bytes| self.allocator.free(bytes);
+        conn.outbound.release();
         self.allocator.destroy(conn);
 
         if (self.attachments_dir) |dir| deleteAttachmentFile(dir, id);
@@ -195,44 +274,56 @@ pub const Pool = struct {
     /// not a pointer, because the internal Connection may be destroyed
     /// by a concurrent unregister; callers reading via this helper are
     /// safe because the snapshot is stable.
-    pub fn snapshot(self: *Pool, id: ConnectionId) ?Connection {
+    pub fn snapshot(self: *Pool, id: ConnectionId) ?ConnectionSnapshot {
         self.lock();
         defer self.unlock();
         const conn = self.by_id.get(id) orelse return null;
-        return conn.*;
+        return .{
+            .id = conn.id,
+            .fd = conn.fd,
+            .room = conn.room,
+            .state = conn.state,
+            .last_frame_at_ms = conn.last_frame_at_ms,
+        };
     }
 
-    /// Duplicate a connection's fd under the lock, or null if the id is gone.
-    /// Writing to a raw `snapshot().fd` outside the lock is a use-after-close:
-    /// the frame loop unregisters (under the lock) and then closes the fd, so a
-    /// snapshot taken just before teardown yields an fd the OS may have already
-    /// recycled for an unrelated connection - sending bytes to the wrong peer.
-    /// An id present under the lock still has an open fd (close strictly follows
-    /// unregister), and dup() captures a distinct fd number that stays bound to
-    /// THIS socket even after the original is closed. The caller owns the
-    /// returned fd and must close it.
-    pub fn dupFd(self: *Pool, id: ConnectionId) ?std.posix.fd_t {
+    /// Acquire a stable connection-local send lease. The refcount and fd dup are
+    /// captured under the pool lock, but no network I/O holds that coarse lock.
+    pub fn acquireOutbound(self: *Pool, id: ConnectionId) !OutboundLease {
         self.lock();
         defer self.unlock();
-        const conn = self.by_id.get(id) orelse return null;
+        const conn = self.by_id.get(id) orelse return error.ConnectionNotFound;
+        conn.outbound.retain();
         const new_fd = std.c.dup(conn.fd);
-        if (new_fd < 0) return null;
-        return new_fd;
+        if (new_fd < 0) {
+            conn.outbound.release();
+            return error.DuplicateSocketFailed;
+        }
+        return .{ .state = conn.outbound, .fd = new_fd };
     }
 
-    /// Write the set of connection ids in a room into `out`, which must
-    /// have capacity for `countInRoom(room)` entries. Returns the slice
-    /// of ids actually written. The ids remain valid for the duration
-    /// of the caller's frame — a concurrent unregister may invalidate
-    /// them, so broadcast loops should tolerate `snapshot(id) == null`.
-    pub fn collectRoom(self: *Pool, room_key: []const u8, out: []ConnectionId) []ConnectionId {
+    pub fn sendFrame(self: *Pool, id: ConnectionId, opcode: websocket_codec.Opcode, payload: []const u8) !void {
+        var lease = try self.acquireOutbound(id);
+        defer lease.deinit();
+        try lease.writeFrame(opcode, payload);
+    }
+
+    pub fn sendFrameAndShutdown(self: *Pool, id: ConnectionId, opcode: websocket_codec.Opcode, payload: []const u8) !void {
+        var lease = try self.acquireOutbound(id);
+        defer lease.deinit();
+        try lease.writeFrameAndShutdown(opcode, payload);
+    }
+
+    /// Return an allocator-owned snapshot containing every connection id in a
+    /// room. Registration is itself bounded by max_connections, so this cannot
+    /// allocate beyond the configured server-wide WebSocket limit. The pool
+    /// lock is released before callers create JS values or send frames.
+    pub fn snapshotRoom(self: *Pool, room_key: []const u8, out_allocator: std.mem.Allocator) ![]ConnectionId {
         self.lock();
         defer self.unlock();
 
-        const list = self.by_room.getPtr(room_key) orelse return out[0..0];
-        const n = @min(list.items.len, out.len);
-        std.mem.copyForwards(ConnectionId, out[0..n], list.items[0..n]);
-        return out[0..n];
+        const list = self.by_room.getPtr(room_key) orelse return try out_allocator.alloc(ConnectionId, 0);
+        return try out_allocator.dupe(ConnectionId, list.items);
     }
 
     pub fn countInRoom(self: *Pool, room_key: []const u8) usize {
@@ -578,6 +669,197 @@ fn listAttachmentIds(
 
 const testing = std.testing;
 
+test "outbound lease pins state and fd across unregister and pool teardown" {
+    const fds = try @import("server_io.zig").createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    var pool = Pool.init(testing.allocator);
+    const id = try pool.register(fds[0], "lease", 0);
+    var lease = try pool.acquireOutbound(id);
+    defer lease.deinit();
+
+    pool.unregister(id);
+    pool.deinit();
+    std.Io.Threaded.closeFd(fds[0]);
+
+    try lease.writeFrame(.text, "still-pinned");
+    var frame: [14]u8 = undefined;
+    try readExactFd(fds[1], &frame);
+    try testing.expectEqual(@as(u8, 0x81), frame[0]);
+    try testing.expectEqual(@as(u8, 12), frame[1]);
+    try testing.expectEqualStrings("still-pinned", frame[2..]);
+}
+
+test "a blocked peer does not delay an independent connection" {
+    const a_fds = try @import("server_io.zig").createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(a_fds[0]);
+    defer std.Io.Threaded.closeFd(a_fds[1]);
+    const b_fds = try @import("server_io.zig").createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(b_fds[0]);
+    defer std.Io.Threaded.closeFd(b_fds[1]);
+
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    const a = try pool.register(a_fds[0], "a", 0);
+    const b = try pool.register(b_fds[0], "b", 0);
+    const send_buffer: c_int = 256;
+    std.posix.setsockopt(a_fds[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&send_buffer)) catch {};
+
+    const blocked_payload: [32768]u8 = @splat('A');
+    var blocked = SendTestContext{ .pool = &pool, .id = a, .payload = &blocked_payload };
+    const blocked_thread = try std.Thread.spawn(.{}, sendTestFrame, .{&blocked});
+    var blocked_joined = false;
+    defer if (!blocked_joined) {
+        _ = std.c.shutdown(a_fds[0], std.c.SHUT.RDWR);
+        blocked_thread.join();
+    };
+    while (!blocked.started.load(.acquire)) std.atomic.spinLoopHint();
+
+    const peer_payload = "peer-b";
+    var peer = SendTestContext{ .pool = &pool, .id = b, .payload = peer_payload };
+    const peer_thread = try std.Thread.spawn(.{}, sendTestFrame, .{&peer});
+    var waited_ms: usize = 0;
+    while (!peer.finished.load(.acquire) and waited_ms < 1000) : (waited_ms += 1) {
+        const ts = std.c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    if (!peer.finished.load(.acquire)) {
+        _ = std.c.shutdown(a_fds[0], std.c.SHUT.RDWR);
+        blocked_thread.join();
+        blocked_joined = true;
+        peer_thread.join();
+        return error.IndependentPeerBlocked;
+    }
+    peer_thread.join();
+    try testing.expect(!peer.failed.load(.acquire));
+
+    var frame: [8]u8 = undefined;
+    try readExactFd(b_fds[1], &frame);
+    try testing.expectEqualSlices(u8, &.{ 0x81, 0x06 }, frame[0..2]);
+    try testing.expectEqualStrings(peer_payload, frame[2..]);
+
+    _ = std.c.shutdown(a_fds[0], std.c.SHUT.RDWR);
+    blocked_thread.join();
+    blocked_joined = true;
+}
+
+test "a close frame shuts the outbound boundary before later sends" {
+    const fds = try @import("server_io.zig").createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    const id = try pool.register(fds[0], "closing", 0);
+    try pool.sendFrameAndShutdown(id, .connection_close, &.{ 0x03, 0xe8 });
+    try testing.expectError(error.WriteFailed, pool.sendFrame(id, .text, "late"));
+
+    var frame: [4]u8 = undefined;
+    try readExactFd(fds[1], &frame);
+    try testing.expectEqualSlices(u8, &.{ 0x88, 0x02, 0x03, 0xe8 }, &frame);
+    var byte: [1]u8 = undefined;
+    try testing.expectEqual(@as(isize, 0), std.c.read(fds[1], &byte, 1));
+}
+
+test "concurrent large sends to one peer remain complete frames" {
+    const fds = try @import("server_io.zig").createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    const send_buffer: c_int = 256;
+    std.posix.setsockopt(fds[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&send_buffer)) catch {};
+
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    const id = try pool.register(fds[0], "concurrent", 0);
+    const payload_a: [32768]u8 = @splat('A');
+    const payload_b: [32768]u8 = @splat('B');
+    var ctx_a = SendTestContext{ .pool = &pool, .id = id, .payload = &payload_a };
+    var ctx_b = SendTestContext{ .pool = &pool, .id = id, .payload = &payload_b };
+    const thread_a = try std.Thread.spawn(.{}, sendTestFrame, .{&ctx_a});
+    const thread_b = try std.Thread.spawn(.{}, sendTestFrame, .{&ctx_b});
+    var joined = false;
+    defer if (!joined) {
+        _ = std.c.shutdown(fds[0], std.c.SHUT.RDWR);
+        thread_a.join();
+        thread_b.join();
+    };
+
+    var bytes: [2 * (4 + 32768)]u8 = undefined;
+    try readExactFd(fds[1], &bytes);
+    thread_a.join();
+    thread_b.join();
+    joined = true;
+    try testing.expect(!ctx_a.failed.load(.acquire));
+    try testing.expect(!ctx_b.failed.load(.acquire));
+
+    var offset: usize = 0;
+    const first = try decodeServerTextFrame(&bytes, &offset);
+    const second = try decodeServerTextFrame(&bytes, &offset);
+    try testing.expectEqual(bytes.len, offset);
+    const first_is_a = allByte(first, 'A');
+    const first_is_b = allByte(first, 'B');
+    try testing.expect(first_is_a or first_is_b);
+    try testing.expect(if (first_is_a) allByte(second, 'B') else allByte(second, 'A'));
+}
+
+const SendTestContext = struct {
+    pool: *Pool,
+    id: ConnectionId,
+    payload: []const u8,
+    started: std.atomic.Value(bool) = .init(false),
+    finished: std.atomic.Value(bool) = .init(false),
+    failed: std.atomic.Value(bool) = .init(false),
+};
+
+fn sendTestFrame(ctx: *SendTestContext) void {
+    ctx.started.store(true, .release);
+    ctx.pool.sendFrame(ctx.id, .text, ctx.payload) catch ctx.failed.store(true, .release);
+    ctx.finished.store(true, .release);
+}
+
+/// Blocking exact read, shared with the WebSocket callback tests.
+pub fn readExactFd(fd: std.posix.fd_t, out: []u8) !void {
+    var offset: usize = 0;
+    while (offset < out.len) {
+        const n = std.c.read(fd, out[offset..].ptr, out.len - offset);
+        if (n < 0) {
+            if (std.posix.errno(n) == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (n == 0) return error.EndOfStream;
+        offset += @intCast(n);
+    }
+}
+
+fn decodeServerTextFrame(bytes: []const u8, offset: *usize) ![]const u8 {
+    if (offset.* + 2 > bytes.len or bytes[offset.*] != 0x81) return error.InvalidFrame;
+    const len_tag = bytes[offset.* + 1];
+    if ((len_tag & 0x80) != 0) return error.InvalidFrame;
+    offset.* += 2;
+    const len: usize = if (len_tag < 126)
+        len_tag
+    else if (len_tag == 126) blk: {
+        if (offset.* + 2 > bytes.len) return error.InvalidFrame;
+        const value = std.mem.readInt(u16, bytes[offset.*..][0..2], .big);
+        offset.* += 2;
+        break :blk value;
+    } else blk: {
+        if (offset.* + 8 > bytes.len) return error.InvalidFrame;
+        const value = std.math.cast(usize, std.mem.readInt(u64, bytes[offset.*..][0..8], .big)) orelse return error.InvalidFrame;
+        offset.* += 8;
+        break :blk value;
+    };
+    if (offset.* + len > bytes.len) return error.InvalidFrame;
+    const payload = bytes[offset.*..][0..len];
+    offset.* += len;
+    return payload;
+}
+
+fn allByte(bytes: []const u8, expected: u8) bool {
+    for (bytes) |byte| if (byte != expected) return false;
+    return true;
+}
+
 test "register returns incrementing ids and snapshot reflects state" {
     var pool = Pool.init(testing.allocator);
     defer pool.deinit();
@@ -592,7 +874,7 @@ test "register returns incrementing ids and snapshot reflects state" {
     try testing.expectEqual(ConnectionState.parked, snap.state);
 }
 
-test "collectRoom returns all members of a room" {
+test "snapshotRoom returns all members of a room" {
     var pool = Pool.init(testing.allocator);
     defer pool.deinit();
 
@@ -600,8 +882,8 @@ test "collectRoom returns all members of a room" {
     const b = try pool.register(101, "alpha", 1001);
     _ = try pool.register(102, "beta", 1002);
 
-    var buf: [8]ConnectionId = undefined;
-    const alpha = pool.collectRoom("alpha", &buf);
+    const alpha = try pool.snapshotRoom("alpha", testing.allocator);
+    defer testing.allocator.free(alpha);
     try testing.expectEqual(@as(usize, 2), alpha.len);
     // Order isn't part of the contract; just assert membership.
     const has_a = alpha[0] == a or alpha[1] == a;
@@ -657,7 +939,7 @@ test "touch updates state and timestamp, returns false for missing id" {
     try testing.expect(!pool.touch(9999, .live, 3000));
 }
 
-test "collectRoom truncates to output buffer capacity" {
+test "snapshotRoom never truncates live members" {
     var pool = Pool.init(testing.allocator);
     defer pool.deinit();
 
@@ -665,10 +947,17 @@ test "collectRoom truncates to output buffer capacity" {
         _ = try pool.register(@intCast(100 + i), "alpha", 1000);
     }
 
-    var buf: [4]ConnectionId = undefined;
-    const got = pool.collectRoom("alpha", &buf);
-    try testing.expectEqual(@as(usize, 4), got.len);
+    const got = try pool.snapshotRoom("alpha", testing.allocator);
+    defer testing.allocator.free(got);
+    try testing.expectEqual(@as(usize, 10), got.len);
     try testing.expectEqual(@as(usize, 10), pool.countInRoom("alpha"));
+}
+
+test "registration enforces the pool connection limit" {
+    var pool = Pool.initWithLimit(testing.allocator, 1);
+    defer pool.deinit();
+    _ = try pool.register(100, "alpha", 0);
+    try testing.expectError(error.CapacityReached, pool.register(101, "alpha", 0));
 }
 
 test "attachment round-trip owns bytes independent of caller" {

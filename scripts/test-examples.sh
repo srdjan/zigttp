@@ -93,13 +93,15 @@ stop_live_server() {
         for i in $(seq 1 20); do
             if ! kill -0 "$LIVE_PID" 2>/dev/null; then
                 wait "$LIVE_PID" 2>/dev/null || true
-                return
+                return 0
             fi
             sleep 0.1
         done
         kill -KILL "$LIVE_PID" 2>/dev/null || true
         wait "$LIVE_PID" 2>/dev/null || true
+        return 1
     fi
+    return 0
 }
 
 expect_contains() {
@@ -118,6 +120,180 @@ record_live_result() {
         echo "  FAIL  $name (live workflow)"
         if [ -f "${LIVE_LOG:-}" ]; then
             head -8 "$LIVE_LOG" | sed 's/^/        /'
+        fi
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+run_live_websocket() {
+    local name="websocket/chat.ts"
+    local ok=1
+    if start_live_server "examples/websocket/chat.ts" --watch --prove --max-websocket-connections 2; then
+        local proof_ready=1
+        local i
+        for i in $(seq 1 50); do
+            if grep -q "Initial proof ready" "$LIVE_LOG"; then
+                proof_ready=0
+                break
+            fi
+            if ! kill -0 "$LIVE_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+
+        if [ "$proof_ready" = "0" ] && python3 - "$LIVE_PORT" "$LIVE_PID" <<'PY'
+import base64
+import os
+import signal
+import socket
+import struct
+import sys
+import time
+
+port = int(sys.argv[1])
+server_pid = int(sys.argv[2])
+
+def recv_exact(sock, count):
+    out = bytearray()
+    while len(out) < count:
+        chunk = sock.recv(count - len(out))
+        if not chunk:
+            raise AssertionError("unexpected websocket EOF")
+        out.extend(chunk)
+    return bytes(out)
+
+def recv_headers(sock):
+    out = bytearray()
+    while b"\r\n\r\n" not in out:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise AssertionError("connection closed before the response headers")
+        out.extend(chunk)
+    return bytes(out)
+
+def connect(path):
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock.settimeout(5)
+    key = base64.b64encode(os.urandom(16)).decode()
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n\r\n"
+    )
+    sock.sendall(request.encode())
+    response = recv_headers(sock)
+    assert response.startswith(b"HTTP/1.1 101"), response
+    return sock
+
+def rejected(path):
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock.settimeout(5)
+    key = base64.b64encode(os.urandom(16)).decode()
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    )
+    sock.sendall(request.encode())
+    response = recv_headers(sock)
+    sock.close()
+    assert response.startswith(b"HTTP/1.1 503"), response
+
+def send_frame(sock, opcode, payload):
+    if isinstance(payload, str):
+        payload = payload.encode()
+    mask = os.urandom(4)
+    length = len(payload)
+    if length < 126:
+        header = bytes((0x80 | opcode, 0x80 | length))
+    elif length <= 0xFFFF:
+        header = bytes((0x80 | opcode, 0xFE)) + struct.pack("!H", length)
+    else:
+        header = bytes((0x80 | opcode, 0xFF)) + struct.pack("!Q", length)
+    masked = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
+    sock.sendall(header + mask + masked)
+
+def recv_frame(sock):
+    first, second = recv_exact(sock, 2)
+    assert first & 0x80
+    assert not second & 0x80
+    length = second & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", recv_exact(sock, 2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", recv_exact(sock, 8))[0]
+    return first & 0x0F, recv_exact(sock, length)
+
+a = connect("/room/alpha")
+b = connect("/room/alpha")
+try:
+    rejected("/room/alpha")
+
+    send_frame(a, 0x1, "ping")
+    assert recv_frame(a) == (0x1, b"pong")
+
+    send_frame(a, 0x1, "alice")
+    assert recv_frame(a) == (0x1, b"hello alice")
+    send_frame(b, 0x1, "bob")
+    assert recv_frame(b) == (0x1, b"hello bob")
+
+    send_frame(a, 0x1, "hello")
+    assert recv_frame(a) == (0x1, b"alice: hello")
+    assert recv_frame(b) == (0x1, b"alice: hello")
+
+    close_payload = struct.pack("!H", 4001) + b"bye"
+    send_frame(a, 0x8, close_payload)
+    opcode, echoed = recv_frame(a)
+    assert opcode == 0x8
+    assert struct.unpack("!H", echoed[:2])[0] == 4001
+    assert echoed[2:] == b"bye"
+    send_frame(b, 0x8, struct.pack("!H", 1000))
+    assert recv_frame(b)[0] == 0x8
+finally:
+    a.close()
+    b.close()
+
+# Leave a real upgraded socket idle while asking the server to terminate.
+# The peer must observe closure within the live-test timeout; this catches
+# detached or uninterruptible WebSocket workers that unit mocks cannot.
+idle = None
+for _ in range(20):
+    try:
+        idle = connect("/room/shutdown")
+        break
+    except AssertionError:
+        time.sleep(0.05)
+assert idle is not None
+try:
+    idle.settimeout(15)
+    os.kill(server_pid, signal.SIGTERM)
+    try:
+        while idle.recv(4096):
+            pass
+    except ConnectionResetError:
+        pass
+finally:
+    idle.close()
+PY
+        then
+            ok=0
+        fi
+    fi
+    if ! stop_live_server; then
+        ok=1
+    fi
+    if [ "$ok" = "0" ]; then
+        echo "  PASS  $name (upgrade, auto-response, broadcast, close, capacity, shutdown)"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL  $name (live WebSocket transport)"
+        if [ -f "${LIVE_LOG:-}" ]; then
+            head -12 "$LIVE_LOG" | sed 's/^/        /'
         fi
         FAIL=$((FAIL + 1))
     fi
@@ -201,7 +377,7 @@ run_live_workflow() {
                 ;;
         esac
     fi
-    stop_live_server
+    stop_live_server || true
     record_live_result "$name" "$ok"
 }
 
@@ -252,6 +428,11 @@ run_tests_with_args "examples/jsx/jsx-ssr.tsx"       "examples/jsx/jsx-ssr.test.
 # modules/
 run_tests_with_args "examples/modules/modules.ts"      "examples/modules/modules.test.jsonl"
 run_tests_with_args "examples/modules/modules_all.ts"  "examples/modules/modules_all.test.jsonl"
+
+# websocket/ - compile the public module signature, then exercise the real
+# gateway with two peers and the configured connection cap.
+check_types "examples/websocket/chat.ts"
+run_live_websocket
 
 # fetch/
 run_tests_with_args "examples/fetch/weather-forecasts.ts" "examples/fetch/weather-forecasts.test.jsonl"

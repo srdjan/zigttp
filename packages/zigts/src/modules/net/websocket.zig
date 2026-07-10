@@ -24,7 +24,6 @@ pub const WebSocketCallbacks = struct {
     serialize_attachment_fn: WsCallFn,
     deserialize_attachment_fn: WsCallFn,
     get_web_sockets_fn: WsCallFn,
-    room_from_path_fn: WsCallFn,
     set_auto_response_fn: WsCallFn,
 };
 
@@ -65,7 +64,6 @@ pub fn installState(ctx: *context.Context, callbacks: WebSocketCallbacks) !void 
             .serialize_attachment_fn = InstalledState.sdkDispatch("serialize_attachment_fn"),
             .deserialize_attachment_fn = InstalledState.sdkDispatch("deserialize_attachment_fn"),
             .get_web_sockets_fn = InstalledState.sdkDispatch("get_web_sockets_fn"),
-            .room_from_path_fn = InstalledState.sdkDispatch("room_from_path_fn"),
             .set_auto_response_fn = InstalledState.sdkDispatch("set_auto_response_fn"),
         },
     };

@@ -1102,7 +1102,6 @@ pub const Runtime = struct {
             .serialize_attachment_fn = ws_callbacks.wsSerializeAttachmentCallback,
             .deserialize_attachment_fn = ws_callbacks.wsDeserializeAttachmentCallback,
             .get_web_sockets_fn = ws_callbacks.wsGetWebSocketsCallback,
-            .room_from_path_fn = ws_callbacks.wsRoomFromPathCallback,
             .set_auto_response_fn = ws_callbacks.wsSetAutoResponseCallback,
         });
     }
@@ -1429,9 +1428,20 @@ pub const Runtime = struct {
     /// Arm the per-request execution deadline on this runtime's context.
     /// No-op when request_timeout_ms == 0.
     pub fn armRequestDeadline(self: *Self) void {
+        self.armRequestDeadlineMs(self.config.request_timeout_ms);
+    }
+
+    /// Arm a callback deadline bounded by both the configured request timeout
+    /// and an enclosing lifecycle budget such as graceful shutdown.
+    pub fn armRequestDeadlineWithin(self: *Self, max_ms: u32) void {
+        const configured_ms = self.config.request_timeout_ms;
+        const effective_ms = if (configured_ms == 0) max_ms else @min(configured_ms, max_ms);
+        self.armRequestDeadlineMs(effective_ms);
+    }
+
+    fn armRequestDeadlineMs(self: *Self, ms: u32) void {
         self.ctx.interrupt_requested.store(false, .monotonic);
         self.ctx.deadline_ns = 0;
-        const ms = self.config.request_timeout_ms;
         if (ms == 0) return;
         const now = compat.monotonicNowNs() catch return;
         self.ctx.deadline_ns = now + @as(u64, ms) * std.time.ns_per_ms;

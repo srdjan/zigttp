@@ -171,7 +171,7 @@ Import via `import { fn } from "zigttp:module"`. Most implementations live in `p
 | `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` |
 | `zigttp:service` | `serviceCall` |
 | `zigttp:fetch` | `fetch` (web-standard `fetch(url, init?) -> Response`), `fetchWithRetry` |
-| `zigttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `roomFromPath`, `setAutoResponse` |
+| `zigttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `setAutoResponse` |
 | `zigttp:io` | `parallel`, `race` |
 | `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` |
 | `zigttp:compose` | `guard`, `pipe` |
@@ -214,7 +214,7 @@ TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, r
 
 ### zigttp (server)
 
-`-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (memory limit), `--max-body-size SIZE` (request body limit, default 1m), `-n N` (pool size), `--static DIR`, `--watch` (live reload), `--prove` (contract-diff before swap), `--force-swap` (apply breaking changes), `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`, `--sqlite FILE` (SQLite path for zigttp:sql), `--system FILE` (system registry for zigttp:service), `--outbound-http` (enable the native outbound HTTP bridge), `--outbound-host HOST` (restrict the bridge to an exact egress host), `--no-env-check`. `zigttp dev --record-proof` desugars to `--trace` aimed inside a capsule (`.zigttp/capsules/default/`) and writes the capsule manifest up front (the manifest pins the handler/contract/policy hashes; it is written before the session so Ctrl+C, which signals the whole process group, cannot skip it). Replay the capsule against a later edit with `zigttp proof replay default` (exit 0 reproduced, 1 regression; fails closed on schema/policy-hash drift, `--allow-version-mismatch` overrides).
+`-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (memory limit), `--max-body-size SIZE` (request body limit, default 1m), `--max-websocket-connections N` (live WebSocket limit, default 1024; `0` disables upgrades), `-n N` (pool size), `--static DIR`, `--watch` (live reload), `--prove` (contract-diff before swap), `--force-swap` (apply breaking changes), `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`, `--sqlite FILE` (SQLite path for zigttp:sql), `--system FILE` (system registry for zigttp:service), `--outbound-http` (enable the native outbound HTTP bridge), `--outbound-host HOST` (restrict the bridge to an exact egress host), `--no-env-check`. `zigttp dev --record-proof` desugars to `--trace` aimed inside a capsule (`.zigttp/capsules/default/`) and writes the capsule manifest up front (the manifest pins the handler/contract/policy hashes; it is written before the session so Ctrl+C, which signals the whole process group, cannot skip it). Replay the capsule against a later edit with `zigttp proof replay default` (exit 0 reproduced, 1 regression; fails closed on schema/policy-hash drift, `--allow-version-mismatch` overrides).
 
 ### zigttp auth
 
