@@ -318,6 +318,10 @@ pub const FlowChecker = struct {
     allocated_messages: std.ArrayListUnmanaged([]const u8),
 
     properties: FlowProperties,
+    /// Sticky failure for taint labels, provenance, defended paths,
+    /// constraints, witnesses, and diagnostics. Human-only reason/message
+    /// enrichment may fall back to its base text without weakening a proof.
+    allocation_failed: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) FlowChecker {
         return .{
@@ -345,6 +349,7 @@ pub const FlowChecker = struct {
             .external_reasons = .empty,
             .allocated_messages = .empty,
             .properties = .{},
+            .allocation_failed = false,
         };
     }
 
@@ -401,6 +406,7 @@ pub const FlowChecker = struct {
         self.findHandlerParam(handler_func);
         self.walkStmt(handler_func);
         self.recordContainedSecrets();
+        if (self.allocation_failed) return error.OutOfMemory;
 
         var error_count: u32 = 0;
         for (self.diagnostics.items) |diag| {
@@ -428,7 +434,7 @@ pub const FlowChecker = struct {
             self.defended_paths.append(self.allocator, .{
                 .property = p.tag,
                 .safe_form = .never_reached,
-            }) catch {};
+            }) catch self.markAllocationFailure();
         }
     }
 
@@ -468,7 +474,7 @@ pub const FlowChecker = struct {
             .guard_line = if (guard_loc) |l| l.line else 0,
             .sink_label = sink_label,
             .sink_line = if (sink_loc) |l| l.line else 0,
-        }) catch {};
+        }) catch self.markAllocationFailure();
     }
 
     /// Walk an expression for the validator that cleared the taint: the first
@@ -600,9 +606,13 @@ pub const FlowChecker = struct {
             // Merge into existing entry - no new key allocation needed
             entry.value_ptr.* = LabelSet.merge(entry.value_ptr.*, label_set);
         } else {
-            const duped_key = self.allocator.dupe(u8, name) catch return;
+            const duped_key = self.allocator.dupe(u8, name) catch {
+                self.markAllocationFailure();
+                return;
+            };
             self.external_labels.put(self.allocator, duped_key, label_set) catch {
                 self.allocator.free(duped_key);
+                self.markAllocationFailure();
                 return;
             };
         }
@@ -669,7 +679,7 @@ pub const FlowChecker = struct {
                             self.allocator,
                             spec.local_binding.slot,
                             entry.func.return_labels,
-                        ) catch {};
+                        ) catch self.markAllocationFailure();
                     }
                     self.module_fn_meta.put(
                         self.allocator,
@@ -679,7 +689,7 @@ pub const FlowChecker = struct {
                             .func = entry.func.name,
                             .returns = entry.func.returns,
                         },
-                    ) catch {};
+                    ) catch self.markAllocationFailure();
                     if (std.mem.eql(u8, imported_name, "env")) {
                         self.env_fn_slot = spec.local_binding.slot;
                     }
@@ -707,7 +717,7 @@ pub const FlowChecker = struct {
                 if (init_tag != .function_expr and init_tag != .arrow_function) continue;
             }
             const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
-            self.user_fn_decls.put(self.allocator, key, vd.init) catch {};
+            self.user_fn_decls.put(self.allocator, key, vd.init) catch self.markAllocationFailure();
         }
     }
 
@@ -723,7 +733,7 @@ pub const FlowChecker = struct {
         const key = packBindingKey(binding.scope_id, binding.slot);
         self.req_binding_key = key;
         // Request parameter carries user_input label
-        self.binding_labels.put(self.allocator, key, .{ .user_input = true }) catch {};
+        self.binding_labels.put(self.allocator, key, .{ .user_input = true }) catch self.markAllocationFailure();
     }
 
     /// Unwrap a function parameter node to its binding slot. Handles both
@@ -756,7 +766,7 @@ pub const FlowChecker = struct {
                 switch (pe.kind) {
                     .simple, .rest => {
                         const key = packBindingKey(pe.binding.scope_id, pe.binding.slot);
-                        self.binding_labels.put(self.allocator, key, labels) catch {};
+                        self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
                     },
                     // Nested pattern: recurse into pe.key.
                     .object, .array => self.applyPatternLabels(pe.key, labels),
@@ -765,7 +775,7 @@ pub const FlowChecker = struct {
             .identifier => {
                 const binding = self.ir_view.getBinding(pattern) orelse return;
                 const key = packBindingKey(binding.scope_id, binding.slot);
-                self.binding_labels.put(self.allocator, key, labels) catch {};
+                self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
             },
             else => {},
         }
@@ -816,7 +826,7 @@ pub const FlowChecker = struct {
         if (arg_labels.isEmpty()) return;
         const key = packBindingKey(binding.scope_id, binding.slot);
         const existing = self.binding_labels.get(key) orelse LabelSet.empty;
-        self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, arg_labels)) catch {};
+        self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, arg_labels)) catch self.markAllocationFailure();
     }
 
     /// Record a defining value node for a binding so the response-sink check
@@ -826,9 +836,12 @@ pub const FlowChecker = struct {
     fn recordBindingValue(self: *FlowChecker, binding: ir.BindingRef, value: NodeIndex) void {
         if (value == null_node) return;
         const key = packBindingKey(binding.scope_id, binding.slot);
-        const gop = self.binding_value_nodes.getOrPut(self.allocator, key) catch return;
+        const gop = self.binding_value_nodes.getOrPut(self.allocator, key) catch {
+            self.markAllocationFailure();
+            return;
+        };
         if (!gop.found_existing) gop.value_ptr.* = .empty;
-        gop.value_ptr.append(self.allocator, value) catch {};
+        gop.value_ptr.append(self.allocator, value) catch self.markAllocationFailure();
     }
 
     fn walkStmt(self: *FlowChecker, node: NodeIndex) void {
@@ -879,7 +892,7 @@ pub const FlowChecker = struct {
                             self.applyPatternLabels(vd.pattern, labels);
                         } else {
                             const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
-                            self.binding_labels.put(self.allocator, key, labels) catch {};
+                            self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
                         }
                     }
                     if (vd.pattern == null_node) {
@@ -907,10 +920,10 @@ pub const FlowChecker = struct {
                     if (asgn.op) |_| {
                         // Compound assignment (+=, etc): merge with existing
                         const existing = self.binding_labels.get(key) orelse LabelSet.empty;
-                        self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch {};
+                        self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch self.markAllocationFailure();
                     } else {
                         // Simple assignment: replace
-                        self.binding_labels.put(self.allocator, key, labels) catch {};
+                        self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
                     }
                     self.recordBindingValue(binding, asgn.value);
                 } else if (target_tag == .member_access or target_tag == .optional_chain or target_tag == .computed_access) {
@@ -921,7 +934,7 @@ pub const FlowChecker = struct {
                         if (self.assignmentRootBinding(asgn.target)) |binding| {
                             const key = packBindingKey(binding.scope_id, binding.slot);
                             const existing = self.binding_labels.get(key) orelse LabelSet.empty;
-                            self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch {};
+                            self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch self.markAllocationFailure();
                         }
                     }
                 }
@@ -951,7 +964,7 @@ pub const FlowChecker = struct {
                 const iterable_labels = self.inferLabels(fi.iterable);
                 if (!iterable_labels.isEmpty()) {
                     const key = packBindingKey(fi.binding.scope_id, fi.binding.slot);
-                    self.binding_labels.put(self.allocator, key, iterable_labels) catch {};
+                    self.binding_labels.put(self.allocator, key, iterable_labels) catch self.markAllocationFailure();
                 }
                 self.walkStmt(fi.body);
             },
@@ -1246,7 +1259,10 @@ pub const FlowChecker = struct {
             const pb = self.paramBinding(param_idx) orelse continue;
             const key = packBindingKey(pb.scope_id, pb.slot);
             const labels = if (i < call_data.args_count) arg_labels[i] else LabelSet.empty;
-            self.binding_labels.put(self.allocator, key, labels) catch return arg_union;
+            self.binding_labels.put(self.allocator, key, labels) catch {
+                self.markAllocationFailure();
+                return arg_union;
+            };
         }
 
         self.summary_stack[self.summary_depth] = fn_key;
@@ -1850,14 +1866,14 @@ pub const FlowChecker = struct {
         // Only track if the function returns labels worth propagating (e.g., validated)
         if (return_labels.has(.validated)) {
             const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
-            self.result_binding_labels.put(self.allocator, key, return_labels) catch {};
+            self.result_binding_labels.put(self.allocator, key, return_labels) catch self.markAllocationFailure();
             // Remember the validator that cleared the taint so a defended path
             // can name it. `func` is borrowed from the module metadata table.
             if (self.module_fn_meta.get(callee_binding.slot)) |meta| {
                 self.result_binding_guard.put(self.allocator, key, .{
                     .func = meta.func,
                     .node = vd.init,
-                }) catch {};
+                }) catch self.markAllocationFailure();
             }
         }
     }
@@ -1901,11 +1917,17 @@ pub const FlowChecker = struct {
             const constraints = self.allocator.dupe(
                 counterexample.WitnessConstraint,
                 self.working_constraints.items,
-            ) catch &[_]counterexample.WitnessConstraint{};
+            ) catch blk: {
+                self.markAllocationFailure();
+                break :blk &[_]counterexample.WitnessConstraint{};
+            };
             const io_calls = self.allocator.dupe(
                 counterexample.TrackedIoCall,
                 self.working_io_calls.items,
-            ) catch &[_]counterexample.TrackedIoCall{};
+            ) catch blk: {
+                self.markAllocationFailure();
+                break :blk &[_]counterexample.TrackedIoCall{};
+            };
             owned.witness = .{
                 .path_constraints = constraints,
                 .io_calls = io_calls,
@@ -1916,6 +1938,7 @@ pub const FlowChecker = struct {
                 if (w.path_constraints.len > 0) self.allocator.free(w.path_constraints);
                 if (w.io_calls.len > 0) self.allocator.free(w.io_calls);
             }
+            self.markAllocationFailure();
         };
     }
 
@@ -1937,7 +1960,10 @@ pub const FlowChecker = struct {
                     const final = self.findNegatedAndConstraint(cond, true) orelse
                         self.findNegatedAndConstraint(cond, false) orelse
                         return 0;
-                    self.working_constraints.append(self.allocator, final) catch return 0;
+                    self.working_constraints.append(self.allocator, final) catch {
+                        self.markAllocationFailure();
+                        return 0;
+                    };
                     return 1;
                 }
                 const left = self.pushConditionConstraints(bin.left, want_negation);
@@ -1948,7 +1974,10 @@ pub const FlowChecker = struct {
 
         const raw = self.extractCondConstraint(cond) orelse return 0;
         const final = if (want_negation) counterexample.negate(raw) orelse return 0 else raw;
-        self.working_constraints.append(self.allocator, final) catch return 0;
+        self.working_constraints.append(self.allocator, final) catch {
+            self.markAllocationFailure();
+            return 0;
+        };
         return 1;
     }
 
@@ -1974,11 +2003,14 @@ pub const FlowChecker = struct {
             .module = meta.module,
             .func = meta.func,
             .returns = meta.returns,
-        }) catch return;
+        }) catch {
+            self.markAllocationFailure();
+            return;
+        };
         var call_meta = meta;
         call_meta.call_index = @intCast(call_index);
         const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
-        self.binding_origin.put(self.allocator, key, call_meta) catch {};
+        self.binding_origin.put(self.allocator, key, call_meta) catch self.markAllocationFailure();
     }
 
     fn findNegatedAndConstraint(
@@ -2105,11 +2137,54 @@ pub const FlowChecker = struct {
         const atom: object.Atom = @enumFromInt(atom_idx);
         return atom.toPredefinedName();
     }
+
+    fn markAllocationFailure(self: *FlowChecker) void {
+        self.allocation_failed = true;
+    }
 };
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "FlowChecker fails closed when taint state cannot allocate" {
+    const allocator = std.testing.allocator;
+    const source = "function handler(req) { return Response.json(req); }";
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(view, root) orelse
+        return error.HandlerNotFound;
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var checker = FlowChecker.init(failing.allocator(), view, null);
+    defer checker.deinit();
+    try std.testing.expectError(error.OutOfMemory, checker.check(handler_fn));
+}
+
+test "FlowChecker fails closed when diagnostic storage cannot allocate" {
+    const allocator = std.testing.allocator;
+    const source = "function handler() { return Response.json({ ok: true }); }";
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(view, root) orelse
+        return error.HandlerNotFound;
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var checker = FlowChecker.init(failing.allocator(), view, null);
+    defer checker.deinit();
+    checker.addDiagnostic(.{
+        .severity = .err,
+        .kind = .secret_in_response,
+        .node = handler_fn,
+        .message = "forced diagnostic",
+        .help = null,
+    });
+    try std.testing.expectError(error.OutOfMemory, checker.check(handler_fn));
+}
 
 test "FlowChecker captures witness constraints on secret-in-response" {
     const allocator = std.testing.allocator;

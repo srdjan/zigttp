@@ -317,6 +317,9 @@ pub const HandlerVerifier = struct {
     // State isolation (Check 7)
     handler_scope_id: ?ir.ScopeId = null,
     has_module_mutation: bool = false,
+    /// Sticky failure for every tracked binding and diagnostic. These are
+    /// proof inputs, so a partial verifier result must never escape.
+    allocation_failed: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -337,6 +340,7 @@ pub const HandlerVerifier = struct {
             .optional_bindings = .empty,
             .optional_function_slots = .empty,
             .all_bindings = .empty,
+            .allocation_failed = false,
         };
     }
 
@@ -360,7 +364,10 @@ pub const HandlerVerifier = struct {
         self.scanImports();
 
         // Phase 2: Exhaustive return analysis on the handler body
-        const func = self.ir_view.getFunction(handler_func) orelse return 0;
+        const func = self.ir_view.getFunction(handler_func) orelse {
+            if (self.allocation_failed) return error.OutOfMemory;
+            return 0;
+        };
         self.handler_scope_id = func.scope_id;
         const body_status = self.stmtReturns(func.body);
         if (body_status != .always) {
@@ -381,6 +388,7 @@ pub const HandlerVerifier = struct {
 
         // Phase 5: Report unused variables (scope-aware tracking)
         self.reportUnusedVariables();
+        if (self.allocation_failed) return error.OutOfMemory;
 
         // Count errors
         var error_count: u32 = 0;
@@ -580,13 +588,19 @@ pub const HandlerVerifier = struct {
                             .slot = spec.local_binding.slot,
                             .func_name = imported_name,
                             .module_name = module_str,
-                        }) catch continue;
+                        }) catch {
+                            self.markAllocationFailure();
+                            continue;
+                        };
                     },
                     .optional_string, .optional_object => {
                         self.optional_function_slots.append(self.allocator, .{
                             .slot = spec.local_binding.slot,
                             .kind = produces.toOptionalKind().?,
-                        }) catch continue;
+                        }) catch {
+                            self.markAllocationFailure();
+                            continue;
+                        };
                     },
                 }
             }
@@ -618,7 +632,7 @@ pub const HandlerVerifier = struct {
                     .ref_count = 0,
                     .decl_node = node,
                     .name_idx = 0,
-                }) catch {};
+                }) catch self.markAllocationFailure();
 
                 // Check if the init expression is a call to a result-producing function
                 if (decl.init != null_node) {
@@ -635,7 +649,7 @@ pub const HandlerVerifier = struct {
                             .name_idx = 0,
                             .source_func = rfs.func_name,
                             .source_module = rfs.module_name,
-                        }) catch {};
+                        }) catch self.markAllocationFailure();
                     }
 
                     // Check 6: track optional-producing calls
@@ -648,7 +662,7 @@ pub const HandlerVerifier = struct {
                                 .kind = kind,
                                 .narrowed = false,
                                 .decl_node = node,
-                            }) catch {};
+                            }) catch self.markAllocationFailure();
                         }
                     }
                 }
@@ -1437,7 +1451,11 @@ pub const HandlerVerifier = struct {
     // -----------------------------------------------------------------------
 
     fn addDiagnostic(self: *HandlerVerifier, diag: Diagnostic) void {
-        self.diagnostics.append(self.allocator, diag) catch {};
+        self.diagnostics.append(self.allocator, diag) catch self.markAllocationFailure();
+    }
+
+    fn markAllocationFailure(self: *HandlerVerifier) void {
+        self.allocation_failed = true;
     }
 };
 
@@ -1622,6 +1640,20 @@ test "diagnostic formatting" {
     output_buf = aw.toArrayList();
     try std.testing.expect(output_buf.items.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, output_buf.items, "verify error") != null);
+}
+
+test "HandlerVerifier fails closed when a diagnostic cannot allocate" {
+    const allocator = std.testing.allocator;
+    var parser = @import("parser/parse.zig").Parser.init(allocator, "function handler(req) {}");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = findHandlerFunction(view, root) orelse return error.HandlerNotFound;
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var verifier = HandlerVerifier.init(failing.allocator(), view, null, null, null);
+    defer verifier.deinit();
+    try std.testing.expectError(error.OutOfMemory, verifier.verify(handler_fn));
 }
 
 fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32, expect_match_warnings: u32) !void {

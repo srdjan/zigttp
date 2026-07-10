@@ -171,6 +171,11 @@ pub const BoolChecker = struct {
     /// Per-node type annotations for codegen specialization.
     /// Populated for binary ops where both operands have known types.
     node_types: NodeTypeMap,
+    /// Sticky failure for proof-relevant maps and diagnostic storage. The
+    /// walkers are intentionally void-returning; `check` converts any failed
+    /// state update into OutOfMemory before exposing counts. Formatting-only
+    /// message duplication may still fall back to a static core diagnostic.
+    allocation_failed: bool = false,
 
     const TypeofGuard = struct {
         binding_key: u32,
@@ -193,6 +198,7 @@ pub const BoolChecker = struct {
             .module_result_fn_slots = .empty,
             .result_bindings = .empty,
             .node_types = .empty,
+            .allocation_failed = false,
         };
     }
 
@@ -217,6 +223,7 @@ pub const BoolChecker = struct {
     pub fn check(self: *BoolChecker, root: NodeIndex) !u32 {
         self.scanImports();
         self.walkStmt(root);
+        if (self.allocation_failed) return error.OutOfMemory;
         var error_count: u32 = 0;
         for (self.diagnostics.items) |diag| {
             if (diag.severity == .err) error_count += 1;
@@ -322,20 +329,20 @@ pub const BoolChecker = struct {
                     if (vd.kind == .@"const" or vd.kind == .let) {
                         const inferred = self.inferType(vd.init);
                         const key = bindingKey(vd.binding);
-                        self.const_types.put(self.allocator, key, inferred) catch {};
+                        self.const_types.put(self.allocator, key, inferred) catch self.markAllocationFailure();
 
                         // If binding is a function, try to infer its return type
                         if (inferred == .function) {
                             const ret_type = self.inferFunctionReturnType(vd.init);
                             if (ret_type != .unknown) {
-                                self.fn_return_types.put(self.allocator, key, ret_type) catch {};
+                                self.fn_return_types.put(self.allocator, key, ret_type) catch self.markAllocationFailure();
                             }
                         }
 
                         // Track Result bindings: const r = jwtVerify(...)
                         if (inferred == .object) {
                             if (self.isResultCall(vd.init)) {
-                                self.result_bindings.put(self.allocator, key, {}) catch {};
+                                self.result_bindings.put(self.allocator, key, {}) catch self.markAllocationFailure();
                             }
                         }
                     }
@@ -393,13 +400,13 @@ pub const BoolChecker = struct {
                 if (ret_type != .unknown) {
                     if (self.ir_view.getBinding(node)) |binding| {
                         const key = packBindingKey(binding.scope_id, binding.slot);
-                        self.fn_return_types.put(self.allocator, key, ret_type) catch {};
-                        self.const_types.put(self.allocator, key, .function) catch {};
+                        self.fn_return_types.put(self.allocator, key, ret_type) catch self.markAllocationFailure();
+                        self.const_types.put(self.allocator, key, .function) catch self.markAllocationFailure();
                     } else if (func.name_atom != 0) {
                         // Fallback: top-level declarations with no binding info use name atom.
                         const key = @as(u32, func.name_atom);
-                        self.fn_return_types.put(self.allocator, key, ret_type) catch {};
-                        self.const_types.put(self.allocator, key, .function) catch {};
+                        self.fn_return_types.put(self.allocator, key, ret_type) catch self.markAllocationFailure();
+                        self.const_types.put(self.allocator, key, .function) catch self.markAllocationFailure();
                     }
                 }
                 self.walkStmt(func.body);
@@ -577,7 +584,7 @@ pub const BoolChecker = struct {
                     // Re-infer from the new value (simple assignment only)
                     if (asgn.op == null) {
                         const new_type = self.inferType(asgn.value);
-                        self.const_types.put(self.allocator, key, new_type) catch {};
+                        self.const_types.put(self.allocator, key, new_type) catch self.markAllocationFailure();
                     } else {
                         // Compound assignment - invalidate to unknown
                         _ = self.const_types.remove(key);
@@ -1028,12 +1035,12 @@ pub const BoolChecker = struct {
         if (left_type == .number and right_type == .number) {
             switch (op) {
                 .add, .sub, .mul, .div, .mod, .pow, .lt, .lte, .gt, .gte => {
-                    self.node_types.put(self.allocator, node, .number) catch {};
+                    self.node_types.put(self.allocator, node, .number) catch self.markAllocationFailure();
                 },
                 else => {},
             }
         } else if (op == .add and left_type == .string and right_type == .string) {
-            self.node_types.put(self.allocator, node, .string) catch {};
+            self.node_types.put(self.allocator, node, .string) catch self.markAllocationFailure();
         }
     }
 
@@ -1543,7 +1550,7 @@ pub const BoolChecker = struct {
     fn installGuards(self: *BoolChecker, guards: []const TypeofGuard, saved: []?ExprType) void {
         for (guards, 0..) |g, i| {
             saved[i] = self.narrowed_types.get(g.binding_key);
-            self.narrowed_types.put(self.allocator, g.binding_key, g.narrowed_type) catch {};
+            self.narrowed_types.put(self.allocator, g.binding_key, g.narrowed_type) catch self.markAllocationFailure();
         }
     }
 
@@ -1551,7 +1558,7 @@ pub const BoolChecker = struct {
     fn restoreGuards(self: *BoolChecker, guards: []const TypeofGuard, saved: []const ?ExprType) void {
         for (guards, 0..) |g, i| {
             if (saved[i]) |prev| {
-                self.narrowed_types.put(self.allocator, g.binding_key, prev) catch {};
+                self.narrowed_types.put(self.allocator, g.binding_key, prev) catch self.markAllocationFailure();
             } else {
                 _ = self.narrowed_types.remove(g.binding_key);
             }
@@ -1644,9 +1651,9 @@ pub const BoolChecker = struct {
                 const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
                 const entry = findModuleReturnEntry(module_str, imported_name) orelse continue;
 
-                self.module_fn_types.put(self.allocator, spec.local_binding.slot, entry.ret) catch {};
+                self.module_fn_types.put(self.allocator, spec.local_binding.slot, entry.ret) catch self.markAllocationFailure();
                 if (entry.is_result) {
-                    self.module_result_fn_slots.put(self.allocator, spec.local_binding.slot, {}) catch {};
+                    self.module_result_fn_slots.put(self.allocator, spec.local_binding.slot, {}) catch self.markAllocationFailure();
                 }
             }
         }
@@ -1669,7 +1676,14 @@ pub const BoolChecker = struct {
     }
 
     fn addDiagnostic(self: *BoolChecker, diag: Diagnostic) void {
-        self.diagnostics.append(self.allocator, diag) catch {};
+        self.diagnostics.append(self.allocator, diag) catch {
+            if (diag.allocated) self.allocator.free(diag.message);
+            self.markAllocationFailure();
+        };
+    }
+
+    fn markAllocationFailure(self: *BoolChecker) void {
+        self.allocation_failed = true;
     }
 };
 
@@ -1705,6 +1719,19 @@ pub fn getSourceLine(source: []const u8, target_line: u32) ?[]const u8 {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "BoolChecker fails closed when analysis state cannot allocate" {
+    const allocator = std.testing.allocator;
+    var parser = @import("parser/parse.zig").Parser.init(allocator, "if ({}) { const enabled = true; }");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var checker = BoolChecker.init(failing.allocator(), view, null);
+    defer checker.deinit();
+    try std.testing.expectError(error.OutOfMemory, checker.check(root));
+}
 
 fn checkSource(source: []const u8, expect_errors: u32) !void {
     return checkSourceFull(source, expect_errors, null);

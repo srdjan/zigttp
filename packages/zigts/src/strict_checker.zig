@@ -116,6 +116,10 @@ pub const StrictChecker = struct {
     static_literal_bindings: std.AutoHashMapUnmanaged(u32, void),
     call_counts: std.AutoHashMapUnmanaged(u32, u32),
     imported_functions: std.ArrayList(ImportedFunction),
+    /// Sticky failure for diagnostics and profile facts used to decide which
+    /// strict rules fire. The void walkers may continue, but no partial result
+    /// escapes `check`.
+    allocation_failed: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -136,6 +140,7 @@ pub const StrictChecker = struct {
             .static_literal_bindings = .empty,
             .call_counts = .empty,
             .imported_functions = .empty,
+            .allocation_failed = false,
         };
     }
 
@@ -155,6 +160,7 @@ pub const StrictChecker = struct {
         self.collectAssignments(root);
         self.collectCallCounts(root);
         self.walkStmt(root);
+        if (self.allocation_failed) return error.OutOfMemory;
 
         var error_count: u32 = 0;
         for (self.diagnostics.items) |diag| {
@@ -195,7 +201,11 @@ pub const StrictChecker = struct {
     }
 
     fn addDiagnostic(self: *StrictChecker, diag: Diagnostic) void {
-        self.diagnostics.append(self.allocator, diag) catch {};
+        self.diagnostics.append(self.allocator, diag) catch self.markAllocationFailure();
+    }
+
+    fn markAllocationFailure(self: *StrictChecker) void {
+        self.allocation_failed = true;
     }
 
     fn canonicalSeverity(self: *const StrictChecker) Severity {
@@ -902,7 +912,7 @@ pub const StrictChecker = struct {
                     .slot = spec.local_binding.slot,
                     .module = module,
                     .name = name,
-                }) catch {};
+                }) catch self.markAllocationFailure();
             }
         }
     }
@@ -919,13 +929,13 @@ pub const StrictChecker = struct {
             .function_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 if (self.functionHasAnnotation(decl.init)) {
-                    self.annotated_function_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch {};
+                    self.annotated_function_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch self.markAllocationFailure();
                 }
             },
             .var_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 if (decl.init != null_node and self.isFunctionNode(decl.init) and self.functionHasAnnotation(decl.init)) {
-                    self.annotated_function_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch {};
+                    self.annotated_function_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch self.markAllocationFailure();
                 }
             },
             else => {},
@@ -957,7 +967,7 @@ pub const StrictChecker = struct {
                 const assign = self.ir_view.getAssignment(node) orelse return;
                 if (self.ir_view.getTag(assign.target) == .identifier) {
                     if (self.ir_view.getBinding(assign.target)) |binding| {
-                        self.assigned_bindings.put(self.allocator, bindingKey(binding), {}) catch {};
+                        self.assigned_bindings.put(self.allocator, bindingKey(binding), {}) catch self.markAllocationFailure();
                     }
                 }
                 self.collectAssignments(assign.value);
@@ -1000,7 +1010,7 @@ pub const StrictChecker = struct {
         if (tag == .var_decl) {
             const decl = self.ir_view.getVarDecl(node) orelse return;
             if (decl.kind == .@"const" and self.isLiteralOrStaticTemplate(decl.init)) {
-                self.static_literal_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch {};
+                self.static_literal_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch self.markAllocationFailure();
             }
         }
         self.ir_view.forEachChild(node, self, collectStaticLiterals);
@@ -1121,7 +1131,10 @@ pub const StrictChecker = struct {
         if (self.ir_view.getTag(callee) != .identifier) return;
         const binding = self.ir_view.getBinding(callee) orelse return;
         const key = bindingKey(binding);
-        const gop = self.call_counts.getOrPut(self.allocator, key) catch return;
+        const gop = self.call_counts.getOrPut(self.allocator, key) catch {
+            self.markAllocationFailure();
+            return;
+        };
         if (!gop.found_existing) gop.value_ptr.* = 0;
         gop.value_ptr.* += 1;
     }
@@ -1373,6 +1386,19 @@ fn expectKind(checker: *const StrictChecker, kind: DiagnosticKind) !void {
         if (diag.kind == kind) return;
     }
     return error.DiagnosticNotEmitted;
+}
+
+test "StrictChecker fails closed when profile facts cannot allocate" {
+    const allocator = testing.allocator;
+    var parser = @import("parser/root.zig").JsParser.init(allocator, "let answer = 42;");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var checker = StrictChecker.init(failing.allocator(), view, null, null, null);
+    defer checker.deinit();
+    try testing.expectError(error.OutOfMemory, checker.check(root));
 }
 
 fn checkSource(source: []const u8) !StrictChecker {

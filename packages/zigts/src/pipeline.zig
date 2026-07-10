@@ -302,13 +302,11 @@ const JsParser = parser_mod.JsParser;
 fn parseSourceForTest(allocator: std.mem.Allocator, source: []const u8) !struct {
     js_parser: JsParser,
     root: NodeIndex,
-    ir_view: IrView,
 } {
     var js_parser = JsParser.init(allocator, source);
     errdefer js_parser.deinit();
     const root = try js_parser.parse();
-    const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    return .{ .js_parser = js_parser, .root = root, .ir_view = view };
+    return .{ .js_parser = js_parser, .root = root };
 }
 
 test "ParsedModule.fromExisting wraps an IR view" {
@@ -316,8 +314,35 @@ test "ParsedModule.fromExisting wraps an IR view" {
     var parsed_state = try parseSourceForTest(allocator, "const x = true;\n");
     defer parsed_state.js_parser.deinit();
 
-    const parsed = ParsedModule.fromExisting(parsed_state.ir_view, parsed_state.root, null);
-    try testing.expect(parsed.ir_view.isValid(parsed.root));
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    try testing.expect(view.isValid(parsed.root));
+}
+
+test "pipeline.resolve does not emit a module after analysis allocation failure" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(allocator, "const enabled = true;\n");
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, resolve(failing.allocator(), parsed, .{ .strict = false }));
+}
+
+test "pipeline.check does not emit a module after verifier allocation failure" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(allocator, "function handler(req) {}\n");
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    var resolved = try resolve(allocator, parsed, .{ .strict = false });
+    defer resolved.deinit();
+    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root) orelse
+        return error.HandlerNotFound;
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, check(failing.allocator(), &resolved, handler_func));
 }
 
 test "pipeline.resolve runs BoolChecker on clean source" {
@@ -325,7 +350,8 @@ test "pipeline.resolve runs BoolChecker on clean source" {
     var parsed_state = try parseSourceForTest(allocator, "const x = true;\nconst y = !x;\n");
     defer parsed_state.js_parser.deinit();
 
-    const parsed = ParsedModule.fromExisting(parsed_state.ir_view, parsed_state.root, null);
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
     var resolved = try resolve(allocator, parsed, .{});
     defer resolved.deinit();
 
@@ -359,7 +385,8 @@ test "pipeline.resolve runs strict checker without type context" {
     var parsed_state = try parseSourceForTest(allocator, source);
     defer parsed_state.js_parser.deinit();
 
-    const parsed = ParsedModule.fromExisting(parsed_state.ir_view, parsed_state.root, null);
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
     var resolved = try resolve(allocator, parsed, .{ .type_env = null });
     defer resolved.deinit();
 

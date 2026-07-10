@@ -105,6 +105,10 @@ pub const TypeChecker = struct {
     narrowed: std.AutoHashMapUnmanaged(u32, TypeIndex),
     /// Track current function's declared return type for return statement checking
     current_return_type: TypeIndex = null_type_idx,
+    /// Sticky failure for proof-relevant type, narrowing, schema, parameter,
+    /// and diagnostic state. Message-only formatting may retain a static
+    /// fallback because the core diagnostic is still stored.
+    allocation_failed: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -124,6 +128,7 @@ pub const TypeChecker = struct {
             .binding_types = .empty,
             .param_types = .empty,
             .narrowed = .empty,
+            .allocation_failed = false,
         };
     }
 
@@ -146,6 +151,7 @@ pub const TypeChecker = struct {
     /// Run the checker on the given root node. Returns the number of errors.
     pub fn check(self: *TypeChecker, root: NodeIndex) !u32 {
         self.walkStmt(root);
+        if (self.allocation_failed) return error.OutOfMemory;
         var error_count: u32 = 0;
         for (self.diagnostics.items) |diag| {
             if (diag.severity == .err) error_count += 1;
@@ -254,7 +260,7 @@ pub const TypeChecker = struct {
                         effective = self.env.pool.widenLiteral(effective);
                     }
                     if (effective != null_type_idx) {
-                        self.binding_types.put(self.allocator, key, effective) catch {};
+                        self.binding_types.put(self.allocator, key, effective) catch self.markAllocationFailure();
                     }
                 }
             },
@@ -273,11 +279,11 @@ pub const TypeChecker = struct {
                     // A negated guard means the then-branch runs when x is falsy,
                     // so we must not install the non-null narrowing there.
                     if (!narrow.negated) {
-                        self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch {};
+                        self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch self.markAllocationFailure();
                     }
                     self.walkStmt(if_s.then_branch);
                     if (saved) |s| {
-                        self.binding_types.put(self.allocator, narrow.key, s) catch {};
+                        self.binding_types.put(self.allocator, narrow.key, s) catch self.markAllocationFailure();
                     } else {
                         _ = self.binding_types.remove(narrow.key);
                     }
@@ -287,9 +293,9 @@ pub const TypeChecker = struct {
                     // if (x.kind === "err") { return; } narrows x to excluded union
                     if (if_s.else_branch == null_node and self.branchAlwaysReturns(if_s.then_branch)) {
                         if (narrow.negated) {
-                            self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch {};
+                            self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch self.markAllocationFailure();
                         } else if (narrow.else_type != null_type_idx) {
-                            self.binding_types.put(self.allocator, narrow.key, narrow.else_type) catch {};
+                            self.binding_types.put(self.allocator, narrow.key, narrow.else_type) catch self.markAllocationFailure();
                         }
                     }
                 } else {
@@ -330,7 +336,7 @@ pub const TypeChecker = struct {
                 }
                 const narrow = self.extractNarrowingGuard(assert.condition);
                 if (narrow.key != 0 and narrow.narrowed_type != null_type_idx and !narrow.negated) {
-                    self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch {};
+                    self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch self.markAllocationFailure();
                 }
             },
 
@@ -425,7 +431,7 @@ pub const TypeChecker = struct {
         switch (tag) {
             .call => {
                 const c = self.ir_view.getCall(node) orelse return;
-                self.collectSchemaCompileCall(c) catch {};
+                self.collectSchemaCompileCall(c) catch self.markAllocationFailure();
                 self.walkExpr(c.callee);
                 // Check argument types against function signature
                 self.checkCallArgs(node, c);
@@ -588,14 +594,22 @@ pub const TypeChecker = struct {
             return;
         }
 
+        const owned_name = try self.allocator.dupe(u8, schema_name);
+        errdefer self.allocator.free(owned_name);
         try self.compiled_schemas.append(self.allocator, .{
-            .name = try self.allocator.dupe(u8, schema_name),
+            .name = owned_name,
             .type_idx = type_idx,
         });
     }
 
     fn schemaJsonToType(self: *TypeChecker, schema_json: []const u8) !TypeIndex {
-        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, schema_json, .{}) catch return null_type_idx;
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, schema_json, .{}) catch |err| switch (err) {
+            error.OutOfMemory => {
+                self.markAllocationFailure();
+                return error.OutOfMemory;
+            },
+            else => return null_type_idx,
+        };
         defer parsed.deinit();
         return self.schemaValueToType(parsed.value);
     }
@@ -622,7 +636,10 @@ pub const TypeChecker = struct {
                         .bool => |b| pool.addLiteralBool(self.allocator, b),
                         else => pool.idx_unknown,
                     };
-                    members.append(self.allocator, member) catch return pool.idx_unknown;
+                    members.append(self.allocator, member) catch {
+                        self.markAllocationFailure();
+                        return pool.idx_unknown;
+                    };
                 }
                 if (members.items.len > 0) return pool.addUnion(self.allocator, members.items);
             }
@@ -658,7 +675,7 @@ pub const TypeChecker = struct {
                 if (required_val == .array) {
                     for (required_val.array.items) |item| {
                         if (item != .string) continue;
-                        required.append(self.allocator, item.string) catch {};
+                        required.append(self.allocator, item.string) catch self.markAllocationFailure();
                     }
                 }
             }
@@ -674,7 +691,10 @@ pub const TypeChecker = struct {
                     .name_len = name.len,
                     .type_idx = if (prop_type == null_type_idx) pool.idx_unknown else prop_type,
                     .optional = !json_utils.containsString(required.items, entry.key_ptr.*),
-                }) catch return pool.idx_unknown;
+                }) catch {
+                    self.markAllocationFailure();
+                    return pool.idx_unknown;
+                };
             }
             if (fields.items.len == 0) return pool.idx_unknown;
             return pool.addRecord(self.allocator, fields.items);
@@ -879,7 +899,7 @@ pub const TypeChecker = struct {
                 dynamic_flag.* = true;
                 continue;
             };
-            target.append(self.allocator, key) catch {};
+            target.append(self.allocator, key) catch @constCast(self).markAllocationFailure();
         }
     }
 
@@ -942,7 +962,10 @@ pub const TypeChecker = struct {
         comptime fmt: []const u8,
         args: anytype,
     ) void {
-        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch {
+            self.markAllocationFailure();
+            return;
+        };
         self.addDiagnostic(.{
             .severity = .err,
             .kind = kind,
@@ -1031,7 +1054,10 @@ pub const TypeChecker = struct {
                 break :blk pool.idx_unknown;
             }
             if (response.schema_json) |schema_json| {
-                break :blk @constCast(self).schemaJsonToType(schema_json) catch pool.idx_unknown;
+                break :blk @constCast(self).schemaJsonToType(schema_json) catch {
+                    @constCast(self).markAllocationFailure();
+                    break :blk pool.idx_unknown;
+                };
             }
             break :blk pool.idx_unknown;
         };
@@ -1369,7 +1395,10 @@ pub const TypeChecker = struct {
                 .name_len = n.len,
                 .type_idx = val_type,
                 .optional = false,
-            }) catch return null_type_idx;
+            }) catch {
+                @constCast(self).markAllocationFailure();
+                return null_type_idx;
+            };
         }
 
         if (fields_buf.items.len == 0) return null_type_idx;
@@ -1652,10 +1681,10 @@ pub const TypeChecker = struct {
                 const narrowed_type = self.findUnionMemberForPattern(disc_type, arm.pattern);
                 if (narrowed_type != null_type_idx) {
                     const saved = self.narrowed.get(disc_key.?);
-                    self.narrowed.put(self.allocator, disc_key.?, narrowed_type) catch {};
+                    self.narrowed.put(self.allocator, disc_key.?, narrowed_type) catch self.markAllocationFailure();
                     self.walkExpr(arm.body);
                     if (saved) |s| {
-                        self.narrowed.put(self.allocator, disc_key.?, s) catch {};
+                        self.narrowed.put(self.allocator, disc_key.?, s) catch self.markAllocationFailure();
                     } else {
                         _ = self.narrowed.remove(disc_key.?);
                     }
@@ -1684,7 +1713,7 @@ pub const TypeChecker = struct {
             const param_type = sig.param_types[i];
             if (param_type == null_type_idx) continue;
             const key = packBindingKey(binding.scope_id, binding.slot);
-            self.param_types.put(self.allocator, key, param_type) catch {};
+            self.param_types.put(self.allocator, key, param_type) catch self.markAllocationFailure();
         }
     }
 
@@ -1833,7 +1862,10 @@ pub const TypeChecker = struct {
     // -------------------------------------------------------------------
 
     fn addDiagnostic(self: *TypeChecker, diag: Diagnostic) void {
-        self.diagnostics.append(self.allocator, diag) catch {};
+        self.diagnostics.append(self.allocator, diag) catch {
+            if (diag.allocated) self.allocator.free(diag.message);
+            self.markAllocationFailure();
+        };
     }
 
     fn addTypeMismatch(self: *TypeChecker, node: NodeIndex, expected: TypeIndex, got: TypeIndex) void {
@@ -1841,7 +1873,16 @@ pub const TypeChecker = struct {
         const expected_str = self.env.pool.formatType(expected, buf[0..128]);
         const got_str = self.env.pool.formatType(got, buf[128..256]);
 
-        const msg = std.fmt.allocPrint(self.allocator, "type '{s}' is not assignable to type '{s}'", .{ got_str, expected_str }) catch "type mismatch";
+        const msg = std.fmt.allocPrint(self.allocator, "type '{s}' is not assignable to type '{s}'", .{ got_str, expected_str }) catch {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .type_mismatch,
+                .node = node,
+                .message = "type mismatch",
+                .help = null,
+            });
+            return;
+        };
 
         self.addDiagnostic(.{
             .severity = .err,
@@ -1905,12 +1946,59 @@ pub const TypeChecker = struct {
         const atom: object.Atom = @enumFromInt(atom_idx);
         return atom.toPredefinedName();
     }
+
+    fn markAllocationFailure(self: *TypeChecker) void {
+        self.allocation_failed = true;
+    }
 };
 
 const packBindingKey = bool_checker_mod.packBindingKey;
 const getSourceLine = bool_checker_mod.getSourceLine;
 
 const writeJsonString = json_utils.writeJsonString;
+
+test "TypeChecker fails closed when binding analysis cannot allocate" {
+    const allocator = std.testing.allocator;
+    var parser = @import("parser/parse.zig").Parser.init(allocator, "let count = 1;");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var checker = TypeChecker.init(failing.allocator(), view, null, &env, null);
+    defer checker.deinit();
+    try std.testing.expectError(error.OutOfMemory, checker.check(root));
+}
+
+test "TypeChecker fails closed when diagnostic storage cannot allocate" {
+    const allocator = std.testing.allocator;
+    var parser = @import("parser/parse.zig").Parser.init(allocator, "");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var checker = TypeChecker.init(failing.allocator(), view, null, &env, null);
+    defer checker.deinit();
+    checker.addDiagnostic(.{
+        .severity = .err,
+        .kind = .type_mismatch,
+        .node = root,
+        .message = "forced diagnostic",
+        .help = null,
+    });
+    try std.testing.expectError(error.OutOfMemory, checker.check(root));
+}
 
 fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {
     try checkTypedSourceWithServiceContext(source, null, expect_errors, expect_warnings);
