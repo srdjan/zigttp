@@ -1341,8 +1341,18 @@ fn compareApiRouteResponse(
 ) !ApiResponseChange {
     var change = try compareApiParams(allocator, old.query_params.items, new.query_params.items);
     change = mergeApiChange(change, try compareApiParams(allocator, old.header_params.items, new.header_params.items));
+    // path_params were never compared, so a path parameter's validation schema
+    // could change (or a path param be added/removed) and read as unchanged.
+    change = mergeApiChange(change, try compareApiParams(allocator, old.path_params.items, new.path_params.items));
     change = mergeApiChange(change, try compareRequestBodies(allocator, old, new));
     change = mergeApiChange(change, try compareResponses(allocator, old, new));
+    // An auth guard change is unambiguously breaking in both directions: dropping
+    // requiresBearer/requiresJwt lets previously-401 requests through, and adding
+    // one 401s existing callers. These were never compared, so an auth guard
+    // could be removed and the change certified equivalent.
+    if (old.requires_bearer != new.requires_bearer or old.requires_jwt != new.requires_jwt) {
+        change = mergeApiChange(change, .breaking);
+    }
     return change;
 }
 
@@ -2069,6 +2079,101 @@ test "diffContracts api response removal is breaking" {
 
     try std.testing.expectEqual(ApiResponseChange.breaking, diff.api_route_changes.items[0].response);
     try std.testing.expectEqual(Classification.breaking, diff.classify());
+}
+
+test "diffContracts removing a route bearer-auth guard is breaking" {
+    // Dropping requiresBearer means requests that were rejected 401 now pass;
+    // the auth surface changed and must not read as equivalent.
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    try old.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/admin"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = true,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+    });
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    try new.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/admin"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+    });
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(ApiResponseChange.breaking, diff.api_route_changes.items[0].response);
+    try std.testing.expectEqual(Classification.breaking, diff.classify());
+}
+
+test "diffContracts tightening a path-param schema is not equivalent" {
+    // A path parameter whose validation schema changes must be diffed, not
+    // silently read as unchanged.
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    var old_pp: std.ArrayList(handler_contract.ApiParamInfo) = .empty;
+    try old_pp.append(allocator, .{
+        .name = try allocator.dupe(u8, "id"),
+        .location = "path",
+        .required = true,
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"string\",\"pattern\":\"^[0-9]+$\"}"),
+    });
+    try old.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .path_params = old_pp,
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+    });
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    var new_pp: std.ArrayList(handler_contract.ApiParamInfo) = .empty;
+    try new_pp.append(allocator, .{
+        .name = try allocator.dupe(u8, "id"),
+        .location = "path",
+        .required = true,
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+    });
+    try new.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .path_params = new_pp,
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+    });
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expect(diff.api_route_changes.items[0].response != .unchanged);
 }
 
 test "diffContracts api response going dynamic is breaking" {
