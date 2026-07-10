@@ -97,9 +97,21 @@ pub fn execute(
     };
     defer input.deinit(allocator);
 
-    const repair_args = try buildRepairArgs(allocator, input);
-    defer allocator.free(repair_args);
-    var repair_result = try pi_repair_plan.execute(allocator, repair_args);
+    // This tool declares effect=.analyze and must not persist: the RPC surface
+    // denies .persist_agent_state. Route through the non-persisting plan path
+    // (planFromSource with persist_witnesses=false) rather than
+    // pi_repair_plan.execute, whose planFromSource(..., true) writes to the
+    // on-disk witness corpus. Read the source here, mirroring how
+    // pi_repair_plan.execute reads it, so the ToolResult shape is unchanged.
+    const source = readWorkspaceFile(allocator, input.path) catch |e| {
+        return registry_mod.ToolResult.errFmt(
+            allocator,
+            name ++ ": failed to read {s}: {s}\n",
+            .{ input.path, @errorName(e) },
+        );
+    };
+    defer allocator.free(source);
+    var repair_result = try pi_repair_plan.planFromSource(allocator, source, input.path, input.goals, false);
     defer repair_result.deinit(allocator);
 
     if (repair_result.ok) {
@@ -209,16 +221,6 @@ fn goalsFromValue(allocator: std.mem.Allocator, value: std.json.Value) ![]const 
         borrowed[i] = item.string;
     }
     return borrowed;
-}
-
-fn buildRepairArgs(
-    allocator: std.mem.Allocator,
-    input: ParsedInput,
-) ![]const []const u8 {
-    const out = try allocator.alloc([]const u8, 1 + input.goals.len);
-    out[0] = input.path;
-    for (input.goals, 0..) |goal, i| out[i + 1] = goal;
-    return out;
 }
 
 fn readWorkspaceFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -619,4 +621,46 @@ test "execute returns verified candidate without writing the file" {
     const after = try zigts.file_io.readFile(allocator, path, 1024 * 1024);
     defer allocator.free(after);
     try testing.expectEqualStrings(source, after);
+}
+
+test "execute does not persist witnesses to the on-disk corpus" {
+    // Regression: pi_goal_candidate declares effect=.analyze, and the RPC
+    // surface denies .persist_agent_state. Routing execute through
+    // pi_repair_plan.execute persisted witnesses (planFromSource with
+    // persist_witnesses=true), which unconditionally creates
+    // .zigttp/witnesses/<hash>/ on disk - an effect-boundary bypass. The
+    // non-persisting plan path must leave the corpus untouched.
+    const allocator = testing.allocator;
+    const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
+    const cwdPathAlloc = @import("../test_support/cwd.zig").cwdPathAlloc;
+
+    var tmp = try IsolatedTmp.init(allocator, "goal-candidate-corpus");
+    defer tmp.cleanup(allocator);
+
+    const source =
+        \\import { validateJson } from "zigttp:validate";
+        \\
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  const result = validateJson("item", req.body);
+        \\  const data = result.value;
+        \\  return Response.json({ data });
+        \\}
+    ;
+    try tmp.writeFile(allocator, "handler.ts", source);
+
+    const saved_cwd = try cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var result = try execute(allocator, &.{"{\"path\":\"handler.ts\",\"max_repairs\":1}"});
+    defer result.deinit(allocator);
+    // A verified candidate proves the repair lane ran over the failing handler,
+    // so persist_witnesses=true would have created the corpus by this point.
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"reason\":\"candidate_verified\"") != null);
+
+    const corpus_root = try tmp.childPath(allocator, ".zigttp/witnesses");
+    defer allocator.free(corpus_root);
+    try testing.expect(!zigts.file_io.fileExists(allocator, corpus_root));
 }
