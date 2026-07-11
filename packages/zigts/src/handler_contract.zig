@@ -67,6 +67,11 @@ pub const SpecDiagnostic = contract_types.SpecDiagnostic;
 pub const PathCondition = contract_types.PathCondition;
 pub const PathIoCall = contract_types.PathIoCall;
 pub const BehaviorPath = contract_types.BehaviorPath;
+pub const Bound = contract_types.Bound;
+pub const BoundClass = contract_types.BoundClass;
+pub const BoundProvenance = contract_types.BoundProvenance;
+pub const CostEntry = contract_types.CostEntry;
+pub const CostEnvelope = contract_types.CostEnvelope;
 pub const ServiceCallInfo = contract_types.ServiceCallInfo;
 pub const WorkflowCallInfo = contract_types.WorkflowCallInfo;
 pub const EmittedAffordance = contract_types.EmittedAffordance;
@@ -103,6 +108,7 @@ pub fn extractHost(url: []const u8) []const u8 {
 pub const parseFromJson = contract_json_parser.parseFromJson;
 pub const JsonParser = contract_json_parser.JsonParser;
 pub const writeContractJson = contract_json_writer.writeContractJson;
+pub const writeBoundJson = contract_json_writer.writeBoundJson;
 
 pub fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
     return if (s) |v| try allocator.dupe(u8, v) else null;
@@ -955,7 +961,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 17") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
@@ -1145,6 +1151,137 @@ test "behaviors serialization roundtrip" {
     try std.testing.expectEqual(@as(u16, 401), path1.response_status);
     try std.testing.expect(path1.is_failure_path);
     try std.testing.expectEqual(PathCondition.Kind.io_fail, path1.conditions.items[0].kind);
+}
+
+test "costEnvelope serialization roundtrip" {
+    const allocator = std.testing.allocator;
+
+    var contract = emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+
+    var entries: std.ArrayList(CostEntry) = .empty;
+    try entries.append(allocator, .{
+        .module = try allocator.dupe(u8, "fetch"),
+        .bound = .{ .constant = 2 },
+    });
+    try entries.append(allocator, .{
+        .module = try allocator.dupe(u8, "sql"),
+        .bound = .{ .linear = .{
+            .coefficient = 1,
+            .base = 1,
+            .source = .{
+                .line = 12,
+                .column = 3,
+                .desc = try allocator.dupe(u8, "for...of over `ids`"),
+            },
+        } },
+    });
+    try entries.append(allocator, .{
+        .module = try allocator.dupe(u8, "cache"),
+        .bound = .{ .unbounded = .{
+            .line = 20,
+            .column = 5,
+            .desc = try allocator.dupe(u8, "for...of (unrecognized iterable)"),
+        } },
+    });
+
+    contract.cost_envelope = .{
+        .entries = entries,
+        .total = .{ .linear = .{
+            .coefficient = 1,
+            .base = 3,
+            .source = .{
+                .line = 12,
+                .column = 3,
+                .desc = try allocator.dupe(u8, "for...of over `ids`"),
+            },
+        } },
+        .exhaustive = true,
+    };
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try writeContractJson(&contract, &aw.writer);
+    output = aw.toArrayList();
+
+    var parsed = try parseFromJson(allocator, output.items);
+    defer parsed.deinit(allocator);
+
+    const envelope = parsed.cost_envelope.?;
+    try std.testing.expect(envelope.exhaustive);
+    try std.testing.expectEqual(BoundClass.linear, envelope.total.class());
+    try std.testing.expectEqual(@as(u32, 1), envelope.total.linear.coefficient);
+    try std.testing.expectEqual(@as(u32, 3), envelope.total.linear.base);
+    try std.testing.expectEqualStrings("for...of over `ids`", envelope.total.linear.source.desc);
+
+    try std.testing.expectEqual(@as(usize, 3), envelope.entries.items.len);
+    try std.testing.expectEqual(@as(u32, 2), envelope.find("fetch").?.constant);
+    try std.testing.expectEqual(BoundClass.linear, envelope.find("sql").?.class());
+    try std.testing.expectEqual(BoundClass.unbounded, envelope.find("cache").?.class());
+}
+
+test "contract without costEnvelope parses with null envelope (back-compat)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 16,
+        \\  "handler": { "path": "handler.ts", "line": 1, "column": 0 },
+        \\  "routes": [],
+        \\  "modules": [],
+        \\  "functions": {},
+        \\  "env": { "literal": [], "dynamic": false },
+        \\  "egress": { "hosts": [], "dynamic": false },
+        \\  "cache": { "namespaces": [], "dynamic": false },
+        \\  "api": {},
+        \\  "verification": null,
+        \\  "aot": null,
+        \\  "behaviors": [],
+        \\  "behaviorsExhaustive": true
+        \\}
+    ;
+
+    var contract = try parseFromJson(allocator, json);
+    defer contract.deinit(allocator);
+    try std.testing.expect(contract.cost_envelope == null);
+}
+
+test "unknown sibling keys around costEnvelope are skipped" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 17,
+        \\  "handler": { "path": "handler.ts", "line": 1, "column": 0 },
+        \\  "routes": [],
+        \\  "modules": [],
+        \\  "functions": {},
+        \\  "env": { "literal": [], "dynamic": false },
+        \\  "egress": { "hosts": [], "dynamic": false },
+        \\  "cache": { "namespaces": [], "dynamic": false },
+        \\  "api": {},
+        \\  "verification": null,
+        \\  "aot": null,
+        \\  "behaviors": [],
+        \\  "behaviorsExhaustive": true,
+        \\  "unknownBeforeCost": { "nested": [1, { "x": true }] },
+        \\  "costEnvelope": {
+        \\    "exhaustive": true,
+        \\    "total": { "class": "constant", "value": 2 },
+        \\    "perModule": [
+        \\      { "module": "fetch", "bound": { "class": "constant", "value": 2 } }
+        \\    ]
+        \\  },
+        \\  "unknownAfterCost": [false, null, { "y": "z" }]
+        \\}
+    ;
+
+    var contract = try parseFromJson(allocator, json);
+    defer contract.deinit(allocator);
+
+    const envelope = contract.cost_envelope.?;
+    try std.testing.expectEqual(BoundClass.constant, envelope.total.class());
+    try std.testing.expectEqual(@as(u32, 2), envelope.total.constant);
+    try std.testing.expectEqual(@as(u32, 2), envelope.find("fetch").?.constant);
 }
 
 test "intent assertions roundtrip through writer and parser" {

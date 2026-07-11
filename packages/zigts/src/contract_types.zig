@@ -625,8 +625,12 @@ pub const HandlerProperties = struct {
     /// a contract is only ever built for an already-canonical handler, so the
     /// contract builder sets this true unconditionally. The chip makes the
     /// always-on gate explicit and attestable; `Spec<"canonical">` discharges
-    /// against it. Declared last so `provenSpecNames` ordering stays stable.
+    /// against it.
     canonical: bool = false,
+    /// The handler's total cost bound is expressible (constant or linear):
+    /// no unbounded loop over an unidentifiable source, and path enumeration
+    /// was exhaustive. Derived from cost_envelope.total in precompile stage 9.
+    cost_bounded: bool = false,
 
     /// Canonical list of property names that are currently proven true. The
     /// order is stable across builds (struct-field declaration order) so
@@ -727,6 +731,47 @@ test "HandlerProperties.provenSpecNames excludes inverse-polarity facts" {
     }
     try std.testing.expect(!HandlerProperties.isMonotonicProvenSpecName("has_egress"));
     try std.testing.expect(HandlerProperties.isMonotonicProvenSpecName("no_secret_leakage"));
+}
+
+test "Bound.addBorrowed degrades mixed linear sources to unbounded" {
+    const first = Bound{ .linear = .{
+        .coefficient = 1,
+        .base = 0,
+        .source = .{ .line = 4, .column = 2, .desc = "for...of over `ids`" },
+    } };
+    const second = Bound{ .linear = .{
+        .coefficient = 1,
+        .base = 0,
+        .source = .{ .line = 8, .column = 2, .desc = "for...of over `names`" },
+    } };
+
+    const combined = Bound.addBorrowed(first, second);
+    try std.testing.expectEqual(BoundClass.unbounded, combined.class());
+    try std.testing.expectEqualStrings("for...of over `names`", combined.unbounded.desc);
+}
+
+test "Bound.maxBorrowed picks the wider class" {
+    const constant = Bound{ .constant = 4 };
+    const linear = Bound{ .linear = .{
+        .coefficient = 1,
+        .base = 0,
+        .source = .{ .line = 4, .column = 2, .desc = "for...of over `ids`" },
+    } };
+    const unbounded = Bound{ .unbounded = .{ .line = 9, .column = 1, .desc = "unknown" } };
+
+    try std.testing.expectEqual(BoundClass.linear, Bound.maxBorrowed(constant, linear).class());
+    try std.testing.expectEqual(BoundClass.unbounded, Bound.maxBorrowed(linear, unbounded).class());
+}
+
+test "Bound.worstCaseAt evaluates linear at a body limit" {
+    const bound = Bound{ .linear = .{
+        .coefficient = 3,
+        .base = 2,
+        .source = .{ .line = 4, .column = 2, .desc = "for...of over `ids`" },
+    } };
+
+    try std.testing.expectEqual(@as(?u64, 20), bound.worstCaseAt(10));
+    try std.testing.expectEqual(@as(?u64, null), (Bound{ .unbounded = .{} }).worstCaseAt(10));
 }
 
 pub const RateLimitInfo = struct {
@@ -1050,6 +1095,216 @@ pub const BehaviorPath = struct {
             .io_depth = self.io_depth,
             .is_failure_path = self.is_failure_path,
         };
+    }
+};
+
+// --- Cost contract types ---
+
+/// Widening order for cost bounds. Used by contract_diff's cost lane:
+/// constant -> linear -> unbounded only ever widens.
+pub const BoundClass = enum(u2) {
+    constant = 0,
+    linear = 1,
+    unbounded = 2,
+
+    pub fn widerThan(self: BoundClass, other: BoundClass) bool {
+        return @intFromEnum(self) > @intFromEnum(other);
+    }
+
+    pub fn asString(self: BoundClass) []const u8 {
+        return switch (self) {
+            .constant => "constant",
+            .linear => "linear",
+            .unbounded => "unbounded",
+        };
+    }
+};
+
+/// Names the source construct a non-constant bound depends on. CostEnvelope
+/// owns provenance desc strings; every other Bound value borrows them.
+pub const BoundProvenance = struct {
+    line: u32 = 0,
+    column: u32 = 0,
+    desc: []const u8 = "",
+};
+
+/// A symbolic worst-path call-count bound.
+pub const Bound = union(enum) {
+    /// Exactly this many calls on the worst path.
+    constant: u32,
+    /// `base + coefficient * |source|` calls for one undischarged collection.
+    linear: Linear,
+    /// No expressible bound.
+    unbounded: BoundProvenance,
+
+    pub const Linear = struct {
+        coefficient: u32,
+        base: u32 = 0,
+        source: BoundProvenance,
+    };
+
+    pub fn class(self: Bound) BoundClass {
+        return switch (self) {
+            .constant => .constant,
+            .linear => .linear,
+            .unbounded => .unbounded,
+        };
+    }
+
+    /// Sequential composition along one path. Non-allocating; the result
+    /// borrows provenance from the inputs. Saturating u32 arithmetic.
+    pub fn addBorrowed(a: Bound, b: Bound) Bound {
+        return switch (a) {
+            .constant => |av| switch (b) {
+                .constant => |bv| .{ .constant = saturatingAddU32(av, bv) },
+                .linear => |bl| .{ .linear = .{
+                    .coefficient = bl.coefficient,
+                    .base = saturatingAddU32(bl.base, av),
+                    .source = bl.source,
+                } },
+                .unbounded => |bp| .{ .unbounded = bp },
+            },
+            .linear => |al| switch (b) {
+                .constant => |bv| .{ .linear = .{
+                    .coefficient = al.coefficient,
+                    .base = saturatingAddU32(al.base, bv),
+                    .source = al.source,
+                } },
+                .linear => |bl| if (sameProvenance(al.source, bl.source)) .{ .linear = .{
+                    .coefficient = saturatingAddU32(al.coefficient, bl.coefficient),
+                    .base = saturatingAddU32(al.base, bl.base),
+                    .source = al.source,
+                } } else .{ .unbounded = bl.source },
+                .unbounded => |bp| .{ .unbounded = bp },
+            },
+            .unbounded => |ap| .{ .unbounded = ap },
+        };
+    }
+
+    /// Worst-of across alternative paths (or handlers). Non-allocating,
+    /// borrows provenance. Wider class wins.
+    pub fn maxBorrowed(a: Bound, b: Bound) Bound {
+        const ac = a.class();
+        const bc = b.class();
+        if (ac.widerThan(bc)) return a;
+        if (bc.widerThan(ac)) return b;
+
+        return switch (a) {
+            .constant => |av| .{ .constant = @max(av, b.constant) },
+            .linear => |al| blk: {
+                const bl = b.linear;
+                if (bl.coefficient > al.coefficient) break :blk b;
+                if (bl.coefficient == al.coefficient and bl.base > al.base) break :blk b;
+                break :blk a;
+            },
+            .unbounded => a,
+        };
+    }
+
+    /// Deep copy that owns its desc strings.
+    pub fn dupeOwned(self: Bound, allocator: std.mem.Allocator) !Bound {
+        return switch (self) {
+            .constant => |v| .{ .constant = v },
+            .linear => |l| .{ .linear = .{
+                .coefficient = l.coefficient,
+                .base = l.base,
+                .source = try dupeProvenance(allocator, l.source),
+            } },
+            .unbounded => |p| .{ .unbounded = try dupeProvenance(allocator, p) },
+        };
+    }
+
+    /// Free desc strings. Call ONLY on owned bounds.
+    pub fn deinitOwned(self: *Bound, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .constant => {},
+            .linear => |l| allocator.free(l.source.desc),
+            .unbounded => |p| allocator.free(p.desc),
+        }
+    }
+
+    /// Concrete worst case at a request-body byte limit.
+    pub fn worstCaseAt(self: Bound, body_limit_bytes: u64) ?u64 {
+        return switch (self) {
+            .constant => |v| v,
+            .linear => |l| blk: {
+                const source_ceiling = body_limit_bytes / 2 + 1;
+                const product = std.math.mul(u64, l.coefficient, source_ceiling) catch std.math.maxInt(u64);
+                break :blk std.math.add(u64, l.base, product) catch std.math.maxInt(u64);
+            },
+            .unbounded => null,
+        };
+    }
+};
+
+fn saturatingAddU32(a: u32, b: u32) u32 {
+    const sum, const overflow = @addWithOverflow(a, b);
+    return if (overflow != 0) std.math.maxInt(u32) else sum;
+}
+
+fn sameProvenance(a: BoundProvenance, b: BoundProvenance) bool {
+    return a.line == b.line and
+        a.column == b.column and
+        std.mem.eql(u8, a.desc, b.desc);
+}
+
+fn dupeProvenance(allocator: std.mem.Allocator, p: BoundProvenance) !BoundProvenance {
+    return .{
+        .line = p.line,
+        .column = p.column,
+        .desc = try allocator.dupe(u8, p.desc),
+    };
+}
+
+/// One module's worst-path bound.
+pub const CostEntry = struct {
+    module: []const u8, // owned
+    bound: Bound, // owned
+};
+
+/// Per-handler cost envelope: worst-path call bounds per virtual module,
+/// plus the combined total.
+pub const CostEnvelope = struct {
+    entries: std.ArrayList(CostEntry) = .empty,
+    total: Bound = .{ .constant = 0 },
+    /// Mirrors behaviors_exhaustive: false when PathGenerator hit MAX_PATHS.
+    exhaustive: bool = true,
+
+    pub fn find(self: *const CostEnvelope, module: []const u8) ?*const Bound {
+        for (self.entries.items) |*entry| {
+            if (std.mem.eql(u8, entry.module, module)) return &entry.bound;
+        }
+        return null;
+    }
+
+    pub fn deinit(self: *CostEnvelope, allocator: std.mem.Allocator) void {
+        for (self.entries.items) |*entry| {
+            allocator.free(entry.module);
+            entry.bound.deinitOwned(allocator);
+        }
+        self.entries.deinit(allocator);
+        self.total.deinitOwned(allocator);
+    }
+
+    pub fn dupeOwned(self: *const CostEnvelope, allocator: std.mem.Allocator) !CostEnvelope {
+        var copy = CostEnvelope{
+            .entries = .empty,
+            .total = try self.total.dupeOwned(allocator),
+            .exhaustive = self.exhaustive,
+        };
+        errdefer copy.deinit(allocator);
+
+        try copy.entries.ensureTotalCapacity(allocator, self.entries.items.len);
+        for (self.entries.items) |entry| {
+            const module = try allocator.dupe(u8, entry.module);
+            errdefer allocator.free(module);
+            const bound = try entry.bound.dupeOwned(allocator);
+            copy.entries.appendAssumeCapacity(.{
+                .module = module,
+                .bound = bound,
+            });
+        }
+        return copy;
     }
 };
 
@@ -1401,7 +1656,7 @@ pub const EffectCapsuleSummary = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 16,
+    version: u32 = 17,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -1475,6 +1730,9 @@ pub const HandlerContract = struct {
     function_effect_capsules: std.ArrayList(EffectCapsuleSummary) = .empty,
     behaviors: std.ArrayList(BehaviorPath) = .empty,
     behaviors_exhaustive: bool = false,
+    /// Per-module worst-path cost bounds derived from path enumeration.
+    /// Null when no handler function was found (mirrors properties == null).
+    cost_envelope: ?CostEnvelope = null,
     capabilities: CapabilityMatrix = .empty,
     /// The capability budget the handler declared via `Effects<...>` on its
     /// return type. Empty when the handler declares no budget. Serialized
@@ -1552,6 +1810,7 @@ pub const HandlerContract = struct {
             @constCast(b).deinit(allocator);
         }
         self.behaviors.deinit(allocator);
+        if (self.cost_envelope) |*envelope| envelope.deinit(allocator);
         for (self.declared_specs.items) |s| {
             allocator.free(s);
         }

@@ -34,6 +34,10 @@ const SagaStep = handler_contract.SagaStep;
 const PathCondition = handler_contract.PathCondition;
 const PathIoCall = handler_contract.PathIoCall;
 const BehaviorPath = handler_contract.BehaviorPath;
+const Bound = handler_contract.Bound;
+const BoundProvenance = handler_contract.BoundProvenance;
+const CostEntry = handler_contract.CostEntry;
+const CostEnvelope = handler_contract.CostEnvelope;
 const DurableWorkflow = handler_contract.DurableWorkflow;
 const DurableWorkflowNode = handler_contract.DurableWorkflowNode;
 const DurableWorkflowEdge = handler_contract.DurableWorkflowEdge;
@@ -179,6 +183,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseBehaviors(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "behaviorsExhaustive")) {
             contract.behaviors_exhaustive = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "costEnvelope")) {
+            contract.cost_envelope = try parseCostEnvelope(&parser, allocator);
         } else if (std.mem.eql(u8, key, "extensions")) {
             try parseExtensions(&parser, allocator, &contract);
         } else {
@@ -1944,12 +1950,214 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
             props.post_only = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "canonical")) {
             props.canonical = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "costBounded")) {
+            props.cost_bounded = parser.readBool() orelse false;
         } else {
             parser.skipValue();
         }
     }
 
     return props;
+}
+
+fn parseCostEnvelope(parser: *JsonParser, allocator: std.mem.Allocator) !?CostEnvelope {
+    parser.skipWhitespace();
+    if (parser.readNull()) return null;
+    if (!parser.consume('{')) return error.InvalidJson;
+
+    var envelope = CostEnvelope{};
+    errdefer envelope.deinit(allocator);
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "exhaustive")) {
+            envelope.exhaustive = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "total")) {
+            const total = try parseBound(parser, allocator);
+            envelope.total.deinitOwned(allocator);
+            envelope.total = total;
+        } else if (std.mem.eql(u8, key, "perModule")) {
+            try parseCostEntries(parser, allocator, &envelope.entries);
+        } else {
+            parser.skipValue();
+        }
+    }
+
+    return envelope;
+}
+
+fn parseCostEntries(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(CostEntry),
+) !void {
+    parser.skipWhitespace();
+    if (!parser.consume('[')) return error.InvalidJson;
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+
+        if (!parser.consume('{')) return error.InvalidJson;
+        var module: ?[]const u8 = null;
+        var bound: ?Bound = null;
+        errdefer {
+            if (module) |m| allocator.free(m);
+            if (bound) |*b| b.deinitOwned(allocator);
+        }
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "module")) {
+                if (module) |m| allocator.free(m);
+                module = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "bound")) {
+                if (bound) |*b| b.deinitOwned(allocator);
+                bound = try parseBound(parser, allocator);
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        const owned_module = module orelse return error.InvalidJson;
+        const owned_bound: Bound = bound orelse .{ .constant = 0 };
+        try entries.append(allocator, .{
+            .module = owned_module,
+            .bound = owned_bound,
+        });
+        module = null;
+        bound = null;
+    }
+}
+
+fn parseBound(parser: *JsonParser, allocator: std.mem.Allocator) !Bound {
+    parser.skipWhitespace();
+    if (!parser.consume('{')) return error.InvalidJson;
+
+    var class: ?[]const u8 = null;
+    var value: ?u32 = null;
+    var coefficient: ?u32 = null;
+    var base: u32 = 0;
+    var source: ?BoundProvenance = null;
+    errdefer {
+        if (source) |p| allocator.free(p.desc);
+    }
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "class")) {
+            class = parser.readString() orelse return error.InvalidJson;
+        } else if (std.mem.eql(u8, key, "value")) {
+            value = parser.readU32();
+        } else if (std.mem.eql(u8, key, "coefficient")) {
+            coefficient = parser.readU32();
+        } else if (std.mem.eql(u8, key, "base")) {
+            base = parser.readU32() orelse 0;
+        } else if (std.mem.eql(u8, key, "source")) {
+            if (source) |p| allocator.free(p.desc);
+            source = try parseBoundProvenance(parser, allocator);
+        } else {
+            parser.skipValue();
+        }
+    }
+
+    const class_name = class orelse return error.InvalidJson;
+    if (std.mem.eql(u8, class_name, "constant")) {
+        if (source) |p| allocator.free(p.desc);
+        return .{ .constant = value orelse 0 };
+    }
+    if (std.mem.eql(u8, class_name, "linear")) {
+        return .{ .linear = .{
+            .coefficient = coefficient orelse return error.InvalidJson,
+            .base = base,
+            .source = source orelse return error.InvalidJson,
+        } };
+    }
+    if (std.mem.eql(u8, class_name, "unbounded")) {
+        return .{ .unbounded = source orelse return error.InvalidJson };
+    }
+    return error.InvalidJson;
+}
+
+fn parseBoundProvenance(parser: *JsonParser, allocator: std.mem.Allocator) !BoundProvenance {
+    parser.skipWhitespace();
+    if (!parser.consume('{')) return error.InvalidJson;
+
+    var provenance = BoundProvenance{
+        .line = 0,
+        .column = 0,
+        .desc = try allocator.dupe(u8, ""),
+    };
+    errdefer allocator.free(provenance.desc);
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "line")) {
+            provenance.line = parser.readU32() orelse 0;
+        } else if (std.mem.eql(u8, key, "column")) {
+            provenance.column = parser.readU32() orelse 0;
+        } else if (std.mem.eql(u8, key, "desc")) {
+            allocator.free(provenance.desc);
+            provenance.desc = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+        } else {
+            parser.skipValue();
+        }
+    }
+
+    return provenance;
 }
 
 fn parseSpecDiagnostics(

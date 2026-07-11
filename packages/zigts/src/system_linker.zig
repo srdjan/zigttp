@@ -17,6 +17,8 @@ const json_utils = @import("json_utils.zig");
 
 const HandlerContract = handler_contract.HandlerContract;
 const BehaviorPath = handler_contract.BehaviorPath;
+const Bound = handler_contract.Bound;
+const BoundClass = handler_contract.BoundClass;
 const JsonParser = handler_contract.JsonParser;
 
 // -------------------------------------------------------------------------
@@ -155,6 +157,7 @@ pub const SystemProperties = struct {
     fault_covered: bool,
     state_isolated: bool,
     max_system_io_depth: ?u32,
+    system_cost_total: ?Bound = null,
     /// `config.entry`, echoed here so a proof consumer reading only
     /// `SystemProperties` (not the full config) can see the declared entry.
     /// Null when the manifest declares no entry.
@@ -1270,7 +1273,6 @@ fn composeSystemProperties(
     var retry_safe = true;
     var fault_covered = true;
     var state_isolated = true;
-    var max_depth: ?u32 = null;
 
     for (contracts) |c| {
         if (c.properties) |p| {
@@ -1279,10 +1281,6 @@ fn composeSystemProperties(
             if (!p.no_credential_leakage) no_credential_leakage = false;
             if (!p.state_isolated) state_isolated = false;
             if (!p.fault_covered) fault_covered = false;
-
-            if (p.max_io_depth) |d| {
-                max_depth = if (max_depth) |m| @max(m, d) else d;
-            }
         } else {
             // No properties means unproven
             injection_safe = false;
@@ -1297,17 +1295,17 @@ fn composeSystemProperties(
         if (!flow.safe) injection_safe = false;
     }
 
-    // Compute transitive I/O depth and check retry_safe across call chains
-    var system_depth: ?u32 = null;
+    // Compute transitive cost and check retry_safe across call chains.
+    var system_cost_total: ?Bound = null;
     for (contracts, 0..) |c, idx| {
-        var handler_depth: u32 = if (c.properties) |p| p.max_io_depth orelse 0 else 0;
+        var handler_cost = costBoundForContract(&c);
 
         for (links.items) |link| {
             if (link.source_idx != idx) continue;
             const target = contracts[link.target_idx];
 
+            handler_cost = Bound.addBorrowed(handler_cost, costBoundForContract(&target));
             if (target.properties) |tp| {
-                handler_depth += tp.max_io_depth orelse 0;
                 if (c.durable.used and !tp.retry_safe) retry_safe = false;
             } else if (c.durable.used) {
                 retry_safe = false;
@@ -1318,9 +1316,8 @@ fn composeSystemProperties(
         // links (R6): a durable handler reaching a non-retry_safe target
         // only through a HATEOAS affordance must also flip the aggregate,
         // not just the per-link failure_cascades entry. Excluded from the
-        // handler_depth/system_depth accumulation above deliberately - that
-        // I/O-depth accounting is a separate, untouched concern this fix
-        // does not change.
+        // handler_cost accumulation above deliberately - that cost accounting
+        // tracks direct serviceCall chains only.
         for (affordance_links.items) |link| {
             if (link.source_idx != idx) continue;
             const target = contracts[link.target_idx];
@@ -1332,8 +1329,16 @@ fn composeSystemProperties(
             }
         }
 
-        system_depth = if (system_depth) |s| @max(s, handler_depth) else handler_depth;
+        system_cost_total = if (system_cost_total) |current|
+            Bound.maxBorrowed(current, handler_cost)
+        else
+            handler_cost;
     }
+
+    const max_system_io_depth: ?u32 = if (system_cost_total) |bound| switch (bound) {
+        .constant => |n| n,
+        else => null,
+    } else null;
 
     return .{
         // Computed by caller from analysis results
@@ -1346,8 +1351,18 @@ fn composeSystemProperties(
         .retry_safe = retry_safe,
         .fault_covered = fault_covered,
         .state_isolated = state_isolated,
-        .max_system_io_depth = system_depth,
+        .max_system_io_depth = max_system_io_depth,
+        .system_cost_total = system_cost_total,
     };
+}
+
+fn costBoundForContract(contract: *const HandlerContract) Bound {
+    if (contract.cost_envelope) |envelope| return envelope.total;
+    return .{ .unbounded = .{
+        .line = 0,
+        .column = 0,
+        .desc = "no cost envelope",
+    } };
 }
 
 fn containsU16(items: []const u16, value: u16) bool {
@@ -1596,9 +1611,16 @@ pub fn writeSystemContractJson(
     try writer.writeAll(",\n");
     try writer.print("    \"entryPostOnly\": {s},\n", .{boolStr(p.entry_post_only)});
     if (p.max_system_io_depth) |d| {
-        try writer.print("    \"maxSystemIoDepth\": {d}\n", .{d});
+        try writer.print("    \"maxSystemIoDepth\": {d},\n", .{d});
     } else {
-        try writer.writeAll("    \"maxSystemIoDepth\": null\n");
+        try writer.writeAll("    \"maxSystemIoDepth\": null,\n");
+    }
+    try writer.writeAll("    \"systemCost\": ");
+    if (p.system_cost_total) |bound| {
+        try handler_contract.writeBoundJson(writer, bound);
+        try writer.writeByte('\n');
+    } else {
+        try writer.writeAll("null\n");
     }
     try writer.writeAll("  },\n");
 
@@ -1787,6 +1809,19 @@ pub fn writeSystemReport(
     try writer.print("  {s} state_isolated\n", .{provenLabel(p.state_isolated)});
     if (p.max_system_io_depth) |d| {
         try writer.print("  max_system_io_depth: {d}\n", .{d});
+    }
+    if (p.system_cost_total) |bound| {
+        switch (bound) {
+            .constant => |n| try writer.print("  system_cost: {d} calls per request\n", .{n}),
+            .linear => |linear| try writer.print(
+                "  system_cost: {d}+{d}*|source| calls per request ({d}:{d} {s})\n",
+                .{ linear.base, linear.coefficient, linear.source.line, linear.source.column, linear.source.desc },
+            ),
+            .unbounded => |source| try writer.print(
+                "  system_cost: unbounded ({d}:{d} {s})\n",
+                .{ source.line, source.column, source.desc },
+            ),
+        }
     }
     try writer.writeAll("\n");
 
@@ -2622,6 +2657,66 @@ test "linkSystem: payload proof gap is explicit for dynamic responses" {
     try std.testing.expect(!analysis.payload_proofs.items[0].compatible);
     try std.testing.expect(!analysis.properties.payload_compatible);
     try std.testing.expect(analysis.warnings.items.len > 0);
+}
+
+test "system cost composes serviceCall chain bounds and fails closed on missing envelope" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [2]HandlerContract = undefined;
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "gateway.ts"));
+    contracts[0].cost_envelope = .{
+        .entries = .empty,
+        .total = .{ .constant = 1 },
+        .exhaustive = true,
+    };
+    contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "users.ts"));
+    contracts[1].cost_envelope = .{
+        .entries = .empty,
+        .total = .{ .linear = .{
+            .coefficient = 2,
+            .base = 0,
+            .source = .{
+                .line = 7,
+                .column = 3,
+                .desc = try allocator.dupe(u8, "for...of over `ids`"),
+            },
+        } },
+        .exhaustive = true,
+    };
+    defer {
+        contracts[0].deinit(allocator);
+        contracts[1].deinit(allocator);
+    }
+
+    var links: std.ArrayList(SystemLink) = .empty;
+    defer links.deinit(allocator);
+    try links.append(allocator, .{
+        .kind = .service_call,
+        .source_idx = 0,
+        .target_idx = 1,
+        .call_ref = "users",
+        .service_name = "users",
+        .matched_route = "/users",
+        .matched_method = "POST",
+    });
+    var affordance_links: std.ArrayList(SystemLink) = .empty;
+    defer affordance_links.deinit(allocator);
+    var flows: std.ArrayList(CrossBoundaryFlow) = .empty;
+    defer flows.deinit(allocator);
+
+    const composed = composeSystemProperties(&contracts, &links, &affordance_links, &flows);
+    try std.testing.expect(composed.max_system_io_depth == null);
+    try std.testing.expectEqual(BoundClass.linear, composed.system_cost_total.?.class());
+    try std.testing.expectEqual(@as(u32, 2), composed.system_cost_total.?.linear.coefficient);
+    try std.testing.expectEqual(@as(u32, 1), composed.system_cost_total.?.linear.base);
+
+    if (contracts[1].cost_envelope) |*envelope| envelope.deinit(allocator);
+    contracts[1].cost_envelope = null;
+
+    const missing = composeSystemProperties(&contracts, &links, &affordance_links, &flows);
+    try std.testing.expect(missing.max_system_io_depth == null);
+    try std.testing.expectEqual(BoundClass.unbounded, missing.system_cost_total.?.class());
+    try std.testing.expectEqualStrings("no cost envelope", missing.system_cost_total.?.unbounded.desc);
 }
 
 test "linkSystem: unlinked route" {

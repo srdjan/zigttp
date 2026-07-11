@@ -778,10 +778,64 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     if (contract.spec_diagnostics.items.len > 0) try writer.writeAll("\n  ");
     try writer.writeAll("],\n");
 
+    // costEnvelope (optional)
+    if (contract.cost_envelope) |*envelope| {
+        try writeCostEnvelopeJson(writer, envelope);
+    } else {
+        try writer.writeAll("  \"costEnvelope\": null,\n");
+    }
+
     try writeExtensionsJson(writer, contract);
     try writePartnerContractSections(writer, contract);
 
     try writer.writeAll("\n}\n");
+}
+
+fn writeCostEnvelopeJson(
+    writer: anytype,
+    envelope: *const contract_types.CostEnvelope,
+) !void {
+    try writer.writeAll("  \"costEnvelope\": {\n");
+    try writer.print("    \"exhaustive\": {s},\n", .{if (envelope.exhaustive) "true" else "false"});
+    try writer.writeAll("    \"total\": ");
+    try writeBoundJson(writer, envelope.total);
+    try writer.writeAll(",\n");
+    try writer.writeAll("    \"perModule\": [");
+    for (envelope.entries.items, 0..) |entry, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.writeAll("\n      { \"module\": ");
+        try writeJsonString(writer, entry.module);
+        try writer.writeAll(", \"bound\": ");
+        try writeBoundJson(writer, entry.bound);
+        try writer.writeAll(" }");
+    }
+    if (envelope.entries.items.len > 0) try writer.writeAll("\n    ");
+    try writer.writeAll("]\n");
+    try writer.writeAll("  },\n");
+}
+
+pub fn writeBoundJson(writer: anytype, bound: contract_types.Bound) !void {
+    switch (bound) {
+        .constant => |value| {
+            try writer.print("{{ \"class\": \"constant\", \"value\": {d} }}", .{value});
+        },
+        .linear => |linear| {
+            try writer.print("{{ \"class\": \"linear\", \"coefficient\": {d}, \"base\": {d}, \"source\": ", .{ linear.coefficient, linear.base });
+            try writeProvenanceJson(writer, linear.source);
+            try writer.writeAll(" }");
+        },
+        .unbounded => |source| {
+            try writer.writeAll("{ \"class\": \"unbounded\", \"source\": ");
+            try writeProvenanceJson(writer, source);
+            try writer.writeAll(" }");
+        },
+    }
+}
+
+fn writeProvenanceJson(writer: anytype, provenance: contract_types.BoundProvenance) !void {
+    try writer.print("{{ \"line\": {d}, \"column\": {d}, \"desc\": ", .{ provenance.line, provenance.column });
+    try writeJsonString(writer, provenance.desc);
+    try writer.writeAll(" }");
 }
 
 /// Emit the `extensions` section: per-specifier facts produced by partner
