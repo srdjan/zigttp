@@ -35,6 +35,7 @@ pub const v1_specs = [_]V1Spec{
     .{ .name = "pii_contained", .field = .pii_contained, .cause_only = false },
     .{ .name = "injection_safe", .field = .injection_safe, .cause_only = false },
     .{ .name = "canonical", .field = .canonical, .cause_only = true },
+    .{ .name = "cost_bounded", .field = .cost_bounded, .cause_only = true },
 };
 
 pub const V1Spec = struct {
@@ -63,6 +64,7 @@ pub const PropertyField = enum {
     pii_contained,
     injection_safe,
     canonical,
+    cost_bounded,
 
     pub fn lookup(self: PropertyField, properties: HandlerProperties) bool {
         return switch (self) {
@@ -82,6 +84,7 @@ pub const PropertyField = enum {
             .pii_contained => properties.pii_contained,
             .injection_safe => properties.injection_safe,
             .canonical => properties.canonical,
+            .cost_bounded => properties.cost_bounded,
         };
     }
 };
@@ -132,6 +135,9 @@ pub fn suggestionFor(name: []const u8) ?[]const u8 {
     }
     if (std.mem.eql(u8, name, "canonical")) {
         return "run `zigts normalize <file> --write` to rewrite the handler into Canonical Normal Form, or fix the flagged ZTS6xx constructs by hand.";
+    }
+    if (std.mem.eql(u8, name, "cost_bounded")) {
+        return "bound the loop source: iterate a literal array / range(n) / .slice(0, k), add LIMIT n to the SQL statement, or declare maxItems on the validated schema field.";
     }
     return null;
 }
@@ -1055,6 +1061,58 @@ test "dischargeSpecs recognises pure/stateless/result_safe/optional_safe" {
         try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, d.kind);
         try std.testing.expect(d.suggestion != null);
     }
+}
+
+test "cost_bounded spec discharges against the property" {
+    const allocator = std.testing.allocator;
+
+    const props = HandlerProperties{
+        .pure = true,
+        .read_only = true,
+        .stateless = true,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = false,
+        .cost_bounded = true,
+    };
+    const declared: [1][]const u8 = .{"cost_bounded"};
+    const modules: [0][]const u8 = .{};
+
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    defer {
+        for (diags.items) |*d| @constCast(d).deinit(allocator);
+        diags.deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+test "undischarged cost_bounded suggestion names the discharge levers" {
+    const allocator = std.testing.allocator;
+
+    const props = HandlerProperties{
+        .pure = true,
+        .read_only = true,
+        .stateless = true,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = false,
+        .cost_bounded = false,
+    };
+    const declared: [1][]const u8 = .{"cost_bounded"};
+    const modules: [0][]const u8 = .{};
+
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    defer {
+        for (diags.items) |*d| @constCast(d).deinit(allocator);
+        diags.deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, diags.items[0].kind);
+    const suggestion = diags.items[0].suggestion orelse return error.MissingSuggestion;
+    try std.testing.expect(std.mem.indexOf(u8, suggestion, "maxItems") != null);
+    try std.testing.expect(std.mem.indexOf(u8, suggestion, "LIMIT") != null);
 }
 
 test "dischargeSpecs ZTS502 unknown name carries a nearest-match suggestion" {

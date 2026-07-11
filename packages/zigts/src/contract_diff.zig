@@ -138,6 +138,8 @@ pub const PropertiesChange = struct {
     field: []const u8,
     old_value: bool,
     new_value: bool,
+    old_label: ?[]const u8 = null,
+    new_label: ?[]const u8 = null,
 };
 
 pub const BehaviorPathChange = struct {
@@ -222,6 +224,8 @@ pub const ContractDiff = struct {
     /// position-sensitive) or purely appended (additive).
     durable_steps_breaking: bool = false,
     durable_steps_added: bool = false,
+    cost_class_old: ?handler_contract.BoundClass = null,
+    cost_class_new: ?handler_contract.BoundClass = null,
 
     pub fn deinit(self: *ContractDiff, allocator: std.mem.Allocator) void {
         self.routes.deinit(allocator);
@@ -250,6 +254,18 @@ pub const ContractDiff = struct {
             if (!dc.new_dynamic and dc.old_dynamic) return true;
         }
         return false;
+    }
+
+    pub fn costWidened(self: *const ContractDiff) bool {
+        const old_class = self.cost_class_old orelse return false;
+        const new_class = self.cost_class_new orelse return true;
+        return new_class.widerThan(old_class);
+    }
+
+    pub fn costWidenedToUnbounded(self: *const ContractDiff) bool {
+        _ = self.cost_class_old orelse return false;
+        const new_class = self.cost_class_new orelse return true;
+        return new_class == .unbounded and self.costWidened();
     }
 
     /// Classify the diff structurally (without replay data).
@@ -298,6 +314,8 @@ pub const ContractDiff = struct {
         // A route/schema surface that lost provability (became runtime-computed)
         // can no longer be trusted as complete; fail closed like a dynamic response.
         if (self.routes_became_dynamic) return .breaking;
+        if (self.costWidenedToUnbounded()) return .breaking;
+        if (self.costWidened()) has_added = true;
         // A removed WebSocket event export is a removed live capability.
         if (self.websocket_capability_removed) return .breaking;
         if (self.websocket_capability_added) has_added = true;
@@ -495,6 +513,15 @@ pub const ProofCertificate = struct {
 // Diff computation
 // -------------------------------------------------------------------------
 
+fn costClassOf(contract: *const HandlerContract) ?handler_contract.BoundClass {
+    const envelope = contract.cost_envelope orelse return null;
+    return envelope.total.class();
+}
+
+fn costClassLabel(class: ?handler_contract.BoundClass) []const u8 {
+    return if (class) |c| c.asString() else "absent";
+}
+
 /// Compare two contracts and produce a structural diff.
 /// All slices in the returned diff point into the old/new contracts.
 pub fn diffContracts(
@@ -607,6 +634,8 @@ pub fn diffContracts(
     // Handler properties comparison (informational only)
     var effect_changes: std.ArrayList(PropertiesChange) = .empty;
     errdefer effect_changes.deinit(allocator);
+    const old_cost_class = costClassOf(old);
+    const new_cost_class = costClassOf(new);
 
     if (old.properties != null and new.properties != null) {
         const op = old.properties.?;
@@ -642,6 +671,15 @@ pub fn diffContracts(
             });
         }
     }
+    if (old_cost_class != new_cost_class) {
+        try effect_changes.append(allocator, .{
+            .field = "cost_class",
+            .old_value = old_cost_class != null,
+            .new_value = new_cost_class != null,
+            .old_label = costClassLabel(old_cost_class),
+            .new_label = costClassLabel(new_cost_class),
+        });
+    }
 
     // Behavioral path comparison (when both contracts have behaviors)
     var behavior_diff: ?BehaviorDiff = null;
@@ -671,6 +709,8 @@ pub fn diffContracts(
             (new.websocket.on_error and !old.websocket.on_error),
         .durable_steps_breaking = durableStepsChange(old.durable.steps.items, new.durable.steps.items) == .breaking,
         .durable_steps_added = durableStepsChange(old.durable.steps.items, new.durable.steps.items) == .added,
+        .cost_class_old = old_cost_class,
+        .cost_class_new = new_cost_class,
     };
     errdefer diff.deinit(allocator);
 
@@ -845,7 +885,9 @@ pub fn writeProofJson(cert: *const ProofCertificate, writer: anytype) !void {
     try writeItemChangesJson(writer, "sql_removed", cert.diff.sql_changes.items, .removed);
     try writer.writeAll(",\n");
     try writer.print("    \"capabilities_widened\": {s},\n", .{if (cert.diff.capabilitiesWidened()) "true" else "false"});
-    try writer.print("    \"capabilities_narrowed\": {s}\n", .{if (cert.diff.capabilitiesNarrowed()) "true" else "false"});
+    try writer.print("    \"capabilities_narrowed\": {s},\n", .{if (cert.diff.capabilitiesNarrowed()) "true" else "false"});
+    try writeEffectChangesJson(writer, cert.diff.effect_changes.items);
+    try writer.writeAll("\n");
     try writer.writeAll("  },\n");
 
     // replay_result
@@ -1070,6 +1112,16 @@ pub fn writeProofReport(writer: anytype, cert: *const ProofCertificate) !void {
         } else {
             try writer.writeAll(": dynamic -> proven\n");
         }
+    }
+
+    for (cert.diff.effect_changes.items) |change| {
+        try writer.writeAll("  ~ CHANGED  ");
+        try writer.writeAll(change.field);
+        try writer.writeAll(": ");
+        try writer.writeAll(propertyValueLabel(change, true));
+        try writer.writeAll(" -> ");
+        try writer.writeAll(propertyValueLabel(change, false));
+        try writer.writeAll("\n");
     }
 
     // Behavioral diff
@@ -1836,6 +1888,30 @@ fn writeItemChangesJson(writer: anytype, field: []const u8, changes: []const Ite
     try writer.writeAll("]");
 }
 
+fn propertyValueLabel(change: PropertiesChange, old: bool) []const u8 {
+    if (old) {
+        if (change.old_label) |label| return label;
+        return if (change.old_value) "true" else "false";
+    }
+    if (change.new_label) |label| return label;
+    return if (change.new_value) "true" else "false";
+}
+
+fn writeEffectChangesJson(writer: anytype, changes: []const PropertiesChange) !void {
+    try writer.writeAll("    \"effect_changes\": [");
+    for (changes, 0..) |change, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.writeAll("{\"field\":");
+        try writeJsonString(writer, change.field);
+        try writer.writeAll(",\"old\":");
+        try writeJsonString(writer, propertyValueLabel(change, true));
+        try writer.writeAll(",\"new\":");
+        try writeJsonString(writer, propertyValueLabel(change, false));
+        try writer.writeByte('}');
+    }
+    try writer.writeAll("]");
+}
+
 fn writeApiRouteChangesJson(
     writer: anytype,
     field: []const u8,
@@ -1895,6 +1971,18 @@ fn makeTestContract(allocator: std.mem.Allocator) !HandlerContract {
     };
 }
 
+fn setTestCostEnvelope(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    total: handler_contract.Bound,
+) !void {
+    contract.cost_envelope = .{
+        .entries = .empty,
+        .total = try total.dupeOwned(allocator),
+        .exhaustive = true,
+    };
+}
+
 test "diffContracts identical contracts are equivalent" {
     const allocator = std.testing.allocator;
 
@@ -1910,6 +1998,65 @@ test "diffContracts identical contracts are equivalent" {
     try std.testing.expectEqual(@as(usize, 0), diff.routes.items.len);
     try std.testing.expect(!diff.capabilitiesWidened());
     try std.testing.expect(!diff.capabilitiesNarrowed());
+}
+
+test "cost class widening to unbounded classifies breaking" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    try setTestCostEnvelope(allocator, &old, .{ .constant = 2 });
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    try setTestCostEnvelope(allocator, &new, .{ .unbounded = .{
+        .line = 9,
+        .column = 3,
+        .desc = "for...of (unrecognized iterable)",
+    } });
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.breaking, diff.classify());
+}
+
+test "cost class widening constant to linear floors verdict at additive" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    try setTestCostEnvelope(allocator, &old, .{ .constant = 2 });
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    try setTestCostEnvelope(allocator, &new, .{ .linear = .{
+        .coefficient = 1,
+        .base = 2,
+        .source = .{ .line = 12, .column = 7, .desc = "for...of over `ids`" },
+    } });
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.additive, diff.classify());
+    try std.testing.expect(!diff.classify().isSafeNoOp());
+}
+
+test "absent old cost envelope does not flag widening" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    try setTestCostEnvelope(allocator, &new, .{ .constant = 4 });
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.equivalent, diff.classify());
 }
 
 test "diffContracts added route is additive" {

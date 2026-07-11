@@ -221,10 +221,13 @@ Three diagnostic codes:
 - **ZTS500 - spec_not_discharged**: the corresponding property field is
   false. Cause-only specs (`deterministic`, `read_only`, `retry_safe`,
   `idempotent`, `state_isolated`, `fault_covered`, `pure`, `stateless`,
-  `result_safe`, `optional_safe`) include a per-property `Try:`
+  `result_safe`, `optional_safe`, `cost_bounded`) include a per-property `Try:`
   suggestion. Counterexample-rich specs
   (`no_secret_leakage`, `no_credential_leakage`, `input_validated`,
   `pii_contained`, `injection_safe`) include a falsifying request body.
+  `cost_bounded` discharges when the worst-path module-call count has a
+  finite envelope; its suggestion points at literal arrays, `range(n)`,
+  `.slice(0, k)`, SQL `LIMIT n`, or schema `maxItems`.
 - **ZTS501 - spec_incompatible_with_import**: the spec contradicts an
   imported module. v1 fires for `Spec<"read_only">` against
   `zigttp:cache` or `zigttp:sql`. ZTS500 is suppressed for the same

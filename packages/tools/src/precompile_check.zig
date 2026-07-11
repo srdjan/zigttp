@@ -382,6 +382,7 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         writeProven(writer, "injection_safe", props.injection_safe);
         writeProven(writer, "deterministic", props.deterministic);
         writeProven(writer, "read_only", props.read_only);
+        writeProven(writer, "cost_bounded", props.cost_bounded);
 
         writer.print("\n  Security:\n", .{}) catch return;
         writeProven(writer, "no_secret_leakage", props.no_secret_leakage);
@@ -405,6 +406,7 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
     if (r.max_io_depth) |depth| {
         writer.print("  Max I/O depth: {d}\n", .{depth}) catch return;
     }
+    writeCostBound(writer, r);
 
     if (hasCanonicalDiagnostic(r.json_diagnostics.items)) {
         writer.print("\n  Canonical diagnostics:\n", .{}) catch return;
@@ -495,6 +497,26 @@ fn writeProven(writer: anytype, label: []const u8, proven: bool) void {
     const pad = @min(20 -| label.len, dots.len);
     writer.writeAll(dots[0..pad]) catch return;
     writer.writeAll(if (proven) " PROVEN\n" else " ---\n") catch return;
+}
+
+fn writeCostBound(writer: anytype, r: *const CheckResult) void {
+    const contract = if (r.contract) |*c| c else return;
+    const envelope = contract.cost_envelope orelse return;
+    switch (envelope.total) {
+        .constant => {},
+        .linear => |linear| {
+            writer.print(
+                "  Cost bound: {d}+{d}*|source| (line {d})\n",
+                .{ linear.base, linear.coefficient, linear.source.line },
+            ) catch return;
+        },
+        .unbounded => |source| {
+            writer.print(
+                "  Cost bound: unbounded (line {d}) - see cost_bounded\n",
+                .{source.line},
+            ) catch return;
+        },
+    }
 }
 
 /// Generate TypeScript type definitions for all virtual modules.
