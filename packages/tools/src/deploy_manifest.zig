@@ -19,6 +19,7 @@ const contract_diff = zigts.contract_diff;
 // -------------------------------------------------------------------------
 
 pub const ProofLevel = contract_diff.ProofLevel;
+pub const default_cost_body_limit: u64 = 1024 * 1024;
 
 pub const ProvenRoute = struct {
     pattern: []const u8,
@@ -54,6 +55,8 @@ pub const ProvenFacts = struct {
     deterministic: bool = true,
     max_io_depth: ?u32 = null,
     cost_total: ?handler_contract.Bound = null,
+    cost_worst_case_total: ?u64 = null,
+    cost_worst_case_body_limit: u64 = default_cost_body_limit,
 
     // Data flow provenance
     no_secret_leakage: bool = true,
@@ -175,6 +178,7 @@ pub fn extractProvenFacts(
 
     const ws = contract.websocket;
     const has_ws = ws.on_open or ws.on_message or ws.on_close or ws.on_error;
+    const cost_total: ?handler_contract.Bound = if (contract.cost_envelope) |envelope| envelope.total else null;
 
     return .{
         .facts = .{
@@ -196,7 +200,9 @@ pub fn extractProvenFacts(
             .state_isolated = if (contract.properties) |p| p.state_isolated else true,
             .deterministic = if (contract.properties) |p| p.deterministic else true,
             .max_io_depth = if (contract.properties) |p| p.max_io_depth else null,
-            .cost_total = if (contract.cost_envelope) |envelope| envelope.total else null,
+            .cost_total = cost_total,
+            .cost_worst_case_total = if (cost_total) |bound| bound.worstCaseAt(default_cost_body_limit) else null,
+            .cost_worst_case_body_limit = default_cost_body_limit,
             .no_secret_leakage = if (contract.properties) |p| p.no_secret_leakage else true,
             .no_credential_leakage = if (contract.properties) |p| p.no_credential_leakage else true,
             .input_validated = if (contract.properties) |p| p.input_validated else true,
@@ -224,6 +230,12 @@ pub fn extractProvenFacts(
 fn containsString(haystack: []const []const u8, needle: []const u8) bool {
     for (haystack) |item| if (std.mem.eql(u8, item, needle)) return true;
     return false;
+}
+
+pub fn costWorstCaseTotal(facts: *const ProvenFacts) ?u64 {
+    if (facts.cost_worst_case_total) |n| return n;
+    const bound = facts.cost_total orelse return null;
+    return bound.worstCaseAt(facts.cost_worst_case_body_limit);
 }
 
 fn extractHandlerName(path: []const u8) []const u8 {
@@ -511,6 +523,14 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
                 try w.writeAll("\"");
             },
         }
+        try w.writeAll(",\n          \"zigttp:costWorstCase\": \"");
+        if (costWorstCaseTotal(facts)) |worst| {
+            try w.print("{d}", .{worst});
+        } else {
+            try w.writeAll("unbounded");
+        }
+        try w.writeAll("\"");
+        try w.print(",\n          \"zigttp:costBodyLimit\": \"{d}\"", .{facts.cost_worst_case_body_limit});
     }
 
     // Flow provenance tags
@@ -946,6 +966,11 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, provider: []cons
                 try w.writeAll(")\n");
             },
         }
+        if (costWorstCaseTotal(facts)) |worst| {
+            try w.print("  PROVEN  cost worst-case at {d}-byte body: {d} calls\n", .{ facts.cost_worst_case_body_limit, worst });
+        } else {
+            try w.print("  REVIEW  cost worst-case at {d}-byte body: unbounded\n", .{facts.cost_worst_case_body_limit});
+        }
     }
 
     if (facts.rate_limit_namespace) |ns| {
@@ -1225,6 +1250,44 @@ test "linear cost bound emits costClass/costBound tags and no maxIoDepth" {
     try std.testing.expect(std.mem.indexOf(u8, content, "\"zigttp:costBound\": \"1+1*n\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"zigttp:costSource\": \"5:3 for...of over `ids`\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "zigttp:maxIoDepth") == null);
+}
+
+test "worst-case cost tags render at the body limit" {
+    const allocator = std.testing.allocator;
+
+    const facts = ProvenFacts{
+        .handler_name = "handler",
+        .handler_path = "handler.ts",
+        .env_vars = &.{},
+        .env_proven = true,
+        .egress_hosts = &.{},
+        .egress_proven = true,
+        .cache_namespaces = &.{},
+        .cache_proven = true,
+        .routes = &.{},
+        .proof_level = .none,
+        .checks_passed = &.{},
+        .cost_total = .{ .linear = .{
+            .coefficient = 2,
+            .base = 1,
+            .source = .{ .line = 5, .column = 3, .desc = "for...of over `ids`" },
+        } },
+        .cost_worst_case_total = 1_048_579,
+        .cost_worst_case_body_limit = default_cost_body_limit,
+    };
+
+    const outputs = try renderAws(allocator, &facts);
+    defer {
+        for (outputs) |o| allocator.free(o.content);
+        allocator.free(outputs);
+    }
+
+    const content = outputs[0].content;
+    const class_idx = std.mem.indexOf(u8, content, "\"zigttp:costClass\": \"linear\"") orelse return error.MissingCostClass;
+    const worst_idx = std.mem.indexOf(u8, content, "\"zigttp:costWorstCase\": \"1048579\"") orelse return error.MissingCostWorstCase;
+    const body_idx = std.mem.indexOf(u8, content, "\"zigttp:costBodyLimit\": \"1048576\"") orelse return error.MissingCostBodyLimit;
+    try std.testing.expect(class_idx < worst_idx);
+    try std.testing.expect(worst_idx < body_idx);
 }
 
 test "renderAws with env vars and routes" {

@@ -7,6 +7,8 @@ const zq = @import("zigts");
 const embedded_handler = @import("embedded_handler");
 const fault_explain = @import("fault_explain.zig");
 
+const cost_meter = zq.context.cost_meter;
+
 pub const DurableWorkflowProperties = struct {
     /// Runtime proof gates are off for direct/no-contract runtime use. The
     /// server turns this on only after loading a contract, so older contracts
@@ -15,6 +17,18 @@ pub const DurableWorkflowProperties = struct {
     retry_safe: bool = false,
     idempotent: bool = false,
     fault_covered: bool = false,
+};
+
+pub const CostCeilings = struct {
+    per_class: [cost_meter.class_count]?u64 = @splat(null),
+    total: ?u64 = null,
+    /// True only when the contract's total bound was `.constant`; linear
+    /// bounds can still evaluate to a finite worst case at the body limit.
+    total_is_constant: bool = false,
+
+    pub inline fn classLimit(self: *const CostCeilings, class: cost_meter.ModuleClass) ?u64 {
+        return self.per_class[@intFromEnum(class)];
+    }
 };
 
 pub const RuntimeConfig = struct {
@@ -52,6 +66,9 @@ pub const RuntimeConfig = struct {
     /// false so a no-contract runtime reports faults as predicted, never as a
     /// (false) soundness incident.
     handler_proof: fault_explain.Proof = .{},
+    /// Contract cost envelope evaluated once at startup for the configured
+    /// request body limit.
+    cost_ceilings: ?CostCeilings = null,
     system_config_path: ?[]const u8 = null,
     /// Route durable `zigttp:workflow` child dispatch through a persisted
     /// workflow queue. Requires both `durable_oplog_dir` and `system_config_path`.

@@ -149,6 +149,10 @@ pub const AppendParams = struct {
     /// after `appendEvent` returns. The serialiser writes an `equivalence`
     /// JSON object next to `facts`; older readers ignore it.
     equivalence: ?*const EquivalencePayload = null,
+    /// Present on deploy rows when the contract carries a cost envelope.
+    /// `null` total with a body limit means the worst case is unbounded.
+    cost_worst_case_total: ?u64 = null,
+    cost_worst_case_body_limit: ?u64 = null,
 };
 
 pub fn appendEvent(allocator: std.mem.Allocator, params: AppendParams) !void {
@@ -172,6 +176,16 @@ pub fn appendEvent(allocator: std.mem.Allocator, params: AppendParams) !void {
     }
     try json.objectField("facts");
     try params.facts.writeJson(&json);
+    if (params.cost_worst_case_body_limit) |body_limit| {
+        try json.objectField("costWorstCase");
+        if (params.cost_worst_case_total) |total| {
+            try json.write(total);
+        } else {
+            try json.write("unbounded");
+        }
+        try json.objectField("costBodyLimit");
+        try json.write(body_limit);
+    }
     if (params.perf) |perf| {
         try json.objectField("perf");
         try json.beginObject();

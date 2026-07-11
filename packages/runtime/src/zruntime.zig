@@ -85,6 +85,7 @@ pub const HttpResponse = http_types.HttpResponse;
 // ============================================================================
 
 const runtime_config_mod = @import("runtime_config.zig");
+const cost_meter = zq.context.cost_meter;
 
 pub const RuntimeConfig = runtime_config_mod.RuntimeConfig;
 
@@ -1508,6 +1509,64 @@ pub const Runtime = struct {
         }
     }
 
+    fn arenaHighWatermark(self: *Self) usize {
+        const arena = self.arena_state orelse return 0;
+        return arena.getStats().high_watermark;
+    }
+
+    fn recordCostBoundedIncident(self: *Self, detail: []const u8) void {
+        self.recordSoundnessIncident(&.{"cost_bounded"}, detail);
+    }
+
+    fn recordCostFuseIncidents(self: *Self) void {
+        const ceilings = self.config.cost_ceilings orelse return;
+        const high_water = self.arenaHighWatermark();
+
+        inline for (std.enums.values(cost_meter.ModuleClass)) |class| {
+            if (ceilings.classLimit(class)) |ceiling| {
+                const observed: u64 = self.ctx.cost_meter.count(class);
+                if (observed > ceiling) {
+                    var detail_buf: [192]u8 = undefined;
+                    const detail = std.fmt.bufPrint(
+                        &detail_buf,
+                        "cost envelope exceeded: {s} {d} > {d} (arena high-water {d} bytes)",
+                        .{ @tagName(class), observed, ceiling, high_water },
+                    ) catch "cost envelope exceeded";
+                    self.recordCostBoundedIncident(detail);
+                    return;
+                }
+            }
+        }
+
+        if (ceilings.total) |ceiling| {
+            const observed: u64 = self.ctx.cost_meter.total();
+            if (observed > ceiling) {
+                var detail_buf: [192]u8 = undefined;
+                const detail = std.fmt.bufPrint(
+                    &detail_buf,
+                    "cost envelope exceeded: total {d} > {d} (arena high-water {d} bytes)",
+                    .{ observed, ceiling, high_water },
+                ) catch "cost envelope exceeded";
+                self.recordCostBoundedIncident(detail);
+                return;
+            }
+        }
+
+        if (ceilings.total_is_constant) {
+            const arena = self.arena_state orelse return;
+            const stats = arena.getStats();
+            if (stats.overflow_count > 0) {
+                var detail_buf: [192]u8 = undefined;
+                const detail = std.fmt.bufPrint(
+                    &detail_buf,
+                    "cost arena overflow under constant envelope: overflow_count {d} (arena high-water {d} bytes)",
+                    .{ stats.overflow_count, stats.high_watermark },
+                ) catch "cost arena overflow under constant envelope";
+                self.recordCostBoundedIncident(detail);
+            }
+        }
+    }
+
     fn executeHandlerInternal(self: *Self, request: HttpRequestView, request_id: u64, borrow_body: bool) !HttpResponse {
         self.last_request_body_len = if (request.body) |b| b.len else 0;
         self.active_request = request;
@@ -1538,6 +1597,7 @@ pub const Runtime = struct {
         defer if (tracked) self.active_request_id.store(0, .release);
         var reset_after = self.owns_resources;
         defer if (reset_after) self.resetForNextRequest();
+        defer self.recordCostFuseIncidents();
 
         // === TRACE RECORDING: Set up per-request recorder ===
         const trace_timer = trace_request_recorder.setupRequestRecorder(self, request);
@@ -2175,6 +2235,7 @@ pub const Runtime = struct {
         self.ctx.sp = 0;
         self.ctx.call_depth = 0;
         self.ctx.clearException();
+        self.ctx.cost_meter.reset();
         self.consumed_body_objects.clearRetainingCapacity();
 
         // Reset ephemeral allocations when hybrid allocation is enabled
@@ -3131,6 +3192,141 @@ test "soundness incident on a proven path is written to the incident log" {
     // The single-line handler faults on line 1; the source map (feature A) must
     // surface that line into the incident detail.
     try std.testing.expect(std.mem.indexOf(u8, contents, "NotCallable at 1:") != null);
+}
+
+test "exceeding a constant cost ceiling records a soundness incident" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const log_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cost-incidents.jsonl", .{tmp.sub_path});
+
+    const fd = try incident_log.open(allocator, log_path);
+    defer std.Io.Threaded.closeFd(fd);
+
+    const rt = try Runtime.init(allocator, .{
+        .jit_policy = .disabled,
+        .incident_log_fd = fd,
+        .cost_ceilings = .{
+            .total = 1,
+            .total_is_constant = true,
+        },
+    });
+    defer rt.deinit();
+
+    try rt.loadHandler(
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  env("ONE");
+        \\  env("TWO");
+        \\  return Response.text("ok");
+        \\}
+    , "<cost-exceeded>");
+
+    var request = try makeTestRequest(allocator, "GET", "/cost", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+
+    const contents = try zq.file_io.readFile(allocator, log_path, 64 * 1024);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "soundness_incident") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "cost_bounded") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "cost envelope exceeded") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "total 2 > 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "arena high-water") != null);
+}
+
+test "requests within the ceiling record no incident" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const log_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cost-clean.jsonl", .{tmp.sub_path});
+
+    const fd = try incident_log.open(allocator, log_path);
+    defer std.Io.Threaded.closeFd(fd);
+
+    const rt = try Runtime.init(allocator, .{
+        .jit_policy = .disabled,
+        .incident_log_fd = fd,
+        .cost_ceilings = .{
+            .total = 2,
+            .total_is_constant = true,
+        },
+    });
+    defer rt.deinit();
+
+    try rt.loadHandler(
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  env("ONE");
+        \\  return Response.text("ok");
+        \\}
+    , "<cost-clean>");
+
+    var request = try makeTestRequest(allocator, "GET", "/cost", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+
+    const contents = try zq.file_io.readFile(allocator, log_path, 64 * 1024);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "soundness_incident") == null);
+}
+
+test "cost meter resets between pooled requests" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const log_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cost-reset.jsonl", .{tmp.sub_path});
+
+    const fd = try incident_log.open(allocator, log_path);
+    defer std.Io.Threaded.closeFd(fd);
+
+    const rt = try Runtime.init(allocator, .{
+        .jit_policy = .disabled,
+        .incident_log_fd = fd,
+        .cost_ceilings = .{
+            .total = 1,
+            .total_is_constant = true,
+        },
+    });
+    defer rt.deinit();
+
+    try rt.loadHandler(
+        \\import { env } from "zigttp:env";
+        \\function handler(req) {
+        \\  env("ONE");
+        \\  return Response.text("ok");
+        \\}
+    , "<cost-reset>");
+
+    var first = try makeTestRequest(allocator, "GET", "/first", null);
+    defer first.deinit(allocator);
+    var first_response = try rt.executeHandler(first.asView());
+    defer first_response.deinit();
+    try std.testing.expectEqual(@as(u32, 0), rt.ctx.cost_meter.total());
+
+    var second = try makeTestRequest(allocator, "GET", "/second", null);
+    defer second.deinit(allocator);
+    var second_response = try rt.executeHandler(second.asView());
+    defer second_response.deinit();
+    try std.testing.expectEqual(@as(u32, 0), rt.ctx.cost_meter.total());
+
+    const contents = try zq.file_io.readFile(allocator, log_path, 64 * 1024);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "soundness_incident") == null);
 }
 
 test "proof-gated durable retry blocks unproven workflow replay" {

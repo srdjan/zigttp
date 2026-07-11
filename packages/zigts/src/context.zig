@@ -18,6 +18,8 @@ const bytecode = @import("bytecode.zig");
 const handler_policy = @import("handler_policy.zig");
 const modules = @import("modules/root.zig");
 
+pub const cost_meter = @import("cost_meter.zig");
+
 pub const enable_jit_metrics = builtin.mode != .ReleaseFast;
 
 /// Enhanced JIT metrics for monitoring and tuning compilation behavior
@@ -328,6 +330,9 @@ pub const Context = struct {
     module_state: [MAX_MODULE_STATE_SLOTS]?ModuleStateEntry,
     /// Embedded capability policy for precompiled handlers.
     capability_policy: handler_policy.RuntimePolicy,
+    /// Per-request virtual-module call counters, reset by the runtime after
+    /// request accounting has observed them.
+    cost_meter: cost_meter.Meter = .{},
     /// Canonical filesystem paths that SDK modules may read. Empty means deny.
     sdk_file_allowlist: SdkPathAllowList,
     /// Canonical SQLite database paths that SDK modules may open. Empty means deny.
@@ -405,6 +410,7 @@ pub const Context = struct {
             .literal_shapes = .empty,
             .module_state = .{null} ** MAX_MODULE_STATE_SLOTS,
             .capability_policy = .{},
+            .cost_meter = .{},
             .sdk_file_allowlist = .{},
             .sdk_sqlite_allowlist = .{},
             .interrupt_requested = std.atomic.Value(bool).init(false),

@@ -11,10 +11,15 @@ const zq = @import("zigts");
 const runtime_config = @import("runtime_config.zig");
 const HandlerContract = zq.HandlerContract;
 const HandlerProperties = zq.handler_contract.HandlerProperties;
+const Bound = zq.handler_contract.Bound;
+const BoundProvenance = zq.handler_contract.BoundProvenance;
+const CostEnvelope = zq.handler_contract.CostEnvelope;
 const ModuleCapability = zq.module_binding.ModuleCapability;
 const capability_count = zq.module_binding.capability_count;
+const cost_meter = zq.context.cost_meter;
 
 pub const CapabilityMatrix = zq.handler_contract.CapabilityMatrix;
+pub const CostCeilings = runtime_config.CostCeilings;
 pub const DurableWorkflowProperties = runtime_config.DurableWorkflowProperties;
 
 /// Proven handler properties extracted from the contract.
@@ -120,6 +125,7 @@ pub const RuntimeContract = struct {
     /// All-zero means the contract did not carry a sandbox block.
     policy_hash: [32]u8 = [_]u8{0} ** 32,
     modules: []const []const u8 = &.{},
+    cost_envelope: ?CostEnvelope = null,
     allocator: std.mem.Allocator,
 
     pub fn hasCapability(self: *const RuntimeContract, cap: ModuleCapability) bool {
@@ -137,6 +143,7 @@ pub const RuntimeContract = struct {
         self.allocator.free(self.routes);
         for (self.modules) |m| self.allocator.free(m);
         self.allocator.free(self.modules);
+        if (self.cost_envelope) |*envelope| envelope.deinit(self.allocator);
     }
 
     /// Check if a request method+path matches any proven route.
@@ -227,6 +234,10 @@ pub const ValidatedRuntimeContract = struct {
 
     pub fn durableWorkflowProperties(self: *const ValidatedRuntimeContract) DurableWorkflowProperties {
         return self.inner.durable_workflow_properties;
+    }
+
+    pub fn costCeilings(self: *const ValidatedRuntimeContract, body_limit_bytes: usize) ?CostCeilings {
+        return deriveCostCeilings(self.inner.cost_envelope, @intCast(body_limit_bytes));
     }
 
     pub fn websocket(self: *const ValidatedRuntimeContract) WebSocketInfo {
@@ -363,6 +374,8 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
     // Parse properties
     const properties = parseProperties(root);
     const durable_workflow_properties = parseDurableWorkflowProperties(root);
+    var cost_envelope = try parseCostEnvelope(root, allocator);
+    errdefer if (cost_envelope) |*envelope| envelope.deinit(allocator);
 
     var capabilities: ?CapabilityMatrix = null;
     var artifact_sha256 = [_]u8{0} ** 32;
@@ -429,6 +442,8 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
         for (modules_slice) |m| allocator.free(m);
         allocator.free(modules_slice);
     }
+    const cost_envelope_out = cost_envelope;
+    cost_envelope = null;
 
     return .{ .inner = .{
         .env_vars = env_vars_slice,
@@ -443,6 +458,7 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
         .artifact_sha256 = artifact_sha256,
         .policy_hash = policy_hash,
         .modules = modules_slice,
+        .cost_envelope = cost_envelope_out,
         .allocator = allocator,
     } };
 }
@@ -464,6 +480,123 @@ fn routeReadsRequestState(route_obj: std.json.ObjectMap) bool {
         }
     }
     return false;
+}
+
+fn parseCostEnvelope(root: std.json.ObjectMap, allocator: std.mem.Allocator) !?CostEnvelope {
+    const value = root.get("costEnvelope") orelse return null;
+    if (value == .null) return null;
+    if (value != .object) return error.InvalidContract;
+
+    var envelope = CostEnvelope{};
+    errdefer envelope.deinit(allocator);
+
+    const obj = value.object;
+    if (obj.get("exhaustive")) |v| {
+        if (v == .bool) envelope.exhaustive = v.bool;
+    }
+    if (obj.get("total")) |v| {
+        const total = try parseBoundValue(v, allocator);
+        envelope.total.deinitOwned(allocator);
+        envelope.total = total;
+    }
+    if (obj.get("perModule")) |v| {
+        if (v != .array) return error.InvalidContract;
+        for (v.array.items) |item| {
+            if (item != .object) return error.InvalidContract;
+            const entry_obj = item.object;
+            const module_value = entry_obj.get("module") orelse return error.InvalidContract;
+            const bound_value = entry_obj.get("bound") orelse return error.InvalidContract;
+            if (module_value != .string) return error.InvalidContract;
+
+            var module: ?[]const u8 = try allocator.dupe(u8, module_value.string);
+            errdefer if (module) |m| allocator.free(m);
+            var bound: ?Bound = try parseBoundValue(bound_value, allocator);
+            errdefer if (bound) |*owned| owned.deinitOwned(allocator);
+
+            try envelope.entries.append(allocator, .{
+                .module = module.?,
+                .bound = bound.?,
+            });
+            module = null;
+            bound = null;
+        }
+    }
+
+    return envelope;
+}
+
+fn parseBoundValue(value: std.json.Value, allocator: std.mem.Allocator) !Bound {
+    if (value != .object) return error.InvalidContract;
+    const obj = value.object;
+    const class_value = obj.get("class") orelse return error.InvalidContract;
+    if (class_value != .string) return error.InvalidContract;
+    const class_name = class_value.string;
+
+    if (std.mem.eql(u8, class_name, "constant")) {
+        return .{ .constant = readU32(obj, "value") orelse 0 };
+    }
+    if (std.mem.eql(u8, class_name, "linear")) {
+        return .{ .linear = .{
+            .coefficient = readU32(obj, "coefficient") orelse return error.InvalidContract,
+            .base = readU32(obj, "base") orelse 0,
+            .source = try parseBoundProvenanceValue(obj.get("source") orelse return error.InvalidContract, allocator),
+        } };
+    }
+    if (std.mem.eql(u8, class_name, "unbounded")) {
+        return .{ .unbounded = try parseBoundProvenanceValue(obj.get("source") orelse return error.InvalidContract, allocator) };
+    }
+    return error.InvalidContract;
+}
+
+fn parseBoundProvenanceValue(value: std.json.Value, allocator: std.mem.Allocator) !BoundProvenance {
+    if (value != .object) return error.InvalidContract;
+    const obj = value.object;
+    const desc_value = obj.get("desc");
+    const desc = if (desc_value) |v| blk: {
+        if (v != .string) return error.InvalidContract;
+        break :blk v.string;
+    } else "";
+
+    return .{
+        .line = readU32(obj, "line") orelse 0,
+        .column = readU32(obj, "column") orelse 0,
+        .desc = try allocator.dupe(u8, desc),
+    };
+}
+
+fn readU32(obj: std.json.ObjectMap, key: []const u8) ?u32 {
+    const value = obj.get(key) orelse return null;
+    if (value != .integer) return null;
+    if (value.integer < 0 or value.integer > std.math.maxInt(u32)) return null;
+    return @intCast(value.integer);
+}
+
+pub fn deriveCostCeilings(envelope_opt: ?CostEnvelope, body_limit_bytes: u64) ?CostCeilings {
+    const envelope = envelope_opt orelse return null;
+    var ceilings = CostCeilings{
+        .total = envelope.total.worstCaseAt(body_limit_bytes),
+        .total_is_constant = envelope.total == .constant,
+    };
+    var seen = [_]bool{false} ** cost_meter.class_count;
+
+    for (envelope.entries.items) |entry| {
+        const class = cost_meter.classForName(entry.module);
+        const idx = @intFromEnum(class);
+        seen[idx] = true;
+        const value = entry.bound.worstCaseAt(body_limit_bytes) orelse {
+            ceilings.per_class[idx] = null;
+            continue;
+        };
+        if (ceilings.per_class[idx]) |current| {
+            ceilings.per_class[idx] = std.math.add(u64, current, value) catch std.math.maxInt(u64);
+        } else if (!seen[idx]) {
+            ceilings.per_class[idx] = value;
+        } else {
+            ceilings.per_class[idx] = value;
+        }
+    }
+
+    return ceilings;
 }
 
 fn readSandboxHex(obj: std.json.ObjectMap, key: []const u8, out: *[32]u8) void {
@@ -653,6 +786,15 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         try modules.append(allocator, duped);
     }
 
+    var cost_envelope: ?CostEnvelope = null;
+    errdefer if (cost_envelope) |*envelope| envelope.deinit(allocator);
+    if (hc.cost_envelope) |*envelope| {
+        cost_envelope = try envelope.dupeOwned(allocator);
+    }
+
+    const cost_envelope_out = cost_envelope;
+    cost_envelope = null;
+
     return .{ .inner = .{
         .env_vars = try env_vars.toOwnedSlice(allocator),
         .env_dynamic = hc.env.dynamic,
@@ -693,6 +835,7 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         .artifact_sha256 = hc.artifact_sha256,
         .policy_hash = hc.policy_hash,
         .modules = try modules.toOwnedSlice(allocator),
+        .cost_envelope = cost_envelope_out,
         .allocator = allocator,
     } };
 }
