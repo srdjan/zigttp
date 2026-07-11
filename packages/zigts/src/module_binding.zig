@@ -17,6 +17,7 @@ const build_options = @import("build_options");
 const object = @import("object.zig");
 const value = @import("value.zig");
 const context = @import("context.zig");
+const cost_meter = context.cost_meter;
 const compat = @import("compat.zig");
 const file_io = @import("file_io.zig");
 const sqlite_runtime = @import("sqlite.zig");
@@ -76,6 +77,8 @@ pub fn wrapNativeFnWithCapabilities(
         fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
             const token = pushActiveModuleContext(specifier, required_capabilities);
             defer popActiveModuleContext(token);
+            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            ctx.cost_meter.bump(comptime cost_meter.classForSpecifier(specifier));
             return user_fn(ctx_ptr, this, args);
         }
     }.call;
@@ -90,7 +93,9 @@ pub fn wrapModuleFnWithCapabilities(
         fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
             const token = pushActiveModuleContext(specifier, required_capabilities);
             defer popActiveModuleContext(token);
-            return user_fn(@ptrCast(ctx_ptr), this, args);
+            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            ctx.cost_meter.bump(comptime cost_meter.classForSpecifier(specifier));
+            return user_fn(contextToHandle(ctx), this, args);
         }
     }.call;
 }
@@ -2114,6 +2119,12 @@ test "validateBindings accepts idempotent_call on write-effect function" {
 }
 
 test "wrapNativeFnWithCapabilities activates context for built-in native fns" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
     const wrapped = comptime wrapNativeFnWithCapabilities(
         struct {
             fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
@@ -2125,8 +2136,9 @@ test "wrapNativeFnWithCapabilities activates context for built-in native fns" {
         &.{.clock},
     );
 
-    const result = try wrapped(@ptrFromInt(0x1), value.JSValue.undefined_val, &.{});
+    const result = try wrapped(ctx, value.JSValue.undefined_val, &.{});
     try std.testing.expect(result.isTrue());
+    try std.testing.expectEqual(@as(u32, 1), ctx.cost_meter.count(.other));
 }
 
 // Sandbox invariant: when a NativeFn produced by wrapModuleFnWithCapabilities
@@ -2141,6 +2153,12 @@ test "wrapNativeFnWithCapabilities activates context for built-in native fns" {
 // the wrapped pointer - this test would fail because the inner function would
 // observe an empty active context.
 test "wrapModuleFnWithCapabilities invocation activates threadlocal context" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
     const Observed = struct {
         var saw_clock: bool = false;
         var saw_random: bool = false;
@@ -2154,8 +2172,8 @@ test "wrapModuleFnWithCapabilities invocation activates threadlocal context" {
         fn f(_: *ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
             Observed.saw_clock = activeContextHasCapability(.clock);
             Observed.saw_random = activeContextHasCapability(.random);
-            if (active_module_context) |ctx| {
-                Observed.specifier_seen = ctx.specifier;
+            if (active_module_context) |active_ctx| {
+                Observed.specifier_seen = active_ctx.specifier;
             }
             return value.JSValue.true_val;
         }
@@ -2167,16 +2185,43 @@ test "wrapModuleFnWithCapabilities invocation activates threadlocal context" {
         &.{.clock},
     );
 
-    const result = try wrapped(@ptrFromInt(0x1), value.JSValue.undefined_val, &.{});
+    const result = try wrapped(ctx, value.JSValue.undefined_val, &.{});
     try std.testing.expect(result.isTrue());
     try std.testing.expect(Observed.saw_clock);
     try std.testing.expect(!Observed.saw_random);
     try std.testing.expectEqualStrings("zigttp:invariant-test", Observed.specifier_seen);
+    try std.testing.expectEqual(@as(u32, 1), ctx.cost_meter.count(.other));
 
     // Threadlocal must be torn down after the wrapped call returns so that
     // a subsequent call from outside any module context does not inherit
     // residual capabilities.
     try std.testing.expect(active_module_context == null);
+}
+
+test "module call bumps the context cost meter" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const module_fn: ModuleFn = struct {
+        fn f(_: *ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.true_val;
+        }
+    }.f;
+
+    const wrapped = comptime wrapModuleFnWithCapabilities(
+        module_fn,
+        "zigttp:sql",
+        &.{},
+    );
+
+    _ = try wrapped(ctx, value.JSValue.undefined_val, &.{});
+    _ = try wrapped(ctx, value.JSValue.undefined_val, &.{});
+
+    try std.testing.expectEqual(@as(u32, 2), ctx.cost_meter.count(.sql));
+    try std.testing.expectEqual(@as(u32, 2), ctx.cost_meter.total());
 }
 
 // Policy gating: the four `allows*ForActiveModule` helpers are the only

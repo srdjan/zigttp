@@ -10,10 +10,12 @@ const builtin = @import("builtin");
 const zigts = @import("zigts");
 const zigts_cli = @import("zigts_cli");
 const precompile = zigts_cli.precompile;
+const deploy_manifest = zigts_cli.deploy_manifest;
 const shared = @import("cli_shared.zig");
 const self_extract = @import("self_extract.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
 const live_reload = @import("live_reload.zig");
+const proof_ledger = @import("proof_ledger.zig");
 const project_config_mod = @import("project_config");
 const cli_paths = @import("cli_paths.zig");
 const resolveRuntimeBinary = cli_paths.resolveRuntimeBinary;
@@ -428,6 +430,30 @@ fn buildAttestationJws(
     return try attest_build_receipt.buildJws(allocator, contract_json, bytecode, contract);
 }
 
+fn appendDeployLedgerEntry(
+    allocator: std.mem.Allocator,
+    contract: *const zigts.HandlerContract,
+    handler_path: []const u8,
+    sha_hex: []const u8,
+    service_name: []const u8,
+) !void {
+    var facts = try live_reload.factsFromContract(allocator, contract, sha_hex);
+    defer facts.deinit(allocator);
+
+    var params = proof_ledger.AppendParams{
+        .kind = .deploy,
+        .facts = &facts,
+        .handler_path = handler_path,
+        .service_name = service_name,
+    };
+    if (contract.cost_envelope) |envelope| {
+        params.cost_worst_case_total = envelope.total.worstCaseAt(deploy_manifest.default_cost_body_limit);
+        params.cost_worst_case_body_limit = deploy_manifest.default_cost_body_limit;
+    }
+
+    try proof_ledger.appendEvent(allocator, params);
+}
+
 /// Inputs to `buildArtifact`. Bundled so the three call sites
 /// (`compileCommand`, `buildCommand`, `localDeployCommand`) name what they
 /// pass rather than relying on positional order across a 5-param signature.
@@ -572,7 +598,7 @@ fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void 
             var sha_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash(source, &sha_digest, .{});
             const sha_hex = std.fmt.bytesToHex(sha_digest, .lower);
-            try live_reload.appendLedgerEntry(allocator, .deploy, contract, handler_path, &sha_hex, service_name);
+            try appendDeployLedgerEntry(allocator, contract, handler_path, &sha_hex, service_name);
         }
     }
 
@@ -744,6 +770,40 @@ test "prepareProjectArtifact override path: passes through unchanged, no parent 
     defer artifact.deinit(testing.allocator);
 
     try testing.expectEqualStrings("/tmp/explicit-name", artifact.output_path);
+}
+
+test "deploy ledger payload includes worst-case cost summary" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try proof_ledger.chdirTmpForTest(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const path = try allocator.dupe(u8, "handler.ts");
+    var contract = zigts.handler_contract.emptyContract(path);
+    defer contract.deinit(allocator);
+    contract.cost_envelope = .{
+        .total = .{ .linear = .{
+            .coefficient = 2,
+            .base = 1,
+            .source = .{
+                .line = 5,
+                .column = 3,
+                .desc = try allocator.dupe(u8, "for...of over `ids`"),
+            },
+        } },
+    };
+
+    try appendDeployLedgerEntry(allocator, &contract, "handler.ts", "sha-cost", "demo");
+
+    const raw = try zigts.file_io.readFile(allocator, proof_ledger.ledgerPath(), 64 * 1024);
+    defer allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"kind\":\"deploy\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"costWorstCase\":1048579") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"costBodyLimit\":1048576") != null);
 }
 
 test "prepareProjectArtifact returns NoProjectConfig when no zigttp.json on or above CWD" {

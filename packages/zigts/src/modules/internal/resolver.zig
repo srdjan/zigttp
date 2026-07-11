@@ -7,6 +7,7 @@
 const std = @import("std");
 const object = @import("../../object.zig");
 const context = @import("../../context.zig");
+const gc = @import("../../gc.zig");
 const trace = @import("../../trace.zig");
 const mb = @import("../../module_binding.zig");
 const builtin_modules = @import("../../builtin_modules.zig");
@@ -247,6 +248,12 @@ test "validateImports reports first missing export" {
 const value = @import("../../value.zig");
 
 test "wrappedExportFn propagates required_capabilities through module_func" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
     const probe = struct {
         fn run(_: *mb.ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
             // Asserts execute against the active context installed by the
@@ -271,8 +278,9 @@ test "wrappedExportFn propagates required_capabilities through module_func" {
     };
 
     const wrapped = comptime wrappedExportFn(binding, fb);
-    const result = try wrapped(@ptrFromInt(0x1), value.JSValue.undefined_val, &.{});
+    const result = try wrapped(ctx, value.JSValue.undefined_val, &.{});
     try std.testing.expect(result.isTrue());
+    try std.testing.expectEqual(@as(u32, 1), ctx.cost_meter.count(.other));
 }
 
 test "wrappedExportFn leaves func path unwrapped when no capabilities declared" {
