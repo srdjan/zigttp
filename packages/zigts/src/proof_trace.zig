@@ -17,6 +17,7 @@ const flow_checker = @import("flow_checker.zig");
 const counterexample = @import("counterexample.zig");
 const ir = @import("parser/ir.zig");
 const json_utils = @import("json_utils.zig");
+const spec_discharge = @import("spec_discharge.zig");
 
 const HandlerProperties = handler_contract.HandlerProperties;
 const HandlerContract = handler_contract.HandlerContract;
@@ -435,6 +436,24 @@ fn buildTrace(
                         );
                     }
                 }
+            } else if (!holds and eql(name, "cost_bounded")) {
+                if (contract.cost_envelope) |envelope| {
+                    if (envelope.total == .unbounded) {
+                        const source = envelope.total.unbounded;
+                        trace.summary = try std.fmt.allocPrint(
+                            arena,
+                            "Cost is unbounded because {s} cannot be assigned a finite module-call bound.",
+                            .{source.desc},
+                        );
+                        trace.counterexample = .{
+                            .kind = .offending_node,
+                            .line = source.line,
+                            .column = source.column,
+                            .snippet = source.desc,
+                            .fix = spec_discharge.suggestionFor("cost_bounded") orelse "",
+                        };
+                    }
+                }
             } else if (holds and paths_enumerated > 0) {
                 trace.summary = try std.fmt.allocPrint(
                     arena,
@@ -764,6 +783,54 @@ test "collect emits durable workflow negative reasons" {
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"durable_workflow_retry_safe\":{") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "Durable workflow retry safety is unproven") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "dynamic names") != null);
+}
+
+test "unbounded cost trace carries loop counterexample and lever" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var contract = handler_contract.emptyContract(try testing.allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(testing.allocator);
+    contract.properties = .{
+        .pure = true,
+        .read_only = true,
+        .stateless = true,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = false,
+        .cost_bounded = false,
+    };
+    contract.cost_envelope = .{
+        .total = .{ .unbounded = .{
+            .line = 17,
+            .column = 5,
+            .desc = try testing.allocator.dupe(u8, "for...of over `ids`"),
+        } },
+        .exhaustive = true,
+    };
+
+    const traces = try collect(
+        arena.allocator(),
+        &contract,
+        &.{},
+        &.{},
+        undefined,
+        3,
+        true,
+    );
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
+    try writeJson(&aw.writer, traces);
+    buf = aw.toArrayList();
+
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"cost_bounded\":{") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"kind\":\"offending-node\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"line\":17") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "for...of over `ids`") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "LIMIT") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "maxItems") != null);
 }
 
 test "writeJson emits an offending-node counterexample" {
