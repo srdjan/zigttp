@@ -331,6 +331,52 @@ Results appear in:
 - Deployment manifest tags (`zigttp:faultCovered`)
 - Build report alongside other PROVEN/--- labels
 
+### Cost Envelope (Multiplicity)
+
+The banned back-edge constructs (`while`, `do...while`, `for(;;)`, recursion)
+buy more than termination: they make the worst-path resource cost of a handler
+statically computable. `PathGenerator.buildCostEnvelope` folds the multiplicity
+of every module call along the enumerated paths into a per-module `CostEnvelope`
+(`packages/zigts/src/contract_types.zig`). Each bound is a symbolic `Bound`:
+
+- `constant` - exactly `n` calls on the worst path.
+- `linear` - `base + coefficient * |source|` calls, where `|source|` is the
+  length of one request-derived collection an I/O call loops over. The bound
+  carries the loop's source location and the collection name, so a handler that
+  calls `sqlOne` inside `for (const id of ids)` reports `1 + 1*|ids|` rather than
+  the old `max_io_depth` undercount of `2` (which walked the loop body once).
+- `unbounded` - no expressible bound (an unidentifiable iterable, or two dynamic
+  collections on one path), carrying the offending loop's location.
+
+The envelope is written to `contract.json` under `costEnvelope`, covered by the
+`Zigttp-Attest` JWS signature, and composed across `serviceCall` chains by the
+system linker (a handler with no envelope composes as `unbounded`, failing
+closed). `HandlerProperties.max_io_depth` is kept but made honest: it is set
+only when the total bound is constant, else `null`.
+
+A `linear` or `unbounded` bound is dischargeable to `constant` by sizing the
+loop source: iterate a literal array, a `range(n)` literal, `Object.keys` of an
+object literal, a `.slice(0, k)`, a SQL statement ending in `LIMIT n`, or a
+field of a `zigttp:validate` schema that declares `maxItems`. When the total
+bound is constant or linear with exhaustive path enumeration, the
+`cost_bounded` property holds and `Spec<"cost_bounded">` discharges against it;
+otherwise the proof card's counterexample names the loop and the discharge
+lever.
+
+Results appear in:
+- `contract.json` under `costEnvelope`, plus the honest `properties.maxIoDepth`
+- The `cost_bounded` proof chip and `Spec<"cost_bounded">` discharge
+- The `contract_diff` cost lane: widening a bound to `unbounded` is breaking, a
+  bounded widening (`constant` to `linear`) is additive; this reaches
+  `prove`, `prove-behavior`, the expert equivalence receipt, and `proofs gate`
+- Deployment manifest tags (`zigttp:costClass`, `zigttp:costBound`,
+  `zigttp:costSource`, `zigttp:costWorstCase` evaluated at `--max-body-size`)
+  and the `kind=deploy` receipt
+- A runtime cost fuse: the interpreter counts module calls per request at the
+  capability-enforcement chokepoint and, on an excess over the proven envelope,
+  records a `cost_bounded` soundness incident (log-only, with the arena
+  high-water as evidence; it never alters the response)
+
 ## Running Tests
 
 ```bash
