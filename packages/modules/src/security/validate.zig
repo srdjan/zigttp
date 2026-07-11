@@ -77,6 +77,7 @@ const CompiledSchema = struct {
     schema_type: ?SchemaType = null,
     min_length: ?u32 = null,
     max_length: ?u32 = null,
+    max_items: ?u32 = null,
     minimum: ?f64 = null,
     maximum: ?f64 = null,
     format: ?FormatType = null,
@@ -281,6 +282,7 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
             const supported = std.mem.eql(u8, key, "type") or
                 std.mem.eql(u8, key, "minLength") or
                 std.mem.eql(u8, key, "maxLength") or
+                std.mem.eql(u8, key, "maxItems") or
                 std.mem.eql(u8, key, "minimum") or
                 std.mem.eql(u8, key, "maximum") or
                 std.mem.eql(u8, key, "required") or
@@ -302,6 +304,7 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
     };
     if (obj.get("minLength")) |v| schema.min_length = jsonToU32(v) orelse return error.InvalidSchema;
     if (obj.get("maxLength")) |v| schema.max_length = jsonToU32(v) orelse return error.InvalidSchema;
+    if (obj.get("maxItems")) |v| schema.max_items = jsonToU32(v) orelse return error.InvalidSchema;
     if (obj.get("minimum")) |v| schema.minimum = jsonToF64(v) orelse return error.InvalidSchema;
     if (obj.get("maximum")) |v| schema.maximum = jsonToF64(v) orelse return error.InvalidSchema;
 
@@ -398,7 +401,7 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
     // without `"type":"array"` would accept any non-array value yet still stamp
     // it `.validated`. Reject the under-specified schema at compile time.
     const is_array_type = schema.schema_type != null and schema.schema_type.? == .array;
-    if (schema.items != null and !is_array_type) {
+    if ((schema.items != null or schema.max_items != null) and !is_array_type) {
         return error.InvalidSchema;
     }
 
@@ -702,16 +705,30 @@ fn validateRecursive(
         try appendValidationError(allocator, errors, path, "type mismatch");
     }
 
-    if (sdk.isArray(val) and schema.items != null) {
+    if (sdk.isArray(val)) {
         const len = sdk.arrayLength(val) orelse return;
-        const items_schema = schema.items.?;
-        for (0..len) |i| {
-            if (sdk.arrayGet(handle, val, @intCast(i))) |elem| {
-                const child_path = try buildIndexPath(allocator, path, i);
-                defer allocator.free(child_path);
-                try validateRecursive(handle, items_schema, elem, child_path, errors);
+        try validateArrayLength(allocator, schema, len, path, errors);
+        if (schema.items) |items_schema| {
+            for (0..len) |i| {
+                if (sdk.arrayGet(handle, val, @intCast(i))) |elem| {
+                    const child_path = try buildIndexPath(allocator, path, i);
+                    defer allocator.free(child_path);
+                    try validateRecursive(handle, items_schema, elem, child_path, errors);
+                }
             }
         }
+    }
+}
+
+fn validateArrayLength(
+    allocator: std.mem.Allocator,
+    schema: *const CompiledSchema,
+    len: u32,
+    path: []const u8,
+    errors: *std.ArrayList(ValidationError),
+) !void {
+    if (schema.max_items) |max| {
+        if (len > max) try appendValidationError(allocator, errors, path, "too many items");
     }
 }
 
@@ -895,6 +912,47 @@ test "schema compilation: array with items" {
     }
     try std.testing.expect(schema.schema_type.? == .array);
     try std.testing.expect(schema.items.?.schema_type.? == .number);
+}
+
+test "maxItems rejects oversized arrays" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"array\",\"maxItems\":2}", .{});
+    defer parsed.deinit();
+    const schema = try compileSchemaFromJson(allocator, parsed.value);
+    defer {
+        schema.deinit(allocator);
+        allocator.destroy(schema);
+    }
+
+    var errors: std.ArrayList(ValidationError) = .empty;
+    defer {
+        for (errors.items) |err| allocator.free(err.path);
+        errors.deinit(allocator);
+    }
+
+    try validateArrayLength(allocator, schema, 3, "", &errors);
+    try std.testing.expectEqual(@as(usize, 1), errors.items.len);
+    try std.testing.expectEqualStrings("", errors.items[0].path);
+    try std.testing.expectEqualStrings("too many items", errors.items[0].message);
+}
+
+test "maxItems without array type fails schema compile" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"object\",\"maxItems\":2}", .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidSchema, compileSchemaFromJson(allocator, parsed.value));
+}
+
+test "maxItems keyword is accepted by the fail-closed allowlist" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"array\",\"maxItems\":2}", .{});
+    defer parsed.deinit();
+    const schema = try compileSchemaFromJson(allocator, parsed.value);
+    defer {
+        schema.deinit(allocator);
+        allocator.destroy(schema);
+    }
+    try std.testing.expectEqual(@as(?u32, 2), schema.max_items);
 }
 
 test "schema compilation: enum values" {

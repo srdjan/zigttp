@@ -1266,6 +1266,8 @@ pub const PathGenerator = struct {
     /// P2 extends this body to discharge known-size iterables. Keep callers
     /// above this seam so later phases can edit this function in isolation.
     fn resolveLoopBound(self: *PathGenerator, iterable: NodeIndex, loop_node: NodeIndex) LoopBound {
+        if (self.constantLoopBound(iterable)) |count| return .{ .constant = count };
+
         const loc: ir.SourceLocation = self.ir_view.getLoc(loop_node) orelse .{ .line = 0, .column = 0, .offset = 0 };
         const tag = self.ir_view.getTag(iterable) orelse {
             return .{ .unknown = .{
@@ -1301,6 +1303,272 @@ pub const PathGenerator = struct {
                 .desc = self.allocLoopDesc("{s}", .{"for...of (unrecognized iterable)"}, "for...of (unrecognized iterable)"),
             } },
         }
+    }
+
+    fn constantLoopBound(self: *PathGenerator, iterable: NodeIndex) ?u32 {
+        const tag = self.ir_view.getTag(iterable) orelse return null;
+        switch (tag) {
+            .array_literal => return self.arrayLiteralCount(iterable),
+            .call, .method_call => {
+                if (self.rangeCallCount(iterable)) |count| return count;
+                if (self.sliceCallCeiling(iterable)) |count| return count;
+                if (self.objectKeysLiteralCount(iterable)) |count| return count;
+            },
+            .identifier => if (self.sqlLimitForIdentifier(iterable)) |count| return count,
+            .member_access => if (self.schemaMaxItemsForMember(iterable)) |count| return count,
+            else => {},
+        }
+        return null;
+    }
+
+    fn arrayLiteralCount(self: *const PathGenerator, node: NodeIndex) ?u32 {
+        const arr = self.ir_view.getArray(node) orelse return null;
+        if (arr.has_spread) return null;
+        return arr.elements_count;
+    }
+
+    fn rangeCallCount(self: *const PathGenerator, node: NodeIndex) ?u32 {
+        const call = self.ir_view.getCall(node) orelse return null;
+        if (!self.isUndeclaredGlobalName(call.callee, "range")) return null;
+
+        if (call.args_count == 1) {
+            const end_node = self.ir_view.getListIndex(call.args_start, 0);
+            const end = self.intLiteralValue(end_node) orelse return null;
+            return nonNegativeI64ToU32(end);
+        }
+        if (call.args_count == 2) {
+            const start_node = self.ir_view.getListIndex(call.args_start, 0);
+            const end_node = self.ir_view.getListIndex(call.args_start, 1);
+            const start = self.intLiteralValue(start_node) orelse return null;
+            const end = self.intLiteralValue(end_node) orelse return null;
+            return nonNegativeI64ToU32(end - start);
+        }
+        return null;
+    }
+
+    fn sliceCallCeiling(self: *const PathGenerator, node: NodeIndex) ?u32 {
+        const call = self.ir_view.getCall(node) orelse return null;
+        const member = self.memberCalleeNamed(call.callee, "slice") orelse return null;
+        _ = member;
+        if (call.args_count < 2) return null;
+
+        const start_node = self.ir_view.getListIndex(call.args_start, 0);
+        const end_node = self.ir_view.getListIndex(call.args_start, 1);
+        const start = self.intLiteralValue(start_node) orelse return null;
+        const end = self.intLiteralValue(end_node) orelse return null;
+        if (start != 0 or end < 0) return null;
+        return nonNegativeI64ToU32(end);
+    }
+
+    fn objectKeysLiteralCount(self: *const PathGenerator, node: NodeIndex) ?u32 {
+        const call = self.ir_view.getCall(node) orelse return null;
+        const member = self.memberCalleeNamed(call.callee, "keys") orelse return null;
+        if (!self.isUndeclaredGlobalName(member.object, "Object")) return null;
+        if (call.args_count != 1) return null;
+
+        const obj_node = self.ir_view.getListIndex(call.args_start, 0);
+        return self.objectLiteralPropertyCount(obj_node);
+    }
+
+    fn sqlLimitForIdentifier(self: *const PathGenerator, node: NodeIndex) ?u32 {
+        const binding = self.ir_view.getBinding(node) orelse return null;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const init_node = self.var_inits.get(key) orelse return null;
+        const tag = self.ir_view.getTag(init_node) orelse return null;
+        if (tag != .call) return null;
+        const call = self.ir_view.getCall(init_node) orelse return null;
+        const meta = self.getCalleeMeta(call.callee) orelse return null;
+        if (!std.mem.eql(u8, meta.module, "sql")) return null;
+        if (!std.mem.eql(u8, meta.func, "sql") and !std.mem.eql(u8, meta.func, "sqlMany")) return null;
+        if (call.args_count == 0) return null;
+
+        const statement_node = self.ir_view.getListIndex(call.args_start, 0);
+        const statement = self.stringLiteralValue(statement_node) orelse return null;
+        return trailingLimitValue(statement);
+    }
+
+    const ValidatedField = struct {
+        binding_key: u32,
+        field: []const u8,
+    };
+
+    fn schemaMaxItemsForMember(self: *PathGenerator, node: NodeIndex) ?u32 {
+        const access = self.validatedFieldAccess(node) orelse return null;
+        const init_node = self.var_inits.get(access.binding_key) orelse return null;
+        const tag = self.ir_view.getTag(init_node) orelse return null;
+        if (tag != .call) return null;
+        const call = self.ir_view.getCall(init_node) orelse return null;
+        const meta = self.getCalleeMeta(call.callee) orelse return null;
+        if (!std.mem.eql(u8, meta.module, "validate")) return null;
+        if (!std.mem.eql(u8, meta.func, "validateJson") and
+            !std.mem.eql(u8, meta.func, "validateObject") and
+            !std.mem.eql(u8, meta.func, "coerceJson"))
+        {
+            return null;
+        }
+        if (call.args_count == 0) return null;
+
+        const schema_name_node = self.ir_view.getListIndex(call.args_start, 0);
+        const schema_name = self.stringLiteralValue(schema_name_node) orelse return null;
+        const schema_json = self.schemaJsonLiteral(schema_name) orelse return null;
+        return self.schemaFieldMaxItems(schema_json, access.field);
+    }
+
+    fn validatedFieldAccess(self: *const PathGenerator, node: NodeIndex) ?ValidatedField {
+        const outer = self.ir_view.getMember(node) orelse return null;
+        const field = self.resolveAtomName(outer.property) orelse return null;
+
+        var root = outer.object;
+        if (self.ir_view.getTag(root) == .member_access) {
+            const inner = self.ir_view.getMember(root) orelse return null;
+            const inner_prop = self.resolveAtomName(inner.property) orelse return null;
+            if (!std.mem.eql(u8, inner_prop, "value")) return null;
+            root = inner.object;
+        }
+
+        const root_tag = self.ir_view.getTag(root) orelse return null;
+        if (root_tag != .identifier) return null;
+        const binding = self.ir_view.getBinding(root) orelse return null;
+        return .{
+            .binding_key = packBindingKey(binding.scope_id, binding.slot),
+            .field = field,
+        };
+    }
+
+    fn schemaJsonLiteral(self: *const PathGenerator, schema_name: []const u8) ?[]const u8 {
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .call) continue;
+
+            const call = self.ir_view.getCall(idx) orelse continue;
+            const meta = self.getCalleeMeta(call.callee) orelse continue;
+            if (!std.mem.eql(u8, meta.module, "validate")) continue;
+            if (!std.mem.eql(u8, meta.func, "schemaCompile")) continue;
+            if (call.args_count < 2) continue;
+
+            const name_node = self.ir_view.getListIndex(call.args_start, 0);
+            const found_name = self.stringLiteralValue(name_node) orelse continue;
+            if (!std.mem.eql(u8, found_name, schema_name)) continue;
+
+            const schema_node = self.ir_view.getListIndex(call.args_start, 1);
+            return self.stringLiteralValue(schema_node);
+        }
+        return null;
+    }
+
+    fn schemaFieldMaxItems(self: *PathGenerator, schema_json: []const u8, field: []const u8) ?u32 {
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, schema_json, .{}) catch return null;
+        defer parsed.deinit();
+
+        const root = switch (parsed.value) {
+            .object => |obj| obj,
+            else => return null,
+        };
+        const properties_val = root.get("properties") orelse return null;
+        const properties = switch (properties_val) {
+            .object => |obj| obj,
+            else => return null,
+        };
+        const field_val = properties.get(field) orelse return null;
+        const field_obj = switch (field_val) {
+            .object => |obj| obj,
+            else => return null,
+        };
+        const field_type = field_obj.get("type") orelse return null;
+        switch (field_type) {
+            .string => |s| if (!std.mem.eql(u8, s, "array")) return null,
+            else => return null,
+        }
+        const max_items = field_obj.get("maxItems") orelse return null;
+        return jsonValueToU32(max_items);
+    }
+
+    fn objectLiteralPropertyCount(self: *const PathGenerator, node: NodeIndex) ?u32 {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag != .object_literal) return null;
+        const obj = self.ir_view.getObject(node) orelse return null;
+        var count: u32 = 0;
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            const prop_tag = self.ir_view.getTag(prop_idx) orelse return null;
+            switch (prop_tag) {
+                .object_property, .object_method, .object_getter, .object_setter => count += 1,
+                else => return null,
+            }
+        }
+        return count;
+    }
+
+    fn memberCalleeNamed(self: *const PathGenerator, callee: NodeIndex, name: []const u8) ?Node.MemberExpr {
+        const tag = self.ir_view.getTag(callee) orelse return null;
+        if (tag != .member_access) return null;
+        const member = self.ir_view.getMember(callee) orelse return null;
+        const prop_name = self.resolveAtomName(member.property) orelse return null;
+        if (!std.mem.eql(u8, prop_name, name)) return null;
+        return member;
+    }
+
+    fn isUndeclaredGlobalName(self: *const PathGenerator, node: NodeIndex, name: []const u8) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        if (tag != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        if (binding.kind != .undeclared_global) return false;
+        const actual = self.resolveAtomName(binding.slot) orelse return false;
+        return std.mem.eql(u8, actual, name);
+    }
+
+    fn intLiteralValue(self: *const PathGenerator, node: NodeIndex) ?i64 {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag != .lit_int) return null;
+        return self.ir_view.getIntValue(node) orelse return null;
+    }
+
+    fn stringLiteralValue(self: *const PathGenerator, node: NodeIndex) ?[]const u8 {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag != .lit_string) return null;
+        const str_idx = self.ir_view.getStringIdx(node) orelse return null;
+        return self.ir_view.getString(str_idx);
+    }
+
+    fn nonNegativeI64ToU32(value: i64) u32 {
+        if (value <= 0) return 0;
+        if (value > std.math.maxInt(u32)) return std.math.maxInt(u32);
+        return @intCast(value);
+    }
+
+    fn trailingLimitValue(statement: []const u8) ?u32 {
+        var end = statement.len;
+        while (end > 0 and std.ascii.isWhitespace(statement[end - 1])) : (end -= 1) {}
+
+        const digits_end = end;
+        var digits_start = digits_end;
+        while (digits_start > 0 and isAsciiDigit(statement[digits_start - 1])) : (digits_start -= 1) {}
+        if (digits_start == digits_end) return null;
+
+        var limit_end = digits_start;
+        while (limit_end > 0 and std.ascii.isWhitespace(statement[limit_end - 1])) : (limit_end -= 1) {}
+        if (limit_end < "LIMIT".len) return null;
+        const limit_start = limit_end - "LIMIT".len;
+        if (!std.ascii.eqlIgnoreCase(statement[limit_start..limit_end], "LIMIT")) return null;
+        if (limit_start > 0 and !std.ascii.isWhitespace(statement[limit_start - 1])) return null;
+
+        return std.fmt.parseInt(u32, statement[digits_start..digits_end], 10) catch null;
+    }
+
+    fn isAsciiDigit(c: u8) bool {
+        return c >= '0' and c <= '9';
+    }
+
+    fn jsonValueToU32(v: std.json.Value) ?u32 {
+        const max: f64 = @floatFromInt(std.math.maxInt(u32));
+        return switch (v) {
+            .integer => |i| if (i >= 0 and i <= std.math.maxInt(u32)) @intCast(i) else null,
+            .float => |f| if (std.math.isFinite(f) and f >= 0 and f <= max) @intFromFloat(@trunc(f)) else null,
+            else => null,
+        };
     }
 
     /// Best-effort source name for a `for...of` iterable, for provenance only.
@@ -1554,4 +1822,172 @@ test "loop-aware envelope leaves generated test stubs unchanged" {
     defer envelope.deinit(allocator);
     try std.testing.expectEqual(contract_types.BoundClass.linear, envelope.total.class());
     try std.testing.expectEqual(@as(u32, 1), envelope.total.linear.coefficient);
+}
+
+test "for...of over array literal discharges to constant" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sqlOne } from "zigttp:sql";
+        \\export function handler(req) {
+        \\  for (const id of [1, 2, 3]) {
+        \\    sqlOne("row");
+        \\  }
+        \\  return Response.json({});
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expectEqual(contract_types.BoundClass.constant, envelope.total.class());
+    try std.testing.expectEqual(@as(u32, 3), envelope.total.constant);
+}
+
+test "range(n) literal discharges loop bound" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sqlOne } from "zigttp:sql";
+        \\export function handler(req) {
+        \\  for (const id of range(4)) {
+        \\    sqlOne("row");
+        \\  }
+        \\  return Response.json({});
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expectEqual(contract_types.BoundClass.constant, envelope.total.class());
+    try std.testing.expectEqual(@as(u32, 4), envelope.total.constant);
+}
+
+test "slice(0, k) discharges loop bound" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sqlOne } from "zigttp:sql";
+        \\export function handler(req) {
+        \\  const ids = req.ids;
+        \\  for (const id of ids.slice(0, 2)) {
+        \\    sqlOne("row");
+        \\  }
+        \\  return Response.json({});
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expectEqual(contract_types.BoundClass.constant, envelope.total.class());
+    try std.testing.expectEqual(@as(u32, 2), envelope.total.constant);
+}
+
+test "Object.keys of object literal discharges loop bound" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sqlOne } from "zigttp:sql";
+        \\export function handler(req) {
+        \\  for (const key of Object.keys({ a: 1, b: 2, c: 3 })) {
+        \\    sqlOne("row");
+        \\  }
+        \\  return Response.json({});
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expectEqual(contract_types.BoundClass.constant, envelope.total.class());
+    try std.testing.expectEqual(@as(u32, 3), envelope.total.constant);
+}
+
+test "sql LIMIT n discharges loop over query rows" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sqlMany, sqlOne } from "zigttp:sql";
+        \\export function handler(req) {
+        \\  const rows = sqlMany("SELECT id FROM todos ORDER BY id LIMIT 3");
+        \\  for (const row of rows) {
+        \\    sqlOne("row");
+        \\  }
+        \\  return Response.json({});
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expectEqual(contract_types.BoundClass.constant, envelope.total.class());
+    try std.testing.expectEqual(@as(u32, 4), envelope.total.constant);
+}
+
+test "validated field with maxItems discharges to constant ceiling" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { schemaCompile, validateJson } from "zigttp:validate";
+        \\import { sqlOne } from "zigttp:sql";
+        \\schemaCompile("payload", "{\"type\":\"object\",\"properties\":{\"items\":{\"type\":\"array\",\"maxItems\":2}}}");
+        \\export function handler(req) {
+        \\  const parsed = validateJson("payload", req.body);
+        \\  if (!parsed.ok) return Response.json({}, { status: 400 });
+        \\  for (const item of parsed.value.items) {
+        \\    sqlOne("row");
+        \\  }
+        \\  return Response.json({});
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    const sql_bound = envelope.find("sql") orelse return error.ExpectedSqlBound;
+    try std.testing.expectEqual(contract_types.BoundClass.constant, sql_bound.class());
+    try std.testing.expectEqual(@as(u32, 2), sql_bound.constant);
+    try std.testing.expectEqual(contract_types.BoundClass.constant, envelope.total.class());
+}
+
+test "validated field without maxItems stays linear" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { schemaCompile, validateJson } from "zigttp:validate";
+        \\import { sqlOne } from "zigttp:sql";
+        \\schemaCompile("payload", "{\"type\":\"object\",\"properties\":{\"items\":{\"type\":\"array\"}}}");
+        \\export function handler(req) {
+        \\  const parsed = validateJson("payload", req.body);
+        \\  if (!parsed.ok) return Response.json({}, { status: 400 });
+        \\  for (const item of parsed.value.items) {
+        \\    sqlOne("row");
+        \\  }
+        \\  return Response.json({});
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    const sql_bound = envelope.find("sql") orelse return error.ExpectedSqlBound;
+    try std.testing.expectEqual(contract_types.BoundClass.linear, sql_bound.class());
+    try std.testing.expectEqual(@as(u32, 1), sql_bound.linear.coefficient);
+    try std.testing.expectEqualStrings("for...of over `items`", sql_bound.linear.source.desc);
 }
