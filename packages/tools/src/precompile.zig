@@ -1259,22 +1259,34 @@ pub fn runCheckOnlyFromSourceWithOptions(
             result.paths_enumerated = @intCast(tests.len);
             result.paths_exhaustive = tests.len < zigts.PathGenerator.MAX_PATHS;
 
-            // Max I/O depth
-            var max_depth: u32 = 0;
-            for (tests) |t| {
-                const depth: u32 = @intCast(t.io_stubs.items.len);
-                if (depth > max_depth) max_depth = depth;
+            var cost_envelope: ?handler_contract.CostEnvelope = null;
+            if (tests.len > 0) {
+                cost_envelope = try gen.buildCostEnvelope(allocator);
+                result.max_io_depth = switch (cost_envelope.?.total) {
+                    .constant => |n| n,
+                    else => null,
+                };
+            } else {
+                result.max_io_depth = null;
             }
-            result.max_io_depth = if (tests.len > 0) max_depth else null;
 
             // Populate behavioral contract
             if (result.contract) |*c| {
                 if (c.properties) |*props| {
                     props.max_io_depth = result.max_io_depth;
+                    props.cost_bounded = if (cost_envelope) |envelope|
+                        envelope.exhaustive and envelope.total.class() != .unbounded
+                    else
+                        false;
+                }
+                if (cost_envelope) |envelope| {
+                    c.cost_envelope = envelope;
+                    cost_envelope = null;
                 }
                 c.behaviors = try gen.toBehaviorPaths(allocator);
                 c.behaviors_exhaustive = result.paths_exhaustive;
             }
+            if (cost_envelope) |*envelope| envelope.deinit(allocator);
 
             // Fault coverage
             var fc = zigts.fault_coverage.FaultCoverageChecker.init(allocator, tests);
@@ -1939,21 +1951,31 @@ pub fn compileHandler(
                 generated_tests_jsonl = try jsonl_buf.toOwnedSlice(allocator);
             }
 
-            // Compute max I/O depth across all generated paths
             if (contract != null) {
                 const tests = gen.getTests();
+                var cost_envelope: ?handler_contract.CostEnvelope = null;
+                if (tests.len > 0) {
+                    cost_envelope = try gen.buildCostEnvelope(allocator);
+                }
                 if (contract.?.properties) |*props| {
-                    var max_depth: u32 = 0;
-                    for (tests) |t| {
-                        const depth: u32 = @intCast(t.io_stubs.items.len);
-                        if (depth > max_depth) max_depth = depth;
-                    }
-                    props.max_io_depth = if (tests.len > 0) max_depth else null;
+                    props.max_io_depth = if (cost_envelope) |envelope| switch (envelope.total) {
+                        .constant => |n| n,
+                        else => null,
+                    } else null;
+                    props.cost_bounded = if (cost_envelope) |envelope|
+                        envelope.exhaustive and envelope.total.class() != .unbounded
+                    else
+                        false;
+                }
+                if (cost_envelope) |envelope| {
+                    contract.?.cost_envelope = envelope;
+                    cost_envelope = null;
                 }
 
                 // Populate behavioral contract from exhaustive paths
                 contract.?.behaviors = try gen.toBehaviorPaths(allocator);
                 contract.?.behaviors_exhaustive = gen.getTests().len < zigts.PathGenerator.MAX_PATHS;
+                if (cost_envelope) |*envelope| envelope.deinit(allocator);
             }
 
             // Fault coverage analysis on generated paths
@@ -2986,6 +3008,20 @@ fn printPropertiesReport(contract: *const HandlerContract) void {
 
     if (props.max_io_depth) |depth| {
         debugPrint("  PROVEN {s: <15} max {d} I/O calls per request\n", .{ "max_io_depth", depth });
+    }
+    if (contract.cost_envelope) |envelope| {
+        switch (envelope.total) {
+            .constant => {},
+            .linear => |linear| {
+                debugPrint(
+                    "  PROVEN {s: <15} total <= {d}+{d}*|source| calls per request ({s})\n",
+                    .{ "cost_envelope", linear.base, linear.coefficient, linear.source.desc },
+                );
+            },
+            .unbounded => |source| {
+                debugPrint("  ---    {s: <15} unbounded ({s})\n", .{ "cost_envelope", source.desc });
+            },
+        }
     }
 }
 

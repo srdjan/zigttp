@@ -242,6 +242,12 @@ const property_info = [_]PropertyInfo{
         .passing = "The handler's AOT route table (routerMatch) is non-empty and every route's method is POST.",
         .failing = "The route table is empty, dynamic, or contains a non-POST method.",
     },
+    .{
+        .name = "cost_bounded",
+        .family = .path,
+        .passing = "Worst-path module-call count is bounded by the request.",
+        .failing = "A loop over an unsized source makes the handler's I/O cost unbounded.",
+    },
 };
 
 /// Fallback for a property with no `property_info` row. The comptime check

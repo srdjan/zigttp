@@ -53,6 +53,7 @@ pub const ProvenFacts = struct {
     /// flip when they introduce a non-deterministic builtin.
     deterministic: bool = true,
     max_io_depth: ?u32 = null,
+    cost_total: ?handler_contract.Bound = null,
 
     // Data flow provenance
     no_secret_leakage: bool = true,
@@ -195,6 +196,7 @@ pub fn extractProvenFacts(
             .state_isolated = if (contract.properties) |p| p.state_isolated else true,
             .deterministic = if (contract.properties) |p| p.deterministic else true,
             .max_io_depth = if (contract.properties) |p| p.max_io_depth else null,
+            .cost_total = if (contract.cost_envelope) |envelope| envelope.total else null,
             .no_secret_leakage = if (contract.properties) |p| p.no_secret_leakage else true,
             .no_credential_leakage = if (contract.properties) |p| p.no_credential_leakage else true,
             .input_validated = if (contract.properties) |p| p.input_validated else true,
@@ -491,6 +493,25 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     if (facts.max_io_depth) |depth| {
         try w.print(",\n          \"zigttp:maxIoDepth\": \"{d}\"", .{depth});
     }
+    if (facts.cost_total) |bound| {
+        try w.writeAll(",\n          \"zigttp:costClass\": \"");
+        try w.writeAll(bound.class().asString());
+        try w.writeAll("\"");
+        switch (bound) {
+            .constant => {},
+            .linear => |linear| {
+                try w.print(",\n          \"zigttp:costBound\": \"{d}+{d}*n\"", .{ linear.base, linear.coefficient });
+                try w.writeAll(",\n          \"zigttp:costSource\": \"");
+                try writeCostSource(w, linear.source);
+                try w.writeAll("\"");
+            },
+            .unbounded => |source| {
+                try w.writeAll(",\n          \"zigttp:costSource\": \"");
+                try writeCostSource(w, source);
+                try w.writeAll("\"");
+            },
+        }
+    }
 
     // Flow provenance tags
     try w.writeAll(",\n          \"zigttp:noSecretLeakage\": \"");
@@ -749,6 +770,15 @@ fn writeTomlBareString(w: anytype, s: []const u8) !void {
     }
 }
 
+fn writeCostSource(w: anytype, source: handler_contract.BoundProvenance) !void {
+    try w.print("{d}:{d} ", .{ source.line, source.column });
+    try writeJsonStringContent(w, source.desc);
+}
+
+fn writeHumanCostSource(w: anytype, source: handler_contract.BoundProvenance) !void {
+    try w.print("{d}:{d} {s}", .{ source.line, source.column, source.desc });
+}
+
 /// Convert an env var name like "JWT_SECRET" to a SAM parameter name like "JwtSecret"
 fn writeParamName(w: anytype, env_var: []const u8) !void {
     var capitalize_next = true;
@@ -901,6 +931,21 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, provider: []cons
     try writeProvenLine(w, facts.state_isolated, "state isolated (no cross-request data leakage)");
     if (facts.max_io_depth) |depth| {
         try w.print("  PROVEN  max I/O depth: {d} calls per request\n", .{depth});
+    }
+    if (facts.cost_total) |bound| {
+        switch (bound) {
+            .constant => |n| try w.print("  PROVEN  cost bound: {d} calls per request\n", .{n}),
+            .linear => |linear| {
+                try w.print("  PROVEN  cost bound: {d}+{d}*n calls per request (", .{ linear.base, linear.coefficient });
+                try writeHumanCostSource(w, linear.source);
+                try w.writeAll(")\n");
+            },
+            .unbounded => |source| {
+                try w.writeAll("  REVIEW  cost bound: unbounded (");
+                try writeHumanCostSource(w, source);
+                try w.writeAll(")\n");
+            },
+        }
     }
 
     if (facts.rate_limit_namespace) |ns| {
@@ -1144,6 +1189,42 @@ test "renderAws minimal" {
     // No routes => catch-all
     try std.testing.expect(std.mem.indexOf(u8, content, "CatchAll") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "/{proxy+}") != null);
+}
+
+test "linear cost bound emits costClass/costBound tags and no maxIoDepth" {
+    const allocator = std.testing.allocator;
+
+    const facts = ProvenFacts{
+        .handler_name = "handler",
+        .handler_path = "handler.ts",
+        .env_vars = &.{},
+        .env_proven = true,
+        .egress_hosts = &.{},
+        .egress_proven = true,
+        .cache_namespaces = &.{},
+        .cache_proven = true,
+        .routes = &.{},
+        .proof_level = .none,
+        .checks_passed = &.{},
+        .max_io_depth = null,
+        .cost_total = .{ .linear = .{
+            .coefficient = 1,
+            .base = 1,
+            .source = .{ .line = 5, .column = 3, .desc = "for...of over `ids`" },
+        } },
+    };
+
+    const outputs = try renderAws(allocator, &facts);
+    defer {
+        for (outputs) |o| allocator.free(o.content);
+        allocator.free(outputs);
+    }
+
+    const content = outputs[0].content;
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"zigttp:costClass\": \"linear\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"zigttp:costBound\": \"1+1*n\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"zigttp:costSource\": \"5:3 for...of over `ids`\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "zigttp:maxIoDepth") == null);
 }
 
 test "renderAws with env vars and routes" {
