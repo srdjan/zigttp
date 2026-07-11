@@ -358,7 +358,7 @@ fn sampleManifest() Manifest {
         .handler_path = "src/handler.ts",
         .handler_hash = "aa",
         .contract_hash = "bb",
-        .zigttp_version = "0.1.1-beta",
+        .zigttp_version = "0.17.0",
         .policy_hash = "cc",
         .proven_specs = &.{ "pure", "injection_safe" },
         .declared_specs = &.{"injection_safe"},
@@ -383,7 +383,7 @@ test "manifest round-trips through JSON" {
     try testing.expectEqual(schema_version, m.schema_version);
     try testing.expectEqualStrings("checkout", m.name);
     try testing.expectEqualStrings("src/handler.ts", m.handler_path);
-    try testing.expectEqualStrings("0.1.1-beta", m.zigttp_version);
+    try testing.expectEqualStrings("0.17.0", m.zigttp_version);
     try testing.expectEqual(@as(usize, 2), m.proven_specs.len);
     try testing.expectEqualStrings("injection_safe", m.proven_specs[1]);
     try testing.expectEqual(@as(usize, 1), m.routes.len);

@@ -3,7 +3,7 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
 #
 # Environment variables:
-#   ZIGTTP_VERSION     - pin to a specific version (e.g. v0.1.1-beta)
+#   ZIGTTP_VERSION     - pin to a specific version (e.g. v0.17.0)
 #   ZIGTTP_CHANNEL     - beta (default; newest -beta tag), latest, or stable
 #   ZIGTTP_INSTALL_DIR - installation directory, default: $HOME/.zigttp
 

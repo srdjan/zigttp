@@ -6,6 +6,12 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-11
+
+### Added
+
+- **Cost Contracts:** the compiler proves each handler's input-relative resource complexity as a signed per-route cost envelope. An I/O call inside a `for...of` over a request-derived collection now reports a linear bound (`1 + 1*|ids|`) instead of the previous `max_io_depth` undercount that walked the loop body once. Bounds discharge to a constant by sizing the loop source: a literal array, `range(n)`, `Object.keys` of an object literal, `.slice(0, k)`, a SQL statement ending in `LIMIT n`, or a `zigttp:validate` schema field declaring the newly supported `maxItems` keyword. Surfaced as the `cost_bounded` proof chip and `Spec<"cost_bounded">`, a `contract_diff` cost lane (widening a bound to `unbounded` is breaking; a bounded widening is additive) that feeds `prove`, `prove-behavior`, the expert equivalence receipt, and `proofs gate`, deploy manifest tags (`zigttp:costClass` / `zigttp:costBound` / `zigttp:costSource` / `zigttp:costWorstCase`), and a log-only runtime cost fuse that records a `cost_bounded` soundness incident when a request exceeds its proven envelope. The `costEnvelope` is written to `contract.json` and covered by the `Zigttp-Attest` JWS signature.
+
 ### Changed
 
 - **Breaking:** `zigttp:websocket` no longer exports `roomFromPath`. Upgrade handlers now receive the normalized request path as the room key and callbacks receive that room explicitly; migrate callers to the callback `room` argument or `getWebSockets(room)`. This is an intentional beta cutover with no compatibility stub.
@@ -149,7 +155,8 @@ See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-i
 - Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
 - HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.1.1-beta...HEAD
+[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/srdjan/zigttp/compare/v0.1.1-beta...v0.17.0
 [0.1.1-beta]: https://github.com/srdjan/zigttp/compare/v0.1.0-beta...v0.1.1-beta
 [0.1.0-beta]: https://github.com/srdjan/zigttp/compare/v0.16.0-rc2...v0.1.0-beta
 [0.16.0-rc2]: https://github.com/srdjan/zigttp/compare/v0.16.0-rc1...v0.16.0-rc2

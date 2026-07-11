@@ -657,7 +657,7 @@ test "release passport reports known issue for pending public measurement receip
     const json = try cli_release_check.renderReleasePassportJson(testing.allocator, &passport);
     defer testing.allocator.free(json);
     try testing.expect(std.mem.indexOf(u8, json, "\"verdict\":\"ready_with_known_issues\"") != null);
-    try testing.expect(std.mem.indexOf(u8, json, "\"release\":\"0.1.1-beta\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"release\":\"0.17.0\"") != null);
 }
 
 test "release passport blocks stale public claims" {
@@ -780,7 +780,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .data =
         \\.{
         \\    .name = .zigttp,
-        \\    .version = "0.1.1-beta",
+        \\    .version = "0.17.0",
         \\}
         ,
     });
@@ -788,7 +788,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .sub_path = "packages/zigts/src/root.zig",
         .data =
         \\pub const version = struct {
-        \\    pub const string = "0.1.1-beta";
+        \\    pub const string = "0.17.0";
         \\};
         ,
     });
