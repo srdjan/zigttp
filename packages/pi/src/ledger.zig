@@ -407,7 +407,135 @@ pub fn runWithArgs(
         return;
     }
 
+    if (std.mem.eql(u8, argv[0], "stats")) {
+        try runStats(allocator);
+        return;
+    }
+
     return error.UnknownCommand;
+}
+
+/// The three per-session signals `ledger stats` aggregates, read back from a
+/// session's persisted `session_summary` row.
+const SummaryStat = struct {
+    reached_proof: bool,
+    round_trips_to_first_green: u32,
+    proven: u32,
+    tracked: u32,
+};
+
+fn summaryU32(obj: std.json.ObjectMap, key: []const u8) u32 {
+    if (obj.get(key)) |v| {
+        if (v == .integer and v.integer >= 0) return @intCast(v.integer);
+    }
+    return 0;
+}
+
+/// Read the last `session_summary` row from a session's events.jsonl. Returns
+/// null for a session that never wrote one (empty or in-progress). Best-effort:
+/// an unreadable file or a malformed line is skipped, never fatal.
+fn readLastSessionSummary(allocator: std.mem.Allocator, events_path: []const u8) !?SummaryStat {
+    const bytes = zigts.file_io.readFile(allocator, events_path, 16 * 1024 * 1024) catch return null;
+    defer allocator.free(bytes);
+
+    var found: ?SummaryStat = null;
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        // Cheap pre-filter before the JSON parse.
+        if (std.mem.indexOf(u8, line, "\"session_summary\"") == null) continue;
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const root_obj = parsed.value.object;
+        const k = root_obj.get("k") orelse continue;
+        if (k != .string or !std.mem.eql(u8, k.string, "session_summary")) continue;
+        const d = root_obj.get("d") orelse continue;
+        if (d != .object) continue;
+        const dobj = d.object;
+        found = .{
+            .reached_proof = if (dobj.get("reached_proof")) |v| (v == .bool and v.bool) else false,
+            .round_trips_to_first_green = summaryU32(dobj, "round_trips_to_first_green"),
+            .proven = summaryU32(dobj, "proven_properties"),
+            .tracked = summaryU32(dobj, "tracked_properties"),
+        };
+    }
+    return found;
+}
+
+fn medianU32(items: []u32) f64 {
+    if (items.len == 0) return 0;
+    std.mem.sort(u32, items, {}, std.sort.asc(u32));
+    const mid = items.len / 2;
+    if (items.len % 2 == 1) return @floatFromInt(items[mid]);
+    return (@as(f64, @floatFromInt(items[mid - 1])) + @as(f64, @floatFromInt(items[mid]))) / 2.0;
+}
+
+fn medianF32(items: []f32) f64 {
+    if (items.len == 0) return 0;
+    std.mem.sort(f32, items, {}, std.sort.asc(f32));
+    const mid = items.len / 2;
+    if (items.len % 2 == 1) return items[mid];
+    return (@as(f64, items[mid - 1]) + @as(f64, items[mid])) / 2.0;
+}
+
+/// Aggregate every session's `session_summary` for the current workspace into
+/// the three STRATEGY.md metrics (expert success rate, median round-trips to
+/// first green, median proven-path ratio) and print them. These were staked as
+/// cross-session medians/rates but had no measurement home until now.
+fn runStats(allocator: std.mem.Allocator) !void {
+    const root = try session_paths.sessionRoot(allocator);
+    defer allocator.free(root);
+    const hash = try session_paths.cwdHashFull(allocator);
+    const entries = try session_paths.listSessions(allocator, root, hash[0..]);
+    defer {
+        for (entries) |*e| e.deinit(allocator);
+        allocator.free(entries);
+    }
+
+    var green: std.ArrayListUnmanaged(u32) = .empty;
+    defer green.deinit(allocator);
+    var ratios: std.ArrayListUnmanaged(f32) = .empty;
+    defer ratios.deinit(allocator);
+    var total: usize = 0;
+    var proof_reached: usize = 0;
+
+    for (entries) |e| {
+        const events_path = try std.fs.path.join(allocator, &.{ e.dir_path, "events.jsonl" });
+        defer allocator.free(events_path);
+        const stat = (try readLastSessionSummary(allocator, events_path)) orelse continue;
+        total += 1;
+        if (stat.reached_proof) {
+            proof_reached += 1;
+            try green.append(allocator, stat.round_trips_to_first_green);
+            const ratio: f32 = if (stat.tracked == 0)
+                0
+            else
+                @as(f32, @floatFromInt(stat.proven)) / @as(f32, @floatFromInt(stat.tracked));
+            try ratios.append(allocator, ratio);
+        }
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+    if (total == 0) {
+        try w.writeAll("ledger stats: no sessions with a summary yet for this workspace.\n");
+    } else {
+        const success_pct = proof_reached * 100 / total;
+        try w.print("ledger stats for this workspace ({d} session{s} with a summary)\n", .{ total, if (total == 1) "" else "s" });
+        try w.print("  expert success rate:         {d}%  ({d}/{d} reached a verified proof)\n", .{ success_pct, proof_reached, total });
+        if (proof_reached == 0) {
+            try w.writeAll("  round-trips to first green:  n/a  (no proof sessions yet)\n");
+            try w.writeAll("  proven-path ratio:           n/a  (no proof sessions yet)\n");
+        } else {
+            try w.print("  round-trips to first green:  median {d:.1}  (over {d} proof session{s})\n", .{ medianU32(green.items), proof_reached, if (proof_reached == 1) "" else "s" });
+            try w.print("  proven-path ratio:           median {d:.3}  (over {d} proof session{s})\n", .{ medianF32(ratios.items), proof_reached, if (proof_reached == 1) "" else "s" });
+        }
+    }
+    buf = aw.toArrayList();
+    _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
 }
 
 fn writeMetaLine(writer: *std.Io.Writer, meta: ExportMeta) !void {
@@ -618,11 +746,16 @@ fn printReplayResult(result: ReplayResult) void {
 
 fn printHelp() void {
     const help =
-        \\zigttp ledger - export or replay verified_patch ledgers
+        \\zigttp ledger - export, replay, or aggregate verified_patch ledgers
         \\
         \\Usage:
         \\  zigttp ledger export --session <id> --out <path>
         \\  zigttp ledger replay --input <path> --onto <git-ref>
+        \\  zigttp ledger stats
+        \\
+        \\`stats` aggregates every session's summary for the current workspace
+        \\into the staked metrics: expert success rate, median round-trips to
+        \\first green proof, and median proven-path ratio.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -787,4 +920,48 @@ test "replayBundleInWorkspace detects policy drift" {
 
     try testing.expectEqual(ReplayKind.policy_drift, result.kind);
     try testing.expectEqualStrings("handler.ts", result.file);
+}
+
+test "medianU32 handles odd, even, and empty inputs" {
+    var odd = [_]u32{ 3, 1, 2 };
+    try testing.expectEqual(@as(f64, 2), medianU32(&odd));
+    var even = [_]u32{ 4, 1, 3, 2 };
+    try testing.expectEqual(@as(f64, 2.5), medianU32(&even));
+    var empty = [_]u32{};
+    try testing.expectEqual(@as(f64, 0), medianU32(&empty));
+}
+
+test "readLastSessionSummary returns the final summary row's staked signals" {
+    var tmp = try initTmp(testing.allocator);
+    defer tmp.cleanup(testing.allocator);
+    const events_path = try tmp.childPath(testing.allocator, "events.jsonl");
+    defer testing.allocator.free(events_path);
+
+    // An early summary that did not reach proof...
+    try session_events.appendEvent(testing.allocator, events_path, .{ .session_summary = .{
+        .reached_proof = false,
+    } });
+    // ...superseded by a later one that did (e.g. after --resume). The last row
+    // wins, so the aggregate reflects the session's final state.
+    try session_events.appendEvent(testing.allocator, events_path, .{ .session_summary = .{
+        .reached_proof = true,
+        .round_trips_to_first_green = 5,
+        .proven_properties = 12,
+        .tracked_properties = 16,
+    } });
+
+    const stat = (try readLastSessionSummary(testing.allocator, events_path)).?;
+    try testing.expect(stat.reached_proof);
+    try testing.expectEqual(@as(u32, 5), stat.round_trips_to_first_green);
+    try testing.expectEqual(@as(u32, 12), stat.proven);
+    try testing.expectEqual(@as(u32, 16), stat.tracked);
+}
+
+test "readLastSessionSummary returns null when a session wrote no summary" {
+    var tmp = try initTmp(testing.allocator);
+    defer tmp.cleanup(testing.allocator);
+    const events_path = try tmp.childPath(testing.allocator, "events.jsonl");
+    defer testing.allocator.free(events_path);
+    try session_events.appendEvent(testing.allocator, events_path, .{ .user_text = "hello" });
+    try testing.expect((try readLastSessionSummary(testing.allocator, events_path)) == null);
 }
