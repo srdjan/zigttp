@@ -75,8 +75,8 @@ pub const Client = struct {
 fn assembleTurn(arena: std.mem.Allocator, response_body: []const u8) !loop.ModelCallResult {
     const event_list = try sse_parser.parseAll(arena, response_body);
     const outcome = try response_assembler.assemble(arena, event_list);
-    const reply = try apply_edit.maybeRemap(arena, outcome.reply);
-    return .{ .reply = reply, .usage = outcome.usage };
+    const reply = try apply_edit.maybeRemap(arena, outcome.reply, outcome.stop_reason);
+    return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
 }
 
 // -----------------------------------------------------------------------

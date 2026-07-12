@@ -330,10 +330,23 @@ pub const AgentSession = struct {
     /// Switches the live backend's model. `model_id` must outlive the
     /// session (use a compile-time const or an allocator-owned dupe). No-op
     /// for the stub backend.
+    ///
+    /// Also raises the per-request output budget to the model's known maximum:
+    /// a large-output model (Sonnet: 64k) was otherwise silently capped at the
+    /// conservative 8192 default, which truncated a whole-file `apply_edit` on
+    /// larger handlers and surfaced as an opaque `InvalidEditArgs`. Unknown
+    /// models keep the current budget.
     pub fn setModel(self: *AgentSession, model_id: []const u8) void {
+        const max_tokens: ?u32 = if (models_registry.findById(model_id)) |m| m.max_output_tokens else null;
         switch (self.backend) {
-            .anthropic => |*c| c.config.model = model_id,
-            .openai => |*c| c.config.model = model_id,
+            .anthropic => |*c| {
+                c.config.model = model_id;
+                if (max_tokens) |mt| c.config.max_tokens = mt;
+            },
+            .openai => |*c| {
+                c.config.model = model_id;
+                if (max_tokens) |mt| c.config.max_tokens = mt;
+            },
             .stub => {},
         }
     }
@@ -404,7 +417,14 @@ pub fn initFromEnvWithSessionConfig(
     // Apply a --model launch override once, here, so every caller
     // (interactive REPL, autoloop, --print, --rpc) inherits it without each
     // having to remember a separate apply step. Also covers no_session sessions.
-    if (config.model) |model_id| session.setModel(model_id);
+    // With no override, re-apply the active default so its output-token budget
+    // is synced from the registry (the default model is large-output Sonnet, not
+    // the conservative 8192 that Config starts with).
+    if (config.model) |model_id| {
+        session.setModel(model_id);
+    } else if (session.currentModel()) |active| {
+        session.setModel(active);
+    }
 
     if (config.no_session) return session;
 
@@ -1079,6 +1099,22 @@ test "modelClient returns an anthropic client vtable when backend is anthropic" 
 
     const mc = session.modelClient();
     try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&session.backend.anthropic)));
+}
+
+test "setModel raises the output-token budget to the registry maximum for a known model" {
+    var session = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
+    defer session.deinit(testing.allocator);
+
+    // A large-output model lifts the per-request budget off the conservative
+    // 8192 default so a whole-file apply_edit is not truncated on big handlers.
+    session.setModel("claude-sonnet-4-6");
+    try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
+    try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
+
+    // An unknown model keeps the current budget rather than resetting it.
+    session.setModel("some-unknown-model");
+    try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
+    try testing.expectEqualStrings("some-unknown-model", session.backend.anthropic.config.model);
 }
 
 test "envHasModelBackend: empty env var is treated as absent" {

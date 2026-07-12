@@ -36,6 +36,11 @@ const RepairLinks = struct {
 pub const ModelCallResult = struct {
     reply: turn.AssistantReply,
     usage: turn.Usage = .{},
+    /// The provider's stop reason for this roundtrip ("end_turn", "tool_use",
+    /// "max_tokens", ...). Threaded through so the loop can distinguish an
+    /// output-truncated reply from a normal one. Null for clients that do not
+    /// report it (cassette/stub).
+    stop_reason: ?[]const u8 = null,
 };
 
 pub const ModelClient = struct {
@@ -141,6 +146,7 @@ pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
         error.ProviderServerError => "The provider returned a server error. Try again shortly.",
         error.ApiError => "The provider returned an error mid-response (details logged above).",
         error.PromptTooLong => "The conversation is too large for the model's context window. Run `/compact` to shrink it, then retry.",
+        error.OutputTruncated => "The edit was too large for one response and was cut off at the model's output limit. Split the change into smaller edits (edit one function or section at a time), or switch to a model with a larger output budget via `/model <id>`.",
         error.RequestTimedOut => "The request timed out with no response. Check your network and try again.",
         // SSE/stream decode failures from `providers/openai/sse_parser.zig`. A
         // mangled or partial stream (often a proxy) otherwise prints a bare

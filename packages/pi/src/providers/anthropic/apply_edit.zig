@@ -25,11 +25,27 @@ pub const input_schema_literal =
 
 pub const RemapError = error{
     InvalidEditArgs,
+    /// The model hit its output-token limit mid-`apply_edit`, so the tool
+    /// input JSON is incomplete. Distinct from InvalidEditArgs (a genuinely
+    /// malformed args object) because it is recoverable with actionable
+    /// guidance - split the change - rather than an opaque fatal crash.
+    OutputTruncated,
 };
+
+/// A parse/shape failure on an `apply_edit` payload is truncation (recoverable)
+/// when the response stopped on the output-token limit, and a malformed-args bug
+/// otherwise.
+fn remapFailure(stop_reason: ?[]const u8) RemapError {
+    if (stop_reason) |sr| {
+        if (std.mem.eql(u8, sr, "max_tokens")) return RemapError.OutputTruncated;
+    }
+    return RemapError.InvalidEditArgs;
+}
 
 pub fn maybeRemap(
     arena: std.mem.Allocator,
     reply: turn.AssistantReply,
+    stop_reason: ?[]const u8,
 ) !turn.AssistantReply {
     switch (reply.response) {
         .tool_calls => |calls| {
@@ -37,14 +53,14 @@ pub fn maybeRemap(
             if (!std.mem.eql(u8, calls[0].name, tool_name)) return reply;
 
             const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, calls[0].args_json, .{}) catch {
-                return RemapError.InvalidEditArgs;
+                return remapFailure(stop_reason);
             };
-            if (parsed != .object) return RemapError.InvalidEditArgs;
+            if (parsed != .object) return remapFailure(stop_reason);
             const obj = parsed.object;
 
-            const file_v = obj.get("file") orelse return RemapError.InvalidEditArgs;
-            const content_v = obj.get("content") orelse return RemapError.InvalidEditArgs;
-            if (file_v != .string or content_v != .string) return RemapError.InvalidEditArgs;
+            const file_v = obj.get("file") orelse return remapFailure(stop_reason);
+            const content_v = obj.get("content") orelse return remapFailure(stop_reason);
+            if (file_v != .string or content_v != .string) return remapFailure(stop_reason);
 
             const before: ?[]const u8 = if (obj.get("before")) |v|
                 (if (v == .string) v.string else null)
@@ -79,7 +95,7 @@ test "maybeRemap: non-matching tool batch passes through unchanged" {
         .response = .{ .tool_calls = &calls },
     };
 
-    const out = try maybeRemap(arena.allocator(), reply);
+    const out = try maybeRemap(arena.allocator(), reply, null);
     switch (out.response) {
         .tool_calls => |out_calls| try testing.expectEqualStrings("zigts_expert_meta", out_calls[0].name),
         else => return error.TestFailed,
@@ -97,7 +113,7 @@ test "maybeRemap: single apply_edit tool call produces .edit reply" {
         .response = .{ .tool_calls = &calls },
     };
 
-    const out = try maybeRemap(arena.allocator(), reply);
+    const out = try maybeRemap(arena.allocator(), reply, null);
     switch (out.response) {
         .edit => |edit| {
             try testing.expectEqualStrings("handler.ts", edit.file);
@@ -119,7 +135,7 @@ test "maybeRemap: apply_edit in a mixed tool batch stays as tool_calls" {
         .response = .{ .tool_calls = &calls },
     };
 
-    const out = try maybeRemap(arena.allocator(), reply);
+    const out = try maybeRemap(arena.allocator(), reply, null);
     try testing.expect(out.response == .tool_calls);
 }
 
@@ -133,7 +149,28 @@ test "maybeRemap: malformed JSON returns InvalidEditArgs" {
     const reply: turn.AssistantReply = .{
         .response = .{ .tool_calls = &calls },
     };
-    try testing.expectError(RemapError.InvalidEditArgs, maybeRemap(arena.allocator(), reply));
+    try testing.expectError(RemapError.InvalidEditArgs, maybeRemap(arena.allocator(), reply, null));
+}
+
+test "maybeRemap: apply_edit truncated at the output cap returns OutputTruncated, not InvalidEditArgs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // A whole-file content field cut off mid-string when the model hit its
+    // output-token limit: structurally the same parse failure as a malformed
+    // args object, but recoverable with "split the change" guidance rather than
+    // a fatal crash.
+    const calls = [_]turn.ToolCall{
+        .{ .id = "toolu_edit", .name = tool_name, .args_json = "{\"file\":\"handler.ts\",\"content\":\"function handler(req) { return Resp" },
+    };
+    const reply: turn.AssistantReply = .{
+        .response = .{ .tool_calls = &calls },
+    };
+    try testing.expectError(RemapError.OutputTruncated, maybeRemap(arena.allocator(), reply, "max_tokens"));
+
+    // The identical truncation shape, but stopped for a normal reason, is a
+    // genuine malformed-args bug.
+    try testing.expectError(RemapError.InvalidEditArgs, maybeRemap(arena.allocator(), reply, "end_turn"));
 }
 
 test "full pipeline: cassette -> parse -> assemble -> remap -> .edit reply" {
@@ -144,7 +181,7 @@ test "full pipeline: cassette -> parse -> assemble -> remap -> .edit reply" {
 
     const events = try sse_parser.parseAll(ta, cassette);
     const outcome = try response_assembler.assemble(ta, events);
-    const remapped = try maybeRemap(ta, outcome.reply);
+    const remapped = try maybeRemap(ta, outcome.reply, outcome.stop_reason);
 
     switch (remapped.response) {
         .edit => |edit| {

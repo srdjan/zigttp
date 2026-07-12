@@ -224,8 +224,8 @@ pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResul
         .anthropic => {
             const event_list = try anthropic_sse_parser.parseAll(arena, cassette.body);
             const outcome = try anthropic_response_assembler.assemble(arena, event_list);
-            const reply = try anthropic_apply_edit.maybeRemap(arena, outcome.reply);
-            return .{ .reply = reply, .usage = outcome.usage };
+            const reply = try anthropic_apply_edit.maybeRemap(arena, outcome.reply, outcome.stop_reason);
+            return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
         },
         .openai => {
             // The live OpenAI client only speaks the streaming Responses API
@@ -235,8 +235,8 @@ pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResul
             if (!cassette.header.stream) return CassetteError.NonStreamingOpenAINotSupported;
             const event_list = try openai_sse_parser.parseAll(arena, cassette.body);
             const outcome = try openai_response_assembler.assemble(arena, event_list);
-            const reply = try anthropic_apply_edit.maybeRemap(arena, outcome.reply);
-            return .{ .reply = reply, .usage = outcome.usage };
+            const reply = try anthropic_apply_edit.maybeRemap(arena, outcome.reply, outcome.stop_reason);
+            return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
         },
     };
 }
