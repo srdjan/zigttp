@@ -86,9 +86,13 @@ pub fn printAuthHelp() void {
         \\
         \\Usage:
         \\  zigttp auth claude              Prompt for an Anthropic API key and store it
-        \\  zigttp auth openai              Prompt for an OpenAI API key and store it
+        \\  zigttp auth openai              Prompt for an OpenAI API key (experimental) and store it
         \\  zigttp auth status              Show which providers are configured
         \\  zigttp auth revoke <provider>   Remove a stored key (claude | openai)
+        \\
+        \\Anthropic is the measured, supported expert backend. The OpenAI backend
+        \\is experimental (gpt-4o-mini fallback) and not covered by the codegen
+        \\quality ratchet.
         \\
         \\Storage: ~/.zigttp/providers.json (mode 0600).
         \\

@@ -549,7 +549,14 @@ fn contextWindowTokens(session: *const AgentSession) usize {
     if (session.currentModel()) |id| {
         if (models_registry.findById(id)) |m| return m.context_window;
     }
-    return 200_000;
+    // Unknown model. The OpenAI backend is experimental and its default
+    // (gpt-4o-mini) has no registry entry; use its true 128k window so
+    // auto-compact fires below the real limit instead of too late at the
+    // Anthropic-sized 200k assumption. Everything else keeps the 200k default.
+    return switch (session.backend) {
+        .openai => 128_000,
+        else => 200_000,
+    };
 }
 
 /// Compact the session in place when the estimated context size reaches the
@@ -1101,6 +1108,19 @@ test "modelClient returns an anthropic client vtable when backend is anthropic" 
 
     const mc = session.modelClient();
     try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&session.backend.anthropic)));
+}
+
+test "contextWindowTokens uses OpenAI's true 128k window for its unregistered default model" {
+    var openai = try AgentSession.initOpenAI(testing.allocator, "k", "p", null);
+    defer openai.deinit(testing.allocator);
+    // The OpenAI default (gpt-4o-mini) has no registry entry; auto-compact must
+    // fire below its real 128k window, not the Anthropic-sized 200k assumption.
+    try testing.expectEqual(@as(usize, 128_000), contextWindowTokens(&openai));
+
+    var anthropic = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
+    defer anthropic.deinit(testing.allocator);
+    // The Anthropic default is registered, so its real window is used.
+    try testing.expectEqual(@as(usize, 200_000), contextWindowTokens(&anthropic));
 }
 
 test "setModel raises the output-token budget to the registry maximum for a known model" {

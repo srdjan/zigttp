@@ -81,8 +81,8 @@ const help_all_mid =
     \\  zigttp verify <url>                    Verify a deployed proof receipt
     \\
     \\Credentials:
-    \\  zigttp auth claude                     Store an Anthropic API key for expert
-    \\  zigttp auth openai                     Store an OpenAI API key for expert
+    \\  zigttp auth claude                     Store an Anthropic API key for expert (measured, supported)
+    \\  zigttp auth openai                     Store an OpenAI API key for expert (experimental)
     \\  zigttp auth status                     Show which provider keys are configured
     \\  zigttp auth revoke <provider>          Remove a stored key (claude | openai)
     \\
