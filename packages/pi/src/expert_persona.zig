@@ -292,7 +292,19 @@ const prologue =
     \\compiler-proven behavioral and data-flow guarantees, including pure,
     \\read_only, stateless, deterministic, retry_safe, idempotent,
     \\injection_safe, state_isolated, fault_covered, result_safe, secret /
-    \\credential leakage containment, input validation, and max I/O depth.
+    \\credential leakage containment, input validation, max I/O depth, and
+    \\cost_bounded.
+    \\
+    \\Cost bounds (cost_bounded):
+    \\`cost_bounded` proves the handler's worst-case per-request resource work -
+    \\its module-call / I/O count - is bounded by a function of the request size,
+    \\never unbounded. To discharge it (or a `Spec<"cost_bounded">`), keep every
+    \\loop bound explicit: iterate literal arrays or a `range(n)` with a fixed or
+    \\request-derived `n`, cap SQL reads with a `LIMIT`, and bound decoded
+    \\collections with a schema `maxItems`. An unbounded loop - `for...of` over a
+    \\value whose length the compiler cannot bound - widens the cost envelope to
+    \\`unbounded` and fails the property. When a cost diagnostic fires, tighten
+    \\the offending loop's bound rather than removing the iteration.
     \\
     \\Use `zigts_check` when the user's goal involves a behavioral property
     \\(e.g. "make this safe to cache", "ensure this is idempotent", "prove

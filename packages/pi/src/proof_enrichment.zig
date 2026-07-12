@@ -416,27 +416,33 @@ pub fn formatSystemSummary(
     return buf.toOwnedSlice(allocator);
 }
 
+// Property drift gate. pi's PropertiesSnapshot must mirror every boolean handler
+// property the engine tracks, so a new proof dimension added to the engine (like
+// cost_bounded) cannot silently miss the expert surface - the proof card, the
+// /ledger proven-path ratio, and the persona all read this snapshot. If this
+// fails, add the missing field to ui_payload.PropertiesSnapshot (the mapper
+// below copies it automatically) and teach the persona about the new property.
+comptime {
+    for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
+        if (field.type != bool) continue;
+        if (!@hasField(ui_payload.PropertiesSnapshot, field.name)) {
+            @compileError("pi PropertiesSnapshot is missing engine handler property '" ++
+                field.name ++ "'; add it to ui_payload.PropertiesSnapshot so the expert surfaces it");
+        }
+    }
+}
+
+/// Map the engine's HandlerProperties onto pi's PropertiesSnapshot. Every
+/// snapshot field is copied from the identically-named engine field by a
+/// compile-time walk, so the mapper cannot drift: a snapshot field with no
+/// engine counterpart fails to compile here, and a new engine property is caught
+/// by the drift gate above.
 pub fn propertiesSnapshot(properties: HandlerProperties) ui_payload.PropertiesSnapshot {
-    return .{
-        .pure = properties.pure,
-        .read_only = properties.read_only,
-        .stateless = properties.stateless,
-        .retry_safe = properties.retry_safe,
-        .deterministic = properties.deterministic,
-        .has_egress = properties.has_egress,
-        .no_secret_leakage = properties.no_secret_leakage,
-        .no_credential_leakage = properties.no_credential_leakage,
-        .input_validated = properties.input_validated,
-        .pii_contained = properties.pii_contained,
-        .idempotent = properties.idempotent,
-        .max_io_depth = properties.max_io_depth,
-        .injection_safe = properties.injection_safe,
-        .state_isolated = properties.state_isolated,
-        .fault_covered = properties.fault_covered,
-        .result_safe = properties.result_safe,
-        .optional_safe = properties.optional_safe,
-        .canonical = properties.canonical,
-    };
+    var snap: ui_payload.PropertiesSnapshot = undefined;
+    inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".fields) |field| {
+        @field(snap, field.name) = @field(properties, field.name);
+    }
+    return snap;
 }
 
 fn loadPropertiesSnapshot(
@@ -945,12 +951,18 @@ test "propertiesSnapshot maps full handler properties surface" {
         .fault_covered = false,
         .result_safe = true,
         .optional_safe = false,
+        .cost_bounded = true,
+        .post_only = true,
     });
 
     try testing.expect(snapshot.stateless);
     try testing.expectEqual(@as(?u32, 2), snapshot.max_io_depth);
     try testing.expect(snapshot.result_safe);
     try testing.expect(!snapshot.optional_safe);
+    // The Cost Contracts dimension and post_only must round-trip through the
+    // comptime field copy, not be silently dropped as they were before #6.
+    try testing.expect(snapshot.cost_bounded);
+    try testing.expect(snapshot.post_only);
 }
 
 test "resolveHandlerPath rejects absolute paths outside workspace" {

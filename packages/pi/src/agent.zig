@@ -897,17 +897,19 @@ fn snapshotAll(value: bool) ui_payload.PropertiesSnapshot {
         .fault_covered = value,
         .result_safe = value,
         .optional_safe = value,
+        .cost_bounded = value,
+        .post_only = value,
         .canonical = value,
     };
 }
 
 test "guaranteeCounts excludes has_egress and counts discharged guarantees" {
     const all_true = snapshotAll(true).guaranteeCounts();
-    try testing.expectEqual(@as(u32, 16), all_true.tracked);
-    try testing.expectEqual(@as(u32, 16), all_true.proven);
+    try testing.expectEqual(@as(u32, 18), all_true.tracked);
+    try testing.expectEqual(@as(u32, 18), all_true.proven);
 
     const all_false = snapshotAll(false).guaranteeCounts();
-    try testing.expectEqual(@as(u32, 16), all_false.tracked);
+    try testing.expectEqual(@as(u32, 18), all_false.tracked);
     try testing.expectEqual(@as(u32, 0), all_false.proven);
 }
 
@@ -916,7 +918,7 @@ test "SessionMetrics folds a clarifying text turn then an applied edit" {
     // Turn 1: a clarifying question - plain text, ends approved, applies no edit.
     m.record(.{ .final_state = .done, .attempt = 0, .roundtrips = 1 });
     // Turn 2: the answer drives an applied, compiler-verified edit. The veto
-    // counts the proof guarantees (snapshotAll(true) -> 16/16, see guaranteeCounts).
+    // counts the proof guarantees (snapshotAll(true) -> 18/18, see guaranteeCounts).
     m.record(.{
         .final_state = .done,
         .attempt = 1,

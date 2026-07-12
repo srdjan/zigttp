@@ -474,6 +474,7 @@ fn buildProofCardPayload(
             .{ .label = "state_isolated", .value = properties.state_isolated },
             .{ .label = "injection_safe", .value = properties.injection_safe },
             .{ .label = "fault_covered", .value = properties.fault_covered },
+            .{ .label = "cost_bounded", .value = properties.cost_bounded },
         }) |entry| {
             if (entry.value) try highlights_list.append(allocator, try allocator.dupe(u8, entry.label));
         }

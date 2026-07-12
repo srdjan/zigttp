@@ -535,6 +535,8 @@ pub const PropertiesSnapshot = struct {
     fault_covered: bool,
     result_safe: bool,
     optional_safe: bool,
+    cost_bounded: bool = false,
+    post_only: bool = false,
     canonical: bool = false,
 
     pub const ChangeKind = enum { promoted, demoted };
