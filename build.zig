@@ -589,7 +589,12 @@ pub fn build(b: *std.Build) void {
     // change; see docs/zigts-expert-contract.md.
     const expert_golden_step = b.step("test-expert-golden", "Check zigts direct tool contract against golden fixtures");
     const fixtures_root = "packages/tools/tests/fixtures/expert";
-    addExpertGolden(b, expert_golden_step, zigts_exe, &.{ "meta", "--json" }, fixtures_root ++ "/meta.golden.json", 0);
+    // `meta --json` leads with `compiler_version`, which bumps every release.
+    // Pinning it in a byte-exact golden made the fixture stale on each release
+    // for no contract value. Assert the version-independent tail exactly (policy
+    // hash, module hash, rule count, categories, mode) and only that the
+    // version field is present, so the meaningful contract stays covered.
+    addExpertMetaGolden(b, expert_golden_step, zigts_exe, fixtures_root ++ "/meta.golden.json");
     addExpertGolden(b, expert_golden_step, zigts_exe, &.{
         "verify-paths",
         fixtures_root ++ "/clean_handler.ts",
@@ -897,6 +902,34 @@ fn addExpertGolden(
     expected_exit: u8,
 ) void {
     addExpertRun(b, step, zigts_exe, args, expected_exit, golden_rel);
+}
+
+/// Version-agnostic golden for `meta --json`. The command's first field is
+/// `compiler_version`, which changes every release; matching the whole line
+/// byte-for-byte pinned it and made the fixture stale on each version bump.
+/// Instead assert the version-independent tail (from `,"policy_version"` to the
+/// end) byte-exactly, plus that a `compiler_version` field is present. The
+/// golden's stored version value is therefore illustrative, not compared.
+fn addExpertMetaGolden(
+    b: *std.Build,
+    step: *std.Build.Step,
+    zigts_exe: *std.Build.Step.Compile,
+    golden_rel: []const u8,
+) void {
+    const golden = b.build_root.handle.readFileAlloc(b.graph.io, golden_rel, b.allocator, .unlimited) catch |err| {
+        std.debug.panic("missing expert golden fixture {s}: {s}", .{ golden_rel, @errorName(err) });
+    };
+    const marker = ",\"policy_version\":";
+    const idx = std.mem.indexOf(u8, golden, marker) orelse
+        std.debug.panic("meta golden {s} is missing the {s} field", .{ golden_rel, marker });
+    const version_independent_tail = golden[idx..];
+
+    const run = b.addRunArtifact(zigts_exe);
+    run.addArgs(&.{ "meta", "--json" });
+    run.expectExitCode(0);
+    run.expectStdOutMatch("{\"compiler_version\":\"");
+    run.expectStdOutMatch(version_independent_tail);
+    step.dependOn(&run.step);
 }
 
 /// When `golden_rel` is null, only the exit code is asserted — help/error
