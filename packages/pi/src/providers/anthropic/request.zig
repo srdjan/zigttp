@@ -6,7 +6,7 @@ const std = @import("std");
 const json_writer = @import("json_writer.zig");
 const transcript_mod = @import("../../transcript.zig");
 
-pub const default_model = "claude-haiku-4-5-20251001";
+pub const default_model = "claude-sonnet-4-6";
 pub const default_max_tokens: u32 = 8192;
 
 pub const RequestParams = struct {
@@ -92,6 +92,14 @@ fn writeMessagesArray(
         try groups.items[groups.items.len - 1].blocks.append(allocator, .{ .text = body });
     }
 
+    // Rolling cache breakpoint: the last content block of the last message
+    // carries a cache_control marker so the API caches the whole conversation
+    // prefix up to that point. The next turn appends after the breakpoint and
+    // reads the prior prefix at 0.1x input cost instead of re-paying full price
+    // for the growing transcript every roundtrip. (System + tools blocks are
+    // already cached; this is the third of the API's four allowed breakpoints.)
+    const last_group_index = if (groups.items.len == 0) null else groups.items.len - 1;
+
     try writer.writeByte('[');
     for (groups.items, 0..) |group, i| {
         if (i > 0) try writer.writeByte(',');
@@ -101,9 +109,11 @@ fn writeMessagesArray(
             .assistant => "assistant",
         });
         try writer.writeAll(",\"content\":[");
+        const is_last_group = last_group_index != null and i == last_group_index.?;
         for (group.blocks.items, 0..) |block, block_index| {
             if (block_index > 0) try writer.writeByte(',');
-            try writeBlock(writer, block);
+            const is_last_block = is_last_group and block_index == group.blocks.items.len - 1;
+            try writeBlock(writer, block, is_last_block);
         }
         try writer.writeAll("]}");
     }
@@ -122,12 +132,12 @@ fn appendBlock(
     try groups.items[groups.items.len - 1].blocks.append(allocator, block);
 }
 
-fn writeBlock(writer: anytype, block: ContentBlock) !void {
+fn writeBlock(writer: anytype, block: ContentBlock, is_last: bool) !void {
     switch (block) {
         .text => |body| {
             try writer.writeAll("{\"type\":\"text\",\"text\":");
             try json_writer.writeString(writer, body);
-            try writer.writeByte('}');
+            try closeBlock(writer, is_last);
         },
         .tool_use => |call| {
             try writer.writeAll("{\"type\":\"tool_use\",\"id\":");
@@ -136,7 +146,7 @@ fn writeBlock(writer: anytype, block: ContentBlock) !void {
             try json_writer.writeString(writer, call.name);
             try writer.writeAll(",\"input\":");
             try writer.writeAll(call.args_json);
-            try writer.writeByte('}');
+            try closeBlock(writer, is_last);
         },
         .tool_result => |result| {
             try writer.writeAll("{\"type\":\"tool_result\",\"tool_use_id\":");
@@ -150,9 +160,16 @@ fn writeBlock(writer: anytype, block: ContentBlock) !void {
             try json_writer.writeString(writer, content);
             try writer.writeAll(",\"is_error\":");
             try writer.writeAll(if (result.ok) "false" else "true");
-            try writer.writeByte('}');
+            try closeBlock(writer, is_last);
         },
     }
+}
+
+/// Close a content block, adding the rolling cache_control breakpoint when this
+/// is the final block of the messages array.
+fn closeBlock(writer: anytype, is_last: bool) !void {
+    if (is_last) try writer.writeAll(",\"cache_control\":{\"type\":\"ephemeral\"}");
+    try writer.writeByte('}');
 }
 
 const testing = std.testing;
@@ -283,6 +300,53 @@ test "writeRequestBody: system block carries cache_control ephemeral marker" {
     try testing.expectEqualStrings("ephemeral", cache.get("type").?.string);
 }
 
+test "writeRequestBody: rolling cache breakpoint marks only the last message block" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "first" });
+    try transcript.append(testing.allocator, .{ .model_text = "reply" });
+    try transcript.append(testing.allocator, .{ .user_text = "second" });
+
+    const out = try serialize(testing.allocator, .{
+        .system_prompt = "p",
+        .transcript = &transcript,
+    });
+    defer testing.allocator.free(out);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const msgs = parsed.value.object.get("messages").?.array.items;
+    // The final user block carries the breakpoint...
+    const last_msg = msgs[msgs.len - 1].object;
+    const last_blocks = last_msg.get("content").?.array.items;
+    const last_block = last_blocks[last_blocks.len - 1].object;
+    try testing.expectEqualStrings("ephemeral", last_block.get("cache_control").?.object.get("type").?.string);
+    // ...and an earlier block does not.
+    const first_blocks = msgs[0].object.get("content").?.array.items;
+    try testing.expect(first_blocks[0].object.get("cache_control") == null);
+}
+
+test "writeRequestBody: extra_user_text carries the cache breakpoint when present" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "draft" });
+
+    const out = try serialize(testing.allocator, .{
+        .system_prompt = "p",
+        .transcript = &transcript,
+        .extra_user_text = "veto feedback",
+    });
+    defer testing.allocator.free(out);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const msgs = parsed.value.object.get("messages").?.array.items;
+    const last_blocks = msgs[msgs.len - 1].object.get("content").?.array.items;
+    const last_block = last_blocks[last_blocks.len - 1].object;
+    try testing.expectEqualStrings("veto feedback", last_block.get("text").?.string);
+    try testing.expectEqualStrings("ephemeral", last_block.get("cache_control").?.object.get("type").?.string);
+}
+
 test "writeRequestBody: consecutive user messages group into one role block" {
     var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(testing.allocator);
@@ -325,8 +389,8 @@ test "writeRequestBody: model defaults and max_tokens appear on the root" {
     try testing.expect(parsed.value.object.get("stream").?.bool);
 }
 
-test "writeRequestBody: default model is Haiku unless the user overrides it" {
-    try testing.expectEqualStrings("claude-haiku-4-5-20251001", default_model);
+test "writeRequestBody: default model is the measured Sonnet baseline unless overridden" {
+    try testing.expectEqualStrings("claude-sonnet-4-6", default_model);
 }
 
 test "writeRequestBody: tools_json is embedded verbatim when provided" {

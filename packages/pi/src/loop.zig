@@ -222,7 +222,14 @@ pub const RunOptions = struct {
     /// a model roundtrip, the turn is cut short the same way a roundtrip-budget
     /// exhaustion is: the model sees a "budget exhausted" prompt and the turn
     /// returns in .awaiting_user state. 0 disables the limit.
-    turn_timeout_ms: u64 = 60_000,
+    ///
+    /// 5 minutes: the recorded convergence for a complex, multi-tool,
+    /// spec-bearing handler ran 80-96s, so a 60s cap killed the flagship turn
+    /// shape one roundtrip from green. The roundtrip and tool-call budgets are
+    /// the primary bounds; this is only a runaway backstop. The codegen eval
+    /// harness inherits this same default so measurement and production share
+    /// one options struct.
+    turn_timeout_ms: u64 = 300_000,
 };
 
 /// Verification attempts granted to interactive and `--print` turns. Higher
@@ -256,6 +263,61 @@ fn callModel(
     }
     return result;
 }
+
+/// Serialize a model edit draft into `apply_edit` tool-input JSON so the draft
+/// can be recorded in the transcript as an assistant tool call. Recording the
+/// draft on the wire - paired with the compiler veto verdict as a tool_result -
+/// is what makes the retry loop information-complete: the diagnostics the model
+/// must fix reference bytes it can actually see, and the context survives a
+/// mid-repair tool call instead of evaporating with a transient prompt.
+fn buildApplyEditArgs(allocator: std.mem.Allocator, edit: turn.Edit) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+    try w.writeAll("{\"file\":");
+    try json_writer.writeString(w, edit.file);
+    try w.writeAll(",\"content\":");
+    try json_writer.writeString(w, edit.content);
+    if (edit.before) |before| {
+        try w.writeAll(",\"before\":");
+        try json_writer.writeString(w, before);
+    }
+    try w.writeByte('}');
+    buf = aw.toArrayList();
+    return try buf.toOwnedSlice(allocator);
+}
+
+/// Append the `tool_result` that closes a draft's synthetic `apply_edit` tool
+/// call. Every path out of `.run_veto` must call this so the transcript never
+/// carries a dangling tool_use (which the Messages API rejects on the next
+/// request, and which would break `--resume`). The body/id are duplicated into
+/// `allocator` by the transcript, so arena-owned inputs are safe.
+fn appendEditToolResult(
+    allocator: std.mem.Allocator,
+    transcript: *transcript_mod.Transcript,
+    tool_use_id: []const u8,
+    ok: bool,
+    llm_text: []const u8,
+) !void {
+    try transcript.append(allocator, .{ .tool_result = .{
+        .tool_use_id = tool_use_id,
+        .tool_name = "apply_edit",
+        .ok = ok,
+        .llm_text = llm_text,
+        .ui_payload = null,
+    } });
+}
+
+/// SQL escalation hint appended to a failed-draft tool_result once the SQL veto
+/// has failed twice in a turn, so the model gets diagnostic guidance without
+/// burning a blind attempt.
+const sql_escalation_hint =
+    "\n\nYou have failed the SQL check twice. Common causes: " ++
+    "(a) the query references a table or column not in the schema, " ++
+    "(b) you used a non-supported SQL statement (only SELECT/INSERT/UPDATE/DELETE with named parameters). " ++
+    "Use the zigts_expert_describe_rule tool to look up ZTS3xx SQL rules, " ++
+    "or ask the user to verify the schema path in zigttp.json.";
 
 pub fn runTurnWith(
     allocator: std.mem.Allocator,
@@ -294,14 +356,11 @@ pub fn runTurnWith(
     // round-trip exhaustion text.
     var hit_timeout_budget = false;
     const turn_start_ms: i64 = nowMonotonicMs();
-    // Accumulated diagnostics across failed verification attempts. The retry
-    // prompt feeds the whole history (not just the latest envelope) so the model
-    // does not re-introduce a violation it already fixed on an earlier attempt.
-    var diag_history: []const u8 = "";
     // Compiler-authored repair guidance for the most recent failed draft, built
-    // by the in-process repair lane on a veto failure and consumed by the next
-    // `.retry_draft` so the model gets the exact fix instead of re-deriving it.
-    // Arena-owned; null when the lane produced no actionable plans.
+    // by the in-process repair lane on a veto failure and folded into that
+    // draft's failed tool_result so the model gets the exact fix - persisted in
+    // the transcript, not a transient prompt. Arena-owned; null when the lane
+    // produced no actionable plans.
     var auto_repair_block: ?[]const u8 = null;
     // Project SQL schema for the veto, discovered lazily on the first edit
     // attempt and reused for every retry in the turn (the discovery walks the
@@ -309,11 +368,9 @@ pub fn runTurnWith(
     var sql_schema_resolved = false;
     var sql_schema_path: ?[]u8 = null;
     // How many times a SQL veto has failed in this turn. When it reaches 2, an
-    // extra escalation hint is injected before the next model retry so the model
-    // gets diagnostic guidance without burning another attempt blind.
+    // extra escalation hint is folded into the failed draft's tool_result so the
+    // model gets diagnostic guidance without burning another attempt blind.
     var sql_veto_fail_count: u32 = 0;
-    // Set when a SQL escalation hint should be prepended to the next retry prompt.
-    var inject_sql_escalation = false;
     // Set when this turn applies a compiler-verified edit; carries the proof
     // guarantee counts of the applied bytes back to the session layer for metrics.
     var applied_edit = false;
@@ -362,44 +419,42 @@ pub fn runTurnWith(
                 }
                 veto_retry_count += 1;
                 model_roundtrips += 1;
-                diag_history = try std.fmt.allocPrint(
-                    ta,
-                    "{s}--- attempt {d} diagnostic ---\n{s}\n\n",
-                    .{ diag_history, payload.attempt, payload.diagnostic },
-                );
-                const sql_hint: []const u8 = if (inject_sql_escalation) blk: {
-                    inject_sql_escalation = false;
-                    break :blk "\n\nYou have failed the SQL check twice. Common causes: " ++
-                        "(a) the query references a table or column not in the schema, " ++
-                        "(b) you used a non-supported SQL statement (only SELECT/INSERT/UPDATE/DELETE with named parameters). " ++
-                        "Use the zigts_expert_describe_rule tool to look up ZTS3xx SQL rules, " ++
-                        "or ask the user to verify the schema path in zigttp.json.";
-                } else "";
-                // Compiler-authored repair guidance for the draft that just
-                // failed, if the lane produced any. Consumed once: it pertains to
-                // the latest draft, so it is cleared after this prompt is built.
-                const repair_block: []const u8 = auto_repair_block orelse "";
-                auto_repair_block = null;
-                // The lead-in must match what is actually in the prompt: only
-                // claim "compiler-authored repairs below" when the lane produced
-                // a block. On the common no-block paths (hard/parse failures, no
-                // repairable plans) the model would otherwise be told to apply
-                // content that is not there.
-                const lead_in: []const u8 = if (repair_block.len > 0)
-                    "Apply the compiler-authored repairs below verbatim, fix any remaining flagged violations, and do NOT re-introduce one you already fixed in an earlier attempt."
-                else
-                    "Fix all the flagged violations below, and do NOT re-introduce one you already fixed in an earlier attempt.";
+                // The failed draft and its full diagnostic - plus any compiler-
+                // authored repair block and SQL escalation - are already in the
+                // transcript as an `apply_edit` tool_use paired with a failed
+                // tool_result (see the `.run_veto` arm). The model can therefore
+                // see exactly what it wrote and precisely which lines the
+                // compiler flagged, and that context survives even if the model
+                // runs a tool before re-drafting. Only a short framing nudge
+                // rides in the transient prompt; losing it is harmless because
+                // the substantive repair context is persisted, not re-sent.
                 const prompt = try std.fmt.allocPrint(
                     ta,
                     "Your previous edit failed compiler verification (attempt {d}/{d}). " ++
-                        "{s} Emit a new, complete edit.\n\n{s}{s}{s}",
-                    .{ payload.attempt, payload.max_attempts, lead_in, repair_block, diag_history, sql_hint },
+                        "Emit a new, complete edit that fixes every flagged violation " ++
+                        "without re-introducing one you already fixed in an earlier attempt.",
+                    .{ payload.attempt, payload.max_attempts },
                 );
                 const result = try callModel(allocator, ta, client, transcript, prompt);
                 turn_usage.add(result.usage);
                 next_event = .{ .model_replied = result.reply };
             },
             .run_veto => |edit| {
+                // Record the model's draft as an `apply_edit` tool call so the
+                // retry loop is information-complete: the draft's bytes and the
+                // compiler's verdict live in the transcript (as a tool_use/
+                // tool_result pair) instead of a transient prompt, so the model
+                // can see exactly what it wrote and what was flagged - and that
+                // context survives a mid-repair tool call. The id keys off the
+                // transcript index so it is unique across the whole session
+                // (required for `--resume` replay). Every exit from this arm must
+                // append a matching tool_result to close the tool call.
+                const edit_call_id = try std.fmt.allocPrint(ta, "apply_edit-{d}", .{transcript.len()});
+                {
+                    const args_json = try buildApplyEditArgs(ta, edit);
+                    const calls = [_]turn.ToolCall{.{ .id = edit_call_id, .name = "apply_edit", .args_json = args_json }};
+                    try transcript.append(allocator, .{ .assistant_tool_use = &calls });
+                }
                 const prepared = prepareEdit(ta, options.workspace_root, edit) catch |err| switch (err) {
                     // A path that resolves outside the workspace root is the
                     // model's mistake, not a fatal agent error. Surface it as a
@@ -417,6 +472,7 @@ pub fn runTurnWith(
                             .{edit.file},
                         );
                         try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = msg } });
+                        try appendEditToolResult(allocator, transcript, edit_call_id, false, msg);
                         next_event = .{ .edit_verified = .{ .ok = false, .llm_text = msg } };
                         continue;
                     },
@@ -435,6 +491,33 @@ pub fn runTurnWith(
                 // repair path (Phase B) overrides it to a pass after it lands a
                 // candidate, so the failed draft still drives the turn to done.
                 var edit_event: turn.EditOutcome = veto_result.outcome;
+                if (!veto_result.outcome.ok and veto_result.sql_failure) {
+                    sql_veto_fail_count += 1;
+                }
+                // Close the draft's `apply_edit` tool call with the compiler's
+                // verdict on the DRAFT itself (not `edit_event`, which Phase B may
+                // flip to a pass). Appended here - before the success paths'
+                // verified_patch/proof_card - so the tool_use is closed on every
+                // exit and verified_patch stays adjacent to the proof card. On
+                // failure the body carries the diagnostic plus any SQL escalation;
+                // the compiler-authored repair block (built by the lane below) is
+                // persisted afterwards as a follow-up system_note. Either way the
+                // whole retry context lives in the transcript, not a transient
+                // prompt, so it survives a mid-repair tool call.
+                if (veto_result.outcome.ok) {
+                    try appendEditToolResult(allocator, transcript, edit_call_id, true, "verified: all compiler checks passed");
+                } else {
+                    const sql_hint: []const u8 = if (veto_result.sql_failure and sql_veto_fail_count >= 2)
+                        sql_escalation_hint
+                    else
+                        "";
+                    const body = try std.fmt.allocPrint(
+                        ta,
+                        "The compiler rejected this edit. Fix every flagged violation below:\n\n{s}{s}",
+                        .{ veto_result.outcome.llm_text, sql_hint },
+                    );
+                    try appendEditToolResult(allocator, transcript, edit_call_id, false, body);
+                }
                 if (veto_result.outcome.ok and !options.replay_mode) {
                     if (machine.attempt == 1) first_draft_veto_pass = true;
                     const st = try applyVerifiedEdit(allocator, ta, registry, transcript, options, prepared, veto_result.report, null);
@@ -444,10 +527,6 @@ pub fn runTurnWith(
                     applied_edit = st.applied;
                     applied_proven = st.proven;
                     applied_tracked = st.tracked;
-                }
-                if (!veto_result.outcome.ok and veto_result.sql_failure) {
-                    sql_veto_fail_count += 1;
-                    if (sql_veto_fail_count >= 2) inject_sql_escalation = true;
                 }
                 // Failed draft: run the deterministic repair lane in-process on
                 // the un-written draft. If it produces a candidate that ALSO
@@ -512,6 +591,21 @@ pub fn runTurnWith(
                         error.OutOfMemory => return err,
                         else => {},
                     }
+                }
+                // Persist the compiler-authored repair block (Phase A) as a
+                // follow-up note so the exact fix survives in the transcript for
+                // the retry, instead of riding in a transient prompt that a
+                // mid-repair tool call would erase. Phase B (model-free apply)
+                // never sets it, and it is appended after the draft's failed
+                // tool_result so both live in the same user turn on the wire.
+                if (auto_repair_block) |block| {
+                    auto_repair_block = null;
+                    const note = try std.fmt.allocPrint(
+                        ta,
+                        "Compiler-authored repair for your last edit. Apply these changes verbatim, then fix any remaining flagged violations:\n\n{s}",
+                        .{block},
+                    );
+                    try transcript.append(allocator, .{ .system_note = note });
                 }
                 next_event = .{ .edit_verified = edit_event };
             },
@@ -1298,6 +1392,101 @@ test "veto failure triggers model-free compiler-authored apply" {
     const written = try file_io.readFile(testing.allocator, written_path, 1 << 20);
     defer testing.allocator.free(written);
     try testing.expect(std.mem.indexOf(u8, written, "if (!result.ok)") != null);
+}
+
+// A client that records, on each roundtrip after the first, whether the failed
+// draft (recorded as an `apply_edit` tool_use) and the compiler diagnostic
+// (recorded as a failed tool_result) are visible in the transcript it is handed.
+// This is the #1 invariant: because those live in the transcript - not a
+// transient prompt - a tool call interleaved into the repair cannot erase the
+// context the model must fix against.
+const DraftVisibilityClient = struct {
+    calls: usize = 0,
+    saw_on_retry: bool = false,
+    saw_after_interleave: bool = false,
+
+    fn draftAndDiagVisible(transcript: *const transcript_mod.Transcript) bool {
+        var saw_draft = false;
+        var saw_diag = false;
+        for (transcript.entries.items) |*entry| {
+            switch (entry.*) {
+                .assistant_tool_use => |calls| {
+                    for (calls) |call| {
+                        if (std.mem.eql(u8, call.name, "apply_edit") and
+                            std.mem.indexOf(u8, call.args_json, "var x = 1") != null)
+                            saw_draft = true;
+                    }
+                },
+                .tool_result => |result| {
+                    if (!result.ok and std.mem.indexOf(u8, result.llm_text, "compiler rejected") != null)
+                        saw_diag = true;
+                },
+                else => {},
+            }
+        }
+        return saw_draft and saw_diag;
+    }
+
+    fn requestFn(
+        ctx: *anyopaque,
+        arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
+        extra_user_text: ?[]const u8,
+    ) anyerror!ModelCallResult {
+        const self: *DraftVisibilityClient = @ptrCast(@alignCast(ctx));
+        _ = arena;
+        _ = extra_user_text;
+        self.calls += 1;
+        const stub_calls = [_]turn.ToolCall{.{ .id = "toolu_probe", .name = "stub", .args_json = "{}" }};
+        return switch (self.calls) {
+            // First draft: fails the veto (unsupported `var`).
+            1 => .{ .reply = .{ .response = .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } } } },
+            // Retry: the failed draft and its diagnostic must already be in the
+            // transcript. Respond with a TOOL CALL rather than a new edit - the
+            // mid-repair interleave that used to wipe the transient retry prompt.
+            2 => blk: {
+                self.saw_on_retry = DraftVisibilityClient.draftAndDiagVisible(transcript);
+                break :blk .{ .reply = .{ .response = .{ .tool_calls = &stub_calls } } };
+            },
+            // After the interleave: the draft + diagnostic must STILL be visible.
+            3 => blk: {
+                self.saw_after_interleave = DraftVisibilityClient.draftAndDiagVisible(transcript);
+                break :blk .{ .reply = .{ .response = .{ .final_text = "giving up" } } };
+            },
+            else => .{ .reply = .{ .response = .{ .final_text = "done" } } },
+        };
+    }
+
+    pub fn asClient(self: *DraftVisibilityClient) ModelClient {
+        return .{ .context = self, .request_fn = requestFn };
+    }
+};
+
+test "retry loop is information-complete: failed draft + diagnostic survive a mid-repair tool call" {
+    var client: DraftVisibilityClient = .{};
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, stub_tool);
+
+    // replay_mode skips the deterministic repair lane so the failed draft cleanly
+    // drives a model retry (the case that exercises the interleave), while veto
+    // and the transcript appends run exactly as in production.
+    const result = try runTurnWith(
+        testing.allocator,
+        client.asClient(),
+        &registry,
+        &tr,
+        "write the handler",
+        .{ .replay_mode = true },
+    );
+    try testing.expectEqual(turn.TurnState.done, result.final_state);
+
+    // The model saw its failed draft and the compiler diagnostic on the retry...
+    try testing.expect(client.saw_on_retry);
+    // ...and they were NOT erased by the interleaved tool call.
+    try testing.expect(client.saw_after_interleave);
 }
 
 test "text reply path injects workflow note before model text" {

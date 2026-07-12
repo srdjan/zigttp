@@ -94,7 +94,9 @@ pub fn runCase(
         .max_attempts = case.max_attempts,
         .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
         .replay_mode = false,
-        .turn_timeout_ms = 0,
+        // Inherit the production turn_timeout_ms default so the harness and the
+        // live loop share one options struct (cassette replays are instant and
+        // never approach the wall-clock bound anyway).
     });
 
     const passed = switch (case.criterion) {

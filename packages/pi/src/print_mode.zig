@@ -53,6 +53,28 @@ pub fn run(
     defer session.deinit(allocator);
 
     try runWithSession(allocator, &session, registry, flags, policy, null, null);
+
+    // Outcome-bearing exit code: `--print` is the CI/scripting entrypoint, so a
+    // turn that ended without an applied edit (veto exhausted, budget, approval
+    // denied) must be distinguishable from a proven-edit/clean-answer turn by
+    // `$?` alone. Hard errors already exited 1 inside runWithSession. Only the
+    // real (process-owning) entrypoint exits; the test-facing runWithClient path
+    // never reaches here.
+    const code = exitCodeForOutcome(session.metrics.last_outcome);
+    if (code != 0) std.process.exit(code);
+}
+
+/// Map a turn's terminal reason to a process exit code. 0 = an edit applied or a
+/// clean text answer; distinct nonzero codes mirror the failure terminals so a
+/// script can branch on the exact outcome. (Hard turn errors exit 1 separately.)
+fn exitCodeForOutcome(reason: session_events.TurnEndReason) u8 {
+    return switch (reason) {
+        .approved => 0,
+        .veto_exhausted => 2,
+        .budget_roundtrips, .budget_tool_calls, .budget_timeout => 3,
+        .approval_denied => 4,
+        .error_exit => 1,
+    };
 }
 
 /// Test-facing variant that accepts an explicit `ModelClient` plus an
@@ -446,6 +468,16 @@ test "emitErrorEvent: non-provider error emits null remediation" {
     const d = parsed.value.object.get("d").?.object;
     try testing.expectEqualStrings("MissingPrintPrompt", d.get("error").?.string);
     try testing.expect(d.get("remediation").? == .null);
+}
+
+test "exitCodeForOutcome maps every terminal reason to a distinct code" {
+    try testing.expectEqual(@as(u8, 0), exitCodeForOutcome(.approved));
+    try testing.expectEqual(@as(u8, 2), exitCodeForOutcome(.veto_exhausted));
+    try testing.expectEqual(@as(u8, 3), exitCodeForOutcome(.budget_roundtrips));
+    try testing.expectEqual(@as(u8, 3), exitCodeForOutcome(.budget_tool_calls));
+    try testing.expectEqual(@as(u8, 3), exitCodeForOutcome(.budget_timeout));
+    try testing.expectEqual(@as(u8, 4), exitCodeForOutcome(.approval_denied));
+    try testing.expectEqual(@as(u8, 1), exitCodeForOutcome(.error_exit));
 }
 
 test "writeVerifiedSummary ignores verified patches before current turn" {

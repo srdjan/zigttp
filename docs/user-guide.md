@@ -405,9 +405,11 @@ entries and `zigttp proofs gate` for pull-request checks.
 
 ## Expert Mode
 
-`zigttp expert` is the compiler-in-the-loop coding agent. It uses a configured
-Anthropic or OpenAI key, proposes edits, and routes edits through the same
-compiler checks before they land.
+`zigttp expert` is the compiler-in-the-loop coding agent. It proposes edits and
+routes every one through the same compiler checks before they land. The
+Anthropic backend is the measured, supported path; the OpenAI backend is
+experimental and unmeasured (it falls back to `gpt-4o-mini` and is not covered
+by the codegen quality ratchet).
 
 ```bash
 zigttp auth claude
@@ -420,11 +422,19 @@ zigttp expert --print "add a GET /health route"
 zigttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
 
-Pi defaults to `claude-haiku-4-5-20251001`. Pass `--model <id>` to start on a
-specific provider model, or switch mid-session with the `/model` command. Pass
+Pi defaults to `claude-sonnet-4-6`, the measured first-draft baseline. Pass
+`--model <id>` to start on a specific provider model, or switch mid-session with
+the `/model` command. Pass
 `--yes` to apply every verified edit without a confirmation prompt; the approval
 policy is persisted through `--resume`.
 Pass `--no-edit` to allow analysis and file reads while blocking all writes.
+
+`--print` runs one non-interactive turn and encodes the outcome in its exit
+code, so a CI job can branch on `$?` without parsing output: `0` an edit was
+applied or a clean text answer was returned, `1` a hard error, `2` the compiler
+veto was not satisfied within the attempt budget, `3` a turn budget was
+exhausted (round-trips, tool calls, or the wall-clock limit), `4` an edit was
+verified but the approval prompt rejected it.
 
 Keys are stored in `~/.zigttp/providers.json` with mode `0600`. A shell-set
 `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` overrides the stored value.
