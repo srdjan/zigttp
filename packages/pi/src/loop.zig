@@ -315,6 +315,24 @@ fn appendEditToolResult(
     } });
 }
 
+/// Byte cap on a tool_result body entering the transcript. A single large output
+/// (a full-file read, a long diagnostic blob) otherwise inflates the input token
+/// count of every subsequent roundtrip in the turn. Beyond the cap the body is
+/// truncated with a marker telling the model to re-read a specific range.
+const transcript_tool_result_cap: usize = 32 * 1024;
+
+/// Cap a tool result body before it enters the transcript. Small results pass
+/// through unchanged (returned as-is, no copy); an oversized one is truncated on
+/// `arena` with an actionable re-read pointer.
+fn capToolResultForTranscript(arena: std.mem.Allocator, body: []const u8) ![]const u8 {
+    if (body.len <= transcript_tool_result_cap) return body;
+    return std.fmt.allocPrint(
+        arena,
+        "{s}\n...[truncated {d} bytes to bound context growth; re-read a specific line range with workspace_read_file if you need the rest]",
+        .{ body[0..transcript_tool_result_cap], body.len - transcript_tool_result_cap },
+    );
+}
+
 /// SQL escalation hint appended to a failed-draft tool_result once the SQL veto
 /// has failed twice in a turn, so the model gets diagnostic guidance without
 /// burning a blind attempt.
@@ -649,7 +667,7 @@ pub fn runTurnWith(
                         .tool_use_id = call.id,
                         .tool_name = call.name,
                         .ok = result.ok,
-                        .llm_text = result.llm_text,
+                        .llm_text = try capToolResultForTranscript(ta, result.llm_text),
                         .ui_payload = result.ui_payload,
                     } });
                 }
@@ -1493,6 +1511,24 @@ test "retry loop is information-complete: failed draft + diagnostic survive a mi
     try testing.expect(client.saw_on_retry);
     // ...and they were NOT erased by the interleaved tool call.
     try testing.expect(client.saw_after_interleave);
+}
+
+test "capToolResultForTranscript truncates an oversized body with a re-read pointer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ta = arena.allocator();
+
+    const big = try ta.alloc(u8, transcript_tool_result_cap + 5000);
+    @memset(big, 'a');
+    const capped = try capToolResultForTranscript(ta, big);
+    try testing.expect(capped.len < big.len);
+    try testing.expect(std.mem.indexOf(u8, capped, "truncated") != null);
+    try testing.expect(std.mem.indexOf(u8, capped, "workspace_read_file") != null);
+
+    // A small body is returned as-is with no copy.
+    const small = "ok";
+    const passthrough = try capToolResultForTranscript(ta, small);
+    try testing.expectEqual(small.ptr, passthrough.ptr);
 }
 
 test "text reply path injects workflow note before model text" {
