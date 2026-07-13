@@ -76,7 +76,7 @@ with an explicit outbound host allow-list.
 - **websocket/** - WebSocket events with `serializeAttachment` and rooms.
 - **sql/** - the `sql` tagged template from `zigttp:sql`.
 - **system/** - the cross-handler linking story (`zigts link`).
-- **autoloop/** - the agent autoloop demo (`zigts expert`).
+- **autoloop/** - the agent autoloop demo (`zigttp expert`).
 
 ## Running an example
 

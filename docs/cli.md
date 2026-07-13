@@ -174,6 +174,7 @@ zigttp link <system.json>
 zigttp rollout <old-system.json> <new-system.json>
 zigttp edit-simulate [handler.ts] [--before old.ts]
 zigttp review-patch <file> [--before old.ts] [--json]
+zigttp gen-tests [handler.ts] [-o output.jsonl]
 zigttp canonicalize <file> --json
 zigttp normalize <file> [--write] [--check] [--json]
 zigttp features [--json]

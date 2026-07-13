@@ -141,6 +141,7 @@ const expert_help =
     \\  --session-id <id>          resume or create a session with this id
     \\  --resume, --continue       resume the newest session for this cwd
     \\  --fork <session-id>        branch from an existing session
+    \\  --model <id>               start on a specific provider model
     \\  --tools minimal|full       select workspace-read-only or full tool preset
     \\  --print <prompt>           run a single non-interactive turn and exit
     \\  --mode json                with --print, emit NDJSON transcript events
