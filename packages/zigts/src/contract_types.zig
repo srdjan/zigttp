@@ -1487,8 +1487,9 @@ pub fn computeCapabilityMatrix(specifiers: []const []const u8) CapabilityMatrix 
 /// Author-declared intent assertions. Extracted from a static-literal
 /// `export const intent = { assertions: [...] }` in the handler module.
 /// Lives **outside** the proof boundary: assertions are runnable examples,
-/// not new compiler obligations. The runner (`zigts assert-intent`)
-/// executes each entry through the handler test path.
+/// not new compiler obligations. They are extracted into the contract
+/// (`HandlerContract.intent.assertions`) at build time; executing each entry
+/// through the handler test path is deferred.
 ///
 /// Dynamic forms (function, spread, computed) must fail extraction rather
 /// than degrading to "unknown", to preserve the deterministic-extraction
@@ -1541,9 +1542,8 @@ pub const IntentAssertion = struct {
 pub const IntentInfo = struct {
     assertions: std.ArrayList(IntentAssertion) = .empty,
     /// True when the author declared `intent` but the value was dynamic.
-    /// Set by the extractor; surfaces as a hard error from
-    /// `zigts assert-intent` and a per-section verdict on the contract
-    /// diff (Stream B).
+    /// Set by the extractor; surfaces as `intent.dynamic = true` in the
+    /// contract and a per-section verdict on the contract diff (Stream B).
     dynamic: bool = false,
 
     pub fn deinit(self: *IntentInfo, allocator: std.mem.Allocator) void {

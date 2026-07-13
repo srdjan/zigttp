@@ -1083,9 +1083,10 @@ pub fn writeRestrictionsMarkdown(writer: anytype) !void {
         \\and the proof it unlocks. Run `zigts restrictions` for the live table.
         \\
         \\Every entry is a deliberate cut from JavaScript or TypeScript that buys
-        \\a specific soundness guarantee. The intent oracle (`zigts assert-intent`)
-        \\and the contract diff (`zigttp proofs show`) live above these cuts; the
-        \\cuts themselves are what make those higher-level claims possible.
+        \\a specific soundness guarantee. The author-declared intent assertions
+        \\(extracted with `-Dcontract`) and the contract diff (`zigttp proofs show`)
+        \\live above these cuts; the cuts themselves are what make those
+        \\higher-level claims possible.
         \\
         \\| Restriction | Failure class prevented | Proof unlocked | Alternative |
         \\|-------------|-------------------------|----------------|-------------|

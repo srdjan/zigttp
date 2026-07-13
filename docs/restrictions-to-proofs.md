@@ -5,9 +5,10 @@ It maps each zigts language restriction to the failure class it eliminates
 and the proof it unlocks. Run `zigts restrictions` for the live table.
 
 Every entry is a deliberate cut from JavaScript or TypeScript that buys
-a specific soundness guarantee. The intent oracle (`zigts assert-intent`)
-and the contract diff (`zigttp proofs show`) live above these cuts; the
-cuts themselves are what make those higher-level claims possible.
+a specific soundness guarantee. The author-declared intent assertions
+(extracted with `-Dcontract`) and the contract diff (`zigttp proofs show`)
+live above these cuts; the cuts themselves are what make those
+higher-level claims possible.
 
 The proof card's `Trade` lens in `zigttp dev` (press `Tab` to rotate)
 and the matching tab in Studio render a per-property view of this table

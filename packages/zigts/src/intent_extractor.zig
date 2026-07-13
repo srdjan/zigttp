@@ -1,7 +1,7 @@
 //! Walks the IR for a top-level `export const intent = { assertions: [...] }`
 //! static literal and populates `HandlerContract.intent`. The result is
 //! NOT a proof obligation - intent assertions live outside the proof
-//! boundary and are exercised separately by `zigttp assert-intent`.
+//! boundary and are extracted into the contract for separate handling.
 //!
 //! ## Determinism guardrail
 //!
