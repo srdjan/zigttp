@@ -3,7 +3,7 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
 #
 # Environment variables:
-#   ZIGTTP_VERSION     - pin to a specific version (e.g. v0.17.0)
+#   ZIGTTP_VERSION     - pin to a specific version (e.g. v0.18.0)
 #   ZIGTTP_CHANNEL     - stable (default; newest non-prerelease), latest, or beta
 #   ZIGTTP_INSTALL_DIR - installation directory, default: $HOME/.zigttp
 
@@ -107,8 +107,15 @@ resolve_version() {
             ;;
         stable)
             printf "Fetching latest stable version...\n"
-            VERSION=$(download_stdout "https://api.github.com/repos/${REPO}/releases/latest" \
+            VERSION=$(download_stdout "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
                 | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+            if [ -z "$VERSION" ]; then
+                # /releases/latest 404s when every release is a prerelease/draft.
+                # Fall back to the newest release of any kind so a first-time
+                # `curl | sh` never dead-ends.
+                RELEASES=$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=20")
+                VERSION=$(first_release_tag "$RELEASES" "")
+            fi
             ;;
         *)
             printf "Error: unsupported ZIGTTP_CHANNEL: %s (use beta, latest, or stable)\n" "$CHANNEL" >&2

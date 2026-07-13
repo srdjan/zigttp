@@ -1,6 +1,6 @@
 .{
     .name = .zigts,
-    .version = "0.17.0",
+    .version = "0.18.0",
     .fingerprint = 0xfca9f62bd1c96176,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

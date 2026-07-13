@@ -10,9 +10,11 @@
 # them as separate processes here rather than adding a `verify` build step.
 #
 # The format gate is a separate CI job (ci.yml: Check formatting); it is run
-# first here so a local `bash scripts/verify.sh` catches formatting drift too.
-# Note: the repo is fmt-clean only under the pinned toolchain (0.16.0, matching
-# CI's ZIG_VERSION); a nightly `zig` may report spurious drift.
+# LAST here so a local `bash scripts/verify.sh` still catches formatting drift
+# without gating the test suite on it. Note: the repo is fmt-clean only under
+# the pinned toolchain (0.16.0, matching CI's ZIG_VERSION); running under a
+# nightly `zig` may report spurious drift, so keeping fmt last means the full
+# correctness suite always runs first regardless.
 #
 # Usage (from anywhere; the script cd's to the repo root):
 #   bash scripts/verify.sh
@@ -26,9 +28,6 @@ step() {
   printf '>> %s\n' "$1"
   printf '========================================\n'
 }
-
-step "zig fmt --check build.zig packages/  (ci.yml: Check formatting)"
-zig fmt --check build.zig packages/
 
 step "zig build test  (aggregate unit suite)"
 zig build test
@@ -89,6 +88,9 @@ META=$(./zig-out/bin/zigts meta --json)
 echo "$META" | jq -e '.rule_count >= 25' >/dev/null
 echo "$META" | jq -e '.policy_hash | length == 64' >/dev/null
 echo "expert subsystem OK"
+
+step "zig fmt --check build.zig packages/  (ci.yml: Check formatting)"
+zig fmt --check build.zig packages/
 
 printf '\n========================================\n'
 printf '>> verify.sh: all CI test-job steps passed\n'
