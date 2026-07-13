@@ -70,13 +70,13 @@ with an explicit outbound host allow-list.
 
 ### Advanced surfaces
 
-- **durable/** - `run`, `step`, `waitSignal` from `zigttp:durable`. Replay-safe execution. See [approval.ts](durable/approval.ts).
+- **durable/** - `run`, `step`, `waitSignal` from `zigttp:durable`. Replay-safe execution. See [approval.ts](durable/approval.ts) (illustrative; the gated durable coverage lives in `workflow/`, run live by `scripts/test-examples.sh`).
 - **workflow/** - start with [dsl-orchestrator.ts](workflow/dsl-orchestrator.ts) for the embedded workflow DSL path, then use the primitive fixtures for `call`, `fanout`, `follow`, durable workflow queue, signal resume, timeout, and dead-letter replay. See [../docs/durable-workflows.md](../docs/durable-workflows.md).
-- **parallel/** - `parallel` and `race` from `zigttp:io`.
+- **parallel/** - `parallel` and `race` from `zigttp:io` (illustrative; not in the gated example suite).
 - **websocket/** - WebSocket events with `serializeAttachment` and rooms.
 - **sql/** - the `sql` tagged template from `zigttp:sql`.
 - **system/** - the cross-handler linking story (`zigts link`).
-- **autoloop/** - the agent autoloop demo (`zigttp expert`).
+- **autoloop/** - the agent autoloop demo (`zigttp expert`); the handler deliberately fails a proof so the agent has something to repair (illustrative; not in the gated example suite).
 
 ## Running an example
 
