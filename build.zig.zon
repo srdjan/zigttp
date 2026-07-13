@@ -1,6 +1,6 @@
 .{
     .name = .zigttp,
-    .version = "0.17.0",
+    .version = "0.18.0",
     .fingerprint = 0x610658c09272015b, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

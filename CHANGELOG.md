@@ -6,6 +6,65 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-13
+
+Expert-agent convergence release: the `zigttp expert` loop is the sole surface
+touched. The engine, runtime, and analyzer contract are unchanged from 0.17.0
+(same policy hash and semantics hash).
+
+### Added
+
+- `zigttp ledger stats`: a subcommand that aggregates every persisted
+  `session_summary` for the current workspace into the three cross-session
+  metrics STRATEGY.md stakes but never measured - expert success rate (fraction
+  of sessions that reached a verified proof), median round-trips to first green
+  proof, and median proven-path ratio. Reads the last summary row per session
+  (so a `--resume-extended` session reflects its final state), skips sessions
+  without one, and is best-effort on unreadable files. (#9, #11)
+
+### Changed
+
+- The expert default model is now Claude Sonnet (`claude-sonnet-4-6`), the
+  measured 7/7 first-draft-correct baseline, replacing Haiku. Haiku stays
+  reachable via `--model` and the `ZIGTTP_CODEGEN_MODEL` harness knob. (#5)
+- The expert per-request output-token budget now tracks the active model's
+  registry maximum (Sonnet: 64k) instead of the conservative 8192 default, and
+  applies to the default model too, not just a `--model` override - removing the
+  silent handler-size ceiling where a whole-file `apply_edit` exceeded 8192
+  output tokens. A response that still truncates now maps to a recoverable
+  `OutputTruncated` ("split the change") instead of the opaque fatal
+  `InvalidEditArgs`; a genuinely malformed args object still returns
+  `InvalidEditArgs`. (#3)
+- The expert now surfaces the compiler's Cost Contracts: `PropertiesSnapshot`
+  mirrors the engine's full `HandlerProperties` boolean surface (adds the
+  previously missing `cost_bounded` and `post_only`), the proof card highlights
+  a `cost_bounded` chip, the `/ledger` proven-path ratio folds in the new
+  dimensions (16/16 -> 18/18), and the persona teaches the loop-bound discharge
+  forms. A comptime drift gate now asserts the expert mirrors every engine
+  boolean property, so a new engine proof dimension fails the build until the
+  expert surfaces it. (#6)
+- A `tool_result` body is capped at 32 KB before it enters the transcript, with
+  a marker pointing the model at a `workspace_read_file` range re-read, so a
+  single large output no longer inflates the input token count of every
+  subsequent roundtrip. The RPC surface now auto-compacts after each turn
+  (mirroring the interactive REPL) and emits a notification when compaction
+  fires, so a long-lived IDE session cannot dead-end on a `PromptTooLong` the
+  machine client cannot resolve. (#10, #12)
+- The OpenAI expert backend is marked experimental in `zigttp auth` help and the
+  credentials help (Anthropic is the measured, supported path), and its
+  `contextWindowTokens` now returns gpt-4o-mini's true 128k window instead of
+  the Anthropic-sized 200k assumption, so a long OpenAI session compacts before
+  the real limit rather than dead-ending. Full OpenAI parity remains deferred.
+  (#7)
+- The expert retry loop is now information-complete: the `.run_veto` arm records
+  the model's draft as an `apply_edit` tool_use closed by the compiler verdict
+  as a tool_result, and the compiler-authored repair block persists as a
+  follow-up system note, so the whole retry context lives in the transcript
+  instead of a transient buffer a mid-repair tool call would erase. The per-turn
+  wall-clock timeout is raised 60s -> 300s (recorded convergence for complex
+  handlers ran 80-96s), and a rolling cache breakpoint on the last message block
+  lets the conversation prefix hit the prompt cache each roundtrip. (#1, #2, #4)
+
 ## [0.17.0] - 2026-07-11
 
 ### Added
@@ -155,7 +214,8 @@ See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-i
 - Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
 - HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/srdjan/zigttp/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/srdjan/zigttp/compare/v0.1.1-beta...v0.17.0
 [0.1.1-beta]: https://github.com/srdjan/zigttp/compare/v0.1.0-beta...v0.1.1-beta
 [0.1.0-beta]: https://github.com/srdjan/zigttp/compare/v0.16.0-rc2...v0.1.0-beta

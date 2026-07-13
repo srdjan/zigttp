@@ -850,7 +850,7 @@ test "persona pins compiler and policy versions via expert_meta.writeText" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
     try testing.expect(std.mem.indexOf(u8, prompt, "POLICY METADATA") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "0.17.0") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "0.18.0") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "2026.04.2") != null);
 }
 

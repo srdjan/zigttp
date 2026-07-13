@@ -48,7 +48,7 @@ test "execute returns v1 meta envelope" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"compiler_version\":\"0.17.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"compiler_version\":\"0.18.0\"") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"policy_version\":\"2026.04.2\"") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"mode\":\"embedded\"") != null);
 }
