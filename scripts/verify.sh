@@ -9,8 +9,10 @@
 # that build.zig (see the comment above the test step) warns about. We invoke
 # them as separate processes here rather than adding a `verify` build step.
 #
-# The format gate is a separate CI job; run it alongside this script:
-#   zig fmt --check build.zig packages/
+# The format gate is a separate CI job (ci.yml: Check formatting); it is run
+# first here so a local `bash scripts/verify.sh` catches formatting drift too.
+# Note: the repo is fmt-clean only under the pinned toolchain (0.16.0, matching
+# CI's ZIG_VERSION); a nightly `zig` may report spurious drift.
 #
 # Usage (from anywhere; the script cd's to the repo root):
 #   bash scripts/verify.sh
@@ -24,6 +26,9 @@ step() {
   printf '>> %s\n' "$1"
   printf '========================================\n'
 }
+
+step "zig fmt --check build.zig packages/  (ci.yml: Check formatting)"
+zig fmt --check build.zig packages/
 
 step "zig build test  (aggregate unit suite)"
 zig build test
