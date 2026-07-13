@@ -4,7 +4,7 @@
 #
 # Environment variables:
 #   ZIGTTP_VERSION     - pin to a specific version (e.g. v0.17.0)
-#   ZIGTTP_CHANNEL     - beta (default; newest -beta tag), latest, or stable
+#   ZIGTTP_CHANNEL     - stable (default; newest non-prerelease), latest, or beta
 #   ZIGTTP_INSTALL_DIR - installation directory, default: $HOME/.zigttp
 
 set -eu
@@ -84,7 +84,7 @@ resolve_version() {
         return
     fi
 
-    CHANNEL="${ZIGTTP_CHANNEL:-beta}"
+    CHANNEL="${ZIGTTP_CHANNEL:-stable}"
     case "$CHANNEL" in
         beta)
             printf "Fetching latest beta version...\n"
