@@ -3,6 +3,7 @@
 //! Spec section 10: "Never instantiate per request." This wraps the zigts
 //! LockFreePool to hold pre-instantiated WasmInterpreters so the hot path
 //! only acquires from the pool rather than paying Wasm instantiation cost.
+//! Skeleton: every entry currently returns error.WasmPolicyUnavailable.
 
 const std = @import("std");
 const WasmInterpreter = @import("interpreter.zig").WasmInterpreter;

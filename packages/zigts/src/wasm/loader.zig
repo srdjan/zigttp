@@ -3,6 +3,7 @@
 //! Returns the raw bytes of a Wasm policy artifact from disk. Later phases
 //! add WIT-component validation, checksum verification (spec section 14 -
 //! sign/checksum step), and version pinning.
+//! Skeleton: every entry currently returns error.WasmPolicyUnavailable.
 
 const std = @import("std");
 

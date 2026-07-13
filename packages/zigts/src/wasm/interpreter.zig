@@ -3,7 +3,9 @@
 //! Spec sections 6 (Wasm component interface / WIT ABI) and 10 (performance:
 //! never instantiate per request, strict timeout, fail-closed). The real
 //! implementation replaces the @panic stubs with a minimal Wasm 1.0 decoder +
-//! executor that calls the policy-check export through the WIT ABI.
+//! executor that calls the policy-check export through the WIT ABI. Until then
+//! every entry point fails closed with no reachable success path; the module
+//! is imported so it compiles, not because any call can succeed.
 
 const std = @import("std");
 const policy = @import("../policy.zig");
