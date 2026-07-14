@@ -326,7 +326,10 @@ fn handleModelList(
         try json_writer.writeString(w, m.id);
         try w.writeAll(",\"display_name\":");
         try json_writer.writeString(w, m.display_name);
-        try w.print(",\"context_window\":{d},\"max_output_tokens\":{d}}}", .{ m.context_window, m.max_output_tokens });
+        try w.print(",\"context_window\":{d},\"max_output_tokens\":{d}}}", .{
+            m.capabilities.context_window_tokens,
+            m.capabilities.max_output_tokens,
+        });
     }
     try w.writeByte(']');
 
@@ -343,11 +346,22 @@ fn handleModelSet(
 ) !void {
     const obj = (try requireObjectParams(allocator, out, params, id)) orelse return;
     const model_id = (try requireStringField(allocator, out, obj, "id", id)) orelse return;
-    const model = models_registry.findById(model_id) orelse {
-        try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "unknown model: {s}", .{model_id});
+    session.setModel(model_id) catch |err| {
+        switch (err) {
+            error.UnknownModel => try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "unknown model: {s}", .{model_id}),
+            error.ProviderMismatch => try emitErrorFmt(
+                allocator,
+                out,
+                id,
+                INVALID_PARAMS,
+                "model is not available for the active {s} provider: {s}",
+                .{ session.backendDescriptor().provider_label, model_id },
+            ),
+            error.NoActiveProvider => try emitError(allocator, out, id, INVALID_PARAMS, "no active model provider"),
+        }
         return;
     };
-    session.setModel(model.id);
+    const model = models_registry.findById(model_id) orelse unreachable;
     try emitResultString(allocator, out, id, model.id);
 }
 

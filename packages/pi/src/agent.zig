@@ -35,6 +35,9 @@ const expert_workflow = @import("expert_workflow.zig");
 const Registry = registry_mod.Registry;
 const Transcript = transcript_mod.Transcript;
 
+pub const Provider = models_registry.Provider;
+pub const ModelSelectionError = models_registry.SelectionError || error{NoActiveProvider};
+
 pub const AuthKind = enum {
     stub,
     anthropic_api_key,
@@ -106,6 +109,14 @@ const Backend = union(enum) {
     anthropic: anthropic_client.Client,
     openai: openai_client.Client,
 };
+
+fn configWithModel(config: anytype, model: *const models_registry.Model) @TypeOf(config) {
+    std.debug.assert(model.request_policy.max_output_tokens <= model.capabilities.max_output_tokens);
+    var next = config;
+    next.model = model.id;
+    next.max_tokens = model.request_policy.max_output_tokens;
+    return next;
+}
 
 /// Running per-session metrics, folded one turn at a time and emitted as a
 /// `session_summary` event at session close. Keyed on the `verified_patch`
@@ -234,11 +245,14 @@ pub const AgentSession = struct {
         else
             null;
         errdefer if (tools_owned) |json| allocator.free(json);
+        const model = models_registry.defaultForProvider(.anthropic);
         return .{
             .backend = .{ .anthropic = anthropic_client.Client.init(.{
                 .api_key = key_owned,
                 .system_prompt = prompt_owned,
                 .tools_json = tools_owned,
+                .model = model.id,
+                .max_tokens = model.request_policy.max_output_tokens,
             }) },
             .system_prompt_owned = prompt_owned,
             .tools_json_owned = tools_owned,
@@ -265,11 +279,14 @@ pub const AgentSession = struct {
         else
             null;
         errdefer if (tools_owned) |json| allocator.free(json);
+        const model = models_registry.defaultForProvider(.openai);
         return .{
             .backend = .{ .openai = openai_client.Client.init(.{
                 .api_key = key_owned,
                 .system_prompt = prompt_owned,
                 .tools_json = tools_owned,
+                .model = model.id,
+                .max_tokens = model.request_policy.max_output_tokens,
             }) },
             .system_prompt_owned = prompt_owned,
             .tools_json_owned = tools_owned,
@@ -308,6 +325,14 @@ pub const AgentSession = struct {
         };
     }
 
+    pub fn activeProvider(self: *const AgentSession) ?Provider {
+        return switch (self.backend) {
+            .stub => null,
+            .anthropic => .anthropic,
+            .openai => .openai,
+        };
+    }
+
     pub fn authKind(self: *const AgentSession) AuthKind {
         return switch (self.backend) {
             .stub => .stub,
@@ -327,27 +352,15 @@ pub const AgentSession = struct {
         };
     }
 
-    /// Switches the live backend's model. `model_id` must outlive the
-    /// session (use a compile-time const or an allocator-owned dupe). No-op
-    /// for the stub backend.
-    ///
-    /// Also raises the per-request output budget to the model's known maximum:
-    /// a large-output model (Sonnet: 64k) was otherwise silently capped at the
-    /// conservative 8192 default, which truncated a whole-file `apply_edit` on
-    /// larger handlers and surfaced as an opaque `InvalidEditArgs`. Unknown
-    /// models keep the current budget.
-    pub fn setModel(self: *AgentSession, model_id: []const u8) void {
-        const max_tokens: ?u32 = if (models_registry.findById(model_id)) |m| m.max_output_tokens else null;
+    /// Select an exact registry model for the active provider. Validation
+    /// computes the complete next state before either config field changes.
+    pub fn setModel(self: *AgentSession, model_id: []const u8) ModelSelectionError!void {
+        const provider = self.activeProvider() orelse return error.NoActiveProvider;
+        const model = try models_registry.resolveForProvider(provider, model_id);
         switch (self.backend) {
-            .anthropic => |*c| {
-                c.config.model = model_id;
-                if (max_tokens) |mt| c.config.max_tokens = mt;
-            },
-            .openai => |*c| {
-                c.config.model = model_id;
-                if (max_tokens) |mt| c.config.max_tokens = mt;
-            },
-            .stub => {},
+            .anthropic => |*client| client.config = configWithModel(client.config, model),
+            .openai => |*client| client.config = configWithModel(client.config, model),
+            .stub => unreachable,
         }
     }
 
@@ -417,13 +430,12 @@ pub fn initFromEnvWithSessionConfig(
     // Apply a --model launch override once, here, so every caller
     // (interactive REPL, autoloop, --print, --rpc) inherits it without each
     // having to remember a separate apply step. Also covers no_session sessions.
-    // With no override, re-apply the active default so its output-token budget
-    // is synced from the registry (the default model is large-output Sonnet, not
-    // the conservative 8192 that Config starts with).
+    // With no override, validate the active default through the same
+    // provider-aware selection path used by explicit overrides.
     if (config.model) |model_id| {
-        session.setModel(model_id);
+        try session.setModel(model_id);
     } else if (session.currentModel()) |active| {
-        session.setModel(active);
+        try session.setModel(active);
     }
 
     if (config.no_session) return session;
@@ -546,17 +558,13 @@ const compaction_threshold_pct: usize = 70;
 
 /// The active model's context window in tokens, or a conservative default.
 fn contextWindowTokens(session: *const AgentSession) usize {
+    const provider = session.activeProvider() orelse return 200_000;
     if (session.currentModel()) |id| {
-        if (models_registry.findById(id)) |m| return m.context_window;
+        if (models_registry.resolveForProvider(provider, id)) |model| {
+            return model.capabilities.context_window_tokens;
+        } else |_| {}
     }
-    // Unknown model. The OpenAI backend is experimental and its default
-    // (gpt-4o-mini) has no registry entry; use its true 128k window so
-    // auto-compact fires below the real limit instead of too late at the
-    // Anthropic-sized 200k assumption. Everything else keeps the 200k default.
-    return switch (session.backend) {
-        .openai => 128_000,
-        else => 200_000,
-    };
+    return models_registry.defaultForProvider(provider).capabilities.context_window_tokens;
 }
 
 /// Compact the session in place when the estimated context size reaches the
@@ -1082,6 +1090,8 @@ test "initAnthropic dupes api_key and system_prompt, deinit releases both" {
     try testing.expect(session.backend == .anthropic);
     try testing.expectEqualStrings("test-fixture-key", session.backend.anthropic.config.api_key);
     try testing.expectEqualStrings("you are a zigts expert", session.backend.anthropic.config.system_prompt);
+    try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
+    try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
     try testing.expect(session.backend.anthropic.config.tools_json != null);
     try testing.expect(session.system_prompt_owned != null);
 }
@@ -1098,6 +1108,8 @@ test "initOpenAI dupes api_key and system_prompt and routes through openai backe
     try testing.expect(session.backend == .openai);
     try testing.expectEqualStrings("openai-fixture-key", session.backend.openai.config.api_key);
     try testing.expectEqualStrings("you are a zigts expert", session.backend.openai.config.system_prompt);
+    try testing.expectEqualStrings("gpt-4o-mini", session.backend.openai.config.model);
+    try testing.expectEqual(@as(u32, 8_192), session.backend.openai.config.max_tokens);
     try testing.expectEqual(AuthKind.openai_api_key, session.authKind());
     try testing.expectEqualStrings("openai", session.backendDescriptor().provider_label);
 }
@@ -1110,11 +1122,22 @@ test "modelClient returns an anthropic client vtable when backend is anthropic" 
     try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&session.backend.anthropic)));
 }
 
-test "contextWindowTokens uses OpenAI's true 128k window for its unregistered default model" {
+test "registry defaults match provider client model defaults" {
+    const anthropic_defaults = anthropic_client.Config{ .api_key = "", .system_prompt = "" };
+    const openai_defaults = openai_client.Config{ .api_key = "", .system_prompt = "" };
+    try testing.expectEqualStrings(
+        anthropic_defaults.model,
+        models_registry.defaultForProvider(.anthropic).id,
+    );
+    try testing.expectEqualStrings(
+        openai_defaults.model,
+        models_registry.defaultForProvider(.openai).id,
+    );
+}
+
+test "contextWindowTokens uses provider registry metadata" {
     var openai = try AgentSession.initOpenAI(testing.allocator, "k", "p", null);
     defer openai.deinit(testing.allocator);
-    // The OpenAI default (gpt-4o-mini) has no registry entry; auto-compact must
-    // fire below its real 128k window, not the Anthropic-sized 200k assumption.
     try testing.expectEqual(@as(usize, 128_000), contextWindowTokens(&openai));
 
     var anthropic = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
@@ -1123,20 +1146,35 @@ test "contextWindowTokens uses OpenAI's true 128k window for its unregistered de
     try testing.expectEqual(@as(usize, 200_000), contextWindowTokens(&anthropic));
 }
 
-test "setModel raises the output-token budget to the registry maximum for a known model" {
+test "setModel validates provider and commits model with request policy atomically" {
     var session = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
     defer session.deinit(testing.allocator);
 
-    // A large-output model lifts the per-request budget off the conservative
-    // 8192 default so a whole-file apply_edit is not truncated on big handlers.
-    session.setModel("claude-sonnet-4-6");
+    try session.setModel("claude-sonnet-4-6");
     try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
     try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
 
-    // An unknown model keeps the current budget rather than resetting it.
-    session.setModel("some-unknown-model");
+    try testing.expectError(error.UnknownModel, session.setModel("some-unknown-model"));
     try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
-    try testing.expectEqualStrings("some-unknown-model", session.backend.anthropic.config.model);
+    try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
+
+    try testing.expectError(error.ProviderMismatch, session.setModel("gpt-4o-mini"));
+    try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
+    try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
+}
+
+test "OpenAI and stub model selection respect backend provider state" {
+    var openai = try AgentSession.initOpenAI(testing.allocator, "k", "p", null);
+    defer openai.deinit(testing.allocator);
+    try testing.expectEqual(Provider.openai, openai.activeProvider().?);
+    try openai.setModel("gpt-4o-mini");
+    try testing.expectEqual(@as(u32, 8_192), openai.backend.openai.config.max_tokens);
+
+    var stub = AgentSession.initStub();
+    defer stub.deinit(testing.allocator);
+    try testing.expect(stub.activeProvider() == null);
+    try testing.expectError(error.NoActiveProvider, stub.setModel("gpt-4o-mini"));
+    try testing.expect(stub.currentModel() == null);
 }
 
 test "envHasModelBackend: empty env var is treated as absent" {
@@ -1164,6 +1202,30 @@ test "envHasModelBackend: a non-empty env var is detected" {
     var anth = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-fixture-key");
     defer anth.restore(allocator);
     try testing.expect(envHasModelBackend());
+}
+
+test "Anthropic credential precedence rejects an OpenAI model override" {
+    const allocator = testing.allocator;
+    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-key");
+    defer anthropic.restore(allocator);
+    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-key");
+    defer openai.restore(allocator);
+
+    var session = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_session = true,
+        .no_context_files = true,
+    });
+    defer session.deinit(allocator);
+    try testing.expectEqual(Provider.anthropic, session.activeProvider().?);
+
+    try testing.expectError(
+        error.ProviderMismatch,
+        initFromEnvWithSessionConfig(allocator, null, .{
+            .no_session = true,
+            .no_context_files = true,
+            .model = "gpt-4o-mini",
+        }),
+    );
 }
 
 test "estimateContextTokens grows with transcript and includes the fixed allowance" {

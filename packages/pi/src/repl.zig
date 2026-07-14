@@ -84,13 +84,21 @@ pub fn processSubmit(
 
     if (std.mem.startsWith(u8, trimmed, "/model ")) {
         const model_id = std.mem.trim(u8, trimmed["/model ".len..], " \t");
-        if (models_registry.findById(model_id)) |model| {
-            session.setModel(model.id);
-            const msg = try std.fmt.allocPrint(allocator, "Model switched to: {s}\n", .{model.display_name});
-            return .{ .tool_result = .{ .ok = true, .llm_text = msg } };
-        }
-        const msg = try std.fmt.allocPrint(allocator, "Unknown model: {s}\n", .{model_id});
-        return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
+        session.setModel(model_id) catch |err| {
+            const msg = switch (err) {
+                error.UnknownModel => try std.fmt.allocPrint(allocator, "Unknown model: {s}\n", .{model_id}),
+                error.ProviderMismatch => try std.fmt.allocPrint(
+                    allocator,
+                    "Model is not available for the active {s} provider: {s}\n",
+                    .{ session.backendDescriptor().provider_label, model_id },
+                ),
+                error.NoActiveProvider => try allocator.dupe(u8, "No active model provider.\n"),
+            };
+            return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
+        };
+        const model = models_registry.findById(model_id) orelse unreachable;
+        const msg = try std.fmt.allocPrint(allocator, "Model switched to: {s}\n", .{model.display_name});
+        return .{ .tool_result = .{ .ok = true, .llm_text = msg } };
     }
 
     if (std.mem.startsWith(u8, trimmed, "/template:")) {
