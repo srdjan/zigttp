@@ -430,6 +430,152 @@ fn buildAttestationJws(
     return try attest_build_receipt.buildJws(allocator, contract_json, bytecode, contract);
 }
 
+fn serializeContractJson(
+    allocator: std.mem.Allocator,
+    contract: *const zigts.HandlerContract,
+) ![]u8 {
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    zigts.writeContractJson(contract, &output.writer) catch |err| switch (err) {
+        // Allocating.Writer intentionally erases allocator errors behind its
+        // generic writer error. At this boundary allocation is its only
+        // failure source, so restore the actionable cause for callers.
+        error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
+    };
+    return try output.toOwnedSlice();
+}
+
+const ArtifactTailInput = struct {
+    runtime_binary: []const u8,
+    output_path: []const u8,
+    attest_requested: bool,
+    bytecode: []const u8,
+    dep_bytecodes: []const []const u8,
+    contract: ?*const zigts.HandlerContract,
+};
+
+const ArtifactTailCapabilities = struct {
+    context: ?*anyopaque,
+    serialize_contract: *const fn (
+        context: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        contract: *const zigts.HandlerContract,
+    ) anyerror![]u8,
+    sign_contract: *const fn (
+        context: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        contract_json: []const u8,
+        bytecode: []const u8,
+        contract: *const zigts.HandlerContract,
+    ) anyerror!?[]u8,
+    create_artifact: *const fn (
+        context: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        runtime_binary: []const u8,
+        output_path: []const u8,
+        payload: self_extract.PayloadInput,
+    ) anyerror!void,
+};
+
+fn serializeContractCapability(
+    _: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    contract: *const zigts.HandlerContract,
+) ![]u8 {
+    return serializeContractJson(allocator, contract);
+}
+
+fn signContractCapability(
+    _: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    contract_json: []const u8,
+    bytecode: []const u8,
+    contract: *const zigts.HandlerContract,
+) !?[]u8 {
+    return buildAttestationJws(allocator, contract_json, bytecode, contract);
+}
+
+fn createArtifactCapability(
+    _: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    runtime_binary: []const u8,
+    output_path: []const u8,
+    payload: self_extract.PayloadInput,
+) !void {
+    shared.step("Writing binary...");
+    self_extract.create(allocator, runtime_binary, output_path, payload) catch |err| {
+        if (err == error.FileNotFound) {
+            // self_extract opens both the runtime template and the output
+            // path; the output parent was created by prepareProjectArtifact,
+            // so FileNotFound here almost always means the runtime template
+            // is missing alongside the dev CLI.
+            std.debug.print(
+                \\
+                \\Aborted: zigttp-runtime template not found at '{s}'.
+                \\Install zigttp-runtime alongside zigttp, or rebuild via `zig build`.
+                \\
+            , .{runtime_binary});
+        } else {
+            std.log.err("Failed to create output binary: {}", .{err});
+        }
+        return err;
+    };
+}
+
+const production_artifact_tail_capabilities = ArtifactTailCapabilities{
+    .context = null,
+    .serialize_contract = serializeContractCapability,
+    .sign_contract = signContractCapability,
+    .create_artifact = createArtifactCapability,
+};
+
+fn writeArtifactTail(
+    allocator: std.mem.Allocator,
+    input: ArtifactTailInput,
+    capabilities: ArtifactTailCapabilities,
+) !void {
+    const contract_json: ?[]u8 = if (input.contract) |contract|
+        try capabilities.serialize_contract(capabilities.context, allocator, contract)
+    else
+        null;
+    defer if (contract_json) |json| allocator.free(json);
+
+    const attestation_jws: ?[]u8 = blk: {
+        if (!input.attest_requested) break :blk null;
+        const json = contract_json orelse {
+            std.log.warn("attestation requested but no contract was emitted; skipping attestation", .{});
+            break :blk null;
+        };
+        const contract = input.contract orelse break :blk null;
+        break :blk try capabilities.sign_contract(
+            capabilities.context,
+            allocator,
+            json,
+            input.bytecode,
+            contract,
+        );
+    };
+    defer if (attestation_jws) |attestation| allocator.free(attestation);
+
+    const policy = if (input.contract) |contract|
+        zigts.handler_policy.contractToRuntimePolicy(contract)
+    else
+        zigts.handler_policy.RuntimePolicy{};
+    try capabilities.create_artifact(
+        capabilities.context,
+        allocator,
+        input.runtime_binary,
+        input.output_path,
+        .{
+            .bytecode = input.bytecode,
+            .dep_bytecodes = input.dep_bytecodes,
+            .contract_json = contract_json,
+            .policy = &policy,
+            .attestation = attestation_jws,
+        },
+    );
+}
+
 fn appendDeployLedgerEntry(
     allocator: std.mem.Allocator,
     contract: *const zigts.HandlerContract,
@@ -528,65 +674,17 @@ fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void 
     const runtime_binary = try resolveRuntimeBinary(allocator, dev_self_path);
     defer allocator.free(runtime_binary);
 
-    var contract_json: ?[]const u8 = null;
-    if (compiled.contract) |*contract| {
-        var json_output: std.ArrayList(u8) = .empty;
-        defer json_output.deinit(allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_output);
-        zigts.writeContractJson(contract, &aw.writer) catch {};
-        json_output = aw.toArrayList();
-        if (json_output.items.len > 0) {
-            contract_json = try json_output.toOwnedSlice(allocator);
-        }
-    }
-    defer if (contract_json) |cj| allocator.free(cj);
-
     const dep_bytecodes: []const []const u8 = compiled.dep_bytecodes orelse &.{};
-
-    const attestation_jws: ?[]u8 = blk: {
-        if (!attest_requested) break :blk null;
-        const cj = contract_json orelse {
-            std.log.warn("attestation requested but no contract was emitted; skipping attestation", .{});
-            break :blk null;
-        };
-        const contract_ptr = if (compiled.contract) |*c| c else break :blk null;
-        break :blk try buildAttestationJws(allocator, cj, compiled.bytecode, contract_ptr);
-    };
-    defer if (attestation_jws) |a| allocator.free(a);
-
-    shared.step("Writing binary...");
-    // Embed the proven capability allowlist so the deployed binary enforces the
-    // same egress/env/cache/sql restrictions as dev/serve. Previously this was
-    // the empty (allow-all) stub, so a deployed handler ran unsandboxed. The
-    // policy borrows from the contract, which outlives serialization here; the
-    // payload serializer carries the per-query SQL operation (read/write).
-    const policy = blk: {
-        const contract_ptr = if (compiled.contract) |*c| c else break :blk zigts.handler_policy.RuntimePolicy{};
-        break :blk zigts.handler_policy.contractToRuntimePolicy(contract_ptr);
-    };
-    self_extract.create(allocator, runtime_binary, output_path, .{
+    // Serialize the contract completely before signing or opening the output.
+    // The policy borrows from the compiled contract for the duration of create.
+    try writeArtifactTail(allocator, .{
+        .runtime_binary = runtime_binary,
+        .output_path = output_path,
+        .attest_requested = attest_requested,
         .bytecode = compiled.bytecode,
         .dep_bytecodes = dep_bytecodes,
-        .contract_json = contract_json,
-        .policy = &policy,
-        .attestation = attestation_jws,
-    }) catch |err| {
-        if (err == error.FileNotFound) {
-            // self_extract opens both the runtime template and the output
-            // path; the output parent was created by prepareProjectArtifact,
-            // so FileNotFound here almost always means the runtime template
-            // is missing alongside the dev CLI.
-            std.debug.print(
-                \\
-                \\Aborted: zigttp-runtime template not found at '{s}'.
-                \\Install zigttp-runtime alongside zigttp, or rebuild via `zig build`.
-                \\
-            , .{runtime_binary});
-        } else {
-            std.log.err("Failed to create output binary: {}", .{err});
-        }
-        return err;
-    };
+        .contract = if (compiled.contract) |*contract| contract else null,
+    }, production_artifact_tail_capabilities);
 
     if (builtin.os.tag == .macos) {
         codesignAdHoc(allocator, output_path);
@@ -703,6 +801,161 @@ fn printLocalDeployHelp() void {
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+const ArtifactTailProbe = struct {
+    serialize_calls: usize = 0,
+    sign_calls: usize = 0,
+    create_calls: usize = 0,
+    created_with_contract: bool = false,
+    created_with_attestation: bool = false,
+
+    fn fromContext(context: ?*anyopaque) *ArtifactTailProbe {
+        return @ptrCast(@alignCast(context.?));
+    }
+
+    fn recordSerialization(
+        context: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        contract: *const zigts.HandlerContract,
+    ) ![]u8 {
+        const self = fromContext(context);
+        self.serialize_calls += 1;
+        return serializeContractJson(allocator, contract);
+    }
+
+    fn recordSigning(
+        context: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        _: []const u8,
+        _: []const u8,
+        _: *const zigts.HandlerContract,
+    ) !?[]u8 {
+        const self = fromContext(context);
+        self.sign_calls += 1;
+        return try allocator.dupe(u8, "test-attestation");
+    }
+
+    fn recordCreation(
+        context: ?*anyopaque,
+        _: std.mem.Allocator,
+        _: []const u8,
+        _: []const u8,
+        payload: self_extract.PayloadInput,
+    ) !void {
+        const self = fromContext(context);
+        self.create_calls += 1;
+        self.created_with_contract = payload.contract_json != null;
+        self.created_with_attestation = payload.attestation != null;
+    }
+
+    fn capabilities(self: *ArtifactTailProbe) ArtifactTailCapabilities {
+        return .{
+            .context = self,
+            .serialize_contract = recordSerialization,
+            .sign_contract = recordSigning,
+            .create_artifact = recordCreation,
+        };
+    }
+};
+
+fn serializeContractForAllocationTest(
+    allocator: std.mem.Allocator,
+    contract: *const zigts.HandlerContract,
+) !void {
+    const json = try serializeContractJson(allocator, contract);
+    defer allocator.free(json);
+}
+
+test "serializeContractJson returns complete parseable JSON" {
+    const allocator = std.testing.allocator;
+    const path = try allocator.dupe(u8, "handler.ts");
+    var contract = zigts.handler_contract.emptyContract(path);
+    defer contract.deinit(allocator);
+
+    const json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(json);
+    try std.testing.expect(json.len > 0);
+
+    var parsed = try zigts.handler_contract.parseFromJson(allocator, json);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualStrings("handler.ts", parsed.handler.path);
+}
+
+test "serializeContractJson cleans every allocation failure" {
+    const allocator = std.testing.allocator;
+    const path = try allocator.dupe(u8, "handler.ts");
+    var contract = zigts.handler_contract.emptyContract(path);
+    defer contract.deinit(allocator);
+
+    try std.testing.checkAllAllocationFailures(
+        allocator,
+        serializeContractForAllocationTest,
+        .{&contract},
+    );
+}
+
+test "artifact tail stops before signing or creation when serialization fails" {
+    const allocator = std.testing.allocator;
+    const path = try allocator.dupe(u8, "handler.ts");
+    var contract = zigts.handler_contract.emptyContract(path);
+    defer contract.deinit(allocator);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "artifact.bin",
+        .data = "sentinel",
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(root);
+    const output_path = try std.fs.path.join(allocator, &.{ root, "artifact.bin" });
+    defer allocator.free(output_path);
+
+    for ([_]bool{ true, false }) |attest_requested| {
+        var probe = ArtifactTailProbe{};
+        var failing = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = 1 },
+        );
+        try std.testing.expectError(
+            error.OutOfMemory,
+            writeArtifactTail(failing.allocator(), .{
+                .runtime_binary = "runtime",
+                .output_path = output_path,
+                .attest_requested = attest_requested,
+                .bytecode = "bytecode",
+                .dep_bytecodes = &.{},
+                .contract = &contract,
+            }, probe.capabilities()),
+        );
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(@as(usize, 1), probe.serialize_calls);
+        try std.testing.expectEqual(@as(usize, 0), probe.sign_calls);
+        try std.testing.expectEqual(@as(usize, 0), probe.create_calls);
+
+        const existing = try zigts.file_io.readFile(allocator, output_path, 64);
+        defer allocator.free(existing);
+        try std.testing.expectEqualStrings("sentinel", existing);
+    }
+}
+
+test "artifact tail preserves absent-contract creation behavior" {
+    var probe = ArtifactTailProbe{};
+    try writeArtifactTail(std.testing.allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = true,
+        .bytecode = "bytecode",
+        .dep_bytecodes = &.{},
+        .contract = null,
+    }, probe.capabilities());
+
+    try std.testing.expectEqual(@as(usize, 0), probe.serialize_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.sign_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.create_calls);
+    try std.testing.expect(!probe.created_with_contract);
+    try std.testing.expect(!probe.created_with_attestation);
 }
 
 test "prepareProjectArtifact default path: <root>/.zigttp/<subdir>/<basename>" {
