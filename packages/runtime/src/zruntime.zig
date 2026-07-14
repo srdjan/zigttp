@@ -6007,6 +6007,54 @@ test "HandlerPool bytecode cache" {
     try std.testing.expect(hits + misses >= 1);
 }
 
+fn writeCachedTeardownFixture(allocator: std.mem.Allocator, buffer: []u8) ![]const u8 {
+    const source =
+        \\function cachedOuter() {
+        \\  const cachedInner = () => 1;
+        \\  return cachedInner;
+        \\}
+    ;
+
+    const source_rt = try Runtime.init(allocator, .{});
+    defer source_rt.deinit();
+    return (try source_rt.loadCodeWithCachingNoHandler(
+        source,
+        "<cached-teardown-source>",
+        buffer,
+    )) orelse return error.TestExpectedCacheEntry;
+}
+
+test "cached bytecode teardown does not allocate after ownership transfer" {
+    const allocator = std.testing.allocator;
+    var cache_buffer: [64 * 1024]u8 = undefined;
+    const cached = try writeCachedTeardownFixture(allocator, &cache_buffer);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    const cached_rt = try Runtime.init(failing.allocator(), .{});
+    errdefer cached_rt.deinit();
+    try cached_rt.loadFromCachedBytecodeNoHandler(cached);
+
+    // Any allocation from this point fails. Cached bytecode teardown must use
+    // ownership metadata reserved during load rather than allocating a seen-set.
+    failing.fail_index = failing.alloc_index;
+    cached_rt.deinit();
+}
+
+test "cached and source bytecode keep independent teardown ownership" {
+    const allocator = std.testing.allocator;
+    var cache_buffer: [64 * 1024]u8 = undefined;
+    const cached = try writeCachedTeardownFixture(allocator, &cache_buffer);
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+    try rt.loadFromCachedBytecodeNoHandler(cached);
+    try rt.loadFromCachedBytecodeNoHandler(cached);
+    try rt.loadCodeNoHandler(
+        "function sourceOuter() { const sourceInner = () => 2; return sourceInner; }",
+        "<source-teardown-owner>",
+    );
+}
+
 test "Runtime rejects malformed cached bytecode before execution" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

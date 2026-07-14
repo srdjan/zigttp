@@ -315,9 +315,13 @@ pub const Context = struct {
     /// see CodeGen.freeOwnedConstantPayloads contract).
     bytecode_functions: std.ArrayList(*object.JSObject),
     /// Owns heap-allocated script roots loaded from serialized bytecode. Their
-    /// nested functions are also reachable through bytecode_functions, so
-    /// teardown shares one seen-set across both ownership paths.
+    /// nested functions can also be reachable through bytecode_functions;
+    /// cached_bytecode marks those function objects as borrowers at teardown.
     bytecode_roots: std.ArrayList(*bytecode.FunctionBytecode),
+    /// Every bytecode node reachable from bytecode_roots. Populated before a
+    /// deserialized root transfers ownership so cached function objects can be
+    /// identified during teardown without allocating.
+    cached_bytecode: object.JSObject.FunctionBytecodeSeen,
     /// Cached HTTP shapes for fast Request/Response creation
     http_shapes: ?HttpShapeCache,
     /// Cached vnode shape for fast JSX virtual DOM node creation
@@ -408,6 +412,7 @@ pub const Context = struct {
             .builtin_objects = .empty,
             .bytecode_functions = .empty,
             .bytecode_roots = .empty,
+            .cached_bytecode = .empty,
             .http_shapes = null,
             .vnode_shape = null,
             .http_strings = null,
@@ -423,6 +428,7 @@ pub const Context = struct {
         };
         errdefer {
             ctx.literal_shapes.deinit(allocator);
+            ctx.cached_bytecode.deinit(allocator);
             ctx.bytecode_roots.deinit(allocator);
             ctx.bytecode_functions.deinit(allocator);
             ctx.builtin_objects.deinit(allocator);
@@ -833,7 +839,42 @@ pub const Context = struct {
     }
 
     pub fn takeBytecodeRoot(self: *Context, func: *bytecode.FunctionBytecode) !void {
-        try self.bytecode_roots.append(self.allocator, func);
+        if (self.cached_bytecode.contains(func)) return;
+
+        const new_node_count = std.math.cast(
+            u32,
+            self.countUnregisteredCachedBytecode(func),
+        ) orelse return error.OutOfMemory;
+        try self.bytecode_roots.ensureUnusedCapacity(self.allocator, 1);
+        try self.cached_bytecode.ensureUnusedCapacity(self.allocator, new_node_count);
+
+        self.registerCachedBytecodeAssumeCapacity(func);
+        self.bytecode_roots.appendAssumeCapacity(func);
+    }
+
+    fn countUnregisteredCachedBytecode(self: *const Context, func: *bytecode.FunctionBytecode) usize {
+        if (self.cached_bytecode.contains(func)) return 0;
+
+        var count: usize = 1;
+        for (func.constants) |constant| {
+            if (!constant.isExternPtr()) continue;
+            const magic = constant.toExternPtr(u32);
+            if (magic.* != bytecode.MAGIC) continue;
+            count += self.countUnregisteredCachedBytecode(constant.toExternPtr(bytecode.FunctionBytecode));
+        }
+        return count;
+    }
+
+    fn registerCachedBytecodeAssumeCapacity(self: *Context, func: *bytecode.FunctionBytecode) void {
+        if (self.cached_bytecode.contains(func)) return;
+        self.cached_bytecode.putAssumeCapacity(func, {});
+
+        for (func.constants) |constant| {
+            if (!constant.isExternPtr()) continue;
+            const magic = constant.toExternPtr(u32);
+            if (magic.* != bytecode.MAGIC) continue;
+            self.registerCachedBytecodeAssumeCapacity(constant.toExternPtr(bytecode.FunctionBytecode));
+        }
     }
 
     fn clearCompiledCodeRecursive(self: *Context, func: *bytecode.FunctionBytecode) usize {
@@ -1021,22 +1062,23 @@ pub const Context = struct {
             }
         }
 
-        // A non-closure function object's FunctionBytecode is also reachable
-        // by recursing through whichever tracked ancestor's constant pool
-        // embeds it (nested function literals are always compiled as a
-        // constant of their lexically enclosing function). Share one
-        // seen-set across the whole walk so each FunctionBytecode is freed
-        // exactly once regardless of which tracked object reaches it first.
-        var destroyed_bytecode: object.JSObject.FunctionBytecodeSeen = .empty;
+        // cached_bytecode is pre-populated before ownership transfer. Reuse it
+        // as the seen-set so cached function objects borrow their bytecode and
+        // teardown cannot lose an owned cached root to an allocation failure.
+        // Source-compiled functions retain the existing tracked destruction.
+        for (self.bytecode_functions.items) |obj| {
+            obj.destroyFullTracked(self.allocator, &self.cached_bytecode);
+        }
+        self.bytecode_functions.deinit(self.allocator);
+
+        // Independent deserializations produce disjoint trees. Duplicate root
+        // transfers are ignored by takeBytecodeRoot, so each tree is owned and
+        // destroyed exactly once here without a seen-set allocation.
         for (self.bytecode_roots.items) |func| {
-            object.JSObject.destroyFunctionBytecode(self.allocator, func, &destroyed_bytecode);
+            object.JSObject.destroyFunctionBytecode(self.allocator, func, null);
         }
         self.bytecode_roots.deinit(self.allocator);
-        for (self.bytecode_functions.items) |obj| {
-            obj.destroyFullTracked(self.allocator, &destroyed_bytecode);
-        }
-        destroyed_bytecode.deinit(self.allocator);
-        self.bytecode_functions.deinit(self.allocator);
+        self.cached_bytecode.deinit(self.allocator);
 
         // Destroy prototypes with destroyBuiltin to clean up their method properties
         if (self.hidden_class_pool) |pool| {
