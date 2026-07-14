@@ -2,9 +2,10 @@
 
 The coding agent behind the `zigttp expert` and `zigttp ledger` CLI commands.
 Linked only into the developer `zigttp` binary, never into the pi-free `zigts`
-analyzer binary or the deployed `zigttp-runtime`. Built in Zig against the Anthropic
-Messages API, driven by a pure turn state machine with a compiler-aware
-tool registry and a mandatory compile-check veto on every edit.
+analyzer binary or the deployed `zigttp-runtime`. Built in Zig against the
+Anthropic Messages and OpenAI Responses APIs, driven by a pure turn state
+machine with a compiler-aware tool registry and a mandatory compile-check veto
+on every edit.
 
 Companion to Mario Zechner's TypeScript [pi-mono](https://github.com/badlogic/pi-mono).
 Ported to Zig, scoped to this repo's lockdown policy: everything the
@@ -28,7 +29,7 @@ apply. The model cannot emit text that bypasses the check.
 packages/pi/
   src/
     app.zig               # entrypoint; parses ExpertFlags, dispatches to REPL / print / rpc
-    agent.zig             # AgentSession: transcript, backend union (stub|anthropic), session persistence
+    agent.zig             # AgentSession: transcript, backend union (stub|anthropic|openai), session persistence
     loop.zig              # runTurnWith: drives turn.zig state machine, owns I/O + retries
     turn.zig              # pure state machine (idle → awaiting_model → verifying_edit → ...)
     expert_workflow.zig   # deterministic task routing hints before first model round-trip
@@ -45,6 +46,7 @@ packages/pi/
     providers/
       models.zig          # compile-time model registry
       anthropic/          # request builder, SSE parser, response assembler, client
+      openai/             # Responses API request builder, SSE parser, response assembler, client
     registry/
       tool.zig            # ToolDef + JSON decoders
       registry.zig        # invoke / invokeJson / findByName
@@ -192,10 +194,22 @@ ephemeral prompt caching on the system block, and usage token
 accounting (`input_tokens`, `output_tokens`, `cache_read_input_tokens`,
 `cache_creation_input_tokens`).
 
-The model client is a vtable (`loop.ModelClient = {context, request_fn}`),
-so a second backend or a test stub plugs in without touching the loop.
-`CannedClient` and `SequenceClient` in tests exercise the loop without
-network access.
+`providers/openai/` implements the Responses API with SSE streaming and the
+same `turn.AssistantReply` boundary. Anthropic is the measured provider;
+OpenAI is shipped but experimental. The static registry tags every model with
+its provider. Anthropic defaults to `claude-sonnet-4-6`; OpenAI defaults to
+`gpt-4o-mini`. When both credentials exist, Anthropic takes precedence.
+
+Model IDs select within the active provider and never change providers.
+`--model`, `/model`, and RPC `model.set` all use the same exact registry lookup.
+`/model` and RPC `model.list` show only the active provider's entries. A switch
+lasts for the current session and applies the registry request budget. The
+OpenAI entry records a 16,384-token output capability but keeps zigttp's
+8,192-token request policy.
+
+The model client is a vtable (`loop.ModelClient = {context, request_fn}`), so
+the loop stays provider-agnostic. `CannedClient` and `SequenceClient` exercise
+the same boundary in tests without network access.
 
 ## CLI
 
@@ -213,6 +227,7 @@ to pi:
 --yes                    auto-approve all verified edits
 --no-edit                auto-reject all verified edits
 --tools {full,minimal}   tool preset (minimal = workspace read-only)
+--model <id>             model registered for the configured provider
 --print <prompt>         one-shot, rendered text to stdout
 --mode json              one-shot, NDJSON events to stdout (needs --print)
 --mode rpc               long-lived JSON-RPC 2.0 over stdio
@@ -283,12 +298,6 @@ Add a tool:
    synthetic `apply_edit` tool so the compiler veto and approval policy run.
 
 ## Deferred
-
-**Phase 8 (OpenAI second provider).** The second backend drops into
-`packages/pi/src/providers/openai/` mirroring the `anthropic/` file
-layout. The `loop.ModelClient` vtable already accepts a new provider
-without loop changes. The blocker is one live call to record a CI
-cassette; the replay harness itself builds cold.
 
 **Phase 5 (structured `ToolResult` split).** Deliberately skipped. The
 current `ToolResult.body` is JSON that Claude reads natively; splitting

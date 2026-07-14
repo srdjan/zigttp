@@ -190,7 +190,7 @@ fn dispatchMethod(
         return false;
     }
     if (std.mem.eql(u8, method, "model.list")) {
-        try handleModelList(allocator, id, out);
+        try handleModelList(allocator, session, id, out);
         return false;
     }
     if (std.mem.eql(u8, method, "model.set")) {
@@ -311,6 +311,7 @@ fn handleSessionInfo(
 
 fn handleModelList(
     allocator: std.mem.Allocator,
+    session: *const agent.AgentSession,
     id: std.json.Value,
     out: ?*std.Io.Writer,
 ) !void {
@@ -320,16 +321,21 @@ fn handleModelList(
     const w = &aw.writer;
 
     try w.writeByte('[');
-    inline for (models_registry.registry, 0..) |m, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.writeAll("{\"id\":");
-        try json_writer.writeString(w, m.id);
-        try w.writeAll(",\"display_name\":");
-        try json_writer.writeString(w, m.display_name);
-        try w.print(",\"context_window\":{d},\"max_output_tokens\":{d}}}", .{
-            m.capabilities.context_window_tokens,
-            m.capabilities.max_output_tokens,
-        });
+    if (session.activeProvider()) |provider| {
+        var first = true;
+        var iterator = models_registry.iterateProvider(provider);
+        while (iterator.next()) |model| {
+            if (!first) try w.writeByte(',');
+            first = false;
+            try w.writeAll("{\"id\":");
+            try json_writer.writeString(w, model.id);
+            try w.writeAll(",\"display_name\":");
+            try json_writer.writeString(w, model.display_name);
+            try w.print(",\"context_window\":{d},\"max_output_tokens\":{d}}}", .{
+                model.capabilities.context_window_tokens,
+                model.capabilities.max_output_tokens,
+            });
+        }
     }
     try w.writeByte(']');
 
@@ -838,14 +844,22 @@ fn driveWith(
     input: []const u8,
     out: *std.Io.Writer.Allocating,
 ) !void {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(allocator);
+    try driveWithSession(allocator, &session, input, out);
+}
+
+fn driveWithSession(
+    allocator: std.mem.Allocator,
+    session: *agent.AgentSession,
+    input: []const u8,
+    out: *std.Io.Writer.Allocating,
+) !void {
     var reg = try buildMiniRegistry(allocator);
     defer reg.deinit(allocator);
 
-    var session = agent.AgentSession.initStub();
-    defer session.deinit(allocator);
-
     var reader: std.Io.Reader = .fixed(input);
-    try runWithSession(allocator, &session, &reg, .auto_reject, &reader, &out.writer);
+    try runWithSession(allocator, session, &reg, .auto_reject, &reader, &out.writer);
 }
 
 test "rpc: shutdown returns ok and stops the loop" {
@@ -909,23 +923,79 @@ test "rpc: unknown method returns -32601" {
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"id\":\"x\"") != null);
 }
 
-test "rpc: model.list enumerates registered models" {
+test "rpc: model.list filters models to the active provider" {
     const allocator = testing.allocator;
+    const input =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"model.list\"}\n" ++
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n";
+
+    {
+        var session = try agent.AgentSession.initAnthropic(allocator, "k", "p", null);
+        defer session.deinit(allocator);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+        try driveWithSession(allocator, &session, input, &aw);
+        buf = aw.toArrayList();
+        try testing.expect(std.mem.indexOf(u8, buf.items, "claude-sonnet-4-6") != null);
+        try testing.expect(std.mem.indexOf(u8, buf.items, "gpt-4o-mini") == null);
+    }
+
+    {
+        var session = try agent.AgentSession.initOpenAI(allocator, "k", "p", null);
+        defer session.deinit(allocator);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+        try driveWithSession(allocator, &session, input, &aw);
+        buf = aw.toArrayList();
+        try testing.expect(std.mem.indexOf(u8, buf.items, "gpt-4o-mini") != null);
+        try testing.expect(std.mem.indexOf(u8, buf.items, "claude-") == null);
+    }
+}
+
+test "rpc: model.set preserves invalid-params and session state on provider mismatch" {
+    const allocator = testing.allocator;
+    var session = try agent.AgentSession.initAnthropic(allocator, "k", "p", null);
+    defer session.deinit(allocator);
+    const previous_model = session.backend.anthropic.config.model;
+    const previous_budget = session.backend.anthropic.config.max_tokens;
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-
-    try driveWith(
+    try driveWithSession(
         allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"model.list\"}\n" ++
+        &session,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"model.set\",\"params\":{\"id\":\"gpt-4o-mini\"}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
         &aw,
     );
-
     buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "claude-sonnet-5") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "claude-sonnet-4-6") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"code\":-32602") != null);
+    try testing.expectEqualStrings(previous_model, session.backend.anthropic.config.model);
+    try testing.expectEqual(previous_budget, session.backend.anthropic.config.max_tokens);
+}
+
+test "rpc: model.set accepts an active-provider model and updates its request policy" {
+    const allocator = testing.allocator;
+    var session = try agent.AgentSession.initAnthropic(allocator, "k", "p", null);
+    defer session.deinit(allocator);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try driveWithSession(
+        allocator,
+        &session,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"model.set\",\"params\":{\"id\":\"claude-haiku-4-5-20251001\"}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
+        &aw,
+    );
+    buf = aw.toArrayList();
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"result\":\"claude-haiku-4-5-20251001\"") != null);
+    try testing.expectEqualStrings("claude-haiku-4-5-20251001", session.backend.anthropic.config.model);
+    try testing.expectEqual(@as(u32, 8_192), session.backend.anthropic.config.max_tokens);
 }
 
 test "rpc: skills.list and templates.list return catalog metadata" {

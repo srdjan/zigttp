@@ -75,7 +75,7 @@ pub fn processSubmit(
     }
 
     if (std.mem.eql(u8, trimmed, "/model")) {
-        return .{ .tool_result = try renderModel(allocator, session.currentModel()) };
+        return .{ .tool_result = try renderModel(allocator, session) };
     }
 
     if (std.mem.eql(u8, trimmed, "/status")) {
@@ -354,15 +354,21 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tool
 const request_mod = @import("providers/anthropic/request.zig");
 const session_paths = @import("session/paths.zig");
 
-fn renderModel(allocator: std.mem.Allocator, active: ?[]const u8) !ToolResult {
+fn renderModel(allocator: std.mem.Allocator, session: *const agent.AgentSession) !ToolResult {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     const w = &aw.writer;
-    const current = active orelse request_mod.default_model;
+    const current = session.currentModel() orelse "none";
     try w.print("Active model: {s}\n\nAvailable models:\n", .{current});
-    for (models_registry.registry) |m| {
-        try w.print("  {s: <36}  {s}\n", .{ m.id, m.display_name });
+    if (session.activeProvider()) |provider| {
+        var iterator = models_registry.iterateProvider(provider);
+        while (iterator.next()) |model| {
+            const marker: []const u8 = if (std.mem.eql(u8, model.id, current)) " [current]" else "";
+            try w.print("  {s: <36}  {s}{s}\n", .{ model.id, model.display_name, marker });
+        }
+    } else {
+        try w.writeAll("  (no active model provider)\n");
     }
     try w.writeAll("\nSwitch with: /model <model-id>\n");
     buf = aw.toArrayList();
@@ -1550,6 +1556,46 @@ test "processSubmit: /settings reports compile-time defaults without themes" {
         },
         else => return error.TestFailed,
     }
+}
+
+test "processSubmit: /model lists only the active provider and marks current" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+    var session = try agent.AgentSession.initOpenAI(testing.allocator, "k", "p", null);
+    defer session.deinit(testing.allocator);
+
+    var outcome = try processSubmit(testing.allocator, &session, &reg, "/model", null);
+    switch (outcome) {
+        .tool_result => |*result| {
+            defer result.deinit(testing.allocator);
+            try testing.expect(result.ok);
+            try testing.expect(std.mem.indexOf(u8, result.llm_text, "gpt-4o-mini") != null);
+            try testing.expect(std.mem.indexOf(u8, result.llm_text, "[current]") != null);
+            try testing.expect(std.mem.indexOf(u8, result.llm_text, "claude-") == null);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "processSubmit: cross-provider model rejection preserves session config" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+    var session = try agent.AgentSession.initAnthropic(testing.allocator, "k", "p", null);
+    defer session.deinit(testing.allocator);
+    const previous_model = session.backend.anthropic.config.model;
+    const previous_budget = session.backend.anthropic.config.max_tokens;
+
+    var outcome = try processSubmit(testing.allocator, &session, &reg, "/model gpt-4o-mini", null);
+    switch (outcome) {
+        .tool_result => |*result| {
+            defer result.deinit(testing.allocator);
+            try testing.expect(!result.ok);
+            try testing.expect(std.mem.indexOf(u8, result.llm_text, "active anthropic provider") != null);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqualStrings(previous_model, session.backend.anthropic.config.model);
+    try testing.expectEqual(previous_budget, session.backend.anthropic.config.max_tokens);
 }
 
 test "processSubmit: /status reports provider auth and persistence state" {

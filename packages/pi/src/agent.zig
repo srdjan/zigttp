@@ -1214,9 +1214,11 @@ test "Anthropic credential precedence rejects an OpenAI model override" {
     var session = try initFromEnvWithSessionConfig(allocator, null, .{
         .no_session = true,
         .no_context_files = true,
+        .model = "claude-haiku-4-5-20251001",
     });
     defer session.deinit(allocator);
     try testing.expectEqual(Provider.anthropic, session.activeProvider().?);
+    try testing.expectEqualStrings("claude-haiku-4-5-20251001", session.currentModel().?);
 
     try testing.expectError(
         error.ProviderMismatch,
@@ -1226,6 +1228,67 @@ test "Anthropic credential precedence rejects an OpenAI model override" {
             .model = "gpt-4o-mini",
         }),
     );
+}
+
+test "OpenAI-only startup accepts OpenAI and rejects Anthropic overrides" {
+    const allocator = testing.allocator;
+    var anthropic = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+    defer anthropic.restore(allocator);
+    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-key");
+    defer openai.restore(allocator);
+
+    var session = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_session = true,
+        .no_context_files = true,
+        .model = "gpt-4o-mini",
+    });
+    defer session.deinit(allocator);
+    try testing.expectEqual(Provider.openai, session.activeProvider().?);
+
+    try testing.expectError(
+        error.ProviderMismatch,
+        initFromEnvWithSessionConfig(allocator, null, .{
+            .no_session = true,
+            .no_context_files = true,
+            .model = "claude-sonnet-4-6",
+        }),
+    );
+}
+
+test "rejected startup model creates no session state and frees owned buffers" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions-not-created");
+    defer allocator.free(sessions_dir);
+
+    var sessions = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-key");
+    defer anthropic.restore(allocator);
+    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-key");
+    defer openai.restore(allocator);
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+
+    try testing.expectError(
+        error.ProviderMismatch,
+        initFromEnvWithSessionConfig(allocator, &registry, .{
+            .no_context_files = true,
+            .model = "gpt-4o-mini",
+        }),
+    );
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    if (std.Io.Dir.openDirAbsolute(io, sessions_dir, .{})) |dir_value| {
+        var dir = dir_value;
+        dir.close(io);
+        return error.UnexpectedSessionDirectory;
+    } else |err| {
+        try testing.expectEqual(error.FileNotFound, err);
+    }
 }
 
 test "estimateContextTokens grows with transcript and includes the fixed allowance" {

@@ -155,21 +155,21 @@ pub fn run(allocator: std.mem.Allocator) !void {
     defer registry.deinit(allocator);
 
     if (flags.goals != null) {
-        try runAutoloop(allocator, &registry, flags);
+        runAutoloop(allocator, &registry, flags) catch |err| return handleModeError(err);
         return;
     }
 
     if (flags.rpc_mode) {
-        try rpc_mode.run(allocator, &registry, flags, flags.policy orelse .auto_reject);
+        rpc_mode.run(allocator, &registry, flags, flags.policy orelse .auto_reject) catch |err| return handleModeError(err);
         return;
     }
 
     if (flags.print != null) {
-        try print_mode.run(allocator, &registry, flags, flags.policy orelse .auto_reject);
+        print_mode.run(allocator, &registry, flags, flags.policy orelse .auto_reject) catch |err| return handleModeError(err);
         return;
     }
 
-    try repl.run(allocator, &registry, flags, flags.policy);
+    repl.run(allocator, &registry, flags, flags.policy) catch |err| return handleModeError(err);
 }
 
 pub fn runLedgerCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -313,6 +313,19 @@ fn exitWithMessage(msg: []const u8, code: u8) noreturn {
     std.process.exit(code);
 }
 
+pub fn modeErrorMessage(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.ProviderMismatch => "error: --model is not available for the configured provider; model IDs do not switch providers\n",
+        error.NoActiveProvider => "error: no active model provider; configure Anthropic or OpenAI credentials first\n",
+        else => null,
+    };
+}
+
+fn handleModeError(err: anyerror) !void {
+    if (modeErrorMessage(err)) |message| exitWithMessage(message, 2);
+    return err;
+}
+
 pub fn flagErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.MutuallyExclusiveApprovalFlags => "error: --yes and --no-edit are mutually exclusive\n",
@@ -404,11 +417,9 @@ pub const ExpertFlags = struct {
     /// behavioral verdict between the pre- and post-edit handler. Default on,
     /// matching the attestation default; `--no-equivalence-receipt` opts out.
     equivalence_receipt: bool = true,
-    /// Launch-time model override (`--model <id>`). When non-null it is the
-    /// canonical id from the model registry (validated at parse time), applied
-    /// to the session's initial active model so a run can start on a cheaper
-    /// model without typing `/model` first. Null leaves the compile-time
-    /// default in place.
+    /// Launch-time model override (`--model <id>`). Parsing resolves a canonical
+    /// registry id; session construction then checks it against the provider
+    /// selected from credentials. Null keeps that provider's registry default.
     model: ?[]const u8 = null,
 };
 
@@ -933,6 +944,12 @@ test "parseExpertFlags: --model=<id> inline form captures the canonical id" {
     try testing.expectEqualStrings("claude-sonnet-4-6", flags.model.?);
 }
 
+test "parseExpertFlags: --model accepts the registered OpenAI default" {
+    const argv = [_][]const u8{ "zigts", "expert", "--model", "gpt-4o-mini" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqualStrings("gpt-4o-mini", flags.model.?);
+}
+
 test "parseExpertFlags: --model defaults to null when absent" {
     const argv = [_][]const u8{ "zigts", "expert" };
     const flags = try parseExpertFlags(argv[0..]);
@@ -947,6 +964,18 @@ test "parseExpertFlags: --model without a value errors MissingModelValue" {
 test "parseExpertFlags: --model with an unknown id errors UnknownModel" {
     const argv = [_][]const u8{ "zigts", "expert", "--model", "gpt-9-turbo" };
     try testing.expectError(error.UnknownModel, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --model uses exact ids for specialized OpenAI models" {
+    const argv = [_][]const u8{ "zigts", "expert", "--model", "gpt-4o-mini-search-preview" };
+    try testing.expectError(error.UnknownModel, parseExpertFlags(argv[0..]));
+}
+
+test "modeErrorMessage explains provider mismatch without provider payloads" {
+    const message = modeErrorMessage(error.ProviderMismatch).?;
+    try testing.expect(std.mem.indexOf(u8, message, "model IDs do not switch providers") != null);
+    try testing.expect(std.mem.indexOf(u8, message, "key") == null);
+    try testing.expect(modeErrorMessage(error.OutOfMemory) == null);
 }
 
 test "parseExpertFlags: --goal without --handler is rejected" {

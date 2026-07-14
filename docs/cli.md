@@ -227,16 +227,26 @@ zigttp expert --handler src/handler.ts --goal no_secret_leakage
 | `--resume` | Continue the last session for the current project. |
 | `--yes` | Apply every verified edit without prompting. |
 | `--no-edit` | Let the model read and analyze files but block all writes. |
-| `--model <id>` | Start on a specific provider model. |
+| `--model <id>` | Start on a model registered for the configured provider. |
 | `--print <text>` | Non-interactive: send one message, print the response, and exit. |
 | `--mode json` | Emit JSON-encoded turn events to stdout (pairs with `--print`). |
 | `--mode rpc` | Run in RPC mode for editor integrations. |
 | `--handler <file>` | Override the handler file (default: auto-detected from `zigttp.json`). |
 | `--goal <property>` | Restrict the session to edits that achieve a named proof property. |
 
-Pi defaults to `claude-sonnet-4-6`, the measured first-draft baseline.
-`--model <id>` starts the session on a user-selected provider model; run
-`/model` in-session to list the available ids.
+Pi uses `claude-sonnet-4-6` for Anthropic and `gpt-4o-mini` for OpenAI.
+Anthropic remains the measured path; OpenAI support ships as an experimental
+Responses API backend. If both credentials are configured, Anthropic takes
+precedence.
+
+`--model <id>` accepts an exact ID from the static registry, then checks it
+against the provider selected from credentials. A model ID never switches the
+provider. `/model` lists only models for the active provider, marks the current
+one, and changes the current session when you select another. Selection also
+applies that model's request budget: the Claude entries keep their existing
+budgets, while `gpt-4o-mini` requests at most 8,192 output tokens despite its
+16,384-token output capability. RPC clients get the same allowed set through
+`model.list` and the same validation through `model.set`.
 
 The stored provider file is `~/.zigttp/providers.json` with mode `0600`.
 Environment variables `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` override stored

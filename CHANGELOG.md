@@ -6,6 +6,17 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Changed
+
+- Expert model selection is now provider-aware across `--model`, `/model`, and
+  RPC `model.{list,set}`. Listings show only the active provider, exact model
+  IDs cannot switch providers, and rejected startup or in-session choices leave
+  the model and request budget unchanged. Anthropic keeps credential precedence
+  when both keys are configured. The registry now includes the shipped,
+  experimental `gpt-4o-mini` backend with a 128,000-token context window,
+  16,384-token output capability, and zigttp's existing 8,192-token request
+  policy.
+
 ## [0.18.0] - 2026-07-13
 
 Expert-agent convergence release: the `zigttp expert` loop is the sole surface

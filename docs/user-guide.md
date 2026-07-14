@@ -407,12 +407,13 @@ entries and `zigttp proofs gate` for pull-request checks.
 
 `zigttp expert` is the compiler-in-the-loop coding agent. It proposes edits and
 routes every one through the same compiler checks before they land. The
-Anthropic backend is the measured, supported path; the OpenAI backend is
-experimental and unmeasured (it falls back to `gpt-4o-mini` and is not covered
-by the codegen quality ratchet).
+Anthropic backend is the measured, supported path. The shipped OpenAI Responses
+API backend is experimental and unmeasured; its `gpt-4o-mini` default is not
+covered by the codegen quality ratchet.
 
 ```bash
 zigttp auth claude
+zigttp auth openai                              # experimental provider
 zigttp expert
 zigttp expert --yes                                # apply edits without prompting
 zigttp expert --no-edit                            # read-only analysis, no writes
@@ -422,11 +423,16 @@ zigttp expert --print "add a GET /health route"
 zigttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
 
-Pi defaults to `claude-sonnet-4-6`, the measured first-draft baseline. Pass
-`--model <id>` to start on a specific provider model, or switch mid-session with
-the `/model` command. Pass
-`--yes` to apply every verified edit without a confirmation prompt; the approval
-policy is persisted through `--resume`.
+Pi uses `claude-sonnet-4-6` for Anthropic and `gpt-4o-mini` for OpenAI. If both
+credentials are configured, Anthropic takes precedence. Pass `--model <id>` to
+start on an exact model registered for that active provider, or switch the
+current session with `/model`. Model selection never switches providers;
+`/model` lists only the active provider's entries and marks the current one.
+Selecting a model also applies its request budget. Claude models keep their
+curated budgets; `gpt-4o-mini` uses an 8,192-token request limit while retaining
+its documented 16,384-token output capability and 128,000-token context window.
+Pass `--yes` to apply every verified edit without a confirmation prompt; the
+approval policy is persisted through `--resume`.
 Pass `--no-edit` to allow analysis and file reads while blocking all writes.
 
 `--print` runs one non-interactive turn and encodes the outcome in its exit
