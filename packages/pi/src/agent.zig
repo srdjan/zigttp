@@ -111,7 +111,6 @@ const Backend = union(enum) {
 };
 
 fn configWithModel(config: anytype, model: *const models_registry.Model) @TypeOf(config) {
-    std.debug.assert(model.request_policy.max_output_tokens <= model.capabilities.max_output_tokens);
     var next = config;
     next.model = model.id;
     next.max_tokens = model.request_policy.max_output_tokens;
@@ -430,12 +429,8 @@ pub fn initFromEnvWithSessionConfig(
     // Apply a --model launch override once, here, so every caller
     // (interactive REPL, autoloop, --print, --rpc) inherits it without each
     // having to remember a separate apply step. Also covers no_session sessions.
-    // With no override, validate the active default through the same
-    // provider-aware selection path used by explicit overrides.
     if (config.model) |model_id| {
         try session.setModel(model_id);
-    } else if (session.currentModel()) |active| {
-        try session.setModel(active);
     }
 
     if (config.no_session) return session;
@@ -1282,13 +1277,10 @@ test "rejected startup model creates no session state and frees owned buffers" {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
-    if (std.Io.Dir.openDirAbsolute(io, sessions_dir, .{})) |dir_value| {
-        var dir = dir_value;
-        dir.close(io);
-        return error.UnexpectedSessionDirectory;
-    } else |err| {
-        try testing.expectEqual(error.FileNotFound, err);
-    }
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, sessions_dir, .{}),
+    );
 }
 
 test "estimateContextTokens grows with transcript and includes the fixed allowance" {

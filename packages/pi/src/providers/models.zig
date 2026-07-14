@@ -95,14 +95,14 @@ pub const SelectionError = error{
 pub fn resolveForProvider(provider: Provider, id: []const u8) SelectionError!*const Model {
     const model = findById(id) orelse return error.UnknownModel;
     if (model.provider != provider) return error.ProviderMismatch;
-    std.debug.assert(model.request_policy.max_output_tokens <= model.capabilities.max_output_tokens);
     return model;
 }
 
 pub fn defaultForProvider(provider: Provider) *const Model {
     var found: ?*const Model = null;
-    for (&registry) |*model| {
-        if (model.provider != provider or !model.is_default) continue;
+    var iterator = iterateProvider(provider);
+    while (iterator.next()) |model| {
+        if (!model.is_default) continue;
         std.debug.assert(found == null);
         found = model;
     }

@@ -1854,17 +1854,8 @@ test "generate fails closed when handler binding allocation fails" {
     );
 }
 
-test "walkPaths fails closed when local binding allocation fails" {
+fn expectWalkFailsOnNextAllocation(source: []const u8) !void {
     const allocator = std.testing.allocator;
-    const source =
-        \\export function handler(req) {
-        \\  if (req) {
-        \\    const local = req.url;
-        \\    return Response.json(local);
-        \\  }
-        \\  return Response.json(false);
-        \\}
-    ;
     var parser = parser_mod.Parser.init(allocator, source);
     defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
@@ -1886,34 +1877,26 @@ test "walkPaths fails closed when local binding allocation fails" {
     try std.testing.expectError(error.OutOfMemory, generator.walkPaths(function.body));
 }
 
+test "walkPaths fails closed when local binding allocation fails" {
+    try expectWalkFailsOnNextAllocation(
+        \\export function handler(req) {
+        \\  if (req) {
+        \\    const local = req.url;
+        \\    return Response.json(local);
+        \\  }
+        \\  return Response.json(false);
+        \\}
+    );
+}
+
 test "walkPaths fails closed when I/O sequence allocation fails" {
-    const allocator = std.testing.allocator;
-    const source =
+    try expectWalkFailsOnNextAllocation(
         \\import { env } from "zigttp:env";
         \\export function handler(req) {
         \\  env("NAME");
         \\  return Response.json(true);
         \\}
-    ;
-    var parser = parser_mod.Parser.init(allocator, source);
-    defer parser.deinit();
-    var atoms = context.AtomTable.init(allocator);
-    defer atoms.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
-    const function = ir_view.getFunction(handler_fn) orelse return error.HandlerNotFound;
-
-    var failing = FailNextAllocation.init(allocator);
-    failing.armed = false;
-    var generator = PathGenerator.init(failing.allocator(), ir_view, &atoms);
-    defer generator.deinit();
-    try generator.scanImports();
-    try generator.findHandlerBindings(handler_fn);
-    failing.armed = true;
-
-    try std.testing.expectError(error.OutOfMemory, generator.walkPaths(function.body));
+    );
 }
 
 test "emitTestCase keeps argument signature allocation failure conservative" {

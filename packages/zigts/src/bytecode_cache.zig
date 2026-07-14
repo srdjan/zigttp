@@ -1145,10 +1145,6 @@ fn serializePatternDispatchFixture(buffer: []u8) ![]const u8 {
     return writer.getWritten();
 }
 
-fn destroyTestFunction(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode) void {
-    destroyDeserializedFunction(allocator, func);
-}
-
 fn deserializePatternDispatchForAllocationTest(
     allocator: std.mem.Allocator,
     serialized: []const u8,
@@ -1195,7 +1191,7 @@ fn deserializeFunctionForAllocationTest(
 ) !void {
     var reader = SliceReader{ .data = serialized };
     const func = try deserializeFunctionBytecode(&reader, allocator, null);
-    defer destroyTestFunction(allocator, func);
+    defer destroyDeserializedFunction(allocator, func);
 }
 
 fn serializeFullPatternDispatchFixture(
@@ -1206,7 +1202,7 @@ fn serializeFullPatternDispatchFixture(
     const function_bytes = try serializeFunctionWithPatternDispatch(allocator, &function_buffer);
     var function_reader = SliceReader{ .data = function_bytes };
     const func = try deserializeFunctionBytecode(&function_reader, allocator, null);
-    defer destroyTestFunction(allocator, func);
+    defer destroyDeserializedFunction(allocator, func);
 
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
